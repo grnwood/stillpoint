@@ -17,6 +17,22 @@ from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
+import sys
+from pathlib import Path
+
+def _bootstrap_frozen_imports() -> None:
+    """
+    Ensure `sp.*` is importable in PyInstaller builds.
+    PyInstaller often places packages under <MEIPASS>/_internal.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        internal = Path(sys._MEIPASS) / "_internal"
+        p = str(internal)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+_bootstrap_frozen_imports()
+
 from sp.server import api as api_module
 from sp.app import config
 from sp.app.ui.main_window import MainWindow
