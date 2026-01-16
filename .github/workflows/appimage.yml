@@ -45,21 +45,19 @@ jobs:
           cp assets/icon.png "$APPDIR/stillpoint.png"
 
           printf '%s\n' \
-            '[Desktop Entry]' \
-            'Type=Application' \
-            'Name=StillPoint' \
-            'Comment=StillPoint Desktop' \
-            'Exec=StillPoint' \
-            'Icon=stillpoint' \
-            'Terminal=false' \
-            'Categories=Utility;Notes;' \
-            'StartupNotify=true' \
-            'StartupWMClass=StillPoint' \
-            > "$APPDIR/usr/share/applications/stillpoint.desktop"
+          '[Desktop Entry]' \
+          'Type=Application' \
+          'Name=StillPoint' \
+          'Comment=StillPoint Desktop' \
+          'Exec=AppRun' \
+          'Icon=stillpoint' \
+          'Terminal=false' \
+          'Categories=Office;Utility' \
+          'StartupNotify=true' \
+          'StartupWMClass=StillPoint' \
+          > "$APPDIR/usr/share/applications/stillpoint.desktop"
 
-          # appimagetool expects a desktop file in the AppDir root:
           cp "$APPDIR/usr/share/applications/stillpoint.desktop" "$APPDIR/StillPoint.desktop"
-          
           ls -la "$APPDIR"
           ls -la "$APPDIR/usr/share/applications"
           cat "$APPDIR/StillPoint.desktop"
