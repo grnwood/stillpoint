@@ -57,6 +57,13 @@ jobs:
             'StartupWMClass=StillPoint' \
             > "$APPDIR/usr/share/applications/stillpoint.desktop"
 
+          # appimagetool expects a desktop file in the AppDir root:
+          cp "$APPDIR/usr/share/applications/stillpoint.desktop" "$APPDIR/StillPoint.desktop"
+          
+          ls -la "$APPDIR"
+          ls -la "$APPDIR/usr/share/applications"
+          cat "$APPDIR/StillPoint.desktop"
+          
           printf '%s\n' \
             '#!/usr/bin/env bash' \
             'set -euo pipefail' \
