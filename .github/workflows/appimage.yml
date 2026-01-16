@@ -76,3 +76,8 @@ jobs:
         with:
           name: StillPoint-AppImage
           path: StillPoint-x86_64.AppImage
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: StillPoint-x86_64.AppImage
