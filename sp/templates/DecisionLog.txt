@@ -1,0 +1,29 @@
+# {{PageName}}
+**Date:** {{DayDateYear}}
+---
+
+## Decision
+{{cursor}}
+
+## Context / Background
+
+
+## Options Considered
+1. 
+2. 
+3. 
+
+## Chosen Option
+
+
+## Reasoning
+
+
+## Expected Outcomes
+- 
+
+## Review Date
+
+
+## Actual Outcomes (Update Later)
+

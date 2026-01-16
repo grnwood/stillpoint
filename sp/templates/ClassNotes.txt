@@ -1,0 +1,29 @@
+# {{PageName}}
+{{DayDateYear}}
+---
+
+**Instructor:** 
+**Topic:** 
+
+{{cursor}}
+
+## Key Concepts
+- 
+
+## Notes
+
+
+## Important Definitions
+
+
+## Examples
+
+
+## Questions
+- 
+
+## Homework / Action Items
+- [ ] 
+
+## Related Material
+- 

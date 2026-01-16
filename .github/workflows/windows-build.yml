@@ -1,0 +1,40 @@
+name: Build Windows App
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r sp/requirements.txt
+
+      - name: PyInstaller build
+        run: |
+          pyinstaller -y packaging/sp.spec
+
+      - name: Smoke test bundle
+        run: |
+          if (!(Test-Path "dist/StillPoint/StillPoint.exe")) { throw "dist/StillPoint/StillPoint.exe not found" }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: StillPoint-win32
+          path: dist/StillPoint

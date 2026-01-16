@@ -1,0 +1,220 @@
+[ZimxDiag 2025-11-29 08:38:29] Main window shown; entering Qt event loop.
+[StillPoint] Tree selection changed: current=path=/TommyBoy, open=/TommyBoy/TommyBoy.txt, is_dir=False, previous=<invalid>
+[StillPoint] Tree selection target resolved to: '/TommyBoy/TommyBoy.txt'
+
+Thread 1 "python" received signal SIGSEGV, Segmentation fault.
+0x00007ffff2274514 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+(gdb) Main window shown; entering Qt event loop.
+[StillPoint] Tree selection changed: current=path=/TommyBoy, open=/TommyBoy/TommyBoy.txt, is_dir=False, previous=<invalid>
+[StillPoint] Tree selection target resolved to: '/TommyBoy/TommyBoy.txt'
+
+Thread 1 "python" received signal SIGSEGV, Segmentation fault.
+0x00007ffff2274514 in ?? ()
+   from /home/grnwood/code/stillpoint/Main window shown; entering Qt event loop.
+[StillPoint] Tree selection changed: current=path=/TommyBoy, open=/TommyBoy/TommyBoy.txt, is_dir=False, previous=<invalid>
+[StillPoint] Tree selection target resolved to: '/TommyBoy/TommyBoy.txt'
+
+Thread 1 "python" received signal SIGSEGV, Segmentation fault.
+0x00007ffff2274514 in ?? ()
+   from /home/grnwood/code/stillpoint/Main window shown; entering Qt event loop.
+[StillPoint] Tree selection changed: current=path=/TommyBoy, open=/TommyBoy/TommyBoy.txt, is_dir=Fals   from /home/grnwood/code/stillpoint/l SIGSEGV, Segmentation fault.txt'
+Undefined command: "Main".  Try "help".
+(gdb) bt
+#0  0x00007ffff2274514 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#1  0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#2  0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#3  0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#4  0x00007ffff2274794 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+--Type <RET> for more, q to quit, c to continue without paging--c
+#5  0x00007ffff2976f25 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#6  0x00000000005d7c4b in _PyEval_EvalFrameDefault ()
+#7  0x00007ffff64af7ab in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#8  0x00007ffff64affd2 in PySide::SignalManager::callPythonMetaMethod(QList<QByteArray> const&, char const*, void**, _object*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#9  0x00007ffff64b00d1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#10 0x00007ffff64aba57 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#11 0x00007ffff57e8b75 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#12 0x00007ffff218f21f in QApplication::focusChanged(QWidget*, QWidget*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#13 0x00007ffff21eebf6 in QWidget::setFocus(Qt::FocusReason) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#14 0x00007ffff21ef91c in QWidget::focusNextPrevChild(bool) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#15 0x00007ffff21f0282 in QWidgetPrivate::hide_helper() ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#16 0x00007ffff21f558c in QWidgetPrivate::setVisible(bool) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#17 0x00007ffff23964d4 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#18 0x00007ffff239861d in QDialogButtonBox::changeEvent(QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#19 0x00007ffff21f5b50 in QWidget::event(QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#20 0x00007ffff2191c8b in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#21 0x00007ffff2c26bd1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#22 0x00007ffff5783f80 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#23 0x00007ffff2274542 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#24 0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#25 0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#26 0x00007ffff22745c8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#27 0x00007ffff2274794 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#28 0x00007ffff2976f25 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#29 0x00000000005d7c4b in _PyEval_EvalFrameDefault ()
+#30 0x00007ffff64af7ab in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#31 0x00007ffff64affd2 in PySide::SignalManager::callPythonMetaMethod(QList<QByteArray> const&, char const*, void**, _object*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#32 0x00007ffff64b00d1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#33 0x00007ffff64aba57 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#34 0x00007ffff57e8b75 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#35 0x00007ffff218f21f in QApplication::focusChanged(QWidget*, QWidget*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#36 0x00007ffff21eebf6 in QWidget::setFocus(Qt::FocusReason) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#37 0x00007ffff219227d in QApplicationPrivate::giveFocusAccordingToFocusPolicy(QWidget*, QEvent*, QPoint) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#38 0x00007ffff219c045 in QApplication::notify(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#39 0x00007ffff2c26bd1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#40 0x00007ffff5783f80 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#41 0x00007ffff21999b9 in QApplicationPrivate::sendMouseEvent(QWidget*, QMouseEvent*, QWidget*, QWidget*, QWidget**, QPointer<QWidget>&, bool, bool) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#42 0x00007ffff2209dab in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#43 0x00007ffff220cba8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#44 0x00007ffff2191c8b in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#45 0x00007ffff2c26bd1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#46 0x00007ffff5783f80 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#47 0x00007ffff15f2090 in QGuiApplicationPrivate::processMouseEvent(QWindowSystemInterfacePrivate::MouseEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#48 0x00007ffff165a1ec in QWindowSystemInterface::sendWindowSystemEvents(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#49 0x00007fffee9494ee in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/../../lib/libQt6XcbQpa.so.6
+#50 0x00007ffff51145c5 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#51 0x00007ffff5173737 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#52 0x00007ffff5113a63 in g_main_context_iteration ()
+   from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#53 0x00007ffff5a7caae in QEventDispatcherGlib::processEvents(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#54 0x00007ffff579002b in QEventLoop::exec(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#55 0x00007ffff2415dbd in QDialog::exec() ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#56 0x00007ffff244a17e in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#57 0x00007ffff2a6bdbf in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#58 0x0000000000581e4f in ?? ()
+#59 0x0000000000548e25 in _PyObject_MakeTpCall ()
+#60 0x00000000005d71d9 in _PyEval_EvalFrameDefault ()
+#61 0x000000000054c9d2 in ?? ()
+#62 0x00007ffff64af7ab in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#63 0x00007ffff64afba6 in PySide::SignalManager::callPythonMetaMethod(QMetaMethod, void**, _object*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#64 0x00007ffff64b1db7 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/libpyside6.abi3.so.6.10
+#65 0x00007ffff57e8e3d in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#66 0x00007ffff22c2a06 in QAbstractButton::clicked(bool) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#67 0x00007ffff22c2c9e in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#68 0x00007ffff22c4466 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#69 0x00007ffff22c46bc in QAbstractButton::mouseReleaseEvent(QMouseEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#70 0x00007ffff23f1ecb in QToolButton::mouseReleaseEvent(QMouseEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#71 0x00007ffff298f99a in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#72 0x00007ffff21f5c3e in QWidget::event(QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#73 0x00007ffff298ec18 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#74 0x00007ffff2191c8b in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#75 0x00007ffff219afa8 in QApplication::notify(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#76 0x00007ffff2c26bd1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#77 0x00007ffff5783f80 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#78 0x00007ffff21999b9 in QApplicationPrivate::sendMouseEvent(QWidget*, QMouseEvent*, QWidget*, QWidget*, QWidget**, QPointer<QWidget>&, bool, bool) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#79 0x00007ffff2209dab in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#80 0x00007ffff220cba8 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#81 0x00007ffff2191c8b in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#82 0x00007ffff2c26bd1 in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#83 0x00007ffff5783f80 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#84 0x00007ffff15f2090 in QGuiApplicationPrivate::processMouseEvent(QWindowSystemInterfacePrivate::MouseEvent*) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#85 0x00007ffff165a1ec in QWindowSystemInterface::sendWindowSystemEvents(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#86 0x00007fffee9494ee in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/../../lib/libQt6XcbQpa.so.6
+#87 0x00007ffff51145c5 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#88 0x00007ffff5173737 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#89 0x00007ffff5113a63 in g_main_context_iteration ()
+   from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#90 0x00007ffff5a7caae in QEventDispatcherGlib::processEvents(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#91 0x00007ffff579002b in QEventLoop::exec(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#92 0x00007ffff578ba5a in QCoreApplication::exec() ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#93 0x00007ffff2beecec in ?? ()
+   from /home/grnwood/code/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#94 0x000000000045c6c0 in ?? ()
+#95 0x0000000000549825 in PyObject_Vectorcall ()
+#96 0x00000000005d71d9 in _PyEval_EvalFrameDefault ()
+#97 0x00000000005d571b in PyEval_EvalCode ()
+#98 0x00000000005d32ac in ?? ()
+#99 0x0000000000581ccd in ?? ()
+#100 0x0000000000549825 in PyObject_Vectorcall ()
+#101 0x00000000005d71d9 in _PyEval_EvalFrameDefault ()
+#102 0x00000000006bc342 in ?? ()
+#103 0x00000000006bbf72 in Py_RunMain ()
+#104 0x00000000006bbbdd in Py_BytesMain ()
+#105 0x00007ffff7c2a1ca in __libc_start_call_main (main=main@entry=0x518830, 
+    argc=argc@entry=3, argv=argv@entry=0x7fffffffd7d8)
+    at ../sysdeps/nptl/libc_start_call_main.h:58
+#106 0x00007ffff7c2a28b in __libc_start_main_impl (main=0x518830, argc=3, 
+    argv=0x7fffffffd7d8, init=<optimized out>, fini=<optimized out>, 
+    rtld_fini=<optimized out>, stack_end=0x7fffffffd7c8) at ../csu/libc-start.c:360
+#107 0x0000000000657005 in _start ()

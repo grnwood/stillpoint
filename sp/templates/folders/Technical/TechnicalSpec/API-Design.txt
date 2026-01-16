@@ -1,0 +1,51 @@
+﻿# {{FolderName}} - API Design
+Created {{DayDateYear}}
+---
+
+**Project:** {{FolderName}}
+
+{{cursor}}
+
+## Base URL
+```
+https://api.example.com/v1
+```
+
+## Authentication
+
+
+## Endpoints
+
+### GET /resource
+**Description:** 
+
+**Request:**
+```json
+{
+  
+}
+```
+
+**Response:**
+```json
+{
+  
+}
+```
+
+**Status Codes:**
+- `200 OK` - 
+- `400 Bad Request` - 
+- `404 Not Found` - 
+
+### POST /resource
+
+
+## Error Handling
+
+
+## Rate Limiting
+
+
+---
+ [:{{FolderPathSlug}}:Architecture|Architecture] | [:{{FolderPathSlug}}:Data-Models|Data-Models] 

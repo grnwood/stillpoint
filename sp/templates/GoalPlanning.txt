@@ -1,0 +1,32 @@
+# {{PageName}}
+Created {{DayDateYear}}
+---
+
+## Goal Statement
+{{cursor}}
+
+## Why This Matters
+
+
+## Success Criteria
+- 
+
+## Action Steps
+- [ ] 
+- [ ] 
+- [ ] 
+
+## Timeline
+**Start:** 
+**Target:** 
+**Review Dates:** 
+
+## Potential Obstacles
+- 
+
+## Support & Resources
+- 
+
+## Progress Log
+### {{DayDateYear}}
+

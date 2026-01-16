@@ -1,0 +1,66 @@
+﻿# {{FolderName}} - Plot Outline
+Created {{DayDateYear}}
+---
+
+**Novel:** {{FolderName}}
+**Genre:** 
+**Target Word Count:** 
+
+{{cursor}}
+
+## Story Premise
+**Logline:**
+
+
+**Theme:**
+
+
+## Three-Act Structure
+
+### Act 1: Setup
+**Chapters:** 1-X
+
+**Inciting Incident:**
+
+
+**Plot Points:**
+- 
+
+### Act 2: Confrontation
+**Chapters:** X-Y
+
+**Midpoint:**
+
+
+**Plot Points:**
+- 
+
+### Act 3: Resolution
+**Chapters:** Y-Z
+
+**Climax:**
+
+
+**Resolution:**
+
+
+## Chapter Breakdown
+
+### Chapter 1: [Title]
+**POV:** 
+**Setting:** 
+**Summary:** 
+**Word Count Target:** 
+
+### Chapter 2: [Title]
+
+
+## Subplots
+1. 
+2. 
+
+## Foreshadowing & Payoffs
+
+
+---
+ [:{{FolderPathSlug}}:Characters|Characters] | [:{{FolderPathSlug}}:World-Building|World-Building] 

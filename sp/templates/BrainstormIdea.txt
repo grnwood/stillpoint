@@ -1,0 +1,24 @@
+# {{PageName}}
+{{DayDateYear}}
+---
+
+## The Idea
+{{cursor}}
+
+## Initial Thoughts
+
+
+## Potential Applications
+- 
+
+## Questions to Explore
+- 
+
+## Related Ideas
+- 
+
+## Next Steps
+- [ ] 
+
+## Tags
+@idea

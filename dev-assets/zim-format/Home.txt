@@ -1,0 +1,40 @@
+Content-Type: text/x-zim-wiki
+Wiki-Format: zim 0.6
+Creation-Date: 2025-12-06T05:06:36-06:00
+
+====== FormattingTest ======
+Created Tuesday 25 November 2025
+--------------------
+
+====== # Heading One ======
+===== ## Heading Two =====
+==== ### Heading Three ====
+=== #### Heading Four ===
+== ##### Heading Five ==
+
+[ ] this is a checkbox @withtag
+[*] this is done
+[>] this is deferred
+[x] this is done
+[<] this is waiting
+
+[[./code_1.106.3-1764110892_amd64.deb]]
+
+This is a https://www.google.com
+This is also a [[https://www.google.com|gogle link.]]
+
+this is a  [[Wiki|Page Link]]  page link.
+
+this is **bold**.
+
+this is //**bold and italic**//.
+
+this is just //italic//
+
+this is ~~strikethrough~~.
+
+~~this is a multi line 1strikethrough none of this applies.~~
+
+this is a ''single fixed width'' thing.
+
+

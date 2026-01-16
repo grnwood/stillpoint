@@ -1,0 +1,43 @@
+﻿# {{FolderName}} - Research Notes
+Created {{DayDateYear}}
+---
+
+**Novel:** {{FolderName}}
+
+{{cursor}}
+
+## Research Topics
+
+### Topic 1
+**Why needed:** 
+**Sources:**
+- 
+
+**Key Findings:**
+
+
+**How it applies to the story:**
+
+
+### Topic 2
+
+
+## Reference Materials
+- [ ] Books:
+- [ ] Articles:
+- [ ] Videos/Documentaries:
+- [ ] Expert Interviews:
+
+## Fact Checking
+- [ ] 
+- [ ] 
+
+## Inspiration
+**Similar works:**
+- 
+
+**Influenced by:**
+- 
+
+---
+ [:{{FolderPathSlug}}:World-Building|World-Building] | [:{{FolderPathSlug}}:Writing-Progress|Writing-Progress] 

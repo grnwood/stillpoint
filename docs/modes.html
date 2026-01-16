@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StillPoint Focus Modes</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+        <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">Focus Modes</span>
+          <h1>Two modes built for attention.</h1>
+          <p>
+            Focus mode clears the noise so you can write. Audience mode turns a page into a
+            clean, readable presentation view. Both are designed to keep your attention on
+            the words, not the UI.
+          </p>
+        </div>
+        <div>
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox-video="img/focus-modes.mkv"
+            data-lightbox-caption="Focus and Audience modes in action: a clean writing canvas with presentation-ready reading views."
+            style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
+          >
+            <img
+              src="img/focus-modes.png"
+              alt="StillPoint focus and audience mode hero view"
+              style="width: 100%; border-radius: 18px; border: 1px solid #e3dbcf;"
+            />
+          </button>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.15s">
+        <div class="split">
+          <div>
+            <div class="eyebrow">Focus mode</div>
+            <h2>Write without distraction.</h2>
+            <p>
+              Focus mode dims everything except the editor and gives your text more breathing
+              room. It is designed for deep work: planning, journaling, or drafting long pages.
+            </p>
+            <p class="quote">
+              Press Ctrl+Alt+F to enter focus mode. Press it again to exit.
+            </p>
+          </div>
+          <div class="media-card">
+            <button
+              class="lightbox-trigger"
+              type="button"
+              data-lightbox="img/focus-mode.png"
+              data-lightbox-caption="Focus mode view: the editor gets breathing room and the rest of the UI fades back."
+            >
+              <img src="img/focus-mode.png" alt="StillPoint focus mode editor view" />
+            </button>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3>Quiet layout</h3>
+            <p>Panels and visual clutter fade back so the page feels like a blank sheet.</p>
+          </div>
+          <div class="card">
+            <h3>Readable typography</h3>
+            <p>Line spacing and margins expand to encourage longer-form writing.</p>
+          </div>
+          <div class="card">
+            <h3>Stay in flow</h3>
+            <p>Keep keyboard control without bouncing between panels.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.25s">
+        <div class="split">
+          <div>
+            <div class="eyebrow">Audience mode</div>
+            <h2>Present a page like a document.</h2>
+            <p>
+              Audience mode is built for sharing. It enlarges text, cleans up the canvas, and
+              helps you read or present your notes to a group without a wall of UI chrome.
+            </p>
+            <p class="quote">
+              Press Ctrl+Alt+A to enter audience mode. Press it again to exit.
+            </p>
+          </div>
+          <div class="media-card">
+            <button
+              class="lightbox-trigger"
+              type="button"
+              data-lightbox="img/audience.png"
+              data-lightbox-caption="Audience mode view: reading-first typography for sharing notes on a screen."
+            >
+              <img src="img/audience.png" alt="StillPoint audience mode reading view" />
+            </button>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3>Adaptive sizing</h3>
+            <p>Use Ctrl+Alt+= or Ctrl+Alt+- to scale text up or down.</p>
+          </div>
+          <div class="card">
+            <h3>Paragraph highlight</h3>
+            <p>Toggle a subtle highlight with Ctrl+Alt+H to guide attention.</p>
+          </div>
+          <div class="card">
+            <h3>Soft scroll</h3>
+            <p>Enable gentle auto-scroll with Ctrl+Alt+S for reading sessions.</p>
+          </div>
+          <div class="card">
+            <h3>Cursor halo</h3>
+            <p>Toggle the cursor halo with Ctrl+Alt+C to keep your place.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.35s">
+        <div class="eyebrow">When to use them</div>
+        <h2>Switch based on the moment.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Planning</h3>
+            <p>Use focus mode when you are drafting or thinking through complex ideas.</p>
+          </div>
+          <div class="card">
+            <h3>Review</h3>
+            <p>Use audience mode when reading long notes or sharing on a screen.</p>
+          </div>
+          <div class="card">
+            <h3>Teaching</h3>
+            <p>Audience mode keeps attention on the content when presenting to a group.</p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        <span>Focus when you need it. Present when you want it.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+      </footer>
+    </main>
+  </body>
+</html>

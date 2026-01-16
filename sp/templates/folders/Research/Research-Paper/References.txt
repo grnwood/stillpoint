@@ -1,0 +1,42 @@
+﻿# {{FolderName}} - References
+Created {{DayDateYear}}
+---
+
+**Research Paper:** {{FolderName}}
+**Citation Style:** APA / MLA / Chicago / IEEE
+
+{{cursor}}
+
+## References
+
+### Books
+
+Author, A. A. (Year). *Title of book*. Publisher.
+
+
+### Journal Articles
+
+Author, A. A., & Author, B. B. (Year). Title of article. *Journal Name, Volume*(Issue), pages. https://doi.org/xxxx
+
+
+### Conference Papers
+
+
+### Web Resources
+
+
+### Other Sources
+
+
+## Bibliography Management
+**Tool:** Zotero / Mendeley / EndNote
+**Library Location:** 
+
+## Citation Tracking
+- [ ] All in-text citations have references
+- [ ] All references cited in text
+- [ ] Format consistency check
+- [ ] DOIs verified
+
+---
+ [:{{FolderPathSlug}}:Discussion|Discussion] | [:{{FolderPathSlug}}:Abstract|Abstract] 

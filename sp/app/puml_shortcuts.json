@@ -1,0 +1,110 @@
+[
+    {
+        "name": "Sequence Diagram",
+        "help": "https://plantuml.com/sequence-diagram",
+        "simple_puml": "@startuml\nAlice -> Bob: Request\nBob --> Alice: Response\n@enduml",
+        "advanced_puml": "@startuml\ntitle Sequence Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam sequence {\n  ArrowColor #1F6FEB\n  LifeLineBorderColor #444444\n  LifeLineBackgroundColor #F6F8FA\n  ParticipantBorderColor #24292F\n  ParticipantBackgroundColor #EAEEF2\n  BoxBorderColor #57606A\n  BoxBackgroundColor #F6F8FA\n}\nautonumber \n\nbox \"Client\" #E7F5FF\nparticipant \"Web UI\" as Web\nend box\n\nbox \"Server\" #FFF5E6\nparticipant API\ndatabase \"Orders DB\" as DB\nend box\n\nWeb -> API ++ : POST /orders Content-Type: json\nAPI -> DB ++ : INSERT order\nDB --> API -- : ok\n\nalt Payment fails\n  API -[#D1242F]> Web -- : 402 Payment Required\nelse Success\n  API -[#2DA44E]> Web -- : 201 Created Location: /orders/123\nend\n\nnote right of API #FFF8C5\n  Demonstrates:!!BR!!- boxes!!BR!!- autonumber!!BR!!- colors!!BR!!- activation!!BR!!- notes!!BR!!- alt/else\nend note\n@enduml"
+    },
+    {
+        "name": "Use Case Diagram",
+        "help": "https://plantuml.com/use-case-diagram",
+        "simple_puml": "@startuml\nactor Customer\nrectangle Shop {\n  Customer -- (Browse Catalog)\n  Customer -- (Checkout)\n}\n@enduml",
+        "advanced_puml": "@startuml\ntitle Use Case Diagram (advanced features)\nleft to right direction\nskinparam backgroundColor #FFFFFF\nskinparam usecase {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #57606A\n}\nskinparam actor {\n  BorderColor #24292F\n  BackgroundColor #EAEEF2\n}\n\nactor Customer as C\nactor \"Support Agent\" as SA\nactor \"Payment Gateway\" as PG\n\nrectangle \"Commerce Platform\" as SYS #F6F8FA {\n  (Browse Catalog) as UC1\n  (Manage Cart) as UC2\n  (Checkout) as UC3\n  (Authorize Payment) as UC4\n  (Refund Order) as UC5\n\n  UC3 ..> UC2 : <<include>>\n  UC3 ..> UC4 : <<include>>\n  UC5 ..> (Validate Eligibility) : <<include>>\n}\n\nC --> UC1\nC --> UC2\nC --> UC3\nSA --> UC5\nUC4 --> PG\n\nnote bottom of SYS #FFF8C5\n  Demonstrates:!!BR!!- directions!!BR!!- skinparam styling!!BR!!- include!!BR!!- external actor link\nend note\n@enduml"
+    },
+    {
+        "name": "Class Diagram",
+        "help": "https://plantuml.com/class-diagram",
+        "simple_puml": "@startuml\nclass User {\n  +id: int\n  +name: string\n}\nclass Order {\n  +orderId: int\n  +total: decimal\n}\nUser \"1\" -- \"*\" Order\n@enduml",
+        "advanced_puml": "@startuml\ntitle Class Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam class {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #57606A\n}\n\nabstract class BaseEntity {\n  +id: UUID\n  +createdAt: datetime\n}\n\nclass Customer extends BaseEntity {\n  +email: string\n  +name: string\n}\n\nclass Order extends BaseEntity {\n  +status: OrderStatus\n  +total: decimal\n  +addItem(sku: string, qty: int)\n}\n\nclass OrderItem {\n  +sku: string\n  +qty: int\n  +unitPrice: decimal\n}\n\nenum OrderStatus {\n  Draft\n  Submitted\n  Paid\n  Shipped\n  Cancelled\n}\n\ninterface PaymentProvider {\n  +authorize(amount: decimal): AuthResult\n  +capture(authId: string): Receipt\n}\n\nclass StripeProvider\nPaymentProvider <|.. StripeProvider\n\nCustomer \"1\" o-- \"*\" Order : places\nOrder \"1\" *-- \"1..*\" OrderItem\n\nnote right of Order #FFF8C5\n  Demonstrates:!!BR!!- abstract class!!BR!!- inheritance!!BR!!- enum!!BR!!- interface impl!!BR!!- composition/aggregation!!BR!!- multiplicity labels\nend note\n@enduml"
+    },
+    {
+        "name": "Activity Diagram (beta)",
+        "help": "https://plantuml.com/activity-diagram-beta",
+        "simple_puml": "@startuml\nstart\n:User submits form;\nif (Valid?) then (yes)\n  :Process request;\nelse (no)\n  :Show error;\nendif\nstop\n@enduml",
+        "advanced_puml": "@startuml\ntitle Activity Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam activity {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #1F6FEB\n  StartColor #2DA44E\n  EndColor #D1242F\n}\n\n|User|\nstart\n:Open checkout;\n:Click \"Place Order\";\n\n|System|\nif (Inventory available?) then (yes)\n  :Reserve inventory;\nelse (no)\n  :Show out-of-stock;\n  stop\nendif\n\nfork\n  :Authorize payment;\nfork again\n  :Create order record;\nfork again\n  :Send confirmation email;\nend fork\n\nif (Payment authorized?) then (yes)\n  :Finalize order;\n  stop\nelse (no)\n  :Release inventory;\n  :Show payment error;\n  stop\nendif\n@enduml"
+    },
+    {
+        "name": "Component Diagram",
+        "help": "https://plantuml.com/component-diagram",
+        "simple_puml": "@startuml\n[Web App] --> [API]\n[API] --> [Database]\n@enduml",
+        "advanced_puml": "@startuml\ntitle Component Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam component {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #57606A\n}\n\npackage \"Frontend\" #E7F5FF {\n  [Web App] as Web\n  [Admin Portal] as Admin\n}\n\npackage \"Services\" #FFF5E6 {\n  [Auth Service] as Auth\n  [Catalog Service] as Catalog\n  [Order Service] as Orders\n}\n\npackage \"Data\" #EAFBE7 {\n  database \"Orders DB\" as ODB\n  database \"Catalog DB\" as CDB\n}\n\nWeb --> Auth : OIDC\nWeb --> Catalog : Browse\nWeb --> Orders : Checkout\nAdmin --> Auth\nAdmin --> Orders\n\nOrders --> ODB : SQL\nCatalog --> CDB : SQL\n\nnote right of Auth #FFF8C5\n  Demonstrates:!!BR!!- packages!!BR!!- stereotypes/colors!!BR!!- labeled edges\nend note\n@enduml"
+    },
+    {
+        "name": "State Diagram",
+        "help": "https://plantuml.com/state-diagram",
+        "simple_puml": "@startuml\n[*] --> Idle\nIdle --> Processing : start\nProcessing --> Idle : finish\nProcessing --> Error : fail\nError --> Idle : reset\n@enduml",
+        "advanced_puml": "@startuml\ntitle State Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam state {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #1F6FEB\n}\n\n[*] --> Draft\n\nstate Draft #E7F5FF {\n  [*] --> Editing\n  Editing --> Ready : validate ok\n  Ready --> Editing : edit\n}\n\nDraft --> Submitted : submit\nSubmitted --> Paid : payment ok\nSubmitted --> Cancelled : cancel\n\nstate Paid {\n  [*] --> AwaitingFulfillment\n  AwaitingFulfillment --> Shipped : fulfill\n  Shipped --> Delivered : deliver\n}\n\nstate Cancelled #FFE3E6\nstate Delivered #EAFBE7\n\nnote right of Submitted #FFF8C5\n  Demonstrates:!!BR!!- nested states!!BR!!- colored states!!BR!!- labels\nend note\n@enduml"
+    },
+    {
+        "name": "Object Diagram",
+        "help": "https://plantuml.com/object-diagram",
+        "simple_puml": "@startuml\nobject user1 {\n  name = \"Alice\"\n}\nobject order1 {\n  total = 99.99\n}\nuser1 -- order1\n@enduml",
+        "advanced_puml": "@startuml\ntitle Object Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam object {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #57606A\n}\n\nobject customer42 as c #E7F5FF {\n  id = 42\n  email = \"alice@example.com\"\n}\n\nobject order9001 as o #FFF5E6 {\n  orderId = 9001\n  status = \"Paid\"\n  total = 149.95\n}\n\nobject item1 #EAFBE7 {\n  sku = \"SKU-123\"\n  qty = 1\n  unitPrice = 49.99\n}\n\nobject item2 #EAFBE7 {\n  sku = \"SKU-456\"\n  qty = 2\n  unitPrice = 49.98\n}\n\nc -- o : places\no -- item1 : contains\no -- item2 : contains\n\nnote bottom of o #FFF8C5\n  Demonstrates:!!BR!!- per-object colors!!BR!!- labeled links!!BR!!- richer attributes\nend note\n@enduml"
+    },
+    {
+        "name": "Deployment Diagram",
+        "help": "https://plantuml.com/deployment-diagram",
+        "simple_puml": "@startuml\nnode \"Web Server\" {\n  artifact \"webapp\"\n}\nnode \"DB Server\" {\n  database \"postgres\"\n}\n\"webapp\" --> \"postgres\"\n@enduml",
+        "advanced_puml": "@startuml\ntitle Deployment Diagram (advanced features)\nskinparam backgroundColor #FFFFFF\nskinparam node {\n  BorderColor #24292F\n  BackgroundColor #F6F8FA\n  ArrowColor #57606A\n}\n\nnode \"Client\" #E7F5FF {\n  artifact \"Browser\"\n}\n\nnode \"Kubernetes\" #FFF5E6 {\n  node \"Ingress\" {\n    artifact \"nginx\"\n  }\n  node \"App Namespace\" {\n    node \"web-1\" {\n      artifact \"webapp\"\n    }\n    node \"api-1\" {\n      artifact \"api\"\n    }\n  }\n}\n\nnode \"Managed DB\" #EAFBE7 {\n  database \"PostgreSQL\"\n}\n\n\"Browser\" --> \"nginx\" : HTTPS 443\n\"nginx\" --> \"webapp\" : HTTP 80\n\"webapp\" --> \"api\" : REST\n\"api\" --> \"PostgreSQL\" : SQL 5432\n@enduml"
+    },
+    {
+        "name": "Timing Diagram",
+        "help": "https://plantuml.com/timing-diagram",
+        "simple_puml": "@startuml\nrobust \"Web Browser\" as WB\nconcise \"Web User\" as WU\nrectangle \"Rect. Web User\" as RWU\n\n@0\nWU is Idle\nRWU is Idle\nWB is Idle\n\n@100\nWU is Waiting\nRWU is Waiting\nWB is Processing\n\n@300\nWB is Waiting\n@enduml",
+        "advanced_puml": "@startuml\nconcise \"Client\" as Client\nconcise \"Server\" as Server\nconcise \"Response freshness\" as Cache\n\nServer is idle\nClient is idle\n\n@Client\n0 is send\nClient -> Server@+25 : GET\n+25 is await\n+75 is recv\n+25 is idle\n+25 is send\nClient -> Server@+25 : GET!!BR!!If-Modified-Since: 150\n+25 is await\n+50 is recv\n+25 is idle\n@100 <-> @275 : no need to re-request from server\n\n@Server\n25 is recv\n+25 is work\n+25 is send\nServer -> Client@+25 : 200 OK!!BR!!Expires: 275\n+25 is idle\n+75 is recv\n+25 is send\nServer -> Client@+25 : 304 Not Modified\n+25 is idle\n\n@Cache\n75 is fresh\n+200 is stale\n@enduml"
+    },
+    {
+        "name": "Regex Diagram",
+        "help": "https://plantuml.com/regex",
+        "simple_puml": "@startregex\n!option useDescriptiveNames false\n\n\\d?\\D+\\w*\\W{1,2}|\\s.\\S\n@endregex",
+        "advanced_puml": "@startregex\n!option language en\n!option useDescriptiveNames true\n\n\\d?\\D+\\w*\\W{1,2}|\\s.\\S\n@endregex"
+    },
+    {
+        "name": "nwdiag Network Diagram",
+        "help": "https://plantuml.com/nwdiag",
+        "simple_puml": "@startuml\nnwdiag {\n  internet [shape = cloud];\n  router;\n  web;\n  internet -- router;\n  router -- web;\n}\n@enduml",
+        "advanced_puml": "@startuml\ntitle nwdiag (advanced features)\n\nnwdiag {\n  network dmz {\n    address = \"10.0.0.0/24\";\n    ingress [address = \"10.0.0.10\", description = \"Ingress\"];\n  }\n\n  network app {\n    address = \"10.0.1.0/24\";\n    api1 [address = \"10.0.1.20\", description = \"API 1\"];\n    api2 [address = \"10.0.1.21\", description = \"API 2\"];\n  }\n\n  network data {\n    address = \"10.0.2.0/24\";\n    db [address = \"10.0.2.30\", description = \"Postgres\"];\n  }\n\n  ingress -- api1;\n  ingress -- api2;\n  api1 -- db;\n  api2 -- db;\n}\n@enduml"
+    },
+    {
+        "name": "SALT Diagram",
+        "help": "https://plantuml.com/salt",
+        "simple_puml": "@startsalt\n<style>\nsaltDiagram {\n  Fontname Monospaced\n  FontSize 10\n  FontStyle italic\n  LineThickness 0.5\n  LineColor red\n}\n</style>\n{+\n  Login    | \"MyName   \"\n  Password | \"****     \"\n  [Cancel] | [  OK   ]\n}\n@endsalt",
+        "advanced_puml": "@startsalt\n{+\n{/ <b>General | Fullscreen | Behavior | Saving }\n{\n{ Open image in: | ^Smart Mode^ }\n[X] Smooth images when zoomed\n[X] Confirm image deletion\n[ ] Show hidden images\n}\n[Close]\n}\n@endsalt"
+    },
+    {
+        "name": "ArchiMate Diagram",
+        "help": "https://plantuml.com/archimate-diagram",
+        "simple_puml": "@startuml\n!define Junction_Or circle #black\n!define Junction_And circle #whitesmoke\n\nJunction_And JunctionAnd\nJunction_Or JunctionOr\n\narchimate #Technology \"VPN Server\" as vpnServerA <<technology-device>>\n\nrectangle GO #lightgreen\nrectangle STOP #red\nrectangle WAIT #orange\nGO -up-> JunctionOr\nSTOP -up-> JunctionOr\nSTOP -down-> JunctionAnd\nWAIT -down-> JunctionAnd\n@enduml",
+        "advanced_puml": "@startuml\nskinparam rectangle<<behavior>> {\n\troundCorner 25\n}\nsprite $bProcess jar:archimate/business-process\nsprite $aService jar:archimate/application-service\nsprite $aComponent jar:archimate/application-component\n\nrectangle \"Handle claim\"  as HC <<$bProcess>><<behavior>> #Business\nrectangle \"Capture Information\"  as CI <<$bProcess>><<behavior>> #Business\nrectangle \"Notify!!BR!!Additional Stakeholders\" as NAS <<$bProcess>><<behavior>> #Business\nrectangle \"Validate\" as V <<$bProcess>><<behavior>> #Business\nrectangle \"Investigate\" as I <<$bProcess>><<behavior>> #Business\nrectangle \"Pay\" as P <<$bProcess>><<behavior>> #Business\n\nHC *-down- CI\nHC *-down- NAS\nHC *-down- V\nHC *-down- I\nHC *-down- P\n\nCI -right->> NAS\nNAS -right->> V\nV -right->> I\nI -right->> P\n\nrectangle \"Scanning\" as scanning <<$aService>><<behavior>> #Application\nrectangle \"Customer administration\" as customerAdministration <<$aService>><<behavior>> #Application\nrectangle \"Claims administration\" as claimsAdministration <<$aService>><<behavior>> #Application\nrectangle Printing <<$aService>><<behavior>> #Application\nrectangle Payment <<$aService>><<behavior>> #Application\n\nscanning -up-> CI\ncustomerAdministration  -up-> CI\nclaimsAdministration -up-> NAS\nclaimsAdministration -up-> V\nclaimsAdministration -up-> I\nPayment -up-> P\n\nPrinting -up-> V\nPrinting -up-> P\n\nrectangle \"Document!!BR!!Management!!BR!!System\" as DMS <<$aComponent>> #Application\nrectangle \"General!!BR!!CRM!!BR!!System\" as CRM <<$aComponent>>  #Application\nrectangle \"Home & Away!!BR!!Policy!!BR!!Administration\" as HAPA <<$aComponent>> #Application\nrectangle \"Home & Away!!BR!!Financial!!BR!!Administration\" as HFPA <<$aComponent>>  #Application\n\nDMS .up.|> scanning\nDMS .up.|> Printing\nCRM .up.|> customerAdministration\nHAPA .up.|> claimsAdministration\nHFPA .up.|> Payment\n\nlegend left\nExample from the \"Archisurance case study\" (OpenGroup).!!BR!!See!!BR!!====!!BR!!<$bProcess> :business process!!BR!!====!!BR!!<$aService> : application service!!BR!!====!!BR!!<$aComponent> : application component\nendlegend\n@enduml"
+    },
+    {
+        "name": "Gantt Diagram",
+        "help": "https://plantuml.com/gantt-diagram",
+        "simple_puml": "@startgantt\nProject starts 2025-01-01\n[Design] lasts 5 days\n[Build] lasts 10 days\n[Build] starts at [Design]'s end\n@endgantt",
+        "advanced_puml": "@startgantt\ntitle Gantt (advanced features)\nProject starts 2025-01-01\n\n[Discovery] lasts 3 days\n[Design] lasts 5 days\n[Build] lasts 10 days\n[QA] lasts 4 days\n[Release] lasts 1 day\n\n[Design] starts at [Discovery]'s end\n[Build] starts at [Design]'s end\n[QA] starts at [Build]'s end\n[Release] starts at [QA]'s end\n\n-- Milestones --\n[Kickoff] happens at 2025-01-01\n[Go Live] happens at [Release]'s end\n\nnote bottom\n  Demonstrates:!!BR!!- title!!BR!!- dependencies!!BR!!- milestones!!BR!!- phases\nend note\n@endgantt"
+    },
+    {
+        "name": "Mind Map Diagram",
+        "help": "https://plantuml.com/mindmap-diagram",
+        "simple_puml": "@startmindmap\n* StillPoint\n** Notes\n** Search\n** AI\n@endmindmap",
+        "advanced_puml": "@startmindmap\n* StillPoint #E7F5FF\n** Editor #F6F8FA\n*** Markdown\n*** Code blocks\n**** plantuml\n**** mermaid (future)\n** Preview #FFF5E6\n*** Render cache\n*** SVG export\n** Search #EAFBE7\n*** FTS\n*** Tags\n*** Backlinks\n** AI #FFF8C5\n*** Summaries\n*** One-shot prompts\n@endmindmap"
+    },
+    {
+        "name": "WBS Diagram",
+        "help": "https://plantuml.com/wbs-diagram",
+        "simple_puml": "@startwbs\n*[#SkyBlue] this is the partner workpackage\n**[#pink] this is my workpackage\n** this is another workpackage\n@endwbs",
+        "advanced_puml": "@startwbs\n* Business Process Modelling WBS\n** Launch the project\n*** Complete Stakeholder Research\n*** Initial Implementation Plan\n** Design phase\n*** Model of AsIs Processes Completed\n**** Model of AsIs Processes Completed1\n**** Model of AsIs Processes Completed2\n*** Measure AsIs performance metrics\n*** Identify Quick Wins\n** Complete innovate phase\n@endwbs"
+    },
+    {
+        "name": "JSON Diagram",
+        "help": "https://plantuml.com/json",
+        "simple_puml": "@startjson\n{\n  \"firstName\": \"John\",\n  \"lastName\": \"Smith\",\n  \"isAlive\": true,\n  \"age\": 27,\n  \"address\": {\n    \"streetAddress\": \"21 2nd Street\",\n    \"city\": \"New York\",\n    \"state\": \"NY\",\n    \"postalCode\": \"10021-3100\"\n  },\n  \"phoneNumbers\": [\n    {\n      \"type\": \"home\",\n      \"number\": \"212 555-1234\"\n    },\n    {\n      \"type\": \"office\",\n      \"number\": \"646 555-4567\"\n    }\n  ],\n  \"children\": [],\n  \"spouse\": null\n}\n@endjson",
+        "advanced_puml": "@startjson\n<style>\n  .h1 {\n    BackGroundColor green\n    FontColor white\n    FontStyle italic\n  }\n  .h2 {\n    BackGroundColor red\n    FontColor white\n    FontStyle bold\n  }\n</style>\n#highlight \"lastName\"\n#highlight \"address\" / \"city\" <<h1>>\n#highlight \"phoneNumbers\" / \"0\" / \"number\" <<h2>>\n{\n  \"firstName\": \"John\",\n  \"lastName\": \"Smith\",\n  \"isAlive\": true,\n  \"age\": 28,\n  \"address\": {\n    \"streetAddress\": \"21 2nd Street\",\n    \"city\": \"New York\",\n    \"state\": \"NY\",\n    \"postalCode\": \"10021-3100\"\n  },\n  \"phoneNumbers\": [\n    {\n      \"type\": \"home\",\n      \"number\": \"212 555-1234\"\n    },\n    {\n      \"type\": \"office\",\n      \"number\": \"646 555-4567\"\n    }\n  ],\n  \"children\": [],\n  \"spouse\": null\n}\n@endjson"
+    },
+    {
+        "name": "YAML Diagram",
+        "help": "https://plantuml.com/yaml",
+        "simple_puml": "@startyaml\ndoe: \"a deer, a female deer\"\nray: \"a drop of golden sun\"\npi: 3.14159\nxmas: true\nfrench-hens: 3\ncalling-birds:\n  - huey\n  - dewey\n  - louie\n  - fred\nxmas-fifth-day:\n  calling-birds: four\n  french-hens: 3\n  golden-rings: 5\n  partridges:\n    count: 1\n    location: \"a pear tree\"\n  turtle-doves: two\n@endyaml",
+        "advanced_puml": "@startyaml\n<style>\n    .h1 {\n      BackGroundColor green\n      FontColor white\n      FontStyle italic\n    }\n    .h2 {\n      BackGroundColor red\n      FontColor white\n      FontStyle italic\n    }\n</style>\n#highlight \"french-hens\" <<h1>>\n#highlight \"xmas-fifth-day\" / \"partridges\" <<h2>>\n\ndoe: \"a deer, a female deer\"\nray: \"a drop of golden sun\"\npi: 3.14159\nxmas: true\nfrench-hens: 3\ncalling-birds:\n  - huey\n  - dewey\n  - louie\n  - fred\nxmas-fifth-day:\n  calling-birds: four\n  french-hens: 3\n  golden-rings: 5\n  partridges:\n    count: 1\n    location: \"a pear tree\"\n  turtle-doves: two\n@endyaml"
+    }
+]

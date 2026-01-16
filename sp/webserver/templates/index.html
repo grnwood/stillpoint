@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - StillPoint Vault{% endblock %}
+
+{% block content %}
+<article>
+    <header>
+        <h1>{{ title }}</h1>
+        {% if dir_path %}
+        <nav aria-label="breadcrumb">
+            <ul>
+                <li><a href="/browse/">Vault</a></li>
+                {% set parts = dir_path.split('/') %}
+                {% for i in range(parts|length) %}
+                <li><a href="/browse/{{ '/'.join(parts[:i+1]) }}">{{ parts[i] }}</a></li>
+                {% endfor %}
+            </ul>
+        </nav>
+        {% endif %}
+    </header>
+    
+    {% if items %}
+    <div class="directory-listing">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                <tr>
+                    <td>
+                        <a href="{{ item.url }}">
+                            {% if item.type == 'dir' %}📁{% else %}📄{% endif %}
+                            {{ item.name }}
+                        </a>
+                    </td>
+                    <td>{{ item.type }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p><em>This directory is empty.</em></p>
+    {% endif %}
+</article>
+{% endblock %}

@@ -1,0 +1,46 @@
+﻿# {{FolderName}} - Literature Review
+Created {{DayDateYear}}
+---
+
+**Research Paper:** {{FolderName}}
+
+{{cursor}}
+
+## Literature Review
+
+### Theoretical Framework
+
+
+### Key Concepts
+
+#### Concept 1
+
+
+#### Concept 2
+
+
+### Prior Research
+
+#### Study 1
+**Author(s):** 
+**Year:** 
+**Key Findings:**
+
+
+**Relevance to current study:**
+
+
+#### Study 2
+
+
+### Research Gaps
+
+
+### Synthesis
+
+
+## Summary
+
+
+---
+ [:{{FolderPathSlug}}:Introduction|Introduction] | [:{{FolderPathSlug}}:Methodology|Methodology] 

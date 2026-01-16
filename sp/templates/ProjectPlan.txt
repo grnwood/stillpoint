@@ -1,0 +1,26 @@
+# {{PageName}}
+Created {{DayDateYear}}
+---
+
+## Overview
+{{cursor}}
+
+## Goals
+- 
+
+## Timeline
+**Start Date:** 
+**Target Completion:** 
+
+## Milestones
+- [ ] 
+
+## Resources Needed
+- 
+
+## Risks & Mitigation
+- 
+
+## Status Updates
+### {{DayDateYear}}
+

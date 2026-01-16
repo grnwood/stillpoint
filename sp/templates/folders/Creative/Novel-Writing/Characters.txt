@@ -1,0 +1,53 @@
+﻿# {{FolderName}} - Characters
+Created {{DayDateYear}}
+---
+
+**Novel:** {{FolderName}}
+
+{{cursor}}
+
+## Main Characters
+
+### Character 1
+**Full Name:** 
+**Age:** 
+**Role:** Protagonist / Antagonist / Supporting
+
+**Physical Description:**
+
+
+**Personality:**
+
+
+**Background:**
+
+
+**Motivation:**
+
+
+**Character Arc:**
+
+
+**Relationships:**
+- 
+
+**Strengths:**
+- 
+
+**Weaknesses:**
+- 
+
+**Quirks/Habits:**
+- 
+
+### Character 2
+
+
+## Supporting Characters
+
+
+## Character Relationships Map
+
+
+---
+Next: [:{{FolderPathSlug}}:Plot-Outline|Plot-Outline] 

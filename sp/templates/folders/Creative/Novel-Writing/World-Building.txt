@@ -1,0 +1,78 @@
+﻿# {{FolderName}} - World Building
+Created {{DayDateYear}}
+---
+
+**Novel:** {{FolderName}}
+
+{{cursor}}
+
+## Setting Overview
+**Time Period:** 
+**Location:** 
+**Tone/Atmosphere:** 
+
+## Geography & Locations
+
+### Location 1
+**Name:** 
+**Type:** City / Town / Building / Region
+**Description:** 
+
+
+**Notable Features:**
+- 
+
+**Significance to Story:**
+
+
+### Location 2
+
+
+## World Rules & Systems
+
+### Magic/Technology System
+**How it works:**
+
+
+**Limitations:**
+
+
+**Cost/Consequences:**
+
+
+### Social Structure
+
+
+### Economy
+
+
+### Politics & Government
+
+
+## History & Backstory
+
+### Key Historical Events
+- 
+
+### Legends & Myths
+
+
+## Culture & Society
+
+### Customs & Traditions
+
+
+### Religion & Beliefs
+
+
+### Language & Communication
+
+
+## Sensory Details
+**Sights:** 
+**Sounds:** 
+**Smells:** 
+**Textures:** 
+
+---
+ [:{{FolderPathSlug}}:Plot-Outline|Plot-Outline] | [:{{FolderPathSlug}}:Research-Notes|Research-Notes] 

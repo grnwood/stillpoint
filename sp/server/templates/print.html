@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title or "StillPoint Print" }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ print_css_url }}">
+  {% if auto_print %}
+  <script>
+    window.addEventListener("load", () => {
+      setTimeout(() => window.print(), 250);
+    });
+  </script>
+  {% endif %}
+</head>
+<body>
+  <main class="stillpoint-print">
+    {% if show_header %}
+    <header class="stillpoint-header">
+      <h1>{{ title }}</h1>
+      <div class="meta">
+        {% if path_label %}{{ path_label }}{% endif %}
+        {% if generated_at %} · Generated {{ generated_at }}{% endif %}
+      </div>
+    </header>
+    {% endif %}
+    {{ body_html }}
+  </main>
+</body>
+</html>

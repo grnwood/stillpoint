@@ -1,0 +1,37 @@
+﻿# {{FolderName}} - Introduction
+Created {{DayDateYear}}
+---
+
+**Research Paper:** {{FolderName}}
+
+{{cursor}}
+
+## Introduction
+
+### Background
+
+
+### Research Problem
+
+
+### Research Questions
+1. 
+2. 
+3. 
+
+### Significance of Study
+
+
+### Scope & Limitations
+**Scope:**
+- 
+
+**Limitations:**
+- 
+
+### Structure of Paper
+This paper is organized as follows: Section 2 reviews the literature, Section 3 describes the methodology...
+
+---
+ [:{{FolderPathSlug}}:Abstract|Abstract] | [:{{FolderPathSlug}}:Literature-Review|Literature-Review] 
+

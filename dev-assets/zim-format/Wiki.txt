@@ -1,0 +1,8 @@
+Content-Type: text/x-zim-wiki
+Wiki-Format: zim 0.6
+Creation-Date: 2025-12-12T06:21:46-06:00
+
+====== Wiki ======
+Created Friday 12 December 2025
+
+{{./pasted_image.png}}

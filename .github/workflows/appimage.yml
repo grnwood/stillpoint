@@ -1,0 +1,78 @@
+name: Build AppImage
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r sp/requirements.txt
+
+      - name: PyInstaller build
+        run: |
+          pyinstaller -y packaging/sp.spec
+
+      - name: Smoke test bundle
+        run: |
+          test -x dist/StillPoint/StillPoint
+
+      - name: Build AppImage
+        run: |
+          APPDIR="StillPoint.AppDir"
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin"
+          mkdir -p "$APPDIR/usr/share/applications"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          cp -r dist/StillPoint/* "$APPDIR/usr/bin/"
+          cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/stillpoint.png"
+          cp assets/icon.png "$APPDIR/stillpoint.png"
+
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=StillPoint' \
+            'Comment=StillPoint Desktop' \
+            'Exec=StillPoint' \
+            'Icon=stillpoint' \
+            'Terminal=false' \
+            'Categories=Utility;Notes;' \
+            'StartupNotify=true' \
+            'StartupWMClass=StillPoint' \
+            > "$APPDIR/usr/share/applications/stillpoint.desktop"
+
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -euo pipefail' \
+            'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/bin/StillPoint" "$@"' \
+            > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          curl -L -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          ./appimagetool.AppImage --appimage-extract
+          ./squashfs-root/AppRun "$APPDIR" "StillPoint-x86_64.AppImage"
+          rm -rf squashfs-root appimagetool.AppImage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StillPoint-AppImage
+          path: StillPoint-x86_64.AppImage

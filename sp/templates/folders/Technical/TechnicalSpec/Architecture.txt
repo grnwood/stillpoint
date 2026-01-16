@@ -1,0 +1,40 @@
+﻿# {{FolderName}} - Architecture
+Created {{DayDateYear}}
+---
+
+**Project:** {{FolderName}}
+
+{{cursor}}
+
+## System Overview
+
+
+## Components
+### Component 1
+**Purpose:** 
+**Technology:** 
+**Dependencies:** 
+
+### Component 2
+
+
+## Data Flow
+
+
+## Deployment Architecture
+
+
+## Technology Stack
+- **Frontend:** 
+- **Backend:** 
+- **Database:** 
+- **Infrastructure:** 
+
+## Scalability Considerations
+
+
+## Security Considerations
+
+
+---
+ [:{{FolderPathSlug}}:Overview|Overview] | [:{{FolderPathSlug}}:API-Design|API-Design] 

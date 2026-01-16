@@ -1,0 +1,41 @@
+﻿# {{FolderName}} - Testing Strategy
+Created {{DayDateYear}}
+---
+
+**Project:** {{FolderName}}
+
+{{cursor}}
+
+## Testing Approach
+
+
+## Unit Testing
+**Scope:** 
+**Tools:** 
+**Coverage Target:** 
+
+## Integration Testing
+**Scope:** 
+**Tools:** 
+
+## End-to-End Testing
+**Scenarios:**
+- [ ] 
+- [ ] 
+
+## Performance Testing
+**Metrics:**
+- 
+**Load Testing:** 
+
+## Security Testing
+
+
+## Test Data Strategy
+
+
+## CI/CD Integration
+
+
+---
+ [:{{FolderPathSlug}}:Data-Models|Data-Models] | [:{{FolderPathSlug}}:Overview|Overview] 

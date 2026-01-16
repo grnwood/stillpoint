@@ -1,0 +1,129 @@
+#0  0x00007ffff17857d3 in QTextLine::textStart() const ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#1  0x00007ffff173bde6 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#2  0x00007ffff173cba0 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#3  0x00007ffff173ebb8 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#4  0x00007ffff174c275 in QTextDocumentLayout::draw(QPainter*, QAbstractTextDocumentLayout::PaintContext const&)
+    () from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Gui.so.6
+#5  0x00007ffff2204b70 in QWidgetTextControl::drawContents(QPainter*, QRectF const&, QWidget*) ()
+--Type <RET> for more, q to quit, c to continue without paging--c
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#6  0x00007ffff21d149c in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#7  0x00007ffff21d16cf in QTextEdit::paintEvent(QPaintEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#8  0x00007ffff27e2f27 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#9  0x00000000005d7c4b in _PyEval_EvalFrameDefault ()
+#10 0x000000000054c96d in ?? ()
+#11 0x00007ffff276f879 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#12 0x00007ffff27e2e22 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#13 0x00007ffff1ff5b6e in QWidget::event(QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#14 0x00007ffff20486e6 in QFrame::event(QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#15 0x00007ffff27e19ac in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#16 0x00007ffff5583eee in QCoreApplicationPrivate::sendThroughObjectEventFilters(QObject*, QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#17 0x00007ffff1f91c3a in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#18 0x00007ffff2a26f31 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#19 0x00007ffff5584180 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#20 0x00007ffff1fecc5a in QWidgetPrivate::sendPaintEvent(QRegion const&) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#21 0x00007ffff1fed527 in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#22 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#23 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#24 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#25 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#26 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#27 0x00007ffff1fee70f in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#28 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#29 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#30 0x00007ffff1fee70f in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#31 0x00007ffff1fee70f in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#32 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#33 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#34 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#35 0x00007ffff1fee8e8 in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#36 0x00007ffff1fee70f in QWidgetPrivate::paintSiblingsRecursive(QPaintDevice*, QList<QObject*> const&, int, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#37 0x00007ffff1fecf1e in QWidgetPrivate::drawWidget(QPaintDevice*, QRegion const&, QPoint const&, QFlags<QWidgetPrivate::DrawWidgetFlag>, QPainter*, QWidgetRepaintManager*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#38 0x00007ffff2001a3d in QWidgetRepaintManager::paintAndFlush() ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#39 0x00007ffff1ff5cb8 in QWidget::event(QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#40 0x00007ffff2879abc in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#41 0x00007ffff1f91c4b in QApplicationPrivate::notify_helper(QObject*, QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Widgets.so.6
+#42 0x00007ffff2a26f31 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#43 0x00007ffff5584180 in QCoreApplication::notifyInternal2(QObject*, QEvent*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#44 0x00007ffff5587be5 in QCoreApplicationPrivate::sendPostedEvents(QObject*, int, QThreadData*) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#45 0x00007ffff587c737 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#46 0x00007ffff4f145c5 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#47 0x00007ffff4f73737 in ?? () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#48 0x00007ffff4f13a63 in g_main_context_iteration () from /lib/x86_64-linux-gnu/libglib-2.0.so.0
+#49 0x00007ffff587bdce in QEventDispatcherGlib::processEvents(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#50 0x00007ffff559022b in QEventLoop::exec(QFlags<QEventLoop::ProcessEventsFlag>) ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#51 0x00007ffff558bc5a in QCoreApplication::exec() ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/Qt/lib/libQt6Core.so.6
+#52 0x00007ffff29eeba0 in ?? ()
+   from /home/grnwood/stillpoint/venv/lib/python3.12/site-packages/PySide6/QtWidgets.abi3.so
+#53 0x000000000045c6c0 in ?? ()
+#54 0x0000000000549825 in PyObject_Vectorcall ()
+#55 0x00000000005d71d9 in _PyEval_EvalFrameDefault ()
+#56 0x00000000005d571b in PyEval_EvalCode ()
+#57 0x00000000005d32ac in ?? ()
+#58 0x0000000000581ccd in ?? ()
+#59 0x0000000000549825 in PyObject_Vectorcall ()
+#60 0x00000000005d71d9 in _PyEval_EvalFrameDefault ()
+#61 0x00000000006bc342 in ?? ()
+#62 0x00000000006bbf72 in Py_RunMain ()
+#63 0x00000000006bbbdd in Py_BytesMain ()
+#64 0x00007ffff7c2a1ca in __libc_start_call_main (main=main@entry=0x518830, argc=argc@entry=3, 
+    argv=argv@entry=0x7fffffffd988) at ../sysdeps/nptl/libc_start_call_main.h:58
+#65 0x00007ffff7c2a28b in __libc_start_main_impl (main=0x518830, argc=3, argv=0x7fffffffd988, 
+    init=<optimized out>, fini=<optimized out>, rtld_fini=<optimized out>, stack_end=0x7fffffffd978)
+    at ../csu/libc-start.c:360
+#66 0x0000000000657005 in _start ()
+(gdb) thread apply all bt
+
+Thread 25 (Thread 0x7fff9affd6c0 (LWP 75072) "python"):
+#0  0x00007ffff7c98d71 in __futex_abstimed_wait_common64 (private=<optimized out>, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7fff8c0041f0) at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=<optimized out>, abstime=0x0, clockid=0, expected=0, futex_word=0x7fff8c0041f0) at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7fff8c0041f0, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=<optimized out>) at ./nptl/futex-internal.c:139
+#3  0x00007ffff7ca4f1f in do_futex_wait (sem=sem@entry=0x7fff8c0041f0, abstime=0x0, clockid=0) at ./nptl/sem_waitcommon.c:111
+#4  0x00007ffff7ca4fb8 in __new_sem_wait_slow64 (sem=0x7fff8c0041f0, abstime=0x0, clockid=0) at ./nptl/sem_waitco--Type <RET> for more, q to quit, c to continue without paging--q
+Quit
+(gdb) 

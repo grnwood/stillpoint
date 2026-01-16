@@ -1,0 +1,24 @@
+# {{PageName}}
+---
+
+**Source:** 
+**Prep Time:** 
+**Cook Time:** 
+**Servings:** 
+
+{{cursor}}
+
+## Ingredients
+- 
+
+## Instructions
+1. 
+
+## Notes & Modifications
+
+
+## Rating
+/5
+
+## Tags
+@recipe

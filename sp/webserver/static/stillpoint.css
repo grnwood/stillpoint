@@ -1,0 +1,70 @@
+/* StillPoint Web Server Custom Styles */
+
+:root {
+    --spacing-page: 2rem;
+}
+
+.page-actions {
+    margin-bottom: var(--spacing-page);
+    display: flex;
+    gap: 0.5rem;
+}
+
+.page-actions a[role="button"] {
+    margin: 0;
+}
+
+.markdown-content {
+    line-height: 1.7;
+}
+
+.markdown-content img {
+    max-width: 100%;
+    height: auto;
+}
+
+.markdown-content pre {
+    overflow-x: auto;
+}
+
+.markdown-content code {
+    font-size: 0.9em;
+}
+
+.markdown-content table {
+    width: 100%;
+    overflow-x: auto;
+    display: block;
+}
+
+.directory-listing table {
+    margin-top: 1rem;
+}
+
+.directory-listing td:first-child {
+    font-weight: 500;
+}
+
+nav[aria-label="breadcrumb"] ul {
+    padding: 0;
+    display: flex;
+    gap: 0.5rem;
+    list-style: none;
+}
+
+nav[aria-label="breadcrumb"] li:not(:last-child)::after {
+    content: "/";
+    margin-left: 0.5rem;
+    color: var(--muted-color);
+}
+
+/* Wiki links styling */
+.markdown-content a[href^="/wiki/"] {
+    color: var(--primary);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--primary);
+}
+
+.markdown-content a[href^="/wiki/"]:hover {
+    border-bottom-style: solid;
+}

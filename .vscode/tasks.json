@@ -1,0 +1,10 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PyCompile plantuml_editor_window",
+			"type": "shell",
+			"command": "/home/grnwood/code/stillpoint/venv/bin/python -m py_compile sp/app/ui/plantuml_editor_window.py"
+		}
+	]
+}

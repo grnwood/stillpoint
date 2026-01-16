@@ -1,0 +1,11 @@
+# {{DOW}}, {{Month}} {{dd}} {{YYYY}}
+---
+{{QOTD}}
+---
+{{cursor}}
+## Today's Plan
+---
+
+## Today's Actual
+---
+

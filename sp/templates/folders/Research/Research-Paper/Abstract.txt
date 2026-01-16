@@ -1,0 +1,40 @@
+﻿# {{FolderName}} - Abstract
+Created {{DayDateYear}}
+---
+
+**Research Paper:** {{FolderName}}
+**Author:** 
+**Institution:** 
+**Date:** {{DayDateYear}}
+
+{{cursor}}
+
+## Abstract
+[150-250 words summarizing the entire paper]
+
+**Background:**
+
+
+**Methods:**
+
+
+**Results:**
+
+
+**Conclusions:**
+
+
+## Keywords
+- 
+- 
+- 
+
+## Paper Metadata
+**Field:** 
+**Target Journal:** 
+**Word Count Target:** 
+**Citation Style:** APA / MLA / Chicago / IEEE
+
+---
+Next: [:{{FolderPathSlug}}:Introduction|Introduction] 
+

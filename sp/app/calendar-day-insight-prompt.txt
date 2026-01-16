@@ -1,0 +1,35 @@
+You receive a day's messy notes (meetings, tasks, logs, links, fragmented thoughts).
+Produce a clean Markdown daily summary that captures only the important signal.
+
+Rules:
+Extract core events, decisions, meetings, takeaways, tasks, and relevant links.
+Rewrite for clarity and structure; remove noise and duplicates.
+Do not invent information not present or implied.
+Do not completely ignore something that was mentioned.  If its not super relevant 
+still list at as brief as needed in the 'Odds and Ends' section.
+Summarize meetings in 1–2 bullets each.
+Omit empty sections.
+Output Markdown in this format only:
+---
+## ✔️ Daily Summary — {{date}}
+
+### ✔️ Key Highlights
+- …
+
+### ✔️ Meetings & Discussions
+- **Topic** — …
+
+### ✔️ Decisions / Outcomes
+- …
+
+### ✔️ Technical Notes
+- …
+
+### ✔️ Action Items
+- [ ] …
+
+### ✔️ Odds and Ends...
+- Non important but mentioned things.
+---
+Keep it concise (~200 words). Timeline order when possible.
+Only return the Markdown.

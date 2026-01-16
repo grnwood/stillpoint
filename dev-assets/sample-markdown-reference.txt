@@ -1,0 +1,158 @@
+# 📘 Sample Markdown Reference
+
+A demonstration of **all common Markdown features** in one file.
+
+## 1. Headings
+
+# H1 Heading
+## H2 Heading
+### H3 Heading
+#### H4 Heading
+##### H5 Heading
+###### H6 Heading
+
+## 2. Paragraphs & Line Breaks
+
+This is a normal paragraph.  
+This line uses two spaces to force a line break.  
+
+## 3. Text Formatting
+
+**Bold text**
+
+*Italic text*
+
+***Bold + Italic***
+
+~~Strikethrough~~
+
+==Highlighting (if supported)==
+
+<ins>Underlined text</ins>
+
+## 4. Lists
+
+- Item A
+  - Sub-item A1
+  - Sub-item A2
+- Item B
+
+1. First
+2. Second
+   1. Second-A
+   2. Second-B
+
+- [x] Completed task
+- [ ] Pending task
+
+## 5. Links
+
+[OpenAI](https://openai.com)
+
+This is a link to [Google][google-ref].
+
+[google-ref]: https://google.com
+
+<example@example.com>
+
+## 6. Images
+
+![Sample Image](https://via.placeholder.com/300 "Placeholder Image")
+
+![Logo][logo-ref]
+
+[logo-ref]: https://via.placeholder.com/150
+
+## 7. Code
+
+`inline code`
+
+```python
+def greet(name):
+    print(f"Hello, {name}")
+```
+
+```
+SELECT * FROM users LIMIT 10;
+```
+
+## 8. Blockquotes
+
+> This is a blockquote.
+>
+> > Nested quote.
+
+## 9. Horizontal Rule
+
+---
+***
+___
+
+## 10. Tables
+
+| Name | Age | Active |
+|------|-----|--------|
+| Joe  | 42  | Yes    |
+| Mary | 37  | No     |
+
+## 11. Footnotes
+
+Here is a statement that needs a footnote.[^1]
+
+[^1]: This is the first footnote.
+
+## 12. Definition Lists
+
+Term A  
+: Definition of term A.
+
+## 13. Collapsible Section
+
+<details>
+<summary>Expand</summary>
+
+Hidden text here.
+
+</details>
+
+## 14. Emojis
+
+😄 👍 🚀 🔥
+
+## 15. Escaping Characters
+
+\# Not a heading  
+\*Not italic\*
+
+## 16. HTML Support
+
+<div style="background:#eee;padding:5px;">
+<b>HTML inside Markdown.</b>
+</div>
+
+## 17. Math (if supported)
+
+\( E = mc^2 \)
+
+```math
+\int_{0}^{\infty} x^2 dx
+```
+
+## 18. Mermaid
+
+```mermaid
+graph TD;
+    A-->B;
+    A-->C;
+    C-->D;
+```
+
+## 19. YAML Front Matter
+
+```yaml
+---
+title: "Sample Markdown"
+author: "ChatGPT"
+date: 2025-11-18
+---
+```

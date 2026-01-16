@@ -1,0 +1,25 @@
+Task: You are given a conversation transcript between a user and an AI assistant. Your job is to condense this history into 
+a concise context seed that can be used to initialize a future conversation.
+
+Goal: Extract only the durable, session-relevant information — not the transient details — so the next session starts with the right awareness of the user’s needs, preferences, and ongoing threads.
+Requirements:
+Summarize only persistent context:
+Long-term user preferences
+Ongoing projects or multi-step tasks
+User goals, constraints, or working assumptions
+Important facts the assistant should remember next time
+
+Exclude:
+Greetings
+Temporary or time-sensitive items
+Ephemeral discussions not likely to matter again
+Assistant mistakes, debugging steps, or irrelevant chatter
+
+Output format:
+[Context Seed]
+- {bullet points of persistent facts}
+- {ongoing tasks or workstreams}
+- {user preferences & style notes}
+
+Keep it short: no more than 10–15 bullets.
+Be accurate: do not infer facts not clearly present in the transcript.

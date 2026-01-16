@@ -1,0 +1,133 @@
+:root {
+  --text: #111;
+  --muted: #666;
+  --border: #ddd;
+  --code-bg: #f6f8fa;
+  --max-width: 900px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  color: var(--text);
+  background: #fff;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.45;
+  font-size: 12pt;
+}
+
+main.stillpoint-print {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+header.stillpoint-header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.8em;
+}
+
+header.stillpoint-header .meta {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.5em 0 0.5em;
+}
+
+h1 { font-size: 2em; }
+h2 { font-size: 1.6em; }
+h3 { font-size: 1.3em; }
+h4 { font-size: 1.1em; }
+h5 { font-size: 1em; }
+h6 { font-size: 0.95em; color: var(--muted); }
+
+p { margin: 0.75em 0; }
+ul, ol { margin: 0.75em 0 0.75em 2em; }
+li { margin: 0.25em 0; }
+
+blockquote {
+  margin: 1em 0;
+  padding-left: 1em;
+  border-left: 4px solid var(--border);
+  color: var(--muted);
+}
+
+code {
+  background: var(--code-bg);
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  font-size: 0.95em;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75em;
+  overflow: auto;
+  margin: 1em 0;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+table {
+  border-collapse: collapse;
+  margin: 1em 0;
+  width: 100%;
+}
+
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+
+th {
+  background: #f0f0f0;
+  font-weight: 600;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1em 0;
+}
+
+.stillpoint-page-break {
+  border: none;
+  height: 1px;
+}
+
+@media print {
+  @page { margin: 0.75in; }
+
+  main.stillpoint-print {
+    padding: 0;
+    max-width: none;
+  }
+
+  h1, h2, h3 {
+    page-break-after: avoid;
+  }
+
+  pre, blockquote, table {
+    page-break-inside: avoid;
+  }
+
+  a[href]::after {
+    content: "";
+  }
+
+  .stillpoint-page-break {
+    break-after: page;
+  }
+}

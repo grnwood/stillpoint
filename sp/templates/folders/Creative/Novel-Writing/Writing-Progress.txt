@@ -1,0 +1,55 @@
+﻿# {{FolderName}} - Writing Progress
+Created {{DayDateYear}}
+---
+
+**Novel:** {{FolderName}}
+**Target:** [____] words
+**Current:** 0 words
+**Progress:** 0%
+
+{{cursor}}
+
+## Writing Log
+
+### {{DayDateYear}}
+**Words Written:** 
+**Total Words:** 
+**Chapters Completed:** 
+**Notes:** 
+
+
+## Writing Schedule
+**Daily Goal:** ___ words
+**Weekly Goal:** ___ words
+
+**Writing Days:**
+- Monday: 
+- Tuesday: 
+- Wednesday: 
+- Thursday: 
+- Friday: 
+- Saturday: 
+- Sunday: 
+
+## Milestones
+- [ ] First Draft Complete
+- [ ] First Revision Complete
+- [ ] Beta Reader Feedback
+- [ ] Second Revision Complete
+- [ ] Final Polish
+
+## Revision Notes
+
+
+## Beta Reader Feedback
+
+
+## Publishing Checklist
+- [ ] Final proofread
+- [ ] Cover design
+- [ ] Blurb/Synopsis
+- [ ] Author bio
+- [ ] Marketing plan
+
+---
+ [:{{FolderPathSlug}}:Research-Notes|Research-Notes] | [:{{FolderPathSlug}}:Characters|Characters] 

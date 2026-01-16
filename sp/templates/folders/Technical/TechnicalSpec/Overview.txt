@@ -1,0 +1,30 @@
+﻿# {{FolderName}} - Overview
+Created {{DayDateYear}}
+---
+
+**Project:** {{FolderName}}
+**Status:** Draft
+**Last Updated:** {{DayDateYear}}
+
+{{cursor}}
+
+## Purpose
+
+
+## Scope
+**In Scope:**
+- 
+
+**Out of Scope:**
+- 
+
+## Stakeholders
+- 
+
+## Success Criteria
+- 
+
+## References
+- [:{{FolderPathSlug}}:Architecture|Architecture]
+- [:{{FolderPathSlug}}:API-Design|API-Design]
+- [:{{FolderPathSlug}}:Data-Models|Data-Models]

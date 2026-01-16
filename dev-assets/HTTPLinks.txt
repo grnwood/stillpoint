@@ -1,0 +1,33 @@
+# HTTP Link Testing
+
+  
+## Plain HTTP URLs
+These should be automatically detected and clickable:
+
+
+http://www.google.com
+https://www.example.com/test
+https://github.com/grnwood/stillpoint
+
+
+## Wiki-style HTTP Links with Labels
+These use the format [url|label]:
+
+
+[http://www.google.com|Google Search
+][https://www.example.com|Example Website
+][https://github.com/grnwood/stillpoint|My Project on GitHub
+
+
+## Mixed Content
+Plain URL: http://www.google.com?xyz
+With label: ][http://www.google.com?xyz|Google with Query
+
+
+## Testing
+- Paste a plain URL and it should be clickable
+- Edit a link by adding |Label to create a friendly display name
+- Hover over links to see URL in status bar
+- Click or press Enter on links to open in browser
+
+]

@@ -1,0 +1,28 @@
+# Weekly Review - {{PageName}}
+Week of {{DayDateYear}}
+---
+
+{{cursor}}
+
+## Wins This Week
+- 
+
+## Challenges
+- 
+
+## What I Learned
+- 
+
+## Tasks Completed
+- [ ] 
+
+## Tasks Carried Over
+- [ ] 
+
+## Focus for Next Week
+1. 
+2. 
+3. 
+
+## Notes
+

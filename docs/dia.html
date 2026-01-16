@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StillPoint Diagramming</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+        <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">Diagramming</span>
+          <h1>Diagrams that live next to your notes.</h1>
+          <p>
+            StillPoint ships with an AI-powered PlantUML workflow so you can sketch systems,
+            workflows, and architecture without leaving the vault.
+          </p>
+        </div>
+        <div>
+          <img src="img/puml-full.png" alt="Diagram workspace in StillPoint" />
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.15s">
+        <div class="eyebrow">PlantUML built in</div>
+        <h2>Stay in flow while you map the system.</h2>
+        <p>
+          PlantUML diagrams live beside your notes, tasks, and decisions. That means your
+          architecture drawings evolve with the actual work, not in a separate tool you
+          forget to update.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>Text-based and durable</h3>
+            <p>PlantUML is plain text, so it diff’s cleanly and stays future-proof.</p>
+          </div>
+          <div class="card">
+            <h3>Linked to context</h3>
+            <p>Connect a diagram to the page, meeting, or decision that created it.</p>
+          </div>
+          <div class="card">
+            <h3>Fast revisions</h3>
+            <p>Update the diagram when the work changes, not weeks later.</p>
+          </div>
+          <div class="card">
+            <h3>Template library included</h3>
+            <p>
+              Prebuilt templates for every supported diagram type keep you in flow instead of
+              hunting for syntax docs.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.25s">
+        <div>
+          <div class="eyebrow">AI powered</div>
+          <h2>Describe it once, refine it quickly.</h2>
+          <p>
+            The AI assistant can draft PlantUML from a quick prompt, then you iterate with
+            edits and notes. You stay in the same workspace, keeping diagrams and writing
+            aligned.
+          </p>
+          <p>
+            You can also chat with the AI to adjust a diagram and get a clean diff of exactly
+            what changed before applying it.
+          </p>
+          <p class="quote">
+            Draw the idea, then capture the reasoning right next to it.
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Prompt</th>
+                <th>Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>"Sequence for client onboarding"</td>
+                <td>Generates a clean sequence diagram scaffold.</td>
+              </tr>
+              <tr>
+                <td>"Architecture for event pipeline"</td>
+                <td>Creates a component diagram with the main services.</td>
+              </tr>
+              <tr>
+                <td>"Flow for support escalation"</td>
+                <td>Outputs a workflow diagram you can refine.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.35s">
+        <div>
+          <div class="eyebrow">Example snippet</div>
+          <h2>Readable by humans, renderable by StillPoint.</h2>
+          <div class="card">
+<pre><code>@startuml
+actor Client
+participant "Project Lead" as Lead
+participant "Ops Team" as Ops
+
+Client -> Lead: Kickoff request
+Lead -> Ops: Create workspace
+Ops --> Lead: Workspace ready
+Lead --> Client: Share onboarding plan
+@enduml
+</code></pre>
+          </div>
+        </div>
+        <div class="media-card">
+          <img src="img/puml-render.png" alt="Rendered PlantUML diagram" />
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        <span>Diagram the system, then write the story behind it.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+      </footer>
+    </main>
+  </body>
+</html>

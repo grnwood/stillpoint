@@ -1,0 +1,54 @@
+﻿# {{FolderName}} - Project Charter
+Created {{DayDateYear}}
+---
+
+**Project Name:** {{FolderName}}
+**Project Manager:** 
+**Start Date:** 
+**Target Completion:** 
+
+{{cursor}}
+
+## Executive Summary
+
+
+## Business Case
+**Problem Statement:**
+
+
+**Proposed Solution:**
+
+
+**Expected Benefits:**
+- 
+
+## Project Objectives
+1. 
+2. 
+3. 
+
+## Key Deliverables
+- [ ] 
+- [ ] 
+- [ ] 
+
+## Budget Overview
+**Total Budget:** 
+**Allocation:**
+- Development: 
+- Resources: 
+- Contingency: 
+
+## Constraints & Assumptions
+**Constraints:**
+- 
+
+**Assumptions:**
+- 
+
+## Approval
+**Approved by:** 
+**Date:** 
+
+---
+Next: [:{{FolderPathSlug}}:Stakeholders|Stakeholders] 

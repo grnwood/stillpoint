@@ -1,0 +1,45 @@
+name: Build macOS App
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build app bundle
+        run: |
+          set -euo pipefail
+          if ! bash packaging/macos/install-mac.sh; then
+            echo "install-mac.sh failed"
+            exit 1
+          fi
+
+      - name: Smoke test bundle
+        run: |
+          test -d StillPoint.app
+          test -f StillPoint.app/Contents/Info.plist
+          test -x StillPoint.app/Contents/MacOS/StillPoint
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          pytest tests
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: StillPoint-macOS-app
+          path: StillPoint.app

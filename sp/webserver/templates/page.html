@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - StillPoint Vault{% endblock %}
+
+{% block content %}
+<article>
+    <header>
+        <h1>{{ title }}</h1>
+        {% if not print_mode %}
+        <div class="page-actions no-print">
+            <a href="?mode=print" role="button" class="secondary outline">Print View</a>
+            <a href="?mode=print&autoPrint=1" role="button" class="secondary outline">Print/PDF</a>
+        </div>
+        {% endif %}
+    </header>
+    
+    <div class="markdown-content">
+        {{ content | safe_markdown }}
+    </div>
+    
+    {% if attachments and not print_mode %}
+    <footer>
+        <details>
+            <summary>Attachments ({{ attachments|length }})</summary>
+            <ul>
+                {% for attachment in attachments %}
+                <li><a href="{{ attachment.path }}">{{ attachment.name }}</a></li>
+                {% endfor %}
+            </ul>
+        </details>
+    </footer>
+    {% endif %}
+</article>
+{% endblock %}

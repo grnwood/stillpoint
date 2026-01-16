@@ -1,0 +1,92 @@
+{
+  "Enterprise Architecture": [
+    {
+      "name": "Target-State Enterprise Architecture",
+      "text": "Design a Salesforce-centric enterprise architecture for:\nIndustry: Retail\nRegion: ANZ\nWorkloads: Commerce, Order Management, ERP integration\nSLA: 99.95%\nInclude: System landscape, core domains, integration strategy, identity access, resiliency (multi-region), data residency, governance model, and executive risks."
+    },
+    {
+      "name": "License + Cost Optimization Advisor",
+      "text": "Evaluate Salesforce license strategy:\n- Map access by persona\n- Platform vs CRM vs Community licenses\n- API usage & governor risks\nOutput: Low/Medium/Stretch savings scenarios with red/yellow/green viability score."
+    },
+    {
+      "name": "Capability Heatmap & Roadmap",
+      "text": "Turn current-state capability maturity into business roadmap phases (Quarterly), aligned with product architecture decisions and staffing needs. Include dependencies + RACI + KPIs."
+    }
+  ],
+
+  "Solutions Architecture": [
+    {
+      "name": "Salesforce Architecture Blueprint",
+      "text": "Create target-state architecture for: Retail + ANZ + Commerce + OMS + SAP. Include data flow, identity/auth, system boundaries, licensing, decisions, risks, and developer handoff backlog."
+    },
+    {
+      "name": "Integration Pattern Comparison",
+      "text": "Compare MuleSoft, REST, Platform Events, CDC, External Services, and GraphQL for SAP→OMS→Commerce Inventory. Recommend with pros/cons, fault strategy, and governance."
+    },
+    {
+      "name": "OMS + Commerce Solution Design (High Level)",
+      "text": "Design order lifecycle: remorse period, split shipments, ATP, payment capture/refund, error queues, exposure in SFCC and Service Cloud Workspaces."
+    },
+    {
+      "name": "Deep-Dive OMS Failure Flows",
+      "text": "Focus: Declines, WISMO, 3PL delays, lost/damaged, customs, SLA breaches. Provide diagrams + retry logic + monitoring KPIs."
+    },
+    {
+      "name": "Commerce Personalization Strategy",
+      "text": "Einstein personalization + CDP segments: In-stock only rules, geo-based promos, loyalty tiers, and stale-data fallbacks. Include caching + PDP performance model."
+    }
+  ],
+
+  "Technical Architecture": [
+    {
+      "name": "CI/CD + DevOps Strategy",
+      "text": "Design GitHub Actions SFDX pipeline: Trunk with short branches, unlocked packages, automated tests, PMD, source tracking, rollback, and GitOps governance."
+    },
+    {
+      "name": "Data Migration Playbook",
+      "text": "Source: SAP + Legacy SFCC; 2.4M orders. Include mapping templates, dependency resolution, reconciliation SQL, delta sync, and go/no-go checklist."
+    },
+    {
+      "name": "Inventory Sync Architecture",
+      "text": "OMS→Commerce near-real-time inventory (<500ms UI freshness). Include safety stock, backorder logic, pre-order gating, GraphQL example payloads."
+    },
+    {
+      "name": "Export Tooling for Git Governance",
+      "text": "Generate CLI: Extract Apex, Flows, PermSets, Custom Metadata, and External Credentials. Support `--diff`, tagging, and artifact packaging."
+    }
+  ],
+
+  "Tech Lead": [
+    {
+      "name": "Contributor Onboarding Kit",
+      "text": "Produce engineering onboarding: branching policy, sandbox workflow, code review guidelines, service boundaries, naming standards for LWCs, Flows, and sObjects."
+    },
+    {
+      "name": "PR Template + Codeowners Strategy",
+      "text": "Create templates for approvals, test scope, rollout notes, and security rules. Add CODEOWNERS with domain ownership routing."
+    },
+    {
+      "name": "Release Readiness Checklist",
+      "text": "Include: regression coverage, feature toggles, monitoring dashboards activated, DR plans updated, rollout/rollback runbooks, and stakeholder sign-offs."
+    }
+  ],
+
+  "Developer Enablement": [
+    {
+      "name": "Apex Modernization Refactor",
+      "text": "Refactor code with selectors + fflib + async patterns + data factories. Provide diff + justification + improved test suite.\nCode: ```apex\n[paste here]\n```"
+    },
+    {
+      "name": "Branching & Commit Standards",
+      "text": "Enforce semantic rules: feat/refactor/flow/lwc/config. Include hooks to validate metadata structure and enforce test naming conventions."
+    },
+    {
+      "name": "Unit Test Generator",
+      "text": "Given Apex + business rules, generate Test Data Factories and tests with Arrange/Act/Assert sections and negative scenarios for governor risk checks."
+    },
+    {
+      "name": "Executive Deck Transformer",
+      "text": "Convert technical notes → CIO slides (12 max). Include value, KPIs, cost, risks, dependencies, and talking points.\nNotes:\n[paste here]"
+    }
+  ]
+}

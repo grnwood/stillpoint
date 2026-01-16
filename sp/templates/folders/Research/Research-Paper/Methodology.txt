@@ -1,0 +1,54 @@
+﻿# {{FolderName}} - Methodology
+Created {{DayDateYear}}
+---
+
+**Research Paper:** {{FolderName}}
+
+{{cursor}}
+
+## Methodology
+
+### Research Design
+**Type:** Qualitative / Quantitative / Mixed Methods
+**Approach:** 
+
+
+### Participants/Sample
+**Population:** 
+**Sample Size:** 
+**Sampling Method:** 
+**Inclusion Criteria:**
+- 
+
+**Exclusion Criteria:**
+- 
+
+### Data Collection
+
+#### Instruments
+- 
+
+#### Procedures
+
+
+### Data Analysis
+
+#### Analytical Framework
+
+
+#### Statistical Methods
+- 
+
+#### Software/Tools
+- 
+
+### Ethical Considerations
+**IRB Approval:** 
+**Informed Consent:** 
+**Data Privacy:** 
+
+### Validity & Reliability
+
+
+---
+ [:{{FolderPathSlug}}:Literature-Review|Literature-Review] | [:{{FolderPathSlug}}:Results|Results] 

@@ -1,0 +1,27 @@
+# {{PageName}}
+{{DayDateYear}}
+---
+
+## Period
+**From:** 
+**To:** 
+
+{{cursor}}
+
+## What Went Well ✅
+- 
+
+## What Could Be Improved 🔄
+- 
+
+## What We Learned 💡
+- 
+
+## Action Items
+- [ ] 
+
+## Appreciation & Shoutouts 🎉
+
+
+## Next Retrospective
+**Date:** 

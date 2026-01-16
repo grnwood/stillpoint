@@ -1,0 +1,31 @@
+# {{PageName}}
+{{DayDateYear}}
+---
+
+**Source:** 
+**Type:** Article / Book / Video / Other
+**Date:** 
+**URL:** 
+
+{{cursor}}
+
+## Summary
+
+
+## Key Points
+- 
+
+## Quotes & References
+> 
+
+## My Analysis
+
+
+## Related Topics
+- 
+
+## Follow-up Questions
+- 
+
+## Tags
+@research

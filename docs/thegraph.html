@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StillPoint Graph</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+               <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+        </nav>
+
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">The Graph</span>
+          <h1>A graph of everything you connect, not just your calendar.</h1>
+          <p>
+            In StillPoint the graph is not something you build. It is something that emerges as you
+            link pages across projects, ideas, people, and journals. The calendar is a powerful
+            backbone, but every page can be a node.
+          </p>
+        </div>
+        <div class="image-stack">
+          <img
+            src="img/mini-graph.png"
+            alt="Daily notes layout"
+          />
+          <img
+            src="img/raw-links.png"
+            alt="Personal knowledge graph"
+          />
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.15s">
+        <div class="eyebrow">How it forms</div>
+        <h2>Connections are a natural side effect of writing.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>The journal is a backbone</h3>
+            <p>
+              Day pages naturally link to projects, people, and decisions. That daily stream
+              gives the graph a living timeline, but it is only one entry point.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Any page can connect</h3>
+            <p>
+              Project notes, meeting notes, reference pages, or personal ideas all become
+              nodes. Link between them and the graph fills in the relationships.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Linking is the smallest action</h3>
+            <p>
+              A link is just part of writing: client names, project names, concepts, passages,
+              or ticket numbers become references with no metadata required.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Connections reveal patterns</h3>
+            <p>
+              The same project appears in meeting notes, a status update, and a decision log.
+              The graph stitches those moments together without extra work.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.25s">
+        <div>
+          <h2>A living map of your thinking.</h2>
+          <p>
+            The graph grows naturally and stays out of the way until you need it. It shows how
+            journal days connect to projects, how projects connect to ideas, and how your work
+            connects to outcomes across the whole vault.
+          </p>
+          <p class="quote">
+            You do not maintain the graph. You just write, and the graph keeps up.
+          </p>
+        </div>
+        <div class="image-stack">
+          <button class="lightbox-trigger" type="button" data-lightbox="img/graph-day-link.png" data-lightbox-caption="A daily note linking out to projects and ideas, making the graph feel alive without extra work.">
+            <img
+              src="img/graph-day-link.png"
+              alt="Network diagram"
+            />
+          </button>
+          <button class="lightbox-trigger" type="button" data-lightbox="img/graph-panel.png" data-lightbox-caption="The link navigator graph surfaces relationships across your vault, showing how topics connect at a glance.">
+            <img
+              src="img/graph-panel.png"
+              alt="Graph visualization"
+            />
+          </button>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.35s">
+        <div class="eyebrow">Focused views</div>
+        <h2>Filter the graph from any node.</h2>
+        <p>
+          Click a node and filter the graph to that context. StillPoint narrows the visible pages,
+          tasks, and links so you get a dedicated project view without losing the larger
+          structure. It feels like a focused workspace while still being connected to the
+          rest of your vault.
+        </p>
+        <img src="img/filtered-graph.png" alt="Filtered graph view" />
+      </section>
+
+      <footer class="site-footer">
+        <span>Write first. Connections follow.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}StillPoint Vault{% endblock %}</title>
+    
+    <!-- Pico CSS -->
+    <link rel="stylesheet" href="{{ url_for('serve_static', filename='vendor/pico.min.css') }}">
+    
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="{{ url_for('serve_static', filename='stillpoint.css') }}">
+    
+    <!-- Print styles -->
+    <link rel="stylesheet" href="{{ url_for('serve_static', filename='print.css') }}" media="print">
+    
+    {% block head %}{% endblock %}
+</head>
+<body>
+    {% if not print_mode %}
+    <nav class="container-fluid no-print">
+        <ul>
+            <li><strong><a href="/">StillPoint Vault</a></strong></li>
+        </ul>
+        <ul>
+            <li><a href="/browse/">Browse</a></li>
+        </ul>
+    </nav>
+    {% endif %}
+    
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    
+    {% if not print_mode %}
+    <footer class="container-fluid no-print">
+        <hr>
+        <small>Served by StillPoint Web Server</small>
+    </footer>
+    {% endif %}
+    
+    {% if auto_print %}
+    <script>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                window.print();
+            }, 500);
+        });
+    </script>
+    {% endif %}
+</body>
+</html>
