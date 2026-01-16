@@ -44,19 +44,19 @@ from sp.app.ui.main_window import MainWindow
 # Set these environment variables to "1" or "true" to enable detailed logging
 # By default, all are OFF for cleaner stdout (only startup and API calls shown)
 #
-# ZIMX_DEBUG_EDITOR      - Editor operations (markdown save/load, cursor positioning)
-# ZIMX_DEBUG_NAV         - Navigation operations (tree selection, history)  
-# ZIMX_DEBUG_HISTORY     - Page history tracking
-# ZIMX_DEBUG_PANELS      - Right panel signal forwarding
-# ZIMX_DEBUG_TASKS       - Task panel mouse events and signal emission
-# ZIMX_DEBUG_PLANTUML    - PlantUML rendering operations
-# ZIMX_DETAILED_PAGE_LOG - Detailed page load timing and operations
-# ZIMX_DETAILED_LOGGING  - Additional low-level internal logging (various modules)
+# SP_DEBUG_EDITOR      - Editor operations (markdown save/load, cursor positioning)
+# SP_DEBUG_NAV         - Navigation operations (tree selection, history)  
+# SP_DEBUG_HISTORY     - Page history tracking
+# SP_DEBUG_PANELS      - Right panel signal forwarding
+# SP_DEBUG_TASKS       - Task panel mouse events and signal emission
+# SP_DEBUG_PLANTUML    - PlantUML rendering operations
+# SP_DETAILED_PAGE_LOG - Detailed page load timing and operations
+# SP_DETAILED_LOGGING  - Additional low-level internal logging (various modules)
 #
 # Examples:
-#   export ZIMX_DEBUG_NAV=1        # Enable navigation debugging
-#   export ZIMX_DEBUG_TASKS=1      # Enable task panel debugging
-#   ZIMX_DEBUG_EDITOR=1 ./sv.sh   # Enable for single run
+#   export SP_DEBUG_NAV=1        # Enable navigation debugging
+#   export SP_DEBUG_TASKS=1      # Enable task panel debugging
+#   SP_DEBUG_EDITOR=1 ./sv.sh   # Enable for single run
 # ============================================================================
 
 def _debug_enabled(var_name: str) -> bool:
@@ -146,7 +146,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Show the vault picker on startup instead of auto-opening the default vault.",
     )
     parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
-    parser.add_argument("--host", default=os.getenv("ZIMX_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
+    parser.add_argument("--host", default=os.getenv("SP_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     return parser.parse_args(argv)
 
@@ -162,7 +162,7 @@ def _should_use_minimal_font_scan() -> bool:
 def _maybe_use_minimal_fonts() -> None:
     """Optionally force Qt to see only a small font set to avoid long font scans.
 
-    Enable via the global preference or ZIMX_MINIMAL_FONT_SCAN=1. This writes a tiny
+    Enable via the global preference or SP_MINIMAL_FONT_SCAN=1. This writes a tiny
     fontconfig file under ~/.cache/stillpoint/fonts-minimal and points
     FONTCONFIG_FILE/FONTCONFIG_PATH/QT_QPA_FONTDIR to it, copying a single known font
     if needed.
@@ -202,7 +202,7 @@ def _maybe_use_minimal_fonts() -> None:
         ]
     src = next((p for p in candidates if p.exists()), None)
     if not src:
-        print("[StillPoint] ZIMX_MINIMAL_FONT_SCAN set but no candidate font found; falling back to system fonts.", file=sys.stderr)
+        print("[StillPoint] SP_MINIMAL_FONT_SCAN set but no candidate font found; falling back to system fonts.", file=sys.stderr)
         return
     dest = font_dir / src.name
     try:
@@ -307,7 +307,7 @@ def _find_open_port(host: str, preferred: int) -> int:
 
 
 def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvicorn.Server]:
-    env_port = os.getenv("ZIMX_PORT")
+    env_port = os.getenv("SP_PORT")
     preferred = preferred_port if preferred_port is not None else int(env_port or "8765")
     # Allow 0 to force ephemeral port selection
     preferred = 0 if preferred == 0 else preferred
@@ -417,7 +417,7 @@ _FAULTHANDLER_FILE = None
 def _enable_faulthandler_log() -> None:
     """Enable faulthandler to capture native/Python crashes to a temp log."""
     global _FAULTHANDLER_FILE
-    if os.getenv("ZIMX_DISABLE_FAULTHANDLER", "0") not in ("0", "false", "False", ""):
+    if os.getenv("SP_DISABLE_FAULTHANDLER", "0") not in ("0", "false", "False", ""):
         return
     try:
         import faulthandler
