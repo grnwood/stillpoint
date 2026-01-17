@@ -35,14 +35,20 @@ jobs:
         run: |
           if (!(Test-Path "dist/StillPoint/StillPoint.exe")) { throw "dist/StillPoint/StillPoint.exe not found" }
 
-      - name: Upload build
+      - name: Zip bundle
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          Compress-Archive -Path dist\StillPoint -DestinationPath StillPoint-win32.zip
+
+      - name: Upload build artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: StillPoint.exe
-          path: dist/StillPoint
+          name: StillPoint-win32
+          path: StillPoint-win32.zip
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: StillPoint.exe
+          files: StillPoint-win32.zip
