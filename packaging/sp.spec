@@ -26,9 +26,19 @@ MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
 # Hidden imports sometimes needed for PySide6 / FastAPI
 hidden = (
     collect_submodules('sp')
+    + collect_submodules('sp.app')
     + collect_submodules('sp.app.ui')  # Explicitly collect all UI modules
     + collect_submodules('PySide6')
     + [
+        'sp.app.ui.main_window',  # Explicitly ensure main_window is included
+        'sp.app.ui.markdown_editor',
+        'sp.app.ui.page_editor_window',
+        'sp.app.ui.plantuml_editor_window',
+        'sp.app.ui.preferences_dialog',
+        'sp.app.ui.ai_chat_panel',
+        'sp.app.ui.calendar_panel',
+        'sp.app.ui.task_panel',
+        'sp.app.ui.toc_widget',
         'fastapi',
         'httpx',
         'pydantic',
