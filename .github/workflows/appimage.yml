@@ -25,11 +25,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
+          chmod +x packaging/prune-qt.sh
+          apt install -y upx
           pip install -r sp/requirements.txt
 
       - name: PyInstaller build
         run: |
           pyinstaller -y --clean packaging/sp.spec
+
+      - name: Strip uneeded Qt stuff
+        run: |
+          packaging/prune-qt.sh
 
       - name: Smoke test bundle
         run: |
