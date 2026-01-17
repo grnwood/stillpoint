@@ -1,6 +1,6 @@
 # StillPoint
 
-StillPoint is a local-first, Zim-style note system with a PySide6 desktop app and an embedded FastAPI backend. It is built around a folder-per-page vault structure, fast navigation, and Markdown-first editing.
+StillPoint is a local-first, markdown note system with a PySide6 desktop app and an embedded FastAPI backend. It is built around a folder-per-page vault structure, fast navigation, and Markdown-first editing.
 
 ## Highlights
 
