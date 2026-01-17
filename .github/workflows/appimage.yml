@@ -6,7 +6,7 @@ on:
       - "v*"
   workflow_dispatch:
 
-permisisons:
+permissions:
   contents: write
   
 jobs:
