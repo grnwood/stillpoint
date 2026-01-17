@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permisisons:
+  contents: write
+
+
 jobs:
   build:
     runs-on: windows-latest
