@@ -5,10 +5,8 @@ source venv/bin/activate
 # Run the API server over HTTPS using uvicorn.
 # Note: the Python entrypoint only accepts host/port/vault options (no SSL), so we use uvicorn directly.
 
-export ZIMX_VAULTS_ROOT="/home/grnwood/Desktop/StillPointServerVaults"
+export STILPOINT_VAULTS_ROOT="/opt/stillpoint/vaults"
 
 venv/bin/uvicorn sp.server.api:app \
-  --host 0.0.0.0 \
-  --port 8443 \
-  --ssl-keyfile dev-assets/certs/local-key.pem \
-  --ssl-certfile dev-assets/certs/local-cert.pem
+  --host 127.0.0.1 \
+  --port 8080

@@ -25,7 +25,8 @@ MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
 
 # Hidden imports sometimes needed for PySide6 / FastAPI
 hidden = (
-    collect_submodules('sp')  
+    collect_submodules('sp')
+    + collect_submodules('sp.app.ui')  # Explicitly collect all UI modules
     + collect_submodules('PySide6')
     + [
         'fastapi',

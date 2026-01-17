@@ -1,0 +1,53 @@
+# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# Unless the file starts with a global options block, the first
+# uncommented line is always the address of your site.
+#
+# To use your own domain name (with automatic HTTPS), first make
+# sure your domain's A/AAAA DNS records are properly pointed to
+# this machine's public IP, then replace ":80" below with your
+# domain name.
+#
+www.stillpoint.info {
+    redir https://stillpoint.info{uri} permanent
+}
+
+stillpoint.info {
+    root * /opt/stillpoint/site
+    file_server
+    encode zstd gzip
+
+    @junk {
+        path /.git/* /.env /.DS_Store /server-status /actuator/* /v2/* /_all_dbs
+    }
+
+    respond @junk 404
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy interest-cohort=()
+    }
+
+    log {
+        output file /var/log/caddy/site.log
+        format console
+    }
+}
+
+vault.stillpoint.info {
+	@badpaths {
+        path /.git/* /.env /.DS_Store /server-status /actuator/* /v2/* /_all_dbs
+    }
+
+    respond @badpaths 404
+
+	reverse_proxy 127.0.0.1:8080
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/vault.log
+		format console
+	}
+}
