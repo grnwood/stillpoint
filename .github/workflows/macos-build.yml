@@ -1,12 +1,9 @@
-name: Build macOS App
+name: Build macOS App (zip)
 
 on:
   push:
-    branches:
-      - main
     tags:
       - "v*"
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -24,33 +21,52 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build app bundle
+      - name: Install deps
         run: |
           set -euo pipefail
-          if ! bash packaging/macos/install-mac.sh; then
-            echo "install-mac.sh failed"
-            exit 1
-          fi
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r sp/requirements.txt
+
+      - name: PyInstaller build (.app)
+        env:
+          STILLPOINT_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          pyinstaller -y --clean packaging/sp-macos.spec
+          ls -lah dist
 
       - name: Smoke test bundle
         run: |
-          test -d StillPoint.app
-          test -f StillPoint.app/Contents/Info.plist
-          test -x StillPoint.app/Contents/MacOS/StillPoint
+          set -euo pipefail
+          test -d dist/StillPoint.app
+          test -f dist/StillPoint.app/Contents/Info.plist
+          test -x dist/StillPoint.app/Contents/MacOS/StillPoint
 
-      - name: Zip app bundle
-        if: startsWith(github.ref, 'refs/tags/')
+          # Ensure it's a real mac binary, not a stub script
+          file dist/StillPoint.app/Contents/MacOS/StillPoint
+          file dist/StillPoint.app/Contents/MacOS/StillPoint | grep -q "Mach-O"
+
+          # Sanity size check
+          SIZE=$(du -sm dist/StillPoint.app | cut -f1)
+          echo "Bundle size: ${SIZE}MB"
+          if [ "$SIZE" -lt 50 ]; then
+            echo "ERROR: Bundle is too small (${SIZE}MB), likely missing dependencies"
+            exit 1
+          fi
+
+      - name: Zip bundle
         run: |
-          ditto -c -k --sequesterRsrc --keepParent StillPoint.app StillPoint-macOS.zip
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent dist/StillPoint.app StillPoint-macOS.zip
 
-      - name: Upload app bundle
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StillPoint-macOS-app
-          path: StillPoint.app
-      
+          name: StillPoint-macOS
+          path: StillPoint-macOS.zip
+
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: StillPoint-macOS.zip

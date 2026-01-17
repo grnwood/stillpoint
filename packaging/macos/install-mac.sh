@@ -82,6 +82,7 @@ source "$VENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQ_FILE"
+python -m pip install pyinstaller
 
 # ------------------------------------------------------------
 # Build .icns
@@ -107,48 +108,33 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICNS_OUT"
 rm -rf "$ICONSET_DIR"
 
 # ------------------------------------------------------------
-# Build .app bundle
+# Build .app bundle with PyInstaller
 # ------------------------------------------------------------
-echo "Creating app bundle..."
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
+echo "Building .app bundle with PyInstaller..."
+cd "$PROJECT_DIR"
 
-cp "$ICNS_OUT" "$APP_DIR/Contents/Resources/${APP_NAME}.icns"
+# Clean old build artifacts
+rm -rf "$APP_DIR"
+rm -rf "$PROJECT_DIR/build"
+rm -rf "$PROJECT_DIR/dist"
 
-cat > "$APP_DIR/Contents/MacOS/$APP_NAME" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-PROJECT_DIR="$PROJECT_DIR"
-source "\$PROJECT_DIR/.venv/bin/activate"
-cd "\$PROJECT_DIR"
-exec python -m $ENTRYPOINT_MODULE "\$@"
-EOF
+# Run PyInstaller
+pyinstaller -y packaging/sp-macos.spec
 
-chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+# PyInstaller creates dist/StillPoint.app
+if [[ ! -d "$PROJECT_DIR/dist/StillPoint.app" ]]; then
+  echo "ERROR: PyInstaller did not create StillPoint.app"
+  exit 1
+fi
 
-cat > "$APP_DIR/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key>
-  <string>$APP_NAME</string>
-  <key>CFBundleDisplayName</key>
-  <string>$APP_NAME</string>
-  <key>CFBundleIdentifier</key>
-  <string>$BUNDLE_ID</string>
-  <key>CFBundleVersion</key>
-  <string>$APP_VERSION</string>
-  <key>CFBundleExecutable</key>
-  <string>$APP_NAME</string>
-  <key>CFBundleIconFile</key>
-  <string>$APP_NAME.icns</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-EOF
+# Move to project root for convenience
+mv "$PROJECT_DIR/dist/StillPoint.app" "$APP_DIR"
+
+echo "✅ Built self-contained .app bundle"
+
+# Clean up build artifacts
+rm -rf "$PROJECT_DIR/build"
+rm -rf "$PROJECT_DIR/dist"
 
 xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
 
