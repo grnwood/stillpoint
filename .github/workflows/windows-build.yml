@@ -38,11 +38,11 @@ jobs:
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: StillPoint-Win64
+          name: StillPoint.exe
           path: dist/StillPoint
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: StillPoint-Win64.zip
+          files: StillPoint.exe

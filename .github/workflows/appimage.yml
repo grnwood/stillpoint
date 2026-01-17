@@ -1,4 +1,4 @@
-name: Build Linux AppImage
+name: Build Linux Bundle (zip)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,63 +29,24 @@ jobs:
 
       - name: PyInstaller build
         run: |
-          pyinstaller -y packaging/sp.spec
+          pyinstaller -y --clean packaging/sp.spec
 
       - name: Smoke test bundle
         run: |
           test -x dist/StillPoint/StillPoint
 
-      - name: Build AppImage
+      - name: Zip bundle
         run: |
-          APPDIR="StillPoint.AppDir"
-          rm -rf "$APPDIR"
-          mkdir -p "$APPDIR/usr/bin"
-          mkdir -p "$APPDIR/usr/share/applications"
-          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-
-          cp -r dist/StillPoint/* "$APPDIR/usr/bin/"
-          cp assets/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/stillpoint.png"
-          cp assets/icon.png "$APPDIR/stillpoint.png"
-
-          printf '%s\n' \
-          '[Desktop Entry]' \
-          'Type=Application' \
-          'Name=StillPoint' \
-          'Comment=StillPoint Desktop' \
-          'Exec=AppRun' \
-          'Icon=stillpoint' \
-          'Terminal=false' \
-          'Categories=Office;Utility' \
-          'StartupNotify=true' \
-          'StartupWMClass=StillPoint' \
-          > "$APPDIR/usr/share/applications/stillpoint.desktop"
-
-          cp "$APPDIR/usr/share/applications/stillpoint.desktop" "$APPDIR/StillPoint.desktop"
-          ls -la "$APPDIR"
-          ls -la "$APPDIR/usr/share/applications"
-          cat "$APPDIR/StillPoint.desktop"
-          
-          printf '%s\n' \
-            '#!/usr/bin/env bash' \
-            'set -euo pipefail' \
-            'HERE="$(dirname "$(readlink -f "$0")")"' \
-            'exec "$HERE/usr/bin/StillPoint" "$@"' \
-            > "$APPDIR/AppRun"
-          chmod +x "$APPDIR/AppRun"
-
-          curl -L -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool.AppImage
-          ./appimagetool.AppImage --appimage-extract
-          ./squashfs-root/AppRun "$APPDIR" "StillPoint-x86_64.AppImage"
-          rm -rf squashfs-root appimagetool.AppImage
+          cd dist
+          zip -r ../StillPoint-linux-x86_64.zip StillPoint
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StillPoint-AppImage
-          path: StillPoint-x86_64.AppImage
+          name: StillPoint-linux-x86_64
+          path: StillPoint-linux-x86_64.zip
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: StillPoint-x86_64.AppImage
+          files: StillPoint-linux-x86_64.zip
