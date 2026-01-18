@@ -2440,7 +2440,28 @@ class MainWindow(QMainWindow):
             server_password_hash=saved_password_hash,
         )
         vaults = self._build_local_vault_entries(self.vault_root if not self._remote_mode else None)
-        vaults.extend(self._fetch_remote_vaults())
+        # Add the newly added/created remote vault to the list
+        # Note: We already fetched the vault list earlier, so we don't need to fetch again
+        # This avoids a 403 error if the password wasn't saved (remember_password unchecked)
+        vault_entry = {
+            "kind": "remote",
+            "name": Path(selected_path).name if selected_path else "Unknown",
+            "path": selected_path,
+            "server_url": base_url,
+            "verify_ssl": verify_ssl,
+        }
+        vaults.append(vault_entry)
+        # Also add any other vaults from this server that were previously configured
+        if existing and existing.get("selected_vaults"):
+            for vault_path in existing.get("selected_vaults", []):
+                if vault_path != selected_path:
+                    vaults.append({
+                        "kind": "remote",
+                        "name": Path(vault_path).name,
+                        "path": vault_path,
+                        "server_url": base_url,
+                        "verify_ssl": verify_ssl,
+                    })
         return vaults
 
     def _select_vault(self, checked: bool | None = None, startup: bool = False, spawn_new_process: bool = False) -> bool:  # noqa: ARG002
@@ -2760,7 +2781,30 @@ class MainWindow(QMainWindow):
         if is_remote:
             self._load_remote_auth()
             auth = RemoteTokenAuth(self._get_access_token, self._attempt_refresh)
-            headers = None
+            headers = {}
+            
+            # Add server admin password header for remote servers
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                host = parsed.hostname
+                port = parsed.port
+                scheme = parsed.scheme
+                
+                if host and port:
+                    server_password_hash = config.get_server_password_hash(host, port, scheme)
+                    
+                    # If this is the local embedded server, use the embedded password
+                    if not server_password_hash and base_url == self._local_api_base and self._embedded_server_admin_password:
+                        import hashlib
+                        server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
+                    
+                    if server_password_hash:
+                        headers["X-Server-Admin-Password"] = server_password_hash
+            except Exception:
+                pass
+            
+            headers = headers if headers else None
         else:
             auth = None
             headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
@@ -3651,15 +3695,32 @@ class MainWindow(QMainWindow):
         if last_file:
             # Verify the file still exists
             try:
-                abs_path = Path(self.vault_root) / last_file.lstrip("/")
-                if abs_path.exists():
-                    self._open_file(last_file)
-                    return
+                if self._remote_mode:
+                    # For remote vaults, check via API
+                    if self._page_exists(last_file):
+                        self._open_file(last_file)
+                        return
+                else:
+                    # For local vaults, check filesystem
+                    abs_path = Path(self.vault_root) / last_file.lstrip("/")
+                    if abs_path.exists():
+                        self._open_file(last_file)
+                        return
             except Exception:
                 pass
         
-        # Fall back to vault home page
-        self._go_home()
+        # Fall back to vault home page, but for remote vaults, check if it exists first
+        if self._remote_mode:
+            home_path = self._home_page_path()
+            if home_path and self._page_exists(home_path):
+                try:
+                    self._open_file(home_path)
+                except Exception:
+                    # Silently fail for remote vaults - the vault might be empty
+                    pass
+        else:
+            # For local vaults, always try to go home (will create if needed)
+            self._go_home()
     
     def _page_exists(self, rel_path: str) -> bool:
         if not rel_path:

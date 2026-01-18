@@ -2137,7 +2137,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--vaults-root",
-        default=os.getenv("ZIMX_VAULTS_ROOT", "vaults"),
+        default=os.getenv("STILLPOINT_VAULTS_ROOT", "vaults"),
         help="Base folder where vaults are stored",
     )
     parser.add_argument(
