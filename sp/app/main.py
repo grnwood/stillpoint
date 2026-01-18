@@ -84,7 +84,7 @@ def _set_app_icon(app: QApplication) -> None:
     handled by PyInstaller, but this also ensures the window/icon in the titlebar
     matches.
     """
-    for path in _resource_candidates(os.path.join("assets", "icon.png")):
+    for path in _resource_candidates(os.path.join("assets", "sp-icon.png")):
         if os.path.exists(path):
             try:
                 app.setWindowIcon(QIcon(path))

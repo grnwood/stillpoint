@@ -19,7 +19,7 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Paths relative to script
 $DistDir    = Join-Path $ScriptRoot "..\..\dist\StillPoint"
-$AssetsDir  = Join-Path $ScriptRoot "..\..\assets"
+$AssetsDir  = Join-Path $ScriptRoot "..\..\sp\assets"
 
 # Install location (user space)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
@@ -50,8 +50,8 @@ if (-not (Test-Path $ExePathInDist)) {
 
 $IconSource = $null
 
-$IconIco = Join-Path $AssetsDir "icon.ico"
-$IconPng = Join-Path $AssetsDir "icon.png"
+$IconIco = Join-Path $AssetsDir "sp-icon.ico"
+$IconPng = Join-Path $AssetsDir "sp-icon.png"
 
 if (Test-Path $IconIco) {
     $IconSource = $IconIco

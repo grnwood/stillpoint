@@ -10303,23 +10303,25 @@ class MainWindow(QMainWindow):
         """Display a simple About dialog with app info and logo."""
         box = QMessageBox(self)
         box.setWindowTitle("About StillPoint")
-        icon_path = self._find_asset("icon.png")
-        icon_url = ""
+        
+        # Set icon pixmap (properly handles transparency)
+        icon_path = self._find_asset("sp-full-transparent.png")
         if icon_path:
             try:
                 pix = QPixmap(icon_path)
                 if not pix.isNull():
-                    icon_url = QUrl.fromLocalFile(icon_path).toString()
+                    # Scale to reasonable size while maintaining transparency
+                    scaled_pix = pix.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    box.setIconPixmap(scaled_pix)
             except Exception:
-                icon_url = ""
-        image_block = f'<p style="margin: 0 0 8px 0;"><img src="{icon_url}" width="96" height="96"></p>' if icon_url else ""
+                pass
+        
         box_text = (
             "<div style=\"text-align: center;\">"
-            f"{image_block}"
             "<div style=\"font-size: 18px; font-weight: 600;\">StillPoint</div>"
             "<div style=\"margin-top: 6px;\">StillPoint is a local-first Markdown knowledge system for connected notes, tasks, and focused thinking — built to last.</div>"
             "<div style=\"margin-top: 10px;\"><b>Author:</b> Joseph Greenwood "
-            "(<a href=\"mailto:grnwood@gmail.com\">grnwood@gmail.com</a>)</div>"
+            "(<a href=\"mailto:info@stillpoint.info\">info@stillpoint.info</a>)</div>"
             f"<div><b>Version:</b> {APP_VERSION}</div>"
             "<div style=\"margin-top: 8px;\">"
             "<a href=\"https://github.com/grnwood/stillpoint/issues\">Report Issues</a>"

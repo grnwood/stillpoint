@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 REQ_FILE="$PROJECT_DIR/sp/requirements.txt"
-ICON_PNG="$PROJECT_DIR/sp/assets/icon.png"
+ICON_PNG="$PROJECT_DIR/sp/assets/sp-icon.png"
 
 VENV_DIR="$PROJECT_DIR/.venv"
 APP_DIR="$PROJECT_DIR/${APP_NAME}.app"

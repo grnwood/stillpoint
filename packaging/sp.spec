@@ -99,7 +99,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # Onedir bundle: exe + COLLECT for folder distribution (faster startup)
-_icon_ico = os.path.join(_assets_dir, 'icon.ico')
+_icon_ico = os.path.join(_assets_dir, 'sp-icon-bw.ico')
 exe = EXE(
     pyz,
     a.scripts,

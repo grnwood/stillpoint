@@ -14,7 +14,7 @@ EXEC_NAME="StillPoint"               # name of your executable
 DIST_DIR="../../dist/StillPoint"              # PyInstaller dist directory
 INSTALL_DIR="/opt/stillpoint"        # permanent install location
 BIN_LINK="/usr/local/bin/stillpoint" # global symlink
-ICON_SOURCE="../../assets/icon.png"       # optional local icon
+ICON_SOURCE="../../sp/assets/sp-icon.png"       # optional local icon
 ICON_TARGET="/usr/share/icons/stillpoint.png"
 DESKTOP_FILE="/usr/share/applications/stillpoint.desktop"
 
