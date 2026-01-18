@@ -262,18 +262,21 @@ class AddRemoteDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add Remote Server")
         self.setModal(True)
-        self.resize(360, 180)
+        self.resize(360, 280)
 
         self._host = ""
         self._port = 443
         self._use_https = True
         self._no_verify = False
+        self._server_password = ""
+        self._remember_server_password = False
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("example.com or 192.168.1.77")
+        self.host_edit.textChanged.connect(self._on_host_changed)
         form.addRow("Server:", self.host_edit)
 
         self.port_edit = QLineEdit()
@@ -290,10 +293,39 @@ class AddRemoteDialog(QDialog):
         self.no_verify_checkbox.setChecked(False)
         layout.addWidget(self.no_verify_checkbox)
 
+        # Server admin password (only for remote servers)
+        self.server_password_container = QWidget()
+        server_password_layout = QVBoxLayout(self.server_password_container)
+        server_password_layout.setContentsMargins(0, 10, 0, 0)
+        
+        server_password_label = QLabel("Server Admin Password:")
+        server_password_layout.addWidget(server_password_label)
+        
+        self.server_password_edit = QLineEdit()
+        self.server_password_edit.setEchoMode(QLineEdit.Password)
+        self.server_password_edit.setPlaceholderText("Required for vault operations")
+        server_password_layout.addWidget(self.server_password_edit)
+        
+        self.remember_server_password_checkbox = QCheckBox("Remember server password")
+        self.remember_server_password_checkbox.setChecked(False)
+        server_password_layout.addWidget(self.remember_server_password_checkbox)
+        
+        layout.addWidget(self.server_password_container)
+        self.server_password_container.hide()  # Hidden by default
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_host_changed(self, text: str) -> None:
+        """Show/hide server password field based on whether host is localhost."""
+        host = text.strip().lower()
+        is_localhost = host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.0.0.1:")
+        if is_localhost:
+            self.server_password_container.hide()
+        else:
+            self.server_password_container.show()
 
     def accept(self) -> None:  # type: ignore[override]
         host = self.host_edit.text().strip()
@@ -306,14 +338,32 @@ class AddRemoteDialog(QDialog):
         except ValueError:
             QMessageBox.warning(self, "Invalid Port", "Port must be a number.")
             return
+        
+        # Check if server password is required (non-localhost)
+        is_localhost = host.lower() in ("localhost", "127.0.0.1", "::1") or host.lower().startswith("127.0.0.1:")
+        if not is_localhost:
+            server_password = self.server_password_edit.text().strip()
+            if not server_password:
+                QMessageBox.warning(self, "Missing Password", "Server admin password is required for remote servers.")
+                return
+            self._server_password = server_password
+            self._remember_server_password = bool(self.remember_server_password_checkbox.isChecked())
+        
         self._host = host
         self._port = port
         self._use_https = bool(self.https_checkbox.isChecked())
         self._no_verify = bool(self.no_verify_checkbox.isChecked())
         super().accept()
 
-    def values(self) -> tuple[str, int, bool, bool]:
-        return self._host, self._port, self._use_https, self._no_verify
+    def values(self) -> tuple[str, int, bool, bool, str, bool]:
+        return (
+            self._host,
+            self._port,
+            self._use_https,
+            self._no_verify,
+            self._server_password,
+            self._remember_server_password
+        )
 
 
 class RemoteVaultSelectDialog(QDialog):
@@ -891,6 +941,7 @@ class MainWindow(QMainWindow):
         self,
         api_base: str,
         local_auth_token: Optional[str] = None,
+        embedded_server_admin_password: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("StillPoint Desktop")
@@ -903,6 +954,7 @@ class MainWindow(QMainWindow):
         self._verify_tls = True
         self._remote_cache_root: Optional[Path] = None
         self._local_auth_token = local_auth_token
+        self._embedded_server_admin_password = embedded_server_admin_password
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
@@ -2016,11 +2068,25 @@ class MainWindow(QMainWindow):
             display = base_url.replace("http://", "").replace("https://", "")
             verify_ssl = entry.get("verify_ssl", True)
             selected_vaults = entry.get("selected_vaults") or []
+            
+            # Get server admin password hash if stored, or use embedded password for local server
+            server_password_hash = config.get_server_password_hash(host, port, scheme)
+            
+            # If this is the local embedded server, use the embedded password
+            if not server_password_hash and base_url == self._local_api_base and self._embedded_server_admin_password:
+                import hashlib
+                server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
+            
             access_token: Optional[str] = None
             start_server = time.perf_counter()
             vault_count = 0
             try:
-                resp = httpx.get(f"{base_url}/api/vaults", timeout=10.0, verify=verify_ssl)
+                # Prepare headers with server admin password
+                headers = {}
+                if server_password_hash:
+                    headers["X-Server-Admin-Password"] = server_password_hash
+                
+                resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
                 if resp.status_code == 401:
                     server_key = self._server_key_for_url(base_url)
                     auth_entry = config.load_remote_auth(server_key)
@@ -2042,9 +2108,12 @@ class MainWindow(QMainWindow):
                                     new_refresh,
                                     username=auth_entry.get("username"),
                                 )
+                                auth_headers = {"Authorization": f"Bearer {access_token}"}
+                                if server_password_hash:
+                                    auth_headers["X-Server-Admin-Password"] = server_password_hash
                                 resp = httpx.get(
                                     f"{base_url}/api/vaults",
-                                    headers={"Authorization": f"Bearer {access_token}"},
+                                    headers=auth_headers,
                                     timeout=10.0,
                                     verify=verify_ssl,
                                 )
@@ -2200,10 +2269,22 @@ class MainWindow(QMainWindow):
         dlg = AddRemoteDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return None
-        host, port, use_https, no_verify = dlg.values()
+        host, port, use_https, no_verify, server_password, remember_server_password = dlg.values()
         scheme = "https" if use_https else "http"
         verify_ssl = not no_verify
         base_url = f"{scheme}://{host}:{port}"
+        
+        # Hash server password if provided
+        server_password_hash = None
+        if server_password:
+            import hashlib
+            server_password_hash = hashlib.sha256(server_password.encode()).hexdigest()
+        
+        # If this is the local embedded server, use the embedded password
+        if not server_password_hash and base_url == self._local_api_base and self._embedded_server_admin_password:
+            import hashlib
+            server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
+        
         try:
             resp = httpx.get(f"{base_url}/api/health", timeout=10.0, verify=verify_ssl)
             if resp.status_code != 200:
@@ -2214,13 +2295,23 @@ class MainWindow(QMainWindow):
         access_token = None
         selected_path = None
         try:
-            resp = httpx.get(f"{base_url}/api/vaults", timeout=10.0, verify=verify_ssl)
+            # Prepare headers with server admin password if provided
+            headers = {}
+            if server_password_hash:
+                headers["X-Server-Admin-Password"] = server_password_hash
+            
+            resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
+            if resp.status_code == 403:
+                self._alert("Server admin password is invalid or missing.")
+                return None
             if resp.status_code == 401:
                 if not self._prompt_remote_login_for_server(base_url, verify_ssl):
                     return None
                 access_token = self._access_token
-                headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
-                resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
+                auth_headers = {"Authorization": f"Bearer {access_token}"}
+                if server_password_hash:
+                    auth_headers["X-Server-Admin-Password"] = server_password_hash
+                resp = httpx.get(f"{base_url}/api/vaults", headers=auth_headers, timeout=10.0, verify=verify_ssl)
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to list vaults (HTTP {resp.status_code})")
             payload = resp.json()
@@ -2266,7 +2357,11 @@ class MainWindow(QMainWindow):
                     password = password.strip()
                     if not password:
                         QMessageBox.warning(self, "Missing Password", "Please enter a password.")
-                headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
+                headers = {}
+                if access_token:
+                    headers["Authorization"] = f"Bearer {access_token}"
+                if server_password_hash:
+                    headers["X-Server-Admin-Password"] = server_password_hash
                 create_resp = httpx.post(
                     f"{base_url}/api/vaults/create",
                     json={"name": name, "auth_username": username, "auth_password": password},
@@ -2274,11 +2369,15 @@ class MainWindow(QMainWindow):
                     timeout=10.0,
                     verify=verify_ssl,
                 )
+                if create_resp.status_code == 403:
+                    raise RuntimeError("Server admin password required for vault creation")
                 if create_resp.status_code == 401:
                     if not self._prompt_remote_login_for_server(base_url, verify_ssl):
                         return None
                     access_token = self._access_token
-                    headers = {"Authorization": f"Bearer {access_token}"} if access_token else None
+                    headers = {"Authorization": f"Bearer {access_token}"}
+                    if server_password_hash:
+                        headers["X-Server-Admin-Password"] = server_password_hash
                     create_resp = httpx.post(
                         f"{base_url}/api/vaults/create",
                         json={"name": name, "auth_username": username, "auth_password": password},
@@ -2329,12 +2428,16 @@ class MainWindow(QMainWindow):
         selected_vaults = list(existing.get("selected_vaults", [])) if existing else []
         if selected_path not in selected_vaults:
             selected_vaults.append(selected_path)
+        
+        # Save server with password hash if remember was checked
+        saved_password_hash = server_password_hash if remember_server_password else None
         config.add_remote_server(
             host,
             port,
             scheme=scheme,
             verify_ssl=verify_ssl,
             selected_vaults=selected_vaults,
+            server_password_hash=saved_password_hash,
         )
         vaults = self._build_local_vault_entries(self.vault_root if not self._remote_mode else None)
         vaults.extend(self._fetch_remote_vaults())

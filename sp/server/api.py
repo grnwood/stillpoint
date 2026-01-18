@@ -21,6 +21,8 @@ except ImportError:
 import copy
 import re
 import html
+from contextlib import asynccontextmanager
+
 from datetime import date as Date
 from datetime import datetime, timedelta
 import os
@@ -117,7 +119,7 @@ def set_vaults_root(path: Optional[str]) -> None:
 
 
 def _get_vaults_root() -> Path:
-    root = _VAULTS_ROOT or os.getenv("ZIMX_VAULTS_ROOT", "vaults")
+    root = _VAULTS_ROOT or os.getenv("STILLPOINT_VAULTS_ROOT", "vaults")
     root_path = Path(root).expanduser()
     if not root_path.is_absolute():
         root_path = (Path.cwd() / root_path).resolve()
@@ -160,6 +162,7 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+SERVER_ADMIN_PASSWORD = os.getenv("SERVER_ADMIN_PASSWORD")
 
 password_hasher = PasswordHasher()
 security = HTTPBearer(auto_error=False)
@@ -314,6 +317,35 @@ def set_local_ui_token(token: Optional[str]) -> None:
     """Register a shared local UI token for localhost auth bypass."""
     global _LOCAL_UI_TOKEN
     _LOCAL_UI_TOKEN = token or None
+
+
+def _is_localhost_request(request: Request) -> bool:
+    """Check if request is from localhost."""
+    return request.client and request.client.host in _LOCAL_HOSTS
+
+
+def _verify_server_admin_password(password_hash: str) -> bool:
+    """Verify hashed server admin password."""
+    if not SERVER_ADMIN_PASSWORD:
+        return False
+    import hashlib
+    expected_hash = hashlib.sha256(SERVER_ADMIN_PASSWORD.encode()).hexdigest()
+    return password_hash == expected_hash
+
+
+async def verify_server_admin(request: Request) -> None:
+    """Dependency to verify server admin access for vault operations."""
+    # Localhost always has access
+    if _is_localhost_request(request):
+        return
+    
+    # Check for server admin password header
+    password_hash = request.headers.get("x-server-admin-password")
+    if not password_hash or not _verify_server_admin_password(password_hash):
+        raise HTTPException(
+            status_code=403,
+            detail="Server admin password required for vault operations"
+        )
 
 
 async def get_current_user(
@@ -532,7 +564,55 @@ class ChatPayload(BaseModel):
     temperature: Optional[float] = 0.2
 
 
-app = FastAPI(title="StillPoint Local API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup checks."""
+    # Startup: Verify SERVER_ADMIN_PASSWORD is set unless started by embedded app
+    # If started by sp.app.main, it will have set SERVER_ADMIN_PASSWORD
+    # If started standalone without password, fail unless STILLPOINT_INSECURE is set
+    if not SERVER_ADMIN_PASSWORD:
+        if os.getenv("STILLPOINT_INSECURE"):
+            # INSECURE mode - show massive warning
+            print(f"\n{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}🚨 🚨 🚨  DANGER: RUNNING IN INSECURE MODE  🚨 🚨 🚨{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}STILLPOINT_INSECURE=1 is set - SERVER_ADMIN_PASSWORD is disabled!{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}ANYONE can create/list/delete vaults on this server without authentication!{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}This is EXTREMELY DANGEROUS and should NEVER be used in production!{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}Only use this for local development/testing on trusted networks.{_ANSI_RESET}\n")
+            print("To secure this server properly:")
+            print(f"  1. Unset STILLPOINT_INSECURE")
+            print(f"  2. Set SERVER_ADMIN_PASSWORD='your-secure-password'")
+            print(f"  3. Restart the server\n")
+            print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}\n")
+        else:
+            # No password and no insecure flag - fail
+            print(f"\n{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}⚠️  SECURITY ERROR: SERVER_ADMIN_PASSWORD not set!{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}This server requires SERVER_ADMIN_PASSWORD for vault operations.{_ANSI_RESET}")
+            print(f"{_ANSI_BLUE}Without it, anyone can create/list vaults on this server.{_ANSI_RESET}\n")
+            print("To run standalone, set the password:")
+            print(f"  export SERVER_ADMIN_PASSWORD='your-secure-password'")
+            print(f"  python -m sp.server.api --host 127.0.0.1 --port 8000\n")
+            print("Or if using uvicorn directly:")
+            print(f"  export SERVER_ADMIN_PASSWORD='your-secure-password'")
+            print(f"  uvicorn sp.server.api:app --host 127.0.0.1 --port 8000\n")
+            print("To bypass (NOT RECOMMENDED), set:")
+            print(f"  export STILLPOINT_INSECURE=1")
+            print(f"  uvicorn sp.server.api:app --host 127.0.0.1 --port 8000\n")
+            print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}\n")
+            print("Server startup FAILED. Set SERVER_ADMIN_PASSWORD or STILLPOINT_INSECURE=1")
+            import sys
+            sys.exit(1)
+    
+    yield
+    # Shutdown: nothing to clean up
+
+
+app = FastAPI(title="StillPoint Local API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -711,7 +791,7 @@ def auth_print_token(
 
 
 @app.get("/api/vaults")
-def list_vaults() -> dict:
+async def list_vaults(request: Request, _admin: None = Depends(verify_server_admin)) -> dict:
     root = _ensure_vaults_root()
     vaults: list[dict[str, str]] = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
@@ -724,7 +804,7 @@ def list_vaults() -> dict:
 
 
 @app.post("/api/vaults/create")
-def create_vault(payload: VaultCreatePayload) -> dict:
+async def create_vault(request: Request, payload: VaultCreatePayload, _admin: None = Depends(verify_server_admin)) -> dict:
     root = _ensure_vaults_root()
     name = _normalize_vault_name(payload.name)
     target = root / name
@@ -2059,19 +2139,61 @@ if __name__ == "__main__":
         default=os.getenv("ZIMX_VAULTS_ROOT", "vaults"),
         help="Base folder where vaults are stored",
     )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow server to start without SERVER_ADMIN_PASSWORD (NOT RECOMMENDED for production)",
+    )
     args = parser.parse_args()
 
     if not args.vaults_root:
-        print("Error: --vaults-root must be specified or ZIMX_VAULTS_ROOT environment variable set.")
+        print("Error: --vaults-root must be specified or STILLPOINT_VAULTS_ROOT environment variable set.")
+        exit(1)
+    
+    # Standalone server requires explicit password configuration or --insecure flag
+    if not SERVER_ADMIN_PASSWORD and not args.insecure:
+        print(f"\n{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}⚠️  SECURITY WARNING: SERVER_ADMIN_PASSWORD not set!{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}This server requires SERVER_ADMIN_PASSWORD for vault operations.{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}Without it, anyone can create/list vaults on this server.{_ANSI_RESET}\n")
+        print("Set it with:")
+        print(f"  export SERVER_ADMIN_PASSWORD='your-secure-password'")
+        print(f"  python -m sp.server.api --host {args.host} --port {args.port}\n")
+        print("To run without password protection (NOT RECOMMENDED), use:")
+        print(f"  python -m sp.server.api --host {args.host} --port {args.port} --insecure\n")
+        print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}\n")
+        print("Exiting. Set SERVER_ADMIN_PASSWORD or use --insecure flag.")
         exit(1)
     
     set_vaults_root(args.vaults_root)
     vaults_root = _ensure_vaults_root()
 
+    # Show massive warning if running in insecure mode
+    if args.insecure and not SERVER_ADMIN_PASSWORD:
+        print(f"\n{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}🚨 🚨 🚨  DANGER: RUNNING IN INSECURE MODE  🚨 🚨 🚨{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}--insecure flag is set - SERVER_ADMIN_PASSWORD is disabled!{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}ANYONE can create/list/delete vaults on this server without authentication!{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}This is EXTREMELY DANGEROUS and should NEVER be used in production!{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}Only use this for local development/testing on trusted networks.{_ANSI_RESET}\n")
+        print("To secure this server properly:")
+        print(f"  1. Remove --insecure flag")
+        print(f"  2. Set SERVER_ADMIN_PASSWORD='your-secure-password'")
+        print(f"  3. Restart: python -m sp.server.api --host {args.host} --port {args.port}\n")
+        print(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
+        print(f"{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}\n")
+
     print(f"\n{_ANSI_BLUE}=== StillPoint API Server ==={_ANSI_RESET}")
     print(f"{_ANSI_BLUE}Starting server on http://{args.host}:{args.port}{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}API docs: http://{args.host}:{args.port}/docs{_ANSI_RESET}")
-    print(f"{_ANSI_BLUE}Auth enabled: {AUTH_ENABLED}{_ANSI_RESET}\n")
+    print(f"{_ANSI_BLUE}Auth enabled: {AUTH_ENABLED}{_ANSI_RESET}")
+    if SERVER_ADMIN_PASSWORD:
+        print(f"{_ANSI_BLUE}Server admin password: SET ✓{_ANSI_RESET}")
+    elif args.insecure:
+        print(f"{_ANSI_BLUE}Server admin password: DISABLED (--insecure flag) ⚠️ ⚠️ ⚠️{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}Vaults root: {vaults_root}{_ANSI_RESET}\n")
     
     uvicorn.run(

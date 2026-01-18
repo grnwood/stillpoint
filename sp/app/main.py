@@ -290,7 +290,14 @@ def _find_open_port(host: str, preferred: int) -> int:
         return s.getsockname()[1]
 
 
-def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvicorn.Server]:
+def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvicorn.Server, str]:
+    """Start embedded API server with auto-generated server admin password."""
+    import secrets
+    
+    # Generate secure password for embedded server
+    server_admin_password = secrets.token_urlsafe(32)
+    os.environ["SERVER_ADMIN_PASSWORD"] = server_admin_password
+    
     env_port = os.getenv("SP_PORT")
     preferred = preferred_port if preferred_port is not None else int(env_port or "8765")
     # Allow 0 to force ephemeral port selection
@@ -311,7 +318,7 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     thread.start()
     # Give the event loop a moment to bind the socket before the UI fires requests.
     time.sleep(0.2)
-    return port, server
+    return port, server, server_admin_password
 
 
 def _run_webserver_mode(args: argparse.Namespace) -> None:
@@ -437,7 +444,7 @@ def main() -> None:
     qInstallMessageHandler(_qt_message_handler)
     local_ui_token = secrets.token_urlsafe(32)
     api_module.set_local_ui_token(local_ui_token)
-    port, server = _start_api_server(args.host, args.port)
+    port, server, server_admin_password = _start_api_server(args.host, args.port)
     _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
     qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
@@ -446,7 +453,11 @@ def main() -> None:
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits
     qt_app.aboutToQuit.connect(lambda: setattr(server, "should_exit", True))
-    window = MainWindow(api_base=f"http://{args.host}:{port}", local_auth_token=local_ui_token)
+    window = MainWindow(
+        api_base=f"http://{args.host}:{port}",
+        local_auth_token=local_ui_token,
+        embedded_server_admin_password=server_admin_password
+    )
     window.resize(1200, 800)
     windows = getattr(qt_app, "_stillpoint_windows", [])
     windows.append(window)

@@ -311,6 +311,7 @@ def add_remote_server(
     scheme: str = "http",
     verify_ssl: bool = True,
     selected_vaults: Optional[list[str]] = None,
+    server_password_hash: Optional[str] = None,
 ) -> None:
     """Add or update a remote server entry."""
     host = host.strip()
@@ -330,15 +331,16 @@ def add_remote_server(
         ):
             continue
         filtered.append(entry)
-    filtered.append(
-        {
-            "host": host,
-            "port": str(port),
-            "scheme": scheme,
-            "verify_ssl": bool(verify_ssl),
-            "selected_vaults": selected_vaults or [],
-        }
-    )
+    new_entry = {
+        "host": host,
+        "port": str(port),
+        "scheme": scheme,
+        "verify_ssl": bool(verify_ssl),
+        "selected_vaults": selected_vaults or [],
+    }
+    if server_password_hash:
+        new_entry["server_password_hash"] = server_password_hash
+    filtered.append(new_entry)
     _update_global_config({"remote_servers": filtered})
 
 
@@ -360,6 +362,18 @@ def delete_remote_server(host: str, port: int, scheme: str = "http") -> None:
             continue
         filtered.append(entry)
     _update_global_config({"remote_servers": filtered})
+
+
+def get_server_password_hash(host: str, port: int, scheme: str = "http") -> Optional[str]:
+    """Get stored server admin password hash for a remote server."""
+    for entry in load_remote_servers():
+        if (
+            entry.get("host") == host
+            and str(entry.get("port")) == str(port)
+            and entry.get("scheme") == scheme
+        ):
+            return entry.get("server_password_hash")
+    return None
 
 
 def load_default_vault() -> Optional[str]:
