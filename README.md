@@ -85,6 +85,44 @@ The help vault is copied to `~/.stillpoint/help-vault` on first open. To refresh
 
 The API lives in `sp/server/api.py` and is embedded in the desktop app. It handles vault file access, tree listing, tasks, search, and journal utilities. Requests expect vault-relative paths starting with `/` and are validated to stay within the selected vault root.
 
+### Embedded Server Security
+
+When running the desktop app (`python -m sp.app.main`), the embedded server:
+- Automatically generates a secure random password
+- Uses it for server admin authentication
+- Passes it to the UI automatically
+- Runs on localhost (127.0.0.1) with full security enabled
+
+No manual configuration needed for desktop app usage.
+
+### Running as a Standalone Server
+
+You can run StillPoint as a standalone server for multi-user or remote access:
+
+```bash
+export SERVER_ADMIN_PASSWORD="your-secure-password-here"
+export ZIMX_VAULTS_ROOT="/path/to/vaults"
+python -m sp.server.api --host 0.0.0.0 --port 8000
+```
+
+**Important Security Settings:**
+
+- **`SERVER_ADMIN_PASSWORD`**: Required for standalone servers. Protects vault creation and listing operations. Without this, the server will refuse to start unless you use the `--insecure` flag (NOT RECOMMENDED).
+- **`ZIMX_VAULTS_ROOT`**: Base directory where all vaults are stored.
+- **`AUTH_ENABLED`**: Set to `false` to disable per-vault authentication (default: `true`).
+
+**Server Security Model:**
+
+1. **Localhost bypass**: Requests from 127.0.0.1/localhost automatically bypass server admin password checks (password still validated on server, just not required from client on same machine)
+2. **Server admin password**: Required for vault creation/listing (protects against unauthorized vault operations)
+3. **Per-vault authentication**: Each vault has its own username/password set during creation or via `/auth/setup`
+
+**Client Setup:**
+
+When adding a remote server in the desktop app:
+- For localhost servers (127.0.0.1): Automatically uses embedded server password
+- For remote servers: Must enter server admin password with option to remember (stored as SHA256 hash)
+
 ## Print to Browser
 
 StillPoint renders pages (or a merged subtree) to HTML and opens the system browser for print/PDF. This avoids Qt print fidelity issues and makes it easy to produce clean, paginated PDFs.

@@ -17,7 +17,6 @@ from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
-from sp.server import api as api_module
 from sp.app import config
 from sp.app.ui.main_window import MainWindow
 
@@ -298,6 +297,9 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     server_admin_password = secrets.token_urlsafe(32)
     os.environ["SERVER_ADMIN_PASSWORD"] = server_admin_password
     
+    # Import api module AFTER setting password, since FastAPI app is created at import time
+    from sp.server import api as api_module
+    
     env_port = os.getenv("SP_PORT")
     preferred = preferred_port if preferred_port is not None else int(env_port or "8765")
     # Allow 0 to force ephemeral port selection
@@ -314,10 +316,49 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
         log_config=log_config,
     )
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
+    
+    # Track startup status
+    startup_error = [None]
+    
+    def run_server():
+        try:
+            server.run()
+        except Exception as e:
+            startup_error[0] = e
+    
+    thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    # Give the event loop a moment to bind the socket before the UI fires requests.
-    time.sleep(0.2)
+    
+    # Wait for server to be ready by checking if it's listening on the port
+    max_wait = 5.0
+    start_time = time.time()
+    server_ready = False
+    
+    while time.time() - start_time < max_wait:
+        if startup_error[0] is not None:
+            # Server failed to start
+            print(f"\nERROR: API server startup failed: {startup_error[0]}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Check if server is listening
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                s.connect((host, port))
+                server_ready = True
+                break
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.05)
+    
+    if not server_ready:
+        if startup_error[0] is not None:
+            print(f"\nERROR: API server startup failed: {startup_error[0]}", file=sys.stderr)
+        else:
+            print(f"\nERROR: API server failed to start within {max_wait} seconds", file=sys.stderr)
+        sys.exit(1)
+    
+    # Give the server a moment to fully initialize
+    time.sleep(0.1)
     return port, server, server_admin_password
 
 
@@ -443,8 +484,11 @@ def main() -> None:
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
     local_ui_token = secrets.token_urlsafe(32)
-    api_module.set_local_ui_token(local_ui_token)
+    # Start API server (this will set password and import api module)
     port, server, server_admin_password = _start_api_server(args.host, args.port)
+    # Import api_module after server starts to set UI token
+    from sp.server import api as api_module
+    api_module.set_local_ui_token(local_ui_token)
     _diag(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
     qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
