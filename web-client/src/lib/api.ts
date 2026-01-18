@@ -45,6 +45,7 @@ class APIClient {
     const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     this.serverPasswordHash = hashHex;
     sessionStorage.setItem('server_password_hash', hashHex);
+    console.log('[API] Server password hash set:', hashHex.substring(0, 16) + '...');
   }
 
   clearServerPassword() {
@@ -77,6 +78,7 @@ class APIClient {
     // Add server admin password header if available
     if (this.serverPasswordHash) {
       headers.set('X-Server-Admin-Password', this.serverPasswordHash);
+      console.log('[API] Sending server password hash:', this.serverPasswordHash.substring(0, 16) + '...');
     }
 
     const response = await fetch(url, {

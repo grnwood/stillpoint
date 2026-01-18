@@ -341,6 +341,16 @@ async def verify_server_admin(request: Request) -> None:
     
     # Check for server admin password header
     password_hash = request.headers.get("x-server-admin-password")
+    import os
+    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    if debug:
+        print(f"[verify_server_admin] Received hash: {password_hash[:16] + '...' if password_hash else 'None'}")
+        if SERVER_ADMIN_PASSWORD:
+            import hashlib
+            expected = hashlib.sha256(SERVER_ADMIN_PASSWORD.encode()).hexdigest()
+            print(f"[verify_server_admin] Expected hash: {expected[:16]}...")
+            print(f"[verify_server_admin] Match: {password_hash == expected if password_hash else False}")
+    
     if not password_hash or not _verify_server_admin_password(password_hash):
         raise HTTPException(
             status_code=403,
