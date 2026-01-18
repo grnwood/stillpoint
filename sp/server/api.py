@@ -622,7 +622,8 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5173",
         "null",
-        "https://monarchistic-unretractable-susanna.ngrok-free.dev"
+        "https://monarchistic-unretractable-susanna.ngrok-free.dev",
+        "https://pwa.stillpoint.info"
     ],
     allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,

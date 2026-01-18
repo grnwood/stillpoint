@@ -20,11 +20,13 @@ export class APIError extends Error {
 class APIClient {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
+  private serverPasswordHash: string | null = null;
 
   constructor() {
     // Load tokens from localStorage
     this.accessToken = localStorage.getItem('access_token');
     this.refreshToken = localStorage.getItem('refresh_token');
+    this.serverPasswordHash = sessionStorage.getItem('server_password_hash');
   }
 
   setTokens(tokens: AuthTokens) {
@@ -32,6 +34,23 @@ class APIClient {
     this.refreshToken = tokens.refresh_token;
     localStorage.setItem('access_token', tokens.access_token);
     localStorage.setItem('refresh_token', tokens.refresh_token);
+  }
+
+  setServerPassword(password: string) {
+    // Hash the password using SHA-256
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    crypto.subtle.digest('SHA-256', data).then(hashBuffer => {
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      this.serverPasswordHash = hashHex;
+      sessionStorage.setItem('server_password_hash', hashHex);
+    });
+  }
+
+  clearServerPassword() {
+    this.serverPasswordHash = null;
+    sessionStorage.removeItem('server_password_hash');
   }
 
   clearTokens() {
@@ -54,6 +73,11 @@ class APIClient {
 
     if (this.accessToken) {
       headers.set('Authorization', `Bearer ${this.accessToken}`);
+    }
+
+    // Add server admin password header if available
+    if (this.serverPasswordHash) {
+      headers.set('X-Server-Admin-Password', this.serverPasswordHash);
     }
 
     const response = await fetch(url, {

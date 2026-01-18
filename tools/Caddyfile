@@ -51,3 +51,21 @@ vault.stillpoint.info {
 		format console
 	}
 }
+
+pwa.stillpoint.info {
+	@badpaths {
+        path /.git/* /.env /.DS_Store /server-status /actuator/* /v2/* /_all_dbs
+    }
+
+    respond @badpaths 404
+
+	root * /opt/stillpoint/app/web-client/dist/
+	try_files {path} /index.html
+	file_server
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/pwa.log
+		format console
+	}
+}

@@ -60,6 +60,7 @@ export default defineConfig({
     })
   ],
   server: {
+    host: true, // Listen on all addresses including LAN
     https: httpsConfig,
     proxy: {
       '/api': {
