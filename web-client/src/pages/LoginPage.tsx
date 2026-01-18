@@ -41,18 +41,10 @@ export const LoginPage: React.FC = () => {
     setLoading(true);
     try {
       await apiClient.setServerPassword(serverPassword);
-      // Wait a bit for the async hash to complete
-      setTimeout(async () => {
-        try {
-          await loadVaults();
-        } catch (err: any) {
-          setError(err.message || 'Invalid server password');
-        } finally {
-          setLoading(false);
-        }
-      }, 100);
+      await loadVaults();
     } catch (err: any) {
-      setError(err.message || 'Failed to set server password');
+      setError(err.message || 'Invalid server password');
+    } finally {
       setLoading(false);
     }
   };

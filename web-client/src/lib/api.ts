@@ -36,16 +36,15 @@ class APIClient {
     localStorage.setItem('refresh_token', tokens.refresh_token);
   }
 
-  setServerPassword(password: string) {
+  async setServerPassword(password: string): Promise<void> {
     // Hash the password using SHA-256
     const encoder = new TextEncoder();
     const data = encoder.encode(password);
-    crypto.subtle.digest('SHA-256', data).then(hashBuffer => {
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-      this.serverPasswordHash = hashHex;
-      sessionStorage.setItem('server_password_hash', hashHex);
-    });
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    this.serverPasswordHash = hashHex;
+    sessionStorage.setItem('server_password_hash', hashHex);
   }
 
   clearServerPassword() {
