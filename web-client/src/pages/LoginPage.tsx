@@ -6,6 +6,8 @@ export const LoginPage: React.FC = () => {
   const { authConfigured, vaultSelected, setup, login, refreshAuth } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [serverPassword, setServerPassword] = useState('');
+  const [showServerPasswordPrompt, setShowServerPasswordPrompt] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [vaults, setVaults] = useState<Array<{ name: string; path: string }>>([]);
@@ -15,7 +17,13 @@ export const LoginPage: React.FC = () => {
   useEffect(() => {
     if (!vaultSelected) {
       loadVaults().catch((err) => {
-        setError(err.message || 'Failed to load vaults');
+        // If 403, need server password
+        if (err.status === 403) {
+          setShowServerPasswordPrompt(true);
+          setError('Server admin password required');
+        } else {
+          setError(err.message || 'Failed to load vaults');
+        }
       });
     }
   }, [vaultSelected]);
@@ -24,6 +32,29 @@ export const LoginPage: React.FC = () => {
     const response = await apiClient.listVaults();
     setVaults(response.vaults);
     setVaultsRoot(response.root);
+    setShowServerPasswordPrompt(false);
+  };
+
+  const handleServerPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await apiClient.setServerPassword(serverPassword);
+      // Wait a bit for the async hash to complete
+      setTimeout(async () => {
+        try {
+          await loadVaults();
+        } catch (err: any) {
+          setError(err.message || 'Invalid server password');
+        } finally {
+          setLoading(false);
+        }
+      }, 100);
+    } catch (err: any) {
+      setError(err.message || 'Failed to set server password');
+      setLoading(false);
+    }
   };
 
   const handleSelectVault = async (path: string) => {
@@ -90,7 +121,52 @@ export const LoginPage: React.FC = () => {
         border: '1px solid #ddd',
         borderRadius: '8px'
       }}>
-        {!vaultSelected && (
+        {showServerPasswordPrompt && (
+          <>
+            <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>Server Password Required</h1>
+            <p style={{ marginBottom: '20px', color: '#666' }}>
+              This server requires an admin password for vault operations.
+            </p>
+            <form onSubmit={handleServerPasswordSubmit}>
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', marginBottom: '5px' }}>Server Admin Password</label>
+                <input
+                  type="password"
+                  value={serverPassword}
+                  onChange={(e) => setServerPassword(e.target.value)}
+                  required
+                  style={{
+                    width: '100%',
+                    padding: '10px',
+                    fontSize: '16px',
+                    border: '1px solid #ddd',
+                    borderRadius: '4px'
+                  }}
+                />
+              </div>
+              {error && <p style={{ color: 'red', marginBottom: '12px' }}>{error}</p>}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  fontSize: '16px',
+                  backgroundColor: '#222',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  opacity: loading ? 0.6 : 1
+                }}
+              >
+                {loading ? 'Verifying...' : 'Continue'}
+              </button>
+            </form>
+          </>
+        )}
+
+        {!vaultSelected && !showServerPasswordPrompt && (
           <>
             <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>Select a Vault</h1>
             <p style={{ marginBottom: '20px', color: '#666' }}>
