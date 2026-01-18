@@ -288,15 +288,17 @@ def load_remote_servers() -> list[dict[str, str]]:
                 continue
             if not isinstance(selected_vaults, list):
                 selected_vaults = []
-            result.append(
-                {
-                    "host": str(host),
-                    "port": str(port_val),
-                    "scheme": str(scheme),
-                    "verify_ssl": bool(verify_ssl),
-                    "selected_vaults": [str(p) for p in selected_vaults if p],
-                }
-            )
+            server_entry = {
+                "host": str(host),
+                "port": str(port_val),
+                "scheme": str(scheme),
+                "verify_ssl": bool(verify_ssl),
+                "selected_vaults": [str(p) for p in selected_vaults if p],
+            }
+            # Preserve server_password_hash if present
+            if "server_password_hash" in entry:
+                server_entry["server_password_hash"] = entry["server_password_hash"]
+            result.append(server_entry)
     return result
 
 
@@ -314,6 +316,9 @@ def add_remote_server(
     server_password_hash: Optional[str] = None,
 ) -> None:
     """Add or update a remote server entry."""
+    import os
+    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    
     host = host.strip()
     scheme = scheme.strip() or "http"
     payload = _read_global_config()
@@ -329,6 +334,8 @@ def add_remote_server(
             and str(entry.get("port")) == str(port)
             and entry.get("scheme") == scheme
         ):
+            if debug:
+                print(f"[Config.add_remote_server] Removing existing entry for {scheme}://{host}:{port}")
             continue
         filtered.append(entry)
     new_entry = {
@@ -340,8 +347,34 @@ def add_remote_server(
     }
     if server_password_hash:
         new_entry["server_password_hash"] = server_password_hash
+        if debug:
+            print(f"[Config.add_remote_server] Adding password hash to new entry")
+    else:
+        if debug:
+            print(f"[Config.add_remote_server] NO password hash provided (value={repr(server_password_hash)})")
+    
+    if debug:
+        print(f"[Config.add_remote_server] New entry keys: {list(new_entry.keys())}")
+        print(f"[Config.add_remote_server] Has password: {'server_password_hash' in new_entry}")
+    
     filtered.append(new_entry)
     _update_global_config({"remote_servers": filtered})
+    
+    if debug:
+        print(f"[Config.add_remote_server] Config updated, verifying write...")
+        # Verify it was written
+        reread = _read_global_config()
+        reread_servers = reread.get("remote_servers", [])
+        for entry in reread_servers:
+            if (
+                entry.get("host") == host
+                and str(entry.get("port")) == str(port)
+                and entry.get("scheme") == scheme
+            ):
+                print(f"[Config.add_remote_server] Re-read entry keys: {list(entry.keys())}")
+                print(f"[Config.add_remote_server] Re-read has password: {'server_password_hash' in entry}")
+                if "server_password_hash" in entry:
+                    print(f"[Config.add_remote_server] Re-read password value: {'<hash>' if entry['server_password_hash'] else 'None/Empty'}")
 
 
 def delete_remote_server(host: str, port: int, scheme: str = "http") -> None:
@@ -366,13 +399,27 @@ def delete_remote_server(host: str, port: int, scheme: str = "http") -> None:
 
 def get_server_password_hash(host: str, port: int, scheme: str = "http") -> Optional[str]:
     """Get stored server admin password hash for a remote server."""
+    import os
+    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    if debug:
+        print(f"[Config] Looking up password: host={host} port={port} (type={type(port).__name__}) scheme={scheme}")
     for entry in load_remote_servers():
+        entry_host = entry.get("host")
+        entry_port = entry.get("port")
+        entry_scheme = entry.get("scheme")
+        if debug:
+            print(f"[Config]   Checking entry: host={entry_host} port={entry_port} (type={type(entry_port).__name__}) scheme={entry_scheme}")
         if (
             entry.get("host") == host
             and str(entry.get("port")) == str(port)
             and entry.get("scheme") == scheme
         ):
-            return entry.get("server_password_hash")
+            result = entry.get("server_password_hash")
+            if debug:
+                print(f"[Config]   MATCH! Found password hash: {bool(result)}")
+            return result
+    if debug:
+        print(f"[Config]   No match found")
     return None
 
 

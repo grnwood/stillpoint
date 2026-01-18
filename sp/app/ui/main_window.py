@@ -955,6 +955,7 @@ class MainWindow(QMainWindow):
         self._remote_cache_root: Optional[Path] = None
         self._local_auth_token = local_auth_token
         self._embedded_server_admin_password = embedded_server_admin_password
+        self._session_server_passwords: dict[str, str] = {}  # Cache server passwords for current session
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
@@ -2042,7 +2043,7 @@ class MainWindow(QMainWindow):
 
     # --- Vault actions -------------------------------------------------
     def _fetch_remote_vaults_with_status(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        """Load available vaults from configured remote servers with status detail."""
+        """Load configured remote vaults with individual connectivity status."""
         results: list[dict[str, str]] = []
         status: list[dict[str, str]] = []
         debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
@@ -2051,171 +2052,155 @@ class MainWindow(QMainWindow):
         if not servers:
             status.append({"kind": "remote_status", "level": "info", "message": "No remote servers configured."})
             return results, status
+        
         for entry in servers:
             host = entry.get("host")
-            port = entry.get("port")
-            scheme = entry.get("scheme") or "http"
-            if not host or not port:
-                status.append(
-                    {
-                        "kind": "remote_status",
-                        "level": "error",
-                        "message": "Error: skipping malformed remote server entry.",
-                    }
-                )
+            port_raw = entry.get("port")
+            if not host or not port_raw:
                 continue
+            # Ensure port is an integer for consistency
+            try:
+                port = int(port_raw)
+            except (ValueError, TypeError):
+                continue
+            scheme = entry.get("scheme") or "http"
+            
             base_url = f"{scheme}://{host}:{port}"
             display = base_url.replace("http://", "").replace("https://", "")
             verify_ssl = entry.get("verify_ssl", True)
             selected_vaults = entry.get("selected_vaults") or []
             
-            # Get server admin password hash if stored, or use embedded password for local server
-            server_password_hash = config.get_server_password_hash(host, port, scheme)
+            # Skip servers with no configured vaults
+            if not selected_vaults:
+                continue
+            
+            # Get server admin password hash - check session cache first, then saved config
+            server_key = f"{scheme}://{host}:{port}"
+            server_password_hash = self._session_server_passwords.get(server_key)
+            if debug:
+                print(f"[RemoteVaults] Server {base_url}:")
+                print(f"[RemoteVaults]   Session cache: {'<hash>' if server_password_hash else 'None'}")
+            if not server_password_hash:
+                server_password_hash = config.get_server_password_hash(host, port, scheme)
+                if debug:
+                    print(f"[RemoteVaults]   Config lookup: {'<hash>' if server_password_hash else 'None'}")
             
             # If this is the local embedded server, use the embedded password
             if not server_password_hash and base_url == self._local_api_base and self._embedded_server_admin_password:
                 import hashlib
                 server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
             
-            access_token: Optional[str] = None
-            start_server = time.perf_counter()
-            vault_count = 0
-            try:
-                # Prepare headers with server admin password
-                headers = {}
-                if server_password_hash:
-                    headers["X-Server-Admin-Password"] = server_password_hash
+            # Check connectivity for each configured vault individually
+            for vault_path in selected_vaults:
+                start_vault = time.perf_counter()
+                vault_status = "ok"
+                error_message = None
+                vault_name = Path(vault_path).name
                 
-                resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
-                if resp.status_code == 401:
-                    server_key = self._server_key_for_url(base_url)
-                    auth_entry = config.load_remote_auth(server_key)
-                    refresh_token = auth_entry.get("refresh_token")
-                    if refresh_token:
-                        refresh_resp = httpx.post(
-                            f"{base_url}/auth/refresh",
-                            headers={"Authorization": f"Bearer {refresh_token}"},
-                            timeout=10.0,
-                            verify=verify_ssl,
-                        )
-                        if refresh_resp.status_code == 200:
-                            payload = refresh_resp.json()
-                            access_token = payload.get("access_token")
-                            new_refresh = payload.get("refresh_token") or refresh_token
-                            if access_token:
-                                config.save_remote_auth(
-                                    server_key,
-                                    new_refresh,
-                                    username=auth_entry.get("username"),
-                                )
-                                auth_headers = {"Authorization": f"Bearer {access_token}"}
-                                if server_password_hash:
-                                    auth_headers["X-Server-Admin-Password"] = server_password_hash
-                                resp = httpx.get(
-                                    f"{base_url}/api/vaults",
-                                    headers=auth_headers,
-                                    timeout=10.0,
-                                    verify=verify_ssl,
-                                )
-                if resp.status_code == 401:
-                    status.append(
-                        {
-                            "kind": "remote_status",
-                            "level": "error",
-                            "server_url": base_url,
-                            "display": display,
-                            "message": f"Error: {base_url} requires login.",
-                        }
-                    )
-                    if debug:
-                        print(
-                            f"[RemoteVaults] {base_url} login required "
-                            f"dt={(time.perf_counter()-start_server)*1000:.1f}ms"
-                        )
-                    continue
-                if resp.status_code != 200:
-                    status.append(
-                        {
-                            "kind": "remote_status",
-                            "level": "error",
-                            "server_url": base_url,
-                            "display": display,
-                            "message": f"Error: {base_url} returned HTTP {resp.status_code}.",
-                        }
-                    )
-                    if debug:
-                        print(
-                            f"[RemoteVaults] {base_url} http={resp.status_code} "
-                            f"dt={(time.perf_counter()-start_server)*1000:.1f}ms"
-                        )
-                    continue
-                payload = resp.json()
-                vaults = payload.get("vaults", [])
-                if not isinstance(vaults, list):
-                    status.append(
-                        {
-                            "kind": "remote_status",
-                            "level": "error",
-                            "server_url": base_url,
-                            "display": display,
-                            "message": f"Error: {base_url} returned an invalid vault list.",
-                        }
-                    )
-                    if debug:
-                        print(
-                            f"[RemoteVaults] {base_url} invalid list "
-                            f"dt={(time.perf_counter()-start_server)*1000:.1f}ms"
-                        )
-                    continue
-                for vault in vaults:
-                    if not isinstance(vault, dict) or not vault.get("path"):
-                        continue
-                    if selected_vaults and vault.get("path") not in selected_vaults:
-                        continue
-                    vault_count += 1
+                try:
+                    # Prepare headers with server admin password
+                    headers = {}
+                    if server_password_hash:
+                        headers["X-Server-Admin-Password"] = server_password_hash
+                    
+                    # Try to fetch the specific vault
+                    resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
+                    
+                    # Handle 401 - try to refresh token
+                    if resp.status_code == 401:
+                        server_key = self._server_key_for_url(base_url)
+                        auth_entry = config.load_remote_auth(server_key)
+                        refresh_token = auth_entry.get("refresh_token")
+                        if refresh_token:
+                            refresh_resp = httpx.post(
+                                f"{base_url}/auth/refresh",
+                                headers={"Authorization": f"Bearer {refresh_token}"},
+                                timeout=10.0,
+                                verify=verify_ssl,
+                            )
+                            if refresh_resp.status_code == 200:
+                                payload = refresh_resp.json()
+                                access_token = payload.get("access_token")
+                                new_refresh = payload.get("refresh_token") or refresh_token
+                                if access_token:
+                                    config.save_remote_auth(
+                                        server_key,
+                                        new_refresh,
+                                        username=auth_entry.get("username"),
+                                    )
+                                    auth_headers = {"Authorization": f"Bearer {access_token}"}
+                                    if server_password_hash:
+                                        auth_headers["X-Server-Admin-Password"] = server_password_hash
+                                    resp = httpx.get(
+                                        f"{base_url}/api/vaults",
+                                        headers=auth_headers,
+                                        timeout=10.0,
+                                        verify=verify_ssl,
+                                    )
+                    
+                    if resp.status_code == 401:
+                        vault_status = "error"
+                        error_message = "Authentication required"
+                    elif resp.status_code == 403:
+                        vault_status = "error"
+                        error_message = f"HTTP 403 - Server password: {'yes' if server_password_hash else 'NO'}"
+                    elif resp.status_code != 200:
+                        vault_status = "error"
+                        error_message = f"HTTP {resp.status_code}"
+                    else:
+                        # Check if vault exists in the response
+                        payload = resp.json()
+                        vaults = payload.get("vaults", [])
+                        if isinstance(vaults, list):
+                            vault_data = next((v for v in vaults if v.get("path") == vault_path), None)
+                            if vault_data:
+                                # Vault exists, get its name
+                                vault_name = vault_data.get("name") or Path(vault_path).name
+                            else:
+                                vault_status = "error"
+                                error_message = "Vault not found on server"
+                        else:
+                            vault_status = "error"
+                            error_message = "Invalid server response"
+                    
                     results.append(
                         {
                             "kind": "remote",
-                            "name": vault.get("name") or Path(vault["path"]).name,
-                            "path": vault["path"],
+                            "name": vault_name,
+                            "path": vault_path,
                             "server_url": base_url,
                             "verify_ssl": verify_ssl,
-                            "id": f"remote::{base_url}::{vault['path']}",
+                            "id": f"remote::{base_url}::{vault_path}",
+                            "status": vault_status,
+                            **({"error": error_message} if error_message else {}),
                         }
                     )
-                status.append(
-                    {
-                        "kind": "remote_status",
-                        "level": "ok" if vault_count else "info",
-                        "server_url": base_url,
-                        "display": display,
-                        "message": f"{base_url}: {vault_count} vault(s) available."
-                        if vault_count
-                        else f"{base_url}: no remote vaults available.",
-                    }
-                )
-                if debug:
-                    print(
-                        f"[RemoteVaults] {base_url} loaded "
-                        f"count={len([v for v in results if v.get('server_url') == base_url])} "
-                        f"dt={(time.perf_counter()-start_server)*1000:.1f}ms"
+                    
+                    if debug:
+                        print(
+                            f"[RemoteVaults] {base_url}{vault_path} status={vault_status} "
+                            f"dt={(time.perf_counter()-start_vault)*1000:.1f}ms"
+                        )
+                        
+                except Exception as exc:
+                    results.append(
+                        {
+                            "kind": "remote",
+                            "name": Path(vault_path).name,
+                            "path": vault_path,
+                            "server_url": base_url,
+                            "verify_ssl": verify_ssl,
+                            "id": f"remote::{base_url}::{vault_path}",
+                            "status": "error",
+                            "error": str(exc),
+                        }
                     )
-            except Exception as exc:
-                status.append(
-                    {
-                        "kind": "remote_status",
-                        "level": "error",
-                        "server_url": base_url,
-                        "display": display,
-                        "message": f"Error: {base_url} unreachable ({exc}).",
-                    }
-                )
-                if debug:
-                    print(
-                        f"[RemoteVaults] {base_url} error={exc} "
-                        f"dt={(time.perf_counter()-start_server)*1000:.1f}ms"
-                    )
-                continue
+                    if debug:
+                        print(
+                            f"[RemoteVaults] {base_url}{vault_path} error={exc} "
+                            f"dt={(time.perf_counter()-start_vault)*1000:.1f}ms"
+                        )
+        
         if debug:
             print(
                 f"[RemoteVaults] total servers={len(servers)} total_vaults={len(results)} "
@@ -2286,7 +2271,13 @@ class MainWindow(QMainWindow):
             server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
         
         try:
-            resp = httpx.get(f"{base_url}/api/health", timeout=10.0, verify=verify_ssl)
+            # Prepare headers with server admin password for consistency
+            # (health endpoint doesn't require it, but including it doesn't hurt)
+            headers = {}
+            if server_password_hash:
+                headers["X-Server-Admin-Password"] = server_password_hash
+            
+            resp = httpx.get(f"{base_url}/api/health", headers=headers, timeout=10.0, verify=verify_ssl)
             if resp.status_code != 200:
                 raise RuntimeError(f"Health check failed (HTTP {resp.status_code})")
         except Exception as exc:
@@ -2429,8 +2420,18 @@ class MainWindow(QMainWindow):
         if selected_path not in selected_vaults:
             selected_vaults.append(selected_path)
         
+        # Cache the password in the session so it's available even if "remember" is unchecked
+        if server_password_hash:
+            server_key = f"{scheme}://{host}:{port}"
+            self._session_server_passwords[server_key] = server_password_hash
+        
         # Save server with password hash if remember was checked
         saved_password_hash = server_password_hash if remember_server_password else None
+        debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+        if debug:
+            print(f"[AddRemote] Saving server: host={host} port={port} scheme={scheme}")
+            print(f"[AddRemote]   remember_password={remember_server_password}")
+            print(f"[AddRemote]   saved_password_hash={'<hash>' if saved_password_hash else 'None'}")
         config.add_remote_server(
             host,
             port,
@@ -2439,6 +2440,10 @@ class MainWindow(QMainWindow):
             selected_vaults=selected_vaults,
             server_password_hash=saved_password_hash,
         )
+        if debug:
+            # Verify it was saved
+            retrieved = config.get_server_password_hash(host, port, scheme)
+            print(f"[AddRemote]   Verification: retrieved password={'<hash>' if retrieved else 'None'}")
         vaults = self._build_local_vault_entries(self.vault_root if not self._remote_mode else None)
         # Add the newly added/created remote vault to the list
         # Note: We already fetched the vault list earlier, so we don't need to fetch again
@@ -2788,10 +2793,10 @@ class MainWindow(QMainWindow):
                 from urllib.parse import urlparse
                 parsed = urlparse(base_url)
                 host = parsed.hostname
-                port = parsed.port
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
                 scheme = parsed.scheme
                 
-                if host and port:
+                if host:
                     server_password_hash = config.get_server_password_hash(host, port, scheme)
                     
                     # If this is the local embedded server, use the embedded password
@@ -3291,9 +3296,18 @@ class MainWindow(QMainWindow):
                         return False
                     index_dir_missing = True
             if self.vault_root:
-                if not self._remote_mode:
-                    # ensure DB connection is set (may already be set above)
+                # Set active vault for both local and remote modes
+                # For remote vaults, we cache the index locally so we still need the DB connection
+                if self._remote_mode:
+                    # For remote vaults, use a cache directory based on the server URL and vault path
+                    cache_key = hashlib.sha256(f"{self.api_base}:{self.vault_root}".encode()).hexdigest()[:16]
+                    cache_root = Path.home() / ".cache" / "stillpoint" / "remote-vaults" / cache_key
+                    cache_root.mkdir(parents=True, exist_ok=True)
+                    config.set_active_vault(str(cache_root))
+                else:
+                    # For local vaults, use the vault directory itself
                     config.set_active_vault(self.vault_root)
+                
                 if self._remote_mode:
                     config.save_last_vault(self._encode_remote_ref(self.api_base, self.vault_root))
                 else:

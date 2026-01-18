@@ -274,19 +274,55 @@ class OpenVaultDialog(QDialog):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(2)
 
+        # Create a horizontal layout for name and status indicator
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        
         name_label = QLabel(vault.get("name") or Path(vault["path"]).name)
         name_font = name_label.font()
         name_font.setBold(True)
         name_label.setFont(name_font)
-        layout.addWidget(name_label)
+        name_row.addWidget(name_label, 1)
+        
+        # Add status indicator for remote vaults
+        if vault.get("kind") == "remote":
+            status = vault.get("status", "unknown")
+            if status == "error":
+                status_label = QLabel("●")
+                status_label.setStyleSheet("color: #d32f2f; font-size: 16pt;")
+                status_label.setToolTip(vault.get("error", "Connection failed"))
+                name_row.addWidget(status_label)
+                # Make the name label red too
+                name_label.setStyleSheet("color: #d32f2f;")
+            elif status == "ok":
+                status_label = QLabel("●")
+                status_label.setStyleSheet("color: #4caf50; font-size: 16pt;")
+                status_label.setToolTip("Connected")
+                name_row.addWidget(status_label)
+        
+        layout.addLayout(name_row)
 
         path_label = QLabel(self._format_vault_path(vault))
         path_label.setWordWrap(True)
         path_font = path_label.font()
         path_font.setPointSize(max(path_font.pointSize() - 2, 8))
         path_label.setFont(path_font)
-        path_label.setStyleSheet("color: #666;")
+        # Gray color unless there's an error
+        if vault.get("kind") == "remote" and vault.get("status") == "error":
+            path_label.setStyleSheet("color: #d32f2f;")
+        else:
+            path_label.setStyleSheet("color: #666;")
         layout.addWidget(path_label)
+        
+        # Add error message if present
+        if vault.get("kind") == "remote" and vault.get("error"):
+            error_label = QLabel(f"Error: {vault.get('error')}")
+            error_label.setWordWrap(True)
+            error_font = error_label.font()
+            error_font.setPointSize(max(error_font.pointSize() - 2, 8))
+            error_label.setFont(error_font)
+            error_label.setStyleSheet("color: #d32f2f;")
+            layout.addWidget(error_label)
 
         return container
 
@@ -361,7 +397,6 @@ class OpenVaultDialog(QDialog):
         current_item = current_list.currentItem()
         has_selection = current_item is not None
         current_data = current_item.data(Qt.UserRole) if current_item else None
-        is_status_item = isinstance(current_data, dict) and current_data.get("kind") == "remote_status"
         is_remote_vault = isinstance(current_data, dict) and current_data.get("kind") == "remote"
         can_remove = False
         if has_selection and current_list is self.local_list_widget:
@@ -369,11 +404,11 @@ class OpenVaultDialog(QDialog):
             can_remove = bool(data)
         self.remove_btn.setEnabled(can_remove)
         self.remove_remote_btn.setEnabled(
-            current_list is self.remote_list_widget and (is_remote_vault or is_status_item)
+            current_list is self.remote_list_widget and is_remote_vault
         )
         ok_button = self.button_box.button(QDialogButtonBox.Ok)
         if ok_button:
-            ok_button.setEnabled(has_selection and not is_status_item)
+            ok_button.setEnabled(has_selection)
 
     def _accept_current(self) -> None:
         item = self._active_list_widget().currentItem()
@@ -381,8 +416,6 @@ class OpenVaultDialog(QDialog):
             return
         vault = item.data(Qt.UserRole)
         if not vault:
-            return
-        if vault.get("kind") == "remote_status":
             return
         self._selected = dict(vault)
         self._open_new_window = False
@@ -394,8 +427,6 @@ class OpenVaultDialog(QDialog):
             return
         vault = item.data(Qt.UserRole)
         if not vault:
-            return
-        if vault.get("kind") == "remote_status":
             return
         self._selected = dict(vault)
         self._open_new_window = True
@@ -450,16 +481,9 @@ class OpenVaultDialog(QDialog):
         if not item:
             return
         vault = item.data(Qt.UserRole)
-        if not vault:
+        if not vault or vault.get("kind") != "remote":
             return
-        if vault.get("kind") == "remote_status":
-            server_url = vault.get("server_url")
-            if not server_url:
-                return
-            self._remove_remote_server_by_url(server_url)
-            self._remote_loaded = False
-            self._load_remote_vaults()
-            return
+        
         server_url = vault.get("server_url")
         path = vault.get("path")
         if not server_url or not path:
@@ -469,12 +493,13 @@ class OpenVaultDialog(QDialog):
 
             parsed = urlparse(server_url)
             host = parsed.hostname
-            port = parsed.port
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
             scheme = parsed.scheme or "http"
         except Exception:
             return
-        if not host or not port:
+        if not host:
             return
+        
         servers = config.load_remote_servers()
         changed = False
         for entry in servers:
@@ -508,24 +533,8 @@ class OpenVaultDialog(QDialog):
 
     def _populate_remote_list(self, select_id: Optional[str] = None) -> None:
         self.remote_list_widget.clear()
-        status_entries = list(getattr(self, "remote_status_entries", []))
-        servers_with_vaults = {v.get("server_url") for v in self.remote_vaults if v.get("server_url")}
-        for entry in status_entries:
-            server_url = entry.get("server_url")
-            level = entry.get("level")
-            if level not in {"error", "loading"}:
-                continue
-            if not server_url:
-                continue
-            if server_url in servers_with_vaults and level in {"ok", "info"}:
-                continue
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, entry)
-            widget = self._build_status_item_widget(entry)
-            item.setSizeHint(widget.sizeHint())
-            self.remote_list_widget.addItem(item)
-            self.remote_list_widget.setItemWidget(item, widget)
-
+        
+        # Only show configured vaults with embedded status
         for vault in self.remote_vaults:
             if "id" not in vault:
                 vault["id"] = vault.get("path")
