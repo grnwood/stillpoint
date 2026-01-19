@@ -9,7 +9,7 @@ QUICK START
 
 To install StillPoint with Start Menu and Desktop shortcuts:
 
-1. Right-click on "install.ps1" in this folder
+1. Right-click on "install-win32.ps1" in this folder
 2. Select "Run with PowerShell"
 3. Follow the prompts
 
@@ -38,10 +38,10 @@ To uninstall:
 TROUBLESHOOTING
 ---------------
 
-If install.ps1 won't run:
+If install-win32.ps1 won't run:
   - Open PowerShell as Administrator
   - Run: Set-ExecutionPolicy RemoteSigned
-  - Try running install.ps1 again
+  - Try running install-win32.ps1 again
 
 If you see security warnings:
   - This is normal for PowerShell scripts

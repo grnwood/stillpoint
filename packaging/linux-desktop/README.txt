@@ -10,7 +10,7 @@ INSTALLATION OPTIONS
 Option 1: System-wide Install (Recommended)
   Installs to /opt/stillpoint with desktop launcher
 
-  sudo ./install.sh
+  sudo ./install-linux.sh
 
   This will:
   ✓ Install StillPoint to /opt/stillpoint
@@ -50,7 +50,7 @@ If the icon doesn't appear:
   - Run: sudo update-desktop-database
 
 If you see "Permission denied":
-  - Make sure to run install.sh with sudo
+  - Make sure to run install-linux.sh with sudo
   - Or run directly: chmod +x ./StillPoint && ./StillPoint
 
 For more help, visit:
