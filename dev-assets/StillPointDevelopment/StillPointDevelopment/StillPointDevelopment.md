@@ -1,4 +1,5 @@
 # StillPointDevelopment
+	StillPointDevelopment
 Logbook of all the development efforts on zim. yes!
 ---
 [:StillPointDevelopment:App|:StillPointDevelopment:App]
@@ -14,7 +15,6 @@ Logbook of all the development efforts on zim. yes!
 
 
 		
-
 
 
 

@@ -18,7 +18,7 @@ Created Monday 19 January 2026
 - [ ] when i use ctrl-l to insert link from popup window it puts link in main, needs to go in popup @edit
 - [x] toc widget is still showing hr's, just moving them to the end, i want them supressed @edit
 	:tocWidget 
-- [ ] toy with idea of // or ''  to kickoff link insertion or creation. @edit
+  - [ ] toy with idea of // or ''  to kickoff link insertion or creation. @edit
 - [x] FullTextSearch  [:StillPointDevelopment:App:StillPointDevelopment:App:FullTextSearch|:StillPointDevelopment:App:FullTextSearch]
 - [x] right click menus still suck, fix. also right click is losing selected buffer @edit
 	[:RightClickDesignRightClickDesign
