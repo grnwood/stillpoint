@@ -18,8 +18,9 @@ param(
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Paths relative to script
-$DistDir    = Join-Path $ScriptRoot "..\..\dist\StillPoint"
-$AssetsDir  = Join-Path $ScriptRoot "..\..\sp\assets"
+# When bundled with PyInstaller, the script is in the same dir as the exe
+$DistDir    = $ScriptRoot
+$AssetsDir  = Join-Path $ScriptRoot "_internal\sp\assets"
 
 # Install location (user space)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"

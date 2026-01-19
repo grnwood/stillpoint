@@ -65,6 +65,10 @@ _datas = [
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
     (os.path.join(ROOT, 'LICENSE'), '.'),
     (os.path.join(ROOT, 'NOTICE'), '.'),
+    (os.path.join(ROOT, 'packaging', 'win32', 'install.ps1'), '.'),
+    (os.path.join(ROOT, 'packaging', 'win32', 'README.txt'), '.'),
+    (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install.sh'), '.'),
+    (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
 ]
 
 # Add optional subdirectories if they exist
