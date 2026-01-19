@@ -6183,6 +6183,9 @@ class MainWindow(QMainWindow):
             window.setWindowFlag(Qt.Tool, False)
             window.setAttribute(Qt.WA_NativeWindow, True)
             window.setWindowModality(Qt.NonModal)
+            # Set window icon explicitly (especially important on Windows)
+            from sp.app.main import get_app_icon
+            window.setWindowIcon(get_app_icon())
         except Exception:
             pass
 
