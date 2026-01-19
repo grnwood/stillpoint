@@ -83,13 +83,31 @@ def _set_app_icon(app: QApplication) -> None:
     handled by PyInstaller, but this also ensures the window/icon in the titlebar
     matches.
     """
-    for path in _resource_candidates(os.path.join("assets", "sp-icon.png")):
-        if os.path.exists(path):
-            try:
-                app.setWindowIcon(QIcon(path))
-            except Exception:
-                pass
-            break
+    # On Windows, set the App User Model ID to ensure taskbar icon displays correctly
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # Set a unique App User Model ID for Windows taskbar grouping
+            myappid = 'com.stillpoint.app'  # arbitrary string
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+    
+    # Prefer .ico on Windows (multi-resolution), PNG on other platforms
+    icon_candidates = []
+    if sys.platform == "win32":
+        icon_candidates = ["sp-icon.ico", "icon.ico", "sp-icon.png"]
+    else:
+        icon_candidates = ["sp-icon.png", "sp-icon.ico"]
+    
+    for icon_name in icon_candidates:
+        for path in _resource_candidates(os.path.join("assets", icon_name)):
+            if os.path.exists(path):
+                try:
+                    app.setWindowIcon(QIcon(path))
+                    return
+                except Exception:
+                    pass
 
 
 def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
