@@ -11,8 +11,9 @@
 
 param(
     [string]$AppName = "StillPoint",
-    [string]$ExeName = "StillPoint.exe"
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs"
 )
+
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

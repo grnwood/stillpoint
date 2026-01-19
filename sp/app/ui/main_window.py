@@ -947,6 +947,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("StillPoint Desktop")
         # Ensure standard window controls (including maximize) are present.
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
+        
+        # Set window icon explicitly (especially important on Windows)
+        from sp.app.main import get_app_icon
+        self.setWindowIcon(get_app_icon())
+        
         self._local_api_base = api_base.rstrip("/")
         self.api_base = self._local_api_base
         self._remote_mode = False

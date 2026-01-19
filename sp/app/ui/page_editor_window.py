@@ -42,6 +42,11 @@ class PageEditorWindow(QMainWindow):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        
+        # Set window icon explicitly (especially important on Windows)
+        from sp.app.main import get_app_icon
+        self.setWindowIcon(get_app_icon())
+        
         self.api_base = api_base.rstrip("/")
         self.vault_root = vault_root
         self._source_path = page_path  # lock the target path for all saves

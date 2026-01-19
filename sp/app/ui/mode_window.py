@@ -111,6 +111,11 @@ class ModeWindow(QMainWindow):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        
+        # Set window icon explicitly (especially important on Windows)
+        from sp.app.main import get_app_icon
+        self.setWindowIcon(get_app_icon())
+        
         self.mode = mode.lower()
         self._base_editor = base_editor
         self._base_wrap_mode = base_editor.lineWrapMode()

@@ -39,9 +39,9 @@ TROUBLESHOOTING
 ---------------
 
 If install-win32.ps1 won't run:
-  - Open PowerShell as Administrator
-  - Run: Set-ExecutionPolicy RemoteSigned
-  - Try running install-win32.ps1 again
+  - Open PowerShell
+  - Unblock-File .\install-win32.ps1
+  - Re run the file (terminal)
 
 If you see security warnings:
   - This is normal for PowerShell scripts
