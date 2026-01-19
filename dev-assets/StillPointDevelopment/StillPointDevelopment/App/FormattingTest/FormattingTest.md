@@ -15,7 +15,7 @@ Paste from buffer, or drag from attachments.
 
 ## Links
 This is a [https://www.google.com|Google link]
-this is a [:FormattingTest|] page link.
+this is a [:StillPointDevelopment:App:StillPointDevelopment:App:FormattingTest|] page link.
 
 ## Formatting
 this is **bold**.
