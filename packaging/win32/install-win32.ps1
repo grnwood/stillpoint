@@ -11,8 +11,9 @@
 
 param(
     [string]$AppName = "StillPoint",
-    [string]$ExeName = "StillPoint.exe"
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs"
 )
+
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -36,13 +37,13 @@ Write-Host ""
 # === VALIDATE dist\ AND EXE ===
 
 if (-not (Test-Path $DistDir)) {
-    Write-Host "❌ dist\ folder not found at: $DistDir" -ForegroundColor Red
+    Write-Host "dist\ folder not found at: $DistDir" -ForegroundColor Red
     exit 1
 }
 
 $ExePathInDist = Join-Path $DistDir $ExeName
 if (-not (Test-Path $ExePathInDist)) {
-    Write-Host "❌ Executable not found: $ExePathInDist" -ForegroundColor Red
+    Write-Host " Executable not found: $ExePathInDist" -ForegroundColor Red
     Write-Host "   Make sure `\$ExeName` matches your built .exe" -ForegroundColor Yellow
     exit 1
 }
@@ -56,34 +57,34 @@ $IconPng = Join-Path $AssetsDir "sp-icon.png"
 
 if (Test-Path $IconIco) {
     $IconSource = $IconIco
-    Write-Host "✔️  Using icon: $IconSource"
+    Write-Host " Using icon: $IconSource"
 }
 elseif (Test-Path $IconPng) {
     $IconSource = $IconPng
-    Write-Host "✔️  Using icon: $IconSource"
+    Write-Host " Using icon: $IconSource"
 }
 else {
-    Write-Host "ℹ️  No assets\icon.ico or assets\icon.png found. Shortcuts will use exe icon." -ForegroundColor Yellow
+    Write-Host " No assets\icon.ico or assets\icon.png found. Shortcuts will use exe icon." -ForegroundColor Yellow
 }
 
 # === CREATE INSTALL DIR ===
 
 if (-not (Test-Path $InstallDir)) {
-    Write-Host "➡️  Creating install directory: $InstallDir"
+    Write-Host " Creating install directory: $InstallDir"
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 else {
-    Write-Host "ℹ️  Using existing install directory: $InstallDir"
+    Write-Host "ℹ Using existing install directory: $InstallDir"
 }
 
 # === COPY FILES FROM dist\ ===
 
-Write-Host "➡️  Copying files from $DistDir to $InstallDir"
+Write-Host " Copying files from $DistDir to $InstallDir"
 Copy-Item -Recurse -Force (Join-Path $DistDir "*") $InstallDir
 
 $InstalledExe = Join-Path $InstallDir $ExeName
 if (-not (Test-Path $InstalledExe)) {
-    Write-Host "❌ Something went wrong: installed exe not found at $InstalledExe" -ForegroundColor Red
+    Write-Host "Something went wrong: installed exe not found at $InstalledExe" -ForegroundColor Red
     exit 1
 }
 
@@ -95,7 +96,7 @@ if ($IconSource) {
     $IconLeaf = Split-Path $IconSource -Leaf
     $IconDest = Join-Path $InstallDir $IconLeaf
 
-    Write-Host "➡️  Copying icon to: $IconDest"
+    Write-Host " Copying icon to: $IconDest"
     Copy-Item -Force $IconSource $IconDest
 }
 
@@ -116,7 +117,7 @@ $Shortcut.WindowStyle = 1
 $Shortcut.IconLocation = $IconDest
 $Shortcut.Save()
 
-Write-Host "✔️  Start Menu shortcut created: $StartMenuShortcutPath"
+Write-Host " Start Menu shortcut created: $StartMenuShortcutPath"
 
 # === OPTIONAL DESKTOP SHORTCUT (USER ONLY) ===
 
@@ -131,11 +132,11 @@ if ($CreateDesktopShortcut) {
     $DesktopShortcut.IconLocation = $IconDest
     $DesktopShortcut.Save()
 
-    Write-Host "✔️  Desktop shortcut created: $DesktopShortcutPath"
+    Write-Host " Desktop shortcut created: $DesktopShortcutPath"
 
 
 Write-Host ""
-Write-Host "🎉 $AppName installed successfully!" -ForegroundColor Green
+Write-Host " $AppName installed successfully!" -ForegroundColor Green
 Write-Host "   - Installed to: $InstallDir"
 Write-Host "   - Start Menu entry under your user profile"
 if ($CreateDesktopShortcut) {

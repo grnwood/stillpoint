@@ -65,11 +65,20 @@ _datas = [
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
     (os.path.join(ROOT, 'LICENSE'), '.'),
     (os.path.join(ROOT, 'NOTICE'), '.'),
-    (os.path.join(ROOT, 'packaging', 'win32', 'install.ps1'), '.'),
-    (os.path.join(ROOT, 'packaging', 'win32', 'README.txt'), '.'),
-    (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install.sh'), '.'),
-    (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
 ]
+
+# Add platform-specific install scripts
+import sys
+if sys.platform == 'win32':
+    _datas.extend([
+        (os.path.join(ROOT, 'packaging', 'win32', 'install-win32.ps1'), '.'),
+        (os.path.join(ROOT, 'packaging', 'win32', 'README.txt'), '.'),
+    ])
+elif sys.platform.startswith('linux'):
+    _datas.extend([
+        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install-linux.sh'), '.'),
+        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
+    ])
 
 # Add optional subdirectories if they exist
 for subdir in ['assets', 'slipstream', 'rag', 'ai']:
@@ -128,3 +137,22 @@ coll = COLLECT(
     upx=True,
     name='StillPoint'
 )
+
+# Post-process: Move install scripts and README to dist root for easy access
+import shutil
+dist_root = os.path.join('dist', 'StillPoint')
+internal_dir = os.path.join(dist_root, '_internal')
+
+# Determine which files to move based on platform
+files_to_move = ['README.txt', 'LICENSE', 'NOTICE']
+if sys.platform == 'win32':
+    files_to_move.append('install-win32.ps1')
+elif sys.platform.startswith('linux'):
+    files_to_move.append('install-linux.sh')
+
+for filename in files_to_move:
+    src = os.path.join(internal_dir, filename)
+    dst = os.path.join(dist_root, filename)
+    if os.path.exists(src) and not os.path.exists(dst):
+        shutil.copy2(src, dst)
+        print(f"Moved {filename} to dist root")

@@ -90,6 +90,31 @@ def _set_windows_app_id() -> None:
             pass
 
 
+def get_app_icon() -> QIcon:
+    """Get the application icon, preferring .ico on Windows.
+    
+    Returns a QIcon that can be used for window icons.
+    Caches the result to avoid repeated file searches.
+    """
+    if not hasattr(get_app_icon, '_cached_icon'):
+        icon_candidates = []
+        if sys.platform == "win32":
+            icon_candidates = ["sp-icon.ico", "icon.ico", "sp-icon.png"]
+        else:
+            icon_candidates = ["sp-icon.png", "sp-icon.ico"]
+        
+        for icon_name in icon_candidates:
+            for path in _resource_candidates(os.path.join("assets", icon_name)):
+                if os.path.exists(path):
+                    get_app_icon._cached_icon = QIcon(path)
+                    return get_app_icon._cached_icon
+        
+        # Fallback to empty icon
+        get_app_icon._cached_icon = QIcon()
+    
+    return get_app_icon._cached_icon
+
+
 def _set_app_icon(app: QApplication) -> None:
     """Attempt to set the application/window icon if an asset is bundled.
 
@@ -98,21 +123,12 @@ def _set_app_icon(app: QApplication) -> None:
     handled by PyInstaller, but this also ensures the window/icon in the titlebar
     matches.
     """
-    # Prefer .ico on Windows (multi-resolution), PNG on other platforms
-    icon_candidates = []
-    if sys.platform == "win32":
-        icon_candidates = ["sp-icon.ico", "icon.ico", "sp-icon.png"]
-    else:
-        icon_candidates = ["sp-icon.png", "sp-icon.ico"]
-    
-    for icon_name in icon_candidates:
-        for path in _resource_candidates(os.path.join("assets", icon_name)):
-            if os.path.exists(path):
-                try:
-                    app.setWindowIcon(QIcon(path))
-                    return
-                except Exception:
-                    pass
+    icon = get_app_icon()
+    if not icon.isNull():
+        try:
+            app.setWindowIcon(icon)
+        except Exception:
+            pass
 
 
 def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:

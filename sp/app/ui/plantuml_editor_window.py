@@ -640,6 +640,10 @@ class PlantUMLEditorWindow(QMainWindow):
     def __init__(self, file_path: str, parent=None, on_save=None) -> None:
         super().__init__(parent)
         
+        # Set window icon explicitly (especially important on Windows)
+        from sp.app.main import get_app_icon
+        self.setWindowIcon(get_app_icon())
+        
         self.file_path = Path(file_path)
         self._on_save = on_save
         self.renderer = PlantUMLRenderer()
