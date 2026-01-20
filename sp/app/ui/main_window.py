@@ -6124,6 +6124,8 @@ class MainWindow(QMainWindow):
             app._stillpoint_tray_owner = self
 
     def _show_from_tray(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
         self.show()
         self.raise_()
         self.activateWindow()
