@@ -1,19 +1,19 @@
 # StillPoint
 
-StillPoint is a local-first, markdown note system with a PySide6 desktop app and an embedded FastAPI backend. It is built around a folder-per-page vault structure, fast navigation, and Markdown-first editing.
+StillPoint is a local-first, markdown note system with a PySide6 desktop app and an embedded FastAPI backend. It is built around a folder-per-page vault structure, fast navigation, and Markdown-first editing.  Local and Remote LLM infused alongside your thoughts and writing where you want it.
 
 ## Highlights
 
 - Local-first vaults on disk (folders + Markdown files).
 - Fast tree navigation, history popup, and heading switcher.
 - Markdown editor with formatting shortcuts, task parsing, and inline images.
-- Print to browser with clean HTML output, print CSS, and image support.
 - Journaling workflows with date navigation and templates.
+- Quick Capture (tray/menu/CLI) for low-friction capture into today's page.
+- Focus and Audience modes for distraction-free writing and reading.
+- Link graph / navigator and filtered navigation for working in a project context.
+- Print to browser with clean HTML output, print CSS, and image support.
 - Optional vi-mode navigation/editing.
 - Built-in help vault and keyboard shortcuts guide.
-- AI chat panel, one-shot prompts, and AI actions when configured.
-- Focus/Audience modes for distraction-free writing and reading.
-- Link graph / navigator for contextual browsing and filtered views.
 - PlantUML diagramming with AI-assisted generation and templates.
 
 ## License
@@ -71,6 +71,25 @@ Key UI features:
 - Calendar panel and "Today" journal actions.
 - Attachments, link navigator, and AI panels (optional).
 - Focus/Audience modes for distraction-free reading.
+
+## Graph / Project Mode
+
+StillPoint supports project-focused navigation by filtering the vault tree to a chosen root.
+This keeps the left nav and related views scoped to the current project area without moving files.
+
+Related features:
+
+- Link graph / navigator for contextual browsing.
+- Filtered navigation to work inside a project slice of the vault.
+
+## AI Features
+
+AI features are opt-in and require configuration. Current capabilities include:
+
+- One-shot prompting in-flow (quick refine/transform actions).
+- Page chat (contextual chat scoped to the current page).
+- Global chat (vault-wide or general context).
+- AI actions menu for common edits and transformations.
 
 ## Keyboard Shortcuts
 
@@ -142,6 +161,13 @@ Local overrides:
 
 Template files live in `sp/templates` and user templates are stored under `~/.stillpoint/templates`. Templates currently use `.txt` names (by design).
 
+Templates are used for:
+
+- New page creation
+- Journal/day pages
+- Quick Capture destination content
+- Creating a whole series of pages/sub-pages (Technical Spec, Class Notes, Research Papers, etc)
+
 ## Tests
 
 Tests live in `tests/`:
@@ -158,7 +184,7 @@ Build scripts and spec live under `packaging/`.
 pyinstaller -y packaging/sp.spec
 ```
 
-Artifacts land in `dist/StillPoint/`.
+Artifacts land in `dist/stillpoint/`.
 
 ## Install into OS
 If you want to install fully into the OS there are some helper scripts in packaging/
