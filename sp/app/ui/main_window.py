@@ -15,6 +15,7 @@ import tempfile
 import time
 import faulthandler
 import re
+from urllib.parse import urlparse
 
 import httpx
 import traceback
@@ -1725,6 +1726,15 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
         self._update_vi_badge_visibility()
 
+        self._remote_status_label = QLabel("REMOTE")
+        self._remote_status_label.setObjectName("remoteStatusLabel")
+        self._remote_status_label.setStyleSheet(
+            self._badge_base_style + " background-color: #1e88e5; margin-right: 6px; color: #ffffff;"
+        )
+        self._remote_status_label.setToolTip("")
+        self._remote_status_label.hide()
+        self.statusBar().addPermanentWidget(self._remote_status_label, 0)
+
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
 
@@ -2786,6 +2796,39 @@ class MainWindow(QMainWindow):
             self._action_server_login.setToolTip("Available when connected to a remote server.")
             self._action_server_logout.setEnabled(False)
             self._action_server_logout.setToolTip("Available when connected to a remote server.")
+        self._update_remote_status_badge()
+
+    @staticmethod
+    def _format_remote_host(server_url: str, include_scheme: bool = False) -> str:
+        parsed = urlparse(server_url or "")
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or server_url
+        port = parsed.port
+        is_standard = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+        host_port = f"{host}:{port}" if port and not is_standard else host
+        if include_scheme:
+            return f"{scheme}://{host_port}"
+        return host_port
+
+    def _remote_connection_string(self) -> Optional[str]:
+        if not self._remote_mode or not self.api_base:
+            return None
+        base = self._format_remote_host(self.api_base, include_scheme=True)
+        path = self.vault_root or ""
+        if path and not path.startswith("/"):
+            path = f"/{path}"
+        return f"{base}{path}" if base else None
+
+    def _update_remote_status_badge(self) -> None:
+        if not hasattr(self, "_remote_status_label"):
+            return
+        if self._remote_mode and self.vault_root:
+            self._remote_status_label.setText("REMOTE")
+            self._remote_status_label.setToolTip(self._remote_connection_string() or "")
+            self._remote_status_label.show()
+        else:
+            self._remote_status_label.setToolTip("")
+            self._remote_status_label.hide()
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
         if is_remote:
@@ -3283,6 +3326,7 @@ class MainWindow(QMainWindow):
                     return False
             else:
                 self._ensure_vault_root_page()
+            self._update_remote_status_badge()
             index_dir_missing = False
             if self.vault_root and not self._remote_mode:
                 index_dir = Path(self.vault_root) / ".stillpoint"

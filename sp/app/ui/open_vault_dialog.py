@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -330,12 +331,24 @@ class OpenVaultDialog(QDialog):
     def _format_vault_path(vault: dict[str, str]) -> str:
         if vault.get("kind") == "remote":
             server = vault.get("server_url") or ""
-            display = server.replace("http://", "").replace("https://", "")
+            display = OpenVaultDialog._format_remote_server(server, include_scheme=False)
             path = vault.get("path") or ""
             if path and not path.startswith("/"):
                 path = f"/{path}"
             return f"{display}{path}"
         return vault.get("path") or ""
+
+    @staticmethod
+    def _format_remote_server(server_url: str, include_scheme: bool = False) -> str:
+        parsed = urlparse(server_url or "")
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or server_url
+        port = parsed.port
+        is_standard = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+        host_port = f"{host}:{port}" if port and not is_standard else host
+        if include_scheme:
+            return f"{scheme}://{host_port}"
+        return host_port
 
     def _on_selection_changed(self, current, previous) -> None:  # noqa: ARG002
         self._update_buttons()
