@@ -91,6 +91,48 @@ class PreferencesDialog(QDialog):
         self.toc_widget_checkbox.setChecked(config.load_toc_widget_enabled())
         self.toc_widget_checkbox.setToolTip("Show floating transparent Heading navigator in editor")
         general_layout.addWidget(self.toc_widget_checkbox)
+
+        general_layout.addWidget(QLabel("<b>Tray</b>"))
+        self.tray_icon_checkbox = QCheckBox("Enable system tray icon")
+        self.tray_icon_checkbox.setChecked(config.load_tray_icon_enabled())
+        general_layout.addWidget(self.tray_icon_checkbox)
+        self.minimize_to_tray_checkbox = QCheckBox("Minimize to tray on close")
+        self.minimize_to_tray_checkbox.setChecked(config.load_minimize_to_tray_enabled())
+        general_layout.addWidget(self.minimize_to_tray_checkbox)
+
+        general_layout.addWidget(QLabel("<b>Capture</b>"))
+        row_capture_vault = QHBoxLayout()
+        row_capture_vault.addWidget(QLabel("Home Quick Capture Vault:"))
+        self.quick_capture_vault_combo = QComboBox()
+        row_capture_vault.addWidget(self.quick_capture_vault_combo, 1)
+        general_layout.addLayout(row_capture_vault)
+
+        row_capture_page = QHBoxLayout()
+        row_capture_page.addWidget(QLabel("Default Capture Page:"))
+        self.quick_capture_page_combo = QComboBox()
+        self.quick_capture_page_combo.addItems(["Today Journal Page", "Custom Page"])
+        row_capture_page.addWidget(self.quick_capture_page_combo, 1)
+        general_layout.addLayout(row_capture_page)
+
+        self.quick_capture_custom_edit = QLineEdit()
+        self.quick_capture_custom_edit.setPlaceholderText("Page name or :Colon:Path")
+        general_layout.addWidget(self.quick_capture_custom_edit)
+
+        capture_help = QLabel(
+            "Used for quick captures via tray icon.\n"
+            "If unset, StillPoint falls back to the currently open vault's Today page."
+        )
+        capture_help.setStyleSheet("color: #666; font-size: 11px;")
+        capture_help.setWordWrap(True)
+        general_layout.addWidget(capture_help)
+
+        self._populate_quick_capture_vaults()
+        page_mode = config.load_quick_capture_page_mode()
+        self.quick_capture_page_combo.setCurrentIndex(0 if page_mode == "today" else 1)
+        self.quick_capture_custom_edit.setText(config.load_quick_capture_custom_page() or "")
+        self.quick_capture_page_combo.currentIndexChanged.connect(self._update_quick_capture_custom_visibility)
+        self._update_quick_capture_custom_visibility()
+
         general_layout.addStretch(1)
 
         # Modes
@@ -630,6 +672,12 @@ class PreferencesDialog(QDialog):
         ai_font = self._font_value(self.ai_chat_font_combo)
         config.save_ai_chat_font_family(ai_font)
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
+        config.save_tray_icon_enabled(self.tray_icon_checkbox.isChecked())
+        config.save_minimize_to_tray_enabled(self.minimize_to_tray_checkbox.isChecked())
+        config.save_quick_capture_vault(self.quick_capture_vault_combo.currentData())
+        capture_mode = "today" if self.quick_capture_page_combo.currentIndex() == 0 else "custom"
+        config.save_quick_capture_page_mode(capture_mode)
+        config.save_quick_capture_custom_page(self.quick_capture_custom_edit.text())
         config.save_focus_mode_settings(
             {
                 "center_column": self.focus_center_column_checkbox.isChecked(),
@@ -699,6 +747,28 @@ class PreferencesDialog(QDialog):
         except Exception:
             pass
         super().accept()
+
+    def _populate_quick_capture_vaults(self) -> None:
+        self.quick_capture_vault_combo.blockSignals(True)
+        self.quick_capture_vault_combo.clear()
+        self.quick_capture_vault_combo.addItem("No home vault (use current vault)", None)
+        for vault in config.load_known_vaults():
+            path = vault.get("path")
+            if not path:
+                continue
+            name = vault.get("name") or Path(path).name
+            self.quick_capture_vault_combo.addItem(name, path)
+        saved = config.load_quick_capture_vault()
+        if saved and self.quick_capture_vault_combo.findData(saved) == -1:
+            display = Path(saved).name or saved
+            self.quick_capture_vault_combo.addItem(f"{display} (missing)", saved)
+        idx = self.quick_capture_vault_combo.findData(saved)
+        self.quick_capture_vault_combo.setCurrentIndex(idx if idx != -1 else 0)
+        self.quick_capture_vault_combo.blockSignals(False)
+
+    def _update_quick_capture_custom_visibility(self) -> None:
+        is_custom = self.quick_capture_page_combo.currentIndex() == 1
+        self.quick_capture_custom_edit.setVisible(is_custom)
 
     def _warn_restart_required(self) -> None:
         return None

@@ -190,6 +190,27 @@ Zimx should be installed in menus, etc.
 You can now launch it from: Menu → Accessories → StillPoint
 Or run from terminal: stillpoint
 ```
+
+## Quick Capture Shortcuts
+
+PyInstaller builds include a `quickcapture` helper executable alongside the main app.
+This helper can open the Quick Capture overlay or accept text via `--text`/stdin.
+
+### Linux (Cinnamon)
+- Open **System Settings → Keyboard → Shortcuts → Custom Shortcuts**.
+- Add a shortcut with the command:
+  - `"/path/to/StillPoint/quickcapture"`
+- Assign your preferred key combo.
+
+### Windows
+- Find `quickcapture.exe` inside the installed StillPoint folder.
+- Create a desktop shortcut, then open **Properties → Shortcut key** and set your hotkey.
+
+### macOS
+- Create an Automator “Quick Action” or Shortcut that runs:
+  - `/Applications/StillPoint.app/Contents/MacOS/quickcapture`
+- Assign a keyboard shortcut to that action in **System Settings → Keyboard → Keyboard Shortcuts**.
+
 ## Repo Layout
 
 - `sp/app/` - Desktop app (PySide6)

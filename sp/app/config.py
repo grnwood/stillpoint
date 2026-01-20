@@ -433,6 +433,66 @@ def save_default_vault(path: Optional[str]) -> None:
     _update_global_config({"default_vault": path})
 
 
+def load_quick_capture_vault() -> Optional[str]:
+    payload = _read_global_config()
+    value = payload.get("quick_capture_vault")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def save_quick_capture_vault(path: Optional[str]) -> None:
+    value = path.strip() if isinstance(path, str) and path.strip() else None
+    _update_global_config({"quick_capture_vault": value})
+
+
+def load_quick_capture_page_mode() -> str:
+    payload = _read_global_config()
+    mode = payload.get("quick_capture_page_mode")
+    return mode if mode in ("today", "custom") else "today"
+
+
+def save_quick_capture_page_mode(mode: str) -> None:
+    _update_global_config({"quick_capture_page_mode": "custom" if mode == "custom" else "today"})
+
+
+def load_quick_capture_custom_page() -> Optional[str]:
+    payload = _read_global_config()
+    value = payload.get("quick_capture_custom_page")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def save_quick_capture_custom_page(value: Optional[str]) -> None:
+    cleaned = value.strip() if isinstance(value, str) and value.strip() else None
+    _update_global_config({"quick_capture_custom_page": cleaned})
+
+
+def load_tray_icon_enabled() -> bool:
+    payload = _read_global_config()
+    value = payload.get("tray_icon_enabled")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def save_tray_icon_enabled(enabled: bool) -> None:
+    _update_global_config({"tray_icon_enabled": bool(enabled)})
+
+
+def load_minimize_to_tray_enabled() -> bool:
+    payload = _read_global_config()
+    value = payload.get("minimize_to_tray")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def save_minimize_to_tray_enabled(enabled: bool) -> None:
+    _update_global_config({"minimize_to_tray": bool(enabled)})
+
+
 def load_vi_block_cursor_enabled() -> bool:
     """Load app-level preference for vi-mode block cursor. Defaults to True on Windows, False elsewhere."""
     if not GLOBAL_CONFIG.exists():

@@ -31,6 +31,7 @@ import traceback
 from pathlib import Path
 import secrets
 from typing import List, Literal, Optional
+import time
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
@@ -50,7 +51,7 @@ from sp.server import indexer
 from sp.server import file_ops
 from sp.server import search_index
 from sp.server.adapters import files
-from sp.server.adapters.files import FileAccessError
+from sp.server.adapters.files import FileAccessError, PAGE_SUFFIX
 from sp.server.state import vault_state
 from sp.server.vector import vector_manager
 from sp.rag.index import RetrievedChunk
@@ -83,6 +84,55 @@ def _normalize_tree_path(path: str) -> str:
     if cleaned != "/":
         cleaned = cleaned.rstrip("/") or "/"
     return cleaned or "/"
+
+
+def _colon_to_page_path(colon_path: str) -> str:
+    cleaned = (colon_path or "").strip()
+    if cleaned.startswith(":"):
+        cleaned = cleaned.lstrip(":")
+    if "#" in cleaned:
+        cleaned = cleaned.split("#", 1)[0]
+    cleaned = cleaned.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Custom capture page is required")
+    parts = [part.strip() for part in cleaned.split(":") if part.strip()]
+    if not parts:
+        raise HTTPException(status_code=400, detail="Custom capture page is required")
+    parts = [part.replace("_", " ") for part in parts]
+    folder_path = "/".join(parts)
+    file_name = f"{parts[-1]}{PAGE_SUFFIX}"
+    return f"/{folder_path}/{file_name}"
+
+
+def _build_quick_capture_entry(text: str, timestamp: str) -> list[str]:
+    lines = [line.rstrip() for line in text.splitlines()]
+    if not lines:
+        return []
+    first = f"- *{timestamp}* - {lines[0].strip()}"
+    rest = [f"  {line}" for line in lines[1:]]
+    return [first] + rest + ["", "---"]
+
+
+def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
+    if not entry_lines:
+        return content
+    section_title = "## Inbox / Captures"
+    lines = content.splitlines()
+    header_idx = next((i for i, line in enumerate(lines) if line.strip() == section_title), -1)
+    if header_idx == -1:
+        trimmed = content.rstrip("\n")
+        spacer = "\n\n" if trimmed else ""
+        return f"{trimmed}{spacer}{section_title}\n" + "\n".join(entry_lines) + "\n"
+    insert_at = len(lines)
+    for i in range(header_idx + 1, len(lines)):
+        if re.match(r"^#{1,2}\s+", lines[i]):
+            insert_at = i
+            break
+    new_lines = lines[:insert_at] + entry_lines + lines[insert_at:]
+    result = "\n".join(new_lines)
+    if not result.endswith("\n"):
+        result += "\n"
+    return result
 
 
 def _get_cached_tree(root: Path, path: str, recursive: bool, include_journal: bool, version: int) -> list[dict] | None:
@@ -494,6 +544,13 @@ class FileWritePayload(FilePathPayload):
 
 class JournalPayload(BaseModel):
     template: Optional[str] = None
+
+
+class QuickCapturePayload(BaseModel):
+    vault_path: str
+    page_mode: Literal["today", "custom"] = "today"
+    page_ref: Optional[str] = None
+    text: str
 
 
 class VaultSelectPayload(BaseModel):
@@ -1155,8 +1212,57 @@ def journal_today(payload: JournalPayload) -> dict:
     root = vault_state.get_root()
     # Pass template through so the initial content becomes the user's day template
     target, created = files.ensure_journal_today(root, template=payload.template)
+    if created:
+        config.bump_tree_version()
     rel = f"/{target.relative_to(root).as_posix()}"
     return {"path": rel, "created": created}
+
+
+@app.post("/api/quick-capture")
+def quick_capture(
+    payload: QuickCapturePayload,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    text = (payload.text or "").strip()
+    if not text:
+        return {"ok": True, "skipped": True}
+    root = Path(payload.vault_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=404, detail="Vault not found")
+    _init_vault_db(root)
+    if payload.page_mode == "custom":
+        if not payload.page_ref:
+            raise HTTPException(status_code=400, detail="Custom capture page is required")
+        rel_path = _colon_to_page_path(payload.page_ref)
+    else:
+        target, _created = files.ensure_journal_today(root, template=None)
+        rel_path = f"/{target.relative_to(root).as_posix()}"
+    try:
+        content = files.read_file(root, rel_path)
+    except FileAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    now = datetime.now()
+    is_journal = rel_path.startswith("/Journal/")
+    if is_journal:
+        timestamp = now.strftime("%I:%M %p").lower()
+    else:
+        timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
+    entry_lines = _build_quick_capture_entry(text, timestamp)
+    updated = _append_quick_capture_section(content, entry_lines)
+    try:
+        files.write_file(root, rel_path, updated)
+    except FileAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db_path = root / ".stillpoint" / "settings.db"
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        search_index.upsert_page(conn, rel_path, int(time.time()), updated)
+        conn.close()
+    except Exception:
+        pass
+    return {"ok": True, "path": rel_path}
 
 
 @app.get("/api/tasks")

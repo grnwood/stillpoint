@@ -18,7 +18,6 @@ python-docx>=0.8.11
 pytesseract>=0.3.10
 Pillow>=10.0
 
-keyboard>=0.13
 markdown>=3.5
 Pygments>=2.18
 Flask>=3.0

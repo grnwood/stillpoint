@@ -211,7 +211,8 @@ WIKI_FILE_LINK_PATTERN = QRegularExpression(
 # Plain HTTP URL pattern (for highlighting plain URLs without labels)
 HTTP_URL_PATTERN = QRegularExpression(r"(?P<url>https?://[^\s<>\"{}|\\^`\[\]]+)")
 # Plain colon link pattern (for highlighting plain colon links without labels)
-COLON_LINK_PATTERN = QRegularExpression(r"(?P<link>:[^\s\[\]]+(?:#[^\s\[\]]+)?)")
+# Require start-of-line or whitespace so times like 08:19am don't register as links.
+COLON_LINK_PATTERN = QRegularExpression(r"(?<!\S)(?P<link>:[^\s\[\]]+(?:#[^\s\[\]]+)?)")
 
 # Unified wiki-style link storage format: [link|label]
 # Matches both HTTP and page links (label can be empty)

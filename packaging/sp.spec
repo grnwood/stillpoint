@@ -20,8 +20,9 @@ def _find_root():
 
 ROOT = _find_root()
 
-# Entry script (absolute)
+# Entry scripts (absolute)
 MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
+QUICKCAPTURE = os.path.join(ROOT, 'sp', 'app', 'quickcapture.py')
 
 # Hidden imports sometimes needed for PySide6 / FastAPI
 hidden = (
@@ -39,6 +40,7 @@ hidden = (
         'sp.app.ui.calendar_panel',
         'sp.app.ui.task_panel',
         'sp.app.ui.toc_widget',
+        'sp.app.quickcapture',
         'fastapi',
         'httpx',
         'pydantic',
@@ -95,7 +97,7 @@ block_cipher = None
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
 
 a = Analysis(
-    [MAIN],
+    [MAIN, QUICKCAPTURE],
     pathex=[ROOT],
     binaries=[],
     datas=datas,
@@ -115,7 +117,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 _icon_ico = os.path.join(_assets_dir, 'sp-icon.ico')
 exe = EXE(
     pyz,
-    a.scripts,
+    [s for s in a.scripts if os.path.basename(s[0]).startswith('main')],
     [],
     exclude_binaries=True,
     name='StillPoint',
@@ -128,8 +130,24 @@ exe = EXE(
     version=None,
 )
 
+quickcapture_exe = EXE(
+    pyz,
+    [s for s in a.scripts if os.path.basename(s[0]).startswith('quickcapture')],
+    [],
+    exclude_binaries=True,
+    name='quickcapture',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=True,
+    upx=True,
+    console=False,
+    icon=_icon_ico if os.path.exists(_icon_ico) else None,
+    version=None,
+)
+
 coll = COLLECT(
     exe,
+    quickcapture_exe,
     a.binaries,
     a.zipfiles,
     a.datas,

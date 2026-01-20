@@ -97,6 +97,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QSpinBox,
+    QSystemTrayIcon,
 )
 
 from sp.app import config, indexer
@@ -439,6 +440,7 @@ from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
+from .quick_capture_overlay import QuickCaptureOverlay
 from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from .mode_window import ModeWindow
@@ -1495,6 +1497,10 @@ class MainWindow(QMainWindow):
         open_templates_action.setToolTip("Open or create ~/.stillpoint/templates in your file manager")
         open_templates_action.triggered.connect(self._open_user_templates_folder)
         vault_menu.addAction(open_templates_action)
+        quick_capture_action = QAction("Quick Capture...", self)
+        quick_capture_action.setToolTip("Capture a thought into your home vault")
+        quick_capture_action.triggered.connect(self._show_quick_capture_overlay)
+        vault_menu.addAction(quick_capture_action)
         import_menu = file_menu.addMenu("Import")
         zim_import_action = QAction("Zim Wiki…", self)
         zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
@@ -1568,6 +1574,7 @@ class MainWindow(QMainWindow):
             self._action_server_logout: self._action_server_logout.toolTip(),
         }
         self._apply_remote_mode_ui()
+        self._setup_tray_icon()
 
         go_menu = self.menuBar().addMenu("&Go")
         home_action = QAction("(H)ome", self)
@@ -4530,6 +4537,13 @@ class MainWindow(QMainWindow):
         """Ensure the tree has loaded nodes along the target path."""
         if not target_path:
             return
+        if not self._use_lazy_loading:
+            if not self._find_item(self.tree_model.invisibleRootItem(), target_path):
+                if getattr(self, "_selection_retry_path", None) != target_path:
+                    self._selection_retry_path = target_path
+                    self._pending_selection = target_path
+                    self._populate_vault_tree()
+            return
         folder_path = self._file_path_to_folder(target_path) or "/"
         parts = [p for p in folder_path.strip("/").split("/") if p]
         current_path = "/"
@@ -5080,25 +5094,6 @@ class MainWindow(QMainWindow):
         payload_content = self.editor.to_markdown()
         if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
             print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
-        # Keep buffer and on-disk content in sync when we inject a missing title
-        title_content = self._ensure_page_title(payload_content, self.current_path)
-        if title_content != payload_content:
-            payload_content = title_content
-            # Update editor with injected title
-            self._suspend_autosave = True
-            self._suspend_dirty_tracking = True
-            try:
-                leaf = Path(self.current_path.rstrip("/")).stem
-                self.editor.apply_title_heading(leaf)
-            finally:
-                self._suspend_dirty_tracking = False
-                self._suspend_autosave = False
-            try:
-                editor_cursor = self.editor.textCursor()
-                saved_cursor_pos = editor_cursor.position()
-                saved_anchor_pos = editor_cursor.anchor()
-            except Exception:
-                pass
         
         payload = {"path": self.current_path, "content": payload_content}
         headers = self._if_match_headers(self.current_path)
@@ -5279,9 +5274,11 @@ class MainWindow(QMainWindow):
             if template_cursor_pos >= 0:
                 self._template_cursor_position = template_cursor_pos
             
-            # Repopulate tree so newly created nested year/month/day nodes appear
-            self._pending_selection = path
-            self._populate_vault_tree()
+            handled_nav = self._ensure_journal_visible_for_path(path)
+            if not handled_nav:
+                # Repopulate tree so newly created nested year/month/day nodes appear
+                self._pending_selection = path
+                self._populate_vault_tree()
             # Apply journal templates (year/month/day) if newly created
             self._apply_journal_templates(path, allow_overwrite=created)
             # Open with cursor at template position or end for immediate typing
@@ -6063,6 +6060,133 @@ class MainWindow(QMainWindow):
             self._main_soft_scroll_enabled = config.load_enable_main_soft_scroll()
         except Exception:
             self._main_soft_scroll_enabled = True
+        self._setup_tray_icon()
+
+    def _setup_tray_icon(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if not config.load_tray_icon_enabled():
+            if getattr(self, "_tray_icon", None):
+                self._tray_icon.hide()
+                self._tray_icon.deleteLater()
+                self._tray_icon = None
+                self._tray_menu = None
+            return
+        if getattr(self, "_tray_icon", None):
+            return
+        from sp.app.main import get_app_icon
+
+        tray_icon = QSystemTrayIcon(get_app_icon(), self)
+        menu = QMenu()
+        action_capture = menu.addAction("Quick Capture...")
+        action_capture.triggered.connect(self._show_quick_capture_overlay)
+        action_open_vault = menu.addAction("Open Vault...")
+        action_open_vault.triggered.connect(lambda: self._select_vault(spawn_new_process=False))
+        action_open_vault_new = menu.addAction("Open Vault in New Window...")
+        action_open_vault_new.triggered.connect(lambda: self._select_vault(spawn_new_process=True))
+        action_show = menu.addAction("Show StillPoint")
+        action_show.triggered.connect(self._show_from_tray)
+        menu.addSeparator()
+        action_quit = menu.addAction("Quit")
+        action_quit.triggered.connect(self._quit_from_tray)
+        tray_icon.setContextMenu(menu)
+        tray_icon.activated.connect(self._on_tray_activated)
+        tray_icon.show()
+        self._tray_icon = tray_icon
+        self._tray_menu = menu
+
+    def _show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self._allow_tray_exit = True
+        QApplication.instance().quit()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._show_from_tray()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            config.load_tray_icon_enabled()
+            and config.load_minimize_to_tray_enabled()
+            and getattr(self, "_tray_icon", None)
+            and not getattr(self, "_allow_tray_exit", False)
+        ):
+            event.ignore()
+            self.hide()
+            return
+        super().closeEvent(event)
+
+
+    def _show_quick_capture_overlay(self) -> None:
+        target = self._resolve_quick_capture_target()
+        if not target:
+            self._show_quick_capture_unavailable()
+            return
+
+        def _on_capture(text: str) -> None:
+            self._submit_quick_capture(text, target)
+
+        overlay = QuickCaptureOverlay(parent=self, on_capture=_on_capture)
+        overlay.adjustSize()
+        geo = self.frameGeometry()
+        pos = geo.center() - overlay.rect().center()
+        pos.setY(pos.y() - int(geo.height() * 0.1))
+        overlay.move(pos)
+        overlay.show()
+        overlay.raise_()
+        overlay.activateWindow()
+        overlay.input.setFocus()
+
+    def _resolve_quick_capture_target(self) -> Optional[dict[str, Optional[str]]]:
+        if self._remote_mode:
+            return None
+        home_vault = config.load_quick_capture_vault()
+        vault_path = home_vault or self.vault_root
+        if not vault_path:
+            return None
+        vault_root = Path(vault_path).expanduser()
+        if not vault_root.exists():
+            return None
+        if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
+            return None
+        if not os.access(vault_root, os.W_OK):
+            return None
+        page_mode = config.load_quick_capture_page_mode()
+        page_ref = config.load_quick_capture_custom_page() if page_mode == "custom" else None
+        if page_mode == "custom" and not page_ref:
+            return None
+        return {"vault_path": str(vault_root), "page_mode": page_mode, "page_ref": page_ref}
+
+    def _show_quick_capture_unavailable(self) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Quick Capture")
+        msg.setText(
+            "Quick Capture isn't ready yet.\n"
+            "Choose a home vault in Settings to enable it."
+        )
+        msg.setIcon(QMessageBox.Information)
+        msg.setStandardButtons(QMessageBox.NoButton)
+        open_settings = msg.addButton("Open Settings", QMessageBox.AcceptRole)
+        msg.exec()
+        if msg.clickedButton() == open_settings:
+            self._open_preferences()
+
+    def _submit_quick_capture(self, text: str, target: dict[str, Optional[str]]) -> None:
+        payload = {
+            "vault_path": target.get("vault_path"),
+            "page_mode": target.get("page_mode"),
+            "page_ref": target.get("page_ref"),
+            "text": text,
+        }
+        try:
+            resp = self.http.post("/api/quick-capture", json=payload)
+            resp.raise_for_status()
+        except Exception:
+            self.statusBar().showMessage("Quick Capture failed.", 4000)
         try:
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
         except Exception:
@@ -9341,17 +9465,30 @@ class MainWindow(QMainWindow):
             return
         try:
             self._ensure_tree_path_loaded(target_path)
-            self._select_tree_path(target_path)
+            if self._select_tree_path(target_path):
+                self._selection_retry_path = None
+                return
+            if self._nav_filter_path:
+                filter_root = self._nav_filter_path.rstrip("/") or "/"
+                if not (target_path == filter_root or target_path.startswith(filter_root + "/")):
+                    return
+            if getattr(self, "_selection_retry_path", None) == target_path:
+                return
+            self._selection_retry_path = target_path
+            self._pending_selection = target_path
+            self._populate_vault_tree()
         except Exception as exc:
             logNav(f"Failed to select tree path {target_path}: {exc}")
 
-    def _select_tree_path(self, target_path: str) -> None:
+    def _select_tree_path(self, target_path: str) -> bool:
         match = self._find_item(self.tree_model.invisibleRootItem(), target_path)
         if match:
             index = match.index()
             if index.isValid():
                 self.tree_view.setCurrentIndex(index)
                 self.tree_view.scrollTo(index)
+                return True
+        return False
 
     def _locate_current_page_in_tree(self) -> None:
         """Manually locate the current page in the navigator."""
@@ -9361,7 +9498,9 @@ class MainWindow(QMainWindow):
         if self._ensure_journal_visible_for_path(self.current_path):
             return
         self._ensure_tree_path_loaded(self.current_path)
-        self._select_tree_path(self.current_path)
+        if not self._select_tree_path(self.current_path):
+            self._pending_selection = self.current_path
+            self._populate_vault_tree()
 
     def _ensure_journal_visible_for_path(self, path: str) -> bool:
         if not self._is_journal_path(path):

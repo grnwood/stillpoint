@@ -131,6 +131,32 @@ def _set_app_icon(app: QApplication) -> None:
             pass
 
 
+def _write_local_ui_token(token: str) -> None:
+    try:
+        token_path = Path.home() / ".stillpoint" / "local-ui-token"
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token, encoding="utf-8")
+        try:
+            os.chmod(token_path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _write_local_api_base(host: str, port: int) -> None:
+    try:
+        base_path = Path.home() / ".stillpoint" / "api-base"
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.write_text(f"http://{host}:{port}", encoding="utf-8")
+        try:
+            os.chmod(base_path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
     """Custom Qt message handler to suppress known harmless warnings."""
     # Suppress DirectWrite font warning on Windows
@@ -525,8 +551,10 @@ def main() -> None:
     # Install custom message handler to suppress harmless Qt warnings
     qInstallMessageHandler(_qt_message_handler)
     local_ui_token = secrets.token_urlsafe(32)
+    _write_local_ui_token(local_ui_token)
     # Start API server (this will set password and import api module)
     port, server, server_admin_password = _start_api_server(args.host, args.port)
+    _write_local_api_base(args.host, port)
     # Import api_module after server starts to set UI token
     from sp.server import api as api_module
     api_module.set_local_ui_token(local_ui_token)
