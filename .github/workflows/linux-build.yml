@@ -39,12 +39,12 @@ jobs:
 
       - name: Smoke test bundle
         run: |
-          test -x dist/StillPoint/StillPoint
+          test -x dist/stillpoint/stillpoint
 
       - name: Zip bundle
         run: |
           cd dist
-          zip -r ../StillPoint-linux-x86_64.zip StillPoint
+          zip -r ../StillPoint-linux-x86_64.zip stillpoint
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
