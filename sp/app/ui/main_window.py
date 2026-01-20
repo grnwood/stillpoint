@@ -1497,10 +1497,10 @@ class MainWindow(QMainWindow):
         open_templates_action.setToolTip("Open or create ~/.stillpoint/templates in your file manager")
         open_templates_action.triggered.connect(self._open_user_templates_folder)
         vault_menu.addAction(open_templates_action)
-        quick_capture_action = QAction("Quick Capture...", self)
-        quick_capture_action.setToolTip("Capture a thought into your home vault")
-        quick_capture_action.triggered.connect(self._show_quick_capture_overlay)
-        vault_menu.addAction(quick_capture_action)
+        self._action_quick_capture = QAction("Quick Capture...", self)
+        self._action_quick_capture.setToolTip("Capture a thought into your home vault")
+        self._action_quick_capture.triggered.connect(self._show_quick_capture_overlay)
+        vault_menu.addAction(self._action_quick_capture)
         import_menu = file_menu.addMenu("Import")
         zim_import_action = QAction("Zim Wiki…", self)
         zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
@@ -1655,6 +1655,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
 
         self._register_shortcuts()
+        self._setup_quick_capture_shortcut(show_error=False)
         self._focus_recent = ["editor", "tree", "left", "right"]
         # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
@@ -1988,6 +1989,79 @@ class MainWindow(QMainWindow):
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
+
+    def _quick_capture_shortcut_conflicts(self, sequence: QKeySequence) -> list[str]:
+        if sequence.isEmpty():
+            return []
+        conflicts = []
+        seen = set()
+        app = QApplication.instance()
+        widgets = app.topLevelWidgets() if app is not None else [self]
+        for widget in widgets:
+            for action in widget.findChildren(QAction):
+                if action is getattr(self, "_action_quick_capture", None):
+                    continue
+                for seq in action.shortcuts():
+                    if not seq.isEmpty() and seq == sequence:
+                        label = action.text().replace("&", "").strip() or "Unnamed action"
+                        key = f"action:{label}"
+                        if key not in seen:
+                            conflicts.append(label)
+                            seen.add(key)
+                        break
+            for sc in widget.findChildren(QShortcut):
+                if sc.key() == sequence:
+                    label = sc.objectName() or "Shortcut"
+                    key = f"shortcut:{label}"
+                    if key not in seen:
+                        conflicts.append(label)
+                        seen.add(key)
+        return conflicts
+
+    def _is_ambiguous_alt_letter(self, sequence: QKeySequence) -> bool:
+        text = sequence.toString(QKeySequence.NativeText).strip()
+        return bool(re.match(r"^Alt\+[A-Za-z]$", text))
+
+    def _setup_quick_capture_shortcut(self, *, show_error: bool) -> None:
+        if not hasattr(self, "_action_quick_capture"):
+            return
+        hotkey = config.load_quick_capture_app_hotkey()
+        sequence = QKeySequence(hotkey)
+        if not hotkey.strip() or sequence.isEmpty():
+            self._action_quick_capture.setShortcut(QKeySequence())
+            return
+        if self._is_ambiguous_alt_letter(sequence):
+            self._action_quick_capture.setShortcut(QKeySequence())
+            if show_error:
+                QMessageBox.warning(
+                    self,
+                    "Quick Capture Hotkey",
+                    "Alt+letter shortcuts are reserved for menu access and can be ambiguous.\n"
+                    "Please choose a different shortcut.",
+                )
+            return
+        conflicts = self._quick_capture_shortcut_conflicts(sequence)
+        if conflicts:
+            self._action_quick_capture.setShortcut(QKeySequence())
+            if show_error:
+                conflict_list = ", ".join(conflicts[:5])
+                extra = f" (+{len(conflicts) - 5} more)" if len(conflicts) > 5 else ""
+                QMessageBox.warning(
+                    self,
+                    "Quick Capture Hotkey",
+                    "That shortcut conflicts with another command and was not applied.\n"
+                    f"Conflicts: {conflict_list}{extra}",
+                )
+            return
+        self._action_quick_capture.setShortcut(sequence)
+        self._action_quick_capture.setShortcutContext(Qt.ApplicationShortcut)
+        app = QApplication.instance()
+        if app is not None:
+            for widget in app.topLevelWidgets():
+                if self._action_quick_capture not in widget.actions():
+                    widget.addAction(self._action_quick_capture)
+        elif self._action_quick_capture not in self.actions():
+            self.addAction(self._action_quick_capture)
 
     def _build_format_menu(self) -> None:
         """Add a Format menu that mirrors markdown styling shortcuts."""
@@ -6052,6 +6126,7 @@ class MainWindow(QMainWindow):
                 self.update_links_on_index = config.load_update_links_on_index()
             except Exception:
                 self.update_links_on_index = True
+            self._setup_quick_capture_shortcut(show_error=True)
         try:
             self.editor.set_pygments_style(config.load_pygments_style("monokai"))
         except Exception:

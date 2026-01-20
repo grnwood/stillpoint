@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QWidget,
     QFileDialog,
+    QKeySequenceEdit,
 )
 from pathlib import Path
 from PySide6.QtGui import QFontDatabase, QFont
@@ -132,6 +134,13 @@ class PreferencesDialog(QDialog):
         self.quick_capture_custom_edit.setText(config.load_quick_capture_custom_page() or "")
         self.quick_capture_page_combo.currentIndexChanged.connect(self._update_quick_capture_custom_visibility)
         self._update_quick_capture_custom_visibility()
+
+        row_capture_hotkey = QHBoxLayout()
+        row_capture_hotkey.addWidget(QLabel("Quick Capture Hotkey (in-app):"))
+        self.quick_capture_hotkey_edit = QKeySequenceEdit()
+        self.quick_capture_hotkey_edit.setKeySequence(config.load_quick_capture_app_hotkey())
+        row_capture_hotkey.addWidget(self.quick_capture_hotkey_edit, 1)
+        general_layout.addLayout(row_capture_hotkey)
 
         general_layout.addStretch(1)
 
@@ -678,6 +687,19 @@ class PreferencesDialog(QDialog):
         capture_mode = "today" if self.quick_capture_page_combo.currentIndex() == 0 else "custom"
         config.save_quick_capture_page_mode(capture_mode)
         config.save_quick_capture_custom_page(self.quick_capture_custom_edit.text())
+        hotkey = self.quick_capture_hotkey_edit.keySequence().toString().strip()
+        if hotkey and re.match(r"^Alt\+[A-Za-z]$", hotkey):
+            QMessageBox.warning(
+                self,
+                "Quick Capture Hotkey",
+                "Alt+letter shortcuts are reserved for menu access and can be ambiguous.\n"
+                "Please choose a different shortcut.",
+            )
+            return
+        if not hotkey:
+            config.save_quick_capture_app_hotkey("")
+        else:
+            config.save_quick_capture_app_hotkey(hotkey)
         config.save_focus_mode_settings(
             {
                 "center_column": self.focus_center_column_checkbox.isChecked(),

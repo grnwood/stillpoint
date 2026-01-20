@@ -469,6 +469,19 @@ def save_quick_capture_custom_page(value: Optional[str]) -> None:
     _update_global_config({"quick_capture_custom_page": cleaned})
 
 
+def load_quick_capture_app_hotkey() -> str:
+    payload = _read_global_config()
+    value = payload.get("quick_capture_app_hotkey")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "ctrl+alt+space"
+
+
+def save_quick_capture_app_hotkey(hotkey: str) -> None:
+    value = hotkey.strip() if isinstance(hotkey, str) and hotkey.strip() else ""
+    _update_global_config({"quick_capture_app_hotkey": value})
+
+
 def load_tray_icon_enabled() -> bool:
     payload = _read_global_config()
     value = payload.get("tray_icon_enabled")
