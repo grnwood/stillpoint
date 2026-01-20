@@ -90,6 +90,15 @@ AI features are opt-in and require configuration. Current capabilities include:
 - Page chat (contextual chat scoped to the current page).
 - Global chat (vault-wide or general context).
 - AI actions menu for common edits and transformations.
+- Embedded RAG capabilities.
+- PDF and .docx extraction with vector indexing (pdfminer, python-docx).
+- Image text extraction via Tesseract.
+
+### Sample Use Cases (AI / RAG)
+
+- Ask questions with context from a single page or a series of pages.
+- RAG over attachments in a folder (PDFs, Word docs, other text).
+- Scrape text from images into the context before querying.
 
 ## Keyboard Shortcuts
 
