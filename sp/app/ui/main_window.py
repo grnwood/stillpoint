@@ -6160,7 +6160,8 @@ class MainWindow(QMainWindow):
         def _on_capture(text: str) -> None:
             self._submit_quick_capture(text, target)
 
-        overlay = QuickCaptureOverlay(parent=self, on_capture=_on_capture)
+        subtitle = self._quick_capture_subtitle(target)
+        overlay = QuickCaptureOverlay(parent=self, on_capture=_on_capture, subtitle=subtitle)
         overlay.adjustSize()
         geo = self.frameGeometry()
         pos = geo.center() - overlay.rect().center()
@@ -6217,6 +6218,17 @@ class MainWindow(QMainWindow):
             resp.raise_for_status()
         except Exception:
             self.statusBar().showMessage("Quick Capture failed.", 4000)
+
+    def _quick_capture_subtitle(self, target: dict[str, Optional[str]]) -> str:
+        vault_path = target.get("vault_path") or ""
+        vault_name = Path(vault_path).name or vault_path
+        page_mode = target.get("page_mode") or "today"
+        page_ref = target.get("page_ref") or ""
+        page_label = "Today's Journal" if page_mode == "today" else page_ref
+        if config.load_quick_capture_vault():
+            return f"Dropping to {vault_name}: {page_label}"
+        current_name = Path(self.vault_root).name if self.vault_root else vault_name
+        return f"Dropping to: {current_name}: {page_label} | Today's Journal"
         try:
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
         except Exception:
