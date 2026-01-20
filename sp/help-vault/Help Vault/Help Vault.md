@@ -6,6 +6,7 @@ Welcome to the StillPoint Help Vault. This is a real StillPoint vault made of pl
 - New to StillPoint? Start with [:Help_Vault:Getting_Started|Getting Started].
 - Learn the core editing flow: [:Editing|:Editing]
 - Move faster with [:Navigation|Navigation] and [:Keyboard_Shortcuts|Keyboard Shortcuts].
+- Capture thoughts fast: [:Getting_Started:Quick_Capture|Quick Capture]
 
 ## Key Ideas
 - Your notes are plain files on your machine.
@@ -19,6 +20,7 @@ Welcome to the StillPoint Help Vault. This is a real StillPoint vault made of pl
 - Finding things fast: [:Search_and_Filtering|Search and Filtering]
 - Tracking work: [:Tasks|Tasks]
 - Daily notes and dates: [:Calendar|Calendar]
+- Quick capture: [:Getting_Started:Quick_Capture|Quick Capture]
 - Images and files: [:Attachments|Attachments]
 - Optional AI features: [:Troubleshooting:AI|AI]
 - Power user setups: [:Advanced_Setup_(Tech)|Advanced Setup (Tech)]

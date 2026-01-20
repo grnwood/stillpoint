@@ -202,22 +202,22 @@ def _resolve_page_mode(page_arg: Optional[str]) -> tuple[str, Optional[str]]:
     return "today", None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="StillPoint Quick Capture")
-    parser.add_argument("--vault", help="Vault path for capture")
-    parser.add_argument("--page", help="Custom page (colon path or /path)")
-    parser.add_argument("--text", help="Capture text (omit to read from stdin)")
-    args = parser.parse_args()
-
+def run_quick_capture(
+    *,
+    vault: Optional[str],
+    page: Optional[str],
+    text: Optional[str],
+    allow_overlay: bool = True,
+) -> int:
     config.init_settings()
-    text = _parse_hotkey_text(args.text)
-    if not text:
-        text = _prompt_overlay()
-    if not text:
+    capture_text = _parse_hotkey_text(text)
+    if not capture_text and allow_overlay:
+        capture_text = _prompt_overlay()
+    if not capture_text:
         return 0
 
     try:
-        vault_root = _resolve_vault_path(args.vault)
+        vault_root = _resolve_vault_path(vault)
     except Exception as exc:
         print(f"Quick Capture error: {exc}")
         return 1
@@ -225,7 +225,7 @@ def main() -> int:
         print("Quick Capture error: vault does not exist.")
         return 1
 
-    page_mode, page_ref = _resolve_page_mode(args.page)
+    page_mode, page_ref = _resolve_page_mode(page)
     if page_mode == "custom" and not page_ref:
         print("Quick Capture error: custom page not configured.")
         return 1
@@ -236,12 +236,12 @@ def main() -> int:
         "vault_path": str(vault_root),
         "page_mode": page_mode,
         "page_ref": page_ref,
-        "text": text,
+        "text": capture_text,
     }
     if _capture_via_api(api_base, token, payload):
         return 0
     try:
-        _capture_to_files(vault_root, page_mode, page_ref, text)
+        _capture_to_files(vault_root, page_mode, page_ref, capture_text)
     except FileAccessError as exc:
         print(f"Quick Capture error: {exc}")
         return 1
@@ -249,6 +249,15 @@ def main() -> int:
         print(f"Quick Capture error: {exc}")
         return 1
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="StillPoint Quick Capture")
+    parser.add_argument("--vault", help="Vault path for capture")
+    parser.add_argument("--page", help="Custom page (colon path or /path)")
+    parser.add_argument("--text", help="Capture text (omit to read from stdin)")
+    args = parser.parse_args(argv)
+    return run_quick_capture(vault=args.vault, page=args.page, text=args.text, allow_overlay=True)
 
 
 if __name__ == "__main__":

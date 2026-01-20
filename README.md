@@ -193,22 +193,24 @@ Or run from terminal: stillpoint
 
 ## Quick Capture Shortcuts
 
-PyInstaller builds include a `quickcapture` helper executable alongside the main app.
-This helper can open the Quick Capture overlay or accept text via `--text`/stdin.
+PyInstaller builds include a `stillpoint` executable that also supports Quick Capture via flags.
+The same entry point works for overlay capture or text capture via `--text`/stdin.
 
 ### Linux (Cinnamon)
 - Open **System Settings → Keyboard → Shortcuts → Custom Shortcuts**.
 - Add a shortcut with the command:
-  - `"/path/to/StillPoint/quickcapture"`
+  - `"/path/to/stillpoint/stillpoint" --quick-capture`
 - Assign your preferred key combo.
 
 ### Windows
-- Find `quickcapture.exe` inside the installed StillPoint folder.
-- Create a desktop shortcut, then open **Properties → Shortcut key** and set your hotkey.
+- Find `stillpoint.exe` inside the installed StillPoint folder.
+- Create a desktop shortcut with:
+  - `"C:\Path\To\stillpoint\stillpoint.exe" --quick-capture`
+- Then open **Properties → Shortcut key** and set your hotkey.
 
 ### macOS
 - Create an Automator “Quick Action” or Shortcut that runs:
-  - `/Applications/StillPoint.app/Contents/MacOS/quickcapture`
+  - `/Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture`
 - Assign a keyboard shortcut to that action in **System Settings → Keyboard → Keyboard Shortcuts**.
 
 ## Repo Layout

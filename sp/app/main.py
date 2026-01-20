@@ -193,6 +193,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Show the vault picker on startup instead of auto-opening the default vault.",
     )
+    parser.add_argument(
+        "--quick-capture",
+        action="store_true",
+        help="Open Quick Capture or capture text via CLI.",
+    )
+    parser.add_argument("--text", help="Quick Capture text (omit to read from stdin).")
+    parser.add_argument("--page", help="Quick Capture custom page (colon path or /path).")
     parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
     parser.add_argument("--host", default=os.getenv("SP_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
@@ -535,6 +542,16 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+
+    if args.quick_capture:
+        from sp.app.quickcapture import run_quick_capture
+        rc = run_quick_capture(
+            vault=args.vault,
+            page=args.page,
+            text=args.text,
+            allow_overlay=True,
+        )
+        sys.exit(rc)
     
     # Handle webserver mode
     if args.webserver is not None:

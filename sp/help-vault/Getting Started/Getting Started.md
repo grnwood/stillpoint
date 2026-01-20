@@ -20,5 +20,6 @@ StillPoint works with simple folders and Markdown files. A vault is just a folde
 ## What to Read Next
 - Learn editing basics: [:Editing|Editing]
 - Learn fast navigation: [:Navigation|Navigation]
+- Capture fast thoughts: [:Getting_Started:Quick_Capture|Quick Capture]
 - See how StillPoint thinks about notes: [:Design_Philosophy|Design Philosophy]
 - Advanced setups: [:Advanced_Setup_(Tech)|Advanced Setup (Tech)]

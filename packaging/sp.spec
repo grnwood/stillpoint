@@ -20,9 +20,8 @@ def _find_root():
 
 ROOT = _find_root()
 
-# Entry scripts (absolute)
+# Entry script (absolute)
 MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
-QUICKCAPTURE = os.path.join(ROOT, 'sp', 'app', 'quickcapture.py')
 
 # Hidden imports sometimes needed for PySide6 / FastAPI
 hidden = (
@@ -97,7 +96,7 @@ block_cipher = None
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
 
 a = Analysis(
-    [MAIN, QUICKCAPTURE],
+    [MAIN],
     pathex=[ROOT],
     binaries=[],
     datas=datas,
@@ -117,25 +116,10 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 _icon_ico = os.path.join(_assets_dir, 'sp-icon.ico')
 exe = EXE(
     pyz,
-    [s for s in a.scripts if os.path.basename(s[0]).startswith('main')],
+    a.scripts,
     [],
     exclude_binaries=True,
-    name='StillPoint',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
-    console=False,
-    icon=_icon_ico if os.path.exists(_icon_ico) else None,
-    version=None,
-)
-
-quickcapture_exe = EXE(
-    pyz,
-    [s for s in a.scripts if os.path.basename(s[0]).startswith('quickcapture')],
-    [],
-    exclude_binaries=True,
-    name='quickcapture',
+    name='stillpoint',
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
@@ -147,18 +131,17 @@ quickcapture_exe = EXE(
 
 coll = COLLECT(
     exe,
-    quickcapture_exe,
     a.binaries,
     a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
-    name='StillPoint'
+    name='stillpoint'
 )
 
 # Post-process: Move install scripts and README to dist root for easy access
 import shutil
-dist_root = os.path.join('dist', 'StillPoint')
+dist_root = os.path.join('dist', 'stillpoint')
 internal_dir = os.path.join(dist_root, '_internal')
 
 # Determine which files to move based on platform

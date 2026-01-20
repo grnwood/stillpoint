@@ -13,7 +13,6 @@ def _find_root():
 
 ROOT = _find_root()
 MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
-QUICKCAPTURE = os.path.join(ROOT, 'sp', 'app', 'quickcapture.py')
 
 STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '0.99')
 
@@ -74,7 +73,7 @@ block_cipher = None
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
 a = Analysis(
-    [MAIN, QUICKCAPTURE],
+    [MAIN],
     pathex=[ROOT],
     binaries=[],
     datas=datas,
@@ -92,10 +91,10 @@ _icon_icns = os.path.join(_assets_dir, 'StillPoint.icns')
 
 exe = EXE(
     pyz,
-    [s for s in a.scripts if os.path.basename(s[0]).startswith('main')],
+    a.scripts,
     [],
     exclude_binaries=True,
-    name='StillPoint',
+    name='stillpoint',
     debug=False,
     bootloader_ignore_signals=False,
 
@@ -107,23 +106,8 @@ exe = EXE(
     icon=_icon_icns if os.path.exists(_icon_icns) else None,
 )
 
-quickcapture_exe = EXE(
-    pyz,
-    [s for s in a.scripts if os.path.basename(s[0]).startswith('quickcapture')],
-    [],
-    exclude_binaries=True,
-    name='quickcapture',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon=_icon_icns if os.path.exists(_icon_icns) else None,
-)
-
 app = BUNDLE(
     exe,
-    quickcapture_exe,
     a.binaries,
     a.zipfiles,
     a.datas,
