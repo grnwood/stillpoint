@@ -19,10 +19,40 @@ $ExeName = "stillpoint.exe"
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Paths relative to script
-# When bundled with PyInstaller, the script is in the same dir as the exe
-$DistDir    = $ScriptRoot
-$AssetsDir  = Join-Path $ScriptRoot "_internal\sp\assets"
+# Detect build type and set paths accordingly
+# Case 1: PyInstaller build - exe is in same dir as script or script is in dist/
+# Case 2: Source build - exe is in dist/stillpoint/stillpoint.exe relative to script
+
+$DistDir = $null
+$ExePathInDist = $null
+$AssetsDir = $null
+
+# Try PyInstaller structure first (script in dist/ or same dir as exe)
+$PyInstallerExe = Join-Path $ScriptRoot $ExeName
+if (Test-Path $PyInstallerExe) {
+    Write-Host "Detected PyInstaller build"
+    $DistDir = $ScriptRoot
+    $ExePathInDist = $PyInstallerExe
+    $AssetsDir = Join-Path $ScriptRoot "_internal\sp\assets"
+}
+# Try source build structure (dist/stillpoint/stillpoint.exe)
+elseif (Test-Path (Join-Path $ScriptRoot "dist\stillpoint\$ExeName")) {
+    Write-Host "Detected source build"
+    $DistDir = Join-Path $ScriptRoot "dist\stillpoint"
+    $ExePathInDist = Join-Path $DistDir $ExeName
+    # For source builds, assets are in dist/stillpoint/_internal/sp/assets
+    $AssetsDir = Join-Path $DistDir "_internal\sp\assets"
+    # Fallback: try relative to script root
+    if (-not (Test-Path $AssetsDir)) {
+        $AssetsDir = Join-Path $ScriptRoot "sp\assets"
+    }
+}
+else {
+    Write-Host "ERROR: Could not locate $ExeName" -ForegroundColor Red
+    Write-Host "  Tried PyInstaller: $PyInstallerExe" -ForegroundColor Yellow
+    Write-Host "  Tried source build: $(Join-Path $ScriptRoot "dist\stillpoint\$ExeName")" -ForegroundColor Yellow
+    exit 1
+}
 
 # Install location (user space)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
@@ -34,20 +64,6 @@ $CreateDesktopShortcut = $true
 Write-Host "Installing $AppName from: $DistDir"
 Write-Host "Target install directory: $InstallDir"
 Write-Host ""
-
-# === VALIDATE dist\ AND EXE ===
-
-if (-not (Test-Path $DistDir)) {
-    Write-Host "dist\ folder not found at: $DistDir" -ForegroundColor Red
-    exit 1
-}
-
-$ExePathInDist = Join-Path $DistDir $ExeName
-if (-not (Test-Path $ExePathInDist)) {
-    Write-Host " Executable not found: $ExePathInDist" -ForegroundColor Red
-    Write-Host "   Make sure `\$ExeName` matches your built .exe" -ForegroundColor Yellow
-    exit 1
-}
 
 # === RESOLVE ICON FROM assets\ ===
 
@@ -73,9 +89,8 @@ else {
 if (-not (Test-Path $InstallDir)) {
     Write-Host " Creating install directory: $InstallDir"
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
-}
-else {
-    Write-Host "ℹ Using existing install directory: $InstallDir"
+} else {
+    Write-Host " Using existing install directory: $InstallDir"
 }
 
 # === COPY FILES FROM dist\ ===
@@ -134,12 +149,13 @@ if ($CreateDesktopShortcut) {
     $DesktopShortcut.Save()
 
     Write-Host " Desktop shortcut created: $DesktopShortcutPath"
-
+}
 
 Write-Host ""
 Write-Host " $AppName installed successfully!" -ForegroundColor Green
 Write-Host "   - Installed to: $InstallDir"
 Write-Host "   - Start Menu entry under your user profile"
+
 if ($CreateDesktopShortcut) {
     Write-Host "   - Desktop shortcut created"
 }
