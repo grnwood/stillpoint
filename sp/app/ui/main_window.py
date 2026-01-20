@@ -1575,6 +1575,7 @@ class MainWindow(QMainWindow):
         }
         self._apply_remote_mode_ui()
         self._setup_tray_icon()
+        self._register_quick_capture_hook()
 
         go_menu = self.menuBar().addMenu("&Go")
         home_action = QAction("(H)ome", self)
@@ -6060,6 +6061,7 @@ class MainWindow(QMainWindow):
         except Exception:
             self._main_soft_scroll_enabled = True
         self._setup_tray_icon()
+        self._register_quick_capture_hook()
 
     def _setup_tray_icon(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -10957,7 +10959,47 @@ class MainWindow(QMainWindow):
         self._release_vault_lock()
         self._release_tray_lock()
         self._transfer_tray_icon_if_owner()
+        self._clear_quick_capture_hook_if_owner()
         return super().closeEvent(event)
+
+    def _register_quick_capture_hook(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if getattr(app, "_stillpoint_quick_capture_hook_set", False):
+            return
+        try:
+            from sp.server import api as api_module
+        except Exception:
+            return
+
+        def _show_capture() -> bool:
+            owner = getattr(app, "_stillpoint_tray_owner", None)
+            if owner is None:
+                windows = list(getattr(app, "_stillpoint_windows", []))
+                owner = windows[0] if windows else None
+            if not owner:
+                return False
+            print("[QuickCapture] UI hook invoked; showing overlay in running app.")
+            QTimer.singleShot(0, owner._show_quick_capture_overlay)
+            return True
+
+        api_module.set_ui_quick_capture_hook(_show_capture)
+        app._stillpoint_quick_capture_hook_set = True
+
+    def _clear_quick_capture_hook_if_owner(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        windows = [w for w in list(getattr(app, "_stillpoint_windows", [])) if w is not self]
+        if windows:
+            return
+        try:
+            from sp.server import api as api_module
+            api_module.set_ui_quick_capture_hook(None)
+        except Exception:
+            pass
+        app._stillpoint_quick_capture_hook_set = False
 
     def _acquire_tray_lock(self) -> bool:
         if getattr(self, "_tray_lock_handle", None):

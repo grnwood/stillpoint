@@ -75,6 +75,7 @@ _TASK_CACHE_VERSION: int = -1
 _TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
+_UI_QUICK_CAPTURE_HOOK = None
 
 
 def _normalize_tree_path(path: str) -> str:
@@ -367,6 +368,12 @@ def set_local_ui_token(token: Optional[str]) -> None:
     """Register a shared local UI token for localhost auth bypass."""
     global _LOCAL_UI_TOKEN
     _LOCAL_UI_TOKEN = token or None
+
+
+def set_ui_quick_capture_hook(callback) -> None:
+    """Register a UI callback for Quick Capture overlay requests."""
+    global _UI_QUICK_CAPTURE_HOOK
+    _UI_QUICK_CAPTURE_HOOK = callback
 
 
 def _is_localhost_request(request: Request) -> bool:
@@ -1214,6 +1221,19 @@ def journal_today(payload: JournalPayload) -> dict:
     target, created = files.ensure_journal_today(root, template=payload.template)
     rel = f"/{target.relative_to(root).as_posix()}"
     return {"path": rel, "created": created}
+
+
+@app.post("/api/ui/quick-capture")
+def ui_quick_capture(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    if _UI_QUICK_CAPTURE_HOOK is None:
+        raise HTTPException(status_code=409, detail="Quick capture UI not available")
+    try:
+        handled = bool(_UI_QUICK_CAPTURE_HOOK())
+    except Exception:
+        handled = False
+    if not handled:
+        raise HTTPException(status_code=409, detail="Quick capture UI not available")
+    return {"ok": True}
 
 
 @app.post("/api/quick-capture")

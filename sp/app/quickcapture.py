@@ -181,6 +181,18 @@ def _capture_via_api(base: str, token: Optional[str], payload: dict) -> bool:
     return False
 
 
+def _show_overlay_via_api(base: str, token: Optional[str]) -> bool:
+    headers = {"X-Local-UI-Token": token} if token else None
+    try:
+        with httpx.Client(base_url=base, timeout=1.5, headers=headers) as client:
+            resp = client.post("/api/ui/quick-capture")
+            if resp.status_code == 200:
+                return True
+    except httpx.HTTPError:
+        return False
+    return False
+
+
 def _resolve_vault_path(vault_arg: Optional[str]) -> Path:
     if vault_arg:
         return Path(vault_arg).expanduser().resolve()
@@ -212,6 +224,10 @@ def run_quick_capture(
     config.init_settings()
     capture_text = _parse_hotkey_text(text)
     if not capture_text and allow_overlay:
+        api_base = _default_api_base()
+        token = _load_local_ui_token()
+        if _show_overlay_via_api(api_base, token):
+            return 0
         capture_text = _prompt_overlay()
     if not capture_text:
         return 0
