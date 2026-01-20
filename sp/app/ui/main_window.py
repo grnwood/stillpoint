@@ -6156,8 +6156,10 @@ class MainWindow(QMainWindow):
     def _show_quick_capture_overlay(self) -> None:
         target = self._resolve_quick_capture_target()
         if not target:
+            print("[QuickCapture] UI overlay aborted: no capture target resolved.")
             self._show_quick_capture_unavailable()
             return
+        print(f"[QuickCapture] UI overlay target resolved: {target}")
 
         def _on_capture(text: str) -> None:
             self._submit_quick_capture(text, target)
@@ -10981,7 +10983,17 @@ class MainWindow(QMainWindow):
             if not owner:
                 return False
             print("[QuickCapture] UI hook invoked; showing overlay in running app.")
-            QTimer.singleShot(0, owner._show_quick_capture_overlay)
+            def _focus_and_show() -> None:
+                try:
+                    if owner.isMinimized():
+                        owner.showNormal()
+                    owner.show()
+                    owner.raise_()
+                    owner.activateWindow()
+                except Exception:
+                    pass
+                owner._show_quick_capture_overlay()
+            QTimer.singleShot(0, owner, _focus_and_show)
             return True
 
         api_module.set_ui_quick_capture_hook(_show_capture)
