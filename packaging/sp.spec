@@ -74,11 +74,13 @@ if sys.platform == 'win32':
     _datas.extend([
         (os.path.join(ROOT, 'packaging', 'win32', 'install-win32.ps1'), '.'),
         (os.path.join(ROOT, 'packaging', 'win32', 'README.txt'), '.'),
+        (os.path.join(ROOT, 'packaging', 'win32', 'windows-quicklaunch-shortcut.png'), '.'),
     ])
 elif sys.platform.startswith('linux'):
     _datas.extend([
         (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install-linux.sh'), '.'),
         (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
+        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'linux-quicklaunch-shortcut.png'), '.'),
     ])
 
 # Add optional subdirectories if they exist

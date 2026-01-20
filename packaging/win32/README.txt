@@ -25,6 +25,20 @@ MANUAL START (Without Installing)
 You can run StillPoint directly without installing:
   - Double-click "stillpoint.exe" in this folder
 
+QUICK CAPTURE HOTKEY (Windows)
+------------------------------
+
+Use the provided screenshot to set up a Quick Capture shortcut:
+
+1. Copy the existing StillPoint shortcut (Start Menu or Desktop).
+2. Paste it and rename the copy (e.g., "StillPoint Quick Capture").
+3. Edit the shortcut target to:
+   "C:\Path\To\StillPoint\stillpoint.exe" --quick-capture
+4. Assign a Shortcut key (hotkey).
+5. Apply and close — you're good to go.
+
+See: packaging/win32/windows-quicklaunch-shortcut.png
+
 Note: The taskbar icon may not display correctly unless you 
       use the install.ps1 script.
 

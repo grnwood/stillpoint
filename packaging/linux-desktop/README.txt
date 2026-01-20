@@ -33,6 +33,24 @@ Launch from:
   - Terminal: stillpoint
   - Or search for "StillPoint" in your app launcher
 
+QUICK CAPTURE SHORTCUT (Linux)
+------------------------------
+
+Use the screenshot to set up a custom shortcut:
+
+1. Open System Settings → Keyboard → Shortcuts → Custom Shortcuts
+2. Add a shortcut pointing to:
+   /usr/local/bin/stillpoint --quick-capture
+3. Assign a hotkey and save.
+
+See: packaging/linux-desktop/linux-quicklaunch-shortcut.png
+
+Quick Capture via stdin:
+  echo "Idea..." | stillpoint --quick-capture
+
+Quick Capture with a specific vault/page:
+  stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."
+
 UNINSTALL
 ---------
 
