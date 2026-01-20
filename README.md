@@ -194,23 +194,35 @@ Or run from terminal: stillpoint
 ## Quick Capture Shortcuts
 
 PyInstaller builds include a `stillpoint` executable that also supports Quick Capture via flags.
-The same entry point works for overlay capture or text capture via `--text`/stdin.
+The same entry point works for overlay capture or text capture via `--text`/stdin, and can target a specific vault/page.
 
 ### Linux (Cinnamon)
 - Open **System Settings → Keyboard → Shortcuts → Custom Shortcuts**.
 - Add a shortcut with the command:
   - `"/path/to/stillpoint/stillpoint" --quick-capture`
+- stdin capture:
+  - `echo "Idea..." | /path/to/stillpoint/stillpoint --quick-capture`
+- specific vault/page:
+  - `/path/to/stillpoint/stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."`
 - Assign your preferred key combo.
 
 ### Windows
 - Find `stillpoint.exe` inside the installed StillPoint folder.
 - Create a desktop shortcut with:
   - `"C:\Path\To\stillpoint\stillpoint.exe" --quick-capture`
-- Then open **Properties → Shortcut key** and set your hotkey.
+- Optional stdin capture (PowerShell):
+  - `echo "Idea..." | "C:\Path\To\stillpoint\stillpoint.exe" --quick-capture`
+- specific vault/page:
+  - `"C:\Path\To\stillpoint\stillpoint.exe" --quick-capture --vault "D:\Vaults\MyVault" --page :Projects:Ideas --text "Idea..."`
+- Assign a Shortcut key in **Properties**.
 
 ### macOS
 - Create an Automator “Quick Action” or Shortcut that runs:
   - `/Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture`
+- stdin capture:
+  - `echo "Idea..." | /Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture`
+- specific vault/page:
+  - `/Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."`
 - Assign a keyboard shortcut to that action in **System Settings → Keyboard → Keyboard Shortcuts**.
 
 ## Repo Layout
