@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-BASE="dist/StillPoint/_internal/PySide6/Qt"
+BASE="dist/stillpoint/_internal/PySide6/Qt"
 
 rm -rf "$BASE/qml" "$BASE/translations"
 rm -f  "$BASE/plugins/imageformats/libqtiff.so"

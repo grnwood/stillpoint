@@ -12,7 +12,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 APP_NAME="StillPoint"
-EXEC_NAME="StillPoint"
+EXEC_NAME="stillpoint"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/stillpoint"
 BIN_LINK="/usr/local/bin/stillpoint"
@@ -27,15 +27,15 @@ DIST_DIR="$SCRIPT_DIR"
 if [[ -f "$DIST_DIR/$EXEC_NAME" ]]; then
     echo "✔️  Found executable in bundled distribution"
 else
-    # Second try: running from source, check ../../dist/StillPoint
-    DIST_DIR="$SCRIPT_DIR/../../dist/StillPoint"
+    # Second try: running from source, check ../../dist/stillpoint
+    DIST_DIR="$SCRIPT_DIR/../../dist/stillpoint"
     if [[ -f "$DIST_DIR/$EXEC_NAME" ]]; then
         echo "✔️  Found executable in build directory (source)"
         DIST_DIR="$(cd "$DIST_DIR" && pwd)"  # Resolve to absolute path
     else
         echo "❌ Executable not found in:"
         echo "   • $SCRIPT_DIR/$EXEC_NAME (bundled)"
-        echo "   • $SCRIPT_DIR/../../dist/StillPoint/$EXEC_NAME (build)"
+        echo "   • $SCRIPT_DIR/../../dist/stillpoint/$EXEC_NAME (build)"
         exit 1
     fi
 fi
@@ -75,7 +75,7 @@ Icon=$ICON_TARGET
 Terminal=false
 Categories=Office;TextEditor;Utility;
 StartupNotify=true
-StartupWMClass=StillPoint
+StartupWMClass=stillpoint
 EOF
 
 chmod 644 "$DESKTOP_FILE"

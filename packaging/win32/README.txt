@@ -23,7 +23,7 @@ MANUAL START (Without Installing)
 ----------------------------------
 
 You can run StillPoint directly without installing:
-  - Double-click "StillPoint.exe" in this folder
+  - Double-click "stillpoint.exe" in this folder
 
 Note: The taskbar icon may not display correctly unless you 
       use the install.ps1 script.

@@ -21,7 +21,7 @@ Option 1: System-wide Install (Recommended)
 Option 2: Run Without Installing
   You can run StillPoint directly from this folder:
 
-  ./StillPoint
+  ./stillpoint
 
   Note: No desktop launcher or menu entry will be created
 
@@ -51,7 +51,7 @@ If the icon doesn't appear:
 
 If you see "Permission denied":
   - Make sure to run install-linux.sh with sudo
-  - Or run directly: chmod +x ./StillPoint && ./StillPoint
+  - Or run directly: chmod +x ./stillpoint && ./stillpoint
 
 For more help, visit:
 https://github.com/grnwood/StillPoint
