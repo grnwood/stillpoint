@@ -1212,8 +1212,6 @@ def journal_today(payload: JournalPayload) -> dict:
     root = vault_state.get_root()
     # Pass template through so the initial content becomes the user's day template
     target, created = files.ensure_journal_today(root, template=payload.template)
-    if created:
-        config.bump_tree_version()
     rel = f"/{target.relative_to(root).as_posix()}"
     return {"path": rel, "created": created}
 

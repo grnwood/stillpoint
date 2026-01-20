@@ -5274,8 +5274,7 @@ class MainWindow(QMainWindow):
             if template_cursor_pos >= 0:
                 self._template_cursor_position = template_cursor_pos
             
-            handled_nav = self._ensure_journal_visible_for_path(path)
-            if not handled_nav:
+            if self._show_journal_in_nav:
                 # Repopulate tree so newly created nested year/month/day nodes appear
                 self._pending_selection = path
                 self._populate_vault_tree()
@@ -6065,12 +6064,39 @@ class MainWindow(QMainWindow):
     def _setup_tray_icon(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
+        if not self._acquire_tray_lock():
+            if getattr(self, "_tray_retry_timer", None) is None:
+                self._tray_retry_timer = QTimer(self)
+                self._tray_retry_timer.setInterval(2000)
+                self._tray_retry_timer.timeout.connect(self._setup_tray_icon)
+                self._tray_retry_timer.start()
+            return
+        if getattr(self, "_tray_retry_timer", None) is not None:
+            self._tray_retry_timer.stop()
+            self._tray_retry_timer = None
+        app = QApplication.instance()
+        if app is not None:
+            tray_owner = getattr(app, "_stillpoint_tray_owner", None)
+            for widget in app.topLevelWidgets():
+                if (
+                    isinstance(widget, MainWindow)
+                    and widget is not self
+                    and getattr(widget, "_tray_icon", None) is not None
+                ):
+                    if tray_owner is None:
+                        app._stillpoint_tray_owner = widget
+                    return
+            if tray_owner is not None and tray_owner is not self:
+                return
         if not config.load_tray_icon_enabled():
             if getattr(self, "_tray_icon", None):
                 self._tray_icon.hide()
                 self._tray_icon.deleteLater()
                 self._tray_icon = None
                 self._tray_menu = None
+                if app is not None and getattr(app, "_stillpoint_tray_owner", None) is self:
+                    app._stillpoint_tray_owner = None
+                self._release_tray_lock()
             return
         if getattr(self, "_tray_icon", None):
             return
@@ -6094,6 +6120,8 @@ class MainWindow(QMainWindow):
         tray_icon.show()
         self._tray_icon = tray_icon
         self._tray_menu = menu
+        if app is not None:
+            app._stillpoint_tray_owner = self
 
     def _show_from_tray(self) -> None:
         self.show()
@@ -10913,7 +10941,81 @@ class MainWindow(QMainWindow):
         self.http.close()
         config.set_active_vault(None)
         self._release_vault_lock()
+        self._release_tray_lock()
+        self._transfer_tray_icon_if_owner()
         return super().closeEvent(event)
+
+    def _acquire_tray_lock(self) -> bool:
+        if getattr(self, "_tray_lock_handle", None):
+            return True
+        lock_path = Path.home() / ".stillpoint" / "tray.lock"
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, "a+", encoding="utf-8")
+        except Exception:
+            return False
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            try:
+                handle.close()
+            except Exception:
+                pass
+            return False
+        self._tray_lock_handle = handle
+        return True
+
+    def _release_tray_lock(self) -> None:
+        handle = getattr(self, "_tray_lock_handle", None)
+        if not handle:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            handle.close()
+        except Exception:
+            pass
+        self._tray_lock_handle = None
+
+    def _transfer_tray_icon_if_owner(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if getattr(app, "_stillpoint_tray_owner", None) is not self:
+            return
+        try:
+            windows = list(getattr(app, "_stillpoint_windows", []))
+        except Exception:
+            windows = []
+        windows = [w for w in windows if w is not self]
+        if not windows:
+            app._stillpoint_tray_owner = None
+            return
+        app._stillpoint_tray_owner = None
+        for window in windows:
+            try:
+                if window.isVisible():
+                    window._setup_tray_icon()
+                    if getattr(app, "_stillpoint_tray_owner", None) is window:
+                        break
+            except Exception:
+                continue
 
     def _describe_index(self, index: QModelIndex) -> str:
         if not index.isValid():
