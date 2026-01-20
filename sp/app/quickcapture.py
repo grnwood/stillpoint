@@ -50,7 +50,7 @@ def _load_local_ui_token() -> Optional[str]:
 def _parse_hotkey_text(text_arg: Optional[str]) -> Optional[str]:
     if text_arg is not None and text_arg.strip():
         return text_arg.strip()
-    if not sys.stdin.isatty():
+    if sys.stdin and not sys.stdin.isatty():
         data = sys.stdin.read()
         if data and data.strip():
             return data.strip()
