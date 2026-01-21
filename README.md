@@ -133,10 +133,18 @@ export ZIMX_VAULTS_ROOT="/path/to/vaults"
 python -m sp.server.api --host 0.0.0.0 --port 8000
 ```
 
+If you are using the bundled executable, pass `--server` to start the API server:
+
+```bash
+export SERVER_ADMIN_PASSWORD="your-secure-password-here"
+export STILLPOINT_VAULTS_ROOT="/path/to/vaults"
+./stillpoint --server --host 0.0.0.0 --port 8000
+```
+
 **Important Security Settings:**
 
 - **`SERVER_ADMIN_PASSWORD`**: Required for standalone servers. Protects vault creation and listing operations. Without this, the server will refuse to start unless you use the `--insecure` flag (NOT RECOMMENDED).
-- **`ZIMX_VAULTS_ROOT`**: Base directory where all vaults are stored.
+- **`STILLPOINT_VAULTS_ROOT`**: Base directory where all vaults are stored.
 - **`AUTH_ENABLED`**: Set to `false` to disable per-vault authentication (default: `true`).
 
 **Server Security Model:**

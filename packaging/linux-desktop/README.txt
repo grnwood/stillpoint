@@ -25,6 +25,18 @@ Option 2: Run Without Installing
 
   Note: No desktop launcher or menu entry will be created
 
+Option 3: Run API Server Only
+  Starts the FastAPI server without the desktop UI:
+
+  ./run-server.sh
+
+  Environment variables:
+    SERVER_ADMIN_PASSWORD   (required unless STILLPOINT_SERVER_INSECURE=1)
+    STILLPOINT_VAULTS_ROOT  (optional, default: ./vaults)
+    STILLPOINT_SERVER_HOST  (optional, default: 0.0.0.0)
+    STILLPOINT_SERVER_PORT  (optional, default: 8000)
+    STILLPOINT_SERVER_INSECURE=1  (optional, NOT RECOMMENDED)
+
 AFTER INSTALLATION
 ------------------
 

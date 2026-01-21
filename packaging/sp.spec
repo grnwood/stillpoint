@@ -79,6 +79,7 @@ if sys.platform == 'win32':
 elif sys.platform.startswith('linux'):
     _datas.extend([
         (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install-linux.sh'), '.'),
+        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'run-server.sh'), '.'),
         (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
         (os.path.join(ROOT, 'packaging', 'linux-desktop', 'linux-quicklaunch-shortcut.png'), '.'),
     ])
@@ -152,6 +153,7 @@ if sys.platform == 'win32':
     files_to_move.append('install-win32.ps1')
 elif sys.platform.startswith('linux'):
     files_to_move.append('install-linux.sh')
+    files_to_move.append('run-server.sh')
 
 for filename in files_to_move:
     src = os.path.join(internal_dir, filename)
