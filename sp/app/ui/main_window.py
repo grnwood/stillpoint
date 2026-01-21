@@ -1477,12 +1477,12 @@ class MainWindow(QMainWindow):
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
         vault_menu.addAction(open_vault_new_win_action)
-        self._action_server_login = QAction("Server Login", self)
-        self._action_server_login.setToolTip("Authenticate to the remote server")
+        self._action_server_login = QAction("Login - Authenticate to Remote Vault", self)
+        self._action_server_login.setToolTip("Authenticate to the remote vault")
         self._action_server_login.triggered.connect(self._prompt_remote_login)
         vault_menu.addAction(self._action_server_login)
-        self._action_server_logout = QAction("Server Logout", self)
-        self._action_server_logout.setToolTip("Clear stored server credentials")
+        self._action_server_logout = QAction("Logout - Clear Remote Vault Credentials", self)
+        self._action_server_logout.setToolTip("Clear stored remote vault credentials")
         self._action_server_logout.triggered.connect(self._logout_remote)
         vault_menu.addAction(self._action_server_logout)
         self._action_new_vault = QAction("New Vault", self)
@@ -2906,7 +2906,36 @@ class MainWindow(QMainWindow):
             return
         if self._remote_mode and self.vault_root:
             self._remote_status_label.setText("REMOTE")
-            self._remote_status_label.setToolTip(self._remote_connection_string() or "")
+            
+            # Build detailed tooltip with connection and auth status
+            tooltip_parts = []
+            connection_str = self._remote_connection_string()
+            if connection_str:
+                tooltip_parts.append(f"Connected: {connection_str}")
+            
+            # Add authentication status and set badge color
+            if self._access_token:
+                tooltip_parts.append("Auth: ✓ Active (access token valid)")
+                badge_color = "#1e88e5"  # Blue - authenticated
+            elif self._refresh_token:
+                if self._remember_refresh:
+                    tooltip_parts.append("Auth: ✓ Saved (refresh token available)")
+                else:
+                    tooltip_parts.append("Auth: Session only (refresh token)")
+                badge_color = "#1e88e5"  # Blue - authenticated
+            else:
+                tooltip_parts.append("Auth: ✗ Not authenticated")
+                badge_color = "#ff9800"  # Orange - not authenticated
+            
+            # Add username if known
+            if self._remote_username:
+                tooltip_parts.append(f"User: {self._remote_username}")
+            
+            tooltip = "\n".join(tooltip_parts) if tooltip_parts else ""
+            self._remote_status_label.setToolTip(tooltip)
+            self._remote_status_label.setStyleSheet(
+                self._badge_base_style + f" background-color: {badge_color}; margin-right: 6px; color: #ffffff;"
+            )
             self._remote_status_label.show()
         else:
             self._remote_status_label.setToolTip("")
@@ -2952,18 +2981,10 @@ class MainWindow(QMainWindow):
             auth=auth,
         )
 
-    def _switch_api_base(self, base_url: str, is_remote: bool, verify_tls: Optional[bool] = None) -> None:
-        """Swap the active API base URL and rebuild the HTTP client."""
-        self.api_base = base_url.rstrip("/")
-        self._remote_mode = is_remote
-        self._server_url = self.api_base if is_remote else None
-        self._remote_cache_root = None
-        if verify_tls is not None:
-            self._verify_tls = bool(verify_tls)
-        self._access_token = None
-        self._refresh_token = None
-        self._remember_refresh = False
-        self._remote_username = None
+    def _rebuild_http_client(self) -> None:
+        """Rebuild the HTTP client with current auth state (useful after re-login)."""
+        if not hasattr(self, 'http'):
+            return
         try:
             self.http.close()
         except Exception:
@@ -2984,10 +3005,39 @@ class MainWindow(QMainWindow):
 
         self.http = self._build_http_client(
             base_url=self.api_base,
-            is_remote=is_remote,
+            is_remote=self._remote_mode,
             local_auth_token=self._local_auth_token,
             request_hooks=(_log_request, _log_response),
         )
+        # Update references in other components
+        try:
+            self.right_panel.set_http_client(
+                self.http,
+                api_base=self.api_base,
+                remote_mode=self._remote_mode,
+                auth_prompt=self._prompt_remote_login if self._remote_mode else None,
+            )
+        except Exception:
+            pass
+        try:
+            if self.search_tab:
+                self.search_tab.set_http_client(self.http)
+        except Exception:
+            pass
+
+    def _switch_api_base(self, base_url: str, is_remote: bool, verify_tls: Optional[bool] = None) -> None:
+        """Swap the active API base URL and rebuild the HTTP client."""
+        self.api_base = base_url.rstrip("/")
+        self._remote_mode = is_remote
+        self._server_url = self.api_base if is_remote else None
+        self._remote_cache_root = None
+        if verify_tls is not None:
+            self._verify_tls = bool(verify_tls)
+        self._access_token = None
+        self._refresh_token = None
+        self._remember_refresh = False
+        self._remote_username = None
+        self._rebuild_http_client()
         self._apply_remote_mode_ui()
         try:
             self.right_panel.set_http_client(
@@ -3117,6 +3167,39 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _setup_remote_auth(self, username: str, password: str, remember: bool) -> bool:
+        """Setup authentication for a vault that doesn't have it configured yet."""
+        try:
+            resp = httpx.post(
+                f"{self.api_base}/auth/setup",
+                json={"username": username, "password": password},
+                timeout=10.0,
+                verify=self._verify_tls,
+            )
+            if resp.status_code != 200:
+                detail = None
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        detail = data.get("detail") or data.get("message")
+                except Exception:
+                    pass
+                raise RuntimeError(detail or f"HTTP {resp.status_code}")
+            payload = resp.json()
+            access = payload.get("access_token")
+            refresh = payload.get("refresh_token")
+            if not access or not refresh:
+                raise RuntimeError("Missing tokens in response")
+            self._remote_username = username
+            self._set_auth_tokens(access, refresh, remember, username)
+            # Rebuild the HTTP client so it uses the new auth tokens
+            self._rebuild_http_client()
+            self.statusBar().showMessage("Vault authentication configured.", 3000)
+            return True
+        except Exception as exc:
+            self._alert(f"Setup failed: {exc}")
+            return False
+
     def _login_remote(self, username: str, password: str, remember: bool) -> bool:
         try:
             resp = httpx.post(
@@ -3141,21 +3224,47 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("Missing tokens in response")
             self._remote_username = username
             self._set_auth_tokens(access, refresh, remember, username)
-            self.statusBar().showMessage("Server login successful.", 3000)
+            # Rebuild the HTTP client so it uses the new auth tokens
+            self._rebuild_http_client()
+            self._update_remote_status_badge()
+            self.statusBar().showMessage("Remote vault authentication successful.", 3000)
             return True
         except Exception as exc:
             self._alert(f"Login failed: {exc}")
+            self.statusBar().showMessage(f"Remote vault login failed: {exc}", 5000)
             return False
 
     def _prompt_remote_login(self) -> bool:
+        """Prompt for vault credentials, calling setup or login based on auth status."""
         if not self._remote_mode:
             return False
+        
+        # Check if auth is already configured for this vault
+        auth_configured = False
+        try:
+            resp = self.http.get("/auth/status")
+            if resp.status_code == 200:
+                payload = resp.json()
+                auth_configured = payload.get("configured", False)
+        except Exception:
+            pass
+        
         remember_default = self._remember_refresh or bool(self._refresh_token)
-        dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=remember_default)
-        if dlg.exec() != QDialog.Accepted:
-            return False
-        username, password, remember = dlg.credentials()
-        return self._login_remote(username, password, remember)
+        if auth_configured:
+            # Auth exists, prompt for login
+            dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=remember_default)
+            if dlg.exec() != QDialog.Accepted:
+                return False
+            username, password, remember = dlg.credentials()
+            return self._login_remote(username, password, remember)
+        else:
+            # Auth doesn't exist, prompt for setup
+            dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=remember_default)
+            dlg.setWindowTitle("Setup Vault Authentication")
+            if dlg.exec() != QDialog.Accepted:
+                return False
+            username, password, remember = dlg.credentials()
+            return self._setup_remote_auth(username, password, remember)
 
     def _prompt_remote_login_for_server(self, base_url: str, verify_ssl: bool) -> bool:
         dlg = RemoteLoginDialog(self, username=self._remote_username or "", remember_default=True)
@@ -3217,7 +3326,8 @@ class MainWindow(QMainWindow):
         if not self._remote_mode:
             return
         self._clear_auth_tokens()
-        self.statusBar().showMessage("Server credentials cleared.", 3000)
+        self._update_remote_status_badge()
+        self.statusBar().showMessage("Remote vault credentials cleared.", 3000)
 
     def _check_and_acquire_vault_lock(self, directory: str, prefer_read_only: bool = False) -> bool:
         """Create a simple lockfile in the vault; prompt if locked or forced read-only."""
@@ -5354,7 +5464,9 @@ class MainWindow(QMainWindow):
                 self._pending_selection = path
                 self._populate_vault_tree()
             # Apply journal templates (year/month/day) if newly created
-            self._apply_journal_templates(path, allow_overwrite=created)
+            # Skip template application for remote vaults - server handles this
+            if not self._remote_mode:
+                self._apply_journal_templates(path, allow_overwrite=created)
             # Open with cursor at template position or end for immediate typing
             self._debug(f"Journal shortcut: forcing reload for {path}")
             self._open_file(path, force=True, cursor_at_end=(template_cursor_pos < 0))
@@ -6252,12 +6364,21 @@ class MainWindow(QMainWindow):
         overlay.input.setFocus()
 
     def _resolve_quick_capture_target(self) -> Optional[dict[str, Optional[str]]]:
-        if self._remote_mode:
-            return None
+        # Quick capture works with both local and remote vaults (remote is API-based)
         home_vault = config.load_quick_capture_vault()
         vault_path = home_vault or self.vault_root
+        
         if not vault_path:
             return None
+        
+        # For remote vaults, we can skip local filesystem checks since it's API-based
+        if self._remote_mode and not home_vault:
+            # Capturing to current remote vault
+            if self._read_only:
+                return None
+            return {"vault_path": vault_path, "page_mode": config.load_quick_capture_page_mode(), "page_ref": config.load_quick_capture_custom_page() if config.load_quick_capture_page_mode() == "custom" else None}
+        
+        # For local vaults or explicit home vault, do filesystem checks
         vault_root = Path(vault_path).expanduser()
         if not vault_root.exists():
             return None
@@ -10577,6 +10698,7 @@ class MainWindow(QMainWindow):
                 show_header=options["include_header"],
                 include_toc=options["include_toc"],
                 toc_title=options["toc_title"],
+                auto_pop=options.get("auto_pop_browser", True),
             )
             QDesktopServices.openUrl(QUrl(url))
             self.statusBar().showMessage("Print view opened in browser", 3000)
@@ -10586,10 +10708,11 @@ class MainWindow(QMainWindow):
 
     def _show_print_dialog(self) -> Optional[dict]:
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QSpinBox, QDialogButtonBox
+        from sp.app import config
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Print to Browser")
-        dialog.resize(360, 180)
+        dialog.setMinimumWidth(400)
         dialog.setWindowModality(Qt.ApplicationModal)
 
         layout = QVBoxLayout()
@@ -10598,6 +10721,10 @@ class MainWindow(QMainWindow):
         include_header = QCheckBox("Include header (title/path)")
         include_header.setChecked(False)
         layout.addWidget(include_header)
+
+        auto_pop_browser = QCheckBox("Auto pop the browser print dialogue?")
+        auto_pop_browser.setChecked(config.load_print_auto_pop_browser())
+        layout.addWidget(auto_pop_browser)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.HLine)
@@ -10614,6 +10741,7 @@ class MainWindow(QMainWindow):
         depth_input.setRange(1, 20)
         depth_input.setValue(1)
         depth_input.setEnabled(False)
+        depth_label.setEnabled(False)
         depth_row.addWidget(depth_label)
         depth_row.addWidget(depth_input)
         depth_row.addStretch(1)
@@ -10621,6 +10749,7 @@ class MainWindow(QMainWindow):
 
         include_toc = QCheckBox("Include table of contents")
         include_toc.setChecked(False)
+        include_toc.setEnabled(False)
         layout.addWidget(include_toc)
 
         toc_title_row = QHBoxLayout()
@@ -10629,18 +10758,32 @@ class MainWindow(QMainWindow):
         toc_title_input = QLineEdit()
         default_title = Path(self.current_path or "").stem if self.current_path else ""
         toc_title_input.setText(default_title)
-        toc_title_input.setEnabled(include_toc.isChecked())
-        toc_title_label.setEnabled(include_toc.isChecked())
+        toc_title_input.setEnabled(False)
+        toc_title_label.setEnabled(False)
         toc_title_row.addWidget(toc_title_label)
         toc_title_row.addWidget(toc_title_input)
         layout.addLayout(toc_title_row)
 
-        include_subpages.toggled.connect(depth_input.setEnabled)
-        include_toc.toggled.connect(toc_title_input.setEnabled)
-        include_toc.toggled.connect(toc_title_label.setEnabled)
-        include_subpages.toggled.connect(
-            lambda checked: include_toc.setChecked(True) if checked and not include_toc.isChecked() else None
-        )
+        def toggle_subpage_options(checked: bool) -> None:
+            depth_input.setEnabled(checked)
+            depth_label.setEnabled(checked)
+            include_toc.setEnabled(checked)
+            if checked:
+                if not include_toc.isChecked():
+                    include_toc.setChecked(True)
+                toc_title_input.setEnabled(include_toc.isChecked())
+                toc_title_label.setEnabled(include_toc.isChecked())
+            else:
+                toc_title_input.setEnabled(False)
+                toc_title_label.setEnabled(False)
+
+        def toggle_toc_title(checked: bool) -> None:
+            if include_subpages.isChecked():
+                toc_title_input.setEnabled(checked)
+                toc_title_label.setEnabled(checked)
+
+        include_subpages.toggled.connect(toggle_subpage_options)
+        include_toc.toggled.connect(toggle_toc_title)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -10648,6 +10791,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
 
         dialog.setLayout(layout)
+        dialog.setSizeGripEnabled(False)
+        dialog.setFixedHeight(dialog.sizeHint().height())
+        
         ok_button = buttons.button(QDialogButtonBox.Ok)
         if ok_button is not None:
             ok_button.setDefault(True)
@@ -10658,6 +10804,9 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return None
 
+        # Save the auto-pop preference
+        config.save_print_auto_pop_browser(auto_pop_browser.isChecked())
+
         return {
             "include_subpages": include_subpages.isChecked(),
             "depth": depth_input.value(),
@@ -10665,6 +10814,7 @@ class MainWindow(QMainWindow):
             "include_header": include_header.isChecked(),
             "include_toc": include_toc.isChecked(),
             "toc_title": toc_title_input.text().strip(),
+            "auto_pop_browser": auto_pop_browser.isChecked(),
         }
 
     def _get_print_token(self) -> Optional[str]:
@@ -10695,11 +10845,13 @@ class MainWindow(QMainWindow):
         show_header: bool,
         include_toc: bool,
         toc_title: str,
+        auto_pop: bool = True,
     ) -> str:
         from urllib.parse import quote
 
         safe_path = quote(path.lstrip("/"), safe="/")
-        url = f"{self.api_base}/print/{safe_path}?mode={mode}&auto=1"
+        auto_val = "1" if auto_pop else "0"
+        url = f"{self.api_base}/print/{safe_path}?mode={mode}&auto={auto_val}"
         if mode == "tree":
             url += f"&depth={depth}"
         if show_header:

@@ -506,6 +506,18 @@ def save_minimize_to_tray_enabled(enabled: bool) -> None:
     _update_global_config({"minimize_to_tray": bool(enabled)})
 
 
+def load_print_auto_pop_browser() -> bool:
+    payload = _read_global_config()
+    value = payload.get("print_auto_pop_browser")
+    if value is None:
+        return True
+    return bool(value)
+
+
+def save_print_auto_pop_browser(enabled: bool) -> None:
+    _update_global_config({"print_auto_pop_browser": bool(enabled)})
+
+
 def load_vi_block_cursor_enabled() -> bool:
     """Load app-level preference for vi-mode block cursor. Defaults to True on Windows, False elsewhere."""
     if not GLOBAL_CONFIG.exists():
