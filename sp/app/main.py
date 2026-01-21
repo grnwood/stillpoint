@@ -183,6 +183,11 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="StillPoint desktop entry point.")
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Run StillPoint in API server-only mode (no UI).",
+    )
     parser.add_argument("--vault", help="Path to a vault to open at startup.")
     parser.add_argument(
         "--vault-ref",
@@ -202,6 +207,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--page", help="Quick Capture custom page (colon path or /path).")
     parser.add_argument("--port", type=int, help="Preferred API port (0 = auto-select).")
     parser.add_argument("--host", default=os.getenv("SP_HOST", "127.0.0.1"), help="Host/interface to bind the API server.")
+    parser.add_argument("--vaults-root", help="Base folder where server-managed vaults live (server mode).")
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow server mode without SERVER_ADMIN_PASSWORD (NOT RECOMMENDED).",
+    )
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     return parser.parse_args(argv)
 
@@ -502,6 +513,19 @@ def _run_webserver_mode(args: argparse.Namespace) -> None:
         web_server.stop()
 
 
+def _run_server_mode(args: argparse.Namespace) -> None:
+    """Run in standalone API server mode."""
+    from sp.server import api as api_module
+
+    port = args.port if args.port is not None else 8000
+    api_module.run_server(
+        host=args.host,
+        port=port,
+        vaults_root=args.vaults_root,
+        insecure=args.insecure,
+    )
+
+
 def _parse_vault_arg(argv: list[str]) -> str | None:
     """Return a vault path passed via --vault flag, if present."""
     for idx, arg in enumerate(argv):
@@ -542,6 +566,10 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+
+    if args.server:
+        _run_server_mode(args)
+        return
 
     if args.quick_capture:
         from sp.app.quickcapture import run_quick_capture
