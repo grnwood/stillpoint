@@ -374,8 +374,6 @@ def _find_open_port(host: str, preferred: int) -> int:
 
 def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvicorn.Server, str]:
     """Start embedded API server with auto-generated server admin password."""
-    import secrets
-    
     # Generate secure password for embedded server
     server_admin_password = secrets.token_urlsafe(32)
     os.environ["SERVER_ADMIN_PASSWORD"] = server_admin_password

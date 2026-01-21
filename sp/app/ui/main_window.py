@@ -5613,7 +5613,6 @@ class MainWindow(QMainWindow):
         # when alt-tabbing or clicking outside the app. Vi mode should only
         # exit on explicit navigation within the app (handled in navigation methods).
         # Check where focus is going
-        from PySide6.QtWidgets import QApplication
         new_focus = QApplication.focusWidget()
         # Skip autosave when focus is moving into the one-shot overlay.
         try:
@@ -5809,8 +5808,6 @@ class MainWindow(QMainWindow):
             return
         
         # Simple dialog to get search query
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QCheckBox, QDialogButtonBox
-        
         dialog = QDialog(self)
         dialog.setWindowTitle("Search Across Vault")
         dialog.resize(500, 180)
@@ -10707,7 +10704,6 @@ class MainWindow(QMainWindow):
             print(f"[UI] Print page error: {exc}")
 
     def _show_print_dialog(self) -> Optional[dict]:
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QSpinBox, QDialogButtonBox
         from sp.app import config
 
         dialog = QDialog(self)

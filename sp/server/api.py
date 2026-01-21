@@ -2282,6 +2282,11 @@ def run_server(
     set_vaults_root(resolved_vaults_root)
     vaults_root_path = _ensure_vaults_root()
 
+    # Set STILLPOINT_INSECURE environment variable if --insecure flag is used
+    # This is checked by the lifespan handler during FastAPI startup
+    if insecure:
+        os.environ["STILLPOINT_INSECURE"] = "1"
+
     # Standalone server requires explicit password configuration or --insecure flag
     if not SERVER_ADMIN_PASSWORD and not insecure:
         print(f"\n{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}")
