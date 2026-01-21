@@ -3620,6 +3620,10 @@ class MainWindow(QMainWindow):
 
                 # Restore window geometry and splitter positions
                 self._restore_geometry()
+                
+                # Register this process's window for tray menu (cross-process)
+                self._register_process_window()
+                
                 return True
         finally:
             try:
@@ -6290,17 +6294,22 @@ class MainWindow(QMainWindow):
 
         tray_icon = QSystemTrayIcon(get_app_icon(), self)
         menu = QMenu()
+        
+        # Static menu items at top
         action_capture = menu.addAction("Quick Capture...")
         action_capture.triggered.connect(self._show_quick_capture_overlay)
-        action_open_vault = menu.addAction("Open Vault...")
-        action_open_vault.triggered.connect(lambda: self._select_vault(spawn_new_process=False))
         action_open_vault_new = menu.addAction("Open Vault in New Window...")
         action_open_vault_new.triggered.connect(lambda: self._select_vault(spawn_new_process=True))
-        action_show = menu.addAction("Show StillPoint")
-        action_show.triggered.connect(self._show_from_tray)
+        
+        # Dynamic vault list (populated on menu show)
+        menu.addSeparator()
+        menu.aboutToShow.connect(lambda: self._update_tray_vault_list(menu))
+        
+        # Static menu items at bottom
         menu.addSeparator()
         action_quit = menu.addAction("Quit")
         action_quit.triggered.connect(self._quit_from_tray)
+        
         tray_icon.setContextMenu(menu)
         tray_icon.activated.connect(self._on_tray_activated)
         tray_icon.show()
@@ -6315,6 +6324,236 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _update_tray_vault_list(self, menu: QMenu) -> None:
+        """Dynamically update the vault list in the tray menu."""
+        # Find the separators
+        actions = menu.actions()
+        sep_indices = [i for i, action in enumerate(actions) if action.isSeparator()]
+        if len(sep_indices) < 2:
+            return
+        
+        # Remove existing vault items (between the two separators)
+        for i in range(sep_indices[1] - 1, sep_indices[0], -1):
+            if i < len(actions) and not actions[i].isSeparator():
+                menu.removeAction(actions[i])
+        
+        # Get all open vaults from all processes
+        vaults = self._get_all_process_vaults()
+        if not vaults:
+            return
+        
+        # Sort by vault name
+        vaults.sort(key=lambda x: x['vault_name'].lower())
+        
+        # Refresh actions list after removals
+        actions = menu.actions()
+        sep_indices = [i for i, action in enumerate(actions) if action.isSeparator()]
+        if len(sep_indices) < 2:
+            return
+        
+        # Insert vault actions
+        second_sep = actions[sep_indices[1]]
+        current_pid = os.getpid()
+        
+        for vault_info in vaults:
+            vault_name = vault_info['vault_name']
+            vault_pid = vault_info['pid']
+            
+            action = QAction(f"Show {vault_name}", menu)
+            if vault_pid == current_pid:
+                # Same process - use normal focus
+                action.triggered.connect(self._show_from_tray)
+            else:
+                # Different process - use cross-process activation
+                action.triggered.connect(lambda checked=False, pid=vault_pid: self._activate_process_window(pid))
+            
+            menu.insertAction(second_sep, action)
+
+    def _get_all_process_vaults(self) -> list[dict]:
+        """Get all open vaults from all StillPoint processes."""
+        vaults = []
+        try:
+            windows_dir = Path.home() / ".stillpoint" / "windows"
+            if not windows_dir.exists():
+                return vaults
+            
+            # Read all pid files
+            for pid_file in windows_dir.glob("*.json"):
+                try:
+                    data = json.loads(pid_file.read_text(encoding="utf-8"))
+                    pid = data.get('pid')
+                    vault_name = data.get('vault_name')
+                    vault_path = data.get('vault_path')
+                    
+                    if pid and vault_name and vault_path:
+                        # Check if process is still alive
+                        if self._is_process_alive(pid):
+                            vaults.append({
+                                'pid': pid,
+                                'vault_name': vault_name,
+                                'vault_path': vault_path
+                            })
+                        else:
+                            # Clean up stale file
+                            pid_file.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        return vaults
+
+    def _is_process_alive(self, pid: int) -> bool:
+        """Check if a process with given PID is alive."""
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_INFORMATION = 0x0400
+                handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            else:
+                # Unix-like systems
+                os.kill(pid, 0)
+                return True
+        except (OSError, AttributeError):
+            return False
+
+    def _activate_process_window(self, pid: int) -> None:
+        """Activate the window of another StillPoint process."""
+        try:
+            if sys.platform == "win32":
+                self._activate_window_windows(pid)
+            elif sys.platform == "darwin":
+                self._activate_window_macos(pid)
+            else:
+                self._activate_window_linux(pid)
+        except Exception as exc:
+            print(f"Failed to activate window for PID {pid}: {exc}", file=sys.stderr)
+
+    def _activate_window_windows(self, pid: int) -> None:
+        """Activate window on Windows using win32 APIs."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            user32 = ctypes.windll.user32
+            
+            # Find window by process ID
+            def enum_windows_callback(hwnd, lparam):
+                if user32.IsWindowVisible(hwnd):
+                    process_id = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+                    if process_id.value == pid:
+                        # Found the window, activate it
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        user32.SetForegroundWindow(hwnd)
+                        return False  # Stop enumeration
+                return True
+            
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            user32.EnumWindows(EnumWindowsProc(enum_windows_callback), 0)
+        except Exception:
+            pass
+
+    def _activate_window_macos(self, pid: int) -> None:
+        """Activate window on macOS using AppleScript."""
+        try:
+            script = f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true'
+            subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+        except Exception:
+            pass
+
+    def _activate_window_linux(self, pid: int) -> None:
+        """Activate window on Linux using wmctrl or xdotool."""
+        try:
+            # Try wmctrl first
+            result = subprocess.run(
+                ["wmctrl", "-lp"], 
+                capture_output=True, 
+                text=True, 
+                check=False
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split(None, 3)
+                    if len(parts) >= 3 and parts[2] == str(pid):
+                        window_id = parts[0]
+                        subprocess.run(["wmctrl", "-ia", window_id], check=False)
+                        return
+            
+            # Try xdotool as fallback
+            result = subprocess.run(
+                ["xdotool", "search", "--pid", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                window_id = result.stdout.strip().split()[0]
+                subprocess.run(["xdotool", "windowactivate", window_id], check=False)
+        except Exception:
+            pass
+
+    def _register_process_window(self) -> None:
+        """Register this process's window in shared state."""
+        if not self.vault_root:
+            return
+        
+        try:
+            windows_dir = Path.home() / ".stillpoint" / "windows"
+            windows_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Clean up stale files on first registration
+            if not hasattr(self, '_process_registered'):
+                self._cleanup_stale_process_files()
+            
+            pid_file = windows_dir / f"{os.getpid()}.json"
+            data = {
+                'pid': os.getpid(),
+                'vault_name': Path(self.vault_root).name,
+                'vault_path': str(self.vault_root)
+            }
+            pid_file.write_text(json.dumps(data), encoding="utf-8")
+            self._process_registered = True
+        except Exception:
+            pass
+
+    def _unregister_process_window(self) -> None:
+        """Unregister this process's window from shared state."""
+        try:
+            windows_dir = Path.home() / ".stillpoint" / "windows"
+            pid_file = windows_dir / f"{os.getpid()}.json"
+            if pid_file.exists():
+                pid_file.unlink()
+        except Exception:
+            pass
+
+    def _cleanup_stale_process_files(self) -> None:
+        """Clean up pid files for processes that are no longer running."""
+        try:
+            windows_dir = Path.home() / ".stillpoint" / "windows"
+            if not windows_dir.exists():
+                return
+            
+            for pid_file in windows_dir.glob("*.json"):
+                try:
+                    data = json.loads(pid_file.read_text(encoding="utf-8"))
+                    pid = data.get('pid')
+                    if pid and not self._is_process_alive(pid):
+                        pid_file.unlink()
+                except Exception:
+                    # If we can't read it, remove it
+                    try:
+                        pid_file.unlink()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _quit_from_tray(self) -> None:
         self._allow_tray_exit = True
@@ -6334,6 +6573,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             return
+        
         super().closeEvent(event)
 
 
@@ -11185,6 +11425,10 @@ class MainWindow(QMainWindow):
         self._release_tray_lock()
         self._transfer_tray_icon_if_owner()
         self._clear_quick_capture_hook_if_owner()
+        
+        # Unregister this process from cross-process tray menu
+        self._unregister_process_window()
+        
         return super().closeEvent(event)
 
     def _register_quick_capture_hook(self) -> None:
