@@ -1588,6 +1588,11 @@ class MainWindow(QMainWindow):
         tasks_action.triggered.connect(self._focus_tasks_search)
         go_menu.addAction(tasks_action)
 
+        tags_action = QAction("T(@)gs", self)
+        tags_action.setShortcut(QKeySequence("G,@"))
+        tags_action.triggered.connect(self._focus_tags_tab)
+        go_menu.addAction(tags_action)
+
         calendar_action = QAction("(C)alendar", self)
         calendar_action.setShortcut(QKeySequence("G,C"))
         calendar_action.triggered.connect(self._focus_calendar_tab)
@@ -8222,6 +8227,34 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _focus_tags_tab(self) -> None:
+        """Switch to Tags tab and focus the search bar."""
+        # Ensure left panel is visible
+        sizes = self.editor_split.sizes()
+        if len(sizes) >= 2 and sizes[0] == 0:
+            width = getattr(self, "_saved_left_width", 360)
+            total = sum(sizes)
+            self.editor_split.setSizes([width, max(1, total - width)])
+        
+        try:
+            # Switch to Tags tab (index 1 in left_tab_widget: Vault=0, Tags=1, Search=2)
+            for i in range(self.left_tab_widget.count()):
+                if self.left_tab_widget.widget(i) == self.tags_tab:
+                    self.left_tab_widget.setCurrentIndex(i)
+                    # Use QTimer to defer focus until tab switch completes
+                    QTimer.singleShot(0, self._deferred_focus_tags_search)
+                    break
+        except Exception:
+            pass
+    
+    def _deferred_focus_tags_search(self) -> None:
+        """Deferred helper to focus tags search after tab switch completes."""
+        try:
+            if hasattr(self.tags_tab, "focus_search"):
+                self.tags_tab.focus_search()
+        except Exception:
+            pass
+
     def _focus_attachments_tab(self) -> None:
         """Switch to Attachments tab and focus."""
         sizes = self.editor_split.sizes()
@@ -8308,13 +8341,19 @@ class MainWindow(QMainWindow):
 
     def _apply_focus_borders(self) -> None:
         """Apply a subtle border around the widget that currently has focus."""
-        if getattr(self, '_suppress_focus_borders', False):
+        try:
+            if getattr(self, '_suppress_focus_borders', False):
+                return
+            focused = self.focusWidget()
+            editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
+            tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
+            left_has = focused is self.left_tab_widget or self.left_tab_widget.isAncestorOf(focused)
+            right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
+        except RuntimeError:
+            # Window is being deleted, silently ignore
             return
-        focused = self.focusWidget()
-        editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
-        tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
-        left_has = focused is self.left_tab_widget or self.left_tab_widget.isAncestorOf(focused)
-        right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
+        except Exception:
+            return
         # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
         focus_border = "#D9534F" if getattr(self, "_nav_filter_path", None) else "#4A90E2"
         editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
@@ -11402,9 +11441,15 @@ class MainWindow(QMainWindow):
         self.autosave_timer.stop()
         self.geometry_save_timer.stop()
         
-        # Disconnect editor signals to prevent save attempts after HTTP client is closed
+        # Disconnect signals to prevent callbacks after window deletion
         try:
             self.editor.focusLost.disconnect()
+        except:
+            pass
+        try:
+            app = QApplication.instance()
+            if app:
+                app.focusChanged.disconnect(self._on_focus_changed)
         except:
             pass
         

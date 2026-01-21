@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLayoutItem,
     QSizePolicy,
     QSplitter,
+    QLineEdit,
 )
 
 from .path_utils import path_to_colon
@@ -232,11 +233,18 @@ class TagsTab(QWidget):
         self.refresh_button.clicked.connect(self.refresh_tags)
         header_layout.addWidget(self.refresh_button)
 
+        # Search bar for filtering tags
+        self.tag_search = QLineEdit()
+        self.tag_search.setPlaceholderText("Search tags...")
+        self.tag_search.setClearButtonEnabled(True)
+        self.tag_search.textChanged.connect(self._filter_tags)
+        
         tags_panel = QWidget()
         tags_panel_layout = QVBoxLayout()
         tags_panel_layout.setContentsMargins(0, 0, 0, 0)
-        tags_panel_layout.setSpacing(0)
+        tags_panel_layout.setSpacing(4)
         tags_panel_layout.addLayout(header_layout)
+        tags_panel_layout.addWidget(self.tag_search)
         tags_panel_layout.addWidget(scroll_area, 1)
         tags_panel.setLayout(tags_panel_layout)
 
@@ -270,18 +278,97 @@ class TagsTab(QWidget):
         
         self.setLayout(layout)
     
+    def focus_search(self):
+        """Public method to focus the search bar."""
+        self.tag_search.setFocus(Qt.ShortcutFocusReason)
+        self.tag_search.selectAll()
+    
+    def focusInEvent(self, event):
+        """Handle focus in event - auto-focus the search bar."""
+        super().focusInEvent(event)
+        # Use QTimer to defer focus until focus change completes
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self.focus_search)
+    
     def keyPressEvent(self, event):
         """Handle key press events for the tags tab."""
         from PySide6.QtCore import Qt
         
-        # Esc key clears all tag filters
+        # Esc key clears search box and all tag filters, then focuses search
         if event.key() == Qt.Key_Escape:
+            self.tag_search.clear()
             self._clear_all_tags()
+            self.tag_search.setFocus(Qt.ShortcutFocusReason)
             event.accept()
             return
         
+        # Handle Ctrl+Shift+J/K or arrow keys - focus results tree if it has items
+        if ((event.key() == Qt.Key_J and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+            (event.key() == Qt.Key_K and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+            event.key() == Qt.Key_Down or event.key() == Qt.Key_Up):
+            if self.results_tree.topLevelItemCount() > 0:
+                # Focus the results tree and select first item if nothing selected
+                if not self.results_tree.currentItem():
+                    self.results_tree.setCurrentItem(self.results_tree.topLevelItem(0))
+                self.results_tree.setFocus(Qt.ShortcutFocusReason)
+                # Let the results tree handle the actual navigation
+                QTreeWidget.keyPressEvent(self.results_tree, event)
+                event.accept()
+                return
+        
         # Call parent implementation for other keys
         super().keyPressEvent(event)
+    
+    def _filter_tags(self, search_text: str):
+        """Filter visible tags based on search text and auto-select exact matches."""
+        search_lower = search_text.lower().strip()
+        
+        # Parse out potential tag names (words starting with @)
+        potential_tags = []
+        # For filtering visibility, we'll collect all filter terms (with @ stripped)
+        filter_terms = []
+        
+        if search_lower:
+            # Split by whitespace and look for @-prefixed words
+            words = search_lower.split()
+            for word in words:
+                if word.startswith('@'):
+                    # Remove the @ prefix for matching
+                    tag_name = word[1:]
+                    if tag_name:
+                        potential_tags.append(tag_name)
+                        filter_terms.append(tag_name)
+                    else:
+                        # Just '@' with nothing after - show all tags
+                        filter_terms.append('')
+                else:
+                    # Non-@ prefixed text - use as-is for filtering
+                    filter_terms.append(word)
+        
+        # First pass: check for exact matches and auto-select them
+        results_changed = False
+        for tag_name in potential_tags:
+            if tag_name in self.tag_chicklets:
+                chicklet = self.tag_chicklets[tag_name]
+                # Auto-select if not already selected
+                if not chicklet.selected:
+                    chicklet.setChecked(True)
+                    # Manually add to selected_tags since setChecked doesn't trigger clicked signal
+                    self.selected_tags.add(tag_name)
+                    results_changed = True
+        
+        # Refresh results if any tags were auto-selected
+        if results_changed:
+            self._refresh_results()
+        
+        # Second pass: filter visibility based on search text
+        # Show tag if any filter term matches or if filter is empty
+        for tag, chicklet in self.tag_chicklets.items():
+            tag_lower = tag.lower()
+            if not filter_terms or any(not term or term in tag_lower for term in filter_terms):
+                chicklet.show()
+            else:
+                chicklet.hide()
     
     def _clear_all_tags(self):
         """Clear all selected tag filters."""
@@ -387,7 +474,7 @@ class TagsTab(QWidget):
             # Build query to find pages with ALL selected tags (AND logic)
             placeholders = ','.join('?' * len(self.selected_tags))
             query = f"""
-                SELECT p.path
+                SELECT DISTINCT p.path
                 FROM pages p
                 WHERE (
                     SELECT COUNT(DISTINCT pt.tag)
@@ -418,7 +505,17 @@ class TagsTab(QWidget):
         try:
             self.results_tree.clear()
             
-            for idx, path in enumerate(paths):
+            # Deduplicate paths by canonical name (same folder/page name with different extensions)
+            seen_canonical = {}
+            unique_paths = []
+            for path in paths:
+                # Get the path without extension as canonical identifier
+                canonical = strip_page_suffix(path)
+                if canonical not in seen_canonical:
+                    seen_canonical[canonical] = path
+                    unique_paths.append(path)
+            
+            for idx, path in enumerate(unique_paths):
                 # Extract leaf node from path
                 leaf_name = path.rstrip("/").split("/")[-1] if "/" in path else path
                 leaf_name = strip_page_suffix(leaf_name)
@@ -457,6 +554,14 @@ class TagsTab(QWidget):
     
     def _on_results_key_press(self, event):
         """Handle key press events in results tree."""
+        # Handle Escape - clear all filters and focus search bar
+        if event.key() == Qt.Key_Escape:
+            self.tag_search.clear()
+            self._clear_all_tags()
+            self.tag_search.setFocus(Qt.ShortcutFocusReason)
+            event.accept()
+            return
+        
         # Handle Ctrl+Enter to load page and focus editor
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
             current_item = self.results_tree.currentItem()
@@ -475,6 +580,26 @@ class TagsTab(QWidget):
                 self._on_result_double_clicked(current_item, 0)
                 event.accept()
                 return
+        
+        # Handle Ctrl+Shift+J or Down arrow - move down
+        if ((event.key() == Qt.Key_J and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+            event.key() == Qt.Key_Down):
+            current_row = self.results_tree.indexOfTopLevelItem(self.results_tree.currentItem())
+            if current_row < self.results_tree.topLevelItemCount() - 1:
+                next_item = self.results_tree.topLevelItem(current_row + 1)
+                self.results_tree.setCurrentItem(next_item)
+            event.accept()
+            return
+        
+        # Handle Ctrl+Shift+K or Up arrow - move up
+        if ((event.key() == Qt.Key_K and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+            event.key() == Qt.Key_Up):
+            current_row = self.results_tree.indexOfTopLevelItem(self.results_tree.currentItem())
+            if current_row > 0:
+                prev_item = self.results_tree.topLevelItem(current_row - 1)
+                self.results_tree.setCurrentItem(prev_item)
+            event.accept()
+            return
         
         # Handle j/k navigation in vi mode
         if self._is_vi_mode():
@@ -515,12 +640,15 @@ class TagsTab(QWidget):
         return False
     
     def showEvent(self, event):
-        """Load tags when tab becomes visible for the first time."""
+        """Load tags when tab becomes visible for the first time and focus search bar."""
         super().showEvent(event)
         if not self._tags_loaded:
             print("[TagsTab] Tab shown for first time, loading tags...")
             self._load_tags()
             self._tags_loaded = True
+        # Auto-focus the search bar
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self.focus_search)
     
     def refresh_tags(self):
         """Reload tags from database (call when vault changes)."""
