@@ -3494,6 +3494,7 @@ class MarkdownEditor(QTextEdit):
                     lambda: self.editPageSourceRequested.emit(self._current_path or "")
                 )
                 open_loc_action = page_sub.addAction("Open Page Location")
+                open_loc_action.setEnabled(not self._remote_mode)
                 open_loc_action.triggered.connect(
                     lambda: self.openFileLocationRequested.emit(self._current_path or "")
                 )
@@ -3568,6 +3569,7 @@ class MarkdownEditor(QTextEdit):
                 lambda: self.editPageSourceRequested.emit(self._current_path or "")
             )
             open_loc_action = page_sub.addAction("Open Page Location")
+            open_loc_action.setEnabled(not self._remote_mode)
             open_loc_action.triggered.connect(
                 lambda: self.openFileLocationRequested.emit(self._current_path or "")
             )

@@ -5371,6 +5371,8 @@ class MainWindow(QMainWindow):
         Variables: {{YYYY}}, {{Month}}, {{DOW}}, {{dd}}
         allow_overwrite: when False, existing files are left untouched (no template writes)
         """
+        if self._remote_mode:
+            return
         if not self.vault_root:
             return
         from datetime import datetime
@@ -6253,23 +6255,26 @@ class MainWindow(QMainWindow):
 
     def _resolve_quick_capture_target(self) -> Optional[dict[str, Optional[str]]]:
         if self._remote_mode:
-            return None
-        home_vault = config.load_quick_capture_vault()
-        vault_path = home_vault or self.vault_root
-        if not vault_path:
-            return None
-        vault_root = Path(vault_path).expanduser()
-        if not vault_root.exists():
-            return None
-        if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
-            return None
-        if not os.access(vault_root, os.W_OK):
-            return None
+            if not self.vault_root or self._read_only:
+                return None
+            vault_path = self.vault_root
+        else:
+            home_vault = config.load_quick_capture_vault()
+            vault_path = home_vault or self.vault_root
+            if not vault_path:
+                return None
+            vault_root = Path(vault_path).expanduser()
+            if not vault_root.exists():
+                return None
+            if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
+                return None
+            if not os.access(vault_root, os.W_OK):
+                return None
         page_mode = config.load_quick_capture_page_mode()
         page_ref = config.load_quick_capture_custom_page() if page_mode == "custom" else None
         if page_mode == "custom" and not page_ref:
             return None
-        return {"vault_path": str(vault_root), "page_mode": page_mode, "page_ref": page_ref}
+        return {"vault_path": str(vault_path), "page_mode": page_mode, "page_ref": page_ref}
 
     def _show_quick_capture_unavailable(self) -> None:
         msg = QMessageBox(self)
@@ -6287,13 +6292,16 @@ class MainWindow(QMainWindow):
 
     def _submit_quick_capture(self, text: str, target: dict[str, Optional[str]]) -> None:
         payload = {
-            "vault_path": target.get("vault_path"),
+            "vault_path": None if self._remote_mode else target.get("vault_path"),
             "page_mode": target.get("page_mode"),
             "page_ref": target.get("page_ref"),
             "text": text,
         }
         try:
             resp = self.http.post("/api/quick-capture", json=payload)
+            if resp.status_code == 401 and self._remote_mode:
+                if self._prompt_remote_login():
+                    resp = self.http.post("/api/quick-capture", json=payload)
             resp.raise_for_status()
         except Exception:
             self.statusBar().showMessage("Quick Capture failed.", 4000)
@@ -6646,9 +6654,6 @@ class MainWindow(QMainWindow):
         """Open a lightweight editor window for a single page (shared server)."""
         if not path or not self.vault_root:
             return
-        if self._remote_mode:
-            self._alert("Popup editor windows are not available in remote mode yet.")
-            return
         rel_path = self._normalize_editor_path(path)
         try:
             window = PageEditorWindow(
@@ -6658,6 +6663,10 @@ class MainWindow(QMainWindow):
                 read_only=self._read_only,
                 open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
                 local_auth_token=self._local_auth_token,
+                http_client=self.http,
+                remote_mode=self._remote_mode,
+                remote_cache_root=self._ensure_remote_cache_root() if self._remote_mode else None,
+                auth_prompt=self._prompt_remote_login if self._remote_mode else None,
                 parent=None,
             )
             try:
@@ -8204,6 +8213,7 @@ class MainWindow(QMainWindow):
                 
                 # Open File Location
                 open_loc = menu.addAction("Open File Location")
+                open_loc.setEnabled(not self._remote_mode)
                 open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
                 
                 add_menu_section("Insights & Output")
@@ -8234,10 +8244,60 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QUrl
         except Exception:
             return
+        if self._remote_mode:
+            try:
+                resp = self.http.post("/api/file/read/source", json={"path": file_path})
+                if resp.status_code == 401 and self._prompt_remote_login():
+                    resp = self.http.post("/api/file/read/source", json={"path": file_path})
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, f"Failed to load {file_path}")
+                return
+            content = resp.json().get("content", "")
+            temp_dir = Path(tempfile.mkdtemp(prefix="stillpoint-source-"))
+            local_path = temp_dir / (Path(file_path).name or "page.md")
+            try:
+                local_path.write_text(content, encoding="utf-8")
+            except OSError as exc:
+                self._alert(f"Failed to write temp file: {exc}")
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(local_path)))
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Edit Page Source")
+            dlg.setText("File being edited outside of StillPoint.\nPress OK when finished.")
+            dlg.setIcon(QMessageBox.Information)
+            dlg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+            dlg.setDefaultButton(QMessageBox.Ok)
+            result = dlg.exec()
+            if result == QMessageBox.Ok:
+                try:
+                    updated = local_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    self._alert(f"Failed to read temp file: {exc}")
+                    return
+                if updated != content:
+                    try:
+                        write_resp = self.http.post(
+                            "/api/file/write/source",
+                            json={"path": file_path, "content": updated},
+                        )
+                        if write_resp.status_code == 401 and self._prompt_remote_login():
+                            write_resp = self.http.post(
+                                "/api/file/write/source",
+                                json={"path": file_path, "content": updated},
+                            )
+                        write_resp.raise_for_status()
+                    except httpx.HTTPError as exc:
+                        self._alert_api_error(exc, f"Failed to save {file_path}")
+                        return
+                self._open_file(file_path, force=True)
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return
         abs_path = str((Path(self.vault_root) / file_path.lstrip("/")).resolve())
-        # Launch in default editor
         QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
-        # Block with modal until user confirms they're done
         dlg = QMessageBox(self)
         dlg.setWindowTitle("Edit Page Source")
         dlg.setText("File being edited outside of StillPoint.\nPress OK when finished.")
@@ -8246,7 +8306,6 @@ class MainWindow(QMainWindow):
         dlg.setDefaultButton(QMessageBox.Ok)
         result = dlg.exec()
         if result == QMessageBox.Ok:
-            # Reload and render page (force reload even if already current)
             self._open_file(file_path, force=True)
     
     def _open_tree_file_location(self, file_path: str) -> None:
@@ -10676,6 +10735,9 @@ class MainWindow(QMainWindow):
             return None
 
         resp = self.http.post("/auth/print-token", json={"ttl_seconds": 900})
+        if resp.status_code == 401 and self._remote_mode:
+            if self._prompt_remote_login():
+                resp = self.http.post("/auth/print-token", json={"ttl_seconds": 900})
         if not resp.is_success:
             detail = "Failed to request print token."
             try:

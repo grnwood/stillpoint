@@ -39,6 +39,10 @@ class PageEditorWindow(QMainWindow):
         read_only: bool,
         open_in_main_callback: Callable[[str], None],
         local_auth_token: Optional[str] = None,
+        http_client: Optional[httpx.Client] = None,
+        remote_mode: bool = False,
+        remote_cache_root: Optional[Path] = None,
+        auth_prompt: Optional[Callable[[], bool]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -53,8 +57,15 @@ class PageEditorWindow(QMainWindow):
         self.page_path = page_path
         self._read_only = read_only
         self._open_in_main = open_in_main_callback
-        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
-        self.http = httpx.Client(base_url=self.api_base, timeout=10.0, headers=headers)
+        self._remote_mode = bool(remote_mode)
+        self._remote_cache_root = remote_cache_root
+        self._auth_prompt = auth_prompt
+        self._owns_http_client = http_client is None
+        if http_client is not None:
+            self.http = http_client
+        else:
+            headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
+            self.http = httpx.Client(base_url=self.api_base, timeout=10.0, headers=headers)
         self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
         self._font_size = config.load_popup_font_size(14)
 
@@ -67,6 +78,13 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.set_read_only_mode(self._read_only)
+        self.editor.set_remote_context(
+            remote_mode=self._remote_mode,
+            api_base=self.api_base if self._remote_mode else None,
+            cache_root=self._remote_cache_root,
+            http_client=self.http if self._remote_mode else None,
+            auth_prompt=self._auth_prompt if self._remote_mode else None,
+        )
         self.editor.linkActivated.connect(self._forward_link_to_main)
         self.editor.linkCopied.connect(
             lambda link: self.statusBar().showMessage(f"Copied link: {link}", 3000)
@@ -216,6 +234,9 @@ class PageEditorWindow(QMainWindow):
             tracer.mark("api read start")
         try:
             resp = self.http.post("/api/file/read", json={"path": self._source_path})
+            if resp.status_code == 401 and self._remote_mode and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self.http.post("/api/file/read", json={"path": self._source_path})
             resp.raise_for_status()
             content = resp.json().get("content", "")
             if tracer:
@@ -291,6 +312,9 @@ class PageEditorWindow(QMainWindow):
         )
         try:
             resp = self.http.post("/api/file/write", json=payload)
+            if resp.status_code == 401 and self._remote_mode and self._auth_prompt:
+                if self._auth_prompt():
+                    resp = self.http.post("/api/file/write", json=payload)
             resp.raise_for_status()
             print(f"[StillPoint Popup] Write OK {self._source_path} status={resp.status_code}")
         except httpx.HTTPError as exc:
@@ -404,6 +428,14 @@ class PageEditorWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_geometry_timer"):
             self._geometry_timer.start()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._owns_http_client:
+            try:
+                self.http.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def moveEvent(self, event) -> None:  # type: ignore[override]
         super().moveEvent(event)

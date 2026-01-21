@@ -921,7 +921,12 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 
 
 @app.get("/api/vault/tree")
-def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = False) -> dict:
+def vault_tree(
+    path: str = "/",
+    recursive: bool = True,
+    include_journal: bool = False,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
     root = vault_state.get_root()
     version = config.get_tree_version()
     normalized_path = _normalize_tree_path(path)
@@ -946,7 +951,7 @@ def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = 
 
 
 @app.get("/api/vault/stats")
-def vault_stats() -> dict:
+def vault_stats(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
     """Get vault statistics including folder count for lazy loading decisions."""
     root = vault_state.get_root()
     folder_count = config.count_folders()
@@ -955,7 +960,7 @@ def vault_stats() -> dict:
 
 
 @app.post("/api/file/read")
-def file_read(payload: FilePathPayload) -> dict:
+def file_read(payload: FilePathPayload, user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
     root = vault_state.get_root()
     file_path = root / payload.path.lstrip("/")
     try:
@@ -982,8 +987,13 @@ def file_read(payload: FilePathPayload) -> dict:
     return {"content": content, "rev": rev, "mtime_ns": mtime_ns}
 
 
+@app.post("/api/file/read/source")
+def file_read_source(payload: FilePathPayload, user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    return file_read(payload, user)
+
+
 @app.get("/api/file/raw")
-def file_raw(path: str) -> FileResponse:
+def file_raw(path: str, user: AuthModels.UserInfo = Depends(get_current_user)) -> FileResponse:
     root = _get_vault_root()
     normalized = _vault_relative_path(path)
     target = (root / normalized.lstrip("/")).resolve()
@@ -1198,6 +1208,15 @@ def file_write(
     return {"ok": True, "mtime_ns": mtime_ns}
 
 
+@app.post("/api/file/write/source")
+def file_write_source(
+    payload: FileWritePayload,
+    if_match: Optional[str] = Header(None),
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    return file_write(payload, if_match=if_match, user=user)
+
+
 @app.post("/api/files/modified")
 def files_modified(payload: ModifiedRangePayload) -> dict:
     try:
@@ -1244,7 +1263,10 @@ def quick_capture(
     text = (payload.text or "").strip()
     if not text:
         return {"ok": True, "skipped": True}
-    root = Path(payload.vault_path).expanduser().resolve()
+    if payload.vault_path:
+        root = Path(payload.vault_path).expanduser().resolve()
+    else:
+        root = _get_vault_root()
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=404, detail="Vault not found")
     _init_vault_db(root)
