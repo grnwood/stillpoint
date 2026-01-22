@@ -3073,6 +3073,10 @@ class MainWindow(QMainWindow):
             self._refresh_editor_context(self.current_path)
         except Exception:
             pass
+        
+        # Check if remote vault needs indexing
+        if is_remote:
+            QTimer.singleShot(500, self._check_remote_vault_index)
 
     def _refresh_editor_context(self, path: Optional[str]) -> None:
         self.editor.set_context(self.vault_root, path)
@@ -3106,6 +3110,48 @@ class MainWindow(QMainWindow):
         base_name = Path(vault_path).name or "vault"
         digest = hashlib.sha1(vault_path.encode("utf-8", errors="ignore")).hexdigest()[:12]
         return cache_root / "vaults" / f"{base_name}-{digest}"
+
+    def _check_remote_vault_index(self) -> None:
+        """Check if remote vault has an index and prompt to build if empty."""
+        if not self._remote_mode:
+            return
+        
+        try:
+            # Check if database has any pages
+            resp = self.http.get("/api/pages/search", params={"q": "", "limit": 1})
+            if resp.status_code != 200:
+                return
+            
+            data = resp.json()
+            pages = data.get("pages", [])
+            
+            # If no pages found, check if vault has files and prompt to index
+            if not pages:
+                tree_resp = self.http.get("/api/vault/tree", params={"path": "/", "recursive": False})
+                if tree_resp.status_code == 200:
+                    tree_data = tree_resp.json()
+                    # Check if there are any markdown files in the vault
+                    has_files = any(
+                        item.get("name", "").endswith((".txt", ".md"))
+                        for item in tree_data.get("entries", [])
+                        if not item.get("is_dir", False)
+                    )
+                    
+                    if has_files:
+                        reply = QMessageBox.question(
+                            self,
+                            "Remote Vault Index Empty",
+                            "The remote vault appears to have files but no index.\n\n"
+                            "Would you like to build the vault index now?\n"
+                            "(This will scan all pages and populate the database)",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.Yes
+                        )
+                        
+                        if reply == QMessageBox.Yes:
+                            self._rebuild_vault_index_from_disk()
+        except Exception as e:
+            print(f"[RemoteVault] Failed to check index status: {e}")
 
     def _local_vault_root(self) -> Optional[str]:
         """Return a local path to use for per-vault metadata storage."""
