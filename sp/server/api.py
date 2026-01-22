@@ -963,7 +963,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
             path_str = f"/{rel_path.as_posix()}"
             try:
                 content = txt_file.read_text(encoding="utf-8")
-                indexer.index_page(path_str, content)
+                # Use config.ensure_page_entry() to populate the pages table
+                config.ensure_page_entry(path_str)
             except Exception:
                 pass
             
