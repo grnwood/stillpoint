@@ -1531,20 +1531,21 @@ def api_pages_search(
         exact_path = f"/{term_lower}"
         starts_path = f"{exact_path}/%"
         
+        # Try to use path_ci/title_ci columns if they exist, otherwise fall back to LOWER()
         cur = conn.execute(
             """
             SELECT path, title
             FROM pages
-            WHERE path_ci LIKE ? OR title_ci LIKE ?
+            WHERE LOWER(path) LIKE ? OR LOWER(COALESCE(title, '')) LIKE ?
             ORDER BY
                 CASE
-                    WHEN path_ci = ? THEN 0
-                    WHEN path_ci LIKE ? THEN 1
-                    WHEN title_ci = ? THEN 2
-                    WHEN title_ci LIKE ? THEN 3
+                    WHEN LOWER(path) = ? THEN 0
+                    WHEN LOWER(path) LIKE ? THEN 1
+                    WHEN LOWER(COALESCE(title, '')) = ? THEN 2
+                    WHEN LOWER(COALESCE(title, '')) LIKE ? THEN 3
                     ELSE 4
                 END,
-                updated DESC
+                COALESCE(updated, 0) DESC
             LIMIT ?
             """,
             (like, like, exact_path, starts_path, term_lower, like, limit),
@@ -1557,6 +1558,8 @@ def api_pages_search(
         return {"pages": pages}
     except Exception as e:
         print(f"[API] Pages search error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"pages": []}
 
 
