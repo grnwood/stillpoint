@@ -1509,15 +1509,14 @@ def api_search(
 @app.get("/api/pages/search")
 def api_pages_search(
     q: str = "",
-    limit: int = 100,
-    user: AuthModels.UserInfo = Depends(get_current_user)
+    limit: int = 100
 ) -> dict:
     """Simple page search by path/title for navigation dialogs (Jump/Link).
     
     This is a lighter-weight search than /api/search, intended for autocomplete
     in dialogs. It does substring matching on page paths and titles.
     """
-    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit} user={user.username if user else 'None'}{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
     
     db_path = config._vault_db_path()
     if not db_path:
