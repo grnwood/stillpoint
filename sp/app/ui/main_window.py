@@ -3125,31 +3125,20 @@ class MainWindow(QMainWindow):
             data = resp.json()
             pages = data.get("pages", [])
             
-            # If no pages found, check if vault has files and prompt to index
+            # If no pages found, prompt to build index
             if not pages:
-                tree_resp = self.http.get("/api/vault/tree", params={"path": "/", "recursive": False})
-                if tree_resp.status_code == 200:
-                    tree_data = tree_resp.json()
-                    # Check if there are any markdown files in the vault
-                    has_files = any(
-                        item.get("name", "").endswith((".txt", ".md"))
-                        for item in tree_data.get("entries", [])
-                        if not item.get("is_dir", False)
-                    )
-                    
-                    if has_files:
-                        reply = QMessageBox.question(
-                            self,
-                            "Remote Vault Index Empty",
-                            "The remote vault appears to have files but no index.\n\n"
-                            "Would you like to build the vault index now?\n"
-                            "(This will scan all pages and populate the database)",
-                            QMessageBox.Yes | QMessageBox.No,
-                            QMessageBox.Yes
-                        )
-                        
-                        if reply == QMessageBox.Yes:
-                            self._rebuild_vault_index_from_disk()
+                reply = QMessageBox.question(
+                    self,
+                    "Remote Vault Index Empty",
+                    "The remote vault's page index is empty.\n\n"
+                    "Would you like to build the vault index now?\n"
+                    "(This will scan all pages and populate the database)",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self._rebuild_vault_index_from_disk()
         except Exception as e:
             print(f"[RemoteVault] Failed to check index status: {e}")
 
