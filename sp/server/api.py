@@ -1517,7 +1517,7 @@ def api_pages_search(
     This is a lighter-weight search than /api/search, intended for autocomplete
     in dialogs. It does substring matching on page paths and titles.
     """
-    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit} user={user.username if user else 'None'}{_ANSI_RESET}")
     
     db_path = config._vault_db_path()
     if not db_path:

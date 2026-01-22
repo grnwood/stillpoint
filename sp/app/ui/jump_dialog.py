@@ -211,6 +211,7 @@ class JumpToPageDialog(QDialog):
         # Get pages from remote API or local config
         if self._remote_mode and self.http:
             try:
+                print(f"[JumpDialog] Fetching pages from API with auth={self.http.auth}")
                 resp = self.http.get("/api/pages/search", params={"q": term, "limit": 100})
                 resp.raise_for_status()
                 pages = resp.json().get("pages", [])
