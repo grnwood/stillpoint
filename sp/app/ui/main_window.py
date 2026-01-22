@@ -5773,13 +5773,21 @@ class MainWindow(QMainWindow):
         if self._remote_mode:
             # For remote vaults, use the dedicated status endpoint
             try:
+                print("[Search] Calling /api/search/status...")
                 resp = self.http.get("/api/search/status")
+                print(f"[Search] Response status: {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data.get("populated", False)
+                    populated = data.get("populated", False)
+                    count = data.get("count", 0)
+                    print(f"[Search] Search index populated={populated}, count={count}")
+                    return populated
+                print("[Search] Non-200 response, assuming not populated")
                 return False
             except Exception as e:
                 print(f"[Search] Failed to check remote search index: {e}")
+                import traceback
+                traceback.print_exc()
                 return False
         else:
             # For local vaults, check the database directly
@@ -5802,8 +5810,11 @@ class MainWindow(QMainWindow):
             self._alert("Select a vault before searching.")
             return
         
+        print(f"[Search] Checking if search index is populated (remote_mode={self._remote_mode})...")
+        
         # Check if index is populated
         if not self._is_search_index_populated():
+            print("[Search] Index not populated, prompting user...")
             reply = QMessageBox.question(
                 self,
                 "Search Index Required",
@@ -5812,6 +5823,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes,
             )
             if reply == QMessageBox.Yes:
+                print("[Search] User chose to build index...")
                 # Trigger search index rebuild
                 if self._remote_mode:
                     # Start remote reindex with search rebuild, then open search tab when done
@@ -5820,9 +5832,11 @@ class MainWindow(QMainWindow):
                     # Local search index rebuild (opens search tab when done)
                     self._rebuild_vault_search_index_for_search()
             else:
+                print("[Search] User declined to build index")
                 return
         else:
             # Index exists, open search tab
+            print("[Search] Index is populated, opening search tab...")
             self._open_search_tab()
     
     def _rebuild_vault_search_index_for_search(self) -> None:
@@ -5994,6 +6008,33 @@ class MainWindow(QMainWindow):
         """Show Ctrl+Shift+F search dialog that populates the search tab."""
         if not config.has_active_vault():
             return
+        
+        print(f"[Search] Checking if search index is populated (remote_mode={self._remote_mode})...")
+        
+        # Check if search index is populated
+        if not self._is_search_index_populated():
+            print("[Search] Index not populated, prompting user...")
+            reply = QMessageBox.question(
+                self,
+                "Search Index Required",
+                "Search requires a search index. Create one now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                print("[Search] User chose to build index...")
+                # Trigger search index rebuild
+                if self._remote_mode:
+                    # Start remote reindex with search rebuild, then open search tab when done
+                    self._reindex_remote_vault(rebuild_search=True, on_complete=self._open_search_tab)
+                else:
+                    # Local search index rebuild (opens search tab when done)
+                    self._rebuild_vault_search_index_for_search()
+            else:
+                print("[Search] User declined to build index")
+            return
+        
+        print("[Search] Index is populated, showing search dialog...")
         
         # Simple dialog to get search query
         dialog = QDialog(self)
