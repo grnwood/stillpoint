@@ -5771,15 +5771,16 @@ class MainWindow(QMainWindow):
     def _is_search_index_populated(self) -> bool:
         """Check if the full-text search index has any content."""
         if self._remote_mode:
-            # For remote vaults, try a simple API check
+            # For remote vaults, use the dedicated status endpoint
             try:
-                resp = self.http.get("/api/search", params={"q": "*", "limit": 1})
+                resp = self.http.get("/api/search/status")
                 if resp.status_code == 200:
                     data = resp.json()
-                    return len(data.get("results", [])) > 0
-            except Exception:
-                pass
-            return True  # Assume it's populated if we can't check
+                    return data.get("populated", False)
+                return False
+            except Exception as e:
+                print(f"[Search] Failed to check remote search index: {e}")
+                return False
         else:
             # For local vaults, check the database directly
             db_path = config._vault_db_path()

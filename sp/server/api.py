@@ -1564,6 +1564,25 @@ def api_pages_search(
         return {"pages": []}
 
 
+@app.get("/api/search/status")
+def api_search_status() -> dict:
+    """Check if the search index has been populated."""
+    db_path = config._vault_db_path()
+    if not db_path:
+        return {"populated": False, "count": 0}
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        cursor = conn.execute("SELECT COUNT(*) FROM pages_search_index")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return {"populated": count > 0, "count": count}
+    except Exception as e:
+        print(f"[API] Search status error: {e}")
+        return {"populated": False, "count": 0}
+
+
 # ===== Web Sync API Endpoints =====
 
 @app.get("/sync/changes")
