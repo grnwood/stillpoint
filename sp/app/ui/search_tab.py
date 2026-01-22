@@ -261,12 +261,17 @@ class SearchTab(QWidget):
     def __init__(self, parent=None, http_client: "httpx.Client" = None):
         super().__init__(parent)
         self.http = http_client
+        self._remote_mode = False
         self.current_subtree = None  # Optional path filter
         
         self._init_ui()
 
     def set_http_client(self, http_client: "httpx.Client") -> None:
         self.http = http_client
+    
+    def set_remote_mode(self, remote_mode: bool) -> None:
+        """Set whether the search tab is operating in remote mode."""
+        self._remote_mode = remote_mode
     
     def _init_ui(self):
         """Initialize the UI layout."""
@@ -366,7 +371,7 @@ class SearchTab(QWidget):
     
     def _select_subtree(self):
         """Open dialog to select a subtree path filter."""
-        dialog = JumpToPageDialog(self, compact=True)
+        dialog = JumpToPageDialog(self, compact=True, http_client=self.http, remote_mode=self._remote_mode)
         if dialog.exec():
             path = dialog.selected_path()
             if path:

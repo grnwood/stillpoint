@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize
 from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
@@ -19,6 +20,9 @@ from sp.app import config
 from .path_utils import path_to_colon
 import html
 import re
+
+if TYPE_CHECKING:
+    import httpx
 
 
 class HTMLDelegate(QStyledItemDelegate):
@@ -77,6 +81,8 @@ class JumpToPageDialog(QDialog):
         geometry_key: str | None = "jump_dialog",
         anchor_global_pos=None,
         show_rewrite_links_checkbox: bool = False,
+        http_client: "httpx.Client" = None,
+        remote_mode: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Jump to page")
@@ -89,6 +95,8 @@ class JumpToPageDialog(QDialog):
         self._anchor_global_pos = anchor_global_pos
         self._show_rewrite_links_checkbox = show_rewrite_links_checkbox
         self.rewrite_links_checkbox = None
+        self.http = http_client
+        self._remote_mode = remote_mode
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -199,7 +207,19 @@ class JumpToPageDialog(QDialog):
         term = self.search.text().strip()
         if term.startswith(":"):
             term = term.lstrip(":")
-        pages = config.search_pages(term)
+        
+        # Get pages from remote API or local config
+        if self._remote_mode and self.http:
+            try:
+                resp = self.http.get("/api/pages/search", params={"q": term, "limit": 100})
+                resp.raise_for_status()
+                pages = resp.json().get("pages", [])
+            except Exception as exc:
+                print(f"[JumpDialog] Failed to fetch pages from API: {exc}")
+                pages = []
+        else:
+            pages = config.search_pages(term)
+        
         self.list_widget.clear()
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):

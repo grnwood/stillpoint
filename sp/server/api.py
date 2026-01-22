@@ -1506,6 +1506,61 @@ def api_search(
         return {"results": []}
 
 
+@app.get("/api/pages/search")
+def api_pages_search(
+    q: str = "",
+    limit: int = 100,
+    user: AuthModels.UserInfo = Depends(get_current_user)
+) -> dict:
+    """Simple page search by path/title for navigation dialogs (Jump/Link).
+    
+    This is a lighter-weight search than /api/search, intended for autocomplete
+    in dialogs. It does substring matching on page paths and titles.
+    """
+    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
+    
+    db_path = config._vault_db_path()
+    if not db_path:
+        return {"pages": []}
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        
+        term_lower = q.lower()
+        like = f"%{term_lower}%"
+        exact_path = f"/{term_lower}"
+        starts_path = f"{exact_path}/%"
+        
+        cur = conn.execute(
+            """
+            SELECT path, title
+            FROM pages
+            WHERE path_ci LIKE ? OR title_ci LIKE ?
+            ORDER BY
+                CASE
+                    WHEN path_ci = ? THEN 0
+                    WHEN path_ci LIKE ? THEN 1
+                    WHEN title_ci = ? THEN 2
+                    WHEN title_ci LIKE ? THEN 3
+                    ELSE 4
+                END,
+                updated DESC
+            LIMIT ?
+            """,
+            (like, like, exact_path, starts_path, term_lower, like, limit),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        
+        pages = [{"path": row[0], "title": row[1]} for row in rows]
+        print(f"{_ANSI_BLUE}[API] /api/pages/search q={q} found {len(pages)} pages{_ANSI_RESET}")
+        return {"pages": pages}
+    except Exception as e:
+        print(f"[API] Pages search error: {e}")
+        return {"pages": []}
+
+
 # ===== Web Sync API Endpoints =====
 
 @app.get("/sync/changes")

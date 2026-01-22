@@ -1501,6 +1501,11 @@ class MainWindow(QMainWindow):
         self._action_quick_capture.setToolTip("Capture a thought into your home vault")
         self._action_quick_capture.triggered.connect(self._show_quick_capture_overlay)
         vault_menu.addAction(self._action_quick_capture)
+        vault_menu.addSeparator()
+        search_vault_action = QAction("Search Across Vault...", self)
+        search_vault_action.setToolTip("Search for text across all pages in the vault")
+        search_vault_action.triggered.connect(self._search_across_vault)
+        vault_menu.addAction(search_vault_action)
         import_menu = file_menu.addMenu("Import")
         zim_import_action = QAction("Zim Wiki…", self)
         zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
@@ -3031,6 +3036,7 @@ class MainWindow(QMainWindow):
         try:
             if self.search_tab:
                 self.search_tab.set_http_client(self.http)
+                self.search_tab.set_remote_mode(self._remote_mode)
         except Exception:
             pass
 
@@ -3060,6 +3066,7 @@ class MainWindow(QMainWindow):
         try:
             if self.search_tab:
                 self.search_tab.set_http_client(self.http)
+                self.search_tab.set_remote_mode(self._remote_mode)
         except Exception:
             pass
         try:
@@ -5726,6 +5733,138 @@ class MainWindow(QMainWindow):
         self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
         self.search_tab.focus_search()
     
+    def _is_search_index_populated(self) -> bool:
+        """Check if the full-text search index has any content."""
+        if self._remote_mode:
+            # For remote vaults, try a simple API check
+            try:
+                resp = self.http.get("/api/search", params={"q": "*", "limit": 1})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return len(data.get("results", [])) > 0
+            except Exception:
+                pass
+            return True  # Assume it's populated if we can't check
+        else:
+            # For local vaults, check the database directly
+            db_path = config._vault_db_path()
+            if not db_path:
+                return False
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                cursor = conn.execute("SELECT COUNT(*) FROM pages_search_index")
+                count = cursor.fetchone()[0]
+                conn.close()
+                return count > 0
+            except Exception:
+                return False
+    
+    def _search_across_vault(self) -> None:
+        """Open search across vault dialog, prompting to build index if needed."""
+        if not self.vault_root:
+            self._alert("Select a vault before searching.")
+            return
+        
+        # Check if index is populated
+        if not self._is_search_index_populated():
+            reply = QMessageBox.question(
+                self,
+                "Search Index Required",
+                "Search requires a search index. Create one now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                # Trigger search index rebuild
+                if self._remote_mode:
+                    # Start remote reindex with search rebuild, then open search tab when done
+                    self._reindex_remote_vault(rebuild_search=True, on_complete=self._open_search_tab)
+                else:
+                    # Local search index rebuild (opens search tab when done)
+                    self._rebuild_vault_search_index_for_search()
+            else:
+                return
+        else:
+            # Index exists, open search tab
+            self._open_search_tab()
+    
+    def _rebuild_vault_search_index_for_search(self) -> None:
+        """Rebuild search index without prompting, for use when opening search."""
+        if not self.vault_root or not config.has_active_vault():
+            return
+        if not self._ensure_writable("rebuild the vault search index"):
+            return
+        
+        db_path = config._vault_db_path()
+        if not db_path:
+            self._alert("No vault database found for search index.")
+            return
+        
+        self.statusBar().showMessage("Rebuilding search index...", 0)
+        
+        root = Path(self.vault_root)
+        txt_files = []
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(root.rglob(f"*{suffix}")):
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                txt_files.append(page_file)
+
+        progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
+        progress.setWindowTitle("Search Index")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        import sqlite3
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pages_search_index (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    mtime INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                )
+            except sqlite3.OperationalError as exc:
+                self.statusBar().showMessage("Search index unavailable", 4000)
+                self._alert(f"Search index unavailable: {exc}")
+                return
+            conn.execute("DELETE FROM pages_search_fts")
+            conn.execute("DELETE FROM pages_search_index")
+            conn.commit()
+
+            for idx, txt_file in enumerate(txt_files, start=1):
+                rel_path = txt_file.relative_to(root)
+                path_str = f"/{rel_path.as_posix()}"
+                try:
+                    content = txt_file.read_text(encoding="utf-8")
+                    mtime = int(txt_file.stat().st_mtime)
+                    search_index.upsert_page(conn, path_str, mtime, content)
+                except Exception:
+                    continue
+                progress.setValue(idx)
+                QApplication.processEvents()
+        finally:
+            conn.close()
+            progress.close()
+
+        page_count = len(txt_files)
+        self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
+        
+        # Now open the search tab
+        self._open_search_tab()
+
     def _on_search_result_selected(self, path: str, line: int, position: int = -1) -> None:
         """Handle navigation from search results to a specific page."""
         print(f"[SearchNav] Navigating to {path}, line {line}")
@@ -5892,6 +6031,8 @@ class MainWindow(QMainWindow):
             filter_prefix=filter_prefix,
             filter_label=filter_label,
             clear_filter_cb=self._clear_nav_filter,
+            http_client=self.http,
+            remote_mode=self._remote_mode,
         )
         result = dlg.exec()
         
@@ -9309,7 +9450,7 @@ class MainWindow(QMainWindow):
     def _move_path_dialog(self, folder_path: str, current_parent: str) -> None:
         if not self._ensure_writable("move pages or folders"):
             return
-        dlg = JumpToPageDialog(self, show_rewrite_links_checkbox=True)
+        dlg = JumpToPageDialog(self, show_rewrite_links_checkbox=True, http_client=self.http, remote_mode=self._remote_mode)
         dlg.setWindowTitle("Move To…")
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -9505,7 +9646,7 @@ class MainWindow(QMainWindow):
         return Path(files[0])
 
     def _prompt_import_target_folder(self) -> Optional[str]:
-        dlg = JumpToPageDialog(self)
+        dlg = JumpToPageDialog(self, http_client=self.http, remote_mode=self._remote_mode)
         dlg.setWindowTitle("Import Target")
         result = dlg.exec()
         if result != QDialog.Accepted:
@@ -10946,7 +11087,7 @@ class MainWindow(QMainWindow):
             page_count = len(txt_files)
             self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
 
-    def _reindex_remote_vault(self, rebuild_search: bool = False) -> None:
+    def _reindex_remote_vault(self, rebuild_search: bool = False, on_complete=None) -> None:
         """Start remote reindex job and poll for progress."""
         try:
             resp = self.http.post("/api/vault/reindex", json={"rebuild_search": rebuild_search})
@@ -11001,6 +11142,9 @@ class MainWindow(QMainWindow):
                     # Refresh UI
                     self.right_panel.refresh_tasks()
                     self.right_panel.refresh_links(self.current_path)
+                    # Call completion callback if provided
+                    if on_complete:
+                        on_complete()
                 elif status == "error":
                     timer.stop()
                     progress.close()
