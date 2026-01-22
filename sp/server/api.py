@@ -1522,14 +1522,26 @@ def api_pages_search(
     if not db_path:
         return {"pages": []}
     
+    print(f"{_ANSI_BLUE}[API] Database path: {db_path}{_ANSI_RESET}")
+    
     try:
         import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
+        
+        # Debug: Check total page count
+        total_pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+        print(f"{_ANSI_BLUE}[API] Total pages in DB: {total_pages}{_ANSI_RESET}")
+        
+        # Debug: Show sample pages
+        sample = conn.execute("SELECT path, title FROM pages LIMIT 5").fetchall()
+        print(f"{_ANSI_BLUE}[API] Sample pages: {sample}{_ANSI_RESET}")
         
         term_lower = q.lower()
         like = f"%{term_lower}%"
         exact_path = f"/{term_lower}"
         starts_path = f"{exact_path}/%"
+        
+        print(f"{_ANSI_BLUE}[API] Searching for term: '{term_lower}' (like pattern: '{like}'){_ANSI_RESET}")
         
         # Try to use path_ci/title_ci columns if they exist, otherwise fall back to LOWER()
         cur = conn.execute(
