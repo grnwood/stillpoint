@@ -78,6 +78,13 @@ _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
 _UI_QUICK_CAPTURE_HOOK = None
 
+# Reindex job tracking
+import threading
+import uuid
+
+_REINDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, message, total, current}
+_REINDEX_LOCK = threading.Lock()
+
 
 def _normalize_tree_path(path: str) -> str:
     cleaned = (path or "/").strip().replace("\\", "/")
@@ -919,6 +926,148 @@ def select_vault(payload: VaultSelectPayload) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
     _clear_task_cache()
     return {"root": str(root)}
+
+
+def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
+    """Background worker to reindex vault."""
+    import sqlite3
+    from sp.server.adapters.files import PAGE_SUFFIXES, LEGACY_SUFFIX
+    
+    try:
+        with _REINDEX_LOCK:
+            if job_id not in _REINDEX_JOBS:
+                return
+            _REINDEX_JOBS[job_id]["status"] = "running"
+            _REINDEX_JOBS[job_id]["message"] = "Scanning files..."
+        
+        # Find all pages
+        txt_files = []
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(root.rglob(f"*{suffix}")):
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                txt_files.append(page_file)
+        
+        total = len(txt_files)
+        with _REINDEX_LOCK:
+            _REINDEX_JOBS[job_id]["total"] = total
+            _REINDEX_JOBS[job_id]["current"] = 0
+            _REINDEX_JOBS[job_id]["message"] = f"Indexing {total} pages..."
+        
+        # Index pages
+        for idx, txt_file in enumerate(txt_files, start=1):
+            rel_path = txt_file.relative_to(root)
+            path_str = f"/{rel_path.as_posix()}"
+            try:
+                content = txt_file.read_text(encoding="utf-8")
+                indexer.index_page(path_str, content)
+            except Exception:
+                pass
+            
+            with _REINDEX_LOCK:
+                _REINDEX_JOBS[job_id]["current"] = idx
+                _REINDEX_JOBS[job_id]["progress"] = int((idx / total) * (50 if rebuild_search else 100))
+        
+        # Rebuild search index if requested
+        if rebuild_search:
+            with _REINDEX_LOCK:
+                _REINDEX_JOBS[job_id]["message"] = "Rebuilding search index..."
+            
+            db_path = config._vault_db_path()
+            if db_path:
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                try:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS pages_search_index (
+                            id INTEGER PRIMARY KEY,
+                            path TEXT NOT NULL UNIQUE,
+                            mtime INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+                    try:
+                        conn.execute(
+                            "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                    conn.execute("DELETE FROM pages_search_fts")
+                    conn.execute("DELETE FROM pages_search_index")
+                    conn.commit()
+                    
+                    for idx, txt_file in enumerate(txt_files, start=1):
+                        rel_path = txt_file.relative_to(root)
+                        path_str = f"/{rel_path.as_posix()}"
+                        try:
+                            content = txt_file.read_text(encoding="utf-8")
+                            mtime = int(txt_file.stat().st_mtime)
+                            search_index.upsert_page(conn, path_str, mtime, content)
+                        except Exception:
+                            pass
+                        
+                        with _REINDEX_LOCK:
+                            _REINDEX_JOBS[job_id]["progress"] = 50 + int((idx / total) * 50)
+                    
+                    conn.commit()
+                finally:
+                    conn.close()
+        
+        with _REINDEX_LOCK:
+            _REINDEX_JOBS[job_id]["status"] = "completed"
+            _REINDEX_JOBS[job_id]["progress"] = 100
+            _REINDEX_JOBS[job_id]["message"] = f"Complete: indexed {total} pages"
+    
+    except Exception as exc:
+        with _REINDEX_LOCK:
+            _REINDEX_JOBS[job_id]["status"] = "error"
+            _REINDEX_JOBS[job_id]["message"] = str(exc)
+
+
+class ReindexRequest(BaseModel):
+    rebuild_search: bool = False
+
+
+@app.post("/api/vault/reindex")
+def start_reindex(payload: ReindexRequest) -> dict:
+    """Start a background reindex job."""
+    root = vault_state.get_root()
+    if not root:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    
+    job_id = str(uuid.uuid4())
+    with _REINDEX_LOCK:
+        _REINDEX_JOBS[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "message": "Starting reindex...",
+            "total": 0,
+            "current": 0,
+        }
+    
+    # Start background thread
+    thread = threading.Thread(target=_do_reindex_vault, args=(job_id, root, payload.rebuild_search), daemon=True)
+    thread.start()
+    
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/vault/reindex/status/{job_id}")
+def reindex_status(job_id: str) -> dict:
+    """Get status of a reindex job."""
+    with _REINDEX_LOCK:
+        job = _REINDEX_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "progress": job["progress"],
+            "message": job["message"],
+            "total": job["total"],
+            "current": job["current"],
+        }
 
 
 @app.get("/api/vault/tree")

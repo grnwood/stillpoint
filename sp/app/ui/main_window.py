@@ -10808,9 +10808,7 @@ class MainWindow(QMainWindow):
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
-        if not self._require_local_mode("Rebuild the vault index from disk"):
-            return
-        if not self.vault_root or not config.has_active_vault():
+        if not self.vault_root:
             self._alert("Select a vault before rebuilding the index.")
             return
         if not self._ensure_writable("rebuild the vault index"):
@@ -10824,32 +10822,39 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        print("[UI] Rebuild index from disk start")
-        self.statusBar().showMessage("Reindexing vault from files...", 0)
-        try:
-            # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
-            config.set_active_vault(None)
-            db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
+        
+        if self._remote_mode:
+            # Remote reindex via API
+            self._reindex_remote_vault(rebuild_search=False)
+        else:
+            # Local reindex
+            if not config.has_active_vault():
+                self._alert("Select a vault before rebuilding the index.")
+                return
+            print("[UI] Rebuild index from disk start")
+            self.statusBar().showMessage("Reindexing vault from files...", 0)
             try:
-                db_path.unlink()
-            except FileNotFoundError:
-                pass
-            config.set_active_vault(self.vault_root)
-        except Exception as exc:
-            self.statusBar().showMessage("Reindex failed", 4000)
-            self._alert(f"Failed to reindex: {exc}")
-            print(f"[UI] Reindex failed: {exc}")
-            return
-        print("[UI] Rebuild index from disk: indexing files")
-        self._reindex_vault(show_progress=True)
-        self.statusBar().showMessage("Reindex complete", 4000)
-        print("[UI] Reindex from files complete")
+                # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
+                config.set_active_vault(None)
+                db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
+                try:
+                    db_path.unlink()
+                except FileNotFoundError:
+                    pass
+                config.set_active_vault(self.vault_root)
+            except Exception as exc:
+                self.statusBar().showMessage("Reindex failed", 4000)
+                self._alert(f"Failed to reindex: {exc}")
+                print(f"[UI] Reindex failed: {exc}")
+                return
+            print("[UI] Rebuild index from disk: indexing files")
+            self._reindex_vault(show_progress=True)
+            self.statusBar().showMessage("Reindex complete", 4000)
+            print("[UI] Reindex from files complete")
 
     def _rebuild_vault_search_index(self) -> None:
         """Rebuild the full-text search index from source files."""
-        if not self._require_local_mode("Rebuild the vault search index"):
-            return
-        if not self.vault_root or not config.has_active_vault():
+        if not self.vault_root:
             self._alert("Select a vault before rebuilding the search index.")
             return
         if not self._ensure_writable("rebuild the vault search index"):
@@ -10863,11 +10868,20 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        db_path = config._vault_db_path()
-        if not db_path:
-            self._alert("No vault database found for search index.")
-            return
-        self.statusBar().showMessage("Rebuilding search index...", 0)
+        
+        if self._remote_mode:
+            # Remote reindex via API
+            self._reindex_remote_vault(rebuild_search=True)
+        else:
+            # Local reindex
+            if not config.has_active_vault():
+                self._alert("Select a vault before rebuilding the search index.")
+                return
+            db_path = config._vault_db_path()
+            if not db_path:
+                self._alert("No vault database found for search index.")
+                return
+            self.statusBar().showMessage("Rebuilding search index...", 0)
 
         root = Path(self.vault_root)
         txt_files = []
@@ -10927,6 +10941,76 @@ class MainWindow(QMainWindow):
 
         page_count = len(txt_files)
         self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
+
+    def _reindex_remote_vault(self, rebuild_search: bool = False) -> None:
+        """Start remote reindex job and poll for progress."""
+        try:
+            resp = self.http.post("/api/vault/reindex", json={"rebuild_search": rebuild_search})
+            resp.raise_for_status()
+            job_data = resp.json()
+            job_id = job_data.get("job_id")
+            if not job_id:
+                self._alert("Failed to start reindex: no job ID returned")
+                return
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to start reindex")
+            return
+        
+        print(f"[UI] Remote reindex started: job_id={job_id}")
+        
+        # Show progress dialog
+        progress = QProgressDialog("Starting reindex...", None, 0, 100, self)
+        progress.setWindowTitle("Reindexing")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        # Poll for status
+        timer = QTimer()
+        
+        def poll_status():
+            try:
+                resp = self.http.get(f"/api/vault/reindex/status/{job_id}")
+                resp.raise_for_status()
+                status_data = resp.json()
+                
+                status = status_data.get("status", "unknown")
+                progress_pct = status_data.get("progress", 0)
+                message = status_data.get("message", "Processing...")
+                current = status_data.get("current", 0)
+                total = status_data.get("total", 0)
+                
+                if total > 0:
+                    label = f"{message} ({current}/{total})"
+                else:
+                    label = message
+                
+                progress.setLabelText(label)
+                progress.setValue(progress_pct)
+                
+                if status == "completed":
+                    timer.stop()
+                    progress.close()
+                    self.statusBar().showMessage(message, 4000)
+                    print(f"[UI] Remote reindex complete: {message}")
+                    # Refresh UI
+                    self.right_panel.refresh_tasks()
+                    self.right_panel.refresh_links(self.current_path)
+                elif status == "error":
+                    timer.stop()
+                    progress.close()
+                    self._alert(f"Reindex failed: {message}")
+                    print(f"[UI] Remote reindex failed: {message}")
+            except Exception as exc:
+                timer.stop()
+                progress.close()
+                self._alert(f"Failed to poll reindex status: {exc}")
+                print(f"[UI] Remote reindex poll error: {exc}")
+        
+        timer.timeout.connect(poll_status)
+        timer.start(1000)  # Poll every second
+        poll_status()  # Initial poll
 
     def _open_webserver_dialog(self) -> None:
         """Open the web server control dialog."""
