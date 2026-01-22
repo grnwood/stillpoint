@@ -10887,64 +10887,64 @@ class MainWindow(QMainWindow):
                 return
             self.statusBar().showMessage("Rebuilding search index...", 0)
 
-        root = Path(self.vault_root)
-        txt_files = []
-        for suffix in PAGE_SUFFIXES:
-            for page_file in sorted(root.rglob(f"*{suffix}")):
-                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
-                    continue
-                txt_files.append(page_file)
+            root = Path(self.vault_root)
+            txt_files = []
+            for suffix in PAGE_SUFFIXES:
+                for page_file in sorted(root.rglob(f"*{suffix}")):
+                    if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                        continue
+                    txt_files.append(page_file)
 
-        progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
-        progress.setWindowTitle("Search Index")
-        progress.setCancelButton(None)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
+            progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
+            progress.setWindowTitle("Search Index")
+            progress.setCancelButton(None)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.show()
 
-        import sqlite3
+            import sqlite3
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pages_search_index (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
-                    mtime INTEGER NOT NULL
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+            conn = sqlite3.connect(db_path, check_same_thread=False)
             try:
                 conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                    """
+                    CREATE TABLE IF NOT EXISTS pages_search_index (
+                        id INTEGER PRIMARY KEY,
+                        path TEXT NOT NULL UNIQUE,
+                        mtime INTEGER NOT NULL
+                    )
+                    """
                 )
-            except sqlite3.OperationalError as exc:
-                self.statusBar().showMessage("Search index unavailable", 4000)
-                self._alert(f"Search index unavailable: {exc}")
-                return
-            conn.execute("DELETE FROM pages_search_fts")
-            conn.execute("DELETE FROM pages_search_index")
-            conn.commit()
-
-            for idx, txt_file in enumerate(txt_files, start=1):
-                rel_path = txt_file.relative_to(root)
-                path_str = f"/{rel_path.as_posix()}"
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
                 try:
-                    content = txt_file.read_text(encoding="utf-8")
-                    mtime = int(txt_file.stat().st_mtime)
-                    search_index.upsert_page(conn, path_str, mtime, content)
-                except Exception:
-                    continue
-                progress.setValue(idx)
-                QApplication.processEvents()
-        finally:
-            conn.close()
-            progress.close()
+                    conn.execute(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                    )
+                except sqlite3.OperationalError as exc:
+                    self.statusBar().showMessage("Search index unavailable", 4000)
+                    self._alert(f"Search index unavailable: {exc}")
+                    return
+                conn.execute("DELETE FROM pages_search_fts")
+                conn.execute("DELETE FROM pages_search_index")
+                conn.commit()
 
-        page_count = len(txt_files)
-        self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
+                for idx, txt_file in enumerate(txt_files, start=1):
+                    rel_path = txt_file.relative_to(root)
+                    path_str = f"/{rel_path.as_posix()}"
+                    try:
+                        content = txt_file.read_text(encoding="utf-8")
+                        mtime = int(txt_file.stat().st_mtime)
+                        search_index.upsert_page(conn, path_str, mtime, content)
+                    except Exception:
+                        continue
+                    progress.setValue(idx)
+                    QApplication.processEvents()
+            finally:
+                conn.close()
+                progress.close()
+
+            page_count = len(txt_files)
+            self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
 
     def _reindex_remote_vault(self, rebuild_search: bool = False) -> None:
         """Start remote reindex job and poll for progress."""
