@@ -2862,8 +2862,6 @@ class MainWindow(QMainWindow):
             (self._action_new_vault, "Create a new vault"),
             (self._action_view_vault_disk, "View vault on disk"),
             (self._action_zim_import, "Import from Zim"),
-            (self._action_rebuild_index, "Rebuild vault index"),
-            (self._action_rebuild_search_index, "Rebuild vault search index"),
             (self._action_webserver, "Start web server"),
         ]
         for action, label in guarded:
@@ -2873,6 +2871,12 @@ class MainWindow(QMainWindow):
             else:
                 action.setEnabled(True)
                 action.setToolTip(self._action_tooltips.get(action, label))
+        
+        # Reindex actions are now supported for both local and remote vaults
+        self._action_rebuild_index.setEnabled(True)
+        self._action_rebuild_index.setToolTip(self._action_tooltips.get(self._action_rebuild_index, "Rebuild vault index"))
+        self._action_rebuild_search_index.setEnabled(True)
+        self._action_rebuild_search_index.setToolTip(self._action_tooltips.get(self._action_rebuild_search_index, "Rebuild vault search index"))
         if self._remote_mode:
             self._action_server_login.setEnabled(True)
             self._action_server_login.setToolTip(self._action_tooltips.get(self._action_server_login, ""))

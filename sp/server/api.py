@@ -933,6 +933,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
     import sqlite3
     from sp.server.adapters.files import PAGE_SUFFIXES, LEGACY_SUFFIX
     
+    print(f"[Reindex] Job {job_id} started: rebuild_search={rebuild_search}")
+    
     try:
         with _REINDEX_LOCK:
             if job_id not in _REINDEX_JOBS:
@@ -949,6 +951,7 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                 txt_files.append(page_file)
         
         total = len(txt_files)
+        print(f"[Reindex] Job {job_id}: found {total} files")
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["total"] = total
             _REINDEX_JOBS[job_id]["current"] = 0
@@ -970,56 +973,80 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         
         # Rebuild search index if requested
         if rebuild_search:
+            print(f"[Reindex] Job {job_id}: starting search index rebuild")
             with _REINDEX_LOCK:
                 _REINDEX_JOBS[job_id]["message"] = "Rebuilding search index..."
             
-            db_path = config._vault_db_path()
-            if db_path:
-                conn = sqlite3.connect(db_path, check_same_thread=False)
-                try:
-                    conn.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS pages_search_index (
-                            id INTEGER PRIMARY KEY,
-                            path TEXT NOT NULL UNIQUE,
-                            mtime INTEGER NOT NULL
-                        )
-                        """
-                    )
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+            try:
+                db_path = config._vault_db_path()
+                if db_path:
+                    print(f"[Reindex] Job {job_id}: db_path={db_path}")
+                    conn = sqlite3.connect(db_path, check_same_thread=False)
                     try:
                         conn.execute(
-                            "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                            """
+                            CREATE TABLE IF NOT EXISTS pages_search_index (
+                                id INTEGER PRIMARY KEY,
+                                path TEXT NOT NULL UNIQUE,
+                                mtime INTEGER NOT NULL
+                            )
+                            """
                         )
-                    except sqlite3.OperationalError:
-                        pass
-                    conn.execute("DELETE FROM pages_search_fts")
-                    conn.execute("DELETE FROM pages_search_index")
-                    conn.commit()
-                    
-                    for idx, txt_file in enumerate(txt_files, start=1):
-                        rel_path = txt_file.relative_to(root)
-                        path_str = f"/{rel_path.as_posix()}"
+                        conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+                        
+                        # Try to create FTS table if it doesn't exist
                         try:
-                            content = txt_file.read_text(encoding="utf-8")
-                            mtime = int(txt_file.stat().st_mtime)
-                            search_index.upsert_page(conn, path_str, mtime, content)
-                        except Exception:
+                            conn.execute(
+                                "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                            )
+                        except sqlite3.OperationalError:
                             pass
                         
-                        with _REINDEX_LOCK:
-                            _REINDEX_JOBS[job_id]["progress"] = 50 + int((idx / total) * 50)
-                    
-                    conn.commit()
-                finally:
-                    conn.close()
+                        # Clear existing search index
+                        try:
+                            conn.execute("DELETE FROM pages_search_fts")
+                        except sqlite3.OperationalError:
+                            # FTS table might not exist, ignore
+                            pass
+                        conn.execute("DELETE FROM pages_search_index")
+                        conn.commit()
+                        
+                        for idx, txt_file in enumerate(txt_files, start=1):
+                            rel_path = txt_file.relative_to(root)
+                            path_str = f"/{rel_path.as_posix()}"
+                            try:
+                                content = txt_file.read_text(encoding="utf-8")
+                                mtime = int(txt_file.stat().st_mtime)
+                                search_index.upsert_page(conn, path_str, mtime, content)
+                            except Exception:
+                                pass
+                            
+                            with _REINDEX_LOCK:
+                                _REINDEX_JOBS[job_id]["progress"] = 50 + int((idx / total) * 50)
+                        
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    print(f"[Reindex] Job {job_id}: search index complete")
+            except Exception as search_exc:
+                print(f"[Reindex] Job {job_id}: search index error: {search_exc}")
+                # Don't fail the entire job if search indexing fails
+                with _REINDEX_LOCK:
+                    _REINDEX_JOBS[job_id]["message"] = f"Main index complete, search index error: {search_exc}"
         
+        print(f"[Reindex] Job {job_id}: marking as completed")
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["status"] = "completed"
             _REINDEX_JOBS[job_id]["progress"] = 100
-            _REINDEX_JOBS[job_id]["message"] = f"Complete: indexed {total} pages"
+            if rebuild_search and _REINDEX_JOBS[job_id].get("message", "").startswith("Main index complete"):
+                # Keep the error message from search indexing
+                pass
+            else:
+                _REINDEX_JOBS[job_id]["message"] = f"Complete: indexed {total} pages"
+        print(f"[Reindex] Job {job_id}: finished successfully")
     
     except Exception as exc:
+        print(f"[Reindex] Job {job_id}: fatal error: {exc}")
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["status"] = "error"
             _REINDEX_JOBS[job_id]["message"] = str(exc)
