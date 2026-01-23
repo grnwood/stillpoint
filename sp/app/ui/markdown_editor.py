@@ -4356,8 +4356,18 @@ class MarkdownEditor(QTextEdit):
         """Delete the complete link structure at the given sentinel position."""
         block = cursor.block()
         text = block.text()
-        
-        # Find the complete link structure containing this sentinel
+        link_range = self._link_range_in_block(text, sentinel_pos)
+        if not link_range:
+            return
+        link_start_pos, link_end_pos = link_range
+        new_cursor = QTextCursor(block)
+        new_cursor.setPosition(block.position() + link_start_pos)
+        new_cursor.setPosition(block.position() + link_end_pos, QTextCursor.KeepAnchor)
+        new_cursor.removeSelectedText()
+        self.setTextCursor(new_cursor)
+
+    def _link_range_in_block(self, text: str, sentinel_pos: int) -> Optional[tuple[int, int]]:
+        """Return (start, end) range for the link containing sentinel_pos in a block."""
         idx = 0
         while idx < len(text):
             if text[idx] == LINK_SENTINEL:
@@ -4369,20 +4379,12 @@ class MarkdownEditor(QTextEdit):
                     label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:
                         link_end_pos = label_end + 1
-                        
-                        # Check if the sentinel_pos is within this link structure
                         if link_start_pos <= sentinel_pos < link_end_pos:
-                            # Delete the entire link
-                            new_cursor = QTextCursor(block)
-                            new_cursor.setPosition(block.position() + link_start_pos)
-                            new_cursor.setPosition(block.position() + link_end_pos, QTextCursor.KeepAnchor)
-                            new_cursor.removeSelectedText()
-                            self.setTextCursor(new_cursor)
-                            return
-                        
+                            return (link_start_pos, link_end_pos)
                         idx = link_end_pos
                         continue
             idx += 1
+        return None
 
     def _trigger_history_navigation(self, qt_key: int) -> None:
         """Simulate Alt+Left/Right to leverage MainWindow history shortcuts."""
@@ -5431,6 +5433,22 @@ class MarkdownEditor(QTextEdit):
             return None
         return "".join(parts)
 
+    def _vi_selection_text(self, cursor: QTextCursor) -> Optional[str]:
+        text = self._vi_selection_as_markdown(cursor)
+        if text is None:
+            if not cursor.hasSelection():
+                return None
+            text = cursor.selectedText()
+        if not text:
+            return None
+        normalized = text.replace("\u2029", "\n")
+        if LINK_SENTINEL in normalized:
+            try:
+                normalized = self._from_display(normalized)
+            except Exception:
+                pass
+        return normalized if normalized else None
+
     def _vi_cut_selection_or_char(self) -> None:
         cursor = self.textCursor()
         
@@ -5438,8 +5456,25 @@ class MarkdownEditor(QTextEdit):
         if cursor.hasSelection():
             selected_text = cursor.selectedText()
             if LINK_SENTINEL in selected_text:
+                start = cursor.selectionStart()
+                end = cursor.selectionEnd()
+                full_text = self.toPlainText()
+                link_ranges = [(m.start(), m.end()) for m in WIKI_LINK_DISPLAY_PATTERN.finditer(full_text)]
+                adjusted_start = start
+                adjusted_end = end
+                for link_start, link_end in link_ranges:
+                    if not (end <= link_start or start >= link_end):
+                        adjusted_start = min(adjusted_start, link_start)
+                        adjusted_end = max(adjusted_end, link_end)
+                yank_cursor = QTextCursor(self.document())
+                yank_cursor.setPosition(adjusted_start)
+                yank_cursor.setPosition(adjusted_end, QTextCursor.KeepAnchor)
+                normalized = self._vi_selection_text(yank_cursor)
                 # Use the safe deletion method
                 self._delete_selection_with_links(cursor)
+                if normalized:
+                    self._vi_clipboard = normalized
+                    self._system_clipboard_set(normalized)
                 return
         else:
             # Check if next character is a sentinel, or if cursor is right after a link's closing sentinel
@@ -5447,13 +5482,34 @@ class MarkdownEditor(QTextEdit):
             rel_pos = cursor.position() - block.position()
             text = block.text()
             if rel_pos < len(text) and text[rel_pos] == LINK_SENTINEL:
-                # Delete the entire link
-                self._delete_link_at_position(cursor, rel_pos)
+                link_range = self._link_range_in_block(text, rel_pos)
+                if link_range:
+                    link_start, link_end = link_range
+                    yank_cursor = QTextCursor(block)
+                    yank_cursor.setPosition(block.position() + link_start)
+                    yank_cursor.setPosition(block.position() + link_end, QTextCursor.KeepAnchor)
+                    normalized = self._vi_selection_text(yank_cursor)
+                    yank_cursor.removeSelectedText()
+                    self.setTextCursor(yank_cursor)
+                    if normalized:
+                        self._vi_clipboard = normalized
+                        self._system_clipboard_set(normalized)
                 return
             # Check if we're right after a link's closing sentinel
             if rel_pos > 0 and (rel_pos - 1) < len(text) and text[rel_pos - 1] == LINK_SENTINEL:
                 # Find if this is a closing sentinel of a link
-                self._delete_link_at_position(cursor, rel_pos - 1)
+                link_range = self._link_range_in_block(text, rel_pos - 1)
+                if link_range:
+                    link_start, link_end = link_range
+                    yank_cursor = QTextCursor(block)
+                    yank_cursor.setPosition(block.position() + link_start)
+                    yank_cursor.setPosition(block.position() + link_end, QTextCursor.KeepAnchor)
+                    normalized = self._vi_selection_text(yank_cursor)
+                    yank_cursor.removeSelectedText()
+                    self.setTextCursor(yank_cursor)
+                    if normalized:
+                        self._vi_clipboard = normalized
+                        self._system_clipboard_set(normalized)
                 return
         
         cursor.beginEditBlock()
