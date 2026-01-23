@@ -368,6 +368,9 @@ class PreferencesDialog(QDialog):
         row2.addWidget(QLabel("Model:"))
         self.default_model_combo = QComboBox()
         row2.addWidget(self.default_model_combo, 1)
+        self.refresh_models_btn = QPushButton("Refresh Models")
+        self.refresh_models_btn.clicked.connect(self._refresh_default_models_from_server)
+        row2.addWidget(self.refresh_models_btn)
         ai_layout.addLayout(row2)
         self._load_default_server_model()
 
@@ -585,6 +588,7 @@ class PreferencesDialog(QDialog):
         layout.addWidget(btns)
 
         dlg.exec()
+        self._load_default_server_model()
 
     def _load_default_server_model(self):
         """Populate default server/model dropdowns based on configured servers."""
@@ -625,6 +629,20 @@ class PreferencesDialog(QDialog):
 
     def _on_default_server_changed(self):
         self._refresh_default_models()
+
+    def _refresh_default_models_from_server(self) -> None:
+        try:
+            from sp.app.ui.ai_chat_panel import ServerManager, fetch_and_cache_models
+
+            manager = ServerManager()
+            server = manager.get_server(self.default_server_combo.currentText())
+            if not server:
+                QMessageBox.warning(self, "No Server", "Please select a server to refresh models.")
+                return
+            fetch_and_cache_models(server)
+            self._refresh_default_models(manager)
+        except Exception:
+            QMessageBox.warning(self, "Refresh Failed", "Failed to refresh models from the server.")
 
     def _browse_plantuml_jar(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select plantuml.jar", "", "JAR Files (*.jar);;All Files (*)")

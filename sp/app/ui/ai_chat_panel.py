@@ -163,8 +163,8 @@ class VectorAPIClient:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ASSETS_DIR = PROJECT_ROOT / "assets"
 SERVER_CONFIG_FILE = PROJECT_ROOT / "slipstream" / "server_configs.json"
-DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
-DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+# Default local model endpoint (LM Studio OpenAI-compatible API)
+DEFAULT_LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://localhost:1234")
 
 @lru_cache(maxsize=1)
 def _get_asset_directory() -> Path:
@@ -363,18 +363,50 @@ def to_bool(value, default=False):
 def build_default_server_configs():
     servers = [
         {
-            "name": "Proxy Server",
-            "base_url": normalize_base_url(DEFAULT_API_URL),
+            "name": "LM Studio",
+            "base_url": normalize_base_url(DEFAULT_LM_STUDIO_URL),
             "auth_mode": "proxy",
-            "api_secret": DEFAULT_API_SECRET,
+            "api_secret": "",
             "api_key": "",
-            "models_path": "/mods",
+            "custom_header_name": "",
+            "custom_header_value": "",
+            "models_path": "/v1/models",
             "chat_path": "/v1/chat/completions",
-            "verify_ssl": False,
+            "verify_ssl": True,
             "default_model": "gpt-3.5-turbo",
             "auto_summarize": True,
             "timeout": "",
-        }
+        },
+        {
+            "name": "OpenAI Compatible (8000)",
+            "base_url": "http://localhost:8000",
+            "auth_mode": "proxy",
+            "api_secret": "",
+            "api_key": "",
+            "custom_header_name": "",
+            "custom_header_value": "",
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "verify_ssl": True,
+            "default_model": "gpt-3.5-turbo",
+            "auto_summarize": True,
+            "timeout": "",
+        },
+        {
+            "name": "OpenAI Compatible (8080)",
+            "base_url": "http://localhost:8080",
+            "auth_mode": "proxy",
+            "api_secret": "",
+            "api_key": "",
+            "custom_header_name": "",
+            "custom_header_value": "",
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "verify_ssl": True,
+            "default_model": "gpt-3.5-turbo",
+            "auto_summarize": True,
+            "timeout": "",
+        },
     ]
     return servers
 

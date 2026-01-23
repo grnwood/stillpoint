@@ -8,8 +8,8 @@ from datetime import date as Date
 import math
 from typing import Optional, Callable
 
-from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect
-from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush
+from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect, QMimeData
+from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush, QDrag
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -121,6 +121,36 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         else:
             # Use default painting
             super().paint(painter, option, index)
+
+
+class InsightDragList(QListWidget):
+    """QListWidget that drags page paths into the editor."""
+
+    def startDrag(self, supportedActions):  # type: ignore[override]
+        item = self.currentItem()
+        if not item:
+            selected = self.selectedItems()
+            item = selected[0] if selected else None
+        if not item:
+            return super().startDrag(supportedActions)
+        path = item.data(PATH_ROLE)
+        if not path:
+            return super().startDrag(supportedActions)
+        mime = QMimeData()
+        mime.setText(str(path))
+        mime.setData("application/x-stillpoint-path", str(path).encode("utf-8"))
+        label = item.text()
+        path_text = str(path)
+        if "#" not in path_text:
+            try:
+                label = Path(path_text).stem or label
+            except Exception:
+                pass
+        if label:
+            mime.setData("application/x-stillpoint-label", label.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
 
 
 class CalendarPanel(QWidget):
@@ -304,9 +334,10 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.addWidget(self.insight_counts)
         self.day_insights_layout.addWidget(self.insight_tags)
 
-        self.subpage_list = QListWidget()
+        self.subpage_list = InsightDragList()
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
+        self.subpage_list.setDragEnabled(True)
         self.subpage_list.setAlternatingRowColors(True)
         self.subpage_list.setStyleSheet(
             """
@@ -322,9 +353,10 @@ class CalendarPanel(QWidget):
         except Exception:
             pass
         # Pages and headings: split into two columns (Headings | Sub Pages)
-        self.headings_list = QListWidget()
+        self.headings_list = InsightDragList()
         self.headings_list.itemActivated.connect(self._open_insight_link)
         self.headings_list.itemClicked.connect(self._open_insight_link)
+        self.headings_list.setDragEnabled(True)
         self.headings_list.setAlternatingRowColors(True)
         self.headings_list.setStyleSheet(
             """

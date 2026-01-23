@@ -78,10 +78,14 @@ def path_to_colon(file_path: str) -> str:
     Returns:
         Colon-separated page hierarchy (e.g., "PageA:PageB:PageC")
     """
-    # Strip whitespace first, then strip slashes
-    cleaned = file_path.strip().strip("/")
+    # Strip whitespace first, then split off any anchor.
+    cleaned = (file_path or "").strip()
+    anchor = ""
+    if "#" in cleaned:
+        cleaned, anchor = cleaned.split("#", 1)
+    cleaned = cleaned.strip().strip("/")
     if not cleaned:
-        return ""
+        return f"#{anchor}" if anchor else ""
     
     parts = cleaned.split("/")
     # Remove page suffix from last part if present
@@ -98,7 +102,10 @@ def path_to_colon(file_path: str) -> str:
     # Convert spaces to underscores in each part for consistent link format
     parts = [part.replace(" ", "_") for part in parts]
     
-    return ":".join(parts)
+    result = ":".join(parts)
+    if anchor:
+        return f"{result}#{anchor}"
+    return result
 
 
 def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:

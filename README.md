@@ -6,7 +6,7 @@ StillPoint is a local-first, markdown note system with a PySide6 desktop app and
 
 - Local-first vaults on disk (folders + Markdown files).
 - Fast tree navigation, history popup, and heading switcher.
-- Markdown editor with formatting shortcuts, task parsing, and inline images.
+- Markdown editor with formatting shortcuts, task parsing, inline images, and inline link triggers (`//` quick link, `[[` inline AI prompt).
 - Journaling workflows with date navigation and templates.
 - Quick Capture (tray/menu/CLI) for low-friction capture into today's page.
 - Focus and Audience modes for distraction-free writing and reading.
@@ -70,6 +70,7 @@ Key UI features:
 - Task panel with tag filtering and search.
 - Calendar panel and "Today" journal actions.
 - Attachments, link navigator, and AI panels (optional).
+- Inline editor triggers: type `//` to insert a page link, or `[[` to open the inline AI prompt (when AI is enabled).
 - Focus/Audience modes for distraction-free reading.
 
 ## Graph / Project Mode
@@ -86,6 +87,7 @@ Related features:
 
 AI features are opt-in and require configuration. Current capabilities include:
 
+- Default server configs ship for local OpenAI-compatible servers (LM Studio on `http://localhost:1234`, plus `http://localhost:8000` and `http://localhost:8080`). These are written into `~/.stillpoint_config.json` only if no servers are configured yet; override or remove them in Preferences → Manage Servers.
 - One-shot prompting in-flow (quick refine/transform actions).
 - Page chat (contextual chat scoped to the current page).
 - Global chat (vault-wide or general context).

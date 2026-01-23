@@ -4023,6 +4023,13 @@ class MarkdownEditor(QTextEdit):
         print(f"[Drop] hasUrls: {mime.hasUrls()}, hasText: {mime.hasText()}")
         print(f"[Drop] Formats: {mime.formats()}")
         print(f"[Drop] Has stillpoint-path: {mime.hasFormat('application/x-stillpoint-path')}")
+        label_override: str | None = None
+        if mime.hasFormat("application/x-stillpoint-label"):
+            try:
+                raw_label = mime.data("application/x-stillpoint-label")
+                label_override = bytes(raw_label).decode("utf-8").strip()
+            except Exception:
+                label_override = None
         
         file_path = None
         dropped_path_text: str | None = None
@@ -4085,7 +4092,7 @@ class MarkdownEditor(QTextEdit):
             if not link_text:
                 colon = path_to_colon(dropped_path_text) or dropped_path_text
                 link_target = ensure_root_colon_link(colon)
-                label = Path(dropped_path_text).stem or link_target
+                label = label_override or Path(dropped_path_text).stem or link_target
                 link_text = f"[{link_target}|{label}]"
             
             cursor = self.cursorForPosition(event.pos())
