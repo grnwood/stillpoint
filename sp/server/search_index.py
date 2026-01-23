@@ -62,6 +62,36 @@ def delete_page(conn: sqlite3.Connection, path: str) -> None:
         print(f"[SearchIndex] Failed to delete page {path}: {e}")
 
 
+def delete_tree(conn: sqlite3.Connection, folder_path: str) -> None:
+    """Remove a folder subtree from the search index (matching any child pages)."""
+    try:
+        prefix = (folder_path or "").strip().replace("\\", "/")
+        if not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+        prefix = prefix.rstrip("/")
+        like_prefix = f"{prefix}/%"
+        rows = conn.execute(
+            "SELECT id FROM pages_search_index WHERE path = ? OR path LIKE ?",
+            (prefix, like_prefix),
+        ).fetchall()
+        if not rows:
+            return
+        row_ids = [row[0] for row in rows if row and row[0] is not None]
+        if not row_ids:
+            return
+        conn.executemany(
+            "DELETE FROM pages_search_fts WHERE rowid = ?",
+            [(row_id,) for row_id in row_ids],
+        )
+        conn.executemany(
+            "DELETE FROM pages_search_index WHERE id = ?",
+            [(row_id,) for row_id in row_ids],
+        )
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        print(f"[SearchIndex] Failed to delete subtree {folder_path}: {e}")
+
+
 def _find_snippet_line(full_content: str, snippet: str) -> int:
     """
     Find the line number where the snippet text appears in the content.

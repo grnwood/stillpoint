@@ -569,6 +569,20 @@ def save_rewrite_backlinks_on_move(enabled: bool) -> None:
     _update_global_config({"rewrite_backlinks_on_move": bool(enabled)})
 
 
+def load_prefer_short_links() -> bool:
+    """Return whether to prefer short link labels during link insertion (default: True)."""
+    payload = _read_global_config()
+    val = payload.get("prefer_short_links")
+    if val is None:
+        return True
+    return bool(val)
+
+
+def save_prefer_short_links(enabled: bool) -> None:
+    """Persist preference for short link labels on insertion."""
+    _update_global_config({"prefer_short_links": bool(enabled)})
+
+
 def save_minimal_font_scan_enabled(enabled: bool) -> None:
     """Persist preference for enabling minimal font scanning."""
     _update_global_config({"minimal_font_scan": bool(enabled)})

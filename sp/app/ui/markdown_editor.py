@@ -2370,9 +2370,13 @@ class MarkdownEditor(QTextEdit):
             if match_left != target_left:
                 label = candidate
         
-        # If no custom label, use the target as the label
+        # If no custom label, use target or a short label based on preference.
         if not label:
-            label = target
+            if (not is_http_url) and config.load_prefer_short_links():
+                trimmed = target.lstrip(":")
+                label = (trimmed.split(":")[-1] if trimmed else target)
+            else:
+                label = target
         
         # Insert directly in display format: sentinel + target + sentinel + label + sentinel
         display_link = f"{LINK_SENTINEL}{target}{LINK_SENTINEL}{label}{LINK_SENTINEL}"

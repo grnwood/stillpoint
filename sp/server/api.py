@@ -1,15 +1,58 @@
 from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import html
+import importlib
+import json
+import os
+import re
+import secrets
+import shutil
+import sqlite3
+import sys
+import threading
+import time
+import traceback
+import uuid
+from contextlib import asynccontextmanager
+from datetime import date as Date
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Literal, Optional
+from urllib.parse import quote, unquote, urlparse
+
+import httpx
+import markdown as md
+import uvicorn
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from fastapi import Depends, FastAPI, File as FastAPISingleFile, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jose import JWTError, jwt
+from markupsafe import Markup
+from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    import pkg_resources
+except Exception:
+    pkg_resources = None
+
 # --- Fix for FastAPI + PyInstaller + python-multipart ---
 try:
-    import importlib
-
     multipart = importlib.import_module("multipart")
     # FastAPI checks for multipart.__version__ to verify python-multipart
     if not getattr(multipart, "__version__", None):
         try:
             # Try to get the real version from the installed dist
-            import pkg_resources
-            multipart.__version__ = pkg_resources.get_distribution("python-multipart").version
+            if pkg_resources:
+                multipart.__version__ = pkg_resources.get_distribution("python-multipart").version
+            else:
+                multipart.__version__ = "0.0.0"
         except Exception:
             # Fallback: any non-empty string will satisfy FastAPI's check
             multipart.__version__ = "0.0.0"
@@ -18,41 +61,11 @@ except ImportError:
     pass
 # --- end fix ---
 
-import copy
-import re
-import html
-from contextlib import asynccontextmanager
-
-from datetime import date as Date
-from datetime import datetime, timedelta
-import os
-import shutil
-import sys
-import traceback
-from pathlib import Path
-import secrets
-from typing import List, Literal, Optional
-import time
-from urllib.parse import quote, unquote, urlparse
-
-import httpx
-from fastapi import Depends, FastAPI, File as FastAPISingleFile, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
-from fastapi.middleware.cors import CORSMiddleware
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
-from pydantic import BaseModel, ConfigDict, Field
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-from markupsafe import Markup
-import markdown as md
-
 from sp.server import indexer
 from sp.server import file_ops
 from sp.server import search_index
 from sp.server.adapters import files
-from sp.server.adapters.files import FileAccessError, PAGE_SUFFIX
+from sp.server.adapters.files import FileAccessError, LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.server.state import vault_state
 from sp.server.vector import vector_manager
 from sp.rag.index import RetrievedChunk
@@ -77,10 +90,6 @@ _TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
 _UI_QUICK_CAPTURE_HOOK = None
-
-# Reindex job tracking
-import threading
-import uuid
 
 _REINDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, message, total, current}
 _REINDEX_LOCK = threading.Lock()
@@ -291,13 +300,11 @@ def _get_auth_config():
     if not db_path.exists():
         return None
     
-    import sqlite3
     conn = sqlite3.connect(str(db_path))
     try:
         cursor = conn.execute("SELECT value FROM kv WHERE key = 'auth_config'")
         row = cursor.fetchone()
         if row:
-            import json
             return json.loads(row[0])
     except Exception:
         pass
@@ -315,9 +322,7 @@ def _set_auth_config(username: str, password_hash: str):
     if not vault_root:
         raise HTTPException(status_code=500, detail="No vault selected")
     db_path = vault_root / ".stillpoint" / "settings.db"
-    import sqlite3
-    import json
-    
+
     config = {
         "username": username,
         "password_hash": password_hash,
@@ -340,8 +345,6 @@ def _init_vault_db(root: Path) -> None:
     db_dir = root / ".stillpoint"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / "settings.db"
-    import sqlite3
-
     conn = sqlite3.connect(str(db_path))
     try:
         config._ensure_schema(conn)
@@ -352,8 +355,6 @@ def _init_vault_db(root: Path) -> None:
 def _set_auth_config_for_path(root: Path, username: str, password_hash: str) -> None:
     """Store auth configuration for a specific vault path."""
     db_path = root / ".stillpoint" / "settings.db"
-    import sqlite3
-    import json
 
     config_payload = {
         "username": username,
@@ -393,7 +394,6 @@ def _verify_server_admin_password(password_hash: str) -> bool:
     """Verify hashed server admin password."""
     if not SERVER_ADMIN_PASSWORD:
         return False
-    import hashlib
     expected_hash = hashlib.sha256(SERVER_ADMIN_PASSWORD.encode()).hexdigest()
     return password_hash == expected_hash
 
@@ -406,12 +406,10 @@ async def verify_server_admin(request: Request) -> None:
     
     # Check for server admin password header
     password_hash = request.headers.get("x-server-admin-password")
-    import os
     debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
     if debug:
         print(f"[verify_server_admin] Received hash: {password_hash[:16] + '...' if password_hash else 'None'}")
         if SERVER_ADMIN_PASSWORD:
-            import hashlib
             expected = hashlib.sha256(SERVER_ADMIN_PASSWORD.encode()).hexdigest()
             print(f"[verify_server_admin] Expected hash: {expected[:16]}...")
             print(f"[verify_server_admin] Match: {password_hash == expected if password_hash else False}")
@@ -671,7 +669,6 @@ async def lifespan(app: FastAPI):
             print(f"{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}\n")
         else:
             # No password and no insecure flag - fail
-            import sys
             sys.stderr.write(f"\n{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}\n")
             sys.stderr.write(f"{_ANSI_BLUE}⚠️  SECURITY ERROR: SERVER_ADMIN_PASSWORD not set!{_ANSI_RESET}\n")
             sys.stderr.write(f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}\n")
@@ -930,9 +927,6 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 
 def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
     """Background worker to reindex vault."""
-    import sqlite3
-    from sp.server.adapters.files import PAGE_SUFFIXES, LEGACY_SUFFIX
-    
     print(f"[Reindex] Job {job_id} started: rebuild_search={rebuild_search}")
     
     try:
@@ -1150,7 +1144,6 @@ def file_read(payload: FilePathPayload) -> dict:
     rev = None
     db_path = config._vault_db_path()
     if db_path:
-        import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
         try:
             row = conn.execute("SELECT rev FROM pages WHERE path = ?", (payload.path,)).fetchone()
@@ -1304,7 +1297,6 @@ def file_write(
             if_match = if_match.split(":", 1)[1]
             db_path = config._vault_db_path()
             if db_path:
-                import sqlite3
                 conn = sqlite3.connect(db_path, check_same_thread=False)
                 try:
                     row = conn.execute(
@@ -1356,8 +1348,6 @@ def file_write(
         # Update search index
         db_path = config._vault_db_path()
         if db_path:
-            import sqlite3
-            import time
             conn = sqlite3.connect(db_path, check_same_thread=False)
             search_index.upsert_page(conn, payload.path, int(time.time()), payload.content)
             conn.close()
@@ -1451,8 +1441,6 @@ def quick_capture(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db_path = root / ".stillpoint" / "settings.db"
     try:
-        import sqlite3
-
         conn = sqlite3.connect(db_path, check_same_thread=False)
         search_index.upsert_page(conn, rel_path, int(time.time()), updated)
         conn.close()
@@ -1493,7 +1481,6 @@ def api_search(
         return {"results": []}
     
     try:
-        import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
         results = search_index.search_pages(conn, q, subtree, limit)
         preview = [item.get("path") for item in results[:5]]
@@ -1524,7 +1511,6 @@ def api_pages_search(
         return {"pages": []}
     
     try:
-        import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
         
         term_lower = q.lower()
@@ -1559,7 +1545,6 @@ def api_pages_search(
         return {"pages": pages}
     except Exception as e:
         print(f"[API] Pages search error: {e}")
-        import traceback
         traceback.print_exc()
         return {"pages": []}
 
@@ -1572,7 +1557,6 @@ def api_search_status() -> dict:
         return {"populated": False, "count": 0}
     
     try:
-        import sqlite3
         conn = sqlite3.connect(db_path, check_same_thread=False)
         cursor = conn.execute("SELECT COUNT(*) FROM pages_search_index")
         count = cursor.fetchone()[0]
@@ -1597,8 +1581,6 @@ def sync_changes(
     db_path = config._vault_db_path()
     if not db_path:
         raise HTTPException(status_code=400, detail="No vault selected")
-    
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         current_sync_rev = config.get_sync_revision()
@@ -1646,7 +1628,6 @@ def get_recent_pages(
     if not db_path:
         raise HTTPException(status_code=400, detail="No vault selected")
     
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         rows = conn.execute(
@@ -1682,7 +1663,6 @@ def get_all_tags(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
     if not db_path:
         raise HTTPException(status_code=400, detail="No vault selected")
     
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         rows = conn.execute(
@@ -1711,7 +1691,6 @@ def get_page_links(
     if not db_path:
         raise HTTPException(status_code=400, detail="No vault selected")
     
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         # Get page path from page_id
@@ -1743,7 +1722,6 @@ def get_page_backlinks(
     if not db_path:
         raise HTTPException(status_code=400, detail="No vault selected")
     
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         # Get page path from page_id
@@ -1805,8 +1783,6 @@ def create_path(payload: CreatePathPayload) -> dict:
             # Update search index for new page
             db_path = config._vault_db_path()
             if db_path:
-                import sqlite3
-                import time
                 conn = sqlite3.connect(db_path, check_same_thread=False)
                 content = payload.content or ""
                 search_index.upsert_page(conn, page_path, int(time.time()), content)
@@ -1827,9 +1803,8 @@ def delete_path(payload: DeletePathPayload) -> dict:
         # Remove from search index
         db_path = config._vault_db_path()
         if db_path:
-            import sqlite3
             conn = sqlite3.connect(db_path, check_same_thread=False)
-            search_index.delete_page(conn, payload.path)
+            search_index.delete_tree(conn, payload.path)
             conn.close()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2525,8 +2500,6 @@ def run_server(
     insecure: bool = False,
 ) -> None:
     """Run the API server in standalone mode."""
-    import uvicorn
-
     resolved_vaults_root = vaults_root if vaults_root is not None else os.getenv("STILLPOINT_VAULTS_ROOT", "vaults")
     if not resolved_vaults_root:
         print("Error: --vaults-root must be specified or STILLPOINT_VAULTS_ROOT environment variable set.")
@@ -2592,8 +2565,6 @@ def run_server(
 
 
 if __name__ == "__main__":
-    import argparse
-    
     parser = argparse.ArgumentParser(description="StillPoint API Server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)

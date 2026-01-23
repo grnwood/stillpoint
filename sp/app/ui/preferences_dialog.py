@@ -504,6 +504,17 @@ class PreferencesDialog(QDialog):
         except Exception:
             self.rewrite_backlinks_checkbox.setChecked(True)
         vault_layout.addWidget(self.rewrite_backlinks_checkbox)
+
+        self.prefer_short_links_checkbox = QCheckBox("Prefer shorter links on link generation?")
+        self.prefer_short_links_checkbox.setToolTip(
+            "For Page :Home:PageOne:PageTwo\n"
+            "link: PageTwo instead of full link."
+        )
+        try:
+            self.prefer_short_links_checkbox.setChecked(config.load_prefer_short_links())
+        except Exception:
+            self.prefer_short_links_checkbox.setChecked(True)
+        vault_layout.addWidget(self.prefer_short_links_checkbox)
         vault_layout.addStretch(1)
 
     def _open_manage_server_dialog(self):
@@ -766,6 +777,7 @@ class PreferencesDialog(QDialog):
             pass
         try:
             config.save_rewrite_backlinks_on_move(self.rewrite_backlinks_checkbox.isChecked())
+            config.save_prefer_short_links(self.prefer_short_links_checkbox.isChecked())
         except Exception:
             pass
         super().accept()
