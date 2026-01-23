@@ -1666,7 +1666,10 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         if not cursor.hasSelection():
             return ""
-        return cursor.selectedText().replace("\u2029", "\n")
+        text = self._vi_selection_as_markdown(cursor)
+        if text is None:
+            text = cursor.selectedText()
+        return (text or "").replace("\u2029", "\n")
 
     def _move_selected_text_to_page(self, dest_page_path: str) -> bool:
         """Append selection to dest page (via callback) and replace selection with a link."""
@@ -1697,7 +1700,14 @@ class MarkdownEditor(QTextEdit):
         if not cursor.hasSelection():
             return
         anchor = self._last_context_menu_global_pos
-        dialog = JumpToPageDialog(self, compact=True, geometry_key=None, anchor_global_pos=anchor)
+        dialog = JumpToPageDialog(
+            self,
+            compact=True,
+            geometry_key=None,
+            anchor_global_pos=anchor,
+            launch_mode="move_text",
+            current_page_path=self._current_path,
+        )
         # Opening a modal dialog steals focus from the editor; suppress focusLost so
         # upstream autosave handlers don't write just for showing the dialog.
         self._suppress_focus_lost_once = True
@@ -5155,6 +5165,14 @@ class MarkdownEditor(QTextEdit):
             return True
         if key == Qt.Key_C and not shift:
             self._vi_copy_to_buffer()
+            return True
+        if key == Qt.Key_M and not shift:
+            if read_only:
+                return _block_vi_edit()
+            if cursor.hasSelection():
+                self._move_text_via_jump_dialog()
+            else:
+                self._status_message("Select text to move.")
             return True
 
         if key == Qt.Key_I and not shift:

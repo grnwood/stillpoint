@@ -5,6 +5,7 @@ import copy
 import hashlib
 import html
 import importlib
+from importlib import metadata as importlib_metadata
 import json
 import os
 import re
@@ -37,11 +38,6 @@ from jose import JWTError, jwt
 from markupsafe import Markup
 from pydantic import BaseModel, ConfigDict, Field
 
-try:
-    import pkg_resources
-except Exception:
-    pkg_resources = None
-
 # --- Fix for FastAPI + PyInstaller + python-multipart ---
 try:
     multipart = importlib.import_module("multipart")
@@ -49,10 +45,7 @@ try:
     if not getattr(multipart, "__version__", None):
         try:
             # Try to get the real version from the installed dist
-            if pkg_resources:
-                multipart.__version__ = pkg_resources.get_distribution("python-multipart").version
-            else:
-                multipart.__version__ = "0.0.0"
+            multipart.__version__ = importlib_metadata.version("python-multipart")
         except Exception:
             # Fallback: any non-empty string will satisfy FastAPI's check
             multipart.__version__ = "0.0.0"

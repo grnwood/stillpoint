@@ -168,7 +168,7 @@ class JumpToPageDialog(QDialog):
         if item:
             return item.data(Qt.UserRole)
         # If no selection but in insert_link/create_new mode with search text, return new page path
-        if self._launch_mode in ("insert_link", "create_new") and not self._has_matching_pages:
+        if self._launch_mode in ("insert_link", "create_new", "move_text") and not self._has_matching_pages:
             search_term = self.search.text().strip()
             if search_term:
                 return self._generate_new_page_path(search_term)
@@ -243,8 +243,8 @@ class JumpToPageDialog(QDialog):
         # Track if we have matching pages and update title accordingly
         self._has_matching_pages = self.list_widget.count() > 0
         
-        # If no matches in insert_link mode, show create option
-        if not self._has_matching_pages and self._launch_mode == "insert_link" and term:
+        # If no matches in insert_link/move_text mode, show create option
+        if not self._has_matching_pages and self._launch_mode in ("insert_link", "move_text") and term:
             new_path = self._generate_new_page_path(term)
             item = QListWidgetItem(f"<i>Create new page: {html.escape(term)}</i>")
             item.setData(Qt.UserRole, new_path)
@@ -342,6 +342,10 @@ class JumpToPageDialog(QDialog):
     
     def _get_title(self) -> str:
         """Generate dialog title based on launch mode and search state."""
+        if self._launch_mode == "move_text":
+            if not self._has_matching_pages and self.search.text().strip():
+                return "Move to New Page"
+            return "Move text to..."
         if self._launch_mode == "insert_link":
             if not self._has_matching_pages and self.search.text().strip():
                 vault_level = self._get_current_vault_level()

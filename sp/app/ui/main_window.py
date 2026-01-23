@@ -5389,13 +5389,43 @@ class MainWindow(QMainWindow):
         if self.current_path and dest_path == self.current_path:
             self._alert("Destination page is the current page.")
             return False
+        created_new = False
         try:
             resp = self.http.post("/api/file/read", json={"path": dest_path})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            self._alert_api_error(exc, f"Failed to read {dest_path}")
-            return False
+            status = getattr(exc.response, "status_code", None)
+            if status != 404:
+                self._alert_api_error(exc, f"Failed to read {dest_path}")
+                return False
+            if not self._ensure_writable("create new page"):
+                return False
+            page_folder = self._file_path_to_folder(dest_path)
+            if not page_folder:
+                self._alert("Invalid destination path.")
+                return False
+            try:
+                create_resp = self.http.post("/api/path/create", json={"path": page_folder, "is_dir": True})
+                create_resp.raise_for_status()
+                created_new = True
+            except httpx.HTTPError as create_exc:
+                self._alert_api_error(create_exc, f"Failed to create {page_folder}")
+                return False
+            if not self._remote_mode:
+                try:
+                    page_name = Path(dest_path).stem
+                    self._apply_new_page_template(dest_path, page_name)
+                except Exception:
+                    pass
+            try:
+                resp = self.http.post("/api/file/read", json={"path": dest_path})
+                resp.raise_for_status()
+            except httpx.HTTPError as reread_exc:
+                self._alert_api_error(reread_exc, f"Failed to read {dest_path}")
+                return False
         content = resp.json().get("content", "")
+        if not self._move_attachments_for_moved_text(markdown_text, dest_path):
+            return False
 
         snippet = markdown_text.replace("\u2029", "\n").rstrip("\n")
         if content:
@@ -5426,6 +5456,103 @@ class MainWindow(QMainWindow):
                 self._refresh_detached_link_panels(dest_path)
             except Exception:
                 pass
+        if created_new:
+            self._populate_vault_tree()
+        return True
+
+    def _move_attachments_for_moved_text(self, markdown_text: str, dest_path: str) -> bool:
+        if not markdown_text or not self.current_path or not dest_path:
+            return True
+        source_dir = Path(self.current_path).parent
+        dest_dir = Path(dest_path).parent
+        if source_dir == dest_dir:
+            return True
+        refs = self._collect_attachment_refs(markdown_text)
+        if not refs:
+            return True
+        for ref in refs:
+            name = self._normalize_attachment_ref(ref)
+            if not name:
+                continue
+            source_path = f"/{(source_dir / name).as_posix()}"
+            if not self._move_attachment_path(source_path, dest_path, name):
+                return False
+        return True
+
+    def _collect_attachment_refs(self, markdown_text: str) -> list[str]:
+        refs: set[str] = set()
+        for match in re.finditer(r"!\[[^\]]*\]\((?P<path>[^)\s]+)\)(?:\{width=\d+\})?", markdown_text):
+            refs.add(match.group("path"))
+        for match in re.finditer(
+            r"\[[^\]]+\]\((?P<path>(?:\./)?[^)\s]+\.[A-Za-z0-9]{1,8})\)",
+            markdown_text,
+        ):
+            refs.add(match.group("path"))
+        return list(refs)
+
+    def _normalize_attachment_ref(self, path: str) -> Optional[str]:
+        raw = (path or "").strip()
+        if not raw:
+            return None
+        if raw.startswith(("http://", "https://", "data:", "#", ":")):
+            return None
+        if raw.startswith("file://"):
+            raw = raw[7:]
+        raw = raw.split("#", 1)[0].split("?", 1)[0]
+        if raw.startswith("./"):
+            raw = raw[2:]
+        raw = raw.replace("\\", "/")
+        if not raw or "/" in raw:
+            return None
+        return raw
+
+    def _move_attachment_path(self, source_path: str, dest_page: str, filename: str) -> bool:
+        data: bytes | None = None
+        if not self._remote_mode:
+            if not self.vault_root:
+                return False
+            try:
+                src_abs = (Path(self.vault_root) / source_path.lstrip("/")).resolve()
+                data = src_abs.read_bytes()
+            except Exception as exc:
+                self._alert(f"Failed to read attachment {source_path}: {exc}")
+                return False
+        else:
+            try:
+                resp = self.http.get("/api/file/raw", params={"path": source_path})
+                if resp.status_code == 401 and self._remote_mode and self._prompt_remote_login():
+                    resp = self.http.get("/api/file/raw", params={"path": source_path})
+                resp.raise_for_status()
+                data = resp.content
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, f"Failed to fetch attachment {source_path}")
+                return False
+        if data is None:
+            return False
+        try:
+            attach_resp = self.http.post(
+                "/files/attach",
+                data={"page_path": dest_page},
+                files={"files": (filename, data, "application/octet-stream")},
+            )
+            if attach_resp.status_code == 401 and self._remote_mode and self._prompt_remote_login():
+                attach_resp = self.http.post(
+                    "/files/attach",
+                    data={"page_path": dest_page},
+                    files={"files": (filename, data, "application/octet-stream")},
+                )
+            attach_resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to attach {filename} to {dest_page}")
+            return False
+        try:
+            delete_resp = self.http.post("/files/delete", json={"paths": [source_path]})
+            if delete_resp.status_code == 401 and self._remote_mode and self._prompt_remote_login():
+                delete_resp = self.http.post("/files/delete", json={"paths": [source_path]})
+            delete_resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to remove attachment {source_path}")
+            return False
         return True
 
     def _is_editor_dirty(self) -> bool:
