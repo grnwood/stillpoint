@@ -83,9 +83,14 @@ class JumpToPageDialog(QDialog):
         show_rewrite_links_checkbox: bool = False,
         http_client: "httpx.Client" = None,
         remote_mode: bool = False,
+        launch_mode: str = "jump",
+        current_page_path: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Jump to page")
+        self._launch_mode = launch_mode  # 'jump', 'insert_link', or 'create_new'
+        self._current_page_path = current_page_path
+        self._has_matching_pages = True
+        self.setWindowTitle(self._get_title())
         self.setModal(True)
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
@@ -160,7 +165,14 @@ class JumpToPageDialog(QDialog):
 
     def selected_path(self) -> str | None:
         item = self.list_widget.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        if item:
+            return item.data(Qt.UserRole)
+        # If no selection but in insert_link/create_new mode with search text, return new page path
+        if self._launch_mode in ("insert_link", "create_new") and not self._has_matching_pages:
+            search_term = self.search.text().strip()
+            if search_term:
+                return self._generate_new_page_path(search_term)
+        return None
     
     def should_rewrite_links(self) -> bool:
         """Return whether link rewriting is enabled (only relevant for move operations)."""
@@ -227,8 +239,22 @@ class JumpToPageDialog(QDialog):
             item = QListWidgetItem(self._display_label(page))
             item.setData(Qt.UserRole, page["path"])
             self.list_widget.addItem(item)
+        
+        # Track if we have matching pages and update title accordingly
+        self._has_matching_pages = self.list_widget.count() > 0
+        
+        # If no matches in insert_link mode, show create option
+        if not self._has_matching_pages and self._launch_mode == "insert_link" and term:
+            new_path = self._generate_new_page_path(term)
+            item = QListWidgetItem(f"<i>Create new page: {html.escape(term)}</i>")
+            item.setData(Qt.UserRole, new_path)
+            self.list_widget.addItem(item)
+        
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
+        
+        # Update title based on whether we have matches
+        self.setWindowTitle(self._get_title())
 
     def _display_label(self, page: dict) -> str:
         """Format display label with search term highlighting."""
@@ -313,6 +339,44 @@ class JumpToPageDialog(QDialog):
         if self.filter_banner:
             self.filter_banner.hide()
         self._refresh()
+    
+    def _get_title(self) -> str:
+        """Generate dialog title based on launch mode and search state."""
+        if self._launch_mode == "insert_link":
+            if not self._has_matching_pages and self.search.text().strip():
+                vault_level = self._get_current_vault_level()
+                return f"Create New Page in {vault_level}"
+            return "Insert Link to Page"
+        return "Jump to Page"
+    
+    def _get_current_vault_level(self) -> str:
+        """Get the current vault level (folder hierarchy) from current page path."""
+        if not self._current_page_path:
+            return "Vault Root"
+        # Extract folder path from current page
+        # Path format: /Folder1/Folder2/Page/Page.md
+        parts = self._current_page_path.strip("/").split("/")
+        if len(parts) <= 1:
+            return "Vault Root"
+        # Return parent folder (where current page lives)
+        return parts[-2] if len(parts) >= 2 else "Vault Root"
+    
+    def _generate_new_page_path(self, page_name: str) -> str:
+        """Generate path for a new page at the current vault level."""
+        # Clean up the page name
+        clean_name = page_name.strip().replace("/", "_")
+        if not self._current_page_path:
+            # Create at root
+            return f"/{clean_name}/{clean_name}.md"
+        # Get parent folder from current page path
+        parts = self._current_page_path.strip("/").split("/")
+        if len(parts) <= 1:
+            return f"/{clean_name}/{clean_name}.md"
+        # Create in same folder as current page
+        parent = parts[-2] if len(parts) >= 2 else ""
+        if parent:
+            return f"/{parent}/{clean_name}/{clean_name}.md"
+        return f"/{clean_name}/{clean_name}.md"
     
     def _highlight_search_term(self, text: str) -> str:
         """Highlight search term in text using HTML."""

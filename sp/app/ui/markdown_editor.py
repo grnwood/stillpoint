@@ -501,7 +501,7 @@ IMAGE_PROP_WIDTH = IMAGE_PROP_ALT + 2
 IMAGE_PROP_NATURAL_WIDTH = IMAGE_PROP_ALT + 3
 IMAGE_PROP_NATURAL_HEIGHT = IMAGE_PROP_ALT + 4
 
-_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_DETAILED_LOGGING = os.getenv("SP_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
 
 def _utf16_positions(text: str) -> list[int]:
     positions = [0]
@@ -629,6 +629,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         self._reset_code_block_cache()
         self._init_pygments(config.load_pygments_style("monokai"))
+        
+        # Block-level highlighting cache for performance
+        self._block_cache: dict[int, tuple[int, list[tuple[int, int, QTextCharFormat]]]] = {}
+        self._cache_access_order: list[int] = []
+        self._cache_max_size: int = 1000
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
     def _apply_heading_sizes(self, base_pt: float) -> None:
         """Recompute heading sizes from the current base font size."""
@@ -791,6 +798,38 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 break
             fence = fence.previous()
 
+    def _scan_inline_patterns(self, text: str) -> list[tuple[int, int, str]]:
+        """Single-pass scanner for all inline markdown patterns.
+        
+        Returns list of (start, length, pattern_name) tuples.
+        Uses combined regex for efficiency - one pass instead of 10+.
+        """
+        # Combined pattern with named groups - matches all inline markdown in priority order
+        combined = re.compile(
+            r'(?P<code>`[^`]+`)|'
+            r'(?P<bold_italic>\*\*\*[^*]+\*\*\*)|'
+            r'(?P<bold>\*\*[^*]+\*\*)|'
+            r'(?P<italic>(?<!\*)\*[^*]+\*(?!\*))|'
+            r'(?P<strike>~~[^~]+~~)|'
+            r'(?P<highlight>==[^=]+==)|'
+            r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+)|'
+            r'(?P<wiki_link>\[[^\]|]+\|[^\]]*\])|'
+            r'(?P<camel_link>(?<!\S)\+[A-Za-z][\w]*(?=\s|$))|'
+            r'(?P<colon_link>(?<!\S):[^\s\[\]]+(?:#[^\s\[\]]+)?)|'
+            r'(?P<file_link>\[[^\]]+\]\s*\((?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8}\))|'
+            r'(?P<http_url>https?://[^\s<>"{}|\\^`\[\]]+)'
+        )
+        
+        tokens = []
+        for match in combined.finditer(text):
+            # Find which named group matched
+            for name, value in match.groupdict().items():
+                if value is not None:
+                    tokens.append((match.start(), match.end() - match.start(), name))
+                    break
+        
+        return tokens
+    
     def _apply_inline_code_formatting(self, text: str) -> None:
         """Hide backticks and apply inline code formatting for a line."""
         iterator = self._code_pattern.globalMatch(text)
@@ -819,6 +858,30 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         t0 = time.perf_counter() if self._timing_enabled else 0.0
 
         block = self.currentBlock()
+        block_num = block.blockNumber()
+        block_revision = block.revision()
+        
+        # Check cache for this block
+        if block_num in self._block_cache:
+            cached_revision, cached_spans = self._block_cache[block_num]
+            if cached_revision == block_revision:
+                # Cache hit - apply cached formats and return
+                for start, length, fmt in cached_spans:
+                    self.setFormat(start, length, fmt)
+                # Update LRU access order
+                if block_num in self._cache_access_order:
+                    self._cache_access_order.remove(block_num)
+                self._cache_access_order.append(block_num)
+                self._cache_hits += 1
+                if self._timing_enabled:
+                    self._timing_blocks += 1
+                    self._timing_total += time.perf_counter() - t0
+                return
+        
+        self._cache_misses += 1
+        # Track all format operations for caching
+        self._current_format_spans: list[tuple[int, int, QTextCharFormat]] = []
+        self._capturing_formats = True
         if not block.previous().isValid():
             self._reset_code_block_cache()
 
@@ -913,152 +976,14 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         if is_table:
             self.setFormat(0, len(text), self.table_format)
         
-        # Inline code - hide backticks and style content
-        self._apply_inline_code_formatting(text)
+        # === PHASE 2: Single-pass inline pattern scanner ===
+        # Scan all patterns once instead of 10+ separate passes
+        tokens = self._scan_inline_patterns(text)
         
-        # Bold+Italic (must be checked before bold and italic separately)
-        iterator = self._bold_italic_pattern.globalMatch(text)
+        # Track bold_italic ranges to avoid double-formatting
         bold_italic_ranges = []
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            bold_italic_ranges.append((start, start + length))
-            
-            # Hide the *** markers and style the content
-            # Pattern: ***content***
-            content_start = start + 3  # Skip opening ***
-            content_length = length - 6  # Exclude both *** markers
-            
-            # Hide opening ***
-            self.setFormat(start, 3, self.hidden_format)
-            
-            # Apply format to content with actual bold+italic styling
-            if content_length > 0:
-                fmt = QTextCharFormat()
-                fmt.setFontWeight(QFont.Weight.Bold)
-                fmt.setFontItalic(True)
-                fmt.setForeground(QColor("#ffb8d1"))
-                self.setFormat(content_start, content_length, fmt)
-            
-            # Hide closing ***
-            self.setFormat(start + length - 3, 3, self.hidden_format)
         
-        # Bold (skip ranges already formatted as bold+italic)
-        iterator = self._bold_pattern.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            # Check if this range overlaps with bold+italic
-            overlaps = any(bi_start <= start < bi_end or bi_start < start + length <= bi_end 
-                          for bi_start, bi_end in bold_italic_ranges)
-            if not overlaps:
-                # Hide the ** markers and style the content
-                # Pattern: **content**
-                content_start = start + 2  # Skip opening **
-                content_length = length - 4  # Exclude both ** markers
-                
-                # Hide opening **
-                self.setFormat(start, 2, self.hidden_format)
-                
-                # Apply format to content with actual bold font weight
-                if content_length > 0:
-                    fmt = QTextCharFormat()
-                    fmt.setFontWeight(QFont.Weight.Bold)
-                    fmt.setForeground(QColor("#ffd479"))
-                    self.setFormat(content_start, content_length, fmt)
-                
-                # Hide closing **
-                self.setFormat(start + length - 2, 2, self.hidden_format)
-        
-        # Italic (skip ranges already formatted as bold+italic)
-        iterator = self._italic_pattern.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            # Check if this range overlaps with bold+italic
-            overlaps = any(bi_start <= start < bi_end or bi_start < start + length <= bi_end 
-                          for bi_start, bi_end in bold_italic_ranges)
-            if not overlaps:
-                # Hide the * markers and style the content
-                # Pattern: *content*
-                content_start = start + 1  # Skip opening *
-                content_length = length - 2  # Exclude both * markers
-                
-                # Hide opening *
-                self.setFormat(start, 1, self.hidden_format)
-                
-                # Apply format to content with actual italic styling
-                if content_length > 0:
-                    fmt = QTextCharFormat()
-                    fmt.setFontItalic(True)
-                    fmt.setForeground(QColor("#ffa7c4"))
-                    self.setFormat(content_start, content_length, fmt)
-                
-                # Hide closing *
-                self.setFormat(start + length - 1, 1, self.hidden_format)
-        
-        # Strikethrough
-        iterator = self._strikethrough_pattern.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            
-            # Hide the ~~ markers and style the content
-            # Pattern: ~~content~~
-            content_start = start + 2  # Skip opening ~~
-            content_length = length - 4  # Exclude both ~~ markers
-            
-            # Hide opening ~~
-            self.setFormat(start, 2, self.hidden_format)
-            
-            # Apply strikethrough format to content
-            if content_length > 0:
-                self.setFormat(content_start, content_length, self.strikethrough_format)
-            
-            # Hide closing ~~
-            self.setFormat(start + length - 2, 2, self.hidden_format)
-        
-        # Highlight
-        iterator = self._highlight_pattern.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            start = match.capturedStart()
-            length = match.capturedLength()
-            
-            # Hide the == markers and style the content
-            # Pattern: ==content==
-            content_start = start + 2  # Skip opening ==
-            content_length = length - 4  # Exclude both == markers
-            
-            # Hide opening ==
-            self.setFormat(start, 2, self.hidden_format)
-            
-            # Apply highlight format to content
-            if content_length > 0:
-                self.setFormat(content_start, content_length, self.highlight_format)
-            
-            # Hide closing ==
-            self.setFormat(start + length - 2, 2, self.hidden_format)
-
-        iterator = TAG_PATTERN.globalMatch(text)
-        while iterator.hasNext():
-            match = iterator.next()
-            self.setFormat(match.capturedStart(), match.capturedLength(), self.tag_format)
-
-        stripped2 = text.lstrip()
-        if stripped2.startswith("☐") or stripped2.startswith("☑"):
-            offset = len(text) - len(stripped2)
-            self.setFormat(offset, 1, self.checkbox_format)
-
-        # Link formatting
-        link_format = QTextCharFormat()
-        link_format.setForeground(QColor("#4fa3ff"))
-        link_format.setFontUnderline(True)
-
+        # Build display link exclusion zones (sentinel-delimited links)
         display_link_spans: list[tuple[int, int]] = []
         idx = 0
         while idx < len(text):
@@ -1068,95 +993,185 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 if link_end > link_start:
                     label_start = link_end + 1
                     label_end = text.find(LINK_SENTINEL, label_start)
-                    if label_end >= label_start:  # Changed: >= instead of > to handle empty labels
+                    if label_end >= label_start:
+                        link_fmt = QTextCharFormat()
+                        link_fmt.setForeground(QColor("#4fa3ff"))
+                        link_fmt.setFontUnderline(True)
                         # Hide opening sentinel and link
                         self.setFormat(idx, label_start - idx, self.hidden_format)
                         # If label is empty, show the link; otherwise show the label
-                        if label_end == label_start:  # Empty label
-                            # Skip the sentinel pipe we inject for empty labels.
+                        if label_end == label_start:
                             visible_end = link_end
                             if link_end > link_start and text[link_end - 1] == "|":
                                 visible_end -= 1
                             if visible_end > link_start:
-                                self.setFormat(link_start, visible_end - link_start, link_format)
-                        else:  # Non-empty label
-                            self.setFormat(label_start, label_end - label_start, link_format)
-                        self.setFormat(label_end, 1, self.hidden_format)  # Hide closing sentinel
+                                self.setFormat(link_start, visible_end - link_start, link_fmt)
+                        else:
+                            self.setFormat(label_start, label_end - label_start, link_fmt)
+                        self.setFormat(label_end, 1, self.hidden_format)
                         display_link_spans.append((idx, label_end + 1))
                         idx = label_end + 1
                         continue
             idx += 1
-
-        # Wiki-style links in storage format: [link|label]
-        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
-        import re as regex_module
+        
+        # Build wiki link exclusion zones
         wiki_spans: list[tuple[int, int]] = []
-        for match in regex_module.finditer(wiki_pattern, text):
-            start = match.start()
-            end = match.end()
-            wiki_spans.append((start, end))
-            link = match.group(1)
-            label = match.group(2)
-            # Highlight the label part
-            label_start = start + 1 + len(link) + 1  # After '[link|'
-            self.setFormat(label_start, len(label), link_format)
-
-        # CamelCase links: +PageName
-        camel_iter = CAMEL_LINK_PATTERN.globalMatch(text)
-        while camel_iter.hasNext():
-            match = camel_iter.next()
-            start = match.capturedStart()
-            end = start + match.capturedLength()
-            inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+        
+        # Apply token formats
+        for start, length, token_type in tokens:
+            end = start + length
+            
+            # Check if inside display link
             inside_display = any(ds <= start and end <= de for (ds, de) in display_link_spans)
-            if inside_wiki or inside_display:
-                continue
-            self.setFormat(start, end - start, link_format)
+            
+            if token_type == 'code':
+                # Inline code: `content`
+                if length >= 2:
+                    self.setFormat(start, 1, self.hidden_format)  # opening `
+                    self.setFormat(start + 1, length - 2, self.code_format)  # content
+                    self.setFormat(start + length - 1, 1, self.hidden_format)  # closing `
+                
+            elif token_type == 'bold_italic':
+                # ***content***
+                bold_italic_ranges.append((start, end))
+                if length >= 6:
+                    self.setFormat(start, 3, self.hidden_format)
+                    fmt = QTextCharFormat()
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setFontItalic(True)
+                    fmt.setForeground(QColor("#ffb8d1"))
+                    self.setFormat(start + 3, length - 6, fmt)
+                    self.setFormat(start + length - 3, 3, self.hidden_format)
+                
+            elif token_type == 'bold':
+                # **content** - skip if inside bold_italic
+                overlaps = any(bi_start <= start < bi_end or bi_start < end <= bi_end 
+                              for bi_start, bi_end in bold_italic_ranges)
+                if not overlaps and length >= 4:
+                    self.setFormat(start, 2, self.hidden_format)
+                    fmt = QTextCharFormat()
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setForeground(QColor("#ffd479"))
+                    self.setFormat(start + 2, length - 4, fmt)
+                    self.setFormat(start + length - 2, 2, self.hidden_format)
+                    
+            elif token_type == 'italic':
+                # *content* - skip if inside bold_italic
+                overlaps = any(bi_start <= start < bi_end or bi_start < end <= bi_end 
+                              for bi_start, bi_end in bold_italic_ranges)
+                if not overlaps and length >= 2:
+                    self.setFormat(start, 1, self.hidden_format)
+                    fmt = QTextCharFormat()
+                    fmt.setFontItalic(True)
+                    fmt.setForeground(QColor("#ffa7c4"))
+                    self.setFormat(start + 1, length - 2, fmt)
+                    self.setFormat(start + length - 1, 1, self.hidden_format)
+                    
+            elif token_type == 'strike':
+                # ~~content~~
+                if length >= 4:
+                    self.setFormat(start, 2, self.hidden_format)
+                    self.setFormat(start + 2, length - 4, self.strikethrough_format)
+                    self.setFormat(start + length - 2, 2, self.hidden_format)
+                
+            elif token_type == 'highlight':
+                # ==content==
+                if length >= 4:
+                    self.setFormat(start, 2, self.hidden_format)
+                    self.setFormat(start + 2, length - 4, self.highlight_format)
+                    self.setFormat(start + length - 2, 2, self.hidden_format)
+                
+            elif token_type == 'tag':
+                # @tag
+                self.setFormat(start, length, self.tag_format)
+                
+            elif token_type == 'wiki_link':
+                # [link|label] - track span and format label
+                wiki_spans.append((start, end))
+                pipe_pos = text.find('|', start, end)
+                if pipe_pos != -1:
+                    label_start = pipe_pos + 1
+                    label_length = end - label_start - 1  # -1 for closing ]
+                    link_fmt = QTextCharFormat()
+                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setFontUnderline(True)
+                    self.setFormat(label_start, label_length, link_fmt)
+                    
+            elif token_type == 'camel_link':
+                # +PageName - skip if inside wiki or display link
+                inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+                if not inside_wiki and not inside_display:
+                    link_fmt = QTextCharFormat()
+                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setFontUnderline(True)
+                    self.setFormat(start, length, link_fmt)
+                    
+            elif token_type == 'colon_link':
+                # :Page:Name - skip if inside wiki or display link
+                inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+                if not inside_wiki and not inside_display:
+                    link_fmt = QTextCharFormat()
+                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setFontUnderline(True)
+                    self.setFormat(start, length, link_fmt)
+                    
+            elif token_type == 'file_link':
+                # [text](./file.ext) - skip if overlaps wiki link
+                inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+                if not inside_wiki:
+                    bracket_end = text.find(']', start)
+                    if bracket_end != -1 and bracket_end < end:
+                        label_start = start + 1
+                        label_length = bracket_end - label_start
+                        link_fmt = QTextCharFormat()
+                        link_fmt.setForeground(QColor("#4fa3ff"))
+                        link_fmt.setFontUnderline(True)
+                        self.setFormat(start, 1, self.hidden_format)  # [
+                        self.setFormat(label_start, label_length, link_fmt)
+                        self.setFormat(bracket_end, end - bracket_end, self.hidden_format)  # ](...)
+                        
+            elif token_type == 'http_url':
+                # https://... - skip if inside wiki or display link
+                inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
+                if not inside_display and not inside_display:
+                    link_fmt = QTextCharFormat()
+                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setFontUnderline(True)
+                    self.setFormat(start, length, link_fmt)
+        
+        # Checkbox symbols (☐☑) - not in scanner, handled separately
+        stripped2 = text.lstrip()
+        if stripped2.startswith("☐") or stripped2.startswith("☑"):
+            offset = len(text) - len(stripped2)
+            self.setFormat(offset, 1, self.checkbox_format)
 
-        # Plain colon links: :Page:Name
-        colon_iter = COLON_LINK_PATTERN.globalMatch(text)
-        while colon_iter.hasNext():
-            match = colon_iter.next()
-            s = match.capturedStart(); e = s + match.capturedLength()
-            inside_wiki = any(ws <= s and e <= we for (ws, we) in wiki_spans)
-            inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
-            if not inside_wiki and not inside_display:
-                self.setFormat(s, e - s, link_format)
-
-        # File links: [text](./file.ext)
-        file_iter = WIKI_FILE_LINK_PATTERN.globalMatch(text)
-        while file_iter.hasNext():
-            fm = file_iter.next()
-            start = fm.capturedStart(); end = start + fm.capturedLength()
-            overlap = any(ws <= start and end <= we for (ws, we) in wiki_spans)
-            if overlap:
-                continue
-            label = fm.captured("text")
-            label_start = start + 1
-            label_len = len(label)
-            if label_start > start:
-                self.setFormat(start, label_start - start, self.hidden_format)
-            self.setFormat(label_start, label_len, link_format)
-            label_end = label_start + label_len
-            if end > label_end:
-                self.setFormat(label_end, end - label_end, self.hidden_format)
-
-        # Plain HTTP URLs (not in wiki-style links)
-        http_iter = HTTP_URL_PATTERN.globalMatch(text)
-        while http_iter.hasNext():
-            match = http_iter.next()
-            s = match.capturedStart(); e = s + match.capturedLength()
-            inside_wiki = any(ws <= s and e <= we for (ws, we) in wiki_spans)
-            inside_display = any(ds <= s and e <= de for (ds, de) in display_link_spans)
-            if not inside_wiki and not inside_display:
-                self.setFormat(s, e - s, link_format)
 
 
-
+        # Store computed formats in cache
+        self._capturing_formats = False
+        self._block_cache[block_num] = (block_revision, self._current_format_spans)
+        self._current_format_spans = []
+        # Update LRU access order
+        if block_num in self._cache_access_order:
+            self._cache_access_order.remove(block_num)
+        self._cache_access_order.append(block_num)
+        # Evict oldest if cache exceeds limit
+        if len(self._block_cache) > self._cache_max_size:
+            oldest = self._cache_access_order.pop(0)
+            self._block_cache.pop(oldest, None)
+        
         if self._timing_enabled:
             self._timing_total += (time.perf_counter() - t0)
             self._timing_blocks += 1
 
+    def setFormat(self, start: int, count: int, format: QTextCharFormat) -> None:  # type: ignore[override]
+        """Override setFormat to capture formatting spans for cache."""
+        super().setFormat(start, count, format)
+        if getattr(self, '_capturing_formats', False) and count > 0:
+            # Make a copy of the format to avoid reference issues
+            fmt_copy = QTextCharFormat(format)
+            self._current_format_spans.append((start, count, fmt_copy))
+    
     def reset_timing(self):
         self._timing_total = 0.0
         self._timing_blocks = 0
@@ -1231,6 +1246,7 @@ class MarkdownEditor(QTextEdit):
     aiChatRequested = Signal(str)  # Emits current page path when AI Chat is requested
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
+    aiInlinePromptRequested = Signal(QPoint, int)  # QPoint(global), insert_pos
     aiActionRequested = Signal(str, str, str)  # title, prompt, text
     deletePageRequested = Signal(QPoint)  # Request deleting the current page (with global position)
     printPageRequested = Signal(str)  # Request printing the current page
@@ -1242,6 +1258,7 @@ class MarkdownEditor(QTextEdit):
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
     _HR_EXTRA_KEY = QTextFormat.UserProperty + 3
     _LOAD_GUARD_DEPTH = 0  # class-level: block cursor/link work during any markdown load
+    _block_count_guard: bool = False
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1288,6 +1305,7 @@ class MarkdownEditor(QTextEdit):
         self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
         self._overlay_active: bool = False  # True while inside a ModeWindow
         self._cursor_events_blocked: bool = False
+        self._enforce_display_guard: bool = False
         self._last_heading_block_num: Optional[int] = None
         self._pending_heading_block_num: Optional[int] = None
         self._pending_heading_level: Optional[int] = None
@@ -1304,7 +1322,9 @@ class MarkdownEditor(QTextEdit):
         self.cursorPositionChanged.connect(self._ensure_cursor_margin)
         self._display_guard = False
         self._hanging_indent_guard = False
+        self._last_block_count: int = 0
         self.textChanged.connect(self._enforce_display_symbols)
+        self.textChanged.connect(self._check_block_count_change)
         self.viewport().installEventFilter(self)
         self._heading_timer = QTimer(self)
         self._heading_timer.setInterval(250)
@@ -1323,6 +1343,8 @@ class MarkdownEditor(QTextEdit):
         self._camel_refresh_timer.timeout.connect(self._refresh_camel_links)
         self._last_camel_trigger: Optional[str] = None
         self._last_camel_cursor_pos: Optional[int] = None
+        # Guard flag for inline trigger processing
+        self._processing_inline_trigger: bool = False
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
         # Enable drag and drop for file attachments
@@ -1514,7 +1536,7 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
-        if os.getenv("ZIMX_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
+        if os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
             super().paintEvent(event)
             return
         if self._suppress_paint or self._suppress_paint_depth:
@@ -1759,14 +1781,13 @@ class MarkdownEditor(QTextEdit):
                 self.document().clear()
                 self.textChanged.disconnect(self._enforce_display_symbols)
                 self.textChanged.disconnect(self._schedule_heading_outline)
-                highlighter_disabled = False
-                if getenv("ZIMX_DISABLE_HIGHLIGHTER_LOAD") == "1":
-                    highlighter_disabled = True
-                    self.highlighter.setDocument(None)
+                # Always defer highlighting during load for better performance
+                highlighter_disabled = True
+                self.highlighter.setDocument(None)
                 incremental = False
                 batch_ms_total = 0.0
                 batches = 0
-                if getenv("ZIMX_INCREMENTAL_LOAD") == "1":
+                if getenv("SP_INCREMENTAL_LOAD") == "1":
                     incremental = True
                     lines = display.splitlines(keepends=True)
                     batch_size = 50
@@ -1819,7 +1840,7 @@ class MarkdownEditor(QTextEdit):
             t5 = time.perf_counter()
             self._mark_page_load("outline + margin scheduled")
             if _DETAILED_LOGGING:
-                print(f"[TIMING] set_markdown breakdown:")
+                print(f"[MD_TIMING] set_markdown breakdown:")
                 print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
                 print(f"  to_display: {(t2-t1)*1000:.1f}ms")
                 print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
@@ -1828,18 +1849,19 @@ class MarkdownEditor(QTextEdit):
                 print(f"  TOTAL: {(t5-t0)*1000:.1f}ms")
                 setPlainText_time_ms = (t3-t2)*1000
                 if setPlainText_time_ms > 1000:
-                    print(f"[PERF WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
-                    print("  This may indicate regex backtracking or signal cascade issues.")
-                    print("  Try environment variable ZIMX_DISABLE_HIGHLIGHTER_LOAD=1 for testing.")
+                    print(f"[MD_PERF_WARNING] setPlainText took {setPlainText_time_ms:.1f}ms - unusually slow!")
+                    print(f"[MD_PERF_WARNING] This may indicate signal cascade issues (highlighter is deferred by default).")
                 if incremental:
                     print(
-                        f"[TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms "
+                        f"[MD_TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms "
                         f"avg_batch={(batch_ms_total/max(batches,1)):.1f}ms"
                     )
                 if self.highlighter._timing_blocks:
                     avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
                     total = self.highlighter._timing_total * 1000.0
-                    print(f"[TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
+                    hit_rate = (self.highlighter._cache_hits / max(1, self.highlighter._cache_hits + self.highlighter._cache_misses)) * 100
+                    print(f"[MD_TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
+                    print(f"[MD_CACHE] hits={self.highlighter._cache_hits} misses={self.highlighter._cache_misses} hit_rate={hit_rate:.1f}% size={len(self.highlighter._block_cache)}")
             self.highlighter.enable_timing(False)
             self._mark_page_load("editor focus ready")
             self.setFocus()
@@ -1849,6 +1871,10 @@ class MarkdownEditor(QTextEdit):
 
     def replace_markdown_in_place(self, content: str) -> None:
         """Replace the full document from markdown without clearing undo history."""
+        # Clear highlighter cache when replacing content
+        if hasattr(self.highlighter, '_block_cache'):
+            self.highlighter._block_cache.clear()
+            self.highlighter._cache_access_order.clear()
         if content.endswith("\n"):
             stripped = content.rstrip("\n")
             trailing_count = len(content) - len(stripped)
@@ -1961,7 +1987,7 @@ class MarkdownEditor(QTextEdit):
                 result = baseline
             elif result_images == baseline_images and len(result) < len(baseline):
                 result = baseline
-        if sys.platform == "win32" and os.getenv("ZIMX_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and os.getenv("SP_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
             display_text = self.toPlainText()
             def _tail(text: str) -> str:
                 tail = text.replace("\u2029", "\n")
@@ -1980,7 +2006,7 @@ class MarkdownEditor(QTextEdit):
             )
             print(f"[StillPoint][WIN_TRUNC_DEBUG] baseline_tail={_tail(baseline)!r}")
             print(f"[StillPoint][WIN_TRUNC_DEBUG] result_tail={_tail(result)!r}")
-        if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_SAVE_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and os.getenv("SP_WIN_IMAGE_SAVE_DEBUG", "0") not in ("0", "false", "False", ""):
             doc = self.document()
             cursor = QTextCursor(doc)
             cursor.setPosition(0)
@@ -2015,17 +2041,108 @@ class MarkdownEditor(QTextEdit):
         return result
 
     def _schedule_camel_refresh(self) -> None:
-        """Schedule a quick refresh to render +CamelCase links into colon format."""
-        if self._display_guard:
+        """DEPRECATED: +CamelCase auto-conversion disabled in Phase 3."""
+        # No-op: Phase 3 removed auto-conversion
+        pass
+    
+    def _check_inline_link_trigger(self) -> None:
+        """Check if user typed // trigger and show quick link picker."""
+        if self._processing_inline_trigger or self._display_guard:
             return
-        text = self.toPlainText()
-        # Fast path: skip if there's no +CamelCase pattern
-        if "+" not in text:
+        cursor = self.textCursor()
+        pos = cursor.position()
+
+        # Look back 3 characters to check for '//'
+        if pos < 3:
             return
-        import re
-        if not re.search(r"\+[A-Za-z][\w]*", text):
+
+        trigger_cursor = QTextCursor(cursor)
+        trigger_cursor.setPosition(pos - 3)
+        trigger_cursor.setPosition(pos, QTextCursor.KeepAnchor)
+        trigger_text = trigger_cursor.selectedText()
+        if trigger_text == "[[ ":
+            if not config.load_enable_ai_chats():
+                return
+            self._processing_inline_trigger = True
+            try:
+                prev_display_guard = self._display_guard
+                self._display_guard = True
+                trigger_cursor.removeSelectedText()
+                self.setTextCursor(trigger_cursor)
+                cursor_rect = self.cursorRect()
+                anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
+                self.aiInlinePromptRequested.emit(anchor_pos, trigger_cursor.position())
+            finally:
+                self._display_guard = prev_display_guard
+                self._processing_inline_trigger = False
             return
-        self._camel_refresh_timer.start()
+
+        # Check if we're inside a [link|label] construct - skip trigger if so
+        line_start = cursor.block().position()
+        line_text = cursor.block().text()
+        pos_in_line = pos - line_start
+        
+        # Don't trigger if we just completed a link (] followed by space)
+        if pos_in_line >= 2 and line_text[pos_in_line - 2:pos_in_line] == "] ":
+            return
+        
+        # Look for unclosed [ before cursor position
+        open_bracket = line_text.rfind('[', 0, pos_in_line)
+        if open_bracket != -1:
+            # Check if there's a matching ] after the [
+            close_bracket = line_text.find(']', open_bracket, pos_in_line)
+            if close_bracket == -1:
+                # We're inside an unclosed [link|label] - don't trigger
+                return
+        
+        cursor.setPosition(pos - 3)
+        cursor.setPosition(pos, QTextCursor.KeepAnchor)
+        trigger_text = cursor.selectedText()
+        
+        # Check for // trigger (quick link)
+        if trigger_text == "// ":
+            # Set guard flag to prevent duplicate processing
+            self._processing_inline_trigger = True
+            try:
+                prev_display_guard = self._display_guard
+                self._display_guard = True
+                # Remove the trigger and update cursor
+                cursor.removeSelectedText()
+                self.setTextCursor(cursor)
+                # Get cursor position for dialog placement (after removal)
+                cursor_rect = self.cursorRect()
+                anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
+                # Show quick link dialog near cursor
+                self._trigger_inline_link_insert(anchor_pos)
+            finally:
+                self._display_guard = prev_display_guard
+                # Always clear guard flag
+                self._processing_inline_trigger = False
+            return
+    
+    def _trigger_inline_link_insert(self, anchor_pos: QPoint) -> None:
+        """Show compact jump dialog near cursor and insert link in [:Page|label] format."""
+        # Create and show jump dialog near cursor
+        try:
+            from .jump_dialog import JumpToPageDialog
+            dialog = JumpToPageDialog(
+                self, 
+                compact=True, 
+                geometry_key=None,
+                anchor_global_pos=anchor_pos,
+                launch_mode="insert_link",
+                current_page_path=self._current_path
+            )
+            if dialog.exec() == QDialog.Accepted:
+                selected = dialog.selected_path()
+                if selected:
+                    # Convert to colon path
+                    from .path_utils import path_to_colon
+                    colon_path = path_to_colon(selected)
+                    # Match Ctrl+L behavior: use target as label unless user provides one.
+                    self.insert_link(colon_path)
+        except Exception as e:
+            logger.warning(f"Failed to show inline link dialog: {e}")
 
     def _refresh_camel_links(self) -> None:
         """Convert any +CamelCase links in the document and re-render display."""
@@ -3379,15 +3496,19 @@ class MarkdownEditor(QTextEdit):
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
         super().keyReleaseEvent(event)
-        # Only schedule CamelCase conversion when space/enter are released (typing flow)
-        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter) and not (event.modifiers() & ~Qt.KeypadModifier):
-            self._last_camel_trigger = "enter" if event.key() in (Qt.Key_Return, Qt.Key_Enter) else "space"
-            self._last_camel_cursor_pos = self.textCursor().position()
-            self._schedule_camel_refresh()
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                block = self.textCursor().block().previous()
-                if block.isValid():
-                    self._finalize_heading_block(block)
+        # Phase 3: +CamelCase auto-conversion removed - use [[ or // triggers instead
+        # Check for inline link triggers: [[ or //
+        if event.key() == Qt.Key_Space and not (event.modifiers() & ~Qt.KeypadModifier):
+            # Only trigger in insert mode (or when vi mode is disabled)
+            if not self._vi_feature_enabled or self._vi_insert_mode:
+                # Prevent duplicate processing
+                if not self._processing_inline_trigger:
+                    self._check_inline_link_trigger()
+        
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            block = self.textCursor().block().previous()
+            if block.isValid():
+                self._finalize_heading_block(block)
 
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()
@@ -5855,132 +5976,118 @@ class MarkdownEditor(QTextEdit):
         Avoid full-document rewrites to preserve inline image fragments and
         prevent cursor jumps or spurious newlines when typing.
         """
-        if self._display_guard:
+        if self._display_guard or self._enforce_display_guard:
             return
-
-        cursor = self.textCursor()
-        block = cursor.block()
-        if not block.isValid():
-            return
-
-        original = block.text()
-
-        # 1) Normalize checkbox syntax to display symbols.
-        def _symbol_for(state: str) -> str:
-            return "☑" if state.strip().lower() == "x" else "☐"
-
-        def _format_task_symbol(indent: str, symbol: str, body: str) -> str:
-            body = (body or "").lstrip()
-            spacer = "  " if not body else " "
-            return f"{indent}{symbol}{spacer}{body}"
-
-        def md_repl(match: re.Match[str]) -> str:
-            symbol = _symbol_for(match.group("state") or " ")
-            return _format_task_symbol(match.group(1), symbol, match.group("body"))
-
-        def symbol_repl(match: re.Match[str]) -> str:
-            symbol = _symbol_for("x" if match.group(2) == "☑" else " ")
-            return _format_task_symbol(match.group(1), symbol, match.group("body"))
-
-        line = original
-        shortcut_match = re.match(r"^(\s*)\((?P<state>[xX]?)\)\s*(?P<body>.*)$", line)
-        if shortcut_match:
-            symbol = _symbol_for(shortcut_match.group("state") or " ")
-            line = _format_task_symbol(
-                shortcut_match.group(1) or "",
-                symbol,
-                shortcut_match.group("body") or "",
-            )
-
-        line = TASK_LINE_PATTERN.sub(md_repl, line)
-        line = SYMBOL_TASK_LINE_PATTERN.sub(symbol_repl, line)
-
-        # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
-        delay_heading_render = False
-        if HEADING_MARK_PATTERN.match(line):
-            if self._is_code_block_line(block):
-                delay_heading_render = True
-            else:
-                stripped = line.lstrip()
-                # Keep hashes visible while the cursor is on this line; render after Enter.
-                if not (stripped and heading_level_from_char(stripped[0])):
-                    delay_heading_render = True
-        if not delay_heading_render:
-            line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
-
-        # 3) Wiki-style links: [link|label] → sentinel + link + sentinel + label + sentinel
-        line = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, line)
-        
-        # 4) Bullet conversion: Convert "* " at start of line (after whitespace) to bullet
-        # Only convert when user types "* " followed by space
-        stripped = line.lstrip()
-        if stripped.startswith("* ") and len(stripped) > 2:
-            # Check if this is a new bullet being typed (cursor should be after "* ")
-            abs_pos = cursor.position()
-            line_start = block.position()
-            rel_pos = abs_pos - line_start
-            indent = line[:len(line) - len(stripped)]
-            bullet_pos = len(indent) + 2  # Position after "* "
-            
-            # Only convert if cursor is near the bullet marker position
-            # This prevents conversion when just navigating through existing bullets
-            if abs(rel_pos - bullet_pos) <= 2:
-                # Convert the * to a bullet point (•)
-                line = indent + "• " + stripped[2:]
-
-        if line == original:
-            # Even if text is unchanged, ensure hanging indent matches current line type
-            is_bullet, bullet_indent, _ = self._is_bullet_line(line)
-            is_dash, dash_indent, _ = self._is_dash_line(line)
-            is_task, task_indent, _, _ = self._is_task_line(line)
-            if is_bullet:
-                self._apply_hanging_indent(block, bullet_indent, "• ")
-            elif is_dash:
-                self._apply_hanging_indent(block, dash_indent, "- ")
-            elif is_task:
-                marker = "☑ " if line.strip().startswith("☑") else "☐ "
-                self._apply_hanging_indent(block, task_indent, marker)
-            else:
-                self._clear_hanging_indent(block)
-            return
-
-        # Preserve caret relative to line start
-        abs_pos = cursor.position()
-        line_start = block.position()
-        rel_pos = max(0, abs_pos - line_start)
-        delta = len(line) - len(original)
-
-        self._display_guard = True
+        self._enforce_display_guard = True
         try:
-            line_cursor = QTextCursor(block)
-            line_cursor.select(QTextCursor.LineUnderCursor)
-            line_cursor.insertText(line)
+            cursor = self.textCursor()
+            block = cursor.block()
+            if not block.isValid():
+                return
 
-            # Restore caret with delta applied and clamped to line length
-            new_block = self.document().findBlock(line_start)
-            new_len = max(0, new_block.length() - 1)  # exclude implicit newline
-            new_rel = min(max(0, rel_pos + delta), new_len)
-            new_abs = line_start + new_rel
-            c = self.textCursor()
-            c.setPosition(new_abs)
-            self.setTextCursor(c)
+            original = block.text()
+
+            # 1) Normalize checkbox syntax to display symbols.
+            def _symbol_for(state: str) -> str:
+                return "☑" if state.strip().lower() == "x" else "☐"
+
+            def _format_task_symbol(indent: str, symbol: str, body: str) -> str:
+                body = (body or "").lstrip()
+                spacer = "  " if not body else " "
+                return f"{indent}{symbol}{spacer}{body}"
+
+            def md_repl(match: re.Match[str]) -> str:
+                symbol = _symbol_for(match.group("state") or " ")
+                return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+            def symbol_repl(match: re.Match[str]) -> str:
+                symbol = _symbol_for("x" if match.group(2) == "☑" else " ")
+                return _format_task_symbol(match.group(1), symbol, match.group("body"))
+
+            line = original
+            shortcut_match = re.match(r"^(\s*)\((?P<state>[xX]?)\)\s*(?P<body>.*)$", line)
+            if shortcut_match:
+                symbol = _symbol_for(shortcut_match.group("state") or " ")
+                line = _format_task_symbol(
+                    shortcut_match.group(1) or "",
+                    symbol,
+                    shortcut_match.group("body") or "",
+                )
+
+            line = TASK_LINE_PATTERN.sub(md_repl, line)
+            line = SYMBOL_TASK_LINE_PATTERN.sub(symbol_repl, line)
+
+            # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
+            delay_heading_render = False
+            if HEADING_MARK_PATTERN.match(line):
+                if self._is_code_block_line(block):
+                    delay_heading_render = True
+                else:
+                    stripped = line.lstrip()
+                    # Keep hashes visible while the cursor is on this line; render after Enter.
+                    if not (stripped and heading_level_from_char(stripped[0])):
+                        delay_heading_render = True
+            if not delay_heading_render:
+                line = HEADING_MARK_PATTERN.sub(self._encode_heading, line)
+
+            # 3) Wiki-style links: [link|label] → sentinel + link + sentinel + label + sentinel
+            line = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, line)
             
-            # Apply hanging indent for wrapped lines (inside guard to prevent recursion)
-            is_bullet, bullet_indent, _ = self._is_bullet_line(line)
-            is_dash, dash_indent, _ = self._is_dash_line(line)
-            is_task, task_indent, _, _ = self._is_task_line(line)
-            if is_bullet:
-                self._apply_hanging_indent(block, bullet_indent, "• ")
-            elif is_dash:
-                self._apply_hanging_indent(block, dash_indent, "- ")
-            elif is_task:
-                marker = "☑ " if line.strip().startswith("☑") else "☐ "
-                self._apply_hanging_indent(block, task_indent, marker)
-            else:
-                self._clear_hanging_indent(block)
+            # 4) Bullet conversion: Convert "* " at start of line (after whitespace) to bullet
+            # Only convert when user types "* " followed by space
+            stripped = line.lstrip()
+            if stripped.startswith("* ") and len(stripped) > 2:
+                # Check if this is a new bullet being typed (cursor should be after "* ")
+                abs_pos = cursor.position()
+                line_start = block.position()
+                rel_pos = abs_pos - line_start
+                indent = line[:len(line) - len(stripped)]
+                bullet_pos = len(indent) + 2  # Position after "* "
+                
+                # Only convert if cursor is near the bullet marker position
+                # This prevents conversion when just navigating through existing bullets
+                if abs(rel_pos - bullet_pos) <= 2:
+                    # Convert the * to a bullet point (•)
+                    line = indent + "• " + stripped[2:]
+
+            if line == original:
+                # Even if text is unchanged, ensure hanging indent matches current line type
+                is_bullet, bullet_indent, _ = self._is_bullet_line(line)
+                is_dash, dash_indent, _ = self._is_dash_line(line)
+                is_task, task_indent, _, _ = self._is_task_line(line)
+                if is_bullet:
+                    self._apply_hanging_indent(block, bullet_indent, "• ")
+                elif is_dash:
+                    self._apply_hanging_indent(block, dash_indent, "- ")
+                elif is_task:
+                    marker = "☑ " if line.strip().startswith("☑") else "☐ "
+                    self._apply_hanging_indent(block, task_indent, marker)
+                else:
+                    self._clear_hanging_indent(block)
+                
+                # Force rehighlight to ensure sentinels stay hidden
+                # This is especially important after deletions where formatting may be lost
+                if LINK_SENTINEL in line:
+                    self.highlighter.rehighlightBlock(block)
+                return
         finally:
-            self._display_guard = False
-        self._schedule_heading_outline()
+            self._enforce_display_guard = False
+    
+    def _check_block_count_change(self) -> None:
+        """Clear highlighter cache when block count changes (lines added/deleted)."""
+        if self._block_count_guard or self._processing_inline_trigger or self._display_guard:
+            return
+        self._block_count_guard = True
+        current_count = self.document().blockCount()
+        if hasattr(self, '_last_block_count') and self._last_block_count != current_count:
+            # Block structure changed - invalidate highlighter cache
+            if hasattr(self.highlighter, '_block_cache'):
+                self.highlighter._block_cache.clear()
+                self.highlighter._cache_access_order.clear()
+            self.highlighter.rehighlight()
+        self._last_block_count = current_count
+        self._block_count_guard = False
+        # All caret/line/block logic removed; only cache invalidation and block count update remain
 
     def _restore_cursor_position(self, position: int) -> None:
         cursor = self.textCursor()
@@ -6789,7 +6896,7 @@ class MarkdownEditor(QTextEdit):
                     )
                 )
             cursor.setPosition(cursor.selectionEnd())
-        if sys.platform == "win32" and os.getenv("ZIMX_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and os.getenv("SP_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
             sample = matches[:5]
             print(f"[StillPoint][WIN_IMAGE_DEBUG] matches={len(matches)} sample_count={len(sample)}")
             for idx, (start_pos, end_pos, path, alt, width, selected, match_text) in enumerate(sample, start=1):
@@ -6819,7 +6926,7 @@ class MarkdownEditor(QTextEdit):
                 t_img_start = time.perf_counter()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-                if os.getenv("ZIMX_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
                     picked = cursor.selectedText().replace("\u2029", "\n")
                     print(
                         f"[StillPoint][IMAGE_RENDER_DEBUG] idx={idx+1}/{len(matches)} "
@@ -6827,7 +6934,7 @@ class MarkdownEditor(QTextEdit):
                     )
                 picked = cursor.selectedText().replace("\u2029", "\n")
                 if picked != match_text:
-                    if os.getenv("ZIMX_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                    if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
                         print(
                             f"[StillPoint][IMAGE_RENDER_DEBUG] skip idx={idx+1} "
                             f"range=({start_pos},{end_pos}) picked_mismatch"

@@ -1195,6 +1195,7 @@ class MainWindow(QMainWindow):
         )
         self.editor.aiChatSendRequested.connect(self._send_selection_to_ai_chat)
         self.editor.aiChatPageFocusRequested.connect(self._focus_ai_chat_for_page)
+        self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.headingPickerRequested.connect(self._show_heading_picker_popup)
         self.editor.linkActivated.connect(self._open_link_in_context)
@@ -9149,6 +9150,180 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         overlay.open_with_selection(text)
+
+    def _open_inline_ai_prompt(self, anchor: QPoint, insert_pos: int) -> None:
+        if not config.load_enable_ai_chats():
+            self.statusBar().showMessage("Enable AI Chats in Preferences to use inline prompts.", 4000)
+            return
+        if getattr(self, "_inline_ai_worker", None):
+            self.statusBar().showMessage("Inline AI is already streaming.", 3000)
+            return
+        try:
+            from .inline_ai_prompt import InlineAIPromptOverlay
+        except Exception:
+            self.statusBar().showMessage("Inline AI prompt unavailable.", 4000)
+            return
+
+        def _send(prompt: str) -> None:
+            self._start_inline_ai_stream(prompt, insert_pos)
+
+        overlay = InlineAIPromptOverlay(parent=self, on_send=_send, anchor=QPoint(anchor.x(), anchor.y() + 10))
+        try:
+            self._inline_ai_prompt_overlay = overlay
+        except Exception:
+            pass
+        try:
+            self.editor.push_focus_lost_suppression()
+        except Exception:
+            try:
+                setattr(self.editor, "_suppress_focus_lost_once", True)
+            except Exception:
+                pass
+
+        def _overlay_cleanup() -> None:
+            try:
+                self.editor.pop_focus_lost_suppression()
+            except Exception:
+                pass
+            try:
+                setattr(self, "_inline_ai_prompt_overlay", None)
+            except Exception:
+                pass
+
+        try:
+            overlay.finished.connect(lambda *_: _overlay_cleanup())
+        except Exception:
+            pass
+        overlay.show()
+
+    def _start_inline_ai_stream(self, prompt: str, insert_pos: int) -> None:
+        if not prompt.strip():
+            return
+        if getattr(self, "_inline_ai_worker", None):
+            return
+        try:
+            from .ai_chat_panel import ServerManager, ApiWorker
+        except Exception:
+            self.statusBar().showMessage("AI worker unavailable.", 4000)
+            return
+
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        try:
+            server_mgr = ServerManager()
+            if default_server_name:
+                server_cfg = server_mgr.get_server(default_server_name)
+                if server_cfg:
+                    server_config = server_cfg
+        except Exception:
+            server_config = {}
+        if not server_config:
+            server_config = getattr(self.right_panel.ai_chat_panel, "current_server", None) or {}
+        if not server_config:
+            self.statusBar().showMessage("No AI server configured.", 4000)
+            return
+
+        try:
+            default_model_name = config.load_default_ai_model()
+        except Exception:
+            default_model_name = None
+        if default_model_name:
+            model = default_model_name
+        else:
+            panel = self.right_panel.ai_chat_panel
+            model = (server_config.get("default_model") if server_config else None) or (
+                getattr(panel, "model_combo", None).currentText() if getattr(panel, "model_combo", None) else None
+            ) or "gpt-3.5-turbo"
+
+        system_prompt = _load_one_shot_prompt()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt.strip()},
+        ]
+
+        doc = self.editor.document()
+        cursor = QTextCursor(doc)
+        cursor.setPosition(max(0, insert_pos))
+        cursor.beginEditBlock()
+        cursor.setKeepPositionOnInsert(False)
+        self._inline_ai_stream_cursor = cursor
+        self._inline_ai_stream_used = False
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        except Exception:
+            pass
+
+        worker = ApiWorker(server_config, messages, model, stream=True, parent=self)
+        worker.chunk.connect(self._append_inline_ai_chunk)
+        worker.finished.connect(self._finalize_inline_ai_stream)
+        worker.failed.connect(self._inline_ai_failed)
+        self._inline_ai_worker = worker
+        self.statusBar().showMessage("AI streaming...", 3000)
+        worker.start()
+
+    def _append_inline_ai_chunk(self, chunk: str) -> None:
+        if not chunk:
+            return
+        cursor = getattr(self, "_inline_ai_stream_cursor", None)
+        if cursor is None:
+            return
+        try:
+            cursor.insertText(chunk)
+            self._inline_ai_stream_used = True
+        except Exception:
+            pass
+
+    def _finalize_inline_ai_stream(self, full: str) -> None:
+        try:
+            cursor = getattr(self, "_inline_ai_stream_cursor", None)
+            used = getattr(self, "_inline_ai_stream_used", False)
+            if cursor is not None and not used and full:
+                cursor.insertText(full)
+            if cursor is not None:
+                try:
+                    cursor.endEditBlock()
+                except Exception:
+                    pass
+            if cursor is not None:
+                try:
+                    self.editor.setTextCursor(cursor)
+                    self.editor.setFocus()
+                except Exception:
+                    pass
+            self.statusBar().showMessage("Inline AI complete.", 2500)
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            self._inline_ai_worker = None
+            for attr in ("_inline_ai_stream_cursor", "_inline_ai_stream_used"):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    pass
+
+    def _inline_ai_failed(self, err: str) -> None:
+        self.statusBar().showMessage(f"Inline AI failed: {err}", 6000)
+        try:
+            cursor = getattr(self, "_inline_ai_stream_cursor", None)
+            if cursor is not None:
+                cursor.endEditBlock()
+        except Exception:
+            pass
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        self._inline_ai_worker = None
+        for attr in ("_inline_ai_stream_cursor", "_inline_ai_stream_used"):
+            try:
+                delattr(self, attr)
+            except Exception:
+                pass
 
     def _append_one_shot_chunk(self, doc: QTextDocument, chunk: str) -> None:
         """Append streamed chunk into the one-shot buffer just before the footer."""
