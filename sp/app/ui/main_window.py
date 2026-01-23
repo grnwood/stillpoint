@@ -3727,22 +3727,19 @@ class MainWindow(QMainWindow):
 
     def _add_bookmark(self) -> None:
         """Toggle the current page bookmark state."""
-        if not self.current_path:
+        self._toggle_bookmark_for_path(self.current_path)
+
+    def _toggle_bookmark_for_path(self, path: Optional[str]) -> None:
+        if not path:
             self.statusBar().showMessage("No page open to bookmark", 3000)
             return
-        
-        # Check if already bookmarked
-        if self.current_path in self.bookmarks:
-            self._remove_bookmark(self.current_path)
+        if path in self.bookmarks:
+            self._remove_bookmark(path)
             return
-        
-        # Add to beginning of list (leftmost position)
-        self.bookmarks.insert(0, self.current_path)
+        self.bookmarks.insert(0, path)
         config.save_bookmarks(self.bookmarks)
         self._refresh_bookmark_buttons()
-        
-        # Show feedback
-        page_name = Path(self.current_path).stem
+        page_name = Path(path).stem
         self.statusBar().showMessage(f"Bookmarked: {page_name}", 3000)
 
     def _refresh_tree(self) -> None:
@@ -8938,6 +8935,10 @@ class MainWindow(QMainWindow):
                 copy_link_action = menu.addAction("Copy Link to this Location")
                 copy_link_action.triggered.connect(
                     lambda checked=False, p=path, op=open_path: self._copy_tree_location_link(p, op)
+                )
+                toggle_bookmark_action = menu.addAction("Toggle Bookmark for this Page")
+                toggle_bookmark_action.triggered.connect(
+                    lambda checked=False, fp=file_path: self._toggle_bookmark_for_path(fp)
                 )
             collapse_action = menu.addAction("Collapse")
             collapse_action.triggered.connect(
