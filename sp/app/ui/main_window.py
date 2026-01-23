@@ -1812,38 +1812,77 @@ class MainWindow(QMainWindow):
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
         
+        home_icon = self._load_icon(self._find_asset("home.svg"), Qt.white, size=18)
+        search_icon = self._load_icon(self._find_asset("binoculars.svg"), Qt.white, size=18)
+        today_icon = self._load_icon(self._find_asset("calendar-days.svg"), Qt.white, size=18)
+        back_icon = self._load_icon(self._find_asset("left.svg"), Qt.white, size=18)
+        forward_icon = self._load_icon(self._find_asset("right.svg"), Qt.white, size=18)
+        up_icon = self._load_icon(self._find_asset("up.svg"), Qt.white, size=18)
+        down_icon = self._load_icon(self._find_asset("down.svg"), Qt.white, size=18)
+
         # Home button (navigate to vault root page)
         home_action = QAction("Home", self)
-        home_action.setIcon(self.style().standardIcon(QStyle.SP_DirHomeIcon))
+        home_action.setIcon(home_icon if home_icon else self.style().standardIcon(QStyle.SP_DirHomeIcon))
         home_action.setToolTip("Go to vault home page")
         home_action.triggered.connect(self._go_home)
         self.toolbar.addAction(home_action)
+
+        # Search button (search across vault)
+        search_action = QAction("Search", self)
+        search_action.setIcon(search_icon if search_icon else self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        search_action.setToolTip("Search across vault (Ctrl+Shift+F)")
+        search_action.triggered.connect(self._show_search_dialog)
+        self.toolbar.addAction(search_action)
+
+        # Today button (jump to today's journal entry)
+        today_action = QAction("Today", self)
+        today_action.setIcon(today_icon if today_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        today_action.setToolTip("Today's journal entry (Alt+D)")
+        today_action.triggered.connect(self._open_journal_today)
+        self.toolbar.addAction(today_action)
         
         # Bookmark button (bold blue plus symbol)
         self.bookmark_button = QAction("Add Bookmark", self)
+        self.bookmark_button.setToolTip("Toggle bookmark (Ctrl+Alt+B)")
         self.bookmark_button.triggered.connect(self._add_bookmark)
-        # Style the button text to be a bold blue plus symbol
-        font = QFont()
-        font.setPointSize(20)
-        font.setBold(True)
-        self.bookmark_button.setFont(font)
-        # Set text as plus symbol
-        self.bookmark_button.setText("+")
-        # We'll apply color via stylesheet after adding to toolbar
+        bookmark_icon = self._load_icon(self._find_asset("bookmark.svg"), Qt.white, size=18)
+        if bookmark_icon:
+            self.bookmark_button.setIcon(bookmark_icon)
+        else:
+            # Style the button text to be a bold blue plus symbol
+            font = QFont()
+            font.setPointSize(20)
+            font.setBold(True)
+            self.bookmark_button.setFont(font)
+            # Set text as plus symbol
+            self.bookmark_button.setText("+")
+            # We'll apply color via stylesheet after adding to toolbar
         self.toolbar.addAction(self.bookmark_button)
 
         # History navigation buttons
         self.nav_back_action = QAction(self)
-        self.nav_back_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.nav_back_action.setIcon(back_icon if back_icon else self.style().standardIcon(QStyle.SP_ArrowBack))
         self.nav_back_action.setToolTip("Back (Alt+Left)")
         self.nav_back_action.triggered.connect(self._navigate_history_back)
         self.toolbar.addAction(self.nav_back_action)
 
         self.nav_forward_action = QAction(self)
-        self.nav_forward_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowForward))
+        self.nav_forward_action.setIcon(forward_icon if forward_icon else self.style().standardIcon(QStyle.SP_ArrowForward))
         self.nav_forward_action.setToolTip("Forward (Alt+Right)")
         self.nav_forward_action.triggered.connect(self._navigate_history_forward)
         self.toolbar.addAction(self.nav_forward_action)
+
+        self.nav_up_action = QAction(self)
+        self.nav_up_action.setIcon(up_icon if up_icon else self.style().standardIcon(QStyle.SP_ArrowUp))
+        self.nav_up_action.setToolTip("Up (Alt+PgUp)")
+        self.nav_up_action.triggered.connect(lambda: self._navigate_tree(-1, leaves_only=False))
+        self.toolbar.addAction(self.nav_up_action)
+
+        self.nav_down_action = QAction(self)
+        self.nav_down_action.setIcon(down_icon if down_icon else self.style().standardIcon(QStyle.SP_ArrowDown))
+        self.nav_down_action.setToolTip("Down (Alt+PgDn)")
+        self.nav_down_action.triggered.connect(lambda: self._navigate_tree(1, leaves_only=False))
+        self.toolbar.addAction(self.nav_down_action)
         
         # Add bookmark display area (will be populated with bookmark buttons)
         self.bookmark_container = QWidget()
@@ -1956,6 +1995,9 @@ class MainWindow(QMainWindow):
         # Home shortcut: Alt+Home (works regardless of vi-mode state)
         home_shortcut = QShortcut(QKeySequence("Alt+Home"), self)
         home_shortcut.activated.connect(self._go_home)
+        bookmark_shortcut = QShortcut(QKeySequence("Ctrl+Alt+B"), self)
+        bookmark_shortcut.setContext(Qt.ApplicationShortcut)
+        bookmark_shortcut.activated.connect(self._add_bookmark)
         find_shortcut = QShortcut(QKeySequence.Find, self)
         find_shortcut.setContext(Qt.ApplicationShortcut)
         find_shortcut.activated.connect(lambda: self._show_find_bar(replace=False))
@@ -3684,14 +3726,14 @@ class MainWindow(QMainWindow):
                 pass
 
     def _add_bookmark(self) -> None:
-        """Add the current page to bookmarks."""
+        """Toggle the current page bookmark state."""
         if not self.current_path:
             self.statusBar().showMessage("No page open to bookmark", 3000)
             return
         
         # Check if already bookmarked
         if self.current_path in self.bookmarks:
-            self.statusBar().showMessage("Page already bookmarked", 3000)
+            self._remove_bookmark(self.current_path)
             return
         
         # Add to beginning of list (leftmost position)
