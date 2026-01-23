@@ -6427,6 +6427,12 @@ class MainWindow(QMainWindow):
             if template_path:
                 self._apply_template_from_path(file_path, page_name, template_path)
             
+            # Insert a short link to the new page before opening it.
+            if self.current_path:
+                colon_path = path_to_colon(file_path)
+                if colon_path:
+                    self.editor.insert_link(colon_path)
+
             # Open the new page
             self._pending_selection = file_path
             self._populate_vault_tree()

@@ -377,10 +377,11 @@ class JumpToPageDialog(QDialog):
         if len(parts) <= 1:
             return f"/{clean_name}/{clean_name}.md"
         # Create in same folder as current page
-        parent = parts[-2] if len(parts) >= 2 else ""
-        if parent:
-            return f"/{parent}/{clean_name}/{clean_name}.md"
-        return f"/{clean_name}/{clean_name}.md"
+        parent_parts = parts[:-1]
+        if not parent_parts:
+            return f"/{clean_name}/{clean_name}.md"
+        parent_path = "/".join(parent_parts)
+        return f"/{parent_path}/{clean_name}/{clean_name}.md"
     
     def _highlight_search_term(self, text: str) -> str:
         """Highlight search term in text using HTML."""
