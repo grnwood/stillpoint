@@ -4077,6 +4077,7 @@ class MarkdownEditor(QTextEdit):
             cursor = self.cursorForPosition(event.pos())
             self.setTextCursor(cursor)
             cursor.insertText(link_text)
+            self._refresh_display()
             event.acceptProposedAction()
             return
         
