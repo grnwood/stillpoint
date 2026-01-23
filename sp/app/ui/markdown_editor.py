@@ -5437,15 +5437,22 @@ class MarkdownEditor(QTextEdit):
         doc_cursor = QTextCursor(self.document())
         doc_cursor.setPosition(start)
         parts: list[str] = []
+        last_image: Optional[str] = None
+        last_was_image = False
         while doc_cursor.position() < end:
             doc_cursor.setPosition(doc_cursor.position() + 1, QTextCursor.KeepAnchor)
             fmt = doc_cursor.charFormat()
             if fmt.isImageFormat():
-                parts.append(self._markdown_from_image_format(fmt.toImageFormat()))
+                image_md = self._markdown_from_image_format(fmt.toImageFormat())
+                if not (last_was_image and last_image == image_md):
+                    parts.append(image_md)
+                last_image = image_md
+                last_was_image = True
             else:
                 part = doc_cursor.selectedText()
                 if part:
                     parts.append(part)
+                last_was_image = False
             doc_cursor.setPosition(doc_cursor.position())
         if not parts:
             return None
