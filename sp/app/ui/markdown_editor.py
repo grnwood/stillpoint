@@ -6074,7 +6074,7 @@ class MarkdownEditor(QTextEdit):
                 return _format_task_symbol(match.group(1), symbol, match.group("body"))
 
             line = original
-        shortcut_match = re.match(r"^(\s*)\(\s*(?P<state>[xX]?)\s*\)\s*(?P<body>.*)$", line)
+            shortcut_match = re.match(r"^(\s*)\(\s*(?P<state>[xX]?)\s*\)\s*(?P<body>.*)$", line)
             if shortcut_match:
                 symbol = _symbol_for(shortcut_match.group("state") or " ")
                 line = _format_task_symbol(
