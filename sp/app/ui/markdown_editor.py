@@ -5540,6 +5540,14 @@ class MarkdownEditor(QTextEdit):
         cursor.insertText(text)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        try:
+            has_wiki = bool(WIKI_LINK_STORAGE_PATTERN.search(text))
+            has_colon = any(COLON_LINK_PATTERN.match(line).hasMatch() for line in text.splitlines())
+        except Exception:
+            has_wiki = False
+            has_colon = False
+        if has_wiki or has_colon:
+            self._refresh_display()
         if "![" in text:
             self._render_images(self.toPlainText())
 
