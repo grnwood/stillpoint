@@ -6058,7 +6058,8 @@ class MarkdownEditor(QTextEdit):
 
             # 1) Normalize checkbox syntax to display symbols.
             def _symbol_for(state: str) -> str:
-                return "☑" if state.strip().lower() == "x" else "☐"
+                normalized = state.strip().lower()
+                return "☑" if normalized in ("x", "*") else "☐"
 
             def _format_task_symbol(indent: str, symbol: str, body: str) -> str:
                 body = (body or "").lstrip()
@@ -6074,7 +6075,7 @@ class MarkdownEditor(QTextEdit):
                 return _format_task_symbol(match.group(1), symbol, match.group("body"))
 
             line = original
-            shortcut_match = re.match(r"^(\s*)\(\s*(?P<state>[xX]?)\s*\)\s*(?P<body>.*)$", line)
+            shortcut_match = re.match(r"^(\s*)\(\s*(?P<state>[xX*]?)\s*\)\s*(?P<body>.*)$", line)
             if shortcut_match:
                 symbol = _symbol_for(shortcut_match.group("state") or " ")
                 line = _format_task_symbol(
@@ -6139,6 +6140,42 @@ class MarkdownEditor(QTextEdit):
                 if LINK_SENTINEL in line:
                     self.highlighter.rehighlightBlock(block)
                 return
+
+            # Preserve caret relative to line start when updating display line.
+            abs_pos = cursor.position()
+            line_start = block.position()
+            rel_pos = max(0, abs_pos - line_start)
+            delta = len(line) - len(original)
+
+            self._display_guard = True
+            try:
+                line_cursor = QTextCursor(block)
+                line_cursor.select(QTextCursor.LineUnderCursor)
+                line_cursor.insertText(line)
+
+                new_block = self.document().findBlock(line_start)
+                new_len = max(0, new_block.length() - 1)
+                new_rel = min(max(0, rel_pos + delta), new_len)
+                new_abs = line_start + new_rel
+                c = self.textCursor()
+                c.setPosition(new_abs)
+                self.setTextCursor(c)
+
+                is_bullet, bullet_indent, _ = self._is_bullet_line(line)
+                is_dash, dash_indent, _ = self._is_dash_line(line)
+                is_task, task_indent, _, _ = self._is_task_line(line)
+                if is_bullet:
+                    self._apply_hanging_indent(block, bullet_indent, "• ")
+                elif is_dash:
+                    self._apply_hanging_indent(block, dash_indent, "- ")
+                elif is_task:
+                    marker = "☑ " if line.strip().startswith("☑") else "☐ "
+                    self._apply_hanging_indent(block, task_indent, marker)
+                else:
+                    self._clear_hanging_indent(block)
+            finally:
+                self._display_guard = False
+            self._schedule_heading_outline()
         finally:
             self._enforce_display_guard = False
     
