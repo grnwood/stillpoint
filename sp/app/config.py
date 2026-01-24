@@ -1582,6 +1582,25 @@ def save_mermaid_hsplit_state(state: str) -> None:
     conn.commit()
 
 
+def load_mermaid_vsplit_state() -> Optional[str]:
+    """Load vertical split state (preview|chat) for Mermaid editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_vsplit_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_mermaid_vsplit_state(state: str) -> None:
+    """Persist vertical splitter state for Mermaid editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_vsplit_state", state))
+    conn.commit()
+
+
 def load_mermaid_editor_zoom(default: int = 0) -> int:
     """Load saved editor zoom level delta for Mermaid editor (int, relative to 11pt)."""
     conn = _get_conn()

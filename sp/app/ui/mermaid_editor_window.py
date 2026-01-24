@@ -85,6 +85,7 @@ class MermaidEditorWindow(QMainWindow):
         self._ai_chat_enabled: bool = config.load_enable_ai_chats()
         self._auto_render_enabled: bool = config.load_mermaid_auto_render(default=False)
         self._editor_dirty: bool = False
+        self._last_saved_content: Optional[str] = None
         self.setWindowTitle(f"Mermaid Editor - {self.file_path.name}")
         self.setGeometry(100, 100, 1400, 800)
 
@@ -246,7 +247,8 @@ class MermaidEditorWindow(QMainWindow):
         self.preview_label = ZoomablePreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(400, 300)
-        self.preview_label.setStyleSheet("background-color: #f8f8f8;")
+        self.preview_label.setStyleSheet("background-color: #f8f8f8; color: #000;")
+        self.preview_label.setWordWrap(True)
         self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
 
         self.preview_scroll_area = QScrollArea()
@@ -292,6 +294,13 @@ class MermaidEditorWindow(QMainWindow):
 
         self._restore_geometry_prefs()
 
+        # Enable mouse panning in preview area
+        self.preview_label.setMouseTracking(True)
+        # Use eventFilter for panning to avoid breaking shortcuts
+        self.preview_label.installEventFilter(self)
+        self._preview_pan_start = None
+        self._preview_pan_origin = None
+
         self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label = QLabel("INS")
@@ -336,6 +345,66 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
         self._render()
+    def _restore_geometry_prefs(self) -> None:
+        """Restore window and splitter geometry from config."""
+        try:
+            geom = config.load_mermaid_editor_geometry()
+            if geom:
+                self.restoreGeometry(QByteArray.fromBase64(geom.encode("utf-8")))
+        except Exception:
+            pass
+        try:
+            splitter = config.load_mermaid_editor_splitter()
+            if splitter:
+                self.editor_preview_splitter.restoreState(QByteArray.fromBase64(splitter.encode("utf-8")))
+        except Exception:
+            pass
+
+    def _save_geometry_prefs(self) -> None:
+        """Save window and splitter geometry to config."""
+        try:
+            geom = self.saveGeometry().toBase64().data().decode("utf-8")
+            config.save_mermaid_editor_geometry(geom)
+        except Exception:
+            pass
+        try:
+            splitter = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
+            config.save_mermaid_editor_splitter(splitter)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._geom_timer.start()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._geom_timer.start()
+
+    def closeEvent(self, event) -> None:
+        self._save_geometry_prefs()
+        super().closeEvent(event)
+
+    # --- Preview panning (mouse drag to scroll) using eventFilter ---
+    def eventFilter(self, obj, event):
+        if obj is self.preview_label:
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._preview_pan_start = event.pos()
+                self._preview_pan_origin = self.preview_scroll_area.horizontalScrollBar().value(), self.preview_scroll_area.verticalScrollBar().value()
+                return True
+            elif event.type() == QEvent.MouseMove and self._preview_pan_start is not None and event.buttons() & Qt.LeftButton:
+                dx = event.pos().x() - self._preview_pan_start.x()
+                dy = event.pos().y() - self._preview_pan_start.y()
+                orig_x, orig_y = self._preview_pan_origin
+                self.preview_scroll_area.horizontalScrollBar().setValue(orig_x - dx)
+                self.preview_scroll_area.verticalScrollBar().setValue(orig_y - dy)
+                return True
+            elif event.type() == QEvent.MouseButtonRelease:
+                self._preview_pan_start = None
+                self._preview_pan_origin = None
+                return True
+        return super().eventFilter(obj, event)
 
     def _get_monospace_font(self):
         from PySide6.QtGui import QFont
@@ -927,6 +996,12 @@ class MermaidEditorWindow(QMainWindow):
                 self.editor_preview_splitter.restoreState(QByteArray.fromBase64(hstate64.encode("utf-8")))
         except Exception:
             pass
+        try:
+            vstate64 = config.load_mermaid_vsplit_state()
+            if vstate64 and hasattr(self, "_vertical_splitter") and self._vertical_splitter:
+                self._vertical_splitter.restoreState(QByteArray.fromBase64(vstate64.encode("utf-8")))
+        except Exception:
+            pass
 
     def _save_geometry_prefs(self) -> None:
         try:
@@ -937,6 +1012,12 @@ class MermaidEditorWindow(QMainWindow):
         try:
             h = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
             config.save_mermaid_hsplit_state(h)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_vertical_splitter") and self._vertical_splitter:
+                v = self._vertical_splitter.saveState().toBase64().data().decode("utf-8")
+                config.save_mermaid_vsplit_state(v)
         except Exception:
             pass
 
@@ -952,6 +1033,11 @@ class MermaidEditorWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         try:
+            if self._is_dirty():
+                self._save_file()
+        except Exception:
+            pass
+        try:
             if hasattr(self, "_geom_timer"):
                 self._geom_timer.stop()
         except Exception:
@@ -964,6 +1050,9 @@ class MermaidEditorWindow(QMainWindow):
             try:
                 content = self.file_path.read_text(encoding="utf-8")
                 self.editor.setPlainText(content)
+                self._last_saved_content = content
+                self._editor_dirty = False
+                self._update_render_status_label()
             except Exception as exc:
                 QMessageBox.warning(self, "Error", f"Failed to load file: {exc}")
         else:
@@ -971,6 +1060,9 @@ class MermaidEditorWindow(QMainWindow):
   A[Start] --> B[End]
 """
             self.editor.setPlainText(template)
+            self._last_saved_content = ""
+            self._editor_dirty = True
+            self._update_render_status_label()
 
     def _save_file(self) -> None:
         try:
@@ -981,8 +1073,15 @@ class MermaidEditorWindow(QMainWindow):
                     QMessageBox.critical(self, "Error", message or "Failed to save file.")
                     return
             self.file_path.write_text(content, encoding="utf-8")
+            self._last_saved_content = content
+            self._editor_dirty = False
+            self._update_render_status_label()
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")
+
+    def _is_dirty(self) -> bool:
+        current = self.editor.toPlainText()
+        return current != (self._last_saved_content or "")
 
     def _on_editor_changed(self) -> None:
         self._editor_dirty = True
@@ -1008,6 +1107,7 @@ class MermaidEditorWindow(QMainWindow):
             result = self.renderer.render_svg(mermaid_text)
         except Exception as exc:
             print(f"[Mermaid Editor] Render exception: {exc}", file=__import__('sys').stdout, flush=True)
+            self._show_preview_error(f"Render exception:\n{exc}")
             return
 
         try:
@@ -1025,11 +1125,14 @@ class MermaidEditorWindow(QMainWindow):
                     self._update_preview_display()
                     self.render_btn.setText("Render OK")
                 else:
-                    error_svg = _generate_error_svg("Failed to convert SVG to image")
+                    error_msg = "Failed to convert SVG to image."
+                    error_svg = _generate_error_svg(error_msg)
                     self._last_svg = error_svg
                     self.preview_pixmap = self._svg_to_pixmap(error_svg)
                     if self.preview_pixmap:
                         self._update_preview_display()
+                    else:
+                        self._show_preview_error(error_msg)
                     self.render_btn.setText("Render Failed")
             else:
                 error_msg = result.error_message or result.stderr or "Unknown error"
@@ -1050,6 +1153,8 @@ class MermaidEditorWindow(QMainWindow):
                 self.preview_pixmap = self._svg_to_pixmap(error_svg)
                 if self.preview_pixmap:
                     self._update_preview_display()
+                else:
+                    self._show_preview_error(error_display)
                 self.render_btn.setText("Render Failed")
         except Exception as exc:
             print(f"[Mermaid Editor] Render error: {exc}", file=__import__('sys').stdout, flush=True)
@@ -1059,6 +1164,8 @@ class MermaidEditorWindow(QMainWindow):
                 self.preview_pixmap = self._svg_to_pixmap(error_svg)
                 if self.preview_pixmap:
                     self._update_preview_display()
+                else:
+                    self._show_preview_error(f"Internal error:\n{str(exc)}")
             except RuntimeError:
                 pass
             self.render_btn.setText("Render Failed")
@@ -1094,6 +1201,10 @@ class MermaidEditorWindow(QMainWindow):
         except RuntimeError:
             return
 
+        try:
+            self.preview_label.setText("")
+        except Exception:
+            pass
         zoom_factor = 1.0 + (self.preview_zoom_level * 0.1)
         size = self.preview_pixmap.size()
         new_size = QSize(int(size.width() * zoom_factor), int(size.height() * zoom_factor))
@@ -1102,8 +1213,24 @@ class MermaidEditorWindow(QMainWindow):
             Qt.SmoothTransformation
         )
         try:
+            self.preview_label.setMinimumSize(scaled_pixmap.size())
+            self.preview_label.resize(scaled_pixmap.size())
             self.preview_label.setPixmap(scaled_pixmap)
         except RuntimeError:
+            pass
+
+    def _show_preview_error(self, message: str) -> None:
+        try:
+            if not self or not hasattr(self, "preview_label"):
+                return
+            _ = self.preview_label
+        except RuntimeError:
+            return
+        try:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setMinimumSize(400, 300)
+            self.preview_label.setText(message)
+        except Exception:
             pass
 
     def _zoom_in_editor(self) -> None:
