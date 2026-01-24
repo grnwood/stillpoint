@@ -438,6 +438,26 @@ class PreferencesDialog(QDialog):
         puml_layout.addLayout(test_row)
         puml_layout.addStretch(1)
 
+        # Mermaid
+        mermaid_layout = add_section("Mermaid")
+        self.mermaid_enable_checkbox = QCheckBox("Enable Mermaid rendering")
+        self.mermaid_enable_checkbox.setChecked(config.load_mermaid_enabled())
+        mermaid_layout.addWidget(self.mermaid_enable_checkbox)
+
+        mermaid_help = QLabel("Install Mermaid CLI: npm install -g @mermaid-js/mermaid-cli")
+        mermaid_help.setWordWrap(True)
+        mermaid_layout.addWidget(mermaid_help)
+
+        mermaid_test_row = QHBoxLayout()
+        self.mermaid_test_btn = QPushButton("Check Mermaid Install")
+        self.mermaid_test_btn.clicked.connect(self._run_mermaid_test)
+        self.mermaid_test_status = QLabel("Not tested")
+        self.mermaid_test_status.setStyleSheet("color: #888;")
+        mermaid_test_row.addWidget(self.mermaid_test_btn)
+        mermaid_test_row.addWidget(self.mermaid_test_status, 1)
+        mermaid_layout.addLayout(mermaid_test_row)
+        mermaid_layout.addStretch(1)
+
         # Templates
         tpl_layout = add_section("Templates")
         row_tpl_page = QHBoxLayout()
@@ -675,6 +695,20 @@ class PreferencesDialog(QDialog):
             if details:
                 QMessageBox.warning(self, "PlantUML Test", details)
 
+    def _run_mermaid_test(self):
+        from sp.app.mermaid_renderer import MermaidRenderer
+
+        self.mermaid_test_status.setText("Checking…")
+        self.mermaid_test_status.setStyleSheet("color: #888;")
+        renderer = MermaidRenderer()
+        path = renderer.discover_mmdc()
+        if path:
+            self.mermaid_test_status.setText(f"OK ({path})")
+            self.mermaid_test_status.setStyleSheet("color: #2a8f2a;")
+        else:
+            self.mermaid_test_status.setText("Failed: mmdc not found on PATH")
+            self.mermaid_test_status.setStyleSheet("color: #c00;")
+
     def _load_pygments_styles(self) -> None:
         styles = ["monokai"]
         try:
@@ -791,6 +825,10 @@ class PreferencesDialog(QDialog):
             config.save_plantuml_jar_path(self.plantuml_jar_edit.text())
             config.save_plantuml_java_path(self.plantuml_java_edit.text())
             config.save_plantuml_render_debounce_ms(self.plantuml_debounce_spin.value())
+        except Exception:
+            pass
+        try:
+            config.save_mermaid_enabled(self.mermaid_enable_checkbox.isChecked())
         except Exception:
             pass
         try:

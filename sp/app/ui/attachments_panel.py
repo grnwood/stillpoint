@@ -59,6 +59,8 @@ class AttachmentsPanel(QWidget):
     
     # Signal emitted when user wants to open a .puml file in the PlantUML editor
     plantumlEditorRequested = Signal(object)  # file_path or payload
+    # Signal emitted when user wants to open a Mermaid diagram file in the Mermaid editor
+    mermaidEditorRequested = Signal(object)  # file_path or payload
 
     def __init__(
         self,
@@ -597,14 +599,25 @@ class AttachmentsPanel(QWidget):
             self._refresh_attachments()
     
     def _open_attachment(self, item: QListWidgetItem) -> None:
-        """Open the selected attachment. .puml files open in PlantUML editor, others use default handler."""
+        """Open the selected attachment. Diagram files open in editors, others use default handler."""
         data = item.data(Qt.UserRole)
+        mermaid_suffixes = {".mmd", ".mermaid"}
         if self._remote_mode and isinstance(data, dict):
             rel_path = data.get("path")
             if not rel_path or not self._api_base:
                 return
-            if str(rel_path).lower().endswith(".puml"):
+            rel_path_lower = str(rel_path).lower()
+            if rel_path_lower.endswith(".puml"):
                 self.plantumlEditorRequested.emit(
+                    {
+                        "kind": "remote",
+                        "path": str(rel_path),
+                        "page_path": self._current_page_key(),
+                    }
+                )
+                return
+            if any(rel_path_lower.endswith(suffix) for suffix in mermaid_suffixes):
+                self.mermaidEditorRequested.emit(
                     {
                         "kind": "remote",
                         "path": str(rel_path),
@@ -626,6 +639,9 @@ class AttachmentsPanel(QWidget):
                 if file_path.suffix.lower() == ".puml":
                     print(f"[Attachments] Double-click .puml -> open editor: {data}")
                     self.plantumlEditorRequested.emit(data)
+                elif file_path.suffix.lower() in mermaid_suffixes:
+                    print(f"[Attachments] Double-click Mermaid -> open editor: {data}")
+                    self.mermaidEditorRequested.emit(data)
                 else:
                     # Open with default system handler
                     print(f"[Attachments] Double-click non-puml -> open default: {data}")
@@ -642,6 +658,9 @@ class AttachmentsPanel(QWidget):
         # Add "Add new PlantUML..." action
         add_plantuml_action = menu.addAction("Add new PlantUML...")
         add_plantuml_action.triggered.connect(self._create_new_plantuml)
+
+        add_mermaid_action = menu.addAction("Add new Mermaid...")
+        add_mermaid_action.triggered.connect(self._create_new_mermaid)
         
         # Show context menu at cursor position
         menu.exec(self.attachments_list.mapToGlobal(pos))
@@ -729,6 +748,81 @@ class AttachmentsPanel(QWidget):
             self._refresh_attachments()
             # Emit signal to open the file in the PlantUML editor
             self.plantumlEditorRequested.emit(str(file_path))
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+
+    def _create_new_mermaid(self) -> None:
+        """Create a new .mmd file in the attachments folder."""
+        if not self.current_page_path:
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "New Mermaid Diagram",
+            "Enter diagram name (without .mmd extension):",
+            text="diagram",
+        )
+
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        if not name:
+            return
+
+        if not name.lower().endswith(".mmd"):
+            name = name + ".mmd"
+
+        if self._remote_mode:
+            if not self._http_client:
+                return
+            page_key = self._current_page_key()
+            if not page_key:
+                return
+            if name in self._remote_attachment_names():
+                QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
+                return
+            template = """flowchart TD
+  A[Start] --> B[End]
+"""
+            try:
+                resp = self._http_client.post(
+                    "/files/attach",
+                    data={"page_path": page_key},
+                    files={"files": (name, template.encode("utf-8"), "text/plain")},
+                )
+                if resp.status_code == 401 and self._auth_prompt:
+                    if self._auth_prompt():
+                        resp = self._http_client.post(
+                            "/files/attach",
+                            data={"page_path": page_key},
+                            files={"files": (name, template.encode("utf-8"), "text/plain")},
+                        )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+                return
+            self._refresh_attachments()
+            return
+
+        page_folder = self.current_page_path.parent
+        if not page_folder.exists() or not page_folder.is_dir():
+            return
+
+        file_path = page_folder / name
+
+        if file_path.exists():
+            QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
+            return
+
+        template = """flowchart TD
+  A[Start] --> B[End]
+"""
+        try:
+            file_path.write_text(template, encoding="utf-8")
+            self._refresh_attachments()
+            self.mermaidEditorRequested.emit(str(file_path))
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")

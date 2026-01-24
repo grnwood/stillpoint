@@ -1308,6 +1308,11 @@ class MainWindow(QMainWindow):
             print("[MainWindow] Connected PlantUML editor request signal")
         except Exception as exc:
             print(f"[MainWindow] Failed to connect PlantUML editor signal: {exc}")
+        try:
+            self.right_panel.attachments_panel.mermaidEditorRequested.connect(self._open_mermaid_editor)
+            print("[MainWindow] Connected Mermaid editor request signal")
+        except Exception as exc:
+            print(f"[MainWindow] Failed to connect Mermaid editor signal: {exc}")
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
         self.right_panel.set_calendar_font_size(self.font_size)
         try:
@@ -7515,6 +7520,110 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._alert(f"Failed to open PlantUML editor: {exc}")
 
+    def _open_mermaid_editor(self, file_path) -> None:
+        """Open a Mermaid editor window for the given .mmd/.mermaid file."""
+        if not file_path:
+            return
+        try:
+            from .mermaid_editor_window import MermaidEditorWindow
+            if isinstance(file_path, dict) and file_path.get("kind") == "remote":
+                self._open_remote_mermaid_editor(file_path.get("path", ""), file_path.get("page_path"))
+                return
+            print(f"[MainWindow] Opening Mermaid editor for: {file_path}")
+
+            window = MermaidEditorWindow(str(file_path), parent=None)
+            try:
+                window.setWindowFlag(Qt.Window, True)
+                window.setWindowFlag(Qt.Tool, False)
+                window.setAttribute(Qt.WA_NativeWindow, True)
+                window.setWindowModality(Qt.NonModal)
+            except Exception:
+                pass
+            if not hasattr(self, "_mermaid_windows"):
+                self._mermaid_windows: list[QMainWindow] = []
+            self._mermaid_windows.append(window)
+            try:
+                window.destroyed.connect(lambda: self._mermaid_windows.remove(window) if window in self._mermaid_windows else None)
+            except Exception:
+                pass
+            window.show()
+        except Exception as exc:
+            self._alert(f"Failed to open Mermaid editor: {exc}")
+
+    def _open_remote_mermaid_editor(self, remote_path: str, page_key: Optional[str]) -> None:
+        if not remote_path:
+            return
+        try:
+            resp = self.http.get("/api/file/raw", params={"path": remote_path})
+            if resp.status_code == 401 and self._remote_mode:
+                if self._prompt_remote_login():
+                    resp = self.http.get("/api/file/raw", params={"path": remote_path})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to load {remote_path}")
+            return
+        try:
+            content = resp.content.decode("utf-8")
+        except Exception as exc:
+            self._alert(f"Failed to decode {remote_path}: {exc}")
+            return
+        cache_root = self._ensure_remote_cache_root()
+        cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self._alert(f"Failed to cache remote file: {exc}")
+            return
+
+        def _save_remote(content_text: str):
+            if not page_key:
+                return False, "Missing page context for attachment save."
+            try:
+                write_resp = self.http.post(
+                    "/files/attach",
+                    data={"page_path": page_key},
+                    files={"files": (Path(remote_path).name, content_text.encode("utf-8"), "text/plain")},
+                )
+                if write_resp.status_code == 401 and self._remote_mode:
+                    if self._prompt_remote_login():
+                        write_resp = self.http.post(
+                            "/files/attach",
+                            data={"page_path": page_key},
+                            files={"files": (Path(remote_path).name, content_text.encode("utf-8"), "text/plain")},
+                        )
+                if write_resp.status_code == 409:
+                    return False, "Save failed: server version changed. Reopen to merge."
+                write_resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                return False, str(exc)
+            try:
+                cache_path.write_text(content_text, encoding="utf-8")
+            except Exception:
+                pass
+            return True, None
+
+        try:
+            from .mermaid_editor_window import MermaidEditorWindow
+            window = MermaidEditorWindow(str(cache_path), parent=None, on_save=_save_remote)
+            try:
+                window.setWindowFlag(Qt.Window, True)
+                window.setWindowFlag(Qt.Tool, False)
+                window.setAttribute(Qt.WA_NativeWindow, True)
+                window.setWindowModality(Qt.NonModal)
+            except Exception:
+                pass
+            if not hasattr(self, "_mermaid_windows"):
+                self._mermaid_windows: list[QMainWindow] = []
+            self._mermaid_windows.append(window)
+            try:
+                window.destroyed.connect(lambda: self._mermaid_windows.remove(window) if window in self._mermaid_windows else None)
+            except Exception:
+                pass
+            window.show()
+        except Exception as exc:
+            self._alert(f"Failed to open Mermaid editor: {exc}")
+
     def _toggle_mode_overlay(self, mode: str) -> None:
         """Toggle Focus/Audience mode full-screen overlay."""
         normalized = (mode or "").lower()
@@ -8275,6 +8384,9 @@ class MainWindow(QMainWindow):
             if candidate.suffix.lower() == ".puml":
                 self._open_plantuml_editor(candidate)
                 return True
+            if candidate.suffix.lower() in {".mmd", ".mermaid"}:
+                self._open_mermaid_editor(candidate)
+                return True
         except Exception:
             pass
         try:
@@ -8299,6 +8411,15 @@ class MainWindow(QMainWindow):
         try:
             if Path(virtual_path).suffix.lower() == ".puml":
                 self._open_plantuml_editor(
+                    {
+                        "kind": "remote",
+                        "path": virtual_path,
+                        "page_path": self.current_path,
+                    }
+                )
+                return True
+            if Path(virtual_path).suffix.lower() in {".mmd", ".mermaid"}:
+                self._open_mermaid_editor(
                     {
                         "kind": "remote",
                         "path": virtual_path,

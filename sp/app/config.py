@@ -810,6 +810,20 @@ def save_plantuml_render_debounce_ms(ms: int) -> None:
     _update_global_config({"plantuml_render_debounce_ms": val})
 
 
+# Mermaid Configuration
+
+
+def load_mermaid_enabled() -> bool:
+    """Load Mermaid rendering enabled flag (default: True)."""
+    payload = _read_global_config()
+    return payload.get("mermaid_enabled", True)
+
+
+def save_mermaid_enabled(enabled: bool) -> None:
+    """Save Mermaid rendering enabled flag."""
+    _update_global_config({"mermaid_enabled": bool(enabled)})
+
+
 def _merge_mode_settings(payload: dict, defaults: dict) -> dict:
     """Merge persisted mode settings with defaults, dropping unexpected keys."""
     merged = defaults.copy()
@@ -1524,6 +1538,117 @@ def save_puml_auto_render(enabled: bool) -> None:
     if not conn:
         return
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_auto_render", "1" if enabled else "0"))
+    conn.commit()
+
+
+# --- Mermaid Editor window prefs -------------------------------------------
+
+
+def load_mermaid_window_geometry() -> Optional[str]:
+    """Load saved geometry for Mermaid editor window (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_window_geometry",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_mermaid_window_geometry(geometry: str) -> None:
+    """Persist geometry for Mermaid editor window (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_window_geometry", geometry))
+    conn.commit()
+
+
+def load_mermaid_hsplit_state() -> Optional[str]:
+    """Load horizontal split state (editor|preview) for Mermaid editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_hsplit_state",))
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def save_mermaid_hsplit_state(state: str) -> None:
+    """Persist horizontal splitter state for Mermaid editor (base64 QByteArray)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_hsplit_state", state))
+    conn.commit()
+
+
+def load_mermaid_editor_zoom(default: int = 0) -> int:
+    """Load saved editor zoom level delta for Mermaid editor (int, relative to 11pt)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_editor_zoom",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return int(row[0])
+    except Exception:
+        return default
+
+
+def save_mermaid_editor_zoom(level: int) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_editor_zoom", str(int(level))))
+    conn.commit()
+
+
+def load_mermaid_preview_zoom(default: int = 0) -> int:
+    """Load saved preview zoom level delta for Mermaid editor (int increments of 10%)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_preview_zoom",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return int(row[0])
+    except Exception:
+        return default
+
+
+def save_mermaid_preview_zoom(level: int) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_preview_zoom", str(int(level))))
+    conn.commit()
+
+
+def load_mermaid_auto_render(default: bool = False) -> bool:
+    """Load Mermaid auto-render setting (default: False)."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_auto_render",))
+    row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return row[0].lower() in ("1", "true", "yes")
+    except Exception:
+        return default
+
+
+def save_mermaid_auto_render(enabled: bool) -> None:
+    """Save Mermaid auto-render setting."""
+    conn = _get_conn()
+    if not conn:
+        return
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_auto_render", "1" if enabled else "0"))
     conn.commit()
 
 

@@ -1,0 +1,74 @@
+[
+  {
+    "name": "Sequence Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/sequenceDiagram.html",
+    "simple_mmd": "sequenceDiagram\nAlice->>Bob: Request\nBob-->>Alice: Response",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\",\"actorBorder\":\"#24292F\",\"actorBkg\":\"#EAEEF2\",\"signalColor\":\"#1F6FEB\",\"signalTextColor\":\"#24292F\",\"noteBkgColor\":\"#FFF8C5\",\"noteBorderColor\":\"#D4A72C\"}}}%%\nsequenceDiagram\n  title Sequence Diagram (advanced features)\n  autonumber\n\n  box Client #E7F5FF\n    participant Web as \"Web UI\"\n  end\n\n  box Server #FFF5E6\n    participant API\n    participant DB as \"Orders DB\"\n  end\n\n  Web->>+API: POST /orders (json)\n  API->>+DB: INSERT order\n  DB-->>-API: ok\n\n  alt Payment fails\n    API-->>Web: 402 Payment Required\n  else Success\n    API-->>Web: 201 Created\\nLocation: /orders/123\n  end\n\n  Note right of API: Demonstrates:\\n- boxes\\n- autonumber\\n- activation\\n- alt/else\\n- themed styling"
+  },
+  {
+    "name": "Flowchart Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/flowchart.html",
+    "simple_mmd": "flowchart LR\nA[Web App] --> B[API]\nB --> C[(Database)]",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nflowchart LR\n  %% Subgraphs as \"packages\"\n  subgraph Frontend[\"Frontend\"]\n    Web[Web App]\n    Admin[Admin Portal]\n  end\n\n  subgraph Services[\"Services\"]\n    Auth[Auth Service]\n    Catalog[Catalog Service]\n    Orders[Order Service]\n  end\n\n  subgraph Data[\"Data\"]\n    ODB[(Orders DB)]\n    CDB[(Catalog DB)]\n  end\n\n  Web -->|OIDC| Auth\n  Web -->|Browse| Catalog\n  Web -->|Checkout| Orders\n  Admin --> Auth\n  Admin --> Orders\n\n  Orders -->|SQL| ODB\n  Catalog -->|SQL| CDB\n\n  %% Styling\n  classDef frontend fill:#E7F5FF,stroke:#24292F,color:#24292F;\n  classDef service fill:#FFF5E6,stroke:#24292F,color:#24292F;\n  classDef data fill:#EAFBE7,stroke:#24292F,color:#24292F;\n\n  class Web,Admin frontend;\n  class Auth,Catalog,Orders service;\n  class ODB,CDB data;"
+  },
+  {
+    "name": "Class Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/classDiagram.html",
+    "simple_mmd": "classDiagram\n  class User {\n    +int id\n    +string name\n  }\n  class Order {\n    +int orderId\n    +decimal total\n  }\n  User \"1\" --> \"*\" Order",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nclassDiagram\n  direction LR\n\n  class BaseEntity {\n    <<abstract>>\n    +UUID id\n    +datetime createdAt\n  }\n\n  class Customer {\n    +string email\n    +string name\n  }\n\n  class Order {\n    +OrderStatus status\n    +decimal total\n    +addItem(string sku, int qty)\n  }\n\n  class OrderItem {\n    +string sku\n    +int qty\n    +decimal unitPrice\n  }\n\n  class PaymentProvider {\n    <<interface>>\n    +authorize(decimal amount) AuthResult\n    +capture(string authId) Receipt\n  }\n\n  class StripeProvider\n\n  class OrderStatus {\n    <<enumeration>>\n    Draft\n    Submitted\n    Paid\n    Shipped\n    Cancelled\n  }\n\n  BaseEntity <|-- Customer\n  BaseEntity <|-- Order\n  PaymentProvider <|.. StripeProvider\n\n  Customer \"1\" o-- \"*\" Order : places\n  Order \"1\" *-- \"1..*\" OrderItem : contains"
+  },
+  {
+    "name": "State Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/stateDiagram.html",
+    "simple_mmd": "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Processing: start\n  Processing --> Idle: finish\n  Processing --> Error: fail\n  Error --> Idle: reset",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#1F6FEB\",\"noteBkgColor\":\"#FFF8C5\",\"noteBorderColor\":\"#D4A72C\"}}}%%\nstateDiagram-v2\n  title State Diagram (advanced features)\n\n  [*] --> Draft\n\n  state Draft {\n    [*] --> Editing\n    Editing --> Ready: validate ok\n    Ready --> Editing: edit\n  }\n\n  Draft --> Submitted: submit\n  Submitted --> Paid: payment ok\n  Submitted --> Cancelled: cancel\n\n  state Paid {\n    [*] --> AwaitingFulfillment\n    AwaitingFulfillment --> Shipped: fulfill\n    Shipped --> Delivered: deliver\n  }\n\n  note right of Submitted\n    Demonstrates:\n    - nested states\n    - labeled transitions\n    - themed styling\n  end note"
+  },
+  {
+    "name": "Entity Relationship Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/entityRelationshipDiagram.html",
+    "simple_mmd": "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ ORDER_ITEM : contains",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nerDiagram\n  CUSTOMER {\n    int id PK\n    string email\n    string name\n  }\n\n  ORDER {\n    int orderId PK\n    string status\n    decimal total\n    datetime createdAt\n  }\n\n  ORDER_ITEM {\n    int id PK\n    string sku\n    int qty\n    decimal unitPrice\n  }\n\n  PAYMENT_AUTH {\n    string authId PK\n    decimal amount\n    string provider\n  }\n\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ ORDER_ITEM : contains\n  ORDER ||--o| PAYMENT_AUTH : \"authorizes\""
+  },
+  {
+    "name": "Gantt Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/gantt.html",
+    "simple_mmd": "gantt\n  title Project Plan\n  dateFormat  YYYY-MM-DD\n  section Plan\n  Design   :a1, 2025-01-01, 5d\n  Build    :a2, after a1, 10d",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\ngantt\n  title Gantt (advanced features)\n  dateFormat  YYYY-MM-DD\n  axisFormat  %b %d\n\n  section Delivery\n  Discovery  :done, d1, 2025-01-01, 3d\n  Design     :active, d2, after d1, 5d\n  Build      :crit, d3, after d2, 10d\n  QA         :q1, after d3, 4d\n  Release    :milestone, r1, after q1, 1d\n\n  section Milestones\n  Kickoff    :milestone, k0, 2025-01-01, 0d\n  Go Live    :milestone, gl, after r1, 0d"
+  },
+  {
+    "name": "Mindmap Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/mindmap.html",
+    "simple_mmd": "mindmap\n  root((StillPoint))\n    Notes\n    Search\n    AI",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nmindmap\n  root((StillPoint))\n    Editor\n      Markdown\n      Code blocks\n        PlantUML\n        Mermaid\n    Preview\n      Render cache\n      SVG export\n    Search\n      FTS\n      Tags\n      Backlinks\n    AI\n      Summaries\n      One-shot prompts"
+  },
+  {
+    "name": "Timeline Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/timeline.html",
+    "simple_mmd": "timeline\n  title StillPoint milestones\n  2025-12 : First public builds\n  2026-01 : macOS packaging",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\ntimeline\n  title Roadmap (advanced features)\n  section Core\n    2026-01 : Packaging parity (win/linux/mac)\n    2026-02 : Print/Export pipeline\n  section Diagrams\n    2026-02 : Mermaid editor\n    2026-03 : Diagram export cache\n  section AI\n    2026-02 : Local embeddings tuning\n    2026-03 : One-shot prompts per page"
+  },
+  {
+    "name": "Pie Chart",
+    "help": "https://mermaid.ai/open-source/syntax/pie.html",
+    "simple_mmd": "pie\n  title Ticket Split\n  \"Bugs\" : 42\n  \"Features\" : 38\n  \"Chore\" : 20",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\npie showData\n  title Work Mix (advanced features)\n  \"Build/Release\" : 25\n  \"Bugs\" : 35\n  \"Features\" : 30\n  \"Docs\" : 10"
+  },
+  {
+    "name": "User Journey Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/userJourney.html",
+    "simple_mmd": "journey\n  title Capture a task\n  section Capture\n    Open StillPoint: 5: User\n    Type task: 4: User\n    Save: 5: User",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\njourney\n  title StillPoint daily workflow (advanced)\n  section Morning\n    Open Journal day page: 5: User\n    Review inbox: 4: User\n    Triage to projects: 3: User\n  section Work\n    Jump via graph slice: 5: User\n    Add notes + links: 4: User\n    Capture action items: 4: User\n  section Wrap-up\n    Process inbox: 3: User\n    Plan tomorrow: 4: User"
+  },
+  {
+    "name": "Git Graph Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/gitgraph.html",
+    "simple_mmd": "gitGraph\n  commit\n  commit\n  commit",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\ngitGraph\n  commit id: \"v0.1.0\"\n  branch feature/mermaid\n  checkout feature/mermaid\n  commit id: \"add editor\"\n  commit id: \"export svg\"\n  checkout main\n  commit id: \"docs\"\n  merge feature/mermaid tag: \"v0.2.0\""
+  },
+  {
+    "name": "Requirement Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/requirementDiagram.html",
+    "simple_mmd": "requirementDiagram\n  requirement capture {\n    id: 1\n    text: Fast inbox capture\n    risk: medium\n    verifymethod: test\n  }",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\nrequirementDiagram\n  title Requirements (advanced features)\n\n  requirement R1 {\n    id: R1\n    text: Mermaid editor mode\n    risk: low\n    verifymethod: test\n  }\n\n  requirement R2 {\n    id: R2\n    text: Export to SVG/PNG/PDF\n    risk: medium\n    verifymethod: analysis\n  }\n\n  requirement R3 {\n    id: R3\n    text: Offline-first rendering\n    risk: low\n    verifymethod: inspection\n  }\n\n  element UI {\n    type: component\n    docref: \"EditorPane\"\n  }\n\n  element Exporter {\n    type: component\n    docref: \"mmdc pipeline\"\n  }\n\n  R1 - satisfies -> UI\n  R2 - satisfies -> Exporter\n  R3 - satisfies -> UI\n  R2 - traces -> R1"
+  }
+]
