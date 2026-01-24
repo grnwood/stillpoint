@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray
+from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -230,6 +230,17 @@ class MermaidEditorWindow(QMainWindow):
         self.editor = ViPlainTextEdit()
         self.editor.setPlaceholderText("Enter Mermaid diagram code here...")
         self.editor.setFont(self._get_monospace_font())
+        self.editor.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+                padding: 8px;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+            }
+        """)
+        self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
 
         editor_container = QWidget()
         editor_layout = QVBoxLayout()
@@ -250,6 +261,8 @@ class MermaidEditorWindow(QMainWindow):
         self.preview_label.setStyleSheet("background-color: #f8f8f8; color: #000;")
         self.preview_label.setWordWrap(True)
         self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
+        self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
 
         self.preview_scroll_area = QScrollArea()
         self.preview_scroll_area.setWidgetResizable(True)
@@ -554,7 +567,7 @@ class MermaidEditorWindow(QMainWindow):
         layout.setSpacing(0)
 
         self.ai_input = ChatLineEdit(self._ai_prompt_history)
-        self.ai_input.setPlaceholderText("Describe the diagram you want to generate...")
+        self.ai_input.setPlaceholderText("Describe the diagram you want to generate or update...")
         self.ai_input.sendRequested.connect(self._on_ai_send)
         font_metrics = self.ai_input.fontMetrics()
         line_height = font_metrics.lineSpacing()
@@ -1104,7 +1117,7 @@ class MermaidEditorWindow(QMainWindow):
         mermaid_text = self.editor.toPlainText()
 
         try:
-            result = self.renderer.render_svg(mermaid_text)
+            result = self.renderer.render_png(mermaid_text)
         except Exception as exc:
             print(f"[Mermaid Editor] Render exception: {exc}", file=__import__('sys').stdout, flush=True)
             self._show_preview_error(f"Render exception:\n{exc}")
@@ -1118,54 +1131,28 @@ class MermaidEditorWindow(QMainWindow):
             return
 
         try:
-            if result.success and result.svg_content:
-                self._last_svg = result.svg_content
-                self.preview_pixmap = self._svg_to_pixmap(result.svg_content)
-                if self.preview_pixmap:
+            if result.success and result.png_bytes:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(result.png_bytes, "PNG"):
+                    self.preview_pixmap = pixmap
+                    self._last_svg = ""
                     self._update_preview_display()
                     self.render_btn.setText("Render OK")
                 else:
-                    error_msg = "Failed to convert SVG to image."
-                    error_svg = _generate_error_svg(error_msg)
-                    self._last_svg = error_svg
-                    self.preview_pixmap = self._svg_to_pixmap(error_svg)
-                    if self.preview_pixmap:
-                        self._update_preview_display()
-                    else:
-                        self._show_preview_error(error_msg)
+                    error_msg = "Failed to load PNG output."
+                    self._show_preview_error(error_msg)
                     self.render_btn.setText("Render Failed")
             else:
                 error_msg = result.error_message or result.stderr or "Unknown error"
-                line_num = 0
-                try:
-                    if "line" in error_msg.lower():
-                        import re
-                        match = re.search(r'line\s+(\d+)', error_msg.lower())
-                        if match:
-                            line_num = int(match.group(1))
-                except Exception:
-                    pass
                 error_display = f"Mermaid Error\n\n{error_msg}"
                 if result.stderr and result.stderr != error_msg:
                     error_display += f"\n\nDetails:\n{result.stderr[:500]}"
-                error_svg = _generate_error_svg(error_display, line_num)
-                self._last_svg = error_svg
-                self.preview_pixmap = self._svg_to_pixmap(error_svg)
-                if self.preview_pixmap:
-                    self._update_preview_display()
-                else:
-                    self._show_preview_error(error_display)
+                self._show_preview_error(error_display)
                 self.render_btn.setText("Render Failed")
         except Exception as exc:
             print(f"[Mermaid Editor] Render error: {exc}", file=__import__('sys').stdout, flush=True)
-            error_svg = _generate_error_svg(f"Internal error:\n{str(exc)}")
-            self._last_svg = error_svg
             try:
-                self.preview_pixmap = self._svg_to_pixmap(error_svg)
-                if self.preview_pixmap:
-                    self._update_preview_display()
-                else:
-                    self._show_preview_error(f"Internal error:\n{str(exc)}")
+                self._show_preview_error(f"Internal error:\n{str(exc)}")
             except RuntimeError:
                 pass
             self.render_btn.setText("Render Failed")
@@ -1310,8 +1297,16 @@ class MermaidEditorWindow(QMainWindow):
 
         menu.exec(self.export_btn.mapToGlobal(self.export_btn.rect().bottomLeft()))
 
+    def _show_preview_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        copy_svg = menu.addAction("Copy SVG")
+        copy_svg.triggered.connect(self._copy_svg)
+        copy_png = menu.addAction("Copy PNG")
+        copy_png.triggered.connect(self._copy_png)
+        menu.exec(self.preview_label.mapToGlobal(pos))
+
     def _export_svg(self) -> None:
-        if not hasattr(self, '_last_svg'):
+        if not self._ensure_svg():
             QMessageBox.warning(self, "No Diagram", "Render the diagram first.")
             return
 
@@ -1349,7 +1344,7 @@ class MermaidEditorWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export: {exc}")
 
     def _copy_svg(self) -> None:
-        if not hasattr(self, '_last_svg'):
+        if not self._ensure_svg():
             QMessageBox.warning(self, "No Diagram", "Render the diagram first.")
             return
         clipboard = QApplication.clipboard()
@@ -1357,11 +1352,37 @@ class MermaidEditorWindow(QMainWindow):
             clipboard.setText(self._last_svg)
             self.statusBar().showMessage("SVG copied to clipboard", 2000)
 
+    def _ensure_svg(self) -> bool:
+        if hasattr(self, "_last_svg") and self._last_svg:
+            return True
+        mermaid_text = self.editor.toPlainText()
+        try:
+            result = self.renderer.render_svg(mermaid_text)
+        except Exception as exc:
+            self._show_preview_error(f"Render exception:\n{exc}")
+            return False
+        if result.success and result.svg_content:
+            self._last_svg = result.svg_content
+            return True
+        error_msg = result.error_message or result.stderr or "Unknown error"
+        error_display = f"Mermaid Error\n\n{error_msg}"
+        if result.stderr and result.stderr != error_msg:
+            error_display += f"\n\nDetails:\n{result.stderr[:500]}"
+        self._show_preview_error(error_display)
+        return False
+
     def _copy_png(self) -> None:
         if not self.preview_pixmap:
             QMessageBox.warning(self, "No Diagram", "Render the diagram first.")
             return
         clipboard = QApplication.clipboard()
         if clipboard:
-            clipboard.setPixmap(self.preview_pixmap)
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            self.preview_pixmap.save(buffer, "PNG")
+            png_bytes = bytes(buffer.data())
+            mime = QMimeData()
+            mime.setData("image/png", png_bytes)
+            mime.setImageData(self.preview_pixmap.toImage())
+            clipboard.setMimeData(mime)
             self.statusBar().showMessage("PNG copied to clipboard", 2000)

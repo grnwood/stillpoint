@@ -29,6 +29,7 @@ class RenderResult:
     """Result of a Mermaid render attempt."""
     success: bool
     svg_content: Optional[str] = None
+    png_bytes: Optional[bytes] = None
     error_message: Optional[str] = None
     stderr: Optional[str] = None
     duration_ms: float = 0.0
@@ -92,7 +93,7 @@ class MermaidRenderer:
             )
 
         with self._render_lock:
-            result = self._invoke_mmdc(mermaid_text)
+            result = self._invoke_mmdc_svg(mermaid_text)
 
         if result.success and result.svg_content:
             self._write_to_cache(cache_key, result.svg_content)
@@ -100,12 +101,94 @@ class MermaidRenderer:
         result.duration_ms = (time.perf_counter() - t0) * 1000
         return result
 
+    def render_png(self, mermaid_text: str) -> RenderResult:
+        """Render Mermaid diagram to PNG."""
+        t0 = time.perf_counter()
+
+        cache_key = self._compute_cache_key(mermaid_text)
+        cached_png = self._read_png_from_cache(cache_key)
+        if cached_png:
+            return RenderResult(
+                success=True,
+                png_bytes=cached_png,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        if not self.is_configured():
+            return RenderResult(
+                success=False,
+                error_message="Mermaid CLI (mmdc) not found. Install with npm install -g @mermaid-js/mermaid-cli",
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        with self._render_lock:
+            result = self._invoke_mmdc(mermaid_text)
+
+        if result.success and result.png_bytes:
+            self._write_png_to_cache(cache_key, result.png_bytes)
+
+        result.duration_ms = (time.perf_counter() - t0) * 1000
+        return result
+
     def test_setup(self) -> RenderResult:
         """Run a tiny diagram render to validate configuration."""
         sample = "flowchart TD\n  A[Start] --> B[End]\n"
-        return self.render_svg(sample)
+        return self.render_png(sample)
 
     def _invoke_mmdc(self, mermaid_text: str) -> RenderResult:
+        try:
+            mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                input_path = Path(tmpdir) / "diagram.mmd"
+                output_path = Path(tmpdir) / "diagram.png"
+                input_path.write_text(mermaid_text, encoding="utf-8")
+
+                cmd = [mmdc_cmd, "-i", str(input_path), "-o", str(output_path), "-t", "neutral"]
+
+                if os.getenv("ZIMX_DEBUG_MERMAID", "0") not in ("0", "false", "False", ""):
+                    print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=15,
+                )
+
+                stderr_text = result.stderr.decode("utf-8", errors="replace")
+                if output_path.exists():
+                    png_bytes = output_path.read_bytes()
+                    if png_bytes:
+                        return RenderResult(success=True, png_bytes=png_bytes)
+
+                if result.returncode != 0:
+                    return RenderResult(
+                        success=False,
+                        error_message=f"Mermaid render error (exit {result.returncode})",
+                        stderr=stderr_text,
+                    )
+
+                return RenderResult(
+                    success=False,
+                    error_message="Invalid PNG output from Mermaid",
+                    stderr=stderr_text,
+                )
+        except subprocess.TimeoutExpired:
+            return RenderResult(
+                success=False,
+                error_message="Mermaid render timed out (>15s)",
+            )
+        except FileNotFoundError:
+            return RenderResult(
+                success=False,
+                error_message="Mermaid CLI (mmdc) not found",
+            )
+        except Exception as exc:
+            return RenderResult(
+                success=False,
+                error_message=f"Render error: {str(exc)}",
+            )
+
+    def _invoke_mmdc_svg(self, mermaid_text: str) -> RenderResult:
         try:
             mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -177,3 +260,19 @@ class MermaidRenderer:
             cache_file.write_text(svg_content, encoding="utf-8")
         except Exception as exc:
             logger.warning("Failed to write cache %s: %s", cache_key, exc)
+
+    def _read_png_from_cache(self, cache_key: str) -> Optional[bytes]:
+        cache_file = self.cache_dir / f"{cache_key}.png"
+        if cache_file.exists():
+            try:
+                return cache_file.read_bytes()
+            except Exception as exc:
+                logger.warning("Failed to read PNG cache %s: %s", cache_key, exc)
+        return None
+
+    def _write_png_to_cache(self, cache_key: str, png_bytes: bytes) -> None:
+        cache_file = self.cache_dir / f"{cache_key}.png"
+        try:
+            cache_file.write_bytes(png_bytes)
+        except Exception as exc:
+            logger.warning("Failed to write PNG cache %s: %s", cache_key, exc)

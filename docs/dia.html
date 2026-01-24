@@ -41,27 +41,28 @@
           <span class="pill">Diagramming</span>
           <h1>Diagrams that live next to your notes.</h1>
           <p>
-            StillPoint ships with an AI-powered PlantUML workflow so you can sketch systems,
-            workflows, and architecture without leaving the vault.
+            StillPoint ships with AI-powered PlantUML and Mermaid workflows so you can sketch
+            systems, workflows, and architecture without leaving the vault.
           </p>
         </div>
         <div>
           <img src="img/puml-full.png" alt="Diagram workspace in StillPoint" />
+          <img src="img/mermaid.png" alt="Mermaid editor in StillPoint" />
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.15s">
-        <div class="eyebrow">PlantUML built in</div>
+        <div class="eyebrow">PlantUML + Mermaid built in</div>
         <h2>Stay in flow while you map the system.</h2>
         <p>
-          PlantUML diagrams live beside your notes, tasks, and decisions. That means your
-          architecture drawings evolve with the actual work, not in a separate tool you
-          forget to update.
+          PlantUML and Mermaid diagrams live beside your notes, tasks, and decisions. That
+          means your architecture drawings evolve with the actual work, not in a separate
+          tool you forget to update.
         </p>
         <div class="grid">
           <div class="card">
             <h3>Text-based and durable</h3>
-            <p>PlantUML is plain text, so it diff’s cleanly and stays future-proof.</p>
+            <p>Both formats are plain text, so they diff cleanly and stay future-proof.</p>
           </div>
           <div class="card">
             <h3>Linked to context</h3>
@@ -141,9 +142,26 @@ Lead --> Client: Share onboarding plan
 @enduml
 </code></pre>
           </div>
+          <div class="card" style="margin-top: 18px;">
+<pre><code>sequenceDiagram
+  participant Client
+  participant Lead as Project Lead
+  participant Ops as Ops Team
+
+  Client->>Lead: Kickoff request
+  Lead->>Ops: Create workspace
+  Ops-->>Lead: Workspace ready
+  Lead-->>Client: Share onboarding plan
+</code></pre>
+          </div>
         </div>
-        <div class="media-card">
-          <img src="img/puml-render.png" alt="Rendered PlantUML diagram" />
+        <div>
+          <div class="media-card">
+            <img src="img/puml-render.png" alt="Rendered PlantUML diagram" />
+          </div>
+          <div class="media-card" style="margin-top: 18px;">
+            <img src="img/mermaid2.png" alt="Rendered Mermaid diagram" />
+          </div>
         </div>
       </section>
 

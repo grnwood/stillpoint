@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -848,6 +848,8 @@ class PlantUMLEditorWindow(QMainWindow):
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setStyleSheet("QLabel { background-color: white; border: 1px solid #ccc; }")
         self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
+        self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview_scroll.setWidget(self.preview_label)
         
         preview_layout.addWidget(self.preview_scroll)
@@ -1308,7 +1310,7 @@ class PlantUMLEditorWindow(QMainWindow):
         
         # Chat input field with history and Ctrl+Enter
         self.ai_input = ChatLineEdit(self._ai_prompt_history)
-        self.ai_input.setPlaceholderText("Describe the diagram you want to generate...")
+        self.ai_input.setPlaceholderText("Describe the diagram you want to generate or update...")
         self.ai_input.sendRequested.connect(self._on_ai_send)
         # Set height to approximately 3 lines
         font_metrics = self.ai_input.fontMetrics()
@@ -1807,17 +1809,44 @@ class PlantUMLEditorWindow(QMainWindow):
         if self.file_path.exists():
             try:
                 content = self.file_path.read_text(encoding="utf-8")
-                self.editor.setPlainText(content)
+                if content.strip():
+                    self.editor.setPlainText(content)
+                    return
             except Exception as exc:
                 QMessageBox.warning(self, "Error", f"Failed to load file: {exc}")
-        else:
-            # New file
+        # New or empty file
+        template = self._default_puml_template()
+        if not template:
             template = """@startuml
-' New PlantUML diagram
+' PlantUML diagram
+' https://plantuml.com/
 
+' Add your diagram here
+A -> B: message
+B --> A: response
 @enduml
 """
-            self.editor.setPlainText(template)
+        self.editor.setPlainText(template)
+
+    def _default_puml_template(self) -> str:
+        """Return the first simple_puml template from shortcuts, if available."""
+        if self._shortcuts_data:
+            first_item = self._shortcuts_data[0]
+            if isinstance(first_item, dict):
+                template = first_item.get("simple_puml", "")
+                if template:
+                    return template
+        try:
+            shortcuts_path = Path(__file__).resolve().parents[1] / "puml_shortcuts.json"
+            data = shortcuts_path.read_text(encoding="utf-8")
+            shortcuts = json.loads(data)
+            if isinstance(shortcuts, list) and shortcuts:
+                first_item = shortcuts[0]
+                if isinstance(first_item, dict):
+                    return first_item.get("simple_puml", "") or ""
+        except Exception:
+            return ""
+        return ""
 
     def _save_file(self) -> None:
         """Save editor content to file."""
@@ -2083,6 +2112,15 @@ class PlantUMLEditorWindow(QMainWindow):
         
         menu.exec(self.export_btn.mapToGlobal(self.export_btn.rect().bottomLeft()))
 
+    def _show_preview_context_menu(self, pos) -> None:
+        """Show right-click menu on preview with copy options."""
+        menu = QMenu(self)
+        copy_svg = menu.addAction("Copy SVG")
+        copy_svg.triggered.connect(self._copy_svg)
+        copy_png = menu.addAction("Copy PNG")
+        copy_png.triggered.connect(self._copy_png)
+        menu.exec(self.preview_label.mapToGlobal(pos))
+
     def _export_svg(self) -> None:
         """Export diagram as SVG file."""
         if not hasattr(self, '_last_svg'):
@@ -2131,7 +2169,7 @@ class PlantUMLEditorWindow(QMainWindow):
         
         clipboard = QApplication.clipboard()
         clipboard.setText(self._last_svg)
-        QMessageBox.information(self, "Copied", "SVG copied to clipboard")
+        self.statusBar().showMessage("SVG copied to clipboard", 2000)
 
     def _copy_png(self) -> None:
         """Copy PNG to clipboard."""
@@ -2140,8 +2178,15 @@ class PlantUMLEditorWindow(QMainWindow):
             return
         
         clipboard = QApplication.clipboard()
-        clipboard.setPixmap(self.preview_pixmap)
-        QMessageBox.information(self, "Copied", "PNG copied to clipboard")
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        self.preview_pixmap.save(buffer, "PNG")
+        png_bytes = bytes(buffer.data())
+        mime = QMimeData()
+        mime.setData("image/png", png_bytes)
+        mime.setImageData(self.preview_pixmap.toImage())
+        clipboard.setMimeData(mime)
+        self.statusBar().showMessage("PNG copied to clipboard", 2000)
 
     def closeEvent(self, event) -> None:
         """Save file before closing."""

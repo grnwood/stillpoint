@@ -985,9 +985,15 @@ class ServerConfigDialog(QtWidgets.QDialog):
         self.models_path_edit = QtWidgets.QLineEdit(self.server.get("models_path", ""))
         self.chat_path_edit = QtWidgets.QLineEdit(self.server.get("chat_path", ""))
         self.timeout_edit = QtWidgets.QLineEdit(str(self.server.get("timeout") or ""))
-        self.default_model_edit = QtWidgets.QLineEdit(self.server.get("default_model", "gpt-3.5-turbo"))
+        self.default_model_combo = QtWidgets.QComboBox()
+        self.default_model_combo.setEnabled(False)
+        self.default_model_combo.addItem(self.server.get("default_model", "gpt-3.5-turbo"))
         self.verify_ssl_check = QtWidgets.QCheckBox("Verify SSL certificates")
         self.verify_ssl_check.setChecked(bool(self.server.get("verify_ssl", True)))
+        self.verify_button = QtWidgets.QPushButton("Verify")
+        self.verify_button.clicked.connect(self._verify_server)
+        self.verify_status_label = QtWidgets.QLabel("")
+        self.verify_status_label.setWordWrap(True)
         self.duplicate_label = QtWidgets.QLabel("")
         self.duplicate_label.setStyleSheet("color: red; font-weight: bold;")
         self.duplicate_label.hide()
@@ -1001,9 +1007,11 @@ class ServerConfigDialog(QtWidgets.QDialog):
         layout.addRow("Models Path", self.models_path_edit)
         layout.addRow("Chat Path", self.chat_path_edit)
         layout.addRow("Timeout (seconds)", self.timeout_edit)
-        layout.addRow("Default Model", self.default_model_edit)
+        layout.addRow("Default Model", self.default_model_combo)
+        layout.addRow("Verify Server", self.verify_button)
         layout.addRow(self.verify_ssl_check)
         layout.addRow(self.duplicate_label)
+        layout.addRow(self.verify_status_label)
 
         self.button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         self.button_box.accepted.connect(self._handle_accept)
@@ -1014,6 +1022,89 @@ class ServerConfigDialog(QtWidgets.QDialog):
             self.ok_button.setText("Add")
         self.name_edit.textChanged.connect(self._validate_name)
         self._validate_name()
+
+    def _verify_server(self) -> None:
+        base_url = self.base_edit.text().strip()
+        if not base_url:
+            self._set_verify_status("Network error: Base URL is required.", success=False)
+            self._set_models([])
+            return
+        auth_mode = self.auth_combo.currentText()
+        models_path = self.models_path_edit.text().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
+        url = compose_url(base_url, models_path)
+        headers = build_auth_headers(
+            {
+                "auth_mode": auth_mode,
+                "api_secret": self.api_secret_edit.text().strip(),
+                "api_key": self.api_key_edit.text().strip(),
+                "custom_header_name": self.custom_header_name_edit.text().strip(),
+                "custom_header_value": self.custom_header_value_edit.text().strip(),
+            }
+        )
+        timeout = self._parse_timeout(default=10.0)
+        verify_ssl = self.verify_ssl_check.isChecked()
+        try:
+            with httpx.Client(timeout=timeout, verify=verify_ssl) as client:
+                resp = client.get(url, headers=headers)
+                resp.raise_for_status()
+                payload = resp.json()
+        except Exception as exc:
+            self._set_verify_status(f"Network error: {exc}", success=False)
+            self._set_models([])
+            return
+        fallback_model = self.server.get("default_model", "gpt-3.5-turbo")
+        models = self._parse_models(payload, fallback_model)
+        self._set_models(models)
+        self._set_verify_status("server is accessible.", success=True)
+
+    def _set_verify_status(self, text: str, success: bool) -> None:
+        self.verify_status_label.setText(text)
+        color = "green" if success else "red"
+        self.verify_status_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+    def _set_models(self, models: list[str]) -> None:
+        self.default_model_combo.setEnabled(bool(models))
+        current_default = self.server.get("default_model", "gpt-3.5-turbo")
+        self.default_model_combo.blockSignals(True)
+        self.default_model_combo.clear()
+        if not models:
+            self.default_model_combo.addItem(current_default)
+            self.default_model_combo.setEnabled(False)
+        else:
+            self.default_model_combo.addItems(models)
+            if current_default in models:
+                self.default_model_combo.setCurrentText(current_default)
+            else:
+                self.default_model_combo.setCurrentIndex(0)
+        self.default_model_combo.blockSignals(False)
+
+    def _parse_models(self, payload: object, fallback_model: str) -> list[str]:
+        model_ids: list[str] = []
+        if isinstance(payload, dict):
+            if "data" in payload and isinstance(payload["data"], list):
+                data_list = payload["data"]
+                if data_list and isinstance(data_list[0], dict):
+                    model_ids = [item.get("id") for item in data_list if item.get("id")]
+                else:
+                    model_ids = [str(item) for item in data_list if item]
+            elif "models" in payload and isinstance(payload["models"], list):
+                model_ids = [str(item) for item in payload["models"] if item]
+        elif isinstance(payload, list):
+            if payload and isinstance(payload[0], dict):
+                model_ids = [item.get("id") for item in payload if item.get("id")]
+            else:
+                model_ids = [str(item) for item in payload if item]
+        cleaned = sorted({m for m in model_ids if m})
+        return cleaned or [fallback_model]
+
+    def _parse_timeout(self, default: float) -> float:
+        timeout_raw = self.timeout_edit.text().strip()
+        if not timeout_raw:
+            return default
+        try:
+            return float(timeout_raw)
+        except ValueError:
+            return default
 
     def _handle_accept(self):
         name = self.name_edit.text().strip()
@@ -1049,7 +1140,7 @@ class ServerConfigDialog(QtWidgets.QDialog):
             "custom_header_value": self.custom_header_value_edit.text().strip(),
             "models_path": models_path,
             "chat_path": chat_path,
-            "default_model": self.default_model_edit.text().strip() or "gpt-3.5-turbo",
+            "default_model": self.default_model_combo.currentText().strip() or "gpt-3.5-turbo",
             "verify_ssl": self.verify_ssl_check.isChecked(),
             "timeout": timeout_value,
             "original_name": self.original_name,
@@ -1090,7 +1181,7 @@ class ServerConfigDialog(QtWidgets.QDialog):
             "custom_header_value": self.custom_header_value_edit.text().strip(),
             "models_path": models_path,
             "chat_path": chat_path,
-            "default_model": self.default_model_edit.text().strip() or "gpt-3.5-turbo",
+            "default_model": self.default_model_combo.currentText().strip() or "gpt-3.5-turbo",
             "verify_ssl": self.verify_ssl_check.isChecked(),
             "timeout": timeout_value,
             "original_name": self.original_name,

@@ -42,6 +42,7 @@ class PreferencesDialog(QDialog):
         app_instance = QApplication.instance()
         self._initial_app_font = QFont(app_instance.font()) if app_instance else QFont()
         self._font_families = sorted(QFontDatabase().families())
+        self.force_read_only_checkbox = None
 
         root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(10, 10, 10, 10)
@@ -820,7 +821,8 @@ class PreferencesDialog(QDialog):
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
-        config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
+        if self.force_read_only_checkbox is not None:
+            config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         config.save_show_task_start_date(self.show_task_start_checkbox.isChecked())
         config.save_show_task_page(self.show_task_page_checkbox.isChecked())
