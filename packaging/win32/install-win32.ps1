@@ -15,6 +15,7 @@ param(
 )
 
 $ExeName = "stillpoint.exe"
+$CaptureExeName = "stillpoint-capture.exe"
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -26,6 +27,8 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DistDir = $null
 $ExePathInDist = $null
 $AssetsDir = $null
+$CaptureDistDir = $null
+$CaptureExePath = $null
 
 # Try PyInstaller structure first (script in dist/ or same dir as exe)
 $PyInstallerExe = Join-Path $ScriptRoot $ExeName
@@ -34,6 +37,10 @@ if (Test-Path $PyInstallerExe) {
     $DistDir = $ScriptRoot
     $ExePathInDist = $PyInstallerExe
     $AssetsDir = Join-Path $ScriptRoot "_internal\sp\assets"
+    $CaptureDistDir = Join-Path $ScriptRoot "stillpoint-capture"
+    if (Test-Path (Join-Path $CaptureDistDir $CaptureExeName)) {
+        $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
+    }
 }
 # Try source build structure (dist/stillpoint/stillpoint.exe)
 elseif (Test-Path (Join-Path $ScriptRoot "dist\stillpoint\$ExeName")) {
@@ -46,6 +53,10 @@ elseif (Test-Path (Join-Path $ScriptRoot "dist\stillpoint\$ExeName")) {
     if (-not (Test-Path $AssetsDir)) {
         $AssetsDir = Join-Path $ScriptRoot "sp\assets"
     }
+    $CaptureDistDir = Join-Path $ScriptRoot "dist\stillpoint-capture"
+    if (Test-Path (Join-Path $CaptureDistDir $CaptureExeName)) {
+        $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
+    }
 }
 else {
     Write-Host "ERROR: Could not locate $ExeName" -ForegroundColor Red
@@ -56,6 +67,7 @@ else {
 
 # Install location (user space)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
+$CaptureInstallDir = Join-Path $InstallDir "stillpoint-capture"
 
 # Shortcuts
 $ShortcutName = "$AppName.lnk"
@@ -116,6 +128,16 @@ if ($IconSource) {
     Copy-Item -Force $IconSource $IconDest
 }
 
+# === COPY QUICK CAPTURE (if present) ===
+
+if ($CaptureExePath) {
+    Write-Host " Copying Quick Capture to: $CaptureInstallDir"
+    if (-not (Test-Path $CaptureInstallDir)) {
+        New-Item -ItemType Directory -Path $CaptureInstallDir | Out-Null
+    }
+    Copy-Item -Recurse -Force (Join-Path $CaptureDistDir "*") $CaptureInstallDir
+}
+
 # === CREATE START MENU SHORTCUT (USER ONLY) ===
 
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
@@ -134,6 +156,18 @@ $Shortcut.IconLocation = $IconDest
 $Shortcut.Save()
 
 Write-Host " Start Menu shortcut created: $StartMenuShortcutPath"
+
+# Quick Capture shortcut (Start Menu only)
+if ($CaptureExePath) {
+    $CaptureShortcutPath = Join-Path $StartMenuDir "$AppName Quick Capture.lnk"
+    $CaptureShortcut = $WshShell.CreateShortcut($CaptureShortcutPath)
+    $CaptureShortcut.TargetPath = (Join-Path $CaptureInstallDir $CaptureExeName)
+    $CaptureShortcut.WorkingDirectory = $CaptureInstallDir
+    $CaptureShortcut.WindowStyle = 1
+    $CaptureShortcut.IconLocation = $IconDest
+    $CaptureShortcut.Save()
+    Write-Host " Quick Capture shortcut created: $CaptureShortcutPath"
+}
 
 # === OPTIONAL DESKTOP SHORTCUT (USER ONLY) ===
 

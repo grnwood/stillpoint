@@ -30,15 +30,21 @@ jobs:
       - name: PyInstaller build
         run: |
           pyinstaller -y packaging/sp.spec
+          pyinstaller -y packaging/stillpoint-capture.spec
 
       - name: Smoke test bundle
         run: |
           if (!(Test-Path "dist/StillPoint/StillPoint.exe")) { throw "dist/StillPoint/StillPoint.exe not found" }
+          if (!(Test-Path "dist/stillpoint-capture/stillpoint-capture.exe")) { throw "dist/stillpoint-capture/stillpoint-capture.exe not found" }
 
       - name: Zip bundle
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          Compress-Archive -Path dist\StillPoint -DestinationPath StillPoint-win32.zip
+          Remove-Item -Recurse -Force bundle -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path bundle | Out-Null
+          Copy-Item -Recurse -Force dist\StillPoint bundle\
+          Copy-Item -Recurse -Force dist\stillpoint-capture bundle\
+          Compress-Archive -Path bundle\* -DestinationPath StillPoint-win32.zip
 
       - name: Upload build artifact
         if: startsWith(github.ref, 'refs/tags/')

@@ -6968,8 +6968,8 @@ class MainWindow(QMainWindow):
             return
         print(f"[QuickCapture] UI overlay target resolved: {target}")
 
-        def _on_capture(text: str) -> None:
-            self._submit_quick_capture(text, target)
+        def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> None:
+            self._submit_quick_capture(text, target, attachments)
 
         subtitle = self._quick_capture_subtitle(target)
         overlay = QuickCaptureOverlay(parent=self, on_capture=_on_capture, subtitle=subtitle)
@@ -7026,13 +7026,42 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == open_settings:
             self._open_preferences()
 
-    def _submit_quick_capture(self, text: str, target: dict[str, Optional[str]]) -> None:
+    def _submit_quick_capture(self, text: str, target: dict[str, Optional[str]], attachments: Optional[list[dict]] = None) -> None:
         payload = {
-            "vault_path": target.get("vault_path"),
+            "vault_path": None if self._remote_mode else target.get("vault_path"),
             "page_mode": target.get("page_mode"),
             "page_ref": target.get("page_ref"),
             "text": text,
         }
+        attachments = attachments or []
+        if attachments and not self._remote_mode:
+            try:
+                from sp.app import quickcapture as qc
+                from sp.server.adapters import files
+                vault_root = Path(target.get("vault_path") or "")
+                page_mode = target.get("page_mode") or "today"
+                page_ref = target.get("page_ref")
+                if page_mode == "today":
+                    target_file, _created = files.ensure_journal_today(vault_root, template=None)
+                    rel_path = f"/{target_file.relative_to(vault_root).as_posix()}"
+                else:
+                    rel_path = qc._resolve_custom_page_ref(page_ref or "")
+                content = files.read_file(vault_root, rel_path)
+                from datetime import datetime
+                now = datetime.now()
+                if rel_path.startswith("/Journal/"):
+                    timestamp = now.strftime("%I:%M %p").lower()
+                else:
+                    timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
+                saved_images = qc._persist_attachments(vault_root, rel_path, attachments)
+                entry_lines = qc._build_quick_capture_entry(text, timestamp, saved_images)
+                updated = qc._append_quick_capture_section(content, entry_lines)
+                files.write_file(vault_root, rel_path, updated)
+                self.statusBar().showMessage("Quick Capture saved.", 3000)
+                return
+            except Exception:
+                self.statusBar().showMessage("Quick Capture failed.", 4000)
+                return
         try:
             resp = self.http.post("/api/quick-capture", json=payload)
             resp.raise_for_status()

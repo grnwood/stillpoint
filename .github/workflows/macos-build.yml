@@ -34,6 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           pyinstaller -y --clean packaging/sp-macos.spec
+          pyinstaller -y --clean packaging/stillpoint-capture.spec
           ls -lah dist
 
       - name: Smoke test bundle
@@ -42,6 +43,7 @@ jobs:
           test -d dist/StillPoint.app
           test -f dist/StillPoint.app/Contents/Info.plist
           test -x dist/StillPoint.app/Contents/MacOS/StillPoint
+          test -x dist/stillpoint-capture/stillpoint-capture
 
           # Ensure it's a real mac binary, not a stub script
           file dist/StillPoint.app/Contents/MacOS/StillPoint
@@ -58,7 +60,11 @@ jobs:
       - name: Zip bundle
         run: |
           set -euo pipefail
-          ditto -c -k --sequesterRsrc --keepParent dist/StillPoint.app StillPoint-macOS.zip
+          rm -rf dist/bundle
+          mkdir -p dist/bundle
+          cp -R dist/StillPoint.app dist/bundle/
+          cp -R dist/stillpoint-capture dist/bundle/
+          ditto -c -k --sequesterRsrc --keepParent dist/bundle StillPoint-macOS.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

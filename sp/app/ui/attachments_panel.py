@@ -654,6 +654,7 @@ class AttachmentsPanel(QWidget):
     def _on_attachments_context_menu(self, pos) -> None:
         """Handle right-click context menu on attachments list."""
         menu = QMenu(self)
+        selected = self.attachments_list.selectedItems()
         
         # Add "Add new PlantUML..." action
         add_plantuml_action = menu.addAction("Add new PlantUML...")
@@ -661,6 +662,10 @@ class AttachmentsPanel(QWidget):
 
         add_mermaid_action = menu.addAction("Add new Mermaid...")
         add_mermaid_action.triggered.connect(self._create_new_mermaid)
+
+        delete_action = menu.addAction("Delete")
+        delete_action.setEnabled(bool(selected))
+        delete_action.triggered.connect(self._remove_selected_attachments)
         
         # Show context menu at cursor position
         menu.exec(self.attachments_list.mapToGlobal(pos))

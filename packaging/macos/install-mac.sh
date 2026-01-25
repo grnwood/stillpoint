@@ -26,6 +26,7 @@ ICON_PNG="$PROJECT_DIR/sp/assets/sp-icon.png"
 
 VENV_DIR="$PROJECT_DIR/.venv"
 APP_DIR="$PROJECT_DIR/${APP_NAME}.app"
+CAPTURE_DIR="$PROJECT_DIR/stillpoint-capture"
 
 echo "== StillPoint macOS installer =="
 echo "Project dir: $PROJECT_DIR"
@@ -120,6 +121,7 @@ rm -rf "$PROJECT_DIR/dist"
 
 # Run PyInstaller
 pyinstaller -y packaging/sp-macos.spec
+pyinstaller -y packaging/stillpoint-capture.spec
 
 # PyInstaller creates dist/StillPoint.app
 if [[ ! -d "$PROJECT_DIR/dist/StillPoint.app" ]]; then
@@ -127,10 +129,18 @@ if [[ ! -d "$PROJECT_DIR/dist/StillPoint.app" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$PROJECT_DIR/dist/stillpoint-capture" ]]; then
+  echo "ERROR: PyInstaller did not create stillpoint-capture"
+  exit 1
+fi
+
 # Move to project root for convenience
 mv "$PROJECT_DIR/dist/StillPoint.app" "$APP_DIR"
+rm -rf "$CAPTURE_DIR"
+mv "$PROJECT_DIR/dist/stillpoint-capture" "$CAPTURE_DIR"
 
 echo "✅ Built self-contained .app bundle"
+echo "✅ Built stillpoint-capture bundle"
 
 # Clean up build artifacts
 rm -rf "$PROJECT_DIR/build"
@@ -149,6 +159,13 @@ if [[ "$INSTALL_APP" == true ]]; then
   echo "✅ Installed: /Applications/${APP_NAME}.app"
 fi
 
+if [[ "$INSTALL_APP" == true ]]; then
+  echo "Installing Quick Capture to /usr/local/bin (sudo required)..."
+  sudo mkdir -p /usr/local/bin
+  sudo ln -sf "$CAPTURE_DIR/stillpoint-capture" /usr/local/bin/stillpoint-capture
+  echo "✅ Installed: /usr/local/bin/stillpoint-capture"
+fi
+
 # ------------------------------------------------------------
 # CLI helper
 # ------------------------------------------------------------
@@ -162,9 +179,18 @@ exec python -m $ENTRYPOINT_MODULE "\$@"
 EOF
 chmod +x "$RUNNER"
 
+CAPTURE_RUNNER="$PROJECT_DIR/run-stillpoint-capture.sh"
+cat > "$CAPTURE_RUNNER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$CAPTURE_DIR/stillpoint-capture" "\$@"
+EOF
+chmod +x "$CAPTURE_RUNNER"
+
 echo ""
 echo "== Done =="
 echo "CLI:   $RUNNER"
+echo "Capture: $CAPTURE_RUNNER"
 echo "App:   open \"$APP_DIR\""
 if [[ "$INSTALL_APP" == true ]]; then
   echo "Dock:  /Applications/${APP_NAME}.app"

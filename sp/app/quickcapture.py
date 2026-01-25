@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import os
 import sys
 from datetime import datetime
@@ -57,12 +58,13 @@ def _parse_hotkey_text(text_arg: Optional[str]) -> Optional[str]:
     return None
 
 
-def _prompt_overlay() -> Optional[str]:
+def _prompt_overlay() -> tuple[Optional[str], list[dict]]:
     app = QApplication.instance() or QApplication([])
-    result: dict[str, Optional[str]] = {"text": None}
+    result: dict[str, object] = {"text": None, "attachments": []}
 
-    def _on_capture(text: str) -> None:
+    def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> None:
         result["text"] = text
+        result["attachments"] = attachments
         app.quit()
 
     overlay = QuickCaptureOverlay(parent=None, on_capture=_on_capture)
@@ -72,7 +74,7 @@ def _prompt_overlay() -> Optional[str]:
     overlay.activateWindow()
     overlay.input.setFocus()
     app.exec()
-    return result["text"]
+    return result["text"], result.get("attachments") or []
 
 
 def _colon_to_page_path(colon_path: str) -> str:
@@ -104,13 +106,89 @@ def _resolve_custom_page_ref(page_ref: str) -> str:
     return _colon_to_page_path(raw)
 
 
-def _build_quick_capture_entry(text: str, timestamp: str) -> list[str]:
+def _format_image_link(name: str, width: Optional[int]) -> str:
+    if width and width > 600:
+        return f"  ![](./{name}){{width=600}}"
+    return f"  ![](./{name})"
+
+
+def _build_quick_capture_entry(text: str, timestamp: str, images: Optional[list[dict]] = None) -> list[str]:
     lines = [line.rstrip() for line in text.splitlines()]
     if not lines:
         return []
     first = f"- *{timestamp}* - {lines[0].strip()}"
     rest = [f"  {line}" for line in lines[1:]]
-    return [first] + rest + ["", "---"]
+    image_lines = []
+    for entry in images or []:
+        name = entry.get("name")
+        if not name:
+            continue
+        width = entry.get("width")
+        image_lines.append(_format_image_link(name, width))
+    return [first] + image_lines + rest + ["", "---"]
+
+
+def _persist_attachments(vault_root: Path, page_path: str, attachments: list[dict]) -> list[dict]:
+    if not attachments:
+        return []
+    rel_file_path = page_path.lstrip("/")
+    folder = (vault_root / rel_file_path).resolve().parent
+    folder.mkdir(parents=True, exist_ok=True)
+    existing = {p.name for p in folder.iterdir() if p.is_file()}
+    saved: list[dict] = []
+
+    def sanitize_name(name: str) -> str:
+        cleaned = (name or "").strip().replace("\\", "_").replace("/", "_")
+        cleaned = re.sub(r"\s+", "_", cleaned)
+        cleaned = re.sub(r"[^A-Za-z0-9._()-]", "_", cleaned)
+        if cleaned in ("", ".", ".."):
+            cleaned = "attachment"
+        return cleaned
+
+    def unique_name(base: str) -> str:
+        base = sanitize_name(base)
+        if base not in existing:
+            existing.add(base)
+            return base
+        stem = Path(base).stem
+        suffix = Path(base).suffix
+        idx = 1
+        while True:
+            candidate = f"{stem}_{idx}{suffix}"
+            if candidate not in existing:
+                existing.add(candidate)
+                return candidate
+            idx += 1
+
+    def next_paste_name() -> str:
+        idx = 1
+        while True:
+            candidate = f"paste_image_{idx:03d}.png"
+            if candidate not in existing:
+                existing.add(candidate)
+                return candidate
+            idx += 1
+
+    for entry in attachments:
+        if entry.get("kind") == "file":
+            path = entry.get("path")
+            if not isinstance(path, Path):
+                continue
+            if not path.exists():
+                continue
+            target_name = unique_name(path.name)
+            target_path = folder / target_name
+            target_path.write_bytes(path.read_bytes())
+            saved.append({"name": target_name, "width": entry.get("width")})
+            continue
+        image = entry.get("image")
+        if image is None:
+            continue
+        target_name = next_paste_name()
+        target_path = folder / target_name
+        if image.save(str(target_path), "PNG"):
+            saved.append({"name": target_name, "width": entry.get("width")})
+    return saved
 
 
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
@@ -135,7 +213,13 @@ def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
     return result
 
 
-def _capture_to_files(vault_root: Path, page_mode: str, page_ref: Optional[str], text: str) -> str:
+def _capture_to_files(
+    vault_root: Path,
+    page_mode: str,
+    page_ref: Optional[str],
+    text: str,
+    attachments: Optional[list[dict]] = None,
+) -> str:
     config.init_settings()
     config.set_active_vault(str(vault_root))
     if page_mode == "today":
@@ -149,7 +233,8 @@ def _capture_to_files(vault_root: Path, page_mode: str, page_ref: Optional[str],
         timestamp = now.strftime("%I:%M %p").lower()
     else:
         timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
-    entry_lines = _build_quick_capture_entry(text, timestamp)
+    saved_images = _persist_attachments(vault_root, rel_path, attachments or [])
+    entry_lines = _build_quick_capture_entry(text, timestamp, saved_images)
     updated = _append_quick_capture_section(content, entry_lines)
     files.write_file(vault_root, rel_path, updated)
     db_path = vault_root / ".stillpoint" / "settings.db"
@@ -223,12 +308,13 @@ def run_quick_capture(
 ) -> int:
     config.init_settings()
     capture_text = _parse_hotkey_text(text)
+    attachments: list[dict] = []
     if not capture_text and allow_overlay:
         api_base = _default_api_base()
         token = _load_local_ui_token()
         if _show_overlay_via_api(api_base, token):
             return 0
-        capture_text = _prompt_overlay()
+        capture_text, attachments = _prompt_overlay()
     if not capture_text:
         return 0
 
@@ -254,10 +340,10 @@ def run_quick_capture(
         "page_ref": page_ref,
         "text": capture_text,
     }
-    if _capture_via_api(api_base, token, payload):
+    if not attachments and _capture_via_api(api_base, token, payload):
         return 0
     try:
-        _capture_to_files(vault_root, page_mode, page_ref, capture_text)
+        _capture_to_files(vault_root, page_mode, page_ref, capture_text, attachments)
     except FileAccessError as exc:
         print(f"Quick Capture error: {exc}")
         return 1

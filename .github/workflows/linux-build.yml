@@ -32,6 +32,7 @@ jobs:
       - name: PyInstaller build
         run: |
           pyinstaller -y --clean packaging/sp.spec
+          pyinstaller -y --clean packaging/stillpoint-capture.spec
 
       - name: Strip uneeded Qt stuff
         run: |
@@ -40,11 +41,12 @@ jobs:
       - name: Smoke test bundle
         run: |
           test -x dist/stillpoint/stillpoint
+          test -x dist/stillpoint-capture/stillpoint-capture
 
       - name: Zip bundle
         run: |
           cd dist
-          zip -r ../StillPoint-linux-x86_64.zip stillpoint
+          zip -r ../StillPoint-linux-x86_64.zip stillpoint stillpoint-capture
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

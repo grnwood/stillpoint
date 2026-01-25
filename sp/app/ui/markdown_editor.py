@@ -6948,14 +6948,30 @@ class MarkdownEditor(QTextEdit):
         text = doc.toPlainText()
         end = len(text)
         cursor = QTextCursor(doc)
+        image_formats: dict[int, QTextImageFormat] = {}
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    fmt = fragment.charFormat()
+                    if fmt.isImageFormat():
+                        image_formats[fragment.position()] = fmt.toImageFormat()
+                it += 1
+            block = block.next()
         pos = 0
         while pos < end:
             ch = text[pos]
             if ch == "\ufffc":
-                cursor.setPosition(pos)
-                fmt = cursor.charFormat()
-                if fmt.isImageFormat():
-                    img_md = self._markdown_from_image_format(fmt.toImageFormat())
+                img_fmt = image_formats.get(pos)
+                if img_fmt is None:
+                    cursor.setPosition(pos)
+                    fmt = cursor.charFormat()
+                    if fmt.isImageFormat():
+                        img_fmt = fmt.toImageFormat()
+                if img_fmt is not None:
+                    img_md = self._markdown_from_image_format(img_fmt)
                     # If the markdown tag is still in the document right after the image
                     # object, skip the duplicate text to keep saves stable.
                     if text.startswith(img_md, pos + 1):
@@ -7072,12 +7088,15 @@ class MarkdownEditor(QTextEdit):
                     )
                 picked = cursor.selectedText().replace("\u2029", "\n")
                 if picked != match_text:
-                    if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
-                        print(
-                            f"[StillPoint][IMAGE_RENDER_DEBUG] skip idx={idx+1} "
-                            f"range=({start_pos},{end_pos}) picked_mismatch"
-                        )
-                    continue
+                    picked_norm = picked.strip()
+                    match_norm = match_text.strip()
+                    if picked_norm != match_norm:
+                        if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                            print(
+                                f"[StillPoint][IMAGE_RENDER_DEBUG] skip idx={idx+1} "
+                                f"range=({start_pos},{end_pos}) picked_mismatch"
+                            )
+                        continue
 
                 fmt = self._create_image_format(
                     path,

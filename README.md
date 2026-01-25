@@ -205,6 +205,12 @@ pyinstaller -y packaging/sp.spec
 
 Artifacts land in `dist/stillpoint/`.
 
+Lite Quick Capture build:
+
+```bash
+pyinstaller -y packaging/stillpoint-capture.spec
+```
+
 ## Install into OS
 If you want to install fully into the OS there are some helper scripts in packaging/
 
