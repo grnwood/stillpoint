@@ -16,6 +16,7 @@ param(
 
 $ExeName = "stillpoint.exe"
 $CaptureExeName = "stillpoint-capture.exe"
+$QuickCaptureExeName = "stillpoint-quickcapture.exe"
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -115,6 +116,7 @@ if (-not (Test-Path $InstalledExe)) {
     Write-Host "Something went wrong: installed exe not found at $InstalledExe" -ForegroundColor Red
     exit 1
 }
+$InstalledQuickCaptureExe = Join-Path $InstallDir $QuickCaptureExeName
 
 # === COPY ICON INTO INSTALL DIR (if present) ===
 
@@ -183,6 +185,22 @@ if ($CreateDesktopShortcut) {
     $DesktopShortcut.Save()
 
     Write-Host " Desktop shortcut created: $DesktopShortcutPath"
+
+    if (Test-Path $InstalledQuickCaptureExe) {
+        $QuickCaptureShortcutName = "$AppName Quick Capture.lnk"
+        $QuickCaptureShortcutPath = Join-Path $DesktopDir $QuickCaptureShortcutName
+
+        $QuickCaptureShortcut = $WshShell.CreateShortcut($QuickCaptureShortcutPath)
+        $QuickCaptureShortcut.TargetPath = $InstalledQuickCaptureExe
+        $QuickCaptureShortcut.WorkingDirectory = $InstallDir
+        $QuickCaptureShortcut.WindowStyle = 1
+        $QuickCaptureShortcut.IconLocation = $IconDest
+        $QuickCaptureShortcut.Save()
+
+        Write-Host " Desktop quick capture shortcut created: $QuickCaptureShortcutPath"
+    } else {
+        Write-Host " Quick capture exe not found at $InstalledQuickCaptureExe" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""
