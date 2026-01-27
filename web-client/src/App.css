@@ -6,6 +6,25 @@
   text-align: left;
 }
 
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.status-dot--active {
+  background-color: #2ecc71;
+}
+
+.status-dot--inactive {
+  background-color: #cbd5e1;
+}
+
+.status-dot--unreachable {
+  background-color: #e74c3c;
+}
+
 .logo {
   height: 6em;
   padding: 1.5em;

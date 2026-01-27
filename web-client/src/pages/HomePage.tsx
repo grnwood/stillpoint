@@ -18,10 +18,11 @@ const SERVER_PREFIX = 'stillpoint.page.server.';
 
 type HomePageProps = {
   headerLeft?: React.ReactNode;
+  vaultAuthStatus?: 'active' | 'inactive' | 'unreachable';
   onLogout?: () => void;
 };
 
-export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
+export const HomePage: React.FC<HomePageProps> = ({ headerLeft, vaultAuthStatus = 'inactive', onLogout }) => {
   const [recentPages, setRecentPages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activePath, setActivePath] = useState('');
@@ -1113,8 +1114,12 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
         gridTemplateColumns: '1fr auto 1fr',
         alignItems: 'center',
         gap: '12px',
-        padding: '12px 0',
-        borderBottom: '1px solid #ddd'
+        padding: '12px 24px',
+        borderBottom: '1px solid #e5e7eb',
+        backgroundColor: '#fff',
+        position: 'sticky',
+        top: 0,
+        zIndex: 5
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', justifySelf: 'start' }}>
           {headerLeft}
@@ -1141,7 +1146,15 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, onLogout }) => {
         }}>
           {pageName || 'No page selected'}
         </div>
-        <div style={{ justifySelf: 'end' }}>
+        <div style={{ justifySelf: 'end', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '14px', color: '#555' }}>
+            <span
+              className={`status-dot status-dot--${vaultAuthStatus}`}
+              aria-label={`Vault auth status: ${vaultAuthStatus}`}
+              title={`Vault auth status: ${vaultAuthStatus}`}
+            />
+            <span>Vault</span>
+          </div>
           {onLogout && (
             <button
               onClick={onLogout}
