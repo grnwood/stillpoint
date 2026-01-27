@@ -14,6 +14,7 @@ export const LoginPage: React.FC = () => {
   const [vaultStatuses, setVaultStatuses] = useState<Record<string, 'active' | 'inactive' | 'unreachable'>>({});
   const [vaultsRoot, setVaultsRoot] = useState('');
   const [newVaultName, setNewVaultName] = useState('');
+  const [rememberMe, setRememberMe] = useState(() => apiClient.isRemembered());
 
   useEffect(() => {
     if (!vaultSelected) {
@@ -117,9 +118,9 @@ export const LoginPage: React.FC = () => {
 
     try {
       if (authConfigured) {
-        await login(username, password);
+        await login(username, password, rememberMe);
       } else {
-        await setup(username, password);
+        await setup(username, password, rememberMe);
       }
     } catch (err: any) {
       setError(err.message || 'Authentication failed');
@@ -324,6 +325,15 @@ export const LoginPage: React.FC = () => {
               }}
             />
           </div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '20px', fontSize: '14px', color: '#444' }}>
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+            />
+            Keep me logged in
+          </label>
 
           {error && (
             <div style={{ 

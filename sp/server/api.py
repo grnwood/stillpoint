@@ -173,6 +173,32 @@ def _clear_tree_cache() -> None:
     _TREE_CACHE.clear()
 
 
+def _apply_vault_root_from_token(token_vault_root: Optional[str]) -> None:
+    if not token_vault_root:
+        return
+    try:
+        root_path = Path(token_vault_root).expanduser().resolve()
+        if not root_path.exists() or not root_path.is_dir():
+            return
+        vaults_root = _ensure_vaults_root()
+        try:
+            root_path.relative_to(vaults_root)
+        except ValueError:
+            return
+        try:
+            current_root = vault_state.get_root()
+            if str(current_root) == str(root_path):
+                return
+        except Exception:
+            pass
+        vault_state.set_root(str(root_path))
+        config.set_active_vault(str(root_path))
+        _clear_tree_cache()
+        _clear_task_cache()
+    except Exception:
+        return
+
+
 def set_vaults_root(path: Optional[str]) -> None:
     """Set the base folder where server-managed vaults live."""
     global _VAULTS_ROOT
@@ -224,6 +250,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
 SERVER_ADMIN_PASSWORD = os.getenv("SERVER_ADMIN_PASSWORD")
+REFRESH_COOKIE_NAME = os.getenv("STILLPOINT_REFRESH_COOKIE_NAME", "sp_refresh")
+REFRESH_COOKIE_DOMAIN = os.getenv("STILLPOINT_REFRESH_COOKIE_DOMAIN")
+REFRESH_COOKIE_SAMESITE = os.getenv("STILLPOINT_REFRESH_COOKIE_SAMESITE", "lax").lower()
+REFRESH_COOKIE_SECURE = os.getenv("STILLPOINT_REFRESH_COOKIE_SECURE")
 
 password_hasher = PasswordHasher()
 security = HTTPBearer(auto_error=False)
@@ -244,14 +274,16 @@ class AuthModels:
     class SetupRequest(BaseModel):
         username: str = Field(..., min_length=3, max_length=50)
         password: str = Field(..., min_length=8)
+        remember: bool = False
 
     class LoginRequest(BaseModel):
         username: str
         password: str
+        remember: bool = False
 
     class TokenResponse(BaseModel):
         access_token: str
-        refresh_token: str
+        refresh_token: Optional[str] = None
         token_type: str = "bearer"
 
     class UserInfo(BaseModel):
@@ -267,6 +299,43 @@ def _create_token(data: dict, expires_delta: timedelta) -> str:
     expire = datetime.utcnow() + expires_delta
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _set_refresh_cookie(response: Response, request: Request, token: str, remember: bool) -> None:
+    if REFRESH_COOKIE_SECURE is None:
+        secure = request.url.scheme == "https"
+    else:
+        secure = REFRESH_COOKIE_SECURE.lower() in ("true", "1", "yes")
+    samesite = REFRESH_COOKIE_SAMESITE
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        domain=REFRESH_COOKIE_DOMAIN,
+        path="/",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60 if remember else None,
+    )
+
+
+def _clear_refresh_cookie(response: Response, request: Request) -> None:
+    if REFRESH_COOKIE_SECURE is None:
+        secure = request.url.scheme == "https"
+    else:
+        secure = REFRESH_COOKIE_SECURE.lower() in ("true", "1", "yes")
+    samesite = REFRESH_COOKIE_SAMESITE
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        domain=REFRESH_COOKIE_DOMAIN,
+        path="/",
+        samesite=samesite,
+        secure=secure,
+    )
 
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -435,6 +504,14 @@ async def get_current_user(
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        token_vault_root = payload.get("vault_root")
+        _apply_vault_root_from_token(token_vault_root)
+        try:
+            current_vault_root = vault_state.get_root()
+        except Exception:
+            current_vault_root = None
+        if token_vault_root and (not current_vault_root or token_vault_root != str(current_vault_root)):
             raise HTTPException(status_code=401, detail="Invalid token")
         return AuthModels.UserInfo(username=username, is_admin=True)
     except JWTError:
@@ -712,7 +789,7 @@ def health() -> dict:
 # ===== Authentication Endpoints =====
 
 @app.post("/auth/setup", response_model=AuthModels.TokenResponse)
-def auth_setup(payload: AuthModels.SetupRequest) -> dict:
+def auth_setup(payload: AuthModels.SetupRequest, request: Request, response: Response) -> dict:
     """First-time password setup. Only works when no password is configured."""
     try:
         vault_root = vault_state.get_root()
@@ -729,25 +806,36 @@ def auth_setup(payload: AuthModels.SetupRequest) -> dict:
     password_hash = _hash_password(payload.password)
     _set_auth_config(payload.username, password_hash)
     
+    vault_root_str = str(vault_root)
+
     # Generate tokens
     access_token = _create_token(
-        {"sub": payload.username},
+        {"sub": payload.username, "vault_root": vault_root_str},
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     refresh_token = _create_token(
-        {"sub": payload.username, "type": "refresh"},
+        {
+            "sub": payload.username,
+            "type": "refresh",
+            "vault_root": vault_root_str,
+            "remember": payload.remember,
+        },
         timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
-    
-    return {
+
+    _set_refresh_cookie(response, request, refresh_token, payload.remember)
+
+    response_payload = {
         "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
     }
+    if payload.remember:
+        response_payload["refresh_token"] = refresh_token
+    return response_payload
 
 
 @app.post("/auth/login", response_model=AuthModels.TokenResponse)
-def auth_login(payload: AuthModels.LoginRequest) -> dict:
+def auth_login(payload: AuthModels.LoginRequest, request: Request, response: Response) -> dict:
     """Login with username and password."""
     try:
         vault_root = vault_state.get_root()
@@ -767,60 +855,96 @@ def auth_login(payload: AuthModels.LoginRequest) -> dict:
     if not _verify_password(payload.password, auth_config["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    vault_root_str = str(vault_root)
+
     # Generate tokens
     access_token = _create_token(
-        {"sub": payload.username},
+        {"sub": payload.username, "vault_root": vault_root_str},
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     refresh_token = _create_token(
-        {"sub": payload.username, "type": "refresh"},
+        {
+            "sub": payload.username,
+            "type": "refresh",
+            "vault_root": vault_root_str,
+            "remember": payload.remember,
+        },
         timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
-    
-    return {
+
+    _set_refresh_cookie(response, request, refresh_token, payload.remember)
+
+    response_payload = {
         "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
     }
+    if payload.remember:
+        response_payload["refresh_token"] = refresh_token
+    return response_payload
 
 
 @app.post("/auth/refresh", response_model=AuthModels.TokenResponse)
-def auth_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+def auth_refresh(
+    request: Request,
+    response: Response,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
     """Refresh access token using refresh token."""
-    if not credentials:
+    token = credentials.credentials if credentials else request.cookies.get(REFRESH_COOKIE_NAME)
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid refresh token")
         
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token")
+        remember = bool(payload.get("remember"))
+
+        token_vault_root = payload.get("vault_root")
+        _apply_vault_root_from_token(token_vault_root)
+        try:
+            current_vault_root = vault_state.get_root()
+        except Exception:
+            current_vault_root = None
+        if not current_vault_root or token_vault_root != str(current_vault_root):
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
         
         # Generate new tokens
         access_token = _create_token(
-            {"sub": username},
+            {"sub": username, "vault_root": token_vault_root},
             timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
         refresh_token = _create_token(
-            {"sub": username, "type": "refresh"},
+            {
+                "sub": username,
+                "type": "refresh",
+                "vault_root": token_vault_root,
+                "remember": remember,
+            },
             timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
         )
-        
-        return {
+
+        _set_refresh_cookie(response, request, refresh_token, remember)
+
+        response_payload = {
             "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
         }
+        if remember:
+            response_payload["refresh_token"] = refresh_token
+        return response_payload
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 
 @app.post("/auth/logout")
-def auth_logout(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+def auth_logout(request: Request, response: Response) -> dict:
     """Logout (client should discard tokens)."""
+    _clear_refresh_cookie(response, request)
     return {"ok": True, "message": "Logged out successfully"}
 
 
@@ -916,6 +1040,15 @@ def select_vault(payload: VaultSelectPayload) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
     _clear_task_cache()
     return {"root": str(root)}
+
+
+@app.post("/api/vault/unselect")
+def unselect_vault() -> dict:
+    vault_state.clear_root()
+    config.set_active_vault(None)
+    _clear_tree_cache()
+    _clear_task_cache()
+    return {"ok": True}
 
 
 def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:

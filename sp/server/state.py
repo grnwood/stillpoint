@@ -24,6 +24,10 @@ class StateManager:
             self._state.root = root_path
         return root_path
 
+    def clear_root(self) -> None:
+        with self._lock:
+            self._state.root = None
+
     def get_root(self) -> Path:
         with self._lock:
             if self._state.root is None:

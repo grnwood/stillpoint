@@ -8,9 +8,10 @@ interface AuthContextType {
   authConfigured: boolean;
   vaultSelected: boolean;
   vaultAuthStatus: 'active' | 'inactive' | 'unreachable';
-  setup: (username: string, password: string) => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
+  setup: (username: string, password: string, remember: boolean) => Promise<void>;
+  login: (username: string, password: string, remember: boolean) => Promise<void>;
   logout: () => Promise<void>;
+  switchVault: () => Promise<void>;
   refreshAuth: () => Promise<void>;
   refreshVaultStatus: () => Promise<void>;
 }
@@ -94,12 +95,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const setup = async (username: string, password: string) => {
+  const setup = async (username: string, password: string, remember: boolean) => {
+    apiClient.setRemembered(remember);
     await apiClient.setup(username, password);
     await checkAuth();
   };
 
-  const login = async (username: string, password: string) => {
+  const login = async (username: string, password: string, remember: boolean) => {
+    apiClient.setRemembered(remember);
     await apiClient.login(username, password);
     await checkAuth();
   };
@@ -109,6 +112,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsAuthenticated(false);
     setUser(null);
     setVaultAuthStatus('inactive');
+    setVaultSelected(false);
+  };
+
+  const switchVault = async () => {
+    await apiClient.unselectVault();
+    apiClient.clearTokens();
+    apiClient.clearActiveVaultPath();
+    setIsAuthenticated(false);
+    setUser(null);
+    setVaultAuthStatus('inactive');
+    setVaultSelected(false);
   };
 
   return (
@@ -123,6 +137,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setup,
         login,
         logout,
+        switchVault,
         refreshAuth: checkAuth,
         refreshVaultStatus: updateVaultAuthStatus,
       }}

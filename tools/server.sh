@@ -12,4 +12,4 @@ export SERVER_ADMIN_PASSWORD="change-me-to-secure-password"
 # Alternative: use python -m instead of uvicorn directly
 # python -m sp.server.api --host 127.0.0.1 --port 8080
 
-venv/bin/python -m sp.server.api --host 127.0.0.1 --port 8080
+venv/bin/python -m sp.server.api --host localhost --port 8080

@@ -20,9 +20,10 @@ type HomePageProps = {
   headerLeft?: React.ReactNode;
   vaultAuthStatus?: 'active' | 'inactive' | 'unreachable';
   onLogout?: () => void;
+  onSwitchVault?: () => void;
 };
 
-export const HomePage: React.FC<HomePageProps> = ({ headerLeft, vaultAuthStatus = 'inactive', onLogout }) => {
+export const HomePage: React.FC<HomePageProps> = ({ headerLeft, vaultAuthStatus = 'inactive', onLogout, onSwitchVault }) => {
   const [recentPages, setRecentPages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activePath, setActivePath] = useState('');
@@ -1147,14 +1148,30 @@ export const HomePage: React.FC<HomePageProps> = ({ headerLeft, vaultAuthStatus 
           {pageName || 'No page selected'}
         </div>
         <div style={{ justifySelf: 'end', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '14px', color: '#555' }}>
+          <button
+            type="button"
+            onClick={onSwitchVault}
+            disabled={!onSwitchVault}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '14px',
+              color: '#555',
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: onSwitchVault ? 'pointer' : 'default'
+            }}
+            title="Switch vault"
+          >
             <span
               className={`status-dot status-dot--${vaultAuthStatus}`}
               aria-label={`Vault auth status: ${vaultAuthStatus}`}
               title={`Vault auth status: ${vaultAuthStatus}`}
             />
             <span>Vault</span>
-          </div>
+          </button>
           {onLogout && (
             <button
               onClick={onLogout}

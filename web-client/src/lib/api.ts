@@ -2,17 +2,19 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localho
 
 export interface AuthTokens {
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
 }
 
-type VaultTokenRecord = AuthTokens & {
+type VaultRefreshRecord = {
+  refresh_token: string;
   updated_at: number;
 };
 
-type VaultTokenStore = Record<string, VaultTokenRecord>;
+type VaultRefreshStore = Record<string, VaultRefreshRecord>;
 
 const ACTIVE_VAULT_KEY = `stillpoint.activeVault.${encodeURIComponent(API_BASE_URL)}`;
-const VAULT_TOKENS_KEY = `stillpoint.vaultTokens.${encodeURIComponent(API_BASE_URL)}`;
+const REMEMBER_ME_KEY = `stillpoint.rememberMe.${encodeURIComponent(API_BASE_URL)}`;
+const VAULT_REFRESH_TOKENS_KEY = `stillpoint.vaultRefreshTokens.${encodeURIComponent(API_BASE_URL)}`;
 
 export class APIError extends Error {
   status: number;
@@ -31,22 +33,38 @@ class APIClient {
   private refreshToken: string | null = null;
   private serverPasswordHash: string | null = null;
   private activeVaultPath: string | null = null;
+  private rememberMe: boolean;
 
   constructor() {
-    // Load tokens from localStorage
-    this.accessToken = localStorage.getItem('access_token');
-    this.refreshToken = localStorage.getItem('refresh_token');
-    this.serverPasswordHash = sessionStorage.getItem('server_password_hash');
+    const rememberRaw = localStorage.getItem(REMEMBER_ME_KEY);
+    this.rememberMe = rememberRaw === 'true';
     this.activeVaultPath = localStorage.getItem(ACTIVE_VAULT_KEY);
+    if (this.rememberMe) {
+      this.accessToken = localStorage.getItem('access_token');
+      this.refreshToken = localStorage.getItem('refresh_token');
+      if (this.activeVaultPath) {
+        this.refreshToken = this.getStoredRefreshToken(this.activeVaultPath) || this.refreshToken;
+      }
+    }
+    this.serverPasswordHash = sessionStorage.getItem('server_password_hash');
   }
 
   setTokens(tokens: AuthTokens) {
     this.accessToken = tokens.access_token;
-    this.refreshToken = tokens.refresh_token;
-    localStorage.setItem('access_token', tokens.access_token);
-    localStorage.setItem('refresh_token', tokens.refresh_token);
-    if (this.activeVaultPath) {
-      this.setStoredVaultTokens(this.activeVaultPath, tokens);
+    if (tokens.refresh_token) {
+      this.refreshToken = tokens.refresh_token;
+      if (this.rememberMe && this.activeVaultPath) {
+        this.setStoredRefreshToken(this.activeVaultPath, tokens.refresh_token);
+      }
+    }
+    if (this.rememberMe) {
+      localStorage.setItem('access_token', tokens.access_token);
+      if (tokens.refresh_token) {
+        localStorage.setItem('refresh_token', tokens.refresh_token);
+      }
+    } else {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
     }
   }
 
@@ -54,9 +72,32 @@ class APIClient {
     return this.activeVaultPath;
   }
 
+  isRemembered() {
+    return this.rememberMe;
+  }
+
+  setRemembered(remember: boolean) {
+    this.rememberMe = remember;
+    localStorage.setItem(REMEMBER_ME_KEY, remember ? 'true' : 'false');
+    if (!remember) {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      this.clearStoredRefreshTokens();
+    }
+  }
+
+  clearActiveVaultPath() {
+    this.activeVaultPath = null;
+    this.refreshToken = null;
+    localStorage.removeItem(ACTIVE_VAULT_KEY);
+  }
+
   setActiveVaultPath(path: string) {
     this.activeVaultPath = path;
     localStorage.setItem(ACTIVE_VAULT_KEY, path);
+    if (this.rememberMe) {
+      this.refreshToken = this.getStoredRefreshToken(path);
+    }
   }
 
   async setServerPassword(password: string): Promise<void> {
@@ -85,19 +126,17 @@ class APIClient {
 
   clearActiveVaultTokens() {
     if (!this.activeVaultPath) return;
-    const store = this.loadVaultTokenStore();
-    if (store[this.activeVaultPath]) {
-      delete store[this.activeVaultPath];
-      this.saveVaultTokenStore(store);
-    }
+    this.clearStoredRefreshToken(this.activeVaultPath);
   }
 
   hasStoredVaultSession(path: string) {
-    return Boolean(this.getStoredVaultTokens(path));
+    if (!this.rememberMe) return false;
+    return Boolean(this.getStoredRefreshToken(path));
   }
 
   listStoredVaultSessions() {
-    return Object.keys(this.loadVaultTokenStore());
+    if (!this.rememberMe) return [];
+    return Object.keys(this.loadVaultRefreshStore());
   }
 
   async checkServerReachable() {
@@ -112,26 +151,32 @@ class APIClient {
   }
 
   async refreshStoredVaultSession(path: string, updateGlobal: boolean = false): Promise<boolean> {
-    const stored = this.getStoredVaultTokens(path);
-    if (!stored?.refresh_token) return false;
+    if (!this.rememberMe) return false;
+    const storedRefresh = this.getStoredRefreshToken(path);
+    if (!storedRefresh) return false;
     try {
-      const tokens = await this.refreshWithToken(stored.refresh_token);
-      if (tokens) {
-        this.setStoredVaultTokens(path, tokens);
-        if (updateGlobal) {
-          this.accessToken = tokens.access_token;
-          this.refreshToken = tokens.refresh_token;
-          localStorage.setItem('access_token', tokens.access_token);
-          localStorage.setItem('refresh_token', tokens.refresh_token);
-        }
-        return true;
+      const tokens = await this.refreshWithToken(storedRefresh);
+      if (!tokens) {
+        this.clearStoredRefreshToken(path);
+        return false;
       }
+      if (tokens.refresh_token) {
+        this.setStoredRefreshToken(path, tokens.refresh_token);
+      }
+      if (updateGlobal) {
+        this.refreshToken = tokens.refresh_token || storedRefresh;
+        this.setActiveVaultPath(path);
+        this.setTokens({
+          ...tokens,
+          refresh_token: tokens.refresh_token || storedRefresh,
+        });
+      }
+      return true;
     } catch (error) {
       if (error instanceof TypeError) {
         throw error;
       }
     }
-    this.clearStoredVaultTokens(path);
     return false;
   }
 
@@ -141,13 +186,48 @@ class APIClient {
   }
 
   async getVaultSessionStatus(path: string): Promise<'active' | 'inactive' | 'unreachable'> {
-    if (!this.hasStoredVaultSession(path)) return 'inactive';
+    return this.hasStoredVaultSession(path) ? 'active' : 'inactive';
+  }
+
+  private loadVaultRefreshStore(): VaultRefreshStore {
+    const raw = localStorage.getItem(VAULT_REFRESH_TOKENS_KEY);
+    if (!raw) return {};
     try {
-      const refreshed = await this.refreshStoredVaultSession(path, false);
-      return refreshed ? 'active' : 'inactive';
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as VaultRefreshStore;
+      }
+      return {};
     } catch (error) {
-      return 'unreachable';
+      return {};
     }
+  }
+
+  private saveVaultRefreshStore(store: VaultRefreshStore) {
+    localStorage.setItem(VAULT_REFRESH_TOKENS_KEY, JSON.stringify(store));
+  }
+
+  private getStoredRefreshToken(path: string): string | null {
+    const store = this.loadVaultRefreshStore();
+    return store[path]?.refresh_token || null;
+  }
+
+  private setStoredRefreshToken(path: string, token: string) {
+    const store = this.loadVaultRefreshStore();
+    store[path] = { refresh_token: token, updated_at: Date.now() };
+    this.saveVaultRefreshStore(store);
+  }
+
+  private clearStoredRefreshToken(path: string) {
+    const store = this.loadVaultRefreshStore();
+    if (store[path]) {
+      delete store[path];
+      this.saveVaultRefreshStore(store);
+    }
+  }
+
+  private clearStoredRefreshTokens() {
+    localStorage.removeItem(VAULT_REFRESH_TOKENS_KEY);
   }
 
   private buildServerHeaders(): HeadersInit {
@@ -156,43 +236,6 @@ class APIClient {
       headers.set('X-Server-Admin-Password', this.serverPasswordHash);
     }
     return headers;
-  }
-
-  private loadVaultTokenStore(): VaultTokenStore {
-    const raw = localStorage.getItem(VAULT_TOKENS_KEY);
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        return parsed as VaultTokenStore;
-      }
-      return {};
-    } catch (error) {
-      return {};
-    }
-  }
-
-  private saveVaultTokenStore(store: VaultTokenStore) {
-    localStorage.setItem(VAULT_TOKENS_KEY, JSON.stringify(store));
-  }
-
-  private getStoredVaultTokens(path: string): VaultTokenRecord | null {
-    const store = this.loadVaultTokenStore();
-    return store[path] || null;
-  }
-
-  private setStoredVaultTokens(path: string, tokens: AuthTokens) {
-    const store = this.loadVaultTokenStore();
-    store[path] = { ...tokens, updated_at: Date.now() };
-    this.saveVaultTokenStore(store);
-  }
-
-  private clearStoredVaultTokens(path: string) {
-    const store = this.loadVaultTokenStore();
-    if (store[path]) {
-      delete store[path];
-      this.saveVaultTokenStore(store);
-    }
   }
 
   private async request<T>(
@@ -219,15 +262,16 @@ class APIClient {
     const response = await fetch(url, {
       ...options,
       headers,
+      credentials: 'include',
     });
 
     // Handle token refresh on 401
-    if (response.status === 401 && this.refreshToken) {
+    if (response.status === 401 && endpoint !== '/auth/login' && endpoint !== '/auth/setup' && endpoint !== '/auth/refresh') {
       const refreshed = await this.refreshAccessToken();
       if (refreshed) {
         // Retry the original request
         headers.set('Authorization', `Bearer ${this.accessToken}`);
-        const retryResponse = await fetch(url, { ...options, headers });
+        const retryResponse = await fetch(url, { ...options, headers, credentials: 'include' });
         if (!retryResponse.ok) {
           throw new Error(`HTTP ${retryResponse.status}: ${retryResponse.statusText}`);
         }
@@ -246,12 +290,19 @@ class APIClient {
   }
 
   async refreshAccessToken(): Promise<boolean> {
-    if (!this.refreshToken) return false;
-
+    if (!this.refreshToken && this.activeVaultPath && this.rememberMe) {
+      this.refreshToken = this.getStoredRefreshToken(this.activeVaultPath);
+    }
+    if (!this.refreshToken) {
+      return false;
+    }
     try {
       const tokens = await this.refreshWithToken(this.refreshToken);
       if (tokens) {
-        this.setTokens(tokens);
+        this.setTokens({
+          ...tokens,
+          refresh_token: tokens.refresh_token || this.refreshToken || undefined,
+        });
         return true;
       }
     } catch (error) {
@@ -263,11 +314,13 @@ class APIClient {
   }
 
   private async refreshWithToken(refreshToken: string): Promise<AuthTokens | null> {
+    const headers: HeadersInit = {
+      'Authorization': `Bearer ${refreshToken}`,
+    };
     const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${refreshToken}`,
-      },
+      headers,
+      credentials: 'include',
     });
 
     if (response.ok) {
@@ -285,7 +338,7 @@ class APIClient {
   async setup(username: string, password: string) {
     const tokens = await this.request<AuthTokens>('/auth/setup', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember: this.rememberMe }),
     });
     this.setTokens(tokens);
     return tokens;
@@ -294,7 +347,7 @@ class APIClient {
   async login(username: string, password: string) {
     const tokens = await this.request<AuthTokens>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember: this.rememberMe }),
     });
     this.setTokens(tokens);
     return tokens;
@@ -329,6 +382,12 @@ class APIClient {
     });
     this.setActiveVaultPath(path);
     return response;
+  }
+
+  async unselectVault() {
+    return this.request<{ ok: boolean }>('/api/vault/unselect', {
+      method: 'POST',
+    });
   }
 
   async getTree(path: string = '/', recursive: boolean = true) {

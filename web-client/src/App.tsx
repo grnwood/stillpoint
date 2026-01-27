@@ -5,7 +5,7 @@ import { HomePage } from './pages/HomePage';
 import './App.css';
 
 function AppContent() {
-  const { isAuthenticated, isLoading, logout, vaultAuthStatus } = useAuth();
+  const { isAuthenticated, isLoading, logout, switchVault, vaultAuthStatus } = useAuth();
   const [syncStarted, setSyncStarted] = useState(false);
 
   useEffect(() => {
@@ -43,6 +43,7 @@ function AppContent() {
         headerLeft={<div style={{ fontWeight: 'bold' }}>StillPoint</div>}
         vaultAuthStatus={vaultAuthStatus}
         onLogout={logout}
+        onSwitchVault={switchVault}
       />
     </div>
   );
