@@ -11,6 +11,7 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [vaults, setVaults] = useState<Array<{ name: string; path: string }>>([]);
+  const [vaultStatuses, setVaultStatuses] = useState<Record<string, 'active' | 'inactive' | 'unreachable'>>({});
   const [vaultsRoot, setVaultsRoot] = useState('');
   const [newVaultName, setNewVaultName] = useState('');
 
@@ -20,7 +21,7 @@ export const LoginPage: React.FC = () => {
         // If 403, need server password
         if (err.status === 403) {
           setShowServerPasswordPrompt(true);
-          setError('Server admin password required');
+          setError('Master password required');
         } else {
           setError(err.message || 'Failed to load vaults');
         }
@@ -33,6 +34,35 @@ export const LoginPage: React.FC = () => {
     setVaults(response.vaults);
     setVaultsRoot(response.root);
     setShowServerPasswordPrompt(false);
+    await updateVaultStatuses(response.vaults);
+  };
+
+  const updateVaultStatuses = async (vaultList: Array<{ name: string; path: string }>) => {
+    if (vaultList.length === 0) {
+      setVaultStatuses({});
+      return;
+    }
+    const reachable = await apiClient.checkServerReachable();
+    if (!reachable) {
+      const unreachableStatuses = vaultList.reduce<Record<string, 'unreachable'>>((acc, vault) => {
+        acc[vault.path] = 'unreachable';
+        return acc;
+      }, {});
+      setVaultStatuses(unreachableStatuses);
+      return;
+    }
+
+    const statusEntries = await Promise.all(
+      vaultList.map(async (vault) => {
+        const status = await apiClient.getVaultSessionStatus(vault.path);
+        return [vault.path, status] as const;
+      })
+    );
+    const nextStatuses = statusEntries.reduce<Record<string, 'active' | 'inactive' | 'unreachable'>>((acc, [path, status]) => {
+      acc[path] = status;
+      return acc;
+    }, {});
+    setVaultStatuses(nextStatuses);
   };
 
   const handleServerPasswordSubmit = async (e: React.FormEvent) => {
@@ -54,6 +84,7 @@ export const LoginPage: React.FC = () => {
     setLoading(true);
     try {
       await apiClient.selectVault(path);
+      await apiClient.applyStoredVaultSession(path);
       await refreshAuth();
     } catch (err: any) {
       setError(err.message || 'Failed to select vault');
@@ -110,18 +141,20 @@ export const LoginPage: React.FC = () => {
         width: '100%', 
         maxWidth: '400px',
         padding: '30px',
-        border: '1px solid #ddd',
-        borderRadius: '8px'
+        border: '1px solid #e5e7eb',
+        borderRadius: '12px',
+        backgroundColor: '#fff',
+        boxShadow: '0 8px 24px rgba(15, 23, 42, 0.08)'
       }}>
         {showServerPasswordPrompt && (
           <>
-            <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>Server Password Required</h1>
+            <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>Master Password Required</h1>
             <p style={{ marginBottom: '20px', color: '#666' }}>
-              This server requires an admin password for vault operations.
+              This server requires a master password before vault operations.
             </p>
             <form onSubmit={handleServerPasswordSubmit}>
               <div style={{ marginBottom: '12px' }}>
-                <label style={{ display: 'block', marginBottom: '5px' }}>Server Admin Password</label>
+                <label style={{ display: 'block', marginBottom: '5px' }}>Master Password</label>
                 <input
                   type="password"
                   value={serverPassword}
@@ -164,6 +197,9 @@ export const LoginPage: React.FC = () => {
             <p style={{ marginBottom: '20px', color: '#666' }}>
               Vaults root: <strong>{vaultsRoot || 'Loading...'}</strong>
             </p>
+            <p style={{ marginBottom: '16px', color: '#666', fontSize: '14px' }}>
+              Vaults with active sessions are highlighted with a green dot.
+            </p>
             {vaults.length > 0 ? (
               <div style={{ marginBottom: '20px' }}>
                 {vaults.map((vault) => (
@@ -182,10 +218,18 @@ export const LoginPage: React.FC = () => {
                       border: '1px solid #222',
                       borderRadius: '4px',
                       cursor: loading ? 'not-allowed' : 'pointer',
-                      textAlign: 'left'
+                      textAlign: 'left',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '10px'
                     }}
                   >
-                    {vault.name}
+                    <span>{vault.name}</span>
+                    <span
+                      className={`status-dot status-dot--${vaultStatuses[vault.path] || 'inactive'}`}
+                      aria-label={`Vault status: ${vaultStatuses[vault.path] || 'inactive'}`}
+                    />
                   </button>
                 ))}
               </div>

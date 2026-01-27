@@ -7,10 +7,12 @@ interface AuthContextType {
   user: { username: string; is_admin: boolean } | null;
   authConfigured: boolean;
   vaultSelected: boolean;
+  vaultAuthStatus: 'active' | 'inactive' | 'unreachable';
   setup: (username: string, password: string) => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshAuth: () => Promise<void>;
+  refreshVaultStatus: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -21,10 +23,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<{ username: string; is_admin: boolean } | null>(null);
   const [authConfigured, setAuthConfigured] = useState(false);
   const [vaultSelected, setVaultSelected] = useState(false);
+  const [vaultAuthStatus, setVaultAuthStatus] = useState<'active' | 'inactive' | 'unreachable'>('inactive');
 
   useEffect(() => {
     checkAuth();
   }, []);
+
+  const updateVaultAuthStatus = async () => {
+    const activeVault = apiClient.getActiveVaultPath();
+    if (!activeVault) {
+      setVaultAuthStatus('inactive');
+      return;
+    }
+    const reachable = await apiClient.checkServerReachable();
+    if (!reachable) {
+      setVaultAuthStatus('unreachable');
+      return;
+    }
+    if (isAuthenticated || apiClient.hasStoredVaultSession(activeVault)) {
+      setVaultAuthStatus('active');
+      return;
+    }
+    setVaultAuthStatus('inactive');
+  };
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const interval = window.setInterval(() => {
+      apiClient.refreshAccessToken().catch(() => undefined);
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    updateVaultAuthStatus().catch(() => undefined);
+  }, [isAuthenticated, vaultSelected]);
 
   const checkAuth = async () => {
     try {
@@ -57,6 +90,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
     } finally {
       setIsLoading(false);
+      await updateVaultAuthStatus();
     }
   };
 
@@ -74,6 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await apiClient.logout();
     setIsAuthenticated(false);
     setUser(null);
+    setVaultAuthStatus('inactive');
   };
 
   return (
@@ -84,10 +119,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         authConfigured,
         vaultSelected,
+        vaultAuthStatus,
         setup,
         login,
         logout,
         refreshAuth: checkAuth,
+        refreshVaultStatus: updateVaultAuthStatus,
       }}
     >
       {children}

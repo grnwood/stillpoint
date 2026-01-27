@@ -5,6 +5,15 @@ export interface AuthTokens {
   refresh_token: string;
 }
 
+type VaultTokenRecord = AuthTokens & {
+  updated_at: number;
+};
+
+type VaultTokenStore = Record<string, VaultTokenRecord>;
+
+const ACTIVE_VAULT_KEY = `stillpoint.activeVault.${encodeURIComponent(API_BASE_URL)}`;
+const VAULT_TOKENS_KEY = `stillpoint.vaultTokens.${encodeURIComponent(API_BASE_URL)}`;
+
 export class APIError extends Error {
   status: number;
   detail: unknown;
@@ -21,12 +30,14 @@ class APIClient {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
   private serverPasswordHash: string | null = null;
+  private activeVaultPath: string | null = null;
 
   constructor() {
     // Load tokens from localStorage
     this.accessToken = localStorage.getItem('access_token');
     this.refreshToken = localStorage.getItem('refresh_token');
     this.serverPasswordHash = sessionStorage.getItem('server_password_hash');
+    this.activeVaultPath = localStorage.getItem(ACTIVE_VAULT_KEY);
   }
 
   setTokens(tokens: AuthTokens) {
@@ -34,6 +45,18 @@ class APIClient {
     this.refreshToken = tokens.refresh_token;
     localStorage.setItem('access_token', tokens.access_token);
     localStorage.setItem('refresh_token', tokens.refresh_token);
+    if (this.activeVaultPath) {
+      this.setStoredVaultTokens(this.activeVaultPath, tokens);
+    }
+  }
+
+  getActiveVaultPath() {
+    return this.activeVaultPath;
+  }
+
+  setActiveVaultPath(path: string) {
+    this.activeVaultPath = path;
+    localStorage.setItem(ACTIVE_VAULT_KEY, path);
   }
 
   async setServerPassword(password: string): Promise<void> {
@@ -58,6 +81,118 @@ class APIClient {
     this.refreshToken = null;
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
+  }
+
+  clearActiveVaultTokens() {
+    if (!this.activeVaultPath) return;
+    const store = this.loadVaultTokenStore();
+    if (store[this.activeVaultPath]) {
+      delete store[this.activeVaultPath];
+      this.saveVaultTokenStore(store);
+    }
+  }
+
+  hasStoredVaultSession(path: string) {
+    return Boolean(this.getStoredVaultTokens(path));
+  }
+
+  listStoredVaultSessions() {
+    return Object.keys(this.loadVaultTokenStore());
+  }
+
+  async checkServerReachable() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/health`, {
+        headers: this.buildServerHeaders(),
+      });
+      return response.ok;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async refreshStoredVaultSession(path: string, updateGlobal: boolean = false): Promise<boolean> {
+    const stored = this.getStoredVaultTokens(path);
+    if (!stored?.refresh_token) return false;
+    try {
+      const tokens = await this.refreshWithToken(stored.refresh_token);
+      if (tokens) {
+        this.setStoredVaultTokens(path, tokens);
+        if (updateGlobal) {
+          this.accessToken = tokens.access_token;
+          this.refreshToken = tokens.refresh_token;
+          localStorage.setItem('access_token', tokens.access_token);
+          localStorage.setItem('refresh_token', tokens.refresh_token);
+        }
+        return true;
+      }
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw error;
+      }
+    }
+    this.clearStoredVaultTokens(path);
+    return false;
+  }
+
+  async applyStoredVaultSession(path: string): Promise<boolean> {
+    this.setActiveVaultPath(path);
+    return this.refreshStoredVaultSession(path, true);
+  }
+
+  async getVaultSessionStatus(path: string): Promise<'active' | 'inactive' | 'unreachable'> {
+    if (!this.hasStoredVaultSession(path)) return 'inactive';
+    try {
+      const refreshed = await this.refreshStoredVaultSession(path, false);
+      return refreshed ? 'active' : 'inactive';
+    } catch (error) {
+      return 'unreachable';
+    }
+  }
+
+  private buildServerHeaders(): HeadersInit {
+    const headers = new Headers();
+    if (this.serverPasswordHash) {
+      headers.set('X-Server-Admin-Password', this.serverPasswordHash);
+    }
+    return headers;
+  }
+
+  private loadVaultTokenStore(): VaultTokenStore {
+    const raw = localStorage.getItem(VAULT_TOKENS_KEY);
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as VaultTokenStore;
+      }
+      return {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  private saveVaultTokenStore(store: VaultTokenStore) {
+    localStorage.setItem(VAULT_TOKENS_KEY, JSON.stringify(store));
+  }
+
+  private getStoredVaultTokens(path: string): VaultTokenRecord | null {
+    const store = this.loadVaultTokenStore();
+    return store[path] || null;
+  }
+
+  private setStoredVaultTokens(path: string, tokens: AuthTokens) {
+    const store = this.loadVaultTokenStore();
+    store[path] = { ...tokens, updated_at: Date.now() };
+    this.saveVaultTokenStore(store);
+  }
+
+  private clearStoredVaultTokens(path: string) {
+    const store = this.loadVaultTokenStore();
+    if (store[path]) {
+      delete store[path];
+      this.saveVaultTokenStore(store);
+    }
   }
 
   private async request<T>(
@@ -114,15 +249,8 @@ class APIClient {
     if (!this.refreshToken) return false;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.refreshToken}`,
-        },
-      });
-
-      if (response.ok) {
-        const tokens: AuthTokens = await response.json();
+      const tokens = await this.refreshWithToken(this.refreshToken);
+      if (tokens) {
         this.setTokens(tokens);
         return true;
       }
@@ -132,6 +260,21 @@ class APIClient {
 
     this.clearTokens();
     return false;
+  }
+
+  private async refreshWithToken(refreshToken: string): Promise<AuthTokens | null> {
+    const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${refreshToken}`,
+      },
+    });
+
+    if (response.ok) {
+      const tokens: AuthTokens = await response.json();
+      return tokens;
+    }
+    return null;
   }
 
   // Auth endpoints
@@ -160,6 +303,7 @@ class APIClient {
   async logout() {
     await this.request('/auth/logout', { method: 'POST' });
     this.clearTokens();
+    this.clearActiveVaultTokens();
   }
 
   async me() {
@@ -179,10 +323,12 @@ class APIClient {
   }
 
   async selectVault(path: string) {
-    return this.request<{ root: string }>('/api/vault/select', {
+    const response = await this.request<{ root: string }>('/api/vault/select', {
       method: 'POST',
       body: JSON.stringify({ path }),
     });
+    this.setActiveVaultPath(path);
+    return response;
   }
 
   async getTree(path: string = '/', recursive: boolean = true) {
