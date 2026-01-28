@@ -3716,6 +3716,11 @@ class MainWindow(QMainWindow):
                 self._load_bookmarks()
                 if self.vault_root:
                     self.right_panel.set_vault_root(self._local_vault_root())
+                    if self._remote_mode:
+                        try:
+                            self.right_panel.attachments_panel.set_remote_vault_root(self.vault_root)
+                        except Exception:
+                            pass
 
                 # Restore window geometry and splitter positions
                 self._restore_geometry()

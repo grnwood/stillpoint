@@ -1907,7 +1907,47 @@ def attach_files(
 def list_files(page_path: str) -> dict:
     _get_vault_root()
     normalized_page = _vault_relative_path(page_path)
+    root = _get_vault_root()
     attachments = config.list_page_attachments(normalized_page)
+    attachment_paths: set[str] = set()
+    for entry in attachments:
+        if isinstance(entry, dict):
+            path = entry.get("attachment_path") or entry.get("stored_path")
+            if path:
+                attachment_paths.add(str(path))
+
+    # Fallback: scan the page folder for unindexed attachments
+    page_file = (root / normalized_page.lstrip("/")).resolve()
+    page_folder = page_file.parent if page_file.exists() else None
+    if page_folder and page_folder.exists() and page_folder.is_dir():
+        try:
+            for candidate in page_folder.iterdir():
+                if not candidate.is_file():
+                    continue
+                if candidate == page_file:
+                    continue
+                rel = f"/{candidate.relative_to(root).as_posix()}"
+                if rel in attachment_paths:
+                    continue
+                try:
+                    updated = candidate.stat().st_mtime
+                except OSError:
+                    updated = None
+                entry = {
+                    "attachment_path": rel,
+                    "stored_path": str(candidate),
+                    "updated": updated,
+                }
+                attachments.append(entry)
+                attachment_paths.add(rel)
+                # Backfill index so future lists are complete
+                try:
+                    config.upsert_attachment_entry(normalized_page, rel, str(candidate), updated=updated)
+                except Exception:
+                    pass
+        except OSError:
+            pass
+
     _log_attachment(f"Listed {len(attachments)} attachment(s) for {normalized_page}")
     return {"attachments": attachments}
 

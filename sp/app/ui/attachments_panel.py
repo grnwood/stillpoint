@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import os
 import shutil
 import time
 from pathlib import Path
 from typing import Optional, Callable, Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -75,6 +77,9 @@ class AttachmentsPanel(QWidget):
         self._remote_mode = False
         self._api_base: Optional[str] = None
         self._auth_prompt = auth_prompt
+        self._remote_cache_root: Optional[Path] = None
+        self._remote_cache_key: Optional[str] = None
+        self._remote_vault_root: Optional[Path] = None
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
@@ -168,6 +173,8 @@ class AttachmentsPanel(QWidget):
         """Track the active vault root so attachments can be normalized."""
         self.vault_root = Path(vault_root) if vault_root else None
         self._page_attachment_cache.clear()
+        if not self._remote_mode:
+            self._remote_vault_root = None
 
     def set_http_client(self, api_client: Optional[httpx.Client]) -> None:
         """Update the API client used for remote attachment operations."""
@@ -177,9 +184,17 @@ class AttachmentsPanel(QWidget):
         """Toggle remote mode for attachments."""
         self._remote_mode = bool(remote_mode)
         self._api_base = api_base.rstrip("/") if api_base else None
+        self._remote_cache_root = None
+        self._remote_cache_key = None
+        if not self._remote_mode:
+            self._remote_vault_root = None
         if self._remote_mode:
             self.open_folder_button.setEnabled(False)
         self._page_attachment_cache.clear()
+
+    def set_remote_vault_root(self, vault_root: Optional[str]) -> None:
+        """Track the server-side vault root for remote attachment lookups."""
+        self._remote_vault_root = Path(vault_root) if vault_root else None
 
     def set_auth_prompt(self, auth_prompt: Optional[Callable[[], bool]]) -> None:
         """Set a callback to prompt for auth when needed."""
@@ -298,7 +313,15 @@ class AttachmentsPanel(QWidget):
                 continue
             item = QListWidgetItem()
             name = Path(str(attachment_path)).name
-            item.setText(name)
+            label = name
+            cache_root = self._get_remote_cache_root()
+            if cache_root is not None:
+                cache_path = (cache_root / "attachments" / str(attachment_path).lstrip("/")).resolve()
+                if cache_path.exists():
+                    label = f"{name} (local cache)"
+                else:
+                    label = f"{name} (remote)"
+            item.setText(label)
             item.setData(Qt.UserRole, {"kind": "remote", "path": str(attachment_path)})
             icon = self.icon_provider.icon(QFileIconProvider.File)
             if icon:
@@ -307,6 +330,22 @@ class AttachmentsPanel(QWidget):
         if PAGE_LOGGING_ENABLED:
             print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()
+
+    def _get_remote_cache_root(self) -> Optional[Path]:
+        if not self._api_base:
+            return None
+        if self._remote_cache_root is not None and self._remote_cache_key == self._api_base:
+            return self._remote_cache_root
+        parsed = urlparse(self._api_base)
+        host = parsed.hostname or "remote"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        key = f"{parsed.scheme}://{host}:{port}"
+        digest = hashlib.sha1(key.encode("ascii", errors="ignore")).hexdigest()[:12]
+        cache_root = Path.home() / ".stillpoint" / "remote" / f"{host}-{port}-{digest}"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        self._remote_cache_root = cache_root
+        self._remote_cache_key = self._api_base
+        return cache_root
 
     def _remote_attachment_names(self) -> set[str]:
         if not self._http_client:
@@ -445,10 +484,13 @@ class AttachmentsPanel(QWidget):
         self._refresh_attachments()
 
     def _current_page_key(self) -> Optional[str]:
-        if not self.current_page_path or not self.vault_root:
+        if not self.current_page_path:
+            return None
+        root = self._remote_vault_root if self._remote_mode else self.vault_root
+        if not root:
             return None
         try:
-            rel = self.current_page_path.relative_to(self.vault_root)
+            rel = self.current_page_path.relative_to(root)
         except ValueError:
             return None
         return f"/{rel.as_posix()}"
