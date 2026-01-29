@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QEvent, QPoint, QTimer, Signal, QPropertyAnimation
+from PySide6.QtCore import Qt, QEvent, QPoint, QTimer, Signal, QPropertyAnimation, QSize
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QFont,
+    QIcon,
     QKeySequence,
     QPainter,
     QPen,
@@ -33,6 +35,27 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+
+_ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+
+
+def _load_one_shot_prompt() -> str:
+    """Load the one-shot system prompt once and cache it."""
+    global _ONE_SHOT_PROMPT_CACHE
+    if _ONE_SHOT_PROMPT_CACHE is not None:
+        return _ONE_SHOT_PROMPT_CACHE
+    default_prompt = "you are a helpful assistent, you will respond with markdown formatting"
+    try:
+        prompt_path = Path(__file__).parent.parent / "one-shot-prompt.txt"
+        if prompt_path.exists():
+            content = prompt_path.read_text(encoding="utf-8").strip()
+            if content:
+                _ONE_SHOT_PROMPT_CACHE = content
+                return content
+    except Exception:
+        pass
+    _ONE_SHOT_PROMPT_CACHE = default_prompt
+    return default_prompt
 from .markdown_editor import MarkdownEditor
 from .date_insert_dialog import DateInsertDialog
 from .find_replace_bar import FindReplaceBar
@@ -142,6 +165,7 @@ class ModeWindow(QMainWindow):
             self._default_max_width = 16777215
         self._vault_root = vault_root
         self._page_path = page_path
+        self._read_only = read_only
         self._heading_provider = heading_provider
         self._tools_timer = QTimer(self)
         self._tools_timer.setInterval(1600)
@@ -213,9 +237,15 @@ class ModeWindow(QMainWindow):
         header.addWidget(title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
         
+        self._ai_button = self._build_ai_button()
+        if self._ai_button:
+            header.addWidget(self._ai_button, 0, Qt.AlignRight | Qt.AlignVCenter)
+
         # Add audience tools to header if in audience mode
         if self.mode == "audience" and self._settings.get("show_floating_tools", True):
             self._build_audience_tools_in_header(header)
+        elif self.mode == "focus":
+            self._build_focus_tools_in_header(header)
         
         self._header_mode_badge = QLabel(self.mode.upper())
         self._header_mode_badge.setStyleSheet(
@@ -282,6 +312,10 @@ class ModeWindow(QMainWindow):
         self.editor.insertDateRequested.connect(self._insert_date)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
         try:
+            self.editor.aiInlinePromptRequested.connect(lambda _a, _p: self._open_ai_assist(insert_pos=_p))
+        except Exception:
+            pass
+        try:
             self.editor.headingPickerRequested.connect(self._handle_heading_picker_request)
         except Exception:
             pass
@@ -338,6 +372,41 @@ class ModeWindow(QMainWindow):
         self._highlight_btn = _btn("H", "Toggle paragraph highlight (Ctrl+Alt+H)", self._toggle_paragraph_highlight)
         self._scroll_btn = _btn("S", "Toggle soft auto-scroll (Ctrl+Alt+S)", self._toggle_soft_scroll)
 
+    def _build_focus_tools_in_header(self, header: QHBoxLayout) -> None:
+        """Add focus mode tools directly to the header bar."""
+        def _btn(text: str, tooltip: str, handler):
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setToolTip(tooltip)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setStyleSheet(
+                "QToolButton { padding: 4px 8px; color: #e9eef8; background: rgba(40, 56, 74, 0.7); border: 1px solid #3b4555; border-radius: 6px; font-weight: 600; margin-right: 4px; } "
+                "QToolButton:hover { background: rgba(60, 80, 100, 0.9); }"
+            )
+            btn.clicked.connect(handler)
+            header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+            return btn
+
+        _btn("A+", "Increase text size", lambda: self._adjust_font_scale(0.05))
+        _btn("A-", "Decrease text size", lambda: self._adjust_font_scale(-0.05))
+
+    def _build_ai_button(self) -> Optional[QToolButton]:
+        ai_path = Path(__file__).resolve().parents[2] / "assets" / "ai.svg"
+        if not ai_path.exists():
+            return None
+        btn = QToolButton()
+        btn.setAutoRaise(True)
+        btn.setIcon(QIcon(str(ai_path)))
+        btn.setIconSize(QSize(18, 18))
+        btn.setToolTip("AI assist (one-shot)")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            "QToolButton { padding: 4px 6px; color: #e9eef8; background: rgba(40, 56, 74, 0.35); border: 1px solid #3b4555; border-radius: 8px; } "
+            "QToolButton:hover { background: rgba(60, 80, 100, 0.7); }"
+        )
+        btn.clicked.connect(self._open_ai_assist)
+        return btn
+
     def _wire_shortcuts(self) -> None:
         def _add_shortcut(seq: QKeySequence | Qt.Key, handler) -> QShortcut:
             sc = QShortcut(QKeySequence(seq), self)
@@ -366,6 +435,119 @@ class ModeWindow(QMainWindow):
         _add_shortcut("Ctrl+H", lambda: self._show_find_bar(replace=True, backwards=False))
         _add_shortcut("Ctrl+Shift+Tab", lambda: self._cycle_popup("heading", reverse=False))
         _add_shortcut("Ctrl+Shift+Backtab", lambda: self._cycle_popup("heading", reverse=True))
+
+    def _open_ai_assist(self, *, insert_pos: Optional[int] = None) -> None:
+        if not config.load_enable_ai_chats():
+            self._status_message("Enable AI Chats in Preferences to use AI assist.")
+            return
+        if self._read_only:
+            self._status_message("Cannot use AI assist while read-only.")
+            return
+        cursor = self.editor.textCursor()
+        selection_text = ""
+        has_selection = cursor.hasSelection()
+        if has_selection:
+            selection_text = cursor.selectedText().replace("\u2029", "\n").strip()
+        try:
+            from .ai_chat_panel import ServerManager
+        except Exception:
+            self._status_message("AI worker unavailable.")
+            return
+        try:
+            from .one_shot_overlay import OneShotPromptOverlay
+        except Exception:
+            self._status_message("One-Shot overlay unavailable.")
+            return
+
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        try:
+            server_mgr = ServerManager()
+            if default_server_name:
+                server_cfg = server_mgr.get_server(default_server_name)
+                if server_cfg:
+                    server_config = server_cfg
+        except Exception:
+            server_config = {}
+        if not server_config:
+            self._status_message("No AI server configured.")
+            return
+
+        try:
+            default_model_name = config.load_default_ai_model()
+        except Exception:
+            default_model_name = None
+        model = default_model_name or server_config.get("default_model") or "gpt-3.5-turbo"
+
+        doc = self.editor.document()
+        if has_selection:
+            start_pos = cursor.selectionStart()
+            end_pos = cursor.selectionEnd()
+        else:
+            pos = insert_pos if insert_pos is not None else cursor.position()
+            start_pos = pos
+            end_pos = pos
+
+        def _accept_insert(assistant_text: str) -> None:
+            try:
+                replace_cursor = QTextCursor(doc)
+                replace_cursor.setPosition(start_pos)
+                replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+                replace_cursor.beginEditBlock()
+                if start_pos != end_pos:
+                    replace_cursor.removeSelectedText()
+                replace_cursor.insertText(assistant_text)
+                replace_cursor.endEditBlock()
+                self.editor.setFocus()
+            except Exception:
+                pass
+
+        system_prompt = _load_one_shot_prompt()
+        overlay = OneShotPromptOverlay(
+            parent=self,
+            server_config=server_config,
+            model=model,
+            system_prompt=system_prompt,
+            on_accept=_accept_insert,
+        )
+        try:
+            self._one_shot_overlay = overlay
+        except Exception:
+            pass
+        try:
+            self.editor.push_focus_lost_suppression()
+        except Exception:
+            try:
+                setattr(self.editor, "_suppress_focus_lost_once", True)
+            except Exception:
+                pass
+
+        def _overlay_cleanup() -> None:
+            try:
+                self.editor.pop_focus_lost_suppression()
+            except Exception:
+                pass
+            try:
+                setattr(self, "_one_shot_overlay", None)
+            except Exception:
+                pass
+
+        try:
+            overlay.finished.connect(lambda *_: _overlay_cleanup())
+        except Exception:
+            pass
+        try:
+            geo = self.geometry()
+            overlay.move(geo.center() - overlay.rect().center())
+        except Exception:
+            pass
+        if selection_text:
+            overlay.open_with_selection(selection_text)
+        else:
+            overlay.show()
 
     # ------------------------------------------------------------------ Behavior
     def _apply_mode_styling(self) -> None:
@@ -649,6 +831,11 @@ class ModeWindow(QMainWindow):
                 self.editor._install_copy_actions(base_menu)
         except Exception:
             pass
+
+        ai_action = QAction("AI assist...", self)
+        ai_action.triggered.connect(self._open_ai_assist)
+        base_menu.addSeparator()
+        base_menu.addAction(ai_action)
         
         # Show the menu
         base_menu.exec(self.editor.mapToGlobal(pos))
@@ -1097,6 +1284,7 @@ class ModeWindow(QMainWindow):
         if self._pending_close:
             self._pending_close = False
             QTimer.singleShot(0, self.close)
+        QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
 
     def _update_vi_badge(self, insert_active: bool) -> None:
         if not hasattr(self, "_vi_badge"):

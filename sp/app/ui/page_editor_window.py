@@ -5,10 +5,11 @@ from typing import Callable, Optional
 import traceback
 import httpx
 
-from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QColor, QTextCursor, QTextFormat
+from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QColor, QIcon, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -26,6 +27,28 @@ from .insert_link_dialog import InsertLinkDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
 from sp.server.adapters.files import PAGE_SUFFIXES
+
+
+_ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+
+
+def _load_one_shot_prompt() -> str:
+    """Load the one-shot system prompt once and cache it."""
+    global _ONE_SHOT_PROMPT_CACHE
+    if _ONE_SHOT_PROMPT_CACHE is not None:
+        return _ONE_SHOT_PROMPT_CACHE
+    default_prompt = "you are a helpful assistent, you will respond with markdown formatting"
+    try:
+        prompt_path = Path(__file__).parent.parent / "one-shot-prompt.txt"
+        if prompt_path.exists():
+            content = prompt_path.read_text(encoding="utf-8").strip()
+            if content:
+                _ONE_SHOT_PROMPT_CACHE = content
+                return content
+    except Exception:
+        pass
+    _ONE_SHOT_PROMPT_CACHE = default_prompt
+    return default_prompt
 
 
 class PageEditorWindow(QMainWindow):
@@ -67,12 +90,14 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.set_read_only_mode(self._read_only)
+        self.editor.set_ai_shortcuts_enabled(False)
         self.editor.linkActivated.connect(self._forward_link_to_main)
         self.editor.linkCopied.connect(
             lambda link: self.statusBar().showMessage(f"Copied link: {link}", 3000)
         )
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True, reason="focus lost"))
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
+        self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.setCentralWidget(self.editor)
         
         # Vi mode state
@@ -80,6 +105,7 @@ class PageEditorWindow(QMainWindow):
         self._vi_insert_active = False
 
         self._last_saved_content: Optional[str] = None
+        self._inline_ai_worker = None
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)
         self._autosave_timer.setSingleShot(True)
@@ -140,6 +166,12 @@ class PageEditorWindow(QMainWindow):
         heading_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         heading_action.triggered.connect(lambda: (print("[PageEditor] Heading action triggered"), self._cycle_popup("heading", reverse=False)))
         self.addAction(heading_action)
+
+        link_action = QAction("Insert Link…", self)
+        link_action.setShortcut(QKeySequence("Ctrl+L"))
+        link_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        link_action.triggered.connect(self._insert_link)
+        self.addAction(link_action)
         
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
@@ -198,7 +230,18 @@ class PageEditorWindow(QMainWindow):
         save_action.triggered.connect(lambda: self._save_current_file(auto=False, reason="manual save"))
         toolbar.addAction(save_action)
         self.addAction(save_action)  # Register shortcut with window
+        insert_link_action = QAction("Insert Link…", self)
+        insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
+        insert_link_action.triggered.connect(self._insert_link)
+        toolbar.addAction(insert_link_action)
         toolbar.addSeparator()
+        ai_action = QAction("AI Assist...", self)
+        ai_action.setToolTip("AI assist (one-shot)")
+        icon_path = Path(__file__).resolve().parents[2] / "assets" / "ai.svg"
+        if icon_path.exists():
+            ai_action.setIcon(QIcon(str(icon_path)))
+        ai_action.triggered.connect(self._open_ai_assist)
+        toolbar.addAction(ai_action)
         font_up = QAction("A+", self)
         font_up.setToolTip("Increase font size")
         font_up.triggered.connect(lambda: self._adjust_font_size(1))
@@ -321,8 +364,62 @@ class PageEditorWindow(QMainWindow):
         if not self.vault_root:
             QMessageBox.information(self, "StillPoint", "Select a vault before inserting links.")
             return
-        # Disabled in popup editor (links are handled in main window)
-        QMessageBox.information(self, "Link Insert Disabled", "Insert Link is available only in the main editor.")
+        if self._read_only:
+            QMessageBox.information(self, "StillPoint", "Cannot insert links while read-only.")
+            return
+
+        editor_cursor = self.editor.textCursor()
+        saved_cursor_pos = editor_cursor.position()
+        saved_anchor_pos = editor_cursor.anchor()
+
+        selection_range: tuple[int, int] | None = None
+        selected_text = ""
+        if editor_cursor.hasSelection():
+            selection_range = (editor_cursor.selectionStart(), editor_cursor.selectionEnd())
+            selected_text = editor_cursor.selectedText()
+            selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+
+        def _restore_cursor() -> QTextCursor:
+            doc_len = len(self.editor.toPlainText())
+            anchor = max(0, min(saved_anchor_pos, doc_len))
+            pos = max(0, min(saved_cursor_pos, doc_len))
+            cursor = QTextCursor(self.editor.document())
+            cursor.setPosition(anchor)
+            cursor.setPosition(
+                pos,
+                QTextCursor.KeepAnchor if anchor != pos else QTextCursor.MoveAnchor,
+            )
+            self.editor.setTextCursor(cursor)
+            return cursor
+
+        dlg = InsertLinkDialog(self, selected_text=selected_text)
+        self.editor.begin_dialog_block()
+        try:
+            result = dlg.exec()
+        finally:
+            self.editor.end_dialog_block()
+            _restore_cursor()
+            QTimer.singleShot(0, self.editor.setFocus)
+
+        if result == QDialog.Accepted:
+            restore_cursor = _restore_cursor()
+            colon_path = dlg.selected_colon_path()
+            link_name = dlg.selected_link_name()
+            if colon_path:
+                if selection_range:
+                    doc_len = len(self.editor.toPlainText())
+                    start = max(0, min(selection_range[0], doc_len))
+                    end = max(0, min(selection_range[1], doc_len))
+                    restore_cursor.setPosition(start)
+                    restore_cursor.setPosition(end, QTextCursor.KeepAnchor)
+                    restore_cursor.removeSelectedText()
+                self.editor.setTextCursor(restore_cursor)
+                label = link_name or selected_text or colon_path
+                self.editor.insert_link(
+                    colon_path,
+                    label,
+                    surround_with_spaces=selection_range is None,
+                )
 
     def _forward_link_to_main(self, link: str) -> None:
         if link:
@@ -363,6 +460,111 @@ class PageEditorWindow(QMainWindow):
         except Exception:
             pass
 
+    def _open_ai_assist(self) -> None:
+        if not config.load_enable_ai_chats():
+            self.statusBar().showMessage("Enable AI Chats in Preferences to use AI assist.", 4000)
+            return
+        cursor = self.editor.textCursor()
+        selection_text = ""
+        has_selection = cursor.hasSelection()
+        if has_selection:
+            selection_text = cursor.selectedText().replace("\u2029", "\n").strip()
+        try:
+            from .ai_chat_panel import ServerManager
+        except Exception:
+            self.statusBar().showMessage("AI worker unavailable.", 4000)
+            return
+        try:
+            from .one_shot_overlay import OneShotPromptOverlay
+        except Exception:
+            self.statusBar().showMessage("One-Shot overlay unavailable.", 4000)
+            return
+
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        try:
+            server_mgr = ServerManager()
+            if default_server_name:
+                server_cfg = server_mgr.get_server(default_server_name)
+                if server_cfg:
+                    server_config = server_cfg
+        except Exception:
+            server_config = {}
+        if not server_config:
+            self.statusBar().showMessage("No AI server configured.", 4000)
+            return
+
+        try:
+            default_model_name = config.load_default_ai_model()
+        except Exception:
+            default_model_name = None
+        model = default_model_name or server_config.get("default_model") or "gpt-3.5-turbo"
+
+        doc = self.editor.document()
+        start_pos = cursor.selectionStart() if has_selection else cursor.position()
+        end_pos = cursor.selectionEnd() if has_selection else cursor.position()
+
+        def _accept_insert(assistant_text: str) -> None:
+            try:
+                replace_cursor = QTextCursor(doc)
+                replace_cursor.setPosition(start_pos)
+                replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+                replace_cursor.beginEditBlock()
+                if start_pos != end_pos:
+                    replace_cursor.removeSelectedText()
+                replace_cursor.insertText(assistant_text)
+                replace_cursor.endEditBlock()
+                self.editor.setFocus()
+            except Exception:
+                pass
+
+        system_prompt = _load_one_shot_prompt()
+        overlay = OneShotPromptOverlay(
+            parent=self,
+            server_config=server_config,
+            model=model,
+            system_prompt=system_prompt,
+            on_accept=_accept_insert,
+        )
+        try:
+            self._one_shot_overlay = overlay
+        except Exception:
+            pass
+        try:
+            self.editor.push_focus_lost_suppression()
+        except Exception:
+            try:
+                setattr(self.editor, "_suppress_focus_lost_once", True)
+            except Exception:
+                pass
+
+        def _overlay_cleanup() -> None:
+            try:
+                self.editor.pop_focus_lost_suppression()
+            except Exception:
+                pass
+            try:
+                setattr(self, "_one_shot_overlay", None)
+            except Exception:
+                pass
+
+        try:
+            overlay.finished.connect(lambda *_: _overlay_cleanup())
+        except Exception:
+            pass
+        try:
+            geo = self.geometry()
+            overlay.move(geo.center() - overlay.rect().center())
+        except Exception:
+            pass
+        if selection_text:
+            overlay.open_with_selection(selection_text)
+        else:
+            overlay.show()
+
     def _show_editor_context_menu(self, pos) -> None:
         """Show context menu with Edit operations matching main window."""
         from PySide6.QtWidgets import QMenu
@@ -396,6 +598,15 @@ class PageEditorWindow(QMainWindow):
                 base_menu.insertAction(actions[0], copy_action)
             else:
                 base_menu.addAction(copy_action)
+
+        insert_link_action = QAction("Insert link…", self)
+        insert_link_action.triggered.connect(self._insert_link)
+        base_menu.addSeparator()
+        base_menu.addAction(insert_link_action)
+
+        ai_action = QAction("AI assist...", self)
+        ai_action.triggered.connect(self._open_ai_assist)
+        base_menu.addAction(ai_action)
         
         # Show the menu
         base_menu.exec(self.editor.mapToGlobal(pos))
@@ -726,6 +937,172 @@ class PageEditorWindow(QMainWindow):
         else:
             style += " background-color: transparent;"
         self._vi_status_label.setStyleSheet(style)
+
+    def _open_inline_ai_prompt(self, anchor: QPoint, insert_pos: int) -> None:
+        if not config.load_enable_ai_chats():
+            self.statusBar().showMessage("Enable AI Chats in Preferences to use inline prompts.", 4000)
+            return
+        if getattr(self, "_inline_ai_worker", None):
+            self.statusBar().showMessage("Inline AI is already streaming.", 3000)
+            return
+        try:
+            from .inline_ai_prompt import InlineAIPromptOverlay
+        except Exception:
+            self.statusBar().showMessage("Inline AI prompt unavailable.", 4000)
+            return
+
+        def _send(prompt: str) -> None:
+            self._start_inline_ai_stream(prompt, insert_pos)
+
+        overlay = InlineAIPromptOverlay(parent=self, on_send=_send, anchor=QPoint(anchor.x(), anchor.y() + 10))
+        try:
+            self._inline_ai_prompt_overlay = overlay
+        except Exception:
+            pass
+        try:
+            self.editor.push_focus_lost_suppression()
+        except Exception:
+            try:
+                setattr(self.editor, "_suppress_focus_lost_once", True)
+            except Exception:
+                pass
+
+        def _overlay_cleanup() -> None:
+            try:
+                self.editor.pop_focus_lost_suppression()
+            except Exception:
+                pass
+            try:
+                setattr(self, "_inline_ai_prompt_overlay", None)
+            except Exception:
+                pass
+
+        try:
+            overlay.finished.connect(lambda *_: _overlay_cleanup())
+        except Exception:
+            pass
+        overlay.show()
+
+    def _start_inline_ai_stream(self, prompt: str, insert_pos: int) -> None:
+        if not prompt.strip():
+            return
+        if getattr(self, "_inline_ai_worker", None):
+            return
+        try:
+            from .ai_chat_panel import ServerManager, ApiWorker
+        except Exception:
+            self.statusBar().showMessage("AI worker unavailable.", 4000)
+            return
+
+        server_config: dict = {}
+        try:
+            default_server_name = config.load_default_ai_server()
+        except Exception:
+            default_server_name = None
+        try:
+            server_mgr = ServerManager()
+            if default_server_name:
+                server_cfg = server_mgr.get_server(default_server_name)
+                if server_cfg:
+                    server_config = server_cfg
+        except Exception:
+            server_config = {}
+        if not server_config:
+            self.statusBar().showMessage("No AI server configured.", 4000)
+            return
+
+        try:
+            default_model_name = config.load_default_ai_model()
+        except Exception:
+            default_model_name = None
+        model = default_model_name or server_config.get("default_model") or "gpt-3.5-turbo"
+
+        system_prompt = _load_one_shot_prompt()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt.strip()},
+        ]
+
+        doc = self.editor.document()
+        cursor = QTextCursor(doc)
+        cursor.setPosition(max(0, insert_pos))
+        cursor.beginEditBlock()
+        cursor.setKeepPositionOnInsert(False)
+        self._inline_ai_stream_cursor = cursor
+        self._inline_ai_stream_used = False
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        except Exception:
+            pass
+
+        worker = ApiWorker(server_config, messages, model, stream=True, parent=self)
+        worker.chunk.connect(self._append_inline_ai_chunk)
+        worker.finished.connect(self._finalize_inline_ai_stream)
+        worker.failed.connect(self._inline_ai_failed)
+        self._inline_ai_worker = worker
+        self.statusBar().showMessage("AI streaming...", 3000)
+        worker.start()
+
+    def _append_inline_ai_chunk(self, chunk: str) -> None:
+        if not chunk:
+            return
+        cursor = getattr(self, "_inline_ai_stream_cursor", None)
+        if cursor is None:
+            return
+        try:
+            cursor.insertText(chunk)
+            self._inline_ai_stream_used = True
+        except Exception:
+            pass
+
+    def _finalize_inline_ai_stream(self, full: str) -> None:
+        try:
+            cursor = getattr(self, "_inline_ai_stream_cursor", None)
+            used = getattr(self, "_inline_ai_stream_used", False)
+            if cursor is not None and not used and full:
+                cursor.insertText(full)
+            if cursor is not None:
+                try:
+                    cursor.endEditBlock()
+                except Exception:
+                    pass
+            if cursor is not None:
+                try:
+                    self.editor.setTextCursor(cursor)
+                    self.editor.setFocus()
+                except Exception:
+                    pass
+            self.statusBar().showMessage("Inline AI complete.", 2500)
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            self._inline_ai_worker = None
+            for attr in ("_inline_ai_stream_cursor", "_inline_ai_stream_used"):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    pass
+
+    def _inline_ai_failed(self, err: str) -> None:
+        self.statusBar().showMessage(f"Inline AI failed: {err}", 6000)
+        try:
+            cursor = getattr(self, "_inline_ai_stream_cursor", None)
+            if cursor is not None:
+                cursor.endEditBlock()
+        except Exception:
+            pass
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        self._inline_ai_worker = None
+        for attr in ("_inline_ai_stream_cursor", "_inline_ai_stream_used"):
+            try:
+                delattr(self, attr)
+            except Exception:
+                pass
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Handle Ctrl key release to activate heading popup selection."""

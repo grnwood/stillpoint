@@ -1353,21 +1353,10 @@ class MarkdownEditor(QTextEdit):
         QTimer.singleShot(0, self._apply_scroll_past_end_margin)
         QTimer.singleShot(0, self._refresh_hr_selections)
 
-        self._ai_send_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
-        try:
-            self._ai_send_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        except Exception:
-            pass
-        self._ai_send_shortcut.activated.connect(self._show_ai_action_overlay)
         self._ai_focus_shortcut = QShortcut(QKeySequence("Ctrl+Shift+["), self)
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
 
-        self._ai_action_overlay = AIActionOverlay(self)
-        self._ai_action_overlay.actionTriggered.connect(self._handle_ai_action_overlay)
-        self._ai_action_overlay.sendSelection.connect(self._emit_ai_chat_send)
-        self._ai_action_overlay.startChat.connect(self._emit_ai_chat_start)
-        self._ai_action_overlay.loadChat.connect(self._emit_ai_chat_focus)
-        self._ai_action_overlay.closed.connect(self._restore_vi_after_overlay)
+        self._ai_action_overlay = None
         self._overlay_vi_mode_before: Optional[bool] = None
         self._document_alive = True
         self._editor_alive = True
@@ -1474,7 +1463,7 @@ class MarkdownEditor(QTextEdit):
             pass
 
     def is_ai_overlay_visible(self) -> bool:
-        return self._ai_action_overlay.is_visible()
+        return False
 
     def _connect_document_signals(self, document: Optional[QTextDocument]) -> None:
         if document is None:
@@ -2146,11 +2135,29 @@ class MarkdownEditor(QTextEdit):
             if dialog.exec() == QDialog.Accepted:
                 selected = dialog.selected_path()
                 if selected:
+                    is_new_page = True
+                    try:
+                        if config.page_exists(selected):
+                            is_new_page = False
+                    except Exception:
+                        pass
+                    if is_new_page and self._vault_root:
+                        try:
+                            if (self._vault_root / selected.lstrip("/")).exists():
+                                is_new_page = False
+                        except Exception:
+                            pass
                     # Convert to colon path
-                    from .path_utils import path_to_colon
                     colon_path = path_to_colon(selected)
                     # Match Ctrl+L behavior: use target as label unless user provides one.
                     self.insert_link(colon_path)
+                    if is_new_page:
+                        link_target = ensure_root_colon_link(colon_path)
+                        try:
+                            self._vi_restore_after_link_activation = bool(self._vi_insert_mode)
+                        except Exception:
+                            self._vi_restore_after_link_activation = False
+                        QTimer.singleShot(0, lambda target=link_target: self.linkActivated.emit(target))
         except Exception as e:
             logger.warning(f"Failed to show inline link dialog: {e}")
 
@@ -2817,6 +2824,7 @@ class MarkdownEditor(QTextEdit):
             ("Dash List", QKeySequence(), lambda: self._apply_list_style("dash"), "Turn selection into dash list"),
             ("Checkbox List", QKeySequence(), lambda: self._apply_list_style("task"), "Turn selection into checkbox list"),
             ("Clear List", QKeySequence(), lambda: self._apply_list_style("clear"), "Remove list markers from selection"),
+            ("Blockquote", QKeySequence(), self._apply_blockquote_style, "Prefix selection with > blockquote"),
             ("Clear Formatting", QKeySequence("Ctrl+9"), self._clear_inline_formatting, "Restore selection to plain text"),
         ]
 
@@ -3144,6 +3152,34 @@ class MarkdownEditor(QTextEdit):
             line_cursor.select(QTextCursor.LineUnderCursor)
             line_cursor.insertText(new_line)
             self._refresh_hanging_indent(block, new_line)
+        cursor.endEditBlock()
+        end_pos = last_block.position() + max(0, last_block.length() - 1)
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(first_pos)
+        new_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        self.setTextCursor(new_cursor)
+        self._schedule_heading_outline()
+
+    def _apply_blockquote_style(self) -> None:
+        """Apply blockquote style to the selected lines."""
+        blocks = self._selected_blocks()
+        if not blocks:
+            return
+        cursor = self.textCursor()
+        first_pos = blocks[0].position()
+        last_block = blocks[-1]
+        cursor.beginEditBlock()
+        for block in blocks:
+            text = block.text()
+            indent = text[: len(text) - len(text.lstrip(" \t"))]
+            content = text[len(indent):]
+            if content.startswith(">"):
+                new_line = indent + content
+            else:
+                new_line = f"{indent}> {content}" if content else f"{indent}>"
+            line_cursor = QTextCursor(block)
+            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor.insertText(new_line)
         cursor.endEditBlock()
         end_pos = last_block.position() + max(0, last_block.length() - 1)
         new_cursor = self.textCursor()
@@ -3914,46 +3950,28 @@ class MarkdownEditor(QTextEdit):
         has_chat: Optional[bool] = None,
         chat_active: Optional[bool] = None,
     ) -> None:
-        if not self._ai_actions_enabled or not config.load_enable_ai_chats():
-            return
-        # Showing the overlay steals focus from the editor (Qt.Popup). Upstream focusLost
-        # handlers may autosave; suppress that focus-loss for this interaction.
-        self._suppress_focus_lost_once = True
-        cursor = QTextCursor(self.textCursor())
-        if cursor.hasSelection():
-            sel_start = cursor.selectionStart()
-            sel_end = cursor.selectionEnd()
-        else:
-            sel_start = sel_end = cursor.position()
-        text = text_override if text_override is not None else self._ai_chat_payload_text()
-        if not text:
-            self._suppress_focus_lost_once = False
-            return
-        self._suspend_vi_for_overlay()
-        self._ai_action_overlay.open(
-            text,
-            has_chat=self._ai_chat_available if has_chat is None else has_chat,
-            chat_active=getattr(self, "_ai_chat_active", False) if chat_active is None else chat_active,
-            anchor=anchor,
-        )
-        self._suppress_focus_lost_once = False
-        try:
-            restore = QTextCursor(self.document())
-            restore.setPosition(sel_start)
-            restore.setPosition(sel_end, QTextCursor.KeepAnchor)
-            self.setTextCursor(restore)
-        except Exception:
-            pass
+        window = self.window()
+        if window and hasattr(window, "_show_command_bar"):
+            try:
+                window._show_command_bar(query="AI / ", ai_text_override=text_override or self._ai_chat_payload_text())
+            except Exception:
+                pass
+        return
 
     def show_ai_overlay_with_text(
         self, text: str, *, anchor: Optional[QPoint] = None, has_chat: bool = True, chat_active: bool = True
     ) -> None:
-        """Expose overlay for external callers (e.g., AI chat panel)."""
-        self._show_ai_action_overlay(anchor=anchor, text_override=text, has_chat=has_chat, chat_active=chat_active)
+        """Expose AI actions via command bar for external callers."""
+        window = self.window()
+        if window and hasattr(window, "_show_command_bar"):
+            try:
+                window._show_command_bar(query="AI / ", ai_text_override=text)
+                return
+            except Exception:
+                pass
 
     def _handle_ai_action_overlay(self, title: str, prompt: str) -> None:
-        text = self._ai_action_overlay.text()
-        self.aiActionRequested.emit(title, prompt, text)
+        return
 
     def _suspend_vi_for_overlay(self) -> None:
         if self._overlay_vi_mode_before is not None:
@@ -3973,20 +3991,6 @@ class MarkdownEditor(QTextEdit):
 
         `as_submenu` is ignored (kept for call-site compatibility).
         """
-        if not (self._ai_actions_enabled and config.load_enable_ai_chats()):
-            return None
-        ai_action = QAction("AI Actions...", self)
-        ai_action.triggered.connect(
-            lambda checked=False: self._show_ai_action_overlay(anchor=self._last_context_menu_global_pos)
-        )
-        existing = menu.actions()
-        if existing:
-            first = existing[0]
-            menu.insertAction(first, ai_action)
-            menu.insertSeparator(first)
-        else:
-            menu.addAction(ai_action)
-            menu.addSeparator()
         return None
     
     def dragEnterEvent(self, event):  # type: ignore[override]
@@ -5054,15 +5058,18 @@ class MarkdownEditor(QTextEdit):
                 return _block_vi_edit()
             return False
 
-        if cursor.hasSelection() and text_char in ("-", "*"):
+        if cursor.hasSelection() and text_char in ("-", "*", ">"):
             if read_only:
                 return _block_vi_edit()
             if text_char == "-":
                 self._apply_list_style("dash")
                 self._vi_last_edit = lambda: self._apply_list_style("dash")
-            else:
+            elif text_char == "*":
                 self._apply_list_style("bullet")
                 self._vi_last_edit = lambda: self._apply_list_style("bullet")
+            else:
+                self._apply_blockquote_style()
+                self._vi_last_edit = self._apply_blockquote_style
             return True
 
         # Navigation mode commands
@@ -7332,6 +7339,10 @@ class MarkdownEditor(QTextEdit):
     def set_ai_actions_enabled(self, enabled: bool) -> None:
         """Enable/disable AI actions menu entries."""
         self._ai_actions_enabled = bool(enabled)
+
+    def set_ai_shortcuts_enabled(self, enabled: bool) -> None:
+        """Enable/disable AI keyboard shortcuts (handled by the main window)."""
+        return
 
     def set_ai_chat_available(self, available: bool, *, active: Optional[bool] = None) -> None:
         """Toggle whether a chat already exists for the current page."""

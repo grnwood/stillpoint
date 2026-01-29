@@ -57,6 +57,7 @@ from PySide6.QtGui import (
     QPainter,
     QPixmap,
     QTextOption,
+    QGuiApplication,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -101,6 +102,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config, indexer
+from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 from sp.app import zim_import
@@ -932,6 +934,140 @@ class NavTreeDelegate(QStyledItemDelegate):
         print(f"[TREE DRAG] Drag completed with result={result}")
 
 
+class MenuCommandBar(QWidget):
+    """Popup command bar for menu actions."""
+
+    actionTriggered = Signal(QAction)
+    closed = Signal()
+
+    class Entry:
+        def __init__(self, label: str, action: QAction) -> None:
+            self.label = label
+            self.action = action
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._entries: list[MenuCommandBar.Entry] = []
+        self.setStyleSheet("background: #000000; color: white; border-radius: 10px; border: 1px solid #222222;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Type a command…")
+        self._search.setStyleSheet(
+            "font-size: 18px; color: white; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.5); padding: 8px; border-radius: 6px;"
+        )
+        self._search.textChanged.connect(self._refresh_list)
+        layout.addWidget(self._search)
+        self._list = QListWidget()
+        self._list.setUniformItemSizes(True)
+        self._list.setStyleSheet("font-size: 18px; color: white; background: transparent; padding: 4px;")
+        self._list.itemActivated.connect(self._activate_current_item)
+        self._list.itemClicked.connect(lambda *_: self._activate_current_item())
+        layout.addWidget(self._list)
+        self._list.setMinimumHeight(220)
+        self._search.installEventFilter(self)
+
+    def open(
+        self,
+        entries: list[tuple[str, QAction]],
+        *,
+        anchor: Optional[QPoint] = None,
+        query: str = "",
+    ) -> None:
+        self._entries = [MenuCommandBar.Entry(label, action) for label, action in entries]
+        self._search.clear()
+        if query:
+            self._search.setText(query)
+        self._search.setFocus()
+        parent = self.parent()
+        if parent:
+            geo = parent.rect()
+            width = max(420, int(geo.width() * 0.8))
+            height = min(280, max(200, geo.height() - 100))
+            parent_top_left = parent.mapToGlobal(geo.topLeft())
+            left = parent_top_left.x() + (geo.width() - width) // 2
+            top = parent_top_left.y() + int(geo.height() * 0.2)
+            self.setGeometry(left, top, width, height)
+        self.show()
+        self.raise_()
+        self._refresh_list()
+        if self._list.count():
+            self._list.setCurrentRow(0)
+
+    def _refresh_list(self) -> None:
+        search_text = self._search.text().lower().strip()
+        self._list.clear()
+        for entry in self._entries:
+            if search_text and search_text not in entry.label.lower():
+                continue
+            item = QListWidgetItem(entry.label)
+            item.setData(Qt.UserRole, entry)
+            if not entry.action.isEnabled():
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self._list.addItem(item)
+        if self._list.count():
+            self._list.setCurrentRow(0)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj == self._search and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Down, Qt.Key_Up):
+                delta = 1 if event.key() == Qt.Key_Down else -1
+                self._move_selection(delta)
+                return True
+            if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                if event.key() == Qt.Key_J:
+                    self._move_selection(1)
+                    return True
+                if event.key() == Qt.Key_K:
+                    self._move_selection(-1)
+                    return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._activate_current_item()
+                return True
+            if event.key() == Qt.Key_Escape:
+                self.hide()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _move_selection(self, delta: int) -> None:
+        count = self._list.count()
+        if not count:
+            return
+        row = self._list.currentRow()
+        row = max(0, min(count - 1, row + delta))
+        self._list.setCurrentRow(row)
+
+    def _activate_current_item(self) -> None:
+        item = self._list.currentItem()
+        if not item:
+            return
+        entry = item.data(Qt.UserRole)
+        if not entry:
+            return
+        if entry.action.isEnabled():
+            self.actionTriggered.emit(entry.action)
+        self.hide()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._activate_current_item()
+            return
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self.hide()
+        super().focusOutEvent(event)
+
+    def hide(self) -> None:  # type: ignore[override]
+        super().hide()
+        self.closed.emit()
+
+
 def logNav(message: str) -> None:
     """Log navigation operations if ZIMX_DEBUG_NAV is enabled."""
     if os.getenv("ZIMX_DEBUG_NAV", "0") not in ("0", "false", "False", ""):
@@ -1000,6 +1136,7 @@ class MainWindow(QMainWindow):
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
         self._history_cursor_positions: dict[str, int] = {}
+        self._history_scroll_positions: dict[str, int] = {}
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
         self._tree_cache: dict[str, list[dict]] = {}
@@ -1477,8 +1614,8 @@ class MainWindow(QMainWindow):
         # Build toolbar and main menus
         self._build_toolbar()
         # Vault menu (now left of File)
-        vault_menu = self.menuBar().addMenu("Vaul&t")
-        file_menu = self.menuBar().addMenu("&File")
+        vault_menu = self.menuBar().addMenu("&Vault")
+        file_menu = self.menuBar().addMenu("F&ile")
         open_vault_new_win_action = QAction("Open Vault in New Window", self)
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
@@ -1506,7 +1643,6 @@ class MainWindow(QMainWindow):
         self._action_quick_capture = QAction("Quick Capture...", self)
         self._action_quick_capture.setToolTip("Capture a thought into your home vault")
         self._action_quick_capture.triggered.connect(self._show_quick_capture_overlay)
-        vault_menu.addAction(self._action_quick_capture)
         vault_menu.addSeparator()
         search_vault_action = QAction("Search Across Vault...", self)
         search_vault_action.setToolTip("Search for text across all pages in the vault")
@@ -1569,6 +1705,8 @@ class MainWindow(QMainWindow):
         webserver_action.setToolTip("Start local web server to serve vault as HTML")
         webserver_action.triggered.connect(self._open_webserver_dialog)
         tools_menu.addAction(webserver_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self._action_quick_capture)
         self._action_view_vault_disk = view_vault_disk_action
         self._action_zim_import = zim_import_action
         self._action_rebuild_index = rebuild_index_action
@@ -1587,40 +1725,38 @@ class MainWindow(QMainWindow):
         self._apply_remote_mode_ui()
         self._setup_tray_icon()
         self._register_quick_capture_hook()
+        self._command_bar = MenuCommandBar(self)
+        self._command_bar.actionTriggered.connect(self._run_command_bar_action)
+        self._command_bar.closed.connect(self._clear_command_bar_context)
+        self._command_bar_ai_text_override: Optional[str] = None
+        self._ai_command_actions: list[QAction] = []
 
         go_menu = self.menuBar().addMenu("&Go")
-        home_action = QAction("(H)ome", self)
-        home_action.setShortcut(QKeySequence("G,H"))
+        home_action = QAction("Home", self)
         home_action.triggered.connect(self._go_home)
         go_menu.addAction(home_action)
 
-        tasks_action = QAction("(T)asks", self)
-        tasks_action.setShortcut(QKeySequence("G,T"))
+        tasks_action = QAction("Tasks", self)
         tasks_action.triggered.connect(self._focus_tasks_search)
         go_menu.addAction(tasks_action)
 
-        tags_action = QAction("T(@)gs", self)
-        tags_action.setShortcut(QKeySequence("G,@"))
+        tags_action = QAction("Tags", self)
         tags_action.triggered.connect(self._focus_tags_tab)
         go_menu.addAction(tags_action)
 
-        calendar_action = QAction("(C)alendar", self)
-        calendar_action.setShortcut(QKeySequence("G,C"))
+        calendar_action = QAction("Calendar", self)
         calendar_action.triggered.connect(self._focus_calendar_tab)
         go_menu.addAction(calendar_action)
 
-        attach_action = QAction("Attach(m)ents", self)
-        attach_action.setShortcut(QKeySequence("G,M"))
+        attach_action = QAction("Attachments", self)
         attach_action.triggered.connect(self._focus_attachments_tab)
         go_menu.addAction(attach_action)
 
-        link_action = QAction("(L)ink Navigator", self)
-        link_action.setShortcut(QKeySequence("G,L"))
+        link_action = QAction("Link Navigator", self)
         link_action.triggered.connect(lambda: self._apply_navigation_focus("navigator"))
         go_menu.addAction(link_action)
 
-        ai_action = QAction("(A)I Chat", self)
-        ai_action.setShortcut(QKeySequence("G,A"))
+        ai_action = QAction("AI Chat", self)
         ai_action.triggered.connect(self._open_ai_chat_window)
         go_menu.addAction(ai_action)
 
@@ -1629,11 +1765,13 @@ class MainWindow(QMainWindow):
         jump_action.triggered.connect(self._jump_to_page)
         go_menu.addAction(jump_action)
 
-        today_action = QAction("T(o)day", self)
-        today_action.setShortcut(QKeySequence("G,O"))
+        today_action = QAction("Today", self)
         today_action.setToolTip("Today's journal entry (Alt+D)")
         today_action.triggered.connect(self._open_journal_today)
         go_menu.addAction(today_action)
+        command_bar_action = QAction("Command Bar", self)
+        command_bar_action.triggered.connect(self._show_command_bar)
+        go_menu.addAction(command_bar_action)
 
         rename_action = QAction("Rename", self)
         rename_action.setShortcut(QKeySequence(Qt.Key_F2))
@@ -1655,7 +1793,7 @@ class MainWindow(QMainWindow):
         insert_link_action.triggered.connect(self._insert_link)
         file_menu.addAction(insert_link_action)
 
-        help_menu = self.menuBar().addMenu("Hel&p")
+        help_menu = self.menuBar().addMenu("&Help")
         documentation_action = QAction("Documentation", self)
         documentation_action.setShortcut(QKeySequence(Qt.Key_F1))
         documentation_action.setShortcutContext(Qt.ApplicationShortcut)
@@ -1669,6 +1807,16 @@ class MainWindow(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
+
+        self._menu_roots = [
+            vault_menu,
+            file_menu,
+            getattr(self, "_format_menu", None),
+            view_menu,
+            tools_menu,
+            go_menu,
+            help_menu,
+        ]
 
         self._register_shortcuts()
         self._setup_quick_capture_shortcut(show_error=False)
@@ -2038,6 +2186,12 @@ class MainWindow(QMainWindow):
         prefs_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
         prefs_shortcut.setContext(Qt.ApplicationShortcut)
         prefs_shortcut.activated.connect(self._open_preferences)
+        command_bar_shortcut = QShortcut(QKeySequence("Alt+G"), self)
+        command_bar_shortcut.setContext(Qt.ApplicationShortcut)
+        command_bar_shortcut.activated.connect(self._show_command_bar)
+        command_bar_universal = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        command_bar_universal.setContext(Qt.ApplicationShortcut)
+        command_bar_universal.activated.connect(self._show_command_bar)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._navigate_hierarchy_up)
@@ -2047,6 +2201,167 @@ class MainWindow(QMainWindow):
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
+
+    @staticmethod
+    def _menu_text(text: str) -> str:
+        return (text or "").replace("&", "").strip()
+
+    def _command_bar_selection_text(self) -> str:
+        if self._command_bar_ai_text_override is not None:
+            return self._command_bar_ai_text_override
+        try:
+            cursor = self.editor.textCursor()
+            if cursor.hasSelection():
+                return cursor.selectedText().replace("\u2029", "\n")
+        except Exception:
+            pass
+        return ""
+
+    def _command_bar_open_ai_chat(self, *, create: bool, global_chat: bool) -> None:
+        if global_chat:
+            self._handle_ai_action("Load Global Chat", "", self._command_bar_selection_text())
+            return
+        target_path = self.current_path
+        if not target_path:
+            return
+        self._open_ai_chat_for_path(target_path, create=create, focus_tab=True)
+
+    def _clear_command_bar_context(self) -> None:
+        self._command_bar_ai_text_override = None
+
+    def _build_ai_command_actions(self) -> list[tuple[str, QAction]]:
+        entries: list[tuple[str, QAction]] = []
+        self._ai_command_actions = []
+
+        def _make_action(label: str, handler: Callable[[], None]) -> QAction:
+            action = QAction(label, self)
+            action.triggered.connect(handler)
+            self._ai_command_actions.append(action)
+            return action
+
+        base_label = "AI"
+        entries.append(
+            (
+                f"{base_label} / Send selection to Page Chat",
+                _make_action(
+                    "AI: Send selection to Page Chat",
+                    lambda: self._handle_ai_action("Send selection to Page Chat", "", self._command_bar_selection_text()),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / Send selection to Global Chat",
+                _make_action(
+                    "AI: Send selection to Global Chat",
+                    lambda: self._handle_ai_action("Send selection to Global Chat", "", self._command_bar_selection_text()),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / Chat: Start Chat with this Page",
+                _make_action(
+                    "AI: Start Chat with this Page",
+                    lambda: self._command_bar_open_ai_chat(create=True, global_chat=False),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / Chat: with Page",
+                _make_action(
+                    "AI: Chat with Page",
+                    lambda: self._command_bar_open_ai_chat(create=False, global_chat=False),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / Chat: With Global",
+                _make_action(
+                    "AI: Chat With Global",
+                    lambda: self._command_bar_open_ai_chat(create=True, global_chat=True),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / Load Global Chat",
+                _make_action(
+                    "AI: Load Global Chat",
+                    lambda: self._handle_ai_action("Load Global Chat", "", self._command_bar_selection_text()),
+                ),
+            )
+        )
+        entries.append(
+            (
+                f"{base_label} / One-Shot Prompt Selection",
+                _make_action(
+                    "AI: One-Shot Prompt Selection",
+                    lambda: self._handle_ai_action("One-Shot Prompt Selection", "", self._command_bar_selection_text()),
+                ),
+            )
+        )
+
+        for group in AI_ACTION_GROUPS:
+            for action in group.actions:
+                label = f"{base_label} / {group.title} / {action.title}"
+                entries.append(
+                    (
+                        label,
+                        _make_action(
+                            label,
+                            lambda checked=False, a=action: self._handle_ai_action(
+                                a.title, a.prompt, self._command_bar_selection_text()
+                            ),
+                        ),
+                    )
+                )
+        return entries
+
+    def _collect_menu_actions(self) -> list[tuple[str, QAction]]:
+        entries: list[tuple[str, QAction]] = []
+
+        def walk(menu: QMenu, path: list[str]) -> None:
+            for action in menu.actions():
+                if action.isSeparator():
+                    continue
+                if action.menu():
+                    label = self._menu_text(action.text())
+                    walk(action.menu(), path + ([label] if label else []))
+                    continue
+                label = self._menu_text(action.text())
+                if not label:
+                    continue
+                entries.append((" / ".join(path + [label]), action))
+
+        menu_roots = [menu for menu in getattr(self, "_menu_roots", []) if menu is not None]
+        if menu_roots:
+            for menu in menu_roots:
+                top_label = self._menu_text(menu.title())
+                walk(menu, [top_label] if top_label else [])
+        else:
+            for top_action in self.menuBar().actions():
+                if not top_action.menu():
+                    continue
+                top_label = self._menu_text(top_action.text())
+                walk(top_action.menu(), [top_label] if top_label else [])
+        if config.load_enable_ai_chats():
+            entries.extend(self._build_ai_command_actions())
+        return entries
+
+    def _show_command_bar(self, *, query: str = "", ai_text_override: Optional[str] = None) -> None:
+        if not hasattr(self, "_command_bar"):
+            return
+        if ai_text_override is not None:
+            self._command_bar_ai_text_override = ai_text_override
+        entries = self._collect_menu_actions()
+        self._command_bar.open(entries, anchor=QCursor.pos(), query=query)
+
+    def _run_command_bar_action(self, action: QAction) -> None:
+        if action.isEnabled():
+            action.trigger()
 
     def _quick_capture_shortcut_conflicts(self, sequence: QKeySequence) -> list[str]:
         if sequence.isEmpty():
@@ -2113,17 +2428,13 @@ class MainWindow(QMainWindow):
             return
         self._action_quick_capture.setShortcut(sequence)
         self._action_quick_capture.setShortcutContext(Qt.ApplicationShortcut)
-        app = QApplication.instance()
-        if app is not None:
-            for widget in app.topLevelWidgets():
-                if self._action_quick_capture not in widget.actions():
-                    widget.addAction(self._action_quick_capture)
-        elif self._action_quick_capture not in self.actions():
+        if self._action_quick_capture not in self.actions():
             self.addAction(self._action_quick_capture)
 
     def _build_format_menu(self) -> None:
         """Add a Format menu that mirrors markdown styling shortcuts."""
-        format_menu = self.menuBar().addMenu("F&ormat")
+        format_menu = self.menuBar().addMenu("&Format")
+        self._format_menu = format_menu
         for label, shortcut, handler, description in self.editor.style_operations():
             action = QAction(label, self.editor)
             action.setShortcut(shortcut)
@@ -5037,6 +5348,15 @@ class MainWindow(QMainWindow):
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         restored_history_cursor = False
         final_cursor_pos = None
+        def _restore_scroll_position(value: int | None) -> None:
+            if value is None:
+                return
+            try:
+                scroll_bar = self.editor.verticalScrollBar()
+                if scroll_bar:
+                    scroll_bar.setValue(max(0, min(int(value), scroll_bar.maximum())))
+            except Exception:
+                pass
         
         # Check if we have a template cursor position for this newly created page
         if self._template_cursor_position >= 0:
@@ -5053,20 +5373,32 @@ class MainWindow(QMainWindow):
         
         if restore_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
-            if saved_pos is not None:
+            saved_scroll = self._history_scroll_positions.get(path)
+            if saved_pos is not None or saved_scroll is not None:
                 cursor = self.editor.textCursor()
-                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
-                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
+                if saved_pos is not None:
+                    cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+                    self.editor.setTextCursor(cursor)
+                if saved_scroll is not None:
+                    _restore_scroll_position(saved_scroll)
+                elif saved_pos is not None:
+                    self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
                 restored_history_cursor = True
                 move_cursor_to_end = False
                 final_cursor_pos = cursor.position()
         # If no explicit restore request, prefer any remembered cursor for this path
         if not restored_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
-            if saved_pos is not None:
+            saved_scroll = self._history_scroll_positions.get(path)
+            if saved_pos is not None or saved_scroll is not None:
                 cursor = self.editor.textCursor()
-                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
-                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
+                if saved_pos is not None:
+                    cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
+                    self.editor.setTextCursor(cursor)
+                if saved_scroll is not None:
+                    _restore_scroll_position(saved_scroll)
+                elif saved_pos is not None:
+                    self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
                 restored_history_cursor = True
                 move_cursor_to_end = False
                 final_cursor_pos = cursor.position()
@@ -5082,6 +5414,12 @@ class MainWindow(QMainWindow):
         self._suspend_cursor_history = False
         if final_cursor_pos is not None:
             self._history_cursor_positions[path] = final_cursor_pos
+        try:
+            scroll_bar = self.editor.verticalScrollBar()
+            if scroll_bar:
+                self._history_scroll_positions[path] = scroll_bar.value()
+        except Exception:
+            pass
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
@@ -6684,8 +7022,6 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         
         # Static menu items at top
-        action_capture = menu.addAction("Quick Capture...")
-        action_capture.triggered.connect(self._show_quick_capture_overlay)
         action_open_vault_new = menu.addAction("Open Vault in New Window...")
         action_open_vault_new.triggered.connect(lambda: self._select_vault(spawn_new_process=True))
         
@@ -7996,7 +8332,19 @@ class MainWindow(QMainWindow):
         """Handle link activations from the editor (main or popup)."""
         if not link:
             return
-        self._exit_vi_insert_on_activate()
+        restore_vi_insert = False
+        try:
+            sender = self.sender()
+            if sender is not None and hasattr(sender, "_vi_restore_after_link_activation"):
+                restore_vi_insert = bool(getattr(sender, "_vi_restore_after_link_activation"))
+                try:
+                    setattr(sender, "_vi_restore_after_link_activation", False)
+                except Exception:
+                    pass
+        except Exception:
+            restore_vi_insert = False
+        if not restore_vi_insert:
+            self._exit_vi_insert_on_activate()
         if "\x00" in link:
             link = link.split("\x00", 1)[0]
         if link.startswith(("http://", "https://")):
@@ -8020,9 +8368,19 @@ class MainWindow(QMainWindow):
                 self._reload_page_preserve_cursor(target)
             elif not refresh_only:
                 self._open_file(target, force=force)
+            if restore_vi_insert:
+                try:
+                    self.editor._enter_vi_insert_mode()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             return
         # Otherwise treat as page link
         self._open_camel_link(link, focus_target="editor", refresh_only=refresh_only, force=force)
+        if restore_vi_insert:
+            try:
+                self.editor._enter_vi_insert_mode()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def _is_local_file_link(self, link: str) -> bool:
         cleaned = (link or "").strip()
@@ -9828,13 +10186,10 @@ class MainWindow(QMainWindow):
             return
 
     def _on_ai_overlay_requested(self, text: str, anchor) -> None:
-        """Open AI actions overlay using chat panel context."""
+        """Open command bar focused on AI actions using chat panel context."""
         if not text:
             return
-        try:
-            self.editor.show_ai_overlay_with_text(text, anchor=anchor, has_chat=True, chat_active=True)
-        except Exception:
-            return
+        self._show_command_bar(query="AI / ", ai_text_override=text)
 
     def _open_in_file_manager(self, path: Path) -> bool:
         """Try to open a file or folder in the OS file manager."""
@@ -10925,10 +11280,14 @@ class MainWindow(QMainWindow):
     def _reload_page_preserve_cursor(self, path: str) -> None:
         """Reload a page while keeping its last known cursor position."""
         saved_pos = self._history_cursor_positions.get(path)
+        saved_scroll = self._history_scroll_positions.get(path)
         # Prefer the live cursor position if this tab is the one being reloaded
         if self.current_path == path:
             try:
                 saved_pos = self.editor.textCursor().position()
+                scroll_bar = self.editor.verticalScrollBar()
+                if scroll_bar:
+                    saved_scroll = scroll_bar.value()
             except Exception:
                 pass
         self._remember_history_cursor()
@@ -10936,7 +11295,14 @@ class MainWindow(QMainWindow):
         if saved_pos is not None:
             cursor = self.editor.textCursor()
             cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
-            self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
+            self.editor.setTextCursor(cursor)
+        if saved_scroll is not None:
+            try:
+                scroll_bar = self.editor.verticalScrollBar()
+                if scroll_bar:
+                    scroll_bar.setValue(max(0, min(int(saved_scroll), scroll_bar.maximum())))
+            except Exception:
+                pass
 
     def _history_can_go_back(self) -> bool:
         """Return True if history has a previous entry to navigate to."""
@@ -10962,9 +11328,13 @@ class MainWindow(QMainWindow):
             return
         try:
             pos = self.editor.textCursor().position()
+            scroll_bar = self.editor.verticalScrollBar()
+            scroll_pos = scroll_bar.value() if scroll_bar else None
         except Exception:
             return
         self._history_cursor_positions[self.current_path] = pos
+        if scroll_pos is not None:
+            self._history_scroll_positions[self.current_path] = scroll_pos
 
     def _should_focus_hr_tail(self, content: str) -> bool:
         """Return True if cursor should jump to trailing newline after a horizontal rule."""
@@ -11015,6 +11385,7 @@ class MainWindow(QMainWindow):
                         if k not in self.page_history]
         for path in deleted_paths:
             self._history_cursor_positions.pop(path, None)
+            self._history_scroll_positions.pop(path, None)
         
         # Adjust history index if needed
         if self.history_index >= len(self.page_history):
@@ -11163,13 +11534,8 @@ class MainWindow(QMainWindow):
         self._hide_history_popup()
         if mode == "history" and target:
             self._exit_vi_insert_on_activate()
-            saved_pos = self._history_cursor_positions.get(target)
             self._remember_history_cursor()
             self._open_file(target, add_to_history=False, force=True, restore_history_cursor=True)
-            if saved_pos is not None:
-                cursor = self.editor.textCursor()
-                cursor.setPosition(min(saved_pos, len(self.editor.toPlainText())))
-                self._scroll_cursor_to_top_quarter(cursor, animate=False, flash=False)
         elif mode == "heading" and target:
             try:
                 pos = int(target.get("position", 0))
@@ -12086,6 +12452,9 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
+                self._show_command_bar()
+                return True
             if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
                 if event.modifiers() & Qt.ShiftModifier:
                     reverse = event.key() == Qt.Key_Backtab
