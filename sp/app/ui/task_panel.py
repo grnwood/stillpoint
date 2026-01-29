@@ -8,20 +8,20 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl
+from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QStyle,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QProgressDialog,
     QStackedWidget,
     QSplitter,
+    QDateEdit,
     QHBoxLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -31,6 +31,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QToolButton,
     QTextBrowser,
+    QPushButton,
+    QDialog,
+    QCalendarWidget,
+    QAbstractSpinBox,
+    QButtonGroup,
 )
 
 from markdown import markdown as render_markdown
@@ -162,6 +167,16 @@ class TaskPanel(QWidget):
         self._ai_summary_panel = None
         self._ai_splitter = None
         self._ai_toggle_btn = None
+        self._date_filter_btn = None
+        self._date_filter_dialog = None
+        self._date_filter_start_edit = None
+        self._date_filter_end_edit = None
+        self._date_filter_calendar_popup = None
+        self._date_filter_calendar_target = None
+        self._date_filter_preset_group = None
+        self._date_filter_active_preset: Optional[str] = None
+        self._date_filter_start: Optional[date] = None
+        self._date_filter_end: Optional[date] = None
         self._ai_generate_btn = None
         self._ai_delete_btn = None
         self._ai_copy_btn = None
@@ -187,7 +202,6 @@ class TaskPanel(QWidget):
         self.active_tags: set[str] = set()
         self._available_tags: set[str] = set()
 
-        style = self.style()
         icon_size = QSize(20, 20)
 
         def _build_toggle(icon, tooltip, slot):
@@ -221,22 +235,23 @@ class TaskPanel(QWidget):
             return toggle
 
         self.show_completed = _build_toggle(
-            style.standardIcon(QStyle.SP_DialogApplyButton),
+            self._load_svg_icon("complete-task.svg", icon_size),
             "Include tasks marked as done.",
             self._refresh_tasks,
         )
 
         self.show_future = _build_toggle(
-            style.standardIcon(QStyle.SP_MediaSeekForward),
+            self._load_svg_icon("future.svg", icon_size),
             "Include tasks that start in the future (e.g., - [ ] task >YYYY-mm-dd).",
             self._on_show_future_toggled,
         )
 
         self.show_actionable = _build_toggle(
-            style.standardIcon(QStyle.SP_MediaPlay),
-            "Show tasks you can act on now (not done, no open subtasks, parents inherit).",
+            self._load_svg_icon("actionable.svg", icon_size),
+            self._actionable_tooltip(),
             self._refresh_tasks,
         )
+        self._update_actionable_tooltip()
 
         self.task_tree = DebugTaskTree()
         self._show_task_start_column = False
@@ -328,6 +343,13 @@ class TaskPanel(QWidget):
         header_row = QHBoxLayout()
         for cb in (self.show_completed, self.show_future, self.show_actionable):
             header_row.addWidget(cb)
+        self._date_filter_btn = QToolButton()
+        self._date_filter_btn.setToolTip("Filter by date range")
+        self._date_filter_btn.setAutoRaise(True)
+        self._date_filter_btn.setIconSize(QSize(20, 20))
+        self._date_filter_btn.clicked.connect(self._open_date_filter_dialog)
+        self._update_date_filter_button()
+        header_row.addWidget(self._date_filter_btn)
         header_row.addSpacing(6)
         header_row.addWidget(self.search, 1)
         self.zoom_out_btn = QToolButton()
@@ -664,6 +686,278 @@ class TaskPanel(QWidget):
 
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(24, 24))
+
+    def _build_date_filter_icon(self, active: bool) -> QIcon:
+        base = self._load_svg_icon("calendar-days.svg", QSize(20, 20))
+        if not active:
+            return base
+        pixmap = base.pixmap(QSize(20, 20))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(QColor("#4a90e2"))
+        painter.setPen(Qt.NoPen)
+        radius = 3
+        painter.drawEllipse(pixmap.width() - 2 * radius - 1, 1, 2 * radius, 2 * radius)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _date_filter_tooltip(self) -> str:
+        if not self._date_filter_active():
+            return "Filter by date range"
+        start = self._date_filter_start.isoformat() if self._date_filter_start else "Any"
+        end = self._date_filter_end.isoformat() if self._date_filter_end else "Any"
+        return f"Date filter active: {start} → {end}"
+
+    def _update_date_filter_button(self) -> None:
+        if not self._date_filter_btn:
+            return
+        active = self._date_filter_active()
+        self._date_filter_btn.setIcon(self._build_date_filter_icon(active))
+        self._date_filter_btn.setToolTip(self._date_filter_tooltip())
+
+    def _date_filter_active(self) -> bool:
+        return bool(self._date_filter_start or self._date_filter_end)
+
+    def _open_date_filter_dialog(self) -> None:
+        if not self._date_filter_dialog:
+            self._date_filter_dialog = QDialog(self, Qt.Popup)
+            self._date_filter_dialog.setObjectName("taskDateFilterPopup")
+            layout = QVBoxLayout(self._date_filter_dialog)
+            layout.setContentsMargins(10, 10, 10, 10)
+            layout.setSpacing(6)
+            layout.addWidget(QLabel("<b>Date Filter</b>"))
+
+            preset_row = QHBoxLayout()
+            self._date_filter_preset_group = QButtonGroup(self._date_filter_dialog)
+            self._date_filter_preset_group.setExclusive(True)
+            for label, preset in (
+                ("Overdue", "overdue"),
+                ("Should Start", "should_start"),
+                ("Today", "today"),
+                ("This Week", "week"),
+                ("Next 7", "next7"),
+                ("This Month", "month"),
+            ):
+                btn = QToolButton()
+                btn.setText(label)
+                btn.setCheckable(True)
+                btn.setAutoRaise(True)
+                btn.setStyleSheet(
+                    """
+                    QToolButton {
+                        border: 1px solid #444;
+                        border-radius: 10px;
+                        padding: 3px 10px;
+                        margin: 2px;
+                        background: transparent;
+                        color: #ddd;
+                    }
+                    QToolButton:hover {
+                        background: #333;
+                    }
+                    QToolButton:checked {
+                        background: #2b2b2b;
+                        color: #fff;
+                        border: 1px solid #2b2b2b;
+                    }
+                    """
+                )
+                btn.clicked.connect(lambda _, p=preset: self._apply_date_preset(p))
+                self._date_filter_preset_group.addButton(btn)
+                preset_row.addWidget(btn)
+            preset_row.addStretch(1)
+            layout.addLayout(preset_row)
+
+            date_row = QHBoxLayout()
+            date_row.setSpacing(6)
+            date_row.addWidget(QLabel("Start after"))
+            self._date_filter_start_edit = QDateEdit()
+            self._date_filter_start_edit.setCalendarPopup(False)
+            self._date_filter_start_edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            self._date_filter_start_edit.setDisplayFormat("yyyy-MM-dd")
+            self._date_filter_start_edit.setSpecialValueText("Any")
+            self._date_filter_start_edit.setDate(QDate.currentDate())
+            self._date_filter_start_edit.setMinimumDate(QDate(1900, 1, 1))
+            self._date_filter_start_edit.setMaximumDate(QDate(2999, 12, 31))
+            date_row.addWidget(self._date_filter_start_edit)
+            start_btn = QToolButton()
+            start_btn.setIcon(self._load_svg_icon("calendar-days.svg", QSize(16, 16)))
+            start_btn.setAutoRaise(True)
+            start_btn.setToolTip("Pick start date")
+            start_btn.clicked.connect(lambda: self._open_date_calendar("start"))
+            date_row.addWidget(start_btn)
+            date_row.addSpacing(8)
+            date_row.addWidget(QLabel("End before"))
+            self._date_filter_end_edit = QDateEdit()
+            self._date_filter_end_edit.setCalendarPopup(False)
+            self._date_filter_end_edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            self._date_filter_end_edit.setDisplayFormat("yyyy-MM-dd")
+            self._date_filter_end_edit.setSpecialValueText("Any")
+            self._date_filter_end_edit.setDate(QDate.currentDate())
+            self._date_filter_end_edit.setMinimumDate(QDate(1900, 1, 1))
+            self._date_filter_end_edit.setMaximumDate(QDate(2999, 12, 31))
+            date_row.addWidget(self._date_filter_end_edit)
+            end_btn = QToolButton()
+            end_btn.setIcon(self._load_svg_icon("calendar-days.svg", QSize(16, 16)))
+            end_btn.setAutoRaise(True)
+            end_btn.setToolTip("Pick end date")
+            end_btn.clicked.connect(lambda: self._open_date_calendar("end"))
+            date_row.addWidget(end_btn)
+            layout.addLayout(date_row)
+
+            action_row = QHBoxLayout()
+            apply_btn = QPushButton("Apply")
+            apply_btn.clicked.connect(self._apply_date_filter_from_dialog)
+            clear_btn = QPushButton("Clear")
+            clear_btn.clicked.connect(self._clear_date_filter)
+            action_row.addStretch(1)
+            action_row.addWidget(clear_btn)
+            action_row.addWidget(apply_btn)
+            layout.addLayout(action_row)
+
+        min_date = QDate(1900, 1, 1)
+        if self._date_filter_start_edit:
+            if self._date_filter_start:
+                self._date_filter_start_edit.setDate(QDate(self._date_filter_start.year, self._date_filter_start.month, self._date_filter_start.day))
+            else:
+                self._date_filter_start_edit.setDate(min_date)
+        if self._date_filter_end_edit:
+            if self._date_filter_end:
+                self._date_filter_end_edit.setDate(QDate(self._date_filter_end.year, self._date_filter_end.month, self._date_filter_end.day))
+            else:
+                self._date_filter_end_edit.setDate(min_date)
+
+        if self._date_filter_btn:
+            pos = self._date_filter_btn.mapToGlobal(QPoint(0, self._date_filter_btn.height()))
+            self._date_filter_dialog.move(pos)
+        self._date_filter_dialog.show()
+
+    def _open_date_calendar(self, target: str) -> None:
+        self._date_filter_calendar_target = target
+        if not self._date_filter_calendar_popup:
+            self._date_filter_calendar_popup = QDialog(self, Qt.Popup)
+            layout = QVBoxLayout(self._date_filter_calendar_popup)
+            layout.setContentsMargins(6, 6, 6, 6)
+            calendar = QCalendarWidget()
+            calendar.clicked.connect(self._apply_calendar_date)
+            layout.addWidget(calendar)
+            self._date_filter_calendar_popup.setLayout(layout)
+        if self._date_filter_btn:
+            pos = self._date_filter_btn.mapToGlobal(QPoint(0, self._date_filter_btn.height()))
+            self._date_filter_calendar_popup.move(pos)
+        self._date_filter_calendar_popup.show()
+
+    def _apply_calendar_date(self, qdate: QDate) -> None:
+        if self._date_filter_calendar_target == "start" and self._date_filter_start_edit:
+            self._date_filter_start_edit.setDate(qdate)
+        elif self._date_filter_calendar_target == "end" and self._date_filter_end_edit:
+            self._date_filter_end_edit.setDate(qdate)
+        if self._date_filter_calendar_popup:
+            self._date_filter_calendar_popup.hide()
+
+    def _clear_preset_selection(self) -> None:
+        if not self._date_filter_preset_group:
+            return
+        for button in self._date_filter_preset_group.buttons():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+
+    def _apply_date_preset(self, preset: str) -> None:
+        today = date.today()
+        start: Optional[date] = None
+        end: Optional[date] = None
+        min_date = QDate(1900, 1, 1)
+        if preset == "today":
+            start = today
+            end = today
+        elif preset == "week":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        elif preset == "next7":
+            start = today
+            end = today + timedelta(days=6)
+        elif preset == "month":
+            start = today.replace(day=1)
+            next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            end = next_month - timedelta(days=1)
+        elif preset == "overdue":
+            end = today - timedelta(days=1)
+        elif preset == "should_start":
+            end = today - timedelta(days=7)
+        else:
+            return
+        self._date_filter_active_preset = preset
+        self._set_date_filter(start, end)
+        if self._date_filter_start_edit:
+            if start:
+                self._date_filter_start_edit.setDate(QDate(start.year, start.month, start.day))
+            else:
+                self._date_filter_start_edit.setDate(min_date)
+        if self._date_filter_end_edit:
+            if end:
+                self._date_filter_end_edit.setDate(QDate(end.year, end.month, end.day))
+            else:
+                self._date_filter_end_edit.setDate(min_date)
+        if self._date_filter_dialog:
+            self._date_filter_dialog.hide()
+
+    def _apply_date_filter_from_dialog(self) -> None:
+        start = None
+        end = None
+        min_date = QDate(1900, 1, 1)
+        if self._date_filter_start_edit and self._date_filter_start_edit.date():
+            start_qdate = self._date_filter_start_edit.date()
+            if start_qdate != min_date:
+                start = date(start_qdate.year(), start_qdate.month(), start_qdate.day())
+        if self._date_filter_end_edit and self._date_filter_end_edit.date():
+            end_qdate = self._date_filter_end_edit.date()
+            if end_qdate != min_date:
+                end = date(end_qdate.year(), end_qdate.month(), end_qdate.day())
+        if start and end and start > end:
+            return
+        self._clear_preset_selection()
+        self._date_filter_active_preset = None
+        self._set_date_filter(start, end)
+        if self._date_filter_dialog:
+            self._date_filter_dialog.hide()
+
+    def _set_date_filter(self, start: Optional[date], end: Optional[date]) -> None:
+        self._date_filter_start = start
+        self._date_filter_end = end
+        self._update_date_filter_button()
+        self._refresh_tasks()
+
+    def _clear_date_filter(self) -> None:
+        self._date_filter_start = None
+        self._date_filter_end = None
+        self._clear_preset_selection()
+        self._date_filter_active_preset = None
+        min_date = QDate(1900, 1, 1)
+        if self._date_filter_start_edit:
+            self._date_filter_start_edit.setDate(min_date)
+        if self._date_filter_end_edit:
+            self._date_filter_end_edit.setDate(min_date)
+        self._update_date_filter_button()
+        if self._date_filter_dialog:
+            self._date_filter_dialog.hide()
+        self._refresh_tasks()
+
+    def _actionable_tooltip(self) -> str:
+        base = "Show tasks you can act on now (not done, no open subtasks, parents inherit)."
+        try:
+            raw = config.load_non_actionable_task_tags()
+        except Exception:
+            raw = ""
+        tags = " ".join(raw.split())
+        if tags:
+            return f"{base}\nNon-actionable tags: {tags}"
+        return base
+
+    def _update_actionable_tooltip(self) -> None:
+        if not self.show_actionable:
+            return
+        self.show_actionable.setToolTip(self._actionable_tooltip())
 
     def _build_ai_summary_panel(self) -> QWidget:
         panel = QWidget()
@@ -1507,6 +1801,49 @@ class TaskPanel(QWidget):
         else:
             self.search.setStyleSheet("")
 
+    def _parse_task_date(self, value: Optional[str]) -> Optional[date]:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value.strip())
+        except Exception:
+            return None
+
+    def _apply_date_filter(self, tasks: list[dict]) -> list[dict]:
+        if not self._date_filter_active():
+            return tasks
+        start_bound = self._date_filter_start
+        end_bound = self._date_filter_end
+        filtered: list[dict] = []
+        for task in tasks:
+            start_value = self._parse_task_date(task.get("starts") or task.get("start"))
+            end_value = self._parse_task_date(task.get("due"))
+            preset = self._date_filter_active_preset
+            if preset == "overdue":
+                if not end_value or not end_bound or end_value > end_bound:
+                    continue
+                filtered.append(task)
+                continue
+            if preset == "should_start":
+                if not start_value or not end_bound or start_value > end_bound:
+                    continue
+                filtered.append(task)
+                continue
+            candidates = [value for value in (start_value, end_value) if value]
+            if not candidates:
+                continue
+            if start_bound and end_bound:
+                if not any(start_bound <= value <= end_bound for value in candidates):
+                    continue
+            elif start_bound:
+                if not any(value >= start_bound for value in candidates):
+                    continue
+            elif end_bound:
+                if not any(value <= end_bound for value in candidates):
+                    continue
+            filtered.append(task)
+        return filtered
+
     def _toggle_tag_selection(self, item: QListWidgetItem) -> None:
         tag = item.data(Qt.UserRole)
         if not tag:
@@ -1599,6 +1936,8 @@ class TaskPanel(QWidget):
         if current_version != self._task_index_version:
             self._task_index_version = current_version
             self._task_context_dirty = True
+        self._update_actionable_tooltip()
+        self._update_date_filter_button()
         self._configure_task_columns()
         raw_text = self.search.text().strip()
         query, tokens = self._parse_search_tags(raw_text)
@@ -1636,6 +1975,7 @@ class TaskPanel(QWidget):
             tasks = self._apply_nav_filter(tasks)
             if effective_tag_groups and not use_sql_tags:
                 tasks = self._filter_tasks_to_tag_groups(tasks, effective_tag_groups)
+            tasks = self._apply_date_filter(tasks)
 
         if include_done:
             self._tag_source_tasks = list(tasks)
@@ -1655,6 +1995,7 @@ class TaskPanel(QWidget):
                     extra_tasks = self._apply_nav_filter(extra_tasks)
                 if effective_tag_groups and not use_sql_tags:
                     extra_tasks = self._filter_tasks_to_tag_groups(extra_tasks, effective_tag_groups)
+                extra_tasks = self._apply_date_filter(extra_tasks)
                 self._tag_source_tasks = []
             if not self._tag_source_tasks:
                 tag_source_map = {task.get("id") or task.get("path"): task for task in extra_tasks}

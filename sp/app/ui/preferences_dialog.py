@@ -258,13 +258,14 @@ class PreferencesDialog(QDialog):
         task_layout = add_section("Tasks")
         task_layout.addWidget(QLabel("<b>Non Actionable Task Tags</b>"))
         self.non_actionable_tags_edit = QLineEdit()
-        self.non_actionable_tags_edit.setPlaceholderText("@wait @wt")
+        self.non_actionable_tags_edit.setPlaceholderText("@wait @wt @someday")
         try:
             val = config.load_non_actionable_task_tags()
         except Exception:
             val = None
-        self.non_actionable_tags_edit.setText(val or "@wait @wt")
+        self.non_actionable_tags_edit.setText(val or "@wait @wt @someday")
         task_layout.addWidget(self.non_actionable_tags_edit)
+        task_layout.addWidget(QLabel("Space-separated tags (e.g., @wait @wt @someday)."))
         self.show_task_start_checkbox = QCheckBox("Show Start Date in Tasks")
         self.show_task_start_checkbox.setChecked(config.load_show_task_start_date())
         task_layout.addWidget(self.show_task_start_checkbox)

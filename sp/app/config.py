@@ -140,12 +140,12 @@ def _read_global_config() -> dict:
         return {}
 
 def load_non_actionable_task_tags() -> str:
-    """Load the configured non-actionable task tags as a space-separated string (default: '@wait @wt')."""
+    """Load the configured non-actionable task tags as a space-separated string (default: '@wait @wt @someday')."""
     payload = _read_global_config()
     tags = payload.get("non_actionable_task_tags")
     if isinstance(tags, str) and tags.strip():
         return tags.strip()
-    return "@wait @wt"
+    return "@wait @wt @someday"
 
 def load_non_actionable_task_tags_list() -> list[str]:
     """Return configured non-actionable tags as lower-case names without leading @ symbols."""
