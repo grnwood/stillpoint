@@ -99,6 +99,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QSpinBox,
     QSystemTrayIcon,
+    QScrollArea,
 )
 
 from sp.app import config, indexer
@@ -2055,43 +2056,56 @@ class MainWindow(QMainWindow):
         print_action.triggered.connect(self._print_current_page)
         self.toolbar.addAction(print_action)
 
-        # History navigation buttons
-        self.nav_back_action = QAction(self)
-        self.nav_back_action.setIcon(back_icon if back_icon else self.style().standardIcon(QStyle.SP_ArrowBack))
-        self.nav_back_action.setToolTip("Back (Alt+Left)")
-        self.nav_back_action.triggered.connect(self._navigate_history_back)
-        self.toolbar.addAction(self.nav_back_action)
-
-        self.nav_forward_action = QAction(self)
-        self.nav_forward_action.setIcon(forward_icon if forward_icon else self.style().standardIcon(QStyle.SP_ArrowForward))
-        self.nav_forward_action.setToolTip("Forward (Alt+Right)")
-        self.nav_forward_action.triggered.connect(self._navigate_history_forward)
-        self.toolbar.addAction(self.nav_forward_action)
-
-        self.nav_up_action = QAction(self)
-        self.nav_up_action.setIcon(up_icon if up_icon else self.style().standardIcon(QStyle.SP_ArrowUp))
-        self.nav_up_action.setToolTip("Up (Alt+PgUp)")
-        self.nav_up_action.triggered.connect(lambda: self._navigate_tree(-1, leaves_only=False))
-        self.toolbar.addAction(self.nav_up_action)
-
-        self.nav_down_action = QAction(self)
-        self.nav_down_action.setIcon(down_icon if down_icon else self.style().standardIcon(QStyle.SP_ArrowDown))
-        self.nav_down_action.setToolTip("Down (Alt+PgDn)")
-        self.nav_down_action.triggered.connect(lambda: self._navigate_tree(1, leaves_only=False))
-        self.toolbar.addAction(self.nav_down_action)
-        
-        # Add bookmark display area (will be populated with bookmark buttons)
-        self.bookmark_container = QWidget()
-        self.bookmark_layout = QHBoxLayout(self.bookmark_container)
+        # Add bookmark display area with horizontal scroll controls
+        self.bookmark_strip = QWidget()
+        self.bookmark_layout = QHBoxLayout(self.bookmark_strip)
         self.bookmark_layout.setContentsMargins(0, 0, 0, 0)
         self.bookmark_layout.setSpacing(4)
-        self.toolbar.addWidget(self.bookmark_container)
-        
-        # Right-aligned spacer before preferences icon
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(spacer)
 
+        self.bookmark_scroll_area = QScrollArea()
+        self.bookmark_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.bookmark_scroll_area.setWidgetResizable(False)
+        self.bookmark_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.bookmark_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.bookmark_strip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.bookmark_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.bookmark_scroll_area.setWidget(self.bookmark_strip)
+
+        self.bookmark_scroll_left = QToolButton()
+        self.bookmark_scroll_left.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.bookmark_scroll_left.setAutoRaise(True)
+        self.bookmark_scroll_left.setToolTip("Scroll bookmarks left")
+        self.bookmark_scroll_left.clicked.connect(lambda: self._scroll_bookmarks(-180))
+
+        self.bookmark_scroll_right = QToolButton()
+        self.bookmark_scroll_right.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.bookmark_scroll_right.setAutoRaise(True)
+        self.bookmark_scroll_right.setToolTip("Scroll bookmarks right")
+        self.bookmark_scroll_right.clicked.connect(lambda: self._scroll_bookmarks(180))
+
+        self.bookmark_container = QWidget()
+        self.bookmark_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._toolbar_height = self.toolbar.iconSize().height() + 8
+        self.bookmark_container.setMinimumHeight(self._toolbar_height)
+        self.bookmark_container.setMaximumHeight(self._toolbar_height)
+        self.bookmark_scroll_area.setMinimumHeight(self._toolbar_height)
+        self.bookmark_scroll_area.setMaximumHeight(self._toolbar_height)
+        self.bookmark_scroll_left.setFixedHeight(self._toolbar_height)
+        self.bookmark_scroll_right.setFixedHeight(self._toolbar_height)
+        self.bookmark_strip.setMinimumHeight(self._toolbar_height)
+        bookmark_container_layout = QHBoxLayout(self.bookmark_container)
+        bookmark_container_layout.setContentsMargins(0, 0, 0, 0)
+        bookmark_container_layout.setSpacing(2)
+        bookmark_container_layout.addWidget(self.bookmark_scroll_left)
+        bookmark_container_layout.addWidget(self.bookmark_scroll_area, 1)
+        bookmark_container_layout.addWidget(self.bookmark_scroll_right)
+        self.bookmark_container.setLayout(bookmark_container_layout)
+        self.toolbar.addWidget(self.bookmark_container)
+
+        self.bookmark_scroll_area.installEventFilter(self)
+        self.toolbar.installEventFilter(self)
+        self._update_bookmark_scroll_buttons()
+        
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
         cog_icon_path = self._find_asset("cog.svg")
@@ -4423,6 +4437,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_bookmark_buttons(self) -> None:
         """Refresh the bookmark buttons in the toolbar."""
+        try:
+            self.bookmark_scroll_area.horizontalScrollBar().setValue(0)
+        except Exception:
+            pass
         # Clear existing buttons
         for btn in list(self.bookmark_buttons.values()):
             self.bookmark_layout.removeWidget(btn)
@@ -4448,6 +4466,97 @@ class MainWindow(QMainWindow):
             
             # Add to layout
             self.bookmark_layout.addWidget(btn)
+        self._update_bookmark_strip_width()
+        self._sync_bookmark_scroll_range()
+        self._update_bookmark_scroll_buttons()
+        QTimer.singleShot(0, self._update_bookmark_strip_width)
+        QTimer.singleShot(0, self._sync_bookmark_scroll_range)
+        QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
+
+    def _scroll_bookmarks(self, delta: int) -> None:
+        bar = self.bookmark_scroll_area.horizontalScrollBar()
+        if bar.maximum() <= 0:
+            if not getattr(self, "_bookmark_scroll_retry", False):
+                self._bookmark_scroll_retry = True
+                self._update_bookmark_strip_width()
+                QTimer.singleShot(0, self._sync_bookmark_scroll_range)
+                QTimer.singleShot(0, lambda: self._scroll_bookmarks(delta))
+            return
+        self._bookmark_scroll_retry = False
+        step = bar.pageStep()
+        if step <= 0:
+            step = abs(delta)
+        bar.setValue(max(0, min(bar.maximum(), bar.value() + (step if delta > 0 else -step))))
+        self._update_bookmark_scroll_buttons()
+
+    def _update_bookmark_scroll_buttons(self) -> None:
+        if not getattr(self, "bookmark_scroll_area", None):
+            return
+        bar = self.bookmark_scroll_area.horizontalScrollBar()
+        content_width = 0
+        try:
+            content_width = self.bookmark_strip.sizeHint().width()
+        except Exception:
+            content_width = self.bookmark_strip.width()
+        try:
+            available_width = self.bookmark_scroll_area.viewport().width()
+        except Exception:
+            available_width = self.bookmark_scroll_area.width()
+        has_overflow = content_width > max(0, available_width)
+        self.bookmark_scroll_left.setVisible(has_overflow)
+        self.bookmark_scroll_right.setVisible(has_overflow)
+        if not has_overflow:
+            bar.setValue(0)
+            self.bookmark_scroll_left.setEnabled(False)
+            self.bookmark_scroll_right.setEnabled(False)
+            return
+        self.bookmark_scroll_left.setEnabled(bar.value() > 0)
+        self.bookmark_scroll_right.setEnabled(bar.value() < bar.maximum())
+
+    def _bookmark_content_width(self) -> int:
+        if not getattr(self, "bookmark_layout", None):
+            return 0
+        spacing = self.bookmark_layout.spacing()
+        total = 0
+        count = 0
+        for btn in self.bookmark_buttons.values():
+            try:
+                total += btn.sizeHint().width()
+                count += 1
+            except Exception:
+                continue
+        if count > 1:
+            total += spacing * (count - 1)
+        return total
+
+    def _update_bookmark_strip_width(self) -> None:
+        if not getattr(self, "bookmark_strip", None):
+            return
+        try:
+            width = max(1, self._bookmark_content_width())
+            self.bookmark_strip.setMinimumWidth(width)
+            self.bookmark_strip.setMaximumWidth(16777215)
+            height = getattr(self, "_toolbar_height", None)
+            if height:
+                self.bookmark_strip.setFixedHeight(height)
+                self.bookmark_strip.resize(width, height)
+            else:
+                self.bookmark_strip.resize(width, self.bookmark_strip.sizeHint().height())
+            self.bookmark_strip.updateGeometry()
+        except Exception:
+            pass
+
+    def _sync_bookmark_scroll_range(self) -> None:
+        if not getattr(self, "bookmark_scroll_area", None):
+            return
+        bar = self.bookmark_scroll_area.horizontalScrollBar()
+        content_width = self._bookmark_content_width()
+        viewport_width = self.bookmark_scroll_area.viewport().width()
+        max_range = max(0, content_width - viewport_width)
+        bar.setRange(0, max_range)
+        bar.setPageStep(max(0, viewport_width))
+        if bar.value() > max_range:
+            bar.setValue(max_range)
 
     def _refresh_history_buttons(self) -> None:
         """Refresh the history buttons in the toolbar (last 10 pages visited)."""
@@ -12646,6 +12755,10 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if event.type() == QEvent.Resize:
+            if obj in (getattr(self, "bookmark_scroll_area", None), getattr(self, "toolbar", None)):
+                QTimer.singleShot(0, self._sync_bookmark_scroll_range)
+                QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
         if event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
                 self._show_command_bar()
