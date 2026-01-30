@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import os
 import re
 import itertools
@@ -15,7 +16,6 @@ from PySide6.QtCore import (
     QByteArray,
     QEvent,
     QMimeData,
-    QPointer,
     Qt,
     QRegularExpression,
     Signal,
@@ -196,6 +196,9 @@ SYMBOL_TASK_LINE_PATTERN = re.compile(
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
+HR_MARKDOWN_PATTERN = re.compile(r"^(\s{0,3})([-*_])\\2{2,}\\s*$", re.MULTILINE)
+HR_DISPLAY_CHAR = "─"
+HR_DISPLAY_PATTERN = re.compile(rf"^(\\s{{0,3}}){HR_DISPLAY_CHAR}{{3,}}\\s*$", re.MULTILINE)
 # Plus-prefixed link pattern: +PageName or +Projects (CamelCase style), requires surrounding whitespace
 CAMEL_LINK_PATTERN = QRegularExpression(r"(?<!\\S)\\+(?P<link>[A-Za-z][\\w]*)(?=\\s|$)")
 
@@ -1366,6 +1369,7 @@ class MarkdownEditor(QTextEdit):
         self._suppress_paint = False
         self._suppress_paint_depth = 0
         self._saved_updates_enabled: Optional[bool] = None
+        self._hr_overlay_suppressed_until: float = 0.0
         self.destroyed.connect(self._on_editor_destroyed)
         self._connect_document_signals(self.document())
         viewport = self.viewport()
@@ -1492,9 +1496,11 @@ class MarkdownEditor(QTextEdit):
 
     def _on_editor_destroyed(self) -> None:
         self._editor_alive = False
+        self._push_paint_block()
 
     def _on_viewport_destroyed(self) -> None:
         self._viewport_alive = False
+        self._push_paint_block()
 
     def _is_alive(self, obj) -> bool:
         return bool(obj) and Shiboken.isValid(obj)
@@ -1526,7 +1532,11 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
-        if os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
+        # Default to the safe selection-based HR rendering; opt-in to the custom painter.
+        if os.getenv("SP_HR_OVERLAY_MODE", "selections") != "paint":
+            super().paintEvent(event)
+            return
+        if time.monotonic() < self._hr_overlay_suppressed_until:
             super().paintEvent(event)
             return
         if self._suppress_paint or self._suppress_paint_depth:
@@ -1535,6 +1545,8 @@ class MarkdownEditor(QTextEdit):
             return
         if self._vi_paint_in_progress:
             return
+        if not self.isVisible() or not self.isEnabled():
+            return
         self._vi_paint_in_progress = True
         painter: Optional[QPainter] = None
         try:
@@ -1542,23 +1554,25 @@ class MarkdownEditor(QTextEdit):
             # being torn down (e.g., during vault switches). Hitting an invalid
             # document/layout inside QTextEdit's paintEvent can segfault, so we bail
             # out early if anything looks dead.
-            if not self._editor_alive or not self._document_alive or not self._is_alive(self):
+            if (
+                not self._editor_alive
+                or not self._document_alive
+                or not self._layout_alive
+                or not self._viewport_alive
+            ):
                 return
-            document = self.document()
-            if not self._is_alive(document):
+            try:
+                document = self.document()
+                if document is None:
+                    return
+                layout = document.documentLayout()
+                if layout is None:
+                    return
+                viewport = self.viewport()
+                if viewport is None:
+                    return
+            except RuntimeError:
                 return
-            layout = document.documentLayout()
-            if not self._layout_alive or not self._is_alive(layout):
-                return
-            viewport = self.viewport()
-            if not self._is_alive(viewport):
-                return
-            doc_ptr = QPointer(document)
-            layout_ptr = QPointer(layout)
-            viewport_ptr = QPointer(viewport)
-            if doc_ptr.isNull() or layout_ptr.isNull() or viewport_ptr.isNull():
-                return
-
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
@@ -1570,8 +1584,6 @@ class MarkdownEditor(QTextEdit):
                         self._viewport_alive = True
                     except Exception:
                         return
-                if viewport_ptr.isNull():
-                    return
                 painter = QPainter(viewport)
                 pen = QPen(QColor("#555555"))
                 pen.setWidth(2)
@@ -1582,9 +1594,7 @@ class MarkdownEditor(QTextEdit):
                 while block.isValid():
                     if not self._document_alive or not self._editor_alive:
                         break
-                    if doc_ptr.isNull() or layout_ptr.isNull() or viewport_ptr.isNull():
-                        break
-                    if not self._is_alive(document) or not self._is_alive(layout):
+                    if not self._layout_alive or not self._viewport_alive:
                         break
                     if block.text().strip() in ("---", "***", "___"):
                         try:
@@ -1592,10 +1602,14 @@ class MarkdownEditor(QTextEdit):
                         except RuntimeError as exc:
                             logger.warning("Aborting markdown rule overlay; layout gone: %s", exc)
                             break
-                        viewport_height = viewport.height() if self._is_alive(viewport) else 0
+                        try:
+                            viewport_height = viewport.height()
+                            viewport_width = viewport.width()
+                        except RuntimeError:
+                            break
                         y = int(br.top() - vsb + br.height() / 2)
                         if 0 <= y <= viewport_height:
-                            painter.drawLine(0, y, viewport.width(), y)
+                            painter.drawLine(0, y, viewport_width, y)
                     block = block.next()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Skipping Markdown paint overlay due to error: %s", exc, exc_info=True)
@@ -3425,7 +3439,8 @@ class MarkdownEditor(QTextEdit):
         if not (meaningful_modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) and (
             event.text() or event.key() in (Qt.Key_Backspace, Qt.Key_Delete)
         ):
-            self._prepare_heading_edit_on_input(cursor)
+            if event.key() not in (Qt.Key_Return, Qt.Key_Enter):
+                self._prepare_heading_edit_on_input(cursor)
         # Ctrl+E: edit link under cursor
         if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
             self._edit_link_at_cursor(cursor)
@@ -3544,6 +3559,7 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_page_up(self):
         # Simulate PageUp: move cursor up by visible lines
+        self._hr_overlay_suppressed_until = time.monotonic() + 0.35
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
         c = self.textCursor()
         c.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, lines)
@@ -3551,6 +3567,7 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_page_down(self):
         # Simulate PageDown: move cursor down by visible lines
+        self._hr_overlay_suppressed_until = time.monotonic() + 0.35
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
         c = self.textCursor()
         c.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, lines)
@@ -5859,11 +5876,13 @@ class MarkdownEditor(QTextEdit):
         converted = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, converted)
         # Transform bullets: * → •
         converted = BULLET_STORAGE_PATTERN.sub(r"\1• ", converted)
+        converted = HR_MARKDOWN_PATTERN.sub(self._encode_hr_display, converted)
         return converted
 
     def _from_display(self, text: str) -> str:
+        restored = HR_DISPLAY_PATTERN.sub(lambda m: f"{m.group(1)}---", text)
         # Restore wiki-style links: sentinel + link + sentinel + label + sentinel → [link|label]
-        restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
+        restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, restored)
         # Drop duplicated link tails that sometimes get re-appended after decoding.
         def _dedupe_tail(m: re.Match[str]) -> str:
             link = m.group("link")
@@ -5882,6 +5901,19 @@ class MarkdownEditor(QTextEdit):
         # Restore bullets: • → *
         restored = BULLET_DISPLAY_PATTERN.sub(r"\1* ", restored)
         return restored
+
+    def _encode_hr_display(self, match: re.Match[str]) -> str:
+        indent = match.group(1) or ""
+        try:
+            width = self.viewport().width()
+        except RuntimeError:
+            width = 0
+        if width <= 0:
+            count = 40
+        else:
+            char_width = max(1, self.fontMetrics().horizontalAdvance(HR_DISPLAY_CHAR))
+            count = max(10, int(width / char_width) - len(indent))
+        return f"{indent}{HR_DISPLAY_CHAR * count}"
 
     def _encode_heading(self, match: re.Match[str]) -> str:
         indent, hashes, _, body = match.groups()
@@ -5936,21 +5968,39 @@ class MarkdownEditor(QTextEdit):
         doc = self.document()
         if doc is None:
             return
+        blocks_to_replace: list[int] = []
         selections: list[QTextEdit.ExtraSelection] = []
         block = doc.begin()
         while block.isValid():
-            if block.text().strip() in ("---", "***", "___"):
+            text = block.text()
+            if HR_MARKDOWN_PATTERN.match(text):
+                blocks_to_replace.append(block.blockNumber())
+            elif text.strip() in ("---", "***", "___"):
                 cursor = QTextCursor(block)
                 cursor.select(QTextCursor.LineUnderCursor)
                 sel = QTextEdit.ExtraSelection()
                 sel.cursor = cursor
                 fmt = sel.format
-                fmt.setBackground(QColor("#333333"))
-                fmt.setForeground(QColor("#333333"))
+                # Full-width bar with hidden text for horizontal rules.
+                fmt.setBackground(QColor("#4a4a4a"))
+                fmt.setForeground(QColor("#4a4a4a"))
                 fmt.setProperty(QTextFormat.FullWidthSelection, True)
                 fmt.setProperty(self._HR_EXTRA_KEY, True)
                 selections.append(sel)
             block = block.next()
+        if blocks_to_replace:
+            cursor = QTextCursor(doc)
+            for block_num in reversed(blocks_to_replace):
+                block = doc.findBlockByNumber(block_num)
+                if not block.isValid():
+                    continue
+                text = block.text()
+                match = HR_MARKDOWN_PATTERN.match(text)
+                if not match:
+                    continue
+                cursor.setPosition(block.position())
+                cursor.select(QTextCursor.LineUnderCursor)
+                cursor.insertText(self._encode_hr_display(match))
         existing = [s for s in self.extraSelections() if s.format.property(self._HR_EXTRA_KEY) is None]
         existing.extend(selections)
         self.setExtraSelections(existing)

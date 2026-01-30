@@ -442,6 +442,7 @@ from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog
 from .open_vault_dialog import OpenVaultDialog
+from .vault_preferences_dialog import VaultPreferencesDialog
 from .quick_capture_overlay import QuickCaptureOverlay
 from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
@@ -1151,6 +1152,10 @@ class MainWindow(QMainWindow):
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
         except Exception:
             self._main_soft_scroll_lines = 5
+        self._feature_tasks_enabled = config.load_feature_tasks_enabled()
+        self._feature_calendar_enabled = config.load_feature_calendar_enabled()
+        self._feature_link_navigator_enabled = config.load_feature_link_navigator_enabled()
+        self._feature_tags_enabled = config.load_feature_tags_enabled()
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -1408,6 +1413,9 @@ class MainWindow(QMainWindow):
         base_ai_font = max(6, (self.font_size or 14) - 2)
         ai_font_size = config.load_ai_chat_font_size(base_ai_font)
         self.right_panel = TabbedRightPanel(
+            enable_tasks=self._feature_tasks_enabled,
+            enable_calendar=self._feature_calendar_enabled,
+            enable_link_navigator=self._feature_link_navigator_enabled,
             enable_ai_chats=config.load_enable_ai_chats(),
             ai_chat_font_size=ai_font_size,
             http_client=self.http,
@@ -1418,7 +1426,8 @@ class MainWindow(QMainWindow):
             self.right_panel.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Expanding)
         except Exception:
             pass
-        self.right_panel.refresh_tasks()
+        if self._feature_tasks_enabled:
+            self.right_panel.refresh_tasks()
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
@@ -1453,7 +1462,8 @@ class MainWindow(QMainWindow):
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
         self.right_panel.set_calendar_font_size(self.font_size)
         try:
-            self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
+            if self.right_panel.task_panel:
+                self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
         except Exception:
             pass
 
@@ -1541,10 +1551,12 @@ class MainWindow(QMainWindow):
         self.left_tab_widget.addTab(vault_tab, "Vault")
         
         # Tags tab
-        self.tags_tab = TagsTab(http_client=self.http)
-        self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
-        self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
-        self.left_tab_widget.addTab(self.tags_tab, "Tags")
+        self.tags_tab = None
+        if self._feature_tags_enabled:
+            self.tags_tab = TagsTab(http_client=self.http)
+            self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+            self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+            self.left_tab_widget.addTab(self.tags_tab, "Tags")
         
         # Search tab
         self.search_tab = SearchTab(http_client=self.http)
@@ -1553,7 +1565,7 @@ class MainWindow(QMainWindow):
         self.left_tab_widget.addTab(self.search_tab, "Search")
 
         self.left_minibar, self._left_minibar_bar, self._left_minibar_toggle = self._build_minibar(
-            ["Vault", "Tags", "Search"],
+            self._left_minibar_labels(),
             side="left",
         )
         self._left_minibar_bar.tabBarClicked.connect(self._expand_left_from_minibar)
@@ -1620,6 +1632,18 @@ class MainWindow(QMainWindow):
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
         vault_menu.addAction(open_vault_new_win_action)
+        vault_prefs_action = QAction("Vault Preferences...", self)
+        vault_prefs_action.setToolTip("Override global preferences for this vault")
+        vault_prefs_action.triggered.connect(self._open_vault_preferences)
+        vault_menu.addAction(vault_prefs_action)
+        reload_vault_action = QAction("Reload Vault", self)
+        reload_vault_action.setToolTip("Close and reopen the current vault")
+        reload_vault_action.triggered.connect(self._reload_vault)
+        vault_menu.addAction(reload_vault_action)
+        close_vault_action = QAction("Close Vault", self)
+        close_vault_action.setToolTip("Close this window")
+        close_vault_action.triggered.connect(self._close_vault_window)
+        vault_menu.addAction(close_vault_action)
         self._action_server_login = QAction("Login - Authenticate to Remote Vault", self)
         self._action_server_login.setToolTip("Authenticate to the remote vault")
         self._action_server_login.triggered.connect(self._prompt_remote_login)
@@ -1679,15 +1703,18 @@ class MainWindow(QMainWindow):
         reset_view_action.triggered.connect(self._reset_view_layout)
         view_menu.addAction(reset_view_action)
         view_menu.addSeparator()
-        task_window_action = QAction("Open Task Panel Window", self)
-        task_window_action.triggered.connect(self._open_task_panel_window)
-        view_menu.addAction(task_window_action)
-        calendar_window_action = QAction("Open Calendar Window", self)
-        calendar_window_action.triggered.connect(self._open_calendar_panel_window)
-        view_menu.addAction(calendar_window_action)
-        link_window_action = QAction("Open Link Navigator Window", self)
-        link_window_action.triggered.connect(self._open_link_panel_window)
-        view_menu.addAction(link_window_action)
+        if self._feature_tasks_enabled:
+            task_window_action = QAction("Open Task Panel Window", self)
+            task_window_action.triggered.connect(self._open_task_panel_window)
+            view_menu.addAction(task_window_action)
+        if self._feature_calendar_enabled:
+            calendar_window_action = QAction("Open Calendar Window", self)
+            calendar_window_action.triggered.connect(self._open_calendar_panel_window)
+            view_menu.addAction(calendar_window_action)
+        if self._feature_link_navigator_enabled:
+            link_window_action = QAction("Open Link Navigator Window", self)
+            link_window_action.triggered.connect(self._open_link_panel_window)
+            view_menu.addAction(link_window_action)
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
@@ -1736,25 +1763,29 @@ class MainWindow(QMainWindow):
         home_action.triggered.connect(self._go_home)
         go_menu.addAction(home_action)
 
-        tasks_action = QAction("Tasks", self)
-        tasks_action.triggered.connect(self._focus_tasks_search)
-        go_menu.addAction(tasks_action)
+        if self._feature_tasks_enabled:
+            tasks_action = QAction("Tasks", self)
+            tasks_action.triggered.connect(self._focus_tasks_search)
+            go_menu.addAction(tasks_action)
 
-        tags_action = QAction("Tags", self)
-        tags_action.triggered.connect(self._focus_tags_tab)
-        go_menu.addAction(tags_action)
+        if self._feature_tags_enabled:
+            tags_action = QAction("Tags", self)
+            tags_action.triggered.connect(self._focus_tags_tab)
+            go_menu.addAction(tags_action)
 
-        calendar_action = QAction("Calendar", self)
-        calendar_action.triggered.connect(self._focus_calendar_tab)
-        go_menu.addAction(calendar_action)
+        if self._feature_calendar_enabled:
+            calendar_action = QAction("Calendar", self)
+            calendar_action.triggered.connect(self._focus_calendar_tab)
+            go_menu.addAction(calendar_action)
 
         attach_action = QAction("Attachments", self)
         attach_action.triggered.connect(self._focus_attachments_tab)
         go_menu.addAction(attach_action)
 
-        link_action = QAction("Link Navigator", self)
-        link_action.triggered.connect(lambda: self._apply_navigation_focus("navigator"))
-        go_menu.addAction(link_action)
+        if self._feature_link_navigator_enabled:
+            link_action = QAction("Link Navigator", self)
+            link_action.triggered.connect(lambda: self._apply_navigation_focus("navigator"))
+            go_menu.addAction(link_action)
 
         ai_action = QAction("AI Chat", self)
         ai_action.triggered.connect(self._open_ai_chat_window)
@@ -2179,10 +2210,10 @@ class MainWindow(QMainWindow):
         tab_vault.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(0))
         tab_tags = QShortcut(QKeySequence("Ctrl+2"), self.left_tab_widget)
         tab_tags.setContext(Qt.WidgetWithChildrenShortcut)
-        tab_tags.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(1))
+        tab_tags.activated.connect(self._focus_tags_tab)
         tab_search = QShortcut(QKeySequence("Ctrl+3"), self.left_tab_widget)
         tab_search.setContext(Qt.WidgetWithChildrenShortcut)
-        tab_search.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(2))
+        tab_search.activated.connect(lambda: self.left_tab_widget.setCurrentIndex(self.left_tab_widget.indexOf(self.search_tab)))
         prefs_shortcut = QShortcut(QKeySequence("Ctrl+."), self)
         prefs_shortcut.setContext(Qt.ApplicationShortcut)
         prefs_shortcut.activated.connect(self._open_preferences)
@@ -2982,6 +3013,48 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def _open_vault_preferences(self) -> None:
+        if not config.has_active_vault():
+            self._alert("Open a vault first.")
+            return
+        dialog = VaultPreferencesDialog(self)
+        dialog.exec()
+
+    def _reload_vault(self) -> None:
+        if not self.vault_root:
+            self._alert("Open a vault first.")
+            return
+        if self._remote_mode:
+            server_url = self.api_base
+            if server_url:
+                self._launch_remote_vault_process(server_url, self.vault_root)
+        else:
+            self._launch_vault_process(self.vault_root)
+        self._close_vault_window()
+
+    def _close_vault_window(self) -> None:
+        for window in list(getattr(self, "_detached_panels", [])):
+            try:
+                window.close()
+            except Exception:
+                pass
+        if getattr(self, "_detached_ai_chat_window", None):
+            try:
+                self._detached_ai_chat_window.close()
+            except Exception:
+                pass
+        self.close()
+        QTimer.singleShot(0, self._quit_if_last_window)
+
+    def _quit_if_last_window(self) -> None:
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in app.topLevelWidgets():
+            if widget.isVisible():
+                return
+        app.quit()
+
     def _launch_new_window(self, select_vault: bool = False) -> None:
         """Spawn a fresh StillPoint process so it gets its own API server and vault."""
         try:
@@ -3035,20 +3108,24 @@ class MainWindow(QMainWindow):
         candidates: list[Path] = []
         base = getattr(sys, "_MEIPASS", None)
         if base:
-            candidates.append(Path(base) / "sp" / "help-vault")
-            candidates.append(Path(base) / "_internal" / "sp" / "help-vault")
+            candidates.append(Path(base) / "sp" / "help-vault" / "help-vault")
+            candidates.append(Path(base) / "_internal" / "sp" / "help-vault" / "help-vault")
+            candidates.append(Path(base) / "help-vault" / "help-vault")
+            candidates.append(Path(base) / "_internal" / "help-vault" / "help-vault")
         try:
             exe_dir = Path(os.path.abspath(os.path.dirname(sys.argv[0])))
-            candidates.append(exe_dir / "sp" / "help-vault")
-            candidates.append(exe_dir / "_internal" / "sp" / "help-vault")
+            candidates.append(exe_dir / "sp" / "help-vault" / "help-vault")
+            candidates.append(exe_dir / "_internal" / "sp" /"help-vault" / "help-vault")
+            candidates.append(exe_dir / "help-vault" / "help-vault")
+            candidates.append(exe_dir / "_internal" / "help-vault" / "help-vault")
         except Exception:
             pass
         pkg_root = Path(__file__).resolve().parents[2]  # .../stillpoint
-        candidates.append(pkg_root / "help-vault")
+        candidates.append(pkg_root / "sp" / "help-vault" / "help-vault")
 
         for cand in candidates:
             try:
-                if (cand / "help-vault" / "help-vault.md").exists() or (cand / "help-vault.txt").exists():
+                if (cand / "help-vault.md").exists() or (cand / "help-vault.txt").exists():
                     return cand
             except Exception:
                 continue
@@ -3866,6 +3943,46 @@ class MainWindow(QMainWindow):
                 self._read_only = True
                 self._apply_read_only_state()
 
+    def _apply_feature_overrides(self) -> None:
+        new_tasks = config.load_feature_tasks_enabled()
+        new_calendar = config.load_feature_calendar_enabled()
+        new_link_navigator = config.load_feature_link_navigator_enabled()
+        new_tags = config.load_feature_tags_enabled()
+        new_ai = config.load_enable_ai_chats()
+        changed = (
+            new_tasks != self._feature_tasks_enabled
+            or new_calendar != self._feature_calendar_enabled
+            or new_link_navigator != self._feature_link_navigator_enabled
+            or new_tags != self._feature_tags_enabled
+        )
+        self._feature_tasks_enabled = new_tasks
+        self._feature_calendar_enabled = new_calendar
+        self._feature_link_navigator_enabled = new_link_navigator
+        self._feature_tags_enabled = new_tags
+        self.right_panel.set_feature_flags(
+            enable_tasks=new_tasks,
+            enable_calendar=new_calendar,
+            enable_link_navigator=new_link_navigator,
+        )
+        self.right_panel.set_ai_enabled(new_ai)
+        self.editor.set_ai_actions_enabled(new_ai)
+        if new_tags and self.tags_tab is None:
+            self.tags_tab = TagsTab(http_client=self.http)
+            self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
+            self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
+            self.left_tab_widget.insertTab(1, self.tags_tab, "Tags")
+        elif not new_tags and self.tags_tab is not None:
+            idx = self.left_tab_widget.indexOf(self.tags_tab)
+            if idx != -1:
+                self.left_tab_widget.removeTab(idx)
+            self.tags_tab.deleteLater()
+            self.tags_tab = None
+            if self.left_tab_widget.currentWidget() is None:
+                self.left_tab_widget.setCurrentIndex(0)
+        if changed:
+            self._refresh_right_minibar_tabs()
+            self._refresh_left_minibar_tabs()
+
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
         try:
@@ -3891,6 +4008,10 @@ class MainWindow(QMainWindow):
                     prefer_read_only = config.load_vault_force_read_only()
                 except Exception:
                     prefer_read_only = False
+            try:
+                self._apply_feature_overrides()
+            except Exception:
+                pass
             try:
                 ai_root = directory
                 if self._remote_mode:
@@ -4101,11 +4222,13 @@ class MainWindow(QMainWindow):
         if not self._show_journal_in_nav and self._is_journal_path(self._nav_filter_path):
             self._nav_filter_path = None
             try:
-                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+                if self.right_panel.task_panel:
+                    self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
             except Exception:
                 pass
             try:
-                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+                if self.right_panel.link_panel:
+                    self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
             except Exception:
                 pass
             for panel in list(getattr(self, "_detached_link_panels", [])):
@@ -4527,11 +4650,13 @@ class MainWindow(QMainWindow):
         self._nav_filter_path = normalized or "/"
         logNav(f"_set_nav_filter: filtered to {self._nav_filter_path}")
         try:
-            self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+            if self.right_panel.task_panel:
+                self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
             pass
         try:
-            self.right_panel.link_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+            if self.right_panel.link_panel:
+                self.right_panel.link_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
         except Exception:
             pass
         for panel in list(getattr(self, "_detached_link_panels", [])):
@@ -4556,11 +4681,13 @@ class MainWindow(QMainWindow):
         logNav(f"_clear_nav_filter: restoring full tree view")
         self._nav_filter_path = None
         try:
-            self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+            if self.right_panel.task_panel:
+                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
         except Exception:
             pass
         try:
-            self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+            if self.right_panel.link_panel:
+                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
         except Exception:
             pass
         for panel in list(getattr(self, "_detached_link_panels", [])):
@@ -4953,7 +5080,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._deferred_select_tree_path(selection_path))
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_calendar()
-        self.tags_tab.refresh_tags()
+        if self.tags_tab:
+            self.tags_tab.refresh_tags()
         self._apply_nav_filter_style()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> QStandardItem:
@@ -6280,7 +6408,7 @@ class MainWindow(QMainWindow):
     def _open_search_tab(self) -> None:
         """Switch to the Search tab and focus the search field."""
         self._ensure_left_panel_visible()
-        self.left_tab_widget.setCurrentIndex(2)  # Search tab is now index 2 (Vault=0, Tags=1, Search=2)
+        self.left_tab_widget.setCurrentIndex(self.left_tab_widget.indexOf(self.search_tab))
         self.search_tab.focus_search()
     
     def _is_search_index_populated(self) -> bool:
@@ -7590,6 +7718,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _open_task_panel_window(self) -> None:
+        if not self._feature_tasks_enabled:
+            return
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
@@ -7612,6 +7742,8 @@ class MainWindow(QMainWindow):
         self._register_detached_panel(window)
     
     def _open_calendar_panel_window(self) -> None:
+        if not self._feature_calendar_enabled:
+            return
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
@@ -7639,6 +7771,8 @@ class MainWindow(QMainWindow):
         self._register_detached_panel(window)
 
     def _open_link_panel_window(self) -> None:
+        if not self._feature_link_navigator_enabled:
+            return
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
@@ -8179,13 +8313,13 @@ class MainWindow(QMainWindow):
             return
         widget = self.right_panel.tabs.widget(index)
         menu = QMenu(self)
-        if widget == self.right_panel.task_panel:
+        if self.right_panel.task_panel and widget == self.right_panel.task_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self._open_task_panel_window)
-        elif widget == self.right_panel.calendar_panel:
+        elif self.right_panel.calendar_panel and widget == self.right_panel.calendar_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self._open_calendar_panel_window)
-        elif widget == self.right_panel.link_panel:
+        elif self.right_panel.link_panel and widget == self.right_panel.link_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self._open_link_panel_window)
         elif widget == self.right_panel.ai_chat_panel:
@@ -8228,6 +8362,13 @@ class MainWindow(QMainWindow):
             labels.append(label or "Tab")
         return labels
 
+    def _left_minibar_labels(self) -> list[str]:
+        labels: list[str] = []
+        for i in range(self.left_tab_widget.count()):
+            label = self.left_tab_widget.tabText(i) or ""
+            labels.append(label or "Tab")
+        return labels
+
     def _sync_left_minibar_selection(self, index: int) -> None:
         if not self._left_minibar_bar:
             return
@@ -8251,6 +8392,17 @@ class MainWindow(QMainWindow):
         for label in self._right_minibar_labels():
             self._right_minibar_bar.addTab(label)
         self._right_minibar_bar.setCurrentIndex(self.right_panel.tabs.currentIndex())
+        del blocker
+
+    def _refresh_left_minibar_tabs(self) -> None:
+        if not self._left_minibar_bar:
+            return
+        blocker = QSignalBlocker(self._left_minibar_bar)
+        while self._left_minibar_bar.count() > 0:
+            self._left_minibar_bar.removeTab(0)
+        for label in self._left_minibar_labels():
+            self._left_minibar_bar.addTab(label)
+        self._left_minibar_bar.setCurrentIndex(self.left_tab_widget.currentIndex())
         del blocker
 
     def _expand_left_from_minibar(self, index: int) -> None:
@@ -9001,9 +9153,13 @@ class MainWindow(QMainWindow):
     def _apply_navigation_focus(self, focus_target: str | None) -> None:
         """Set focus after navigation based on source (editor vs link navigator)."""
         if focus_target == "navigator":
+            if not self._feature_link_navigator_enabled:
+                self.editor.setFocus()
+                return
             self.right_panel.focus_link_tab(self.current_path)
             try:
-                self.right_panel.link_panel.graph_view.setFocus()
+                if self.right_panel.link_panel:
+                    self.right_panel.link_panel.graph_view.setFocus()
             except Exception:
                 pass
         elif focus_target == "editor":
@@ -9040,6 +9196,8 @@ class MainWindow(QMainWindow):
 
     def _focus_tasks_search(self) -> None:
         """Focus the Tasks tab search bar. If external task window exists, focus that instead."""
+        if not self._feature_tasks_enabled:
+            return
         # First check if there's an external task panel window
         for window in self._detached_panels:
             if window.windowTitle() == "Tasks" and window.isVisible():
@@ -9096,6 +9254,8 @@ class MainWindow(QMainWindow):
 
     def _focus_calendar_tab(self) -> None:
         """Switch to Calendar tab and focus calendar widget."""
+        if not self._feature_calendar_enabled:
+            return
         sizes = self.editor_split.sizes()
         if len(sizes) >= 2 and sizes[1] == 0:
             width = getattr(self, "_saved_right_width", 360)
@@ -9115,6 +9275,8 @@ class MainWindow(QMainWindow):
 
     def _focus_tags_tab(self) -> None:
         """Switch to Tags tab and focus the search bar."""
+        if not self._feature_tags_enabled or not self.tags_tab:
+            return
         # Ensure left panel is visible
         sizes = self.editor_split.sizes()
         if len(sizes) >= 2 and sizes[0] == 0:
@@ -9136,7 +9298,7 @@ class MainWindow(QMainWindow):
     def _deferred_focus_tags_search(self) -> None:
         """Deferred helper to focus tags search after tab switch completes."""
         try:
-            if hasattr(self.tags_tab, "focus_search"):
+            if self.tags_tab and hasattr(self.tags_tab, "focus_search"):
                 self.tags_tab.focus_search()
         except Exception:
             pass
@@ -9185,7 +9347,7 @@ class MainWindow(QMainWindow):
             current_tab = self.left_tab_widget.currentWidget()
             if current_tab is self.search_tab:
                 self.search_tab.focus_search()
-            elif current_tab is self.tags_tab:
+            elif self.tags_tab and current_tab is self.tags_tab:
                 current_tab.setFocus(Qt.ShortcutFocusReason)
             else:
                 self.left_tab_widget.setFocus()
@@ -9499,10 +9661,11 @@ class MainWindow(QMainWindow):
                     lambda checked=False, fp=file_path: self._print_page_for_path(fp)
                 )
                 
-                backlinks_action = menu.addAction("Backlinks…")
-                backlinks_action.triggered.connect(
-                    lambda checked=False, fp=file_path: self._show_link_navigator_for_path(fp)
-                )
+                if self._feature_link_navigator_enabled:
+                    backlinks_action = menu.addAction("Backlinks…")
+                    backlinks_action.triggered.connect(
+                        lambda checked=False, fp=file_path: self._show_link_navigator_for_path(fp)
+                    )
                 ai_chat_action = menu.addAction("AI Chat…")
                 ai_chat_action.triggered.connect(lambda checked=False, fp=file_path: self._open_ai_chat_for_path(fp, create=True))
         else:
@@ -9572,6 +9735,8 @@ class MainWindow(QMainWindow):
 
     def _show_link_navigator_for_path(self, file_path: Optional[str]) -> None:
         """Open the Link Navigator tab for the given page."""
+        if not self._feature_link_navigator_enabled:
+            return
         if not file_path:
             return
         normalized = self._normalize_editor_path(file_path)
@@ -11093,11 +11258,13 @@ class MainWindow(QMainWindow):
         if self._nav_filter_path and not self._is_journal_path(self._nav_filter_path):
             self._nav_filter_path = None
             try:
-                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+                if self.right_panel.task_panel:
+                    self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
             except Exception:
                 pass
             try:
-                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
+                if self.right_panel.link_panel:
+                    self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
             except Exception:
                 pass
             for panel in list(getattr(self, "_detached_link_panels", [])):

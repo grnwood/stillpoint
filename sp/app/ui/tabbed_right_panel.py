@@ -46,6 +46,9 @@ class TabbedRightPanel(QWidget):
     def __init__(
         self,
         parent=None,
+        enable_tasks: bool = True,
+        enable_calendar: bool = True,
+        enable_link_navigator: bool = True,
         enable_ai_chats: bool = False,
         ai_chat_font_size: int = 13,
         http_client: Optional[httpx.Client] = None,
@@ -64,55 +67,37 @@ class TabbedRightPanel(QWidget):
         self._pending_calendar_vault_root: Optional[str] = None
         self._pending_calendar_refresh: bool = False
         
-        # Create Tasks tab (now includes calendar)
-        self.task_panel = TaskPanel(font_size_key="task_font_size_tabbed", splitter_key="task_splitter_tabbed")
-        self.tabs.addTab(self.task_panel, "Tasks")
+        # Create Tasks tab
+        self.task_panel = None
+        if enable_tasks:
+            self._add_task_tab()
 
         # Create Calendar tab
-        self.calendar_panel = CalendarPanel(
-            font_size_key="calendar_font_size_tabbed",
-            splitter_key="calendar_splitter_tabbed",
-            http_client=http_client,
-            api_base=self._http_client.base_url if self._http_client else None,
-        )
-        self.tabs.addTab(self.calendar_panel, "Calendar")
+        self.calendar_panel = None
+        if enable_calendar:
+            self._add_calendar_tab()
         
         # Create Attachments tab
         self.attachments_panel = AttachmentsPanel(api_client=http_client, auth_prompt=auth_prompt)
         self.tabs.addTab(self.attachments_panel, "Attachments")
 
         # Create Link Navigator tab
-        self.link_panel = LinkNavigatorPanel()
-        self.tabs.addTab(self.link_panel, "Link Navigator")
+        self.link_panel = None
+        if enable_link_navigator:
+            self._add_link_tab()
 
         # Create AI Chat tab if enabled
         if enable_ai_chats:
             self._add_ai_chat_tab()
         
-        # Set Tasks as default tab (index 0)
-        self.tabs.setCurrentIndex(0)
+        # Set first tab as default
+        if self.tabs.count():
+            self.tabs.setCurrentIndex(0)
         self.tabs.currentChanged.connect(self._focus_current_tab)
         self.tabs.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._open_tab_context_menu)
         
         # Forward signals
-        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
-            self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
-        else:
-            self.task_panel.taskActivated.connect(self.taskActivated)
-        self.task_panel.filterClearRequested.connect(self.filterClearRequested)
-        self.calendar_panel.dateActivated.connect(self.dateActivated)
-        self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
-        self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
-        self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
-        self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
-        self.calendar_panel.pageDeleted.connect(self.pageDeleted)
-        self.link_panel.pageActivated.connect(self.linkActivated)
-        self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
-        self.link_panel.backRequested.connect(self.linkBackRequested)
-        self.link_panel.forwardRequested.connect(self.linkForwardRequested)
-        self.link_panel.homeRequested.connect(self.linkHomeRequested)
-        
         # Layout
         from PySide6.QtWidgets import QVBoxLayout
         layout = QVBoxLayout()
@@ -129,39 +114,46 @@ class TabbedRightPanel(QWidget):
         auth_prompt=None,
     ) -> None:
         self._http_client = http_client
-        self.calendar_panel.http = http_client
-        if api_base:
-            self.calendar_panel.api_base = api_base
+        if self.calendar_panel:
+            self.calendar_panel.http = http_client
+            if api_base:
+                self.calendar_panel.api_base = api_base
         self.attachments_panel.set_http_client(http_client)
         self.attachments_panel.set_remote_mode(remote_mode, api_base)
         if auth_prompt is not None:
             self.attachments_panel.set_auth_prompt(auth_prompt)
-        self.task_panel.set_http_client(http_client)
+        if self.task_panel:
+            self.task_panel.set_http_client(http_client)
         if self.ai_chat_panel:
             self.ai_chat_panel.set_api_client(http_client)
     
     def refresh_tasks(self) -> None:
         """Refresh the task panel."""
-        self.task_panel.refresh()
+        if self.task_panel:
+            self.task_panel.refresh()
     
     def clear_tasks(self) -> None:
         """Clear the task panel."""
-        self.task_panel.clear()
+        if self.task_panel:
+            self.task_panel.clear()
     
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Set vault root for calendar in task panel."""
         if vault_root:
-            self.task_panel.set_vault_root(vault_root)
-            if self._is_calendar_tab_active():
-                self.calendar_panel.set_vault_root(vault_root)
-            else:
-                self._pending_calendar_vault_root = vault_root
+            if self.task_panel:
+                self.task_panel.set_vault_root(vault_root)
+            if self.calendar_panel:
+                if self._is_calendar_tab_active():
+                    self.calendar_panel.set_vault_root(vault_root)
+                else:
+                    self._pending_calendar_vault_root = vault_root
         self.attachments_panel.set_vault_root(vault_root)
-        try:
-            self.link_panel.reload_mode_from_config()
-            self.link_panel.reload_layout_from_config()
-        except Exception:
-            pass
+        if self.link_panel:
+            try:
+                self.link_panel.reload_mode_from_config()
+                self.link_panel.reload_layout_from_config()
+            except Exception:
+                pass
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_root(vault_root)
         if self._is_calendar_tab_active():
@@ -170,6 +162,8 @@ class TabbedRightPanel(QWidget):
 
     def refresh_calendar(self) -> None:
         """Refresh the calendar to update bold dates."""
+        if not self.calendar_panel:
+            return
         if self._is_calendar_tab_active():
             self.calendar_panel.refresh()
         else:
@@ -177,6 +171,8 @@ class TabbedRightPanel(QWidget):
     
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Set the calendar to show a specific date."""
+        if not self.calendar_panel:
+            return
         if self._is_calendar_tab_active():
             self.calendar_panel.set_calendar_date(year, month, day)
         else:
@@ -187,7 +183,8 @@ class TabbedRightPanel(QWidget):
         t0 = time.perf_counter()
         self.attachments_panel.set_page(page_path)
         t1 = time.perf_counter()
-        self.link_panel.set_page(relative_path)
+        if self.link_panel:
+            self.link_panel.set_page(relative_path)
         t2 = time.perf_counter()
         try:
             if self.calendar_panel and relative_path:
@@ -216,14 +213,16 @@ class TabbedRightPanel(QWidget):
     def set_page_text_provider(self, provider) -> None:
         """Provide calendar panel with live editor text for AI summaries."""
         try:
-            self.calendar_panel.set_page_text_provider(provider)
+            if self.calendar_panel:
+                self.calendar_panel.set_page_text_provider(provider)
         except Exception:
             pass
 
     def set_calendar_font_size(self, size: int) -> None:
         """Match calendar/journal/insights fonts to the editor."""
         try:
-            self.calendar_panel.set_base_font_size(size)
+            if self.calendar_panel:
+                self.calendar_panel.set_base_font_size(size)
         except Exception:
             pass
 
@@ -256,6 +255,8 @@ class TabbedRightPanel(QWidget):
 
     def refresh_links(self, page_path=None) -> None:
         """Refresh the link navigator for the given page (or current)."""
+        if not self.link_panel:
+            return
         try:
             win = self.window()
             if getattr(win, "_mode_window_pending", False) or getattr(win, "_mode_window", None):
@@ -267,6 +268,8 @@ class TabbedRightPanel(QWidget):
 
     def focus_link_tab(self, page_path=None) -> None:
         """Switch to the Link Navigator tab and optionally set its page."""
+        if not self.link_panel:
+            return
         if page_path is not None:
             self.link_panel.set_page(page_path)
         for i in range(self.tabs.count()):
@@ -284,13 +287,13 @@ class TabbedRightPanel(QWidget):
             return
         widget = self.tabs.widget(index)
         menu = QMenu(self)
-        if widget == self.task_panel:
+        if self.task_panel and widget == self.task_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openTaskWindowRequested.emit)
-        elif widget == self.calendar_panel:
+        elif self.calendar_panel and widget == self.calendar_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openCalendarWindowRequested.emit)
-        elif widget == self.link_panel:
+        elif self.link_panel and widget == self.link_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openLinkWindowRequested.emit)
         elif widget == self.ai_chat_panel:
@@ -305,10 +308,10 @@ class TabbedRightPanel(QWidget):
         """Ensure the active tab gains focus when selected."""
         widget = self.tabs.currentWidget()
         if widget:
-            if widget == self.calendar_panel:
+            if self.calendar_panel and widget == self.calendar_panel:
                 self._sync_calendar_tab_state()
             # For task panel, focus the search box specifically
-            if widget == self.task_panel:
+            if self.task_panel and widget == self.task_panel:
                 if hasattr(widget, "focus_search"):
                     widget.focus_search()
                 else:
@@ -357,6 +360,8 @@ class TabbedRightPanel(QWidget):
 
     def _is_calendar_tab_active(self) -> bool:
         """Return True if the calendar tab is currently selected."""
+        if not self.calendar_panel:
+            return False
         return self.tabs.currentWidget() == self.calendar_panel
 
     def _sync_calendar_tab_state(self) -> None:
@@ -424,9 +429,106 @@ class TabbedRightPanel(QWidget):
         else:
             self._remove_ai_chat_tab()
         try:
-            self.task_panel.set_ai_enabled(enabled)
+            if self.task_panel:
+                self.task_panel.set_ai_enabled(enabled)
         except Exception:
             pass
+
+    def set_feature_flags(self, *, enable_tasks: bool, enable_calendar: bool, enable_link_navigator: bool) -> None:
+        if enable_tasks:
+            self._add_task_tab()
+        else:
+            self._remove_task_tab()
+        if enable_calendar:
+            self._add_calendar_tab()
+        else:
+            self._remove_calendar_tab()
+        if enable_link_navigator:
+            self._add_link_tab()
+        else:
+            self._remove_link_tab()
+
+    def _tab_insert_index(self, after_widget: Optional[QWidget]) -> int:
+        if not after_widget:
+            return self.tabs.count()
+        idx = self.tabs.indexOf(after_widget)
+        if idx == -1:
+            return self.tabs.count()
+        return idx + 1
+
+    def _add_task_tab(self) -> None:
+        if self.task_panel:
+            return
+        self.task_panel = TaskPanel(font_size_key="task_font_size_tabbed", splitter_key="task_splitter_tabbed")
+        self.tabs.insertTab(0, self.task_panel, "Tasks")
+        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+            self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
+        else:
+            self.task_panel.taskActivated.connect(self.taskActivated)
+        self.task_panel.filterClearRequested.connect(self.filterClearRequested)
+        if self._http_client:
+            self.task_panel.set_http_client(self._http_client)
+
+    def _remove_task_tab(self) -> None:
+        if not self.task_panel:
+            return
+        idx = self.tabs.indexOf(self.task_panel)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        self.task_panel.deleteLater()
+        self.task_panel = None
+
+    def _add_calendar_tab(self) -> None:
+        if self.calendar_panel:
+            return
+        self.calendar_panel = CalendarPanel(
+            font_size_key="calendar_font_size_tabbed",
+            splitter_key="calendar_splitter_tabbed",
+            http_client=self._http_client,
+            api_base=self._http_client.base_url if self._http_client else None,
+        )
+        insert_idx = self._tab_insert_index(self.task_panel)
+        self.tabs.insertTab(insert_idx, self.calendar_panel, "Calendar")
+        self.calendar_panel.dateActivated.connect(self.dateActivated)
+        self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
+        self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
+        self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
+        self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
+        self.calendar_panel.pageDeleted.connect(self.pageDeleted)
+
+    def _remove_calendar_tab(self) -> None:
+        if not self.calendar_panel:
+            return
+        idx = self.tabs.indexOf(self.calendar_panel)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        self.calendar_panel.deleteLater()
+        self.calendar_panel = None
+        self._pending_calendar_vault_root = None
+        self._pending_calendar_refresh = False
+        self._pending_calendar_path = None
+        self._pending_calendar_date = None
+
+    def _add_link_tab(self) -> None:
+        if self.link_panel:
+            return
+        self.link_panel = LinkNavigatorPanel()
+        insert_idx = self._tab_insert_index(self.attachments_panel)
+        self.tabs.insertTab(insert_idx, self.link_panel, "Link Navigator")
+        self.link_panel.pageActivated.connect(self.linkActivated)
+        self.link_panel.openInWindowRequested.connect(self.openInWindowRequested)
+        self.link_panel.backRequested.connect(self.linkBackRequested)
+        self.link_panel.forwardRequested.connect(self.linkForwardRequested)
+        self.link_panel.homeRequested.connect(self.linkHomeRequested)
+
+    def _remove_link_tab(self) -> None:
+        if not self.link_panel:
+            return
+        idx = self.tabs.indexOf(self.link_panel)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        self.link_panel.deleteLater()
+        self.link_panel = None
     
     def _update_attachments_tab_label(self) -> None:
         """Update the Attachments tab label with the count of attachments."""

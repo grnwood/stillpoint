@@ -726,8 +726,8 @@ def save_one_shot_font_size(size: int) -> None:
     _update_global_config({"one_shot_font_size": val})
 
 
-def load_enable_ai_chats() -> bool:
-    """Load preference for enabling AI Chats tab. Defaults to False."""
+def load_global_enable_ai_chats() -> bool:
+    """Load global preference for enabling AI Chats tab. Defaults to False."""
     if not GLOBAL_CONFIG.exists():
         return False
     try:
@@ -735,6 +735,14 @@ def load_enable_ai_chats() -> bool:
     except (json.JSONDecodeError, OSError):
         return False
     return bool(payload.get("enable_ai_chats", False))
+
+
+def load_enable_ai_chats() -> bool:
+    """Load preference for enabling AI Chats tab (vault overrides global)."""
+    override = load_vault_enable_ai_chats_override()
+    if override is not None:
+        return override
+    return load_global_enable_ai_chats()
 
 def load_pygments_style(default: str = "monokai") -> str:
     """Load preferred Pygments style for code fences (global, not per-vault)."""
@@ -925,6 +933,214 @@ def save_pygments_style(style: str) -> None:
 def save_enable_ai_chats(enabled: bool) -> None:
     """Save preference for enabling AI Chats tab."""
     _update_global_config({"enable_ai_chats": bool(enabled)})
+
+
+def _load_vault_override_bool(key: str) -> Optional[bool]:
+    """Return per-vault override bool for key, or None if unset."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.execute("SELECT value FROM kv WHERE key = ?", (key,))
+        row = cur.fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    val = str(row[0]).strip().lower()
+    if val in {"true", "1", "yes"}:
+        return True
+    if val in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _save_vault_override_bool(key: str, value: Optional[bool]) -> None:
+    """Persist per-vault override bool for key, or clear if None."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        if value is None:
+            conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+        else:
+            conn.execute(
+                "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                (key, "true" if value else "false"),
+            )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_vault_feature_tasks_override() -> Optional[bool]:
+    """Return Tasks feature override for this vault."""
+    return _load_vault_override_bool("override_feature_tasks_enabled")
+
+
+def save_vault_feature_tasks_override(value: Optional[bool]) -> None:
+    """Persist Tasks feature override for this vault."""
+    _save_vault_override_bool("override_feature_tasks_enabled", value)
+
+
+def load_vault_feature_calendar_override() -> Optional[bool]:
+    """Return Calendar feature override for this vault."""
+    return _load_vault_override_bool("override_feature_calendar_enabled")
+
+
+def save_vault_feature_calendar_override(value: Optional[bool]) -> None:
+    """Persist Calendar feature override for this vault."""
+    _save_vault_override_bool("override_feature_calendar_enabled", value)
+
+
+def load_vault_feature_link_navigator_override() -> Optional[bool]:
+    """Return Link Navigator feature override for this vault."""
+    return _load_vault_override_bool("override_feature_link_navigator_enabled")
+
+
+def save_vault_feature_link_navigator_override(value: Optional[bool]) -> None:
+    """Persist Link Navigator feature override for this vault."""
+    _save_vault_override_bool("override_feature_link_navigator_enabled", value)
+
+
+def load_vault_feature_tags_override() -> Optional[bool]:
+    """Return Tags feature override for this vault."""
+    return _load_vault_override_bool("override_feature_tags_enabled")
+
+
+def save_vault_feature_tags_override(value: Optional[bool]) -> None:
+    """Persist Tags feature override for this vault."""
+    _save_vault_override_bool("override_feature_tags_enabled", value)
+
+
+def load_vault_feature_remote_vaults_override() -> Optional[bool]:
+    """Return Remote Vaults feature override for this vault."""
+    return _load_vault_override_bool("override_feature_remote_vaults_enabled")
+
+
+def save_vault_feature_remote_vaults_override(value: Optional[bool]) -> None:
+    """Persist Remote Vaults feature override for this vault."""
+    _save_vault_override_bool("override_feature_remote_vaults_enabled", value)
+
+
+def load_vault_enable_ai_chats_override() -> Optional[bool]:
+    """Return AI Chats override for this vault."""
+    return _load_vault_override_bool("override_enable_ai_chats")
+
+
+def save_vault_enable_ai_chats_override(value: Optional[bool]) -> None:
+    """Persist AI Chats override for this vault."""
+    _save_vault_override_bool("override_enable_ai_chats", value)
+
+
+def load_global_feature_tasks_enabled(default: bool = True) -> bool:
+    """Return whether the Tasks feature is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_tasks_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_tasks_enabled(default: bool = True) -> bool:
+    """Return whether the Tasks feature is enabled (vault overrides global)."""
+    override = load_vault_feature_tasks_override()
+    if override is not None:
+        return override
+    return load_global_feature_tasks_enabled(default=default)
+
+
+def save_feature_tasks_enabled(enabled: bool) -> None:
+    """Persist preference for enabling the Tasks feature."""
+    _update_global_config({"feature_tasks_enabled": bool(enabled)})
+
+
+def load_global_feature_calendar_enabled(default: bool = True) -> bool:
+    """Return whether the Calendar feature is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_calendar_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_calendar_enabled(default: bool = True) -> bool:
+    """Return whether the Calendar feature is enabled (vault overrides global)."""
+    override = load_vault_feature_calendar_override()
+    if override is not None:
+        return override
+    return load_global_feature_calendar_enabled(default=default)
+
+
+def save_feature_calendar_enabled(enabled: bool) -> None:
+    """Persist preference for enabling the Calendar feature."""
+    _update_global_config({"feature_calendar_enabled": bool(enabled)})
+
+
+def load_global_feature_link_navigator_enabled(default: bool = True) -> bool:
+    """Return whether the Link Navigator feature is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_link_navigator_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_link_navigator_enabled(default: bool = True) -> bool:
+    """Return whether the Link Navigator feature is enabled (vault overrides global)."""
+    override = load_vault_feature_link_navigator_override()
+    if override is not None:
+        return override
+    return load_global_feature_link_navigator_enabled(default=default)
+
+
+def save_feature_link_navigator_enabled(enabled: bool) -> None:
+    """Persist preference for enabling the Link Navigator feature."""
+    _update_global_config({"feature_link_navigator_enabled": bool(enabled)})
+
+
+def load_global_feature_tags_enabled(default: bool = True) -> bool:
+    """Return whether the Tags feature is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_tags_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_tags_enabled(default: bool = True) -> bool:
+    """Return whether the Tags feature is enabled (vault overrides global)."""
+    override = load_vault_feature_tags_override()
+    if override is not None:
+        return override
+    return load_global_feature_tags_enabled(default=default)
+
+
+def save_feature_tags_enabled(enabled: bool) -> None:
+    """Persist preference for enabling the Tags feature."""
+    _update_global_config({"feature_tags_enabled": bool(enabled)})
+
+
+def load_global_feature_remote_vaults_enabled(default: bool = True) -> bool:
+    """Return whether remote vaults are enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_remote_vaults_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_remote_vaults_enabled(default: bool = True) -> bool:
+    """Return whether remote vaults are enabled (vault overrides global)."""
+    override = load_vault_feature_remote_vaults_override()
+    if override is not None:
+        return override
+    return load_global_feature_remote_vaults_enabled(default=default)
+
+
+def save_feature_remote_vaults_enabled(enabled: bool) -> None:
+    """Persist preference for enabling remote vaults."""
+    _update_global_config({"feature_remote_vaults_enabled": bool(enabled)})
 
 
 def load_default_ai_server() -> Optional[str]:

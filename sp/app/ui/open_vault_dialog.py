@@ -117,6 +117,7 @@ class OpenVaultDialog(QDialog):
         self._selected: Optional[dict[str, str]] = None
         self._select_id = select_id
         self._remote_loaded = False
+        self._remote_vaults_enabled = config.load_feature_remote_vaults_enabled()
 
         layout = QVBoxLayout(self)
         intro_row = QHBoxLayout()
@@ -160,30 +161,35 @@ class OpenVaultDialog(QDialog):
         local_layout.addLayout(local_controls)
         self.tabs.addTab(local_tab, "Local Vaults")
 
-        remote_tab = QWidget()
-        remote_layout = QVBoxLayout(remote_tab)
-        remote_layout.setContentsMargins(0, 0, 0, 0)
-        remote_layout.setSpacing(6)
-        self.remote_list_widget = QListWidget()
-        self.remote_list_widget.itemDoubleClicked.connect(self._accept_current)
-        self.remote_list_widget.currentItemChanged.connect(self._on_selection_changed)
-        remote_layout.addWidget(self.remote_list_widget, 1)
+        self.remote_list_widget = None
+        self.add_remote_btn = None
+        self.remove_remote_btn = None
+        self.edit_configs_remote_btn = None
+        if self._remote_vaults_enabled:
+            remote_tab = QWidget()
+            remote_layout = QVBoxLayout(remote_tab)
+            remote_layout.setContentsMargins(0, 0, 0, 0)
+            remote_layout.setSpacing(6)
+            self.remote_list_widget = QListWidget()
+            self.remote_list_widget.itemDoubleClicked.connect(self._accept_current)
+            self.remote_list_widget.currentItemChanged.connect(self._on_selection_changed)
+            remote_layout.addWidget(self.remote_list_widget, 1)
 
-        remote_controls = QHBoxLayout()
-        self.add_remote_btn = QPushButton("Add Remote")
-        self.add_remote_btn.clicked.connect(self._add_remote)
-        if not self._on_add_remote:
-            self.add_remote_btn.setEnabled(False)
-        self.remove_remote_btn = QPushButton("Remove Selected")
-        self.remove_remote_btn.clicked.connect(self._remove_remote_selected)
-        self.edit_configs_remote_btn = QPushButton("Edit Vault Configs")
-        self.edit_configs_remote_btn.clicked.connect(self._open_config_file)
-        remote_controls.addWidget(self.add_remote_btn)
-        remote_controls.addWidget(self.remove_remote_btn)
-        remote_controls.addWidget(self.edit_configs_remote_btn)
-        remote_controls.addStretch(1)
-        remote_layout.addLayout(remote_controls)
-        self.tabs.addTab(remote_tab, "Remote Vaults")
+            remote_controls = QHBoxLayout()
+            self.add_remote_btn = QPushButton("Add Remote")
+            self.add_remote_btn.clicked.connect(self._add_remote)
+            if not self._on_add_remote:
+                self.add_remote_btn.setEnabled(False)
+            self.remove_remote_btn = QPushButton("Remove Selected")
+            self.remove_remote_btn.clicked.connect(self._remove_remote_selected)
+            self.edit_configs_remote_btn = QPushButton("Edit Vault Configs")
+            self.edit_configs_remote_btn.clicked.connect(self._open_config_file)
+            remote_controls.addWidget(self.add_remote_btn)
+            remote_controls.addWidget(self.remove_remote_btn)
+            remote_controls.addWidget(self.edit_configs_remote_btn)
+            remote_controls.addStretch(1)
+            remote_layout.addLayout(remote_controls)
+            self.tabs.addTab(remote_tab, "Remote Vaults")
 
         default_row = QHBoxLayout()
         default_row.addWidget(QLabel("Default vault:"))
@@ -250,6 +256,8 @@ class OpenVaultDialog(QDialog):
         self._update_buttons()
 
     def _refresh_remote_list(self, select_id: Optional[str] = None) -> None:
+        if not self.remote_list_widget:
+            return
         self._populate_remote_list(select_id=select_id)
         self._update_buttons()
 
@@ -354,11 +362,13 @@ class OpenVaultDialog(QDialog):
         self._update_buttons()
 
     def _on_tab_changed(self, index: int) -> None:
-        if index == 1:
+        if self._remote_vaults_enabled and index == 1:
             self._load_remote_vaults(select_id=self._select_id)
         self._update_buttons()
 
     def _load_remote_vaults(self, select_id: Optional[str] = None) -> None:
+        if not self._remote_vaults_enabled or not self.remote_list_widget:
+            return
         debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
         start = time.perf_counter()
         if self._remote_loaded:
@@ -401,7 +411,9 @@ class OpenVaultDialog(QDialog):
         self.remote_vaults = [v for v in vaults if v.get("kind") == "remote"]
 
     def _active_list_widget(self) -> QListWidget:
-        return self.remote_list_widget if self.tabs.currentIndex() == 1 else self.local_list_widget
+        if self._remote_vaults_enabled and self.remote_list_widget and self.tabs.currentIndex() == 1:
+            return self.remote_list_widget
+        return self.local_list_widget
 
     def _update_buttons(self) -> None:
         if not hasattr(self, "button_box"):
@@ -416,9 +428,10 @@ class OpenVaultDialog(QDialog):
             data = current_list.currentItem().data(Qt.UserRole)
             can_remove = bool(data)
         self.remove_btn.setEnabled(can_remove)
-        self.remove_remote_btn.setEnabled(
-            current_list is self.remote_list_widget and is_remote_vault
-        )
+        if self.remove_remote_btn and self.remote_list_widget:
+            self.remove_remote_btn.setEnabled(
+                current_list is self.remote_list_widget and is_remote_vault
+            )
         ok_button = self.button_box.button(QDialogButtonBox.Ok)
         if ok_button:
             ok_button.setEnabled(has_selection)
@@ -459,6 +472,8 @@ class OpenVaultDialog(QDialog):
         self._refresh_local_list(select_path=result["path"])
 
     def _add_remote(self) -> None:
+        if not self._remote_vaults_enabled:
+            return
         if not self._on_add_remote:
             return
         updated = self._on_add_remote()
@@ -490,6 +505,8 @@ class OpenVaultDialog(QDialog):
         self._refresh_local_list(select_path=next_selection)
 
     def _remove_remote_selected(self) -> None:
+        if not self.remote_list_widget:
+            return
         item = self.remote_list_widget.currentItem()
         if not item:
             return
@@ -545,6 +562,8 @@ class OpenVaultDialog(QDialog):
         config.delete_remote_server(host, int(port), scheme=scheme)
 
     def _populate_remote_list(self, select_id: Optional[str] = None) -> None:
+        if not self.remote_list_widget:
+            return
         self.remote_list_widget.clear()
         
         # Only show configured vaults with embedded status
@@ -598,6 +617,8 @@ class OpenVaultDialog(QDialog):
         return container
 
     def _set_remote_loading_entries(self) -> None:
+        if not self.remote_list_widget:
+            return
         entries: list[dict[str, str]] = []
         for server in config.load_remote_servers():
             host = server.get("host")

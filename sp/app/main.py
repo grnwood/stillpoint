@@ -535,7 +535,7 @@ def _parse_vault_arg(argv: list[str]) -> str | None:
 def _diag(msg: str) -> None:
     """Lightweight diagnostic logger for startup/teardown events."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[ZimxDiag {timestamp}] {msg}", file=sys.stderr)
+    print(f"[SPDiag {timestamp}] {msg}", file=sys.stderr)
 
 _FAULTHANDLER_FILE = None
 

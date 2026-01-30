@@ -1,27 +1,50 @@
 # Navigation
 
-StillPoint is built for fast movement through large vaults.
+## Vault Tree
+The left sidebar shows your vault's folder structure.
+- Click a page name to open it in the editor.
+- Expand/collapse folders with the arrow icons.
+- Right-click for more options like rename or delete.
 
-## Tree Navigation
-- Use the left tree to open pages.
-- **Drag and drop** pages or folders within the same parent folder to reorder them.
-- To move a page/folder to a different parent, **right-click** and choose **"Move To..."**.
-- Rename pages inline with right-click → Rename or F2.
+## Tags
+Tags help group related pages.
+- Add tags in your notes with `@tagname` or `#tagname`.
+- Click a tag in the Tags panel to see all pages with that tag.
+- Use tags to organize by project, topic, or status.
+Example:
+```markdown
+# Project Plan
 
-## Everyday Navigation
-- Jump to a page by name.
-  - CTRL-J to open the jump link editor. Begin typing to filter and/or
-    - then use ctrl-shift j/k to cycle through results (keeps fingers on home keys).
-- Use back/forward history to retrace steps.
-  - alt left/right - go back/go forward
-  - also alt j/k in vi mode.
+Status: @active #project
 
-## Keyboard Flow
-- Keep hands on the keyboard with shortcuts.
-- Use search and quick jump to avoid the mouse.
+- [ ] Research phase
+- [ ] Design phase
+```
 
-## Related Topics
-- All shortcuts: [:Keyboard_Shortcuts|Keyboard Shortcuts]
-- Searching and filtering: [:Search_and_Filtering|Search and Filtering]
-- Linking notes: [:Links_and_Backlinks|Links and Backlinks]
-- Power user setups: [:Advanced_Setup_(Tech)|Advanced Setup (Tech)]
+## Search
+Find anything in your vault quickly.
+- Type in the Search box to scan all pages.
+- Search looks in page titles and content.
+- Use quotes for exact phrases: `"project plan"`
+- Results show matching pages with snippets.
+
+## Link Navigator
+Explore connections between pages.
+- Shows a graph of how pages link to each other.
+- Backlinks show which pages reference the current page.
+- Click nodes to navigate, drag to rearrange.
+
+## Command Bar
+Quick access to everything.
+- Press Ctrl+Shift+P to open.
+- Type to search pages, commands, or settings.
+- Examples: type "new page" or "preferences".
+
+## History
+- Alt+Left/Right to go back/forward.
+- Alt+Home to return to your home page.
+
+## Tips
+- Use the vault tree for browsing.
+- Use search for finding specific content.
+- Use tags for ongoing projects.

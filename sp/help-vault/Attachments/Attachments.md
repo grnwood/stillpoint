@@ -1,15 +1,15 @@
-# Attachments and Images
+# Attachments
 
-StillPoint supports files and images inside your notes.
+## Files
+- Drag and drop files into the editor to attach.
+- Attachments appear in the Attachments panel.
+- Use the panel to open, rename, or remove attachments.
 
-## Add Attachments
-- Drag and drop files into a note.
-- StillPoint inserts a link to the file.
+## Images
+- Images can be embedded inline in a page.
+- Use attachments to keep large files organized.
 
-## Inline Images
-- Paste or drop an image into a note.
-- Images render inline and are stored with the vault.
-
-## Related Topics
-- Editing basics: [:Editing|Editing]
-- Links and backlinks: [:Links_and_Backlinks|Links and Backlinks]
+Example:
+```markdown
+![Screenshot](attachments/screenshot.png)
+```

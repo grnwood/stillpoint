@@ -104,6 +104,28 @@ class PreferencesDialog(QDialog):
         self.minimize_to_tray_checkbox.setChecked(config.load_minimize_to_tray_enabled())
         general_layout.addWidget(self.minimize_to_tray_checkbox)
 
+        general_layout.addWidget(QLabel("<b>Features</b>"))
+        self.feature_tasks_checkbox = QCheckBox("Enable Tasks")
+        self.feature_tasks_checkbox.setChecked(config.load_global_feature_tasks_enabled())
+        general_layout.addWidget(self.feature_tasks_checkbox)
+        self.feature_calendar_checkbox = QCheckBox("Enable Calendar")
+        self.feature_calendar_checkbox.setChecked(config.load_global_feature_calendar_enabled())
+        general_layout.addWidget(self.feature_calendar_checkbox)
+        self.feature_link_navigator_checkbox = QCheckBox("Enable Link Navigator")
+        self.feature_link_navigator_checkbox.setChecked(config.load_global_feature_link_navigator_enabled())
+        general_layout.addWidget(self.feature_link_navigator_checkbox)
+        self.feature_tags_checkbox = QCheckBox("Enable Page Tags")
+        self.feature_tags_checkbox.setChecked(config.load_global_feature_tags_enabled())
+        general_layout.addWidget(self.feature_tags_checkbox)
+        self.feature_remote_vaults_checkbox = QCheckBox("Enable Remote Vaults")
+        self.feature_remote_vaults_checkbox.setChecked(config.load_global_feature_remote_vaults_enabled())
+        general_layout.addWidget(self.feature_remote_vaults_checkbox)
+        self.feature_tasks_checkbox.toggled.connect(self._warn_restart_required)
+        self.feature_calendar_checkbox.toggled.connect(self._warn_restart_required)
+        self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
+        self.feature_tags_checkbox.toggled.connect(self._warn_restart_required)
+        self.feature_remote_vaults_checkbox.toggled.connect(self._warn_restart_required)
+
         general_layout.addWidget(QLabel("<b>Capture</b>"))
         row_capture_vault = QHBoxLayout()
         row_capture_vault.addWidget(QLabel("Home Quick Capture Vault:"))
@@ -353,7 +375,7 @@ class PreferencesDialog(QDialog):
         # AI & Code
         ai_layout = add_section("AI & Code")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
-        self.enable_ai_chats_checkbox.setChecked(config.load_enable_ai_chats())
+        self.enable_ai_chats_checkbox.setChecked(config.load_global_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
         ai_layout.addWidget(self.enable_ai_chats_checkbox)
         self.manage_server_btn = QPushButton("Manage Servers")
@@ -791,6 +813,11 @@ class PreferencesDialog(QDialog):
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
         config.save_tray_icon_enabled(self.tray_icon_checkbox.isChecked())
         config.save_minimize_to_tray_enabled(self.minimize_to_tray_checkbox.isChecked())
+        config.save_feature_tasks_enabled(self.feature_tasks_checkbox.isChecked())
+        config.save_feature_calendar_enabled(self.feature_calendar_checkbox.isChecked())
+        config.save_feature_link_navigator_enabled(self.feature_link_navigator_checkbox.isChecked())
+        config.save_feature_tags_enabled(self.feature_tags_checkbox.isChecked())
+        config.save_feature_remote_vaults_enabled(self.feature_remote_vaults_checkbox.isChecked())
         config.save_quick_capture_vault(self.quick_capture_vault_combo.currentData())
         capture_mode = "today" if self.quick_capture_page_combo.currentIndex() == 0 else "custom"
         config.save_quick_capture_page_mode(capture_mode)
@@ -907,7 +934,11 @@ class PreferencesDialog(QDialog):
         self.quick_capture_custom_edit.setVisible(is_custom)
 
     def _warn_restart_required(self) -> None:
-        return None
+        QMessageBox.information(
+            self,
+            "Restart Required",
+            "This change requires a restart to take effect.",
+        )
 
     def _apply_application_font_live(self) -> None:
         """Apply and save application font immediately when changed."""
