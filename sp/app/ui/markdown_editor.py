@@ -197,8 +197,6 @@ SYMBOL_TASK_LINE_PATTERN = re.compile(
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
 HR_MARKDOWN_PATTERN = re.compile(r"^(\s{0,3})([-*_])\\2{2,}\\s*$", re.MULTILINE)
-HR_DISPLAY_CHAR = "─"
-HR_DISPLAY_PATTERN = re.compile(rf"^(\\s{{0,3}}){HR_DISPLAY_CHAR}{{3,}}\\s*$", re.MULTILINE)
 # Plus-prefixed link pattern: +PageName or +Projects (CamelCase style), requires surrounding whitespace
 CAMEL_LINK_PATTERN = QRegularExpression(r"(?<!\\S)\\+(?P<link>[A-Za-z][\\w]*)(?=\\s|$)")
 
@@ -605,7 +603,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(QColor("#555555"))
-        self.hr_format.setBackground(QColor("#333333"))
+        self.hr_format.setBackground(QColor("#000000"))
+        self.hr_hidden_format = QTextCharFormat()
+        self.hr_hidden_format.setForeground(QColor(0, 0, 0, 0))
 
         self.table_format = QTextCharFormat()
         self.table_format.setFontFamily(mono_family)
@@ -974,7 +974,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         
         stripped_hr = text.strip()
         if stripped_hr == "---" or stripped_hr == "***" or stripped_hr == "___":
-            self.setFormat(0, len(text), self.hr_format)
+            self.setFormat(0, len(text), self.hr_hidden_format)
         
         # Apply monospace + compact font to table rows last so pipes align
         if is_table:
@@ -1339,7 +1339,13 @@ class MarkdownEditor(QTextEdit):
         self._hr_timer.setInterval(120)
         self._hr_timer.setSingleShot(True)
         self._hr_timer.timeout.connect(self._refresh_hr_selections)
-        self.textChanged.connect(self._schedule_hr_selections)
+        self._hr_resize_timer = QTimer(self)
+        self._hr_resize_timer.setInterval(120)
+        self._hr_resize_timer.setSingleShot(True)
+        self._hr_resize_timer.timeout.connect(self._refresh_hr_selections)
+        self._hr_live_refresh_enabled = os.getenv("SP_HR_LIVE_REFRESH", "0") in ("1", "true", "True")
+        if self._hr_live_refresh_enabled:
+            self.textChanged.connect(self._schedule_hr_selections)
         # Timer for CamelCase link conversion; explicitly started on key triggers
         self._camel_refresh_timer = QTimer(self)
         self._camel_refresh_timer.setInterval(120)
@@ -1369,7 +1375,9 @@ class MarkdownEditor(QTextEdit):
         self._suppress_paint = False
         self._suppress_paint_depth = 0
         self._saved_updates_enabled: Optional[bool] = None
-        self._hr_overlay_suppressed_until: float = 0.0
+        self._scroll_margin_retry_pending = False
+        self._render_images_retry_pending = False
+        self._hr_refresh_retry_pending = False
         self.destroyed.connect(self._on_editor_destroyed)
         self._connect_document_signals(self.document())
         viewport = self.viewport()
@@ -1505,6 +1513,33 @@ class MarkdownEditor(QTextEdit):
     def _is_alive(self, obj) -> bool:
         return bool(obj) and Shiboken.isValid(obj)
 
+    def _mutations_blocked(self) -> bool:
+        return (
+            self._display_guard
+            or self._cursor_events_blocked
+            or self._vi_paint_in_progress
+            or self._suppress_paint
+            or self._suppress_paint_depth > 0
+            or type(self)._LOAD_GUARD_DEPTH > 0
+            or self._in_mode_window_transition()
+        )
+
+    def _block_has_hr_object(self, block) -> bool:
+        if not block or not block.isValid():
+            return False
+        it = block.begin()
+        while not it.atEnd():
+            fragment = it.fragment()
+            if fragment.isValid():
+                fmt = fragment.charFormat()
+                try:
+                    if fmt.objectType() == HR_OBJECT_TYPE:
+                        return True
+                except Exception:
+                    pass
+            it += 1
+        return False
+
     def _push_paint_block(self) -> None:
         """Disable painting (and updates) with nesting support."""
         self._suppress_paint_depth += 1
@@ -1532,20 +1567,14 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
-        # Default to the safe selection-based HR rendering; opt-in to the custom painter.
-        if os.getenv("SP_HR_OVERLAY_MODE", "selections") != "paint":
-            super().paintEvent(event)
-            return
-        if time.monotonic() < self._hr_overlay_suppressed_until:
+        if os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
             super().paintEvent(event)
             return
         if self._suppress_paint or self._suppress_paint_depth:
             return
-        if self._display_guard or self._cursor_events_blocked:
+        if self._mutations_blocked():
             return
         if self._vi_paint_in_progress:
-            return
-        if not self.isVisible() or not self.isEnabled():
             return
         self._vi_paint_in_progress = True
         painter: Optional[QPainter] = None
@@ -1559,20 +1588,19 @@ class MarkdownEditor(QTextEdit):
                 or not self._document_alive
                 or not self._layout_alive
                 or not self._viewport_alive
+                or not self._is_alive(self)
             ):
                 return
-            try:
-                document = self.document()
-                if document is None:
-                    return
-                layout = document.documentLayout()
-                if layout is None:
-                    return
-                viewport = self.viewport()
-                if viewport is None:
-                    return
-            except RuntimeError:
+            document = self.document()
+            if not self._is_alive(document):
                 return
+            layout = document.documentLayout()
+            if not self._layout_alive or not self._is_alive(layout):
+                return
+            viewport = self.viewport()
+            if not self._is_alive(viewport):
+                return
+
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
@@ -1585,7 +1613,7 @@ class MarkdownEditor(QTextEdit):
                     except Exception:
                         return
                 painter = QPainter(viewport)
-                pen = QPen(QColor("#555555"))
+                pen = QPen(QColor("#cfcfcf"))
                 pen.setWidth(2)
                 painter.setPen(pen)
                 scroll_bar = self.verticalScrollBar()
@@ -1594,7 +1622,7 @@ class MarkdownEditor(QTextEdit):
                 while block.isValid():
                     if not self._document_alive or not self._editor_alive:
                         break
-                    if not self._layout_alive or not self._viewport_alive:
+                    if not self._is_alive(document) or not self._is_alive(layout):
                         break
                     if block.text().strip() in ("---", "***", "___"):
                         try:
@@ -2189,7 +2217,7 @@ class MarkdownEditor(QTextEdit):
 
     def _refresh_camel_links(self) -> None:
         """Convert any +CamelCase links in the document and re-render display."""
-        if self._display_guard:
+        if self._mutations_blocked():
             return
         current_text = self.toPlainText()
         # Remember current cursor location (block + column) to restore precisely
@@ -3366,6 +3394,26 @@ class MarkdownEditor(QTextEdit):
         if self._read_only_mode:
             if self._handle_read_only_keypress(event):
                 return
+        if self._vi_feature_enabled:
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if mods == Qt.AltModifier:
+                key = event.key()
+                if key == Qt.Key_H:
+                    self._trigger_history_navigation(Qt.Key_Left)
+                    event.accept()
+                    return
+                if key == Qt.Key_L:
+                    self._trigger_history_navigation(Qt.Key_Right)
+                    event.accept()
+                    return
+                if key == Qt.Key_J:
+                    self._trigger_history_navigation(Qt.Key_Down)
+                    event.accept()
+                    return
+                if key == Qt.Key_K:
+                    self._trigger_history_navigation(Qt.Key_Up)
+                    event.accept()
+                    return
         # Reserve Ctrl+\ and Ctrl+Backslash for application shortcuts (task panel focus)
         if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Backslash, 0x5C):
             event.ignore()
@@ -3446,6 +3494,11 @@ class MarkdownEditor(QTextEdit):
             self._edit_link_at_cursor(cursor)
             event.accept()
             return
+        # If the user just completed an HR line, refresh the display immediately.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
+            line_text = block.text().strip()
+            if line_text in ("---", "***", "___"):
+                QTimer.singleShot(0, self._refresh_hr_selections)
         # Tab: indent current line or selection
         if event.key() == Qt.Key_Tab and not meaningful_modifiers:
             if cursor.hasSelection() and self._apply_indent_to_selection(dedent=False):
@@ -3559,7 +3612,6 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_page_up(self):
         # Simulate PageUp: move cursor up by visible lines
-        self._hr_overlay_suppressed_until = time.monotonic() + 0.35
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
         c = self.textCursor()
         c.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, lines)
@@ -3567,7 +3619,6 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_page_down(self):
         # Simulate PageDown: move cursor down by visible lines
-        self._hr_overlay_suppressed_until = time.monotonic() + 0.35
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
         c = self.textCursor()
         c.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, lines)
@@ -5851,6 +5902,8 @@ class MarkdownEditor(QTextEdit):
         self.viewportResized.emit()
         # Reapply scroll-past-end margin on resize
         self._apply_scroll_past_end_margin()
+        # Rebuild HR display lines for new viewport width (debounced)
+        self._hr_resize_timer.start()
 
     def _to_display(self, text: str) -> str:
         def _symbol_for(state: str) -> str:
@@ -5876,13 +5929,11 @@ class MarkdownEditor(QTextEdit):
         converted = WIKI_LINK_STORAGE_PATTERN.sub(self._encode_wiki_link, converted)
         # Transform bullets: * → •
         converted = BULLET_STORAGE_PATTERN.sub(r"\1• ", converted)
-        converted = HR_MARKDOWN_PATTERN.sub(self._encode_hr_display, converted)
         return converted
 
     def _from_display(self, text: str) -> str:
-        restored = HR_DISPLAY_PATTERN.sub(lambda m: f"{m.group(1)}---", text)
         # Restore wiki-style links: sentinel + link + sentinel + label + sentinel → [link|label]
-        restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, restored)
+        restored = WIKI_LINK_DISPLAY_PATTERN.sub(self._decode_wiki_link, text)
         # Drop duplicated link tails that sometimes get re-appended after decoding.
         def _dedupe_tail(m: re.Match[str]) -> str:
             link = m.group("link")
@@ -5901,19 +5952,6 @@ class MarkdownEditor(QTextEdit):
         # Restore bullets: • → *
         restored = BULLET_DISPLAY_PATTERN.sub(r"\1* ", restored)
         return restored
-
-    def _encode_hr_display(self, match: re.Match[str]) -> str:
-        indent = match.group(1) or ""
-        try:
-            width = self.viewport().width()
-        except RuntimeError:
-            width = 0
-        if width <= 0:
-            count = 40
-        else:
-            char_width = max(1, self.fontMetrics().horizontalAdvance(HR_DISPLAY_CHAR))
-            count = max(10, int(width / char_width) - len(indent))
-        return f"{indent}{HR_DISPLAY_CHAR * count}"
 
     def _encode_heading(self, match: re.Match[str]) -> str:
         indent, hashes, _, body = match.groups()
@@ -5958,52 +5996,46 @@ class MarkdownEditor(QTextEdit):
         self._heading_timer.start()
 
     def _schedule_hr_selections(self) -> None:
-        if self._display_guard:
+        if not self._hr_live_refresh_enabled:
+            return
+        if self._mutations_blocked():
             return
         if self._hr_timer.isActive():
             return
         self._hr_timer.start()
 
     def _refresh_hr_selections(self) -> None:
+        if self._mutations_blocked():
+            if not self._hr_refresh_retry_pending:
+                self._hr_refresh_retry_pending = True
+                QTimer.singleShot(0, self._retry_refresh_hr)
+            return
+        self._hr_refresh_retry_pending = False
         doc = self.document()
         if doc is None:
             return
-        blocks_to_replace: list[int] = []
         selections: list[QTextEdit.ExtraSelection] = []
         block = doc.begin()
         while block.isValid():
-            text = block.text()
-            if HR_MARKDOWN_PATTERN.match(text):
-                blocks_to_replace.append(block.blockNumber())
-            elif text.strip() in ("---", "***", "___"):
+            if block.text().strip() in ("---", "***", "___"):
                 cursor = QTextCursor(block)
                 cursor.select(QTextCursor.LineUnderCursor)
                 sel = QTextEdit.ExtraSelection()
                 sel.cursor = cursor
                 fmt = sel.format
-                # Full-width bar with hidden text for horizontal rules.
-                fmt.setBackground(QColor("#4a4a4a"))
-                fmt.setForeground(QColor("#4a4a4a"))
+                fmt.setBackground(QColor("#333333"))
+                fmt.setForeground(QColor("#333333"))
                 fmt.setProperty(QTextFormat.FullWidthSelection, True)
                 fmt.setProperty(self._HR_EXTRA_KEY, True)
                 selections.append(sel)
             block = block.next()
-        if blocks_to_replace:
-            cursor = QTextCursor(doc)
-            for block_num in reversed(blocks_to_replace):
-                block = doc.findBlockByNumber(block_num)
-                if not block.isValid():
-                    continue
-                text = block.text()
-                match = HR_MARKDOWN_PATTERN.match(text)
-                if not match:
-                    continue
-                cursor.setPosition(block.position())
-                cursor.select(QTextCursor.LineUnderCursor)
-                cursor.insertText(self._encode_hr_display(match))
         existing = [s for s in self.extraSelections() if s.format.property(self._HR_EXTRA_KEY) is None]
         existing.extend(selections)
         self.setExtraSelections(existing)
+
+    def _retry_refresh_hr(self) -> None:
+        self._hr_refresh_retry_pending = False
+        self._refresh_hr_selections()
 
     def _emit_heading_outline(self) -> None:
         outline: list[dict] = []
@@ -6291,7 +6323,12 @@ class MarkdownEditor(QTextEdit):
             if hasattr(self.highlighter, '_block_cache'):
                 self.highlighter._block_cache.clear()
                 self.highlighter._cache_access_order.clear()
-            self.highlighter.rehighlight()
+            try:
+                if self._is_alive(self.highlighter):
+                    self.highlighter.rehighlight()
+            except RuntimeError:
+                # Highlighter can be deleted during teardown; skip safely.
+                pass
         self._last_block_count = current_count
         self._block_count_guard = False
         # All caret/line/block logic removed; only cache invalidation and block count update remain
@@ -6979,14 +7016,12 @@ class MarkdownEditor(QTextEdit):
 
     def _apply_scroll_past_end_margin(self) -> None:
         """Add bottom margin to the document so the view can scroll past the last line."""
-        if (
-            self._cursor_events_blocked
-            or self._display_guard
-            or self._suppress_vi_cursor
-            or type(self)._LOAD_GUARD_DEPTH > 0
-            or self._in_mode_window_transition()
-        ):
+        if self._mutations_blocked() or self._suppress_vi_cursor:
+            if not self._scroll_margin_retry_pending:
+                self._scroll_margin_retry_pending = True
+                QTimer.singleShot(0, self._retry_scroll_margin)
             return
+        self._scroll_margin_retry_pending = False
         try:
             root = self.document().rootFrame()
             fmt = root.frameFormat()
@@ -6998,6 +7033,10 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             # Be defensive—failure to set margin shouldn't break editing
             pass
+
+    def _retry_scroll_margin(self) -> None:
+        self._scroll_margin_retry_pending = False
+        self._apply_scroll_past_end_margin()
 
     def _scroll_one_line_down(self) -> None:
         """Scroll the viewport down by roughly one line height."""
@@ -7033,10 +7072,10 @@ class MarkdownEditor(QTextEdit):
         while pos < end:
             ch = text[pos]
             if ch == "\ufffc":
+                cursor.setPosition(pos)
+                fmt = cursor.charFormat()
                 img_fmt = image_formats.get(pos)
                 if img_fmt is None:
-                    cursor.setPosition(pos)
-                    fmt = cursor.charFormat()
                     if fmt.isImageFormat():
                         img_fmt = fmt.toImageFormat()
                 if img_fmt is not None:
@@ -7090,6 +7129,15 @@ class MarkdownEditor(QTextEdit):
         This operates on the current document by selecting each pattern range
         and inserting a QTextImageFormat created from the resolved path.
         """
+        if self._mutations_blocked():
+            if not self._render_images_retry_pending:
+                self._render_images_retry_pending = True
+                QTimer.singleShot(
+                    0,
+                    lambda: self._retry_render_images(display_text, scheduled_at),
+                )
+            return
+        self._render_images_retry_pending = False
         import time
         delay_ms = (time.perf_counter() - scheduled_at) * 1000.0 if scheduled_at else 0.0
         matches: list[tuple[int, int, str, str, Optional[str], str, str]] = []
@@ -7192,6 +7240,10 @@ class MarkdownEditor(QTextEdit):
                 f"qt idle after images delay={(time.perf_counter() - end_at)*1000:.1f}ms"
             ),
         )
+
+    def _retry_render_images(self, display_text: str, scheduled_at: Optional[float]) -> None:
+        self._render_images_retry_pending = False
+        self._render_images(display_text, scheduled_at)
 
     def _insert_image_from_path(self, raw_path: str, alt: str = "", width: Optional[int] = None) -> None:
         fmt = self._create_image_format(raw_path, alt, str(width) if width else None)

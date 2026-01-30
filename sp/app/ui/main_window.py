@@ -1824,7 +1824,7 @@ class MainWindow(QMainWindow):
         insert_link_action.triggered.connect(self._insert_link)
         file_menu.addAction(insert_link_action)
 
-        help_menu = self.menuBar().addMenu("&Help")
+        help_menu = self.menuBar().addMenu("Hel&p")
         documentation_action = QAction("Documentation", self)
         documentation_action.setShortcut(QKeySequence(Qt.Key_F1))
         documentation_action.setShortcutContext(Qt.ApplicationShortcut)
