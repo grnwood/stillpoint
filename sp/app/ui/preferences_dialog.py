@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -691,12 +692,30 @@ class PreferencesDialog(QDialog):
             QMessageBox.warning(self, "Refresh Failed", "Failed to refresh models from the server.")
 
     def _browse_plantuml_jar(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select plantuml.jar", "", "JAR Files (*.jar);;All Files (*)")
+        options = QFileDialog.Options()
+        if sys.platform == "win32":
+            options |= QFileDialog.DontUseNativeDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select plantuml.jar",
+            "",
+            "JAR Files (*.jar);;All Files (*)",
+            options=options,
+        )
         if path:
             self.plantuml_jar_edit.setText(path)
 
     def _browse_java_path(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select java executable", "", "Executable Files (*)")
+        options = QFileDialog.Options()
+        if sys.platform == "win32":
+            options |= QFileDialog.DontUseNativeDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select java executable",
+            "",
+            "Executable Files (*)",
+            options=options,
+        )
         if path:
             self.plantuml_java_edit.setText(path)
 

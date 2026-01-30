@@ -11042,6 +11042,9 @@ class MainWindow(QMainWindow):
         """Select tree path after deferring to next event loop iteration."""
         if not target_path:
             return
+        if self._tree_refresh_in_progress:
+            self._pending_selection = target_path
+            return
         try:
             self._ensure_tree_path_loaded(target_path)
             if self._select_tree_path(target_path):

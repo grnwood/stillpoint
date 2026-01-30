@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QByteArray,
     QEvent,
     QMimeData,
+    QPointer,
     Qt,
     QRegularExpression,
     Signal,
@@ -1530,6 +1531,8 @@ class MarkdownEditor(QTextEdit):
             return
         if self._suppress_paint or self._suppress_paint_depth:
             return
+        if self._display_guard or self._cursor_events_blocked:
+            return
         if self._vi_paint_in_progress:
             return
         self._vi_paint_in_progress = True
@@ -1550,6 +1553,11 @@ class MarkdownEditor(QTextEdit):
             viewport = self.viewport()
             if not self._is_alive(viewport):
                 return
+            doc_ptr = QPointer(document)
+            layout_ptr = QPointer(layout)
+            viewport_ptr = QPointer(viewport)
+            if doc_ptr.isNull() or layout_ptr.isNull() or viewport_ptr.isNull():
+                return
 
             super().paintEvent(event)
             if not self._vi_has_painted:
@@ -1562,6 +1570,8 @@ class MarkdownEditor(QTextEdit):
                         self._viewport_alive = True
                     except Exception:
                         return
+                if viewport_ptr.isNull():
+                    return
                 painter = QPainter(viewport)
                 pen = QPen(QColor("#555555"))
                 pen.setWidth(2)
@@ -1571,6 +1581,8 @@ class MarkdownEditor(QTextEdit):
                 block = document.begin()
                 while block.isValid():
                     if not self._document_alive or not self._editor_alive:
+                        break
+                    if doc_ptr.isNull() or layout_ptr.isNull() or viewport_ptr.isNull():
                         break
                     if not self._is_alive(document) or not self._is_alive(layout):
                         break
