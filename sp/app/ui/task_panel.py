@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import math
 import html
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -365,6 +366,14 @@ class TaskPanel(QWidget):
         self.zoom_in_btn.clicked.connect(lambda: self._adjust_font_size(1))
         header_row.addWidget(self.zoom_in_btn)
 
+        self._print_btn = QToolButton()
+        self._print_btn.setToolTip("Print visible tasks to browser")
+        self._print_btn.setAutoRaise(True)
+        self._print_btn.setIcon(self._load_svg_icon("print.svg", QSize(20, 20)))
+        self._print_btn.setIconSize(QSize(20, 20))
+        self._print_btn.clicked.connect(self._print_visible_tasks)
+        header_row.addWidget(self._print_btn)
+
         self._ai_toggle_btn = QToolButton()
         self._ai_toggle_btn.setToolTip("Open task AI insights and chat")
         self._ai_toggle_btn.setAutoRaise(True)
@@ -617,6 +626,7 @@ class TaskPanel(QWidget):
             self.show_actionable,
             self.zoom_in_btn,
             self.zoom_out_btn,
+            self._print_btn,
             self._ai_toggle_btn,
             self._ai_title_label,
             self._ai_delete_btn,
@@ -634,6 +644,209 @@ class TaskPanel(QWidget):
                 self._ai_chat_panel.set_font_size(self._font_size)
             except Exception:
                 pass
+
+    def _load_print_css(self) -> str:
+        css_path = Path(__file__).resolve().parents[2] / "server" / "templates" / "print.css"
+        try:
+            return css_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _iter_task_items(self) -> list[tuple[QTreeWidgetItem, int, dict]]:
+        items: list[tuple[QTreeWidgetItem, int, dict]] = []
+        iterator = QTreeWidgetItemIterator(self.task_tree, QTreeWidgetItemIterator.All)
+        while iterator.value():
+            item = iterator.value()
+            task = item.data(0, Qt.UserRole) or {}
+            if not task:
+                iterator += 1
+                continue
+            depth = 0
+            parent = item.parent()
+            while parent is not None:
+                depth += 1
+                parent = parent.parent()
+            items.append((item, depth, task))
+            iterator += 1
+        return items
+
+    def _build_task_print_html(self) -> str:
+        css = self._load_print_css()
+        extra_css = """
+        table.task-print {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        table.task-print th,
+        table.task-print td {
+            border: 1px solid var(--border);
+            padding: 0.35em 0.5em;
+            vertical-align: top;
+        }
+        table.task-print th {
+            background: #f0f0f0;
+            font-weight: 600;
+        }
+        .task-priority {
+            text-align: center;
+            white-space: nowrap;
+            width: 4.5em;
+        }
+        .task-due,
+        .task-start {
+            white-space: nowrap;
+        }
+        .task-path {
+            font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+            font-size: 0.95em;
+        }
+        .task-checkbox {
+            display: inline-block;
+            width: 1.1em;
+            margin-right: 0.35em;
+            text-align: center;
+        }
+        .task-text {
+            display: inline-block;
+            vertical-align: top;
+        }
+        .task-done .task-text {
+            text-decoration: line-through;
+        }
+        .task-muted td {
+            color: var(--muted);
+        }
+        """
+
+        items = self._iter_task_items()
+        count = len(items)
+        filters: list[str] = []
+        search_text = self.search.text().strip()
+        if search_text:
+            filters.append(f"Search: {html.escape(search_text)}")
+        if self.active_tags:
+            safe_tags = ", ".join(html.escape(tag) for tag in sorted(self.active_tags))
+            filters.append(f"Tags: {safe_tags}")
+        if self._nav_filter_prefix and self._nav_filter_enabled:
+            filters.append(f"Path: {html.escape(self._present_path(self._nav_filter_prefix))}")
+        if not self.show_completed.isChecked():
+            filters.append("Hide completed")
+        if not self.show_future.isChecked():
+            filters.append("Hide future")
+        if self.show_actionable.isChecked():
+            filters.append("Actionable only")
+        if self._date_filter_active():
+            start_label = self._date_filter_start.isoformat() if self._date_filter_start else "Any"
+            end_label = self._date_filter_end.isoformat() if self._date_filter_end else "Any"
+            if self._date_filter_active_preset:
+                filters.append(f"Date filter: {self._date_filter_active_preset} ({start_label} → {end_label})")
+            else:
+                filters.append(f"Date filter: {start_label} → {end_label}")
+        meta_bits = [f"{count} task{'s' if count != 1 else ''}"]
+        if filters:
+            meta_bits.append(" · ".join(filters))
+        meta_bits.append(f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        meta_line = " · ".join(meta_bits)
+
+        headers = ["!", "Task", "Due"]
+        if self._show_task_start_column:
+            headers.append("Start")
+        if self._show_task_page_column:
+            headers.append("Path")
+
+        header_cells = "".join(f"<th>{html.escape(label)}</th>" for label in headers)
+        rows_html = []
+        for _, depth, task in items:
+            priority_level = min(task.get("priority", 0) or 0, 3)
+            priority_text, due_overdue = self._priority_time_label(task)
+            pri_style = ""
+            pri_brush = self._priority_brush(priority_level)
+            if pri_brush:
+                bg = pri_brush["bg"].name()
+                fg = pri_brush["fg"].name()
+                pri_style += f"background-color: {bg}; color: {fg};"
+            if due_overdue:
+                pri_style += "text-decoration: underline;"
+            due_style = ""
+            due_fg_bg = self._due_colors(task)
+            if due_fg_bg:
+                fg, bg = due_fg_bg
+                if bg:
+                    due_style += f"background-color: {bg.name()};"
+                if fg:
+                    due_style += f"color: {fg.name()};"
+
+            is_done = task.get("status") == "done"
+            row_classes = []
+            if is_done:
+                row_classes.append("task-done")
+            if not task.get("actionable", True):
+                row_classes.append("task-muted")
+            row_class_attr = f" class=\"{' '.join(row_classes)}\"" if row_classes else ""
+
+            checkbox = "☑" if is_done else "☐"
+            task_text = self._format_task_text(task.get("text", "") or "")
+            task_text = html.escape(task_text.replace("\n", " ").strip())
+            indent_px = max(0, depth) * 18
+            task_html = (
+                f"<span class=\"task-text\" style=\"margin-left: {indent_px}px;\">"
+                f"<span class=\"task-checkbox\">{checkbox}</span>{task_text}</span>"
+            )
+
+            row_cells = []
+            row_cells.append(
+                f"<td class=\"task-priority\" style=\"{pri_style}\">{html.escape(priority_text)}</td>"
+            )
+            row_cells.append(f"<td>{task_html}</td>")
+            due_val = html.escape((task.get("due") or "").strip())
+            row_cells.append(f"<td class=\"task-due\" style=\"{due_style}\">{due_val}</td>")
+            if self._show_task_start_column:
+                start_val = html.escape((task.get("starts") or task.get("start") or "").strip())
+                row_cells.append(f"<td class=\"task-start\">{start_val}</td>")
+            if self._show_task_page_column:
+                path_val = html.escape(self._present_path(task.get("path") or ""))
+                row_cells.append(f"<td class=\"task-path\">{path_val}</td>")
+            rows_html.append(f"<tr{row_class_attr}>" + "".join(row_cells) + "</tr>")
+
+        table_html = (
+            "<table class=\"task-print\">"
+            f"<thead><tr>{header_cells}</tr></thead>"
+            f"<tbody>{''.join(rows_html)}</tbody>"
+            "</table>"
+        )
+
+        header_html = (
+            "<header class=\"stillpoint-header\">"
+            "<h1>Tasks</h1>"
+            f"<div class=\"meta\">{meta_line}</div>"
+            "</header>"
+        )
+
+        return (
+            "<!doctype html><html lang=\"en\">"
+            "<head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            f"<title>StillPoint Tasks</title>"
+            f"<style>{css}\n{extra_css}</style>"
+            "</head><body>"
+            "<main class=\"stillpoint-print\">"
+            f"{header_html}{table_html}"
+            "</main></body></html>"
+        )
+
+    def _print_visible_tasks(self) -> None:
+        if not config.has_active_vault():
+            return
+        html_doc = self._build_task_print_html()
+        if not html_doc:
+            return
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
+            with tmp:
+                tmp.write(html_doc.encode("utf-8"))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+        except Exception:
+            return
 
     def _reset_horizontal_scroll(self) -> None:
         """Force the task list to show the left-most priority column."""

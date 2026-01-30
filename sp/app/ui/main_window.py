@@ -1707,10 +1707,10 @@ class MainWindow(QMainWindow):
             task_window_action = QAction("Open Task Panel Window", self)
             task_window_action.triggered.connect(self._open_task_panel_window)
             view_menu.addAction(task_window_action)
-        if self._feature_calendar_enabled:
-            calendar_window_action = QAction("Open Calendar Window", self)
-            calendar_window_action.triggered.connect(self._open_calendar_panel_window)
-            view_menu.addAction(calendar_window_action)
+        self._action_calendar_window = QAction("Open Calendar Window", self)
+        self._action_calendar_window.triggered.connect(self._open_calendar_panel_window)
+        self._action_calendar_window.setVisible(self._feature_calendar_enabled)
+        view_menu.addAction(self._action_calendar_window)
         if self._feature_link_navigator_enabled:
             link_window_action = QAction("Open Link Navigator Window", self)
             link_window_action.triggered.connect(self._open_link_panel_window)
@@ -1773,10 +1773,10 @@ class MainWindow(QMainWindow):
             tags_action.triggered.connect(self._focus_tags_tab)
             go_menu.addAction(tags_action)
 
-        if self._feature_calendar_enabled:
-            calendar_action = QAction("Calendar", self)
-            calendar_action.triggered.connect(self._focus_calendar_tab)
-            go_menu.addAction(calendar_action)
+        self._action_go_calendar = QAction("Calendar", self)
+        self._action_go_calendar.triggered.connect(self._focus_calendar_tab)
+        self._action_go_calendar.setVisible(self._feature_calendar_enabled)
+        go_menu.addAction(self._action_go_calendar)
 
         attach_action = QAction("Attachments", self)
         attach_action.triggered.connect(self._focus_attachments_tab)
@@ -1796,10 +1796,11 @@ class MainWindow(QMainWindow):
         jump_action.triggered.connect(self._jump_to_page)
         go_menu.addAction(jump_action)
 
-        today_action = QAction("Today", self)
-        today_action.setToolTip("Today's journal entry (Alt+D)")
-        today_action.triggered.connect(self._open_journal_today)
-        go_menu.addAction(today_action)
+        self._action_go_today = QAction("Today", self)
+        self._action_go_today.setToolTip("Today's journal entry (Alt+D)")
+        self._action_go_today.triggered.connect(self._open_journal_today)
+        self._action_go_today.setVisible(self._feature_calendar_enabled)
+        go_menu.addAction(self._action_go_today)
         command_bar_action = QAction("Command Bar", self)
         command_bar_action.triggered.connect(self._show_command_bar)
         go_menu.addAction(command_bar_action)
@@ -2019,11 +2020,14 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(search_action)
 
         # Today button (jump to today's journal entry)
-        today_action = QAction("Today", self)
-        today_action.setIcon(today_icon if today_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        today_action.setToolTip("Today's journal entry (Alt+D)")
-        today_action.triggered.connect(self._open_journal_today)
-        self.toolbar.addAction(today_action)
+        self._toolbar_today_action = QAction("Today", self)
+        self._toolbar_today_action.setIcon(
+            today_icon if today_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
+        )
+        self._toolbar_today_action.setToolTip("Today's journal entry (Alt+D)")
+        self._toolbar_today_action.triggered.connect(self._open_journal_today)
+        self._toolbar_today_action.setVisible(self._feature_calendar_enabled)
+        self.toolbar.addAction(self._toolbar_today_action)
         
         # Bookmark button (bold blue plus symbol)
         self.bookmark_button = QAction("Add Bookmark", self)
@@ -2042,6 +2046,14 @@ class MainWindow(QMainWindow):
             self.bookmark_button.setText("+")
             # We'll apply color via stylesheet after adding to toolbar
         self.toolbar.addAction(self.bookmark_button)
+
+        print_action = QAction("Print Page", self)
+        print_action.setToolTip("Print or export current page to PDF (Ctrl+P)")
+        print_icon = self._load_icon(self._find_asset("print.svg"), Qt.white, size=18)
+        if print_icon:
+            print_action.setIcon(print_icon)
+        print_action.triggered.connect(self._print_current_page)
+        self.toolbar.addAction(print_action)
 
         # History navigation buttons
         self.nav_back_action = QAction(self)
@@ -3982,6 +3994,19 @@ class MainWindow(QMainWindow):
         if changed:
             self._refresh_right_minibar_tabs()
             self._refresh_left_minibar_tabs()
+        self._apply_calendar_action_visibility()
+
+    def _apply_calendar_action_visibility(self) -> None:
+        visible = bool(self._feature_calendar_enabled)
+        for action_name in (
+            "_toolbar_today_action",
+            "_action_go_today",
+            "_action_go_calendar",
+            "_action_calendar_window",
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setVisible(visible)
 
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()

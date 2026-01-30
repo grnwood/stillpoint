@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import html
+import tempfile
 import re
 import os
 import calendar
-from datetime import date as Date
+from datetime import date as Date, datetime
 import math
 from typing import Optional, Callable
 
-from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect, QMimeData
-from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush, QDrag
+from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect, QMimeData, QUrl
+from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush, QDrag, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -402,6 +404,19 @@ class CalendarPanel(QWidget):
         ph_layout.addWidget(subpages_col, 1)
         pages_headings_container.setLayout(ph_layout)
 
+        print_row = QHBoxLayout()
+        print_row.setContentsMargins(0, 0, 0, 0)
+        print_row.setSpacing(6)
+        print_row.addStretch(1)
+        self._print_btn = QToolButton()
+        self._print_btn.setToolTip("Print calendar view to browser")
+        self._print_btn.setAutoRaise(True)
+        self._print_btn.setIcon(self._load_svg_icon("print.svg", QSize(20, 20)))
+        self._print_btn.setIconSize(QSize(20, 20))
+        self._print_btn.clicked.connect(self._print_calendar_view)
+        print_row.addWidget(self._print_btn)
+
+        self.day_insights_layout.addLayout(print_row)
         self.day_insights_layout.addWidget(pages_headings_container, 1)
         recent_row = QHBoxLayout()
         recent_row.setContentsMargins(0, 0, 0, 0)
@@ -672,6 +687,7 @@ class CalendarPanel(QWidget):
             self.filter_btn,
             self.zoom_in_btn,
             self.zoom_out_btn,
+            getattr(self, "_print_btn", None),
             getattr(self, "ai_title_label", None),
             getattr(self, "ai_delete_btn", None),
             getattr(self, "ai_generate_btn", None),
@@ -704,6 +720,253 @@ class CalendarPanel(QWidget):
                 self.ai_markdown_view.setFont(font)
             except Exception:
                 pass
+
+    def _load_print_css(self) -> str:
+        css_path = Path(__file__).resolve().parents[2] / "server" / "templates" / "print.css"
+        try:
+            return css_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _calendar_table_html(self) -> tuple[str, str]:
+        year = self.calendar.yearShown()
+        month = self.calendar.monthShown()
+        month_label = QDate(year, month, 1).toString("MMMM yyyy")
+        cal = calendar.Calendar(firstweekday=0)
+        weeks = cal.monthdayscalendar(year, month)
+        today = QDate.currentDate()
+        selected_dates = self.multi_selected_dates or {self.calendar.selectedDate()}
+        selected = {(d.year(), d.month(), d.day()) for d in selected_dates if d and d.isValid()}
+
+        headings = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        head_cells = "".join(f"<th>{h}</th>" for h in headings)
+        rows = []
+        for week in weeks:
+            cells = []
+            for day in week:
+                if day == 0:
+                    cells.append("<td class=\"calendar-day empty\"></td>")
+                    continue
+                classes = ["calendar-day"]
+                if today.year() == year and today.month() == month and today.day() == day:
+                    classes.append("today")
+                if (year, month, day) in selected:
+                    classes.append("selected")
+                class_attr = " ".join(classes)
+                cells.append(f"<td class=\"{class_attr}\">{day}</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        table_html = (
+            "<table class=\"calendar-print\">"
+            f"<thead><tr>{head_cells}</tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody>"
+            "</table>"
+        )
+        return month_label, table_html
+
+    def _read_ai_summary_html(self) -> str:
+        if not self.vault_root:
+            return ""
+        dates = sorted(self.multi_selected_dates or {self.calendar.selectedDate()}, key=lambda d: d.toJulianDay())
+        if len(dates) != 1:
+            return ""
+        path = self._ai_summary_path_for_date(dates[0])
+        if not path or not path.exists():
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            try:
+                text = path.read_text(errors="ignore")
+            except Exception:
+                return ""
+        if not text.strip():
+            return ""
+        cleaned = self._replace_emoji_with_fallback(text.strip())
+        try:
+            return render_markdown(cleaned, extensions=["extra", "sane_lists", "tables", "fenced_code"])
+        except Exception:
+            return "<pre>" + html.escape(cleaned) + "</pre>"
+
+    def _build_due_tasks_table(self) -> str:
+        header = self.tasks_due_list.headerItem()
+        headers = []
+        if header:
+            for i in range(self.tasks_due_list.columnCount()):
+                headers.append(header.text(i))
+        header_cells = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+        rows = []
+        for idx in range(self.tasks_due_list.topLevelItemCount()):
+            item = self.tasks_due_list.topLevelItem(idx)
+            task = item.data(0, Qt.UserRole) or {}
+            priority_level = min(task.get("priority", 0) or 0, 3)
+            priority_text, due_overdue = self._priority_time_label(task)
+            pri_style = ""
+            pri_brush = self._priority_brush(priority_level)
+            if pri_brush:
+                pri_style += f"background-color: {pri_brush['bg'].name()}; color: {pri_brush['fg'].name()};"
+            if due_overdue:
+                pri_style += "text-decoration: underline;"
+            due_style = ""
+            due_colors = self._due_colors(task.get("due") or "")
+            if due_colors:
+                fg, bg = due_colors
+                due_style += f"color: {fg.name()}; background-color: {bg.name()};"
+            row_cells = []
+            for col in range(self.tasks_due_list.columnCount()):
+                text = item.text(col)
+                safe = html.escape(text or "")
+                cell_style = ""
+                if col == 0 and pri_style:
+                    cell_style = pri_style
+                if col == 2 and due_style:
+                    cell_style = due_style
+                class_name = "task-cell"
+                if col == 1:
+                    class_name = "task-text"
+                row_cells.append(f"<td class=\"{class_name}\" style=\"{cell_style}\">{safe}</td>")
+            rows.append("<tr>" + "".join(row_cells) + "</tr>")
+        return "<table class=\"task-print\"><thead><tr>" + header_cells + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+    def _build_calendar_print_html(self) -> str:
+        css = self._load_print_css()
+        month_label, calendar_table = self._calendar_table_html()
+        title = html.escape(self.insight_title.text() or "Calendar")
+        counts = html.escape(self.insight_counts.text() or "")
+        tags = html.escape(self.insight_tags.text() or "")
+        generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        headings = [self.headings_list.item(i).text() for i in range(self.headings_list.count())] if self.headings_list.isVisible() else []
+        subpages = [self.subpage_list.item(i).text() for i in range(self.subpage_list.count())]
+        recent_pages = [self.recent_list.item(i).text() for i in range(self.recent_list.count())]
+
+        ai_html = self._read_ai_summary_html()
+
+        overdue_on = "On" if self.overdue_checkbox.isChecked() else "Off"
+        future_on = "On" if self.future_checkbox.isChecked() else "Off"
+        due_filters = f"Overdue: {overdue_on} · Future: {future_on}"
+
+        extra_css = """
+        .calendar-print {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0.5em 0 1.25em;
+        }
+        .calendar-print th,
+        .calendar-print td {
+            border: 1px solid var(--border);
+            text-align: center;
+            padding: 0.35em;
+            width: 14.28%;
+        }
+        .calendar-day.today {
+            background: #4A90E2;
+            color: #fff;
+            font-weight: 700;
+        }
+        .calendar-day.selected {
+            background: #d9e9ff;
+            font-weight: 600;
+        }
+        .calendar-day.empty {
+            background: #fafafa;
+        }
+        .section {
+            margin: 1em 0 1.4em;
+        }
+        .section h2 {
+            margin: 0 0 0.4em;
+            font-size: 1.2em;
+        }
+        .section ul {
+            margin: 0.2em 0 0.2em 1.2em;
+        }
+        table.task-print {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        table.task-print th,
+        table.task-print td {
+            border: 1px solid var(--border);
+            padding: 0.35em 0.5em;
+            vertical-align: top;
+        }
+        table.task-print th {
+            background: #f0f0f0;
+            font-weight: 600;
+        }
+        .task-text {
+            white-space: normal;
+        }
+        """
+
+        def _list_html(items: list[str]) -> str:
+            if not items:
+                return "<p>—</p>"
+            return "<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in items) + "</ul>"
+
+        sections = []
+        sections.append(
+            "<section class=\"section\">"
+            f"<h2>Calendar — {html.escape(month_label)}</h2>"
+            f"{calendar_table}"
+            "</section>"
+        )
+        if headings:
+            sections.append(
+                "<section class=\"section\"><h2>Headings</h2>" + _list_html(headings) + "</section>"
+            )
+        sections.append(
+            "<section class=\"section\"><h2>Subpages</h2>" + _list_html(subpages) + "</section>"
+        )
+        if ai_html:
+            sections.append(
+                "<section class=\"section\"><h2>AI Summary</h2>" + ai_html + "</section>"
+            )
+        if recent_pages:
+            sections.append(
+                "<section class=\"section\"><h2>Edited Pages</h2>" + _list_html(recent_pages) + "</section>"
+            )
+        if self.tasks_due_list.topLevelItemCount():
+            sections.append(
+                "<section class=\"section\"><h2>Due Tasks</h2>"
+                f"<p>{html.escape(due_filters)}</p>"
+                f"{self._build_due_tasks_table()}</section>"
+            )
+
+        header_html = (
+            "<header class=\"stillpoint-header\">"
+            f"<h1>{title}</h1>"
+            f"<div class=\"meta\">{counts}</div>"
+            f"<div class=\"meta\">{tags}</div>"
+            f"<div class=\"meta\">Generated {generated}</div>"
+            "</header>"
+        )
+
+        return (
+            "<!doctype html><html lang=\"en\">"
+            "<head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>StillPoint Calendar</title>"
+            f"<style>{css}\n{extra_css}</style>"
+            "</head><body>"
+            "<main class=\"stillpoint-print\">"
+            f"{header_html}{''.join(sections)}"
+            "</main></body></html>"
+        )
+
+    def _print_calendar_view(self) -> None:
+        if not config.has_active_vault():
+            return
+        html_doc = self._build_calendar_print_html()
+        if not html_doc:
+            return
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
+            with tmp:
+                tmp.write(html_doc.encode("utf-8"))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+        except Exception:
+            return
 
     def _save_splitter_sizes(self) -> None:
         try:
