@@ -1061,10 +1061,10 @@ async def create_vault(request: Request, payload: VaultCreatePayload, _admin: No
         raise HTTPException(status_code=500, detail=f"Failed to create vault: {exc}") from exc
     try:
         _init_vault_db(target)
-    if payload.auth_username or payload.auth_password:
-        if not payload.auth_username or not payload.auth_password:
-            raise HTTPException(status_code=400, detail="Username and password are required to configure auth")
-        _set_auth_config_for_path(target, payload.auth_username, payload.auth_password)
+        if payload.auth_username or payload.auth_password:
+            if not payload.auth_username or not payload.auth_password:
+                raise HTTPException(status_code=400, detail="Username and password are required to configure auth")
+            _set_auth_config_for_path(target, payload.auth_username, payload.auth_password)
     except HTTPException:
         raise
     except Exception as exc:

@@ -28,6 +28,7 @@ hidden = (
     collect_submodules('sp')
     + collect_submodules('sp.app')
     + collect_submodules('sp.app.ui')  # Explicitly collect all UI modules
+    + collect_submodules('sp.server')
     + collect_submodules('PySide6')
     + [
         'sp.app.ui.main_window',  # Explicitly ensure main_window is included
@@ -40,6 +41,14 @@ hidden = (
         'sp.app.ui.task_panel',
         'sp.app.ui.toc_widget',
         'sp.app.quickcapture',
+        'sp.server.api',
+        'sp.server.indexer',
+        'sp.server.file_ops',
+        'sp.server.search_index',
+        'sp.server.state',
+        'sp.server.vector',
+        'sp.server.adapters',
+        'sp.server.adapters.files',
         'fastapi',
         'httpx',
         'pydantic',
@@ -61,6 +70,7 @@ STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION','0.99')
 _datas = [
     (os.path.join(ROOT, 'sp', 'templates'), 'sp/templates'),
     (os.path.join(ROOT, 'sp', 'server', 'templates'), 'sp/server/templates'),
+    (os.path.join(ROOT, 'sp', 'server'), 'sp/server'),
     (os.path.join(ROOT, 'sp', 'app', 'puml_shortcuts.json'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'calendar-day-insight-prompt.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
