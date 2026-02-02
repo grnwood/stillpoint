@@ -6,12 +6,13 @@ import tempfile
 import re
 import os
 import calendar
-from datetime import date as Date, datetime
-import math
+import time
+from datetime import date as Date, datetime, timedelta
 from typing import Optional, Callable
 
-from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect, QMimeData, QUrl
+from PySide6.QtCore import Qt, Signal, QDate, QEvent, QTimer, QByteArray, QRect, QMimeData, QUrl, QPoint
 from PySide6.QtGui import QFont, QTextCharFormat, QKeyEvent, QColor, QIcon, QPainter, QPixmap, QPalette, QBrush, QDrag, QDesktopServices
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QDialog,
 )
 from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
@@ -44,15 +46,26 @@ from shiboken6 import Shiboken
 
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.app import config
+from sp.app import indexer
 from .path_utils import path_to_colon
+from .task_style import (
+    contrast_text_color,
+    due_colors_from_due_str,
+    priority_brush,
+    priority_time_label,
+    relative_day_label,
+)
 from markdown import markdown as render_markdown
 from .ai_chat_panel import ApiWorker, ServerManager
+from .date_insert_dialog import DateInsertDialog
 
 
 PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
 RECENT_ACTION_ROLE = Qt.UserRole + 50
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
+DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
+START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 
 
 class MultiSelectCalendarDelegate(QStyledItemDelegate):
@@ -64,21 +77,33 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         self.highlight_color = QColor("#4A90E2")
         self.text_color = QColor("#FFFFFF")
         self.calendar_widget = calendar_widget
+
+    def _date_for_index(self, index) -> QDate:
+        date_val = index.data(Qt.UserRole)
+        if isinstance(date_val, QDate) and date_val.isValid():
+            return date_val
+        day_val = index.data(Qt.DisplayRole)
+        if not isinstance(day_val, int):
+            return QDate()
+        if not self.calendar_widget:
+            return QDate()
+        year = self.calendar_widget.yearShown()
+        month = self.calendar_widget.monthShown()
+        first = QDate(year, month, 1)
+        if not first.isValid():
+            return QDate()
+        row = index.row()
+        if row == 0 and day_val > 20:
+            prev = first.addMonths(-1)
+            return QDate(prev.year(), prev.month(), day_val)
+        if row >= 4 and day_val < 15:
+            nxt = first.addMonths(1)
+            return QDate(nxt.year(), nxt.month(), day_val)
+        return QDate(year, month, day_val)
     
     def paint(self, painter, option, index):
         # Try multiple ways to get the date from this cell
-        date_val = index.data(Qt.UserRole)
-        
-        # If UserRole doesn't have the date, try to get it from the calendar widget
-        if not isinstance(date_val, QDate) or not date_val.isValid():
-            if self.calendar_widget:
-                # Try to map row/col to date
-                day_num = index.data(Qt.DisplayRole)
-                if isinstance(day_num, int) and day_num > 0:
-                    # Get current month/year from calendar
-                    year = self.calendar_widget.yearShown()
-                    month = self.calendar_widget.monthShown()
-                    date_val = QDate(year, month, day_num)
+        date_val = self._date_for_index(index)
         
         # Check if this EXACT date (year, month, day) is in the multi-selection
         is_multi_selected = False
@@ -161,6 +186,7 @@ class CalendarPanel(QWidget):
     dateActivated = Signal(int, int, int)  # year, month, day
     pageActivated = Signal(str)  # relative path to a page
     taskActivated = Signal(str, int)  # path, line number
+    tasksUpdated = Signal()
     openInWindowRequested = Signal(str)
     pageAboutToBeDeleted = Signal(str)  # emitted BEFORE page deletion (for editor unload)
     pageDeleted = Signal(str)  # emitted AFTER page is deleted
@@ -200,6 +226,19 @@ class CalendarPanel(QWidget):
         self._recent_pending_params: Optional[tuple[str, str, Optional[str]]] = None
         self._recent_fetching: bool = False
         self._recent_data_loaded: bool = False
+        self._task_date_filter_opener: Optional[Callable[[Optional[QWidget]], None]] = None
+        self._task_date_filter_setter: Optional[Callable[[Optional[Date], Optional[Date], Optional[str]], None]] = None
+        self._task_date_dialog: QDialog | None = None
+        self._task_date_start_cal: QCalendarWidget | None = None
+        self._task_date_due_cal: QCalendarWidget | None = None
+        self._task_date_apply_start: QCheckBox | None = None
+        self._task_date_apply_due: QCheckBox | None = None
+        self._task_date_clear_start = False
+        self._task_date_clear_due = False
+        self._task_date_targets: list[dict] = []
+        self._suppress_task_activation = False
+        self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
+        self._api_task_cache_ttl = 0.5
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
@@ -207,17 +246,25 @@ class CalendarPanel(QWidget):
         # Determine light vs dark mode
         palette = QApplication.palette()
         is_light = palette.color(QPalette.Window).lightness() > 128
+        base_bg = palette.color(QPalette.Base)
+        alt_bg = palette.color(QPalette.AlternateBase)
+        text_fg = palette.color(QPalette.Text)
         
         # Prominent selected day colors
-        selected_bg = "#4A90E2" if is_light else "#5BA3F5"  # Bright blue
+        selected_bg = "#2D7FF9"
         selected_text = "#FFFFFF"
+        self._calendar_selected_bg = QColor(selected_bg)
+        self._calendar_selected_text = QColor(selected_text)
         
         # Friendly calendar styling
         grid_color = "#DDDDDD" if is_light else "#555555"
-        header_bg = "#F5F5F5" if is_light else "#3A3A3A"
+        header_bg = alt_bg.name() if alt_bg.isValid() else ("#3A3A3A" if not is_light else "#F5F5F5")
         
         self.calendar.setStyleSheet(
             f"""
+            QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                background-color: {header_bg};
+            }}
             QCalendarWidget QWidget {{
                 alternate-background-color: palette(base);
             }}
@@ -228,8 +275,8 @@ class CalendarPanel(QWidget):
                 background-color: {header_bg};
             }}
             QCalendarWidget QToolButton:hover {{
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
+                background-color: {selected_bg};
+                color: {selected_text};
             }}
             QCalendarWidget QMenu {{
                 background-color: palette(base);
@@ -256,8 +303,8 @@ class CalendarPanel(QWidget):
                 border: 2px solid {selected_bg};
             }}
             QCalendarWidget QTableView::item:hover {{
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
+                background-color: {selected_bg};
+                color: {selected_text};
             }}
             """
         )
@@ -273,6 +320,7 @@ class CalendarPanel(QWidget):
         self._suppress_next_click = False
         self._pending_shift_click = False
         self.multi_selected_dates: set[QDate] = {self.calendar.selectedDate()}
+        self._selection_anchor: QDate | None = self.calendar.selectedDate()
         
         # Create custom delegate for multi-selection highlighting
         self.calendar_delegate = MultiSelectCalendarDelegate(calendar_widget=self.calendar)
@@ -280,8 +328,8 @@ class CalendarPanel(QWidget):
         # Determine colors based on theme
         palette = QApplication.palette()
         is_light = palette.color(QPalette.Window).lightness() > 128
-        self.calendar_delegate.highlight_color = QColor("#4A90E2" if is_light else "#5BA3F5")
-        self.calendar_delegate.text_color = QColor("#FFFFFF")
+        self.calendar_delegate.highlight_color = self._calendar_selected_bg
+        self.calendar_delegate.text_color = self._calendar_selected_text
         
         self._attach_calendar_view()
         self.day_insights = QWidget()
@@ -293,11 +341,11 @@ class CalendarPanel(QWidget):
         self.insight_title.setStyleSheet(
             "font-weight: bold; background:#30475e; color:white; padding:4px 8px; border-radius:4px;"
         )
-        # Title row with an optional Filter button when multiple days are selected
+        # Title row with an optional Clear button when multiple days are selected
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
-        self.filter_btn = QPushButton("Filtered")
+        self.filter_btn = QPushButton("Clear")
         self.filter_btn.setVisible(False)
         self.filter_btn.setStyleSheet("background:#e53935; color:white; font-weight:bold; padding:2px 6px;")
         self.filter_btn.setCursor(self.insight_title.cursor())
@@ -311,7 +359,7 @@ class CalendarPanel(QWidget):
         self.insight_title.setWordWrap(False)
         for lbl in (self.insight_counts, self.insight_tags):
             lbl.setWordWrap(True)
-        # Add title row (label + optional filter button)
+        # Title row widget (label + optional clear button)
         title_container = QWidget()
         title_container.setLayout(title_row)
         self.zoom_out_btn = QToolButton()
@@ -332,7 +380,6 @@ class CalendarPanel(QWidget):
         cal_zoom_row.addStretch(1)
         cal_zoom_row.addWidget(self.zoom_out_btn)
         cal_zoom_row.addWidget(self.zoom_in_btn)
-        self.day_insights_layout.addWidget(title_container)
         self.day_insights_layout.addWidget(self.insight_counts)
         self.day_insights_layout.addWidget(self.insight_tags)
 
@@ -354,7 +401,7 @@ class CalendarPanel(QWidget):
             self.subpage_list.setUniformItemSizes(True)
         except Exception:
             pass
-        # Pages and headings: split into two columns (Headings | Sub Pages)
+
         self.headings_list = InsightDragList()
         self.headings_list.itemActivated.connect(self._open_insight_link)
         self.headings_list.itemClicked.connect(self._open_insight_link)
@@ -372,13 +419,12 @@ class CalendarPanel(QWidget):
             self.headings_list.setUniformItemSizes(True)
         except Exception:
             pass
-
+        # Pages and headings: split into two columns (Headings | Sub Pages)
         pages_headings_container = QWidget()
         ph_layout = QHBoxLayout()
         ph_layout.setContentsMargins(0, 0, 0, 0)
         ph_layout.setSpacing(6)
 
-        # Left column: Headings
         headings_col = QWidget()
         headings_col_layout = QVBoxLayout()
         headings_col_layout.setContentsMargins(0, 0, 0, 0)
@@ -389,7 +435,6 @@ class CalendarPanel(QWidget):
         headings_col_layout.addWidget(self.headings_list, 1)
         headings_col.setLayout(headings_col_layout)
 
-        # Right column: Sub Pages
         subpages_col = QWidget()
         subpages_col_layout = QVBoxLayout()
         subpages_col_layout.setContentsMargins(0, 0, 0, 0)
@@ -403,7 +448,6 @@ class CalendarPanel(QWidget):
         ph_layout.addWidget(headings_col, 1)
         ph_layout.addWidget(subpages_col, 1)
         pages_headings_container.setLayout(ph_layout)
-
         print_row = QHBoxLayout()
         print_row.setContentsMargins(0, 0, 0, 0)
         print_row.setSpacing(6)
@@ -450,23 +494,25 @@ class CalendarPanel(QWidget):
             pass
         self.day_insights_layout.addLayout(recent_row)
         self.day_insights_layout.addWidget(self.recent_list)
-        # Due tasks header with overdue checkbox filter
         self.tasks_due_list = QTreeWidget()
         self._show_task_start_column = False
         self._show_task_page_column = False
         self._configure_task_columns(force=True)
-        self.tasks_due_list.setRootIsDecorated(False)
+        self.tasks_due_list.setRootIsDecorated(True)
+        self.tasks_due_list.setItemsExpandable(True)
+        self.tasks_due_list.setExpandsOnDoubleClick(True)
         self.tasks_due_list.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tasks_due_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tasks_due_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tasks_due_list.setAlternatingRowColors(True)
         self.tasks_due_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tasks_due_list.itemActivated.connect(self._open_task_item)
         self.tasks_due_list.itemDoubleClicked.connect(self._open_task_item)
+        self.tasks_due_list.itemClicked.connect(self._on_task_item_clicked)
         self.tasks_due_list.setSortingEnabled(True)
-        self.tasks_due_list.sortByColumn(2, Qt.AscendingOrder)
         self.tasks_due_list.setColumnWidth(0, 70)
         self.tasks_due_list.setColumnWidth(2, 90)
         header = self.tasks_due_list.header()
+        header.setSortIndicatorShown(True)
         header.setStretchLastSection(False)
         try:
             from PySide6.QtWidgets import QHeaderView
@@ -483,27 +529,120 @@ class CalendarPanel(QWidget):
                 pass
         self.tasks_due_list.header().sectionMoved.connect(lambda *_: self._header_save_timer.start())
         self.tasks_due_list.header().sectionResized.connect(lambda *_: self._header_save_timer.start())
+        self.tasks_due_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tasks_due_list.customContextMenuRequested.connect(self._open_task_date_context_menu)
+
         due_row = QWidget()
         due_row_layout = QHBoxLayout()
         due_row_layout.setContentsMargins(0, 0, 0, 0)
         due_row_layout.setSpacing(6)
-        due_label = QLabel("Due Tasks")
-        self.overdue_checkbox = QCheckBox("Overdue?")
+        due_label = QLabel("Tasks")
+        self.overdue_checkbox = QToolButton()
+        self.overdue_checkbox.setCheckable(True)
         self.overdue_checkbox.setChecked(True)
-        self.overdue_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
+        self.overdue_checkbox.setIcon(self._load_svg_icon("late.svg", QSize(18, 18)))
+        self.overdue_checkbox.setIconSize(QSize(18, 18))
+        self.overdue_checkbox.setFixedSize(26, 26)
+        self.overdue_checkbox.setAutoRaise(True)
+        self.overdue_checkbox.setToolTip("Include overdue tasks")
+        self.overdue_checkbox.setStyleSheet(
+            """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 13px;
+                background: transparent;
+                padding: 2px;
+            }
+            QToolButton:hover {
+                border: 1px solid #666666;
+                background: rgba(255,255,255,0.06);
+            }
+            QToolButton:checked {
+                border: 1px solid #4a90e2;
+                background: rgba(74,144,226,0.22);
+            }
+            """
+        )
+        self.overdue_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
         due_row_layout.addWidget(due_label)
         due_row_layout.addStretch(1)
+        self.date_filter_btn = QToolButton()
+        self.date_filter_btn.setAutoRaise(True)
+        self.date_filter_btn.setIcon(self._load_svg_icon("calendar-days.svg", QSize(18, 18)))
+        self.date_filter_btn.setIconSize(QSize(18, 18))
+        self.date_filter_btn.setToolTip("Filter tasks by date range")
+        self.date_filter_btn.clicked.connect(self._open_task_date_filter)
+        self.date_filter_btn.setEnabled(False)
+        self.date_filter_btn.setFixedSize(26, 26)
+        self.date_filter_btn.setStyleSheet(
+            """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 13px;
+                padding: 2px;
+                background: transparent;
+            }
+            QToolButton:hover {
+                border: 1px solid #666666;
+                background: rgba(255,255,255,0.06);
+            }
+            QToolButton:pressed {
+                border: 1px solid #4a90e2;
+                background: rgba(74,144,226,0.22);
+            }
+            """
+        )
+        due_row_layout.addWidget(self.date_filter_btn)
         # Future checkbox (shows future-starting tasks); checked by default
-        self.future_checkbox = QCheckBox("Future?")
+        self.future_checkbox = QToolButton()
+        self.future_checkbox.setCheckable(True)
         self.future_checkbox.setChecked(True)
-        self.future_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
+        self.future_checkbox.setIcon(self._load_svg_icon("future.svg", QSize(18, 18)))
+        self.future_checkbox.setIconSize(QSize(18, 18))
+        self.future_checkbox.setFixedSize(26, 26)
+        self.future_checkbox.setAutoRaise(True)
+        self.future_checkbox.setToolTip("Include future-starting tasks in this month")
+        self.future_checkbox.setStyleSheet(
+            """
+            QToolButton {
+                border: 1px solid transparent;
+                border-radius: 13px;
+                background: transparent;
+                padding: 2px;
+            }
+            QToolButton:hover {
+                border: 1px solid #666666;
+                background: rgba(255,255,255,0.06);
+            }
+            QToolButton:checked {
+                border: 1px solid #4a90e2;
+                background: rgba(74,144,226,0.22);
+            }
+            """
+        )
+        self.future_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
         due_row_layout.addWidget(self.future_checkbox)
         due_row_layout.addWidget(self.overdue_checkbox)
         due_row.setLayout(due_row_layout)
-        self.day_insights_layout.addWidget(due_row)
-        # Make tasks list expand to fill the left rail vertical space
+
+        tasks_panel = QWidget()
+        tasks_layout = QVBoxLayout(tasks_panel)
+        tasks_layout.setContentsMargins(8, 8, 8, 8)
+        tasks_layout.setSpacing(6)
+        tasks_layout.addWidget(due_row)
         self.tasks_due_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.day_insights_layout.addWidget(self.tasks_due_list, 2)
+        tasks_layout.addWidget(self.tasks_due_list, 1)
+
+        self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
+        self.journal_tabs = QTabWidget()
+        self.journal_tabs.addTab(tasks_panel, "Tasks")
+        if self.ai_insights_panel:
+            self.journal_tabs.addTab(self.ai_insights_panel, "AI Insights")
+        if self.journal_tabs.count() == 1:
+            try:
+                self.journal_tabs.tabBar().setVisible(False)
+            except Exception:
+                pass
 
         self.journal_tree = QTreeWidget()
         self.journal_tree.setHeaderHidden(True)
@@ -514,16 +653,6 @@ class CalendarPanel(QWidget):
         self.journal_tree.setFocusPolicy(Qt.StrongFocus)
         self.journal_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.journal_tree.customContextMenuRequested.connect(self._open_context_menu)
-        self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
-        self.journal_tabs = QTabWidget()
-        self.journal_tabs.addTab(self.journal_tree, "Journal")
-        if self.ai_insights_panel:
-            self.journal_tabs.addTab(self.ai_insights_panel, "AI Insights")
-        if self.journal_tabs.count() == 1:
-            try:
-                self.journal_tabs.tabBar().setVisible(False)
-            except Exception:
-                pass
 
         # Wrap calendar with a top-aligned zoom row
         cal_container = QWidget()
@@ -533,11 +662,36 @@ class CalendarPanel(QWidget):
         zoom_row = QHBoxLayout()
         zoom_row.setContentsMargins(0, 0, 0, 0)
         zoom_row.setSpacing(6)
+        zoom_row.addWidget(title_container)
         zoom_row.addStretch(1)
         self.today_btn = QToolButton()
-        self.today_btn.setText("← Today")
+        self.today_btn.setText("Today")
         self.today_btn.setToolTip("Jump to today's date")
-        self.today_btn.setAutoRaise(True)
+        self.today_btn.setAutoRaise(False)
+        try:
+            btn_font = self.today_btn.font()
+            btn_font.setBold(True)
+            self.today_btn.setFont(btn_font)
+        except Exception:
+            pass
+        self.today_btn.setMinimumHeight(28)
+        self.today_btn.setStyleSheet(
+            """
+            QToolButton {
+                padding: 4px 10px;
+                border-radius: 6px;
+                border: 1px solid #2b6cb0;
+                background: #2b6cb0;
+                color: #ffffff;
+            }
+            QToolButton:hover {
+                background: #2f76c6;
+            }
+            QToolButton:pressed {
+                background: #255a92;
+            }
+            """
+        )
         self.today_btn.clicked.connect(lambda: self.set_calendar_date(QDate.currentDate().year(), QDate.currentDate().month(), QDate.currentDate().day()))
         zoom_row.addWidget(self.today_btn)
         zoom_row.addWidget(self.zoom_out_btn)
@@ -546,17 +700,10 @@ class CalendarPanel(QWidget):
         cal_layout.addWidget(self.calendar)
         cal_container.setLayout(cal_layout)
 
-        # Vertical splitter for calendar + journal viewer
-        self.right_splitter = QSplitter(Qt.Vertical)
-        self.right_splitter.addWidget(cal_container)
-        self.right_splitter.addWidget(self.journal_tabs)
-        self.right_splitter.setStretchFactor(0, 0)
-        self.right_splitter.setStretchFactor(1, 1)
-
-        # Horizontal splitter between insights and main area
+        # Horizontal splitter between insights and task/ai tabs (bottom row)
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.addWidget(self.day_insights)
-        self.main_splitter.addWidget(self.right_splitter)
+        self.main_splitter.addWidget(self.journal_tabs)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
         sizes = config.load_splitter_sizes(self._splitter_key)
@@ -566,12 +713,21 @@ class CalendarPanel(QWidget):
             except Exception:
                 pass
         self.main_splitter.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
+        self.main_splitter.splitterMoved.connect(lambda *_: self._enforce_calendar_min_width())
         self._apply_font_size()
+
+        # Vertical splitter for calendar (top) + bottom row
+        self.top_splitter = QSplitter(Qt.Vertical)
+        self._calendar_container = cal_container
+        self.top_splitter.addWidget(cal_container)
+        self.top_splitter.addWidget(self.main_splitter)
+        self.top_splitter.setStretchFactor(0, 0)
+        self.top_splitter.setStretchFactor(1, 1)
 
         root_layout = QHBoxLayout()
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        root_layout.addWidget(self.main_splitter)
+        root_layout.addWidget(self.top_splitter)
         self.setLayout(root_layout)
 
         self.vault_root: Optional[str] = None
@@ -581,12 +737,35 @@ class CalendarPanel(QWidget):
         """Allow caller to supply live editor text for a given page path (relative, with leading slash)."""
         self._page_text_provider = provider
 
+    def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
+        """Allow parent to provide a date filter opener for the Task panel."""
+        self._task_date_filter_opener = opener
+        if getattr(self, "date_filter_btn", None):
+            self.date_filter_btn.setEnabled(bool(opener))
+
+    def _open_task_date_filter(self) -> None:
+        if self._task_date_filter_opener:
+            self._task_date_filter_opener(self.date_filter_btn)
+
+    def set_task_date_filter_setter(
+        self,
+        setter: Optional[Callable[[Optional[Date], Optional[Date], Optional[str]], None]],
+    ) -> None:
+        """Allow parent to provide a date filter setter for the Task panel."""
+        self._task_date_filter_setter = setter
+
     def showEvent(self, event):  # type: ignore[override]
         """Ensure we hook the calendar view after widget is shown."""
         super().showEvent(event)
         self._attach_calendar_view()
         self._apply_multi_selection_formats()
         self._update_today_visibility()
+        self._enforce_calendar_min_width()
+        self.ensure_splitter_visible()
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self._enforce_calendar_min_width()
 
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Set vault root for calendar and tree data."""
@@ -604,7 +783,7 @@ class CalendarPanel(QWidget):
         """Move the calendar to a specific date and expand the tree."""
         target = QDate(year, month, day)
         self.calendar.setSelectedDate(target)
-        self.multi_selected_dates = {target}
+        self._set_single_selection(target)
         self._update_calendar_dates(year, month)
         self._expand_to_date(target)
         self._update_day_listing(target)
@@ -684,6 +863,7 @@ class CalendarPanel(QWidget):
             self.journal_tree,
             self.overdue_checkbox,
             self.future_checkbox,
+            getattr(self, "date_filter_btn", None),
             self.filter_btn,
             self.zoom_in_btn,
             self.zoom_out_btn,
@@ -720,6 +900,54 @@ class CalendarPanel(QWidget):
                 self.ai_markdown_view.setFont(font)
             except Exception:
                 pass
+        self._enforce_calendar_min_width()
+
+    def _calendar_min_width(self) -> int:
+        fm = self.calendar.fontMetrics()
+        cell_w = fm.horizontalAdvance("88") + 18
+        base = cell_w * 7 + 28
+        try:
+            base = max(base, self.calendar.minimumSizeHint().width())
+        except Exception:
+            pass
+        return max(240, base)
+
+    def _enforce_calendar_min_width(self) -> None:
+        min_w = self._calendar_min_width()
+        try:
+            self.calendar.setMinimumWidth(min_w)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_calendar_container", None):
+                self._calendar_container.setMinimumWidth(min_w)
+        except Exception:
+            pass
+
+    def ensure_splitter_visible(self, min_left: int = 180) -> None:
+        if not getattr(self, "main_splitter", None):
+            return
+        try:
+            sizes = self.main_splitter.sizes()
+        except Exception:
+            return
+        if len(sizes) < 2:
+            return
+        total = sum(sizes)
+        if total <= 0:
+            return
+        min_right = min(self._calendar_min_width(), total)
+        target_left = min_left if total >= (min_left + min_right) else max(0, total - min_right)
+        if sizes[0] >= target_left:
+            return
+        sizes[0] = target_left
+        sizes[1] = max(0, total - target_left)
+        try:
+            self.main_splitter.blockSignals(True)
+            self.main_splitter.setSizes(sizes)
+        finally:
+            self.main_splitter.blockSignals(False)
+        self._splitter_save_timer.start()
 
     def _load_print_css(self) -> str:
         css_path = Path(__file__).resolve().parents[2] / "server" / "templates" / "print.css"
@@ -795,11 +1023,10 @@ class CalendarPanel(QWidget):
                 headers.append(header.text(i))
         header_cells = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
         rows = []
-        for idx in range(self.tasks_due_list.topLevelItemCount()):
-            item = self.tasks_due_list.topLevelItem(idx)
+        def _append_task_row(item: QTreeWidgetItem) -> None:
             task = item.data(0, Qt.UserRole) or {}
             priority_level = min(task.get("priority", 0) or 0, 3)
-            priority_text, due_overdue = self._priority_time_label(task)
+            _, due_overdue = self._priority_time_label(task)
             pri_style = ""
             pri_brush = self._priority_brush(priority_level)
             if pri_brush:
@@ -825,6 +1052,19 @@ class CalendarPanel(QWidget):
                     class_name = "task-text"
                 row_cells.append(f"<td class=\"{class_name}\" style=\"{cell_style}\">{safe}</td>")
             rows.append("<tr>" + "".join(row_cells) + "</tr>")
+
+        for idx in range(self.tasks_due_list.topLevelItemCount()):
+            item = self.tasks_due_list.topLevelItem(idx)
+            if item.childCount():
+                title = item.text(0) or item.text(1)
+                safe_title = html.escape(title or "")
+                rows.append(
+                    f"<tr><td class=\"task-section\" colspan=\"{self.tasks_due_list.columnCount()}\">{safe_title}</td></tr>"
+                )
+                for child_idx in range(item.childCount()):
+                    _append_task_row(item.child(child_idx))
+            else:
+                _append_task_row(item)
         return "<table class=\"task-print\"><thead><tr>" + header_cells + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
 
     def _build_calendar_print_html(self) -> str:
@@ -1375,7 +1615,29 @@ class CalendarPanel(QWidget):
             self._update_due_tasks([first, last])
         except Exception:
             pass
+        try:
+            if self._task_date_filter_setter:
+                start = Date(year, month, 1)
+                end = Date(year, month, calendar.monthrange(year, month)[1])
+                self._task_date_filter_setter(start, end, "month")
+        except Exception:
+            pass
         self._update_today_visibility()
+
+    def _set_single_selection(self, date: QDate) -> None:
+        if not date or not date.isValid():
+            return
+        self.multi_selected_dates = {date}
+        self._selection_anchor = date
+
+    def _set_range_selection(self, start: QDate, end: QDate) -> None:
+        if not start or not start.isValid() or not end or not end.isValid():
+            return
+        start_j = start.toJulianDay()
+        end_j = end.toJulianDay()
+        if end_j < start_j:
+            start_j, end_j = end_j, start_j
+        self.multi_selected_dates = {QDate.fromJulianDay(j) for j in range(start_j, end_j + 1)}
 
     def _on_date_clicked(self, date: QDate) -> None:
         """Emit selected date and sync the tree."""
@@ -1384,14 +1646,16 @@ class CalendarPanel(QWidget):
             return
         
         # Check if shift key was detected in eventFilter or is currently held
-        if self._pending_shift_click or (QApplication.keyboardModifiers() & Qt.ShiftModifier):
-            # Shift+Click: add this date to the selection
-            self.multi_selected_dates.add(date)
-            print(f"[CALENDAR] _on_date_clicked Shift+Click: Added {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
+        is_shift = self._pending_shift_click or (QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        if is_shift:
+            # Shift+Click: select range from anchor to this date
+            anchor = self._selection_anchor if self._selection_anchor and self._selection_anchor.isValid() else date
+            self._set_range_selection(anchor, date)
+            print(f"[CALENDAR] _on_date_clicked Shift+Click: Range {anchor.toString('yyyy-MM-dd')} -> {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
             self._pending_shift_click = False
         else:
             # Regular click: select only this date (clear previous selection)
-            self.multi_selected_dates = {date}
+            self._set_single_selection(date)
             print(f"[CALENDAR] _on_date_clicked Click: Selected only {date.toString('yyyy-MM-dd')}")
         
         self._apply_multi_selection_formats()
@@ -1399,7 +1663,8 @@ class CalendarPanel(QWidget):
         self._update_day_listing(date)
         self._update_insights_for_selection()
         self._update_today_visibility()
-        self.dateActivated.emit(date.year(), date.month(), date.day())
+        if not is_shift:
+            self.dateActivated.emit(date.year(), date.month(), date.day())
 
     def _update_today_visibility(self) -> None:
         if not hasattr(self, "today_btn"):
@@ -1477,10 +1742,8 @@ class CalendarPanel(QWidget):
         self.calendar_delegate.multi_selected_dates = self.multi_selected_dates.copy()
         
         # Also use QTextCharFormat for reliable highlighting
-        palette = QApplication.palette()
-        is_light = palette.color(QPalette.Window).lightness() > 128
-        highlight_color = QColor("#4A90E2" if is_light else "#5BA3F5")
-        text_color = QColor("#FFFFFF")
+        highlight_color = self._calendar_selected_bg
+        text_color = self._calendar_selected_text
         
         # Get current displayed month
         year = self.calendar.yearShown()
@@ -1500,16 +1763,26 @@ class CalendarPanel(QWidget):
                 self.calendar.setDateTextFormat(day_date, default_format)
         
         # Now apply highlighting ONLY to multi-selected dates that match exactly
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QBrush(highlight_color))
+        highlight_format.setForeground(QBrush(text_color))
+        bold_font = QFont()
+        bold_font.setBold(True)
+        bold_font.setWeight(QFont.Bold)
+        highlight_format.setFont(bold_font)
         for date in self.multi_selected_dates:
             if date.isValid():
-                highlight_format = QTextCharFormat()
-                highlight_format.setBackground(highlight_color)
-                highlight_format.setForeground(text_color)
-                bold_font = QFont()
-                bold_font.setBold(True)
-                bold_font.setWeight(QFont.Bold)
-                highlight_format.setFont(bold_font)
                 self.calendar.setDateTextFormat(date, highlight_format)
+
+        # Ensure today is visible when not multi-selected
+        today = QDate.currentDate()
+        if today.isValid() and today not in self.multi_selected_dates:
+            today_format = QTextCharFormat()
+            today_format.setFontWeight(QFont.Bold)
+            today_format.setForeground(text_color)
+            today_format.setUnderlineStyle(QTextCharFormat.SingleUnderline)
+            today_format.setUnderlineColor(text_color)
+            self.calendar.setDateTextFormat(today, today_format)
         
         # Force repaint
         if self.calendar_view and Shiboken.isValid(self.calendar_view):
@@ -1666,13 +1939,15 @@ class CalendarPanel(QWidget):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 date = self._date_from_pos(event.pos())
                 if date.isValid():
-                    if event.modifiers() & Qt.ShiftModifier:
-                        # Shift+Click: add this date to the selection
-                        self.multi_selected_dates.add(date)
-                        print(f"[CALENDAR] Viewport Shift+Click: Added {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
+                    is_shift = bool(event.modifiers() & Qt.ShiftModifier)
+                    if is_shift:
+                        # Shift+Click: select range from anchor to this date
+                        anchor = self._selection_anchor if self._selection_anchor and self._selection_anchor.isValid() else date
+                        self._set_range_selection(anchor, date)
+                        print(f"[CALENDAR] Viewport Shift+Click: Range {anchor.toString('yyyy-MM-dd')} -> {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
                     else:
                         # Regular click: select only this date (clear previous selection)
-                        self.multi_selected_dates = {date}
+                        self._set_single_selection(date)
                         print(f"[CALENDAR] Viewport Click: Selected only {date.toString('yyyy-MM-dd')}")
                     
                     self.calendar.setSelectedDate(date)
@@ -1680,7 +1955,8 @@ class CalendarPanel(QWidget):
                     self._apply_multi_selection_formats()
                     self._update_day_listing(date)
                     self._update_insights_for_selection()
-                    self.dateActivated.emit(date.year(), date.month(), date.day())
+                    if not is_shift:
+                        self.dateActivated.emit(date.year(), date.month(), date.day())
                     return True
             # Double-click: open/create day's page and remove any multi-day filter
             if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
@@ -1688,7 +1964,7 @@ class CalendarPanel(QWidget):
                 if date.isValid():
                     # Clear multi-selection filter and select this date
                     try:
-                        self.multi_selected_dates = {date}
+                        self._set_single_selection(date)
                         self.calendar.setSelectedDate(date)
                         if hasattr(self, "filter_btn"):
                             self.filter_btn.setVisible(False)
@@ -1994,8 +2270,75 @@ class CalendarPanel(QWidget):
         self._due_task_count = 0
         if message:
             row = QTreeWidgetItem([""] * self.tasks_due_list.columnCount())
-            row.setText(1, message)
+            row.setText(0, message)
+            row.setFirstColumnSpanned(True)
             row.setFlags(Qt.NoItemFlags)
+            self.tasks_due_list.addTopLevelItem(row)
+
+    def _add_task_section(self, title: str) -> QTreeWidgetItem:
+        row = QTreeWidgetItem([""] * self.tasks_due_list.columnCount())
+        row.setText(0, title)
+        row.setFirstColumnSpanned(True)
+        row.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        font = row.font(0)
+        font.setBold(True)
+        row.setFont(0, font)
+        header_bg = QColor("#30475e")
+        header_fg = QColor("#FFFFFF")
+        for col in range(self.tasks_due_list.columnCount()):
+            row.setBackground(col, header_bg)
+            row.setForeground(col, header_fg)
+        self.tasks_due_list.addTopLevelItem(row)
+        row.setExpanded(True)
+        return row
+
+    def _add_task_row(self, task: dict, *, parent: Optional[QTreeWidgetItem] = None) -> None:
+        path = str(task.get("path") or "")
+        if not path.startswith("/"):
+            path = "/" + path.lstrip("/")
+        line = task.get("line") or 1
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        path_idx = 3 if (not self._show_task_start_column and self._show_task_page_column) else 4
+        start_value = (task.get("starts") or task.get("start") or "").strip()
+        priority_txt, is_overdue = self._priority_time_label(task)
+        row_values = [""] * self.tasks_due_list.columnCount()
+        row_values[0] = priority_txt
+        row_values[1] = task.get("text") or "(task)"
+        row_values[due_idx] = task.get("due") or ""
+        if self._show_task_start_column and start_idx is not None:
+            row_values[start_idx] = start_value
+        if self._show_task_page_column:
+            row_values[path_idx] = path_to_colon(path)
+        row = QTreeWidgetItem(row_values)
+        row.setData(0, Qt.UserRole, task)
+        row.setData(0, PATH_ROLE, path)
+        row.setData(0, LINE_ROLE, line)
+        tooltip_parts = []
+        if due_str := (task.get("due") or "").strip():
+            tooltip_parts.append(f"Due: {due_str}")
+        if start_str := start_value:
+            tooltip_parts.append(f"Start: {start_str}")
+        if tooltip_parts:
+            row.setToolTip(1, " • ".join(tooltip_parts))
+        pri_brush = self._priority_brush(int(task.get("priority") or 0))
+        if pri_brush:
+            if pri_brush.get("bg"):
+                row.setBackground(0, pri_brush["bg"])
+            if pri_brush.get("fg"):
+                row.setForeground(0, pri_brush["fg"])
+        if is_overdue:
+            font = row.font(0)
+            font.setUnderline(True)
+            row.setFont(0, font)
+        due_colors = self._due_colors(task.get("due") or "")
+        if due_colors:
+            fg, bg = due_colors
+            row.setForeground(due_idx, fg)
+            row.setBackground(due_idx, bg)
+        if parent:
+            parent.addChild(row)
+        else:
             self.tasks_due_list.addTopLevelItem(row)
 
     @staticmethod
@@ -2076,36 +2419,15 @@ class CalendarPanel(QWidget):
 
     def _priority_brush(self, level: int) -> Optional[dict]:
         """Return background/foreground for priority level."""
-        if level <= 0:
-            return None
-        colors = [
-            {"bg": QColor("#FFF9C4")},
-            {"bg": QColor("#F57900")},
-            {"bg": QColor("#CC0000")},
-        ]
-        idx = min(level - 1, len(colors) - 1)
-        bg = colors[idx]["bg"]
-        return {"bg": bg, "fg": self._contrast_text_color(bg)}
+        return priority_brush(level)
 
     def _contrast_text_color(self, bg: QColor) -> QColor:
         """Return a readable text color for the given background."""
-        return QColor("#FFFFFF") if bg.lightness() < 128 else QColor("#000000")
+        return contrast_text_color(bg)
 
     def _due_colors(self, due_str: str) -> Optional[tuple]:
         """Return (fg, bg) for due column with red/orange/yellow emphasis."""
-        due_str = (due_str or "").strip()
-        if not due_str:
-            return None
-        try:
-            due_dt = Date.fromisoformat(due_str)
-        except ValueError:
-            return None
-        today_dt = Date.today()
-        if due_dt < today_dt:
-            return QColor("#FFFFFF"), QColor("#CC0000")
-        if due_dt == today_dt:
-            return QColor("#3A1D00"), QColor("#F57900")
-        return None
+        return due_colors_from_due_str(due_str, include_tomorrow=True)
 
     def _load_task_display_prefs(self) -> tuple[bool, bool]:
         show_start = config.load_show_task_start_date()
@@ -2145,49 +2467,66 @@ class CalendarPanel(QWidget):
                     header.setSectionResizeMode(3, QHeaderView.Interactive)
         except Exception:
             pass
+        self._ensure_task_column_widths()
+
+    def _ensure_task_column_widths(self) -> None:
+        header = self.tasks_due_list.header()
+        try:
+            if header.sectionSize(0) < 40:
+                header.resizeSection(0, 70)
+            if header.sectionSize(1) < 80:
+                header.resizeSection(1, 260)
+            if header.sectionSize(2) < 60:
+                header.resizeSection(2, 90)
+        except Exception:
+            pass
 
     def _relative_day_label(self, target: Date, prefix: str = "") -> str:
-        today = Date.today()
-        delta_days = (target - today).days
-        if delta_days <= 13:
-            label = f"{max(delta_days, 0)}d"
-        elif delta_days < 56:
-            label = f"{max(1, math.ceil(delta_days / 7))}w"
-        elif delta_days < 365:
-            label = f"{max(1, math.ceil(delta_days / 30))}m"
-        else:
-            label = f"{max(1, math.ceil(delta_days / 365))}y"
-        return f"{prefix}{label}" if label else ""
+        return relative_day_label(target, prefix=prefix)
 
     def _priority_time_label(self, task: dict) -> tuple[str, bool]:
-        priority_level = min(task.get("priority", 0) or 0, 3)
-        priority = "!" * priority_level
-        due_str = (task.get("due") or "").strip()
-        start_str = (task.get("starts") or task.get("start") or "").strip()
-        label = ""
-        overdue = False
-        if due_str:
+        return priority_time_label(task)
+
+    def _fetch_tasks_api(
+        self,
+        *,
+        include_done: bool,
+        include_ancestors: bool,
+        actionable_only: bool,
+    ) -> list[dict]:
+        if self.http:
+            cache_key = (
+                "",
+                (),
+                bool(include_done),
+                bool(include_ancestors),
+                bool(actionable_only),
+            )
+            cached = self._api_task_cache.get(cache_key)
+            now = time.monotonic()
+            if cached and (now - cached[0]) <= self._api_task_cache_ttl:
+                return cached[1]
+            params = {
+                "query": "",
+                "include_done": include_done,
+                "include_ancestors": include_ancestors,
+                "actionable_only": actionable_only,
+            }
             try:
-                due_dt = Date.fromisoformat(due_str)
-                if due_dt < Date.today():
-                    label = "OD"
-                    overdue = True
-                else:
-                    label = self._relative_day_label(due_dt)
-            except Exception:
-                label = ""
-        elif start_str:
-            try:
-                start_dt = Date.fromisoformat(start_str)
-                if start_dt > Date.today():
-                    label = self._relative_day_label(start_dt, prefix=">")
-            except Exception:
-                label = ""
-        if label and priority:
-            return f"{label} {priority}", overdue
-        if label:
-            return label, overdue
-        return priority, overdue
+                resp = self.http.get("/api/tasks", params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+                items = payload.get("items", [])
+                self._api_task_cache[cache_key] = (now, items)
+                return items
+            except Exception as exc:
+                print(f"[CALENDAR] Failed to fetch tasks via API: {exc}")
+                return []
+        return config.fetch_tasks(
+            include_done=include_done,
+            include_ancestors=include_ancestors,
+            actionable_only=actionable_only,
+        )
 
     @staticmethod
     def _parse_date(value: str) -> Optional[Date]:
@@ -2222,16 +2561,21 @@ class CalendarPanel(QWidget):
         except Exception:
             pass
         try:
-            tasks = config.fetch_tasks(include_done=False, include_ancestors=False)
+            tasks = self._fetch_tasks_api(include_done=False, include_ancestors=False, actionable_only=False)
         except Exception:
             tasks = []
-        matches: list[dict] = []
+        if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+            print(f"[CALENDAR] fetched tasks count={len(tasks)}")
+        overdue_tasks: list[dict] = []
+        due_tasks: list[dict] = []
+        start_tasks: list[dict] = []
+        unscheduled_tasks: list[dict] = []
         for task in tasks:
             path = task.get("path") or ""
             if not path:
                 continue
             due_str = (task.get("due") or "").strip()
-            start_str = (task.get("starts") or "").strip()
+            start_str = (task.get("starts") or task.get("start") or "").strip()
             due_dt = self._parse_date(due_str)
             start_dt_val = self._parse_date(start_str)
             is_overdue = bool(due_dt and due_dt < range_start)
@@ -2241,58 +2585,537 @@ class CalendarPanel(QWidget):
             show_overdue = bool(getattr(self, "overdue_checkbox", True) and self.overdue_checkbox.isChecked())
             if is_overdue and not show_overdue:
                 continue
-            if is_overdue or is_due_in_range or starts_in_range:
-                matches.append(task)
-        self.tasks_due_list.clear()
-        if not matches:
-            self._clear_due_tasks("No due tasks for selection")
-            return
-        for task in sorted(matches, key=lambda t: (t.get("due") or "", t.get("path") or "", t.get("line") or 0)):
-            path = str(task.get("path") or "")
-            if not path.startswith("/"):
-                path = "/" + path.lstrip("/")
-            line = task.get("line") or 1
-            due_idx = 2
-            start_idx = 3 if self._show_task_start_column else None
-            path_idx = 3 if (not self._show_task_start_column and self._show_task_page_column) else 4
-            start_value = (task.get("starts") or task.get("start") or "").strip()
-            priority_txt, is_overdue = self._priority_time_label(task)
-            row_values = [""] * self.tasks_due_list.columnCount()
-            row_values[0] = priority_txt
-            row_values[1] = task.get("text") or "(task)"
-            row_values[due_idx] = task.get("due") or ""
-            if self._show_task_start_column and start_idx is not None:
-                row_values[start_idx] = start_value
-            if self._show_task_page_column:
-                row_values[path_idx] = path_to_colon(path)
-            row = QTreeWidgetItem(row_values)
-            row.setData(0, Qt.UserRole, task)
-            row.setData(0, PATH_ROLE, path)
-            row.setData(0, LINE_ROLE, line)
-            tooltip_parts = []
-            if due_str := (task.get("due") or "").strip():
-                tooltip_parts.append(f"Due: {due_str}")
-            if start_str := start_value:
-                tooltip_parts.append(f"Start: {start_str}")
-            if tooltip_parts:
-                row.setToolTip(1, " • ".join(tooltip_parts))
-            pri_brush = self._priority_brush(int(task.get("priority") or 0))
-            if pri_brush:
-                if pri_brush.get("bg"):
-                    row.setBackground(0, pri_brush["bg"])
-                if pri_brush.get("fg"):
-                    row.setForeground(0, pri_brush["fg"])
             if is_overdue:
-                font = row.font(0)
-                font.setUnderline(True)
-                row.setFont(0, font)
-            due_colors = self._due_colors(task.get("due") or "")
-            if due_colors:
-                fg, bg = due_colors
-                row.setForeground(due_idx, fg)
-                row.setBackground(due_idx, bg)
-            self.tasks_due_list.addTopLevelItem(row)
-        self._due_task_count = len(matches)
+                overdue_tasks.append(task)
+                continue
+            if is_due_in_range:
+                due_tasks.append(task)
+                continue
+            if starts_in_range:
+                start_tasks.append(task)
+                continue
+            if not due_dt and not start_dt_val:
+                unscheduled_tasks.append(task)
+        self.tasks_due_list.clear()
+        total_count = 0
+        max_unscheduled = 50
+        unscheduled_total = len(unscheduled_tasks)
+        sort_key = lambda t: (
+            t.get("due") or t.get("start") or t.get("starts") or "",
+            t.get("path") or "",
+            t.get("line") or 0,
+        )
+        if unscheduled_total > max_unscheduled:
+            unscheduled_tasks = sorted(unscheduled_tasks, key=sort_key)[:max_unscheduled]
+        section_defs = [
+            ("Overdue", overdue_tasks),
+            ("Due", due_tasks),
+            ("Starts", start_tasks),
+            (
+                "Unscheduled"
+                if unscheduled_total <= max_unscheduled
+                else f"Unscheduled (showing {max_unscheduled} of {unscheduled_total})",
+                unscheduled_tasks,
+            ),
+        ]
+        if not any(section for _, section in section_defs):
+            self._clear_due_tasks("No tasks for selection")
+            return
+        for title, items in section_defs:
+            if not items:
+                continue
+            section_item = self._add_task_section(title)
+            for task in sorted(items, key=sort_key):
+                self._add_task_row(task, parent=section_item)
+                total_count += 1
+        self._due_task_count = total_count
+        if total_count:
+            self._ensure_task_column_widths()
+        if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+            print(
+                f"[CALENDAR] sections overdue={len(overdue_tasks)} due={len(due_tasks)} "
+                f"start={len(start_tasks)} unscheduled={len(unscheduled_tasks)} total={total_count}"
+            )
+
+    def _open_task_date_popup(self, pos) -> None:
+        if self.tasks_due_list:
+            item = self.tasks_due_list.itemAt(pos)
+            if item and not item.isSelected():
+                self.tasks_due_list.clearSelection()
+                item.setSelected(True)
+        targets = self._collect_task_date_targets()
+        if not targets:
+            return
+        self._task_date_targets = targets
+        if not self._task_date_dialog:
+            self._task_date_dialog = QDialog(self, Qt.Popup)
+            layout = QVBoxLayout(self._task_date_dialog)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+
+            calendars_row = QHBoxLayout()
+            calendars_row.setContentsMargins(0, 0, 0, 0)
+            calendars_row.setSpacing(8)
+
+            start_col = QVBoxLayout()
+            start_label = QLabel("Start on")
+            self._task_date_start_cal = QCalendarWidget()
+            self._task_date_start_cal.setGridVisible(True)
+            self._task_date_start_cal.clicked.connect(self._on_task_start_date_clicked)
+            self._task_date_apply_start = QCheckBox("Set start")
+            self._task_date_apply_start.setChecked(True)
+            clear_start_btn = QPushButton("Clear start")
+            clear_start_btn.clicked.connect(self._clear_task_start_date)
+            start_col.addWidget(start_label)
+            start_col.addWidget(self._task_date_start_cal)
+            start_col.addWidget(self._task_date_apply_start)
+            start_col.addWidget(clear_start_btn)
+
+            due_col = QVBoxLayout()
+            due_label = QLabel("Due on")
+            self._task_date_due_cal = QCalendarWidget()
+            self._task_date_due_cal.setGridVisible(True)
+            self._task_date_due_cal.clicked.connect(self._on_task_due_date_clicked)
+            self._task_date_apply_due = QCheckBox("Set due")
+            self._task_date_apply_due.setChecked(True)
+            clear_due_btn = QPushButton("Clear due")
+            clear_due_btn.clicked.connect(self._clear_task_due_date)
+            due_col.addWidget(due_label)
+            due_col.addWidget(self._task_date_due_cal)
+            due_col.addWidget(self._task_date_apply_due)
+            due_col.addWidget(clear_due_btn)
+
+            calendars_row.addLayout(start_col, 1)
+            calendars_row.addLayout(due_col, 1)
+            layout.addLayout(calendars_row)
+
+            buttons = QHBoxLayout()
+            buttons.addStretch(1)
+            apply_btn = QPushButton("Apply")
+            apply_btn.clicked.connect(self._apply_task_date_popup)
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(self._close_task_date_popup)
+            buttons.addWidget(cancel_btn)
+            buttons.addWidget(apply_btn)
+            layout.addLayout(buttons)
+
+        base_date = self.calendar.selectedDate() if self.calendar else QDate.currentDate()
+        start_date = self._task_date_from_targets("start") or base_date
+        due_date = self._task_date_from_targets("due") or base_date
+        if self._task_date_start_cal:
+            self._task_date_start_cal.setSelectedDate(start_date)
+        if self._task_date_due_cal:
+            self._task_date_due_cal.setSelectedDate(due_date)
+        if self._task_date_apply_start:
+            self._task_date_apply_start.setChecked(True)
+        if self._task_date_apply_due:
+            self._task_date_apply_due.setChecked(True)
+        self._task_date_clear_start = False
+        self._task_date_clear_due = False
+
+        if self.tasks_due_list and self.tasks_due_list.viewport():
+            global_pos = self.tasks_due_list.viewport().mapToGlobal(pos)
+            hint = self._task_date_dialog.sizeHint()
+            self._task_date_dialog.move(self._smart_popup_pos(global_pos, hint))
+        self._task_date_dialog.show()
+
+    def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
+        menu = QMenu(self)
+        for label in ("Today", "Tomorrow", "Yesterday"):
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
+        menu.addSeparator()
+        for label in ("This Week", "Next Week", "End of Week", "This Weekend", "Next Weekend"):
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
+        menu.addSeparator()
+        menu.addAction("Date...").triggered.connect(
+            lambda: self._open_task_date_picker(role, targets, anchor)
+        )
+        menu.exec(anchor)
+        self._suppress_task_activation = False
+
+    def _apply_task_date_choice(self, role: str, label: str, targets: list[dict]) -> None:
+        target_date = self._resolve_quick_date(label, role)
+        if not target_date:
+            return
+        if role == "start":
+            self._update_tasks_with_dates(
+                targets,
+                target_date,
+                None,
+                apply_start=True,
+                apply_due=False,
+                clear_start=False,
+                clear_due=False,
+            )
+        else:
+            self._update_tasks_with_dates(
+                targets,
+                None,
+                target_date,
+                apply_start=False,
+                apply_due=True,
+                clear_start=False,
+                clear_due=False,
+            )
+        QTimer.singleShot(200, self._update_insights_for_selection)
+
+    def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
+        anchor_pos = anchor or QCursor.pos()
+        dlg = DateInsertDialog(self, anchor_pos=None)
+        dlg.move(self._smart_popup_pos(anchor_pos, dlg.sizeHint()))
+        try:
+            dlg.calendar.clicked.connect(lambda *_: dlg.accept())
+        except Exception:
+            pass
+        if dlg.exec() != QDialog.Accepted:
+            return
+        value = dlg.selected_date_text()
+        if not value:
+            return
+        if role == "start":
+            self._update_tasks_with_dates(
+                targets,
+                value,
+                None,
+                apply_start=True,
+                apply_due=False,
+                clear_start=False,
+                clear_due=False,
+            )
+        else:
+            self._update_tasks_with_dates(
+                targets,
+                None,
+                value,
+                apply_start=False,
+                apply_due=True,
+                clear_start=False,
+                clear_due=False,
+            )
+        QTimer.singleShot(200, self._update_insights_for_selection)
+
+    def _task_date_anchor(self) -> QPoint:
+        items = self.tasks_due_list.selectedItems()
+        if items:
+            rect = self.tasks_due_list.visualItemRect(items[0])
+            return self.tasks_due_list.viewport().mapToGlobal(rect.topRight() + QPoint(0, 4))
+        return QCursor.pos()
+
+    def _smart_popup_pos(self, anchor: QPoint, hint: QSize) -> QPoint:
+        screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else self.geometry()
+        x = anchor.x()
+        y = anchor.y()
+        if x + hint.width() > avail.right():
+            x = anchor.x() - hint.width()
+        if y + hint.height() > avail.bottom():
+            y = anchor.y() - hint.height()
+        x = max(avail.left(), min(x, avail.right() - hint.width()))
+        y = max(avail.top(), min(y, avail.bottom() - hint.height()))
+        return QPoint(x, y)
+
+    def _resolve_quick_date(self, label: str, role: str) -> Optional[str]:
+        today = Date.today()
+        weekday = today.weekday()
+        week_start = today - timedelta(days=weekday)
+        week_end = week_start + timedelta(days=6)
+        next_week_start = week_start + timedelta(days=7)
+        next_week_end = next_week_start + timedelta(days=6)
+        this_weekend_start = week_start + timedelta(days=5)
+        this_weekend_end = week_start + timedelta(days=6)
+        next_weekend_start = next_week_start + timedelta(days=5)
+        next_weekend_end = next_week_start + timedelta(days=6)
+
+        if label == "Today":
+            target = today
+        elif label == "Tomorrow":
+            target = today + timedelta(days=1)
+        elif label == "Yesterday":
+            target = today - timedelta(days=1)
+        elif label == "This Week":
+            target = week_start if role == "start" else week_end
+        elif label == "Next Week":
+            target = next_week_start if role == "start" else next_week_end
+        elif label == "End of Week":
+            target = week_end
+        elif label == "This Weekend":
+            target = this_weekend_start if role == "start" else this_weekend_end
+        elif label == "Next Weekend":
+            target = next_weekend_start if role == "start" else next_weekend_end
+        else:
+            return None
+        return target.isoformat()
+
+    def _collect_task_date_targets(self) -> list[dict]:
+        targets: list[dict] = []
+        for item in self.tasks_due_list.selectedItems():
+            path = item.data(0, PATH_ROLE)
+            line = item.data(0, LINE_ROLE)
+            task = item.data(0, Qt.UserRole) or {}
+            if not path or not line:
+                continue
+            try:
+                line_num = int(line)
+            except (TypeError, ValueError):
+                line_num = 1
+            targets.append({"path": str(path), "line": line_num, "task": task})
+        return targets
+
+    def _task_date_from_targets(self, field: str) -> Optional[QDate]:
+        if not self._task_date_targets:
+            return None
+        task = self._task_date_targets[0].get("task") or {}
+        value = ""
+        if field == "start":
+            value = (task.get("starts") or task.get("start") or "").strip()
+        elif field == "due":
+            value = (task.get("due") or "").strip()
+        if not value:
+            return None
+        try:
+            parsed = Date.fromisoformat(value)
+        except Exception:
+            return None
+        return QDate(parsed.year, parsed.month, parsed.day)
+
+    def _on_task_start_date_clicked(self, qdate: QDate) -> None:
+        self._task_date_clear_start = False
+        if self._task_date_apply_start:
+            self._task_date_apply_start.setChecked(True)
+
+    def _on_task_due_date_clicked(self, qdate: QDate) -> None:
+        self._task_date_clear_due = False
+        if self._task_date_apply_due:
+            self._task_date_apply_due.setChecked(True)
+
+    def _clear_task_start_date(self) -> None:
+        self._task_date_clear_start = True
+        if self._task_date_apply_start:
+            self._task_date_apply_start.setChecked(True)
+
+    def _clear_task_due_date(self) -> None:
+        self._task_date_clear_due = True
+        if self._task_date_apply_due:
+            self._task_date_apply_due.setChecked(True)
+
+    def _close_task_date_popup(self) -> None:
+        if self._task_date_dialog:
+            self._task_date_dialog.hide()
+
+    def _apply_task_date_popup(self) -> None:
+        if not self._task_date_targets:
+            self._close_task_date_popup()
+            return
+        apply_start = bool(self._task_date_apply_start and self._task_date_apply_start.isChecked())
+        apply_due = bool(self._task_date_apply_due and self._task_date_apply_due.isChecked())
+        start_value = None
+        due_value = None
+        if apply_start and not self._task_date_clear_start and self._task_date_start_cal:
+            start_value = self._task_date_start_cal.selectedDate().toString("yyyy-MM-dd")
+        if apply_due and not self._task_date_clear_due and self._task_date_due_cal:
+            due_value = self._task_date_due_cal.selectedDate().toString("yyyy-MM-dd")
+        self._update_tasks_with_dates(
+            self._task_date_targets,
+            start_value,
+            due_value,
+            apply_start=apply_start,
+            apply_due=apply_due,
+            clear_start=self._task_date_clear_start,
+            clear_due=self._task_date_clear_due,
+        )
+        self._close_task_date_popup()
+        QTimer.singleShot(200, self._update_insights_for_selection)
+
+    def _update_tasks_with_dates(
+        self,
+        targets: list[dict],
+        start_value: Optional[str],
+        due_value: Optional[str],
+        *,
+        apply_start: bool,
+        apply_due: bool,
+        clear_start: bool,
+        clear_due: bool,
+    ) -> None:
+        if self.http:
+            payload = {
+                "targets": [
+                    {
+                        "path": (t.get("path") or ""),
+                        "line": int(t.get("line") or 1),
+                    }
+                    for t in targets
+                    if t.get("path")
+                ],
+                "start_value": start_value,
+                "due_value": due_value,
+                "apply_start": apply_start,
+                "apply_due": apply_due,
+                "clear_start": clear_start,
+                "clear_due": clear_due,
+            }
+            try:
+                resp = self.http.post("/api/tasks/update-dates", json=payload)
+                resp.raise_for_status()
+            except Exception as exc:
+                print(f"[CALENDAR] Failed to update task dates via API: {exc}")
+            QTimer.singleShot(200, self._update_insights_for_selection)
+            self.tasksUpdated.emit()
+            return
+        if not self.vault_root:
+            return
+        targets_by_path: dict[str, list[dict]] = {}
+        for target in targets:
+            path = target.get("path")
+            if not path:
+                continue
+            targets_by_path.setdefault(path, []).append(target)
+        for rel_path, items in targets_by_path.items():
+            file_path = Path(self.vault_root) / rel_path.lstrip("/")
+            if not file_path.exists():
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                try:
+                    lines = file_path.read_text(errors="ignore").splitlines(keepends=True)
+                except Exception:
+                    continue
+            changed = False
+            for target in items:
+                line_num = target.get("line") or 1
+                line_idx = line_num - 1
+                if line_idx < 0 or line_idx >= len(lines):
+                    continue
+                original = lines[line_idx]
+                updated = self._update_task_line_dates(
+                    original,
+                    start_value=start_value,
+                    due_value=due_value,
+                    apply_start=apply_start,
+                    apply_due=apply_due,
+                    clear_start=clear_start,
+                    clear_due=clear_due,
+                )
+                if updated != original:
+                    lines[line_idx] = updated
+                    changed = True
+            if changed:
+                try:
+                    new_content = "".join(lines)
+                    file_path.write_text(new_content, encoding="utf-8")
+                except Exception:
+                    pass
+                try:
+                    indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
+                except Exception:
+                    pass
+        QTimer.singleShot(200, self._update_insights_for_selection)
+        self.tasksUpdated.emit()
+
+    def _update_task_line_dates(
+        self,
+        line: str,
+        *,
+        start_value: Optional[str],
+        due_value: Optional[str],
+        apply_start: bool,
+        apply_due: bool,
+        clear_start: bool,
+        clear_due: bool,
+    ) -> str:
+        newline = "\n" if line.endswith("\n") else ""
+        base = line.rstrip("\n")
+        existing_start = None
+        existing_due = None
+        start_match = START_TOKEN_PATTERN.search(base)
+        if start_match:
+            existing_start = start_match.group(1)
+        due_match = DUE_TOKEN_PATTERN.search(base)
+        if due_match:
+            existing_due = due_match.group(1)
+        final_start = existing_start
+        final_due = existing_due
+        if apply_start or clear_start:
+            final_start = None if clear_start else start_value
+        if apply_due or clear_due:
+            final_due = None if clear_due else due_value
+        cleaned = re.sub(r"\s*[<>][0-9]{4}-[0-9]{2}-[0-9]{2}", "", base).rstrip()
+        if final_start:
+            cleaned += f" >{final_start}"
+        if final_due:
+            cleaned += f" <{final_due}"
+        return cleaned + newline
+
+    def _update_task_line_checkbox(self, line: str, done: bool) -> str:
+        newline = "\n" if line.endswith("\n") else ""
+        base = line.rstrip("\n")
+        symbol_match = re.match(r"^(?P<indent>\s*)(?P<box>[☐☑])", base)
+        if symbol_match:
+            indent = symbol_match.group("indent") or ""
+            new_box = "☑" if done else "☐"
+            return indent + new_box + base[len(indent) + 1:] + newline
+        md_match = re.match(r"^(?P<prefix>\s*[-*]\s*\[)(?P<state>[ xX])(?P<suffix>\])", base)
+        if md_match:
+            new_state = "x" if done else " "
+            prefix = md_match.group("prefix")
+            suffix = md_match.group("suffix")
+            rest = base[md_match.end():]
+            return prefix + new_state + suffix + rest + newline
+        return line
+
+    def _set_tasks_completed(self, targets: list[dict], done: bool) -> None:
+        if not self.vault_root:
+            return
+        targets_by_path: dict[str, list[dict]] = {}
+        for target in targets:
+            path = target.get("path")
+            if not path:
+                continue
+            rel_path = str(path)
+            if not rel_path.startswith("/"):
+                rel_path = "/" + rel_path.lstrip("/")
+            targets_by_path.setdefault(rel_path, []).append(target)
+        for rel_path, items in targets_by_path.items():
+            file_path = Path(self.vault_root) / rel_path.lstrip("/")
+            if not file_path.exists():
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                try:
+                    lines = file_path.read_text(errors="ignore").splitlines(keepends=True)
+                except Exception:
+                    continue
+            changed = False
+            for target in items:
+                line_num = target.get("line") or 1
+                try:
+                    line_idx = int(line_num) - 1
+                except (TypeError, ValueError):
+                    line_idx = 0
+                if line_idx < 0 or line_idx >= len(lines):
+                    continue
+                original = lines[line_idx]
+                updated = self._update_task_line_checkbox(original, done)
+                if updated != original:
+                    lines[line_idx] = updated
+                    changed = True
+            if not changed:
+                continue
+            try:
+                new_content = "".join(lines)
+                file_path.write_text(new_content, encoding="utf-8")
+            except Exception:
+                continue
+            try:
+                indexer.index_page(rel_path, new_content)
+            except Exception:
+                pass
+        QTimer.singleShot(200, self._update_insights_for_selection)
+        self.tasksUpdated.emit()
 
     def _update_insights(self, date: QDate, current_path: Optional[str] = None) -> None:
         if not self.vault_root or not date.isValid():
@@ -2318,7 +3141,6 @@ class CalendarPanel(QWidget):
                 self.headings_list.clear()
             except Exception:
                 pass
-            self.tasks_due_list.clear()
             return
         day_page = base_dir / f"{base_dir.name}{PAGE_SUFFIX}"
         subpages = self._list_day_subpages(base_dir)
@@ -2521,7 +3343,7 @@ class CalendarPanel(QWidget):
         """Clear the multi-day filter and select the calendar's current date."""
         try:
             cur = self.calendar.selectedDate()
-            self.multi_selected_dates = {cur}
+            self._set_single_selection(cur)
             self.filter_btn.setVisible(False)
             self._apply_multi_selection_formats()
             self._update_insights_for_selection()
@@ -2607,6 +3429,9 @@ class CalendarPanel(QWidget):
 
     def _open_task_item(self, item) -> None:
         """Open a due task's page at its line."""
+        if self._suppress_task_activation:
+            self._suppress_task_activation = False
+            return
         if not item:
             return
         path = item.data(0, PATH_ROLE) if hasattr(item, "data") else None
@@ -2621,6 +3446,85 @@ class CalendarPanel(QWidget):
         if not norm.startswith("/"):
             norm = "/" + norm.lstrip("/")
         self.taskActivated.emit(norm, max(1, line_num))
+
+    def _on_task_item_clicked(self, item: QTreeWidgetItem, col: int) -> None:
+        if not item or not item.data(0, PATH_ROLE):
+            return
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        if col == due_idx or (start_idx is not None and col == start_idx):
+            self._suppress_task_activation = True
+            self._open_task_date_picker_for_column(item, col)
+
+    def _open_task_date_picker_for_column(self, item: QTreeWidgetItem, col: int) -> None:
+        if item and not item.isSelected():
+            self.tasks_due_list.clearSelection()
+            item.setSelected(True)
+        targets = self._collect_task_date_targets()
+        if not targets:
+            return
+        path = item.data(0, PATH_ROLE)
+        line = item.data(0, LINE_ROLE)
+        task = item.data(0, Qt.UserRole) or {}
+        if not path or not line:
+            return
+        try:
+            line_num = int(line)
+        except (TypeError, ValueError):
+            line_num = 1
+        role = "start" if (self._show_task_start_column and col == 3) else "due"
+        anchor = QCursor.pos()
+        self._open_task_date_quick_menu(role, targets, anchor)
+
+    def _task_date_anchor_for_item(self, item: QTreeWidgetItem, col: int) -> QPoint:
+        rect = self.tasks_due_list.visualItemRect(item)
+        header = self.tasks_due_list.header()
+        try:
+            col_x = header.sectionViewportPosition(col)
+        except Exception:
+            col_x = rect.left()
+        anchor = QPoint(col_x + rect.left(), rect.bottom() + 2)
+        return self.tasks_due_list.viewport().mapToGlobal(anchor)
+
+    def _open_task_date_context_menu(self, pos) -> None:
+        col = self.tasks_due_list.columnAt(pos.x())
+        if col < 0:
+            return
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        item = self.tasks_due_list.itemAt(pos)
+        if not item:
+            return
+        if not item.isSelected():
+            self.tasks_due_list.clearSelection()
+            item.setSelected(True)
+        if col == due_idx or (start_idx is not None and col == start_idx):
+            targets = self._collect_task_date_targets()
+            if not targets:
+                return
+            role = "start" if (self._show_task_start_column and col == 3) else "due"
+            anchor = self.tasks_due_list.viewport().mapToGlobal(pos)
+            self._open_task_date_quick_menu(role, targets, anchor)
+            return
+        task = item.data(0, Qt.UserRole) or {}
+        if not task:
+            return
+        targets = self._collect_task_date_targets()
+        if not targets:
+            return
+        any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
+        any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
+        menu = QMenu(self)
+        if any_open:
+            menu.addAction("Mark Complete").triggered.connect(
+                lambda: self._set_tasks_completed(targets, True)
+            )
+        if any_done:
+            menu.addAction("Reopen Task").triggered.connect(
+                lambda: self._set_tasks_completed(targets, False)
+            )
+        if menu.actions():
+            menu.exec(self.tasks_due_list.viewport().mapToGlobal(pos))
 
     def _restore_expanded_paths(self, root: QTreeWidgetItem, expanded_paths: set[str]) -> None:
         def _walk(item: QTreeWidgetItem) -> None:

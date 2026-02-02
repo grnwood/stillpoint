@@ -69,11 +69,11 @@ class TabbedRightPanel(QWidget):
         
         # Create Tasks tab
         self.task_panel = None
+        # Create Calendar tab
+        self.calendar_panel = None
         if enable_tasks:
             self._add_task_tab()
 
-        # Create Calendar tab
-        self.calendar_panel = None
         if enable_calendar:
             self._add_calendar_tab()
         
@@ -383,6 +383,10 @@ class TabbedRightPanel(QWidget):
         elif pending_date:
             y, m, d = pending_date
             self.calendar_panel.set_calendar_date(y, m, d)
+        try:
+            self.calendar_panel.ensure_splitter_visible()
+        except Exception:
+            pass
 
     def focus_ai_chat_input(self) -> None:
         if not self.ai_chat_panel or self.ai_chat_index is None:
@@ -468,6 +472,7 @@ class TabbedRightPanel(QWidget):
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)
+        self._sync_calendar_task_filters()
 
     def _remove_task_tab(self) -> None:
         if not self.task_panel:
@@ -477,6 +482,7 @@ class TabbedRightPanel(QWidget):
             self.tabs.removeTab(idx)
         self.task_panel.deleteLater()
         self.task_panel = None
+        self._sync_calendar_task_filters()
 
     def _add_calendar_tab(self) -> None:
         if self.calendar_panel:
@@ -492,9 +498,11 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.dateActivated.connect(self.dateActivated)
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
         self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
+        self.calendar_panel.tasksUpdated.connect(self.refresh_tasks)
         self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
         self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
         self.calendar_panel.pageDeleted.connect(self.pageDeleted)
+        self._sync_calendar_task_filters()
 
     def _remove_calendar_tab(self) -> None:
         if not self.calendar_panel:
@@ -529,6 +537,20 @@ class TabbedRightPanel(QWidget):
             self.tabs.removeTab(idx)
         self.link_panel.deleteLater()
         self.link_panel = None
+
+    def _sync_calendar_task_filters(self) -> None:
+        if not self.calendar_panel:
+            return
+        opener = self.task_panel.open_date_filter_dialog if self.task_panel else None
+        setter = self.task_panel.set_date_filter_range if self.task_panel else None
+        try:
+            self.calendar_panel.set_task_date_filter_opener(opener)
+        except Exception:
+            pass
+        try:
+            self.calendar_panel.set_task_date_filter_setter(setter)
+        except Exception:
+            pass
     
     def _update_attachments_tab_label(self) -> None:
         """Update the Attachments tab label with the count of attachments."""

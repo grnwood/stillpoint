@@ -63,6 +63,7 @@ from sp.server.state import vault_state
 from sp.server.vector import vector_manager
 from sp.rag.index import RetrievedChunk
 from sp.app import config
+from sp.app import indexer as app_indexer
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
@@ -78,6 +79,10 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
 _TASK_CACHE_VERSION: int = -1
+
+_TASK_DATE_PATTERN = re.compile(r"\s*[<>][0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TASK_START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
+_TASK_DUE_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 
 _TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
@@ -473,6 +478,73 @@ def _clear_task_cache() -> None:
     _TASK_CACHE_VERSION = -1
 
 
+def _vault_needs_task_index(root: Path) -> bool:
+    db_path = config._vault_db_path()
+    if not db_path or not db_path.exists():
+        return True
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+            tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return True
+    if pages == 0:
+        return True
+    return tasks == 0
+
+
+def _start_reindex_job(root: Path, rebuild_search: bool) -> str:
+    job_id = str(uuid.uuid4())
+    with _REINDEX_LOCK:
+        _REINDEX_JOBS[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "message": "Starting reindex...",
+            "total": 0,
+            "current": 0,
+        }
+    thread = threading.Thread(target=_do_reindex_vault, args=(job_id, root, rebuild_search), daemon=True)
+    thread.start()
+    return job_id
+
+
+def _update_task_line_dates(
+    line: str,
+    *,
+    start_value: Optional[str],
+    due_value: Optional[str],
+    apply_start: bool,
+    apply_due: bool,
+    clear_start: bool,
+    clear_due: bool,
+) -> str:
+    newline = "\n" if line.endswith("\n") else ""
+    base = line.rstrip("\n")
+    existing_start = None
+    existing_due = None
+    start_match = _TASK_START_PATTERN.search(base)
+    if start_match:
+        existing_start = start_match.group(1)
+    due_match = _TASK_DUE_PATTERN.search(base)
+    if due_match:
+        existing_due = due_match.group(1)
+    final_start = existing_start
+    final_due = existing_due
+    if apply_start or clear_start:
+        final_start = None if clear_start else start_value
+    if apply_due or clear_due:
+        final_due = None if clear_due else due_value
+    cleaned = _TASK_DATE_PATTERN.sub("", base).rstrip()
+    if final_start:
+        cleaned += f" >{final_start}"
+    if final_due:
+        cleaned += f" <{final_due}"
+    return cleaned + newline
+
+
 def _normalize_tags(raw_tags: Optional[List[str]]) -> tuple[str, ...]:
     if not raw_tags:
         return ()
@@ -496,21 +568,29 @@ def _normalize_status(status: Optional[str]) -> Optional[str]:
     raise HTTPException(status_code=400, detail="Status must be one of: todo, done, all")
 
 
-def _fetch_tasks(query: str, tags: tuple[str, ...], status: Optional[str]) -> list[dict]:
+def _fetch_tasks(
+    query: str,
+    tags: tuple[str, ...],
+    *,
+    include_done: bool,
+    include_ancestors: bool,
+    actionable_only: bool,
+    status: Optional[str],
+) -> list[dict]:
     global _TASK_CACHE_VERSION
     current_version = config.get_task_index_version()
     if _TASK_CACHE_VERSION != current_version:
         _clear_task_cache()
         _TASK_CACHE_VERSION = current_version
-    cache_key = (query, tags, status)
+    cache_key = (query, tags, include_done, include_ancestors, actionable_only, status)
     if cache_key in _TASKS_CACHE:
         return _TASKS_CACHE[cache_key]
-    include_done = status != "todo"
     tasks_from_db = config.fetch_tasks(
         query=query,
         tags=tags,
         include_done=include_done,
-        include_ancestors=False,
+        include_ancestors=include_ancestors,
+        actionable_only=actionable_only,
     )
     if status == "done":
         tasks_from_db = [task for task in tasks_from_db if (task.get("status") or "").lower() == "done"]
@@ -604,6 +684,21 @@ class ReorderPayload(BaseModel):
 class ModifiedRangePayload(BaseModel):
     start_date: str
     end_date: str
+
+
+class TaskDateTargetPayload(BaseModel):
+    path: str
+    line: int
+
+
+class TaskDateUpdatePayload(BaseModel):
+    targets: List[TaskDateTargetPayload]
+    start_value: Optional[str] = None
+    due_value: Optional[str] = None
+    apply_start: bool = True
+    apply_due: bool = True
+    clear_start: bool = False
+    clear_due: bool = False
 
 
 class AttachmentDeletePayload(BaseModel):
@@ -915,7 +1010,10 @@ def select_vault(payload: VaultSelectPayload) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
     _clear_task_cache()
-    return {"root": str(root)}
+    reindex_job_id = None
+    if _vault_needs_task_index(root):
+        reindex_job_id = _start_reindex_job(root, rebuild_search=False)
+    return {"root": str(root), "reindex_job_id": reindex_job_id}
 
 
 def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
@@ -950,8 +1048,7 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
             path_str = f"/{rel_path.as_posix()}"
             try:
                 content = txt_file.read_text(encoding="utf-8")
-                # Use config.ensure_page_entry() to populate the pages table
-                config.ensure_page_entry(path_str)
+                app_indexer.index_page(path_str, content)
             except Exception:
                 pass
             
@@ -1050,21 +1147,7 @@ def start_reindex(payload: ReindexRequest) -> dict:
     root = vault_state.get_root()
     if not root:
         raise HTTPException(status_code=400, detail="No vault selected")
-    
-    job_id = str(uuid.uuid4())
-    with _REINDEX_LOCK:
-        _REINDEX_JOBS[job_id] = {
-            "status": "queued",
-            "progress": 0,
-            "message": "Starting reindex...",
-            "total": 0,
-            "current": 0,
-        }
-    
-    # Start background thread
-    thread = threading.Thread(target=_do_reindex_vault, args=(job_id, root, payload.rebuild_search), daemon=True)
-    thread.start()
-    
+    job_id = _start_reindex_job(root, payload.rebuild_search)
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -1338,6 +1421,10 @@ def file_write(
             mtime_ns = file_path.stat().st_mtime_ns
         except OSError:
             mtime_ns = None
+        try:
+            app_indexer.index_page(payload.path, payload.content)
+        except Exception:
+            pass
         # Update search index
         db_path = config._vault_db_path()
         if db_path:
@@ -1447,13 +1534,113 @@ def api_tasks(
     query: Optional[str] = None,
     tags: Optional[List[str]] = Query(None),
     status: Optional[str] = None,
+    include_done: Optional[bool] = None,
+    include_ancestors: bool = False,
+    actionable_only: bool = False,
 ) -> dict:
     _get_vault_root()
     normalized_query = (query or "").strip()
     normalized_tags = _normalize_tags(tags)
     normalized_status = _normalize_status(status)
-    task_rows = _fetch_tasks(normalized_query, normalized_tags, normalized_status)
+    if normalized_status is not None:
+        include_done_effective = normalized_status != "todo"
+    elif include_done is None:
+        include_done_effective = True
+    else:
+        include_done_effective = bool(include_done)
+    task_rows = _fetch_tasks(
+        normalized_query,
+        normalized_tags,
+        include_done=include_done_effective,
+        include_ancestors=bool(include_ancestors),
+        actionable_only=bool(actionable_only),
+        status=normalized_status,
+    )
+    if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+        print(
+            f"[API] /api/tasks count={len(task_rows)} "
+            f"query={normalized_query!r} tags={list(normalized_tags)} "
+            f"include_done={include_done_effective} include_ancestors={include_ancestors} "
+            f"actionable_only={actionable_only} status={normalized_status}"
+        )
     return {"items": [_serialize_task(task) for task in task_rows]}
+
+
+@app.post("/api/tasks/update-dates")
+def api_update_task_dates(
+    payload: TaskDateUpdatePayload,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    root = vault_state.get_root()
+    if not payload.targets:
+        return {"ok": True, "updated": 0, "paths": []}
+    if payload.start_value:
+        try:
+            _ = Date.fromisoformat(payload.start_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid start_value date") from exc
+    if payload.due_value:
+        try:
+            _ = Date.fromisoformat(payload.due_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid due_value date") from exc
+    targets_by_path: dict[str, list[TaskDateTargetPayload]] = {}
+    for target in payload.targets:
+        normalized = _vault_relative_path(target.path)
+        targets_by_path.setdefault(normalized, []).append(target)
+    updated_paths: list[str] = []
+    updated_count = 0
+    for rel_path, items in targets_by_path.items():
+        try:
+            content = files.read_file(root, rel_path)
+        except FileAccessError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        lines = content.splitlines(keepends=True)
+        changed = False
+        for target in items:
+            line_idx = max(int(target.line or 1), 1) - 1
+            if line_idx < 0 or line_idx >= len(lines):
+                continue
+            original = lines[line_idx]
+            updated = _update_task_line_dates(
+                original,
+                start_value=payload.start_value,
+                due_value=payload.due_value,
+                apply_start=payload.apply_start,
+                apply_due=payload.apply_due,
+                clear_start=payload.clear_start,
+                clear_due=payload.clear_due,
+            )
+            if updated != original:
+                lines[line_idx] = updated
+                changed = True
+                updated_count += 1
+        if not changed:
+            continue
+        new_content = "".join(lines)
+        try:
+            files.write_file(root, rel_path, new_content)
+        except FileAccessError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            app_indexer.index_page(rel_path, new_content)
+        except Exception:
+            pass
+        try:
+            db_path = config._vault_db_path()
+            if db_path:
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                try:
+                    search_index.upsert_page(conn, rel_path, int(time.time()), new_content)
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+        updated_paths.append(rel_path)
+    _clear_task_cache()
+    return {"ok": True, "updated": updated_count, "paths": updated_paths}
 
 
 @app.get("/api/search")

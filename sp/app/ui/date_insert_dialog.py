@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QVBoxLayout,
     QToolButton,
+    QPushButton,
     QMessageBox,
 )
 
@@ -236,8 +237,34 @@ class DateInsertDialog(QDialog):
         hint_row.addWidget(help_btn, 0, Qt.AlignTop)
         layout.addLayout(hint_row)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.accepted.connect(self._try_accept)
+        quick_row = QHBoxLayout()
+        quick_row.setContentsMargins(0, 0, 0, 0)
+        quick_row.setSpacing(8)
+        self.today_btn = QPushButton("Today")
+        self.today_btn.setToolTip("Set date to today")
+        self.today_btn.setStyleSheet(
+            """
+            QPushButton {
+                font-weight: 600;
+                padding: 6px 14px;
+                border-radius: 6px;
+                background: #2b6cb0;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background: #2f76c6;
+            }
+            QPushButton:pressed {
+                background: #255a92;
+            }
+            """
+        )
+        self.today_btn.clicked.connect(self._set_today)
+        quick_row.addWidget(self.today_btn)
+        quick_row.addStretch(1)
+        layout.addLayout(quick_row)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
@@ -307,10 +334,6 @@ class DateInsertDialog(QDialog):
         self.date_edit.blockSignals(False)
         self.date_edit.setStyleSheet(self._default_style)
 
-        ok_btn = self.buttons.button(QDialogButtonBox.Ok)
-        if ok_btn:
-            ok_btn.setEnabled(True)
-
         if update_calendar:
             self.calendar.blockSignals(True)
             self.calendar.setSelectedDate(QDate(dt.year, dt.month, dt.day))
@@ -318,10 +341,10 @@ class DateInsertDialog(QDialog):
 
     def _set_invalid(self) -> None:
         self._valid_date = None
+
+    def _set_today(self) -> None:
+        self._apply_date(date.today())
         self.date_edit.setStyleSheet(self._default_style)
-        ok_btn = self.buttons.button(QDialogButtonBox.Ok)
-        if ok_btn:
-            ok_btn.setEnabled(False)
 
     def _try_accept(self) -> None:
         if self._valid_date is None:

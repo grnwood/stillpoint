@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-import math
 import html
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices
+from PySide6.QtGui import QCursor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QProgressDialog,
     QStackedWidget,
     QSplitter,
@@ -41,12 +43,23 @@ from PySide6.QtWidgets import (
 
 from markdown import markdown as render_markdown
 from sp.app import config
+from sp.app import indexer
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
+from .date_insert_dialog import DateInsertDialog
 from .path_utils import colon_to_path, path_to_colon
+from .task_style import (
+    contrast_text_color,
+    due_colors_from_task,
+    priority_brush,
+    priority_time_label,
+    relative_day_label,
+)
 
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TAG_PREFIX_PATTERN = re.compile(r"(?<![\w.+-])@[\w_]*$")
+DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
+START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 
 
 def _active_tag_token(text: str, cursor: int) -> Optional[str]:
@@ -169,6 +182,7 @@ class TaskPanel(QWidget):
         self._ai_splitter = None
         self._ai_toggle_btn = None
         self._date_filter_btn = None
+        self._date_filter_anchor = None
         self._date_filter_dialog = None
         self._date_filter_start_edit = None
         self._date_filter_end_edit = None
@@ -219,7 +233,7 @@ class TaskPanel(QWidget):
                 """
                 QToolButton {
                     border: 1px solid transparent;
-                    border-radius: 4px;
+                    border-radius: 13px;
                     padding: 2px;
                     background: transparent;
                 }
@@ -259,11 +273,13 @@ class TaskPanel(QWidget):
         self._show_task_page_column = False
         self._configure_task_columns(force=True)
         self.task_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.task_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.task_tree.setRootIsDecorated(True)
         self.task_tree.setAlternatingRowColors(True)
         self.task_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.task_tree.itemActivated.connect(self._on_task_activated)
         self.task_tree.itemDoubleClicked.connect(self._on_task_double_clicked)
+        self.task_tree.itemClicked.connect(self._on_task_item_clicked)
         self.task_tree.itemActivated.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
         self.task_tree.itemDoubleClicked.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
         self.task_tree.setSortingEnabled(True)
@@ -283,6 +299,8 @@ class TaskPanel(QWidget):
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
         self.task_tree.installEventFilter(self)
         self.task_tree.setFocusPolicy(Qt.StrongFocus)
+        self.task_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.task_tree.customContextMenuRequested.connect(self._open_task_date_context_menu)
         
         # Debug: Log when tree signals fire (if enabled)
         if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
@@ -392,12 +410,16 @@ class TaskPanel(QWidget):
 
         self.content_stack = QStackedWidget()
         self.content_stack.addWidget(self.task_content)
+        self.summary_footer = QLabel("")
+        self.summary_footer.setStyleSheet("color: #9aa4ad; padding: 2px 6px;")
+        self.summary_footer.setWordWrap(True)
         if self._ai_enabled:
             self._setup_ai_panel()
 
         layout = QVBoxLayout()
         layout.addLayout(header_row)
         layout.addWidget(self.content_stack, 1)
+        layout.addWidget(self.summary_footer)
         self.setLayout(layout)
         
         self._nav_filter_prefix: Optional[str] = None
@@ -408,6 +430,9 @@ class TaskPanel(QWidget):
         self._last_keyboard_task_id: Optional[str] = None
         self._last_keyboard_task_path: Optional[str] = None
         self._last_keyboard_task_line: Optional[int] = None
+        self._suppress_task_activation = False
+        self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
+        self._api_task_cache_ttl = 0.5
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
@@ -569,47 +594,10 @@ class TaskPanel(QWidget):
             pass
 
     def _relative_day_label(self, target: date, prefix: str = "") -> str:
-        today = date.today()
-        delta_days = (target - today).days
-        if delta_days <= 13:
-            label = f"{max(delta_days, 0)}d"
-        elif delta_days < 56:
-            label = f"{max(1, math.ceil(delta_days / 7))}w"
-        elif delta_days < 365:
-            label = f"{max(1, math.ceil(delta_days / 30))}m"
-        else:
-            label = f"{max(1, math.ceil(delta_days / 365))}y"
-        return f"{prefix}{label}" if label else ""
+        return relative_day_label(target, prefix=prefix)
 
     def _priority_time_label(self, task: dict) -> tuple[str, bool]:
-        priority_level = min(task.get("priority", 0) or 0, 3)
-        priority = "!" * priority_level
-        due_str = (task.get("due") or "").strip()
-        start_str = (task.get("starts") or task.get("start") or "").strip()
-        label = ""
-        overdue = False
-        if due_str:
-            try:
-                due_dt = date.fromisoformat(due_str)
-                if due_dt < date.today():
-                    label = "OD"
-                    overdue = True
-                else:
-                    label = self._relative_day_label(due_dt)
-            except Exception:
-                label = ""
-        elif start_str:
-            try:
-                start_dt = date.fromisoformat(start_str)
-                if start_dt > date.today():
-                    label = self._relative_day_label(start_dt, prefix=">")
-            except Exception:
-                label = ""
-        if label and priority:
-            return f"{label} {priority}", overdue
-        if label:
-            return label, overdue
-        return priority, overdue
+        return priority_time_label(task)
 
     def _apply_font_size(self) -> None:
         font = self.font()
@@ -633,6 +621,7 @@ class TaskPanel(QWidget):
             self._ai_copy_btn,
             self._ai_generate_btn,
             self._ai_markdown_view,
+            self.summary_footer,
         ):
             try:
                 if widget:
@@ -919,6 +908,8 @@ class TaskPanel(QWidget):
             return "Filter by date range"
         start = self._date_filter_start.isoformat() if self._date_filter_start else "Any"
         end = self._date_filter_end.isoformat() if self._date_filter_end else "Any"
+        if self._date_filter_active_preset == "unscheduled":
+            return "Date filter active: Unscheduled"
         return f"Date filter active: {start} → {end}"
 
     def _update_date_filter_button(self) -> None:
@@ -928,7 +919,43 @@ class TaskPanel(QWidget):
         self._date_filter_btn.setIcon(self._build_date_filter_icon(active))
         self._date_filter_btn.setToolTip(self._date_filter_tooltip())
 
+    def _date_filter_anchor_widget(self):
+        return self._date_filter_anchor or self._date_filter_btn
+
+    def open_date_filter_dialog(self, anchor=None) -> None:
+        """Open the date filter dialog anchored to the provided widget."""
+        self._date_filter_anchor = anchor
+        self._open_date_filter_dialog()
+
+    def _position_popup(self, popup: QDialog, anchor) -> None:
+        if not anchor:
+            return
+        anchor_pos = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        anchor_left = anchor.mapToGlobal(QPoint(0, 0)).x()
+        anchor_right = anchor.mapToGlobal(QPoint(anchor.width(), 0)).x()
+        screen = QApplication.screenAt(anchor_pos) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else self.geometry()
+        hint = popup.sizeHint()
+
+        space_right = avail.right() - anchor_pos.x()
+        space_left = anchor_pos.x() - avail.left()
+        if space_right >= hint.width():
+            x = anchor_pos.x()
+        elif space_left >= hint.width():
+            x = anchor_left - hint.width()
+        else:
+            x = anchor_right - hint.width()
+        x = max(avail.left(), min(x, avail.right() - hint.width()))
+
+        y = anchor_pos.y()
+        if y + hint.height() > avail.bottom():
+            y = anchor.mapToGlobal(QPoint(0, 0)).y() - hint.height()
+        y = max(avail.top(), min(y, avail.bottom() - hint.height()))
+        popup.move(x, y)
+
     def _date_filter_active(self) -> bool:
+        if self._date_filter_active_preset == "unscheduled":
+            return True
         return bool(self._date_filter_start or self._date_filter_end)
 
     def _open_date_filter_dialog(self) -> None:
@@ -946,6 +973,7 @@ class TaskPanel(QWidget):
             for label, preset in (
                 ("Overdue", "overdue"),
                 ("Should Start", "should_start"),
+                ("Unscheduled", "unscheduled"),
                 ("Today", "today"),
                 ("This Week", "week"),
                 ("Next 7", "next7"),
@@ -1040,9 +1068,10 @@ class TaskPanel(QWidget):
             else:
                 self._date_filter_end_edit.setDate(min_date)
 
-        if self._date_filter_btn:
-            pos = self._date_filter_btn.mapToGlobal(QPoint(0, self._date_filter_btn.height()))
-            self._date_filter_dialog.move(pos)
+        anchor = self._date_filter_anchor_widget()
+        if anchor:
+            self._position_popup(self._date_filter_dialog, anchor)
+        self._date_filter_anchor = None
         self._date_filter_dialog.show()
 
     def _open_date_calendar(self, target: str) -> None:
@@ -1055,9 +1084,9 @@ class TaskPanel(QWidget):
             calendar.clicked.connect(self._apply_calendar_date)
             layout.addWidget(calendar)
             self._date_filter_calendar_popup.setLayout(layout)
-        if self._date_filter_btn:
-            pos = self._date_filter_btn.mapToGlobal(QPoint(0, self._date_filter_btn.height()))
-            self._date_filter_calendar_popup.move(pos)
+        anchor = self._date_filter_anchor_widget()
+        if anchor:
+            self._position_popup(self._date_filter_calendar_popup, anchor)
         self._date_filter_calendar_popup.show()
 
     def _apply_calendar_date(self, qdate: QDate) -> None:
@@ -1098,6 +1127,9 @@ class TaskPanel(QWidget):
             end = today - timedelta(days=1)
         elif preset == "should_start":
             end = today - timedelta(days=7)
+        elif preset == "unscheduled":
+            start = None
+            end = None
         else:
             return
         self._date_filter_active_preset = preset
@@ -1154,6 +1186,20 @@ class TaskPanel(QWidget):
         self._update_date_filter_button()
         if self._date_filter_dialog:
             self._date_filter_dialog.hide()
+
+    def set_date_filter_range(
+        self,
+        start: Optional[date],
+        end: Optional[date],
+        preset: Optional[str] = None,
+        *,
+        refresh: bool = True,
+    ) -> None:
+        """Set the date filter programmatically and refresh tasks."""
+        self._date_filter_active_preset = preset
+        self._set_date_filter(start, end)
+        if refresh:
+            self._refresh_tasks()
         self._refresh_tasks()
 
     def _actionable_tooltip(self) -> str:
@@ -1433,7 +1479,7 @@ class TaskPanel(QWidget):
             self._ai_chat_panel.setToolTip("Initialize task AI to enable chat.")
 
     def _build_task_context_text(self) -> str:
-        tasks = config.fetch_tasks(
+        tasks = self._fetch_tasks_api(
             "",
             [],
             include_done=True,
@@ -1471,14 +1517,24 @@ class TaskPanel(QWidget):
         return "\n".join(lines).strip()
 
     def _build_task_insight_input(self, max_lines: int = 200, max_chars: int = 6000) -> str:
-        tasks = config.fetch_tasks(
+        tasks = self._fetch_tasks_api(
             "",
             [],
             include_done=True,
             include_ancestors=True,
             actionable_only=False,
         )
-        tag_counts = config.fetch_task_tags()
+        tag_counts: list[tuple[str, int]] = []
+        counts: dict[str, int] = {}
+        for task in tasks:
+            tag_set = set(task.get("tags") or [])
+            text = task.get("text", "") or ""
+            for token in re.findall(r"@[A-Za-z0-9_]+", text):
+                tag_set.add(token)
+            for tag in tag_set:
+                counts[tag] = counts.get(tag, 0) + 1
+        if counts:
+            tag_counts = sorted(counts.items())
         today = date.today()
         overdue = 0
         upcoming = 0
@@ -2032,6 +2088,10 @@ class TaskPanel(QWidget):
             start_value = self._parse_task_date(task.get("starts") or task.get("start"))
             end_value = self._parse_task_date(task.get("due"))
             preset = self._date_filter_active_preset
+            if preset == "unscheduled":
+                if not (start_value or end_value):
+                    filtered.append(task)
+                continue
             if preset == "overdue":
                 if not end_value or not end_bound or end_value > end_bound:
                     continue
@@ -2113,7 +2173,7 @@ class TaskPanel(QWidget):
             tag_items = _count_tags(self._visible_tasks)
         else:
             try:
-                all_tasks = config.fetch_tasks(
+                all_tasks = self._fetch_tasks_api(
                     "",
                     [],
                     include_done=include_done,
@@ -2122,11 +2182,7 @@ class TaskPanel(QWidget):
                 )
                 tag_items = _count_tags(list(all_tasks))
             except Exception:
-                tag_items = [
-                    (tag, count)
-                    for tag, count in config.fetch_task_tags()
-                    if include_done or count > 0
-                ]
+                tag_items = []
         self._available_tags = {tag for tag, _ in tag_items}
         # Drop active tags that are no longer available in the current view
         if self.active_tags:
@@ -2145,6 +2201,11 @@ class TaskPanel(QWidget):
         self.tag_list.blockSignals(False)
 
     def _refresh_tasks(self) -> None:
+        current_item = self.task_tree.currentItem()
+        if current_item:
+            task = current_item.data(0, Qt.UserRole)
+            if task:
+                self._remember_task_selection(task)
         current_version = config.get_task_index_version()
         if current_version != self._task_index_version:
             self._task_index_version = current_version
@@ -2176,15 +2237,27 @@ class TaskPanel(QWidget):
         if impossible_tag_filter:
             tasks = []
         else:
-            tasks = config.fetch_tasks(
+            actionable_only = actionable_toggle or (not include_done and not searching)
+            tasks = self._fetch_tasks_api(
                 query,
                 sql_tags,
                 include_done=include_done,
                 include_ancestors=True,
-                # Force actionable-only when toggled, otherwise keep the default active view
-                # unless the user is explicitly filtering/searching.
-                actionable_only=actionable_toggle or (not include_done and not searching),
+                actionable_only=actionable_only,
             )
+            if (
+                not tasks
+                and actionable_only
+                and not actionable_toggle
+                and not searching
+            ):
+                tasks = self._fetch_tasks_api(
+                    query,
+                    sql_tags,
+                    include_done=include_done,
+                    include_ancestors=True,
+                    actionable_only=False,
+                )
             tasks = self._apply_nav_filter(tasks)
             if effective_tag_groups and not use_sql_tags:
                 tasks = self._filter_tasks_to_tag_groups(tasks, effective_tag_groups)
@@ -2197,7 +2270,7 @@ class TaskPanel(QWidget):
                 self._tag_source_tasks = []
                 extra_tasks = []
             else:
-                extra_tasks = config.fetch_tasks(
+                extra_tasks = self._fetch_tasks_api(
                     query,
                     sql_tags,
                     include_done=True,
@@ -2220,6 +2293,7 @@ class TaskPanel(QWidget):
         self._visible_tasks = []
         if not tasks:
             self._refresh_tags()
+            self._update_summary_footer([])
             return
         task_map = {task["id"]: task for task in tasks}
         visible_ids: set[str] = set()
@@ -2299,6 +2373,7 @@ class TaskPanel(QWidget):
         self.task_tree.sortItems(self.sort_column, self.sort_order)
         self._restore_last_keyboard_selection(items_by_id)
         self._refresh_tags()
+        self._update_summary_footer(visible_tasks)
         QTimer.singleShot(0, self._reset_horizontal_scroll)
 
     def _filter_tasks_to_tag_groups(self, tasks: list[dict], tag_groups: list[set[str]]) -> list[dict]:
@@ -2352,39 +2427,41 @@ class TaskPanel(QWidget):
 
     def _due_colors(self, task: dict) -> Optional[tuple[QColor | None, QColor | None]]:
         """Return (fg, bg) for due column with red/orange/yellow emphasis."""
-        due_str = (task.get("due") or "").strip()
-        if not due_str:
-            return None
-        try:
-            due_dt = date.fromisoformat(due_str)
-        except ValueError:
-            return None
-        today_dt = date.today()
-        if due_dt < today_dt:
-            return QColor("#FFFFFF"), QColor("#CC0000")  # Overdue: white on solid red
-        if due_dt == today_dt:
-            return QColor("#3A1D00"), QColor("#F57900")  # Today: dark on orange
-        if due_dt == today_dt + timedelta(days=1):
-            return QColor("#444444"), QColor("#FDD835")  # Tomorrow: dark on yellow
-        return None
+        return due_colors_from_task(task, include_tomorrow=True)
 
     def _priority_brush(self, level: int) -> Optional[dict]:
         """Return background/foreground for priority level."""
-        if level <= 0:
-            return None
-        # Three levels only, matching red/orange/yellow backgrounds
-        colors = [
-            {"bg": QColor("#FFF9C4")},  # !
-            {"bg": QColor("#F57900")},  # !!
-            {"bg": QColor("#CC0000")},  # !!!
-        ]
-        idx = min(level - 1, len(colors) - 1)
-        bg = colors[idx]["bg"]
-        return {"bg": bg, "fg": self._contrast_text_color(bg)}
+        return priority_brush(level)
 
     def _contrast_text_color(self, bg: QColor) -> QColor:
         """Return a readable text color for the given background."""
-        return QColor("#FFFFFF") if bg.lightness() < 128 else QColor("#000000")
+        return contrast_text_color(bg)
+
+    def _update_summary_footer(self, tasks: list[dict]) -> None:
+        total = len(tasks)
+        done = sum(1 for task in tasks if task.get("status") == "done")
+        open_count = total - done
+        overdue = 0
+        upcoming = 0
+        needs_date = 0
+        today = date.today()
+        for task in tasks:
+            due_str = (task.get("due") or "").strip()
+            start_str = (task.get("starts") or task.get("start") or "").strip()
+            if not due_str and not start_str:
+                needs_date += 1
+            if due_str and task.get("status") != "done":
+                try:
+                    due_dt = date.fromisoformat(due_str)
+                except ValueError:
+                    continue
+                if due_dt < today:
+                    overdue += 1
+                elif due_dt <= today + timedelta(days=7):
+                    upcoming += 1
+        self.summary_footer.setText(
+            f"{total} tasks • open {open_count} • overdue {overdue} • due next 7d {upcoming} • needs date {needs_date}"
+        )
 
     def _task_sort_key(self, task: dict) -> tuple:
         """Sort tasks to ensure parents are created before children."""
@@ -2396,8 +2473,7 @@ class TaskPanel(QWidget):
             if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
                 print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
             return
-        if self._last_activation_source == "keyboard":
-            self._remember_task_selection(task)
+        self._remember_task_selection(task)
         if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
             print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
         if not self._last_activation_source:
@@ -2406,61 +2482,303 @@ class TaskPanel(QWidget):
 
     def _toggle_task_checkbox(self, task: dict) -> None:
         """Toggle the checkbox state of a task by modifying its source file."""
+        if not task:
+            return
+        is_done = task.get("status") == "done"
+        path = task.get("path") or ""
+        if not path:
+            return
+        if not str(path).startswith("/"):
+            path = "/" + str(path).lstrip("/")
+        line = task.get("line") or 1
+        try:
+            line_num = int(line)
+        except (TypeError, ValueError):
+            line_num = 1
+        self._set_tasks_completed([{"path": str(path), "line": line_num, "task": task}], not is_done)
+
+    def _update_task_line_checkbox(self, line: str, done: bool) -> str:
+        newline = "\n" if line.endswith("\n") else ""
+        base = line.rstrip("\n")
+        symbol_match = re.match(r"^(?P<indent>\s*)(?P<box>[☐☑])", base)
+        if symbol_match:
+            indent = symbol_match.group("indent") or ""
+            new_box = "☑" if done else "☐"
+            return indent + new_box + base[len(indent) + 1:] + newline
+        md_match = re.match(r"^(?P<prefix>\s*[-*]\s*\[)(?P<state>[ xX])(?P<suffix>\])", base)
+        if md_match:
+            new_state = "x" if done else " "
+            prefix = md_match.group("prefix")
+            suffix = md_match.group("suffix")
+            rest = base[md_match.end():]
+            return prefix + new_state + suffix + rest + newline
+        return line
+
+    def _set_tasks_completed(self, targets: list[dict], done: bool) -> None:
         if not config.has_active_vault():
             return
-        
-        vault_root = Path(config.active_vault_root())
-        task_path = task.get("path")
-        task_line = task.get("line")
-        
-        if not task_path or not task_line:
+        vault_root_val = config.get_active_vault()
+        if not vault_root_val:
             return
-        
-        file_path = vault_root / task_path.lstrip("/")
-        if not file_path.exists():
+        vault_root = Path(vault_root_val)
+        targets_by_path: dict[str, list[dict]] = {}
+        for target in targets:
+            path = target.get("path")
+            if not path:
+                continue
+            targets_by_path.setdefault(str(path), []).append(target)
+        for rel_path, items in targets_by_path.items():
+            file_path = vault_root / rel_path.lstrip("/")
+            if not file_path.exists():
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                try:
+                    lines = file_path.read_text(errors="ignore").splitlines(keepends=True)
+                except Exception:
+                    continue
+            changed = False
+            for target in items:
+                line_num = target.get("line") or 1
+                try:
+                    line_idx = int(line_num) - 1
+                except (TypeError, ValueError):
+                    line_idx = 0
+                if line_idx < 0 or line_idx >= len(lines):
+                    continue
+                original = lines[line_idx]
+                updated = self._update_task_line_checkbox(original, done)
+                if updated != original:
+                    lines[line_idx] = updated
+                    changed = True
+            if not changed:
+                continue
+            try:
+                new_content = "".join(lines)
+                file_path.write_text(new_content, encoding="utf-8")
+            except Exception:
+                continue
+            try:
+                indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
+            except Exception:
+                pass
+        QTimer.singleShot(100, self._refresh_tasks)
+
+    def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
+        menu = QMenu(self)
+        for label in ("Today", "Tomorrow", "Yesterday"):
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
+        menu.addSeparator()
+        for label in ("This Week", "Next Week", "End of Week", "This Weekend", "Next Weekend"):
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
+        menu.addSeparator()
+        menu.addAction("Date...").triggered.connect(
+            lambda: self._open_task_date_picker(role, targets, anchor)
+        )
+        menu.exec(anchor)
+        self._suppress_task_activation = False
+
+    def _collect_task_targets(self) -> list[dict]:
+        targets: list[dict] = []
+        for item in self.task_tree.selectedItems():
+            task = item.data(0, Qt.UserRole) or {}
+            path = task.get("path") or ""
+            line = task.get("line") or 1
+            if not path:
+                continue
+            if not str(path).startswith("/"):
+                path = "/" + str(path).lstrip("/")
+            try:
+                line_num = int(line)
+            except (TypeError, ValueError):
+                line_num = 1
+            targets.append({"path": str(path), "line": line_num, "task": task})
+        return targets
+
+    def _apply_task_date_choice(self, role: str, label: str, targets: list[dict]) -> None:
+        target_date = self._resolve_quick_date(label, role)
+        if not target_date:
             return
-        
+        if role == "start":
+            self._update_tasks_with_dates(targets, target_date, None, apply_start=True, apply_due=False)
+        else:
+            self._update_tasks_with_dates(targets, None, target_date, apply_start=False, apply_due=True)
+
+    def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
+        anchor_pos = anchor or self._task_date_anchor()
+        dlg = DateInsertDialog(self, anchor_pos=anchor_pos)
         try:
-            # Read the file
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            
-            # Line numbers are 1-based
-            line_idx = task_line - 1
-            if line_idx < 0 or line_idx >= len(lines):
-                return
-            
-            line = lines[line_idx]
-            
-            # Toggle checkbox symbols (☐ ☑)
-            symbol_match = re.match(r"^(?P<indent>\s*)(?P<box>[☐☑])", line)
-            if symbol_match:
-                indent = symbol_match.group("indent") or ""
-                old_box = symbol_match.group("box")
-                new_box = "☑" if old_box == "☐" else "☐"
-                lines[line_idx] = indent + new_box + line[len(indent) + 1:]
-            else:
-                # Toggle markdown checkboxes - [ ] or - [x]
-                md_match = re.match(r"^(?P<prefix>\s*[-*]\s*\[)(?P<state>[ xX])(?P<suffix>\])", line)
-                if md_match:
-                    state = md_match.group("state")
-                    new_state = "x" if state.strip().lower() != "x" else " "
-                    prefix = md_match.group("prefix")
-                    suffix = md_match.group("suffix")
-                    rest = line[md_match.end():]
-                    lines[line_idx] = prefix + new_state + suffix + rest
-                else:
-                    return  # Not a checkbox line
-            
-            # Write the file back
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            
-            # Refresh the task list to show the updated state
-            QTimer.singleShot(100, self._refresh_tasks)
-            
-        except Exception as e:
-            print(f"[TASK_PANEL] Error toggling task checkbox: {e}")
+            dlg.calendar.clicked.connect(lambda *_: dlg.accept())
+        except Exception:
+            pass
+        if dlg.exec() != QDialog.Accepted:
+            return
+        value = dlg.selected_date_text()
+        if not value:
+            return
+        if role == "start":
+            self._update_tasks_with_dates(targets, value, None, apply_start=True, apply_due=False)
+        else:
+            self._update_tasks_with_dates(targets, None, value, apply_start=False, apply_due=True)
+
+    def _task_date_anchor(self) -> QPoint:
+        items = self.task_tree.selectedItems()
+        if items:
+            rect = self.task_tree.visualItemRect(items[0])
+            return self.task_tree.viewport().mapToGlobal(rect.topRight() + QPoint(0, 4))
+        return QCursor.pos()
+
+    def _resolve_quick_date(self, label: str, role: str) -> Optional[str]:
+        today = date.today()
+        weekday = today.weekday()
+        week_start = today - timedelta(days=weekday)
+        week_end = week_start + timedelta(days=6)
+        next_week_start = week_start + timedelta(days=7)
+        next_week_end = next_week_start + timedelta(days=6)
+        this_weekend_start = week_start + timedelta(days=5)
+        this_weekend_end = week_start + timedelta(days=6)
+        next_weekend_start = next_week_start + timedelta(days=5)
+        next_weekend_end = next_week_start + timedelta(days=6)
+
+        if label == "Today":
+            target = today
+        elif label == "Tomorrow":
+            target = today + timedelta(days=1)
+        elif label == "Yesterday":
+            target = today - timedelta(days=1)
+        elif label == "This Week":
+            target = week_start if role == "start" else week_end
+        elif label == "Next Week":
+            target = next_week_start if role == "start" else next_week_end
+        elif label == "End of Week":
+            target = week_end
+        elif label == "This Weekend":
+            target = this_weekend_start if role == "start" else this_weekend_end
+        elif label == "Next Weekend":
+            target = next_weekend_start if role == "start" else next_weekend_end
+        else:
+            return None
+        return target.isoformat()
+
+    def _update_tasks_with_dates(
+        self,
+        targets: list[dict],
+        start_value: Optional[str],
+        due_value: Optional[str],
+        *,
+        apply_start: bool,
+        apply_due: bool,
+    ) -> None:
+        if self._http_client:
+            payload = {
+                "targets": [
+                    {
+                        "path": (t.get("path") or ""),
+                        "line": int(t.get("line") or 1),
+                    }
+                    for t in targets
+                    if t.get("path")
+                ],
+                "start_value": start_value,
+                "due_value": due_value,
+                "apply_start": apply_start,
+                "apply_due": apply_due,
+                "clear_start": False,
+                "clear_due": False,
+            }
+            try:
+                resp = self._http_client.post("/api/tasks/update-dates", json=payload)
+                resp.raise_for_status()
+            except Exception as exc:
+                print(f"[TASK_PANEL] Failed to update task dates via API: {exc}")
+            QTimer.singleShot(150, self._refresh_tasks)
+            return
+        if not config.has_active_vault():
+            return
+        vault_root_val = config.get_active_vault()
+        if not vault_root_val:
+            return
+        vault_root = Path(vault_root_val)
+        targets_by_path: dict[str, list[dict]] = {}
+        for target in targets:
+            path = target.get("path")
+            if not path:
+                continue
+            targets_by_path.setdefault(path, []).append(target)
+        for rel_path, items in targets_by_path.items():
+            file_path = vault_root / rel_path.lstrip("/")
+            if not file_path.exists():
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                try:
+                    lines = file_path.read_text(errors="ignore").splitlines(keepends=True)
+                except Exception:
+                    continue
+            changed = False
+            for target in items:
+                line_num = target.get("line") or 1
+                line_idx = line_num - 1
+                if line_idx < 0 or line_idx >= len(lines):
+                    continue
+                original = lines[line_idx]
+                updated = self._update_task_line_dates(
+                    original,
+                    start_value=start_value,
+                    due_value=due_value,
+                    apply_start=apply_start,
+                    apply_due=apply_due,
+                )
+                if updated != original:
+                    lines[line_idx] = updated
+                    changed = True
+            if changed:
+                try:
+                    new_content = "".join(lines)
+                    file_path.write_text(new_content, encoding="utf-8")
+                except Exception:
+                    pass
+                try:
+                    indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
+                except Exception:
+                    pass
+        QTimer.singleShot(150, self._refresh_tasks)
+
+    def _update_task_line_dates(
+        self,
+        line: str,
+        *,
+        start_value: Optional[str],
+        due_value: Optional[str],
+        apply_start: bool,
+        apply_due: bool,
+    ) -> str:
+        newline = "\n" if line.endswith("\n") else ""
+        base = line.rstrip("\n")
+        existing_start = None
+        existing_due = None
+        start_match = START_TOKEN_PATTERN.search(base)
+        if start_match:
+            existing_start = start_match.group(1)
+        due_match = DUE_TOKEN_PATTERN.search(base)
+        if due_match:
+            existing_due = due_match.group(1)
+        final_start = existing_start
+        final_due = existing_due
+        if apply_start:
+            final_start = start_value
+        if apply_due:
+            final_due = due_value
+        cleaned = re.sub(r"\s*[<>][0-9]{4}-[0-9]{2}-[0-9]{2}", "", base).rstrip()
+        if final_start:
+            cleaned += f" >{final_start}"
+        if final_due:
+            cleaned += f" <{final_due}"
+        return cleaned + newline
 
     def _on_task_double_clicked(self, item: QTreeWidgetItem, col: int) -> None:
         # If double-clicking column 0 (priority/checkbox), toggle the task instead of opening it
@@ -2469,15 +2787,103 @@ class TaskPanel(QWidget):
             if task:
                 self._toggle_task_checkbox(task)
             return
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        if col == due_idx or (start_idx is not None and col == start_idx):
+            self._suppress_task_activation = True
+            self._open_task_date_picker_for_column(item, col)
+            return
         
         self._mark_activation_source("mouse")
         self._emit_task_activation(item)
 
-    def _on_task_activated(self, item: QTreeWidgetItem) -> None:
+    def _on_task_activated(self, item: QTreeWidgetItem, *_args) -> None:
+        if self._suppress_task_activation:
+            self._suppress_task_activation = False
+            return
         # itemActivated can fire for mouse or keyboard; default to unknown unless set elsewhere
         if not self._last_activation_source:
             self._last_activation_source = "unknown"
         self._emit_task_activation(item)
+
+    def _on_task_item_clicked(self, item: QTreeWidgetItem, col: int) -> None:
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        if col == due_idx or (start_idx is not None and col == start_idx):
+            self._suppress_task_activation = True
+            self._open_task_date_picker_for_column(item, col)
+
+    def _open_task_date_picker_for_column(self, item: QTreeWidgetItem, col: int) -> None:
+        if item and not item.isSelected():
+            self.task_tree.clearSelection()
+            item.setSelected(True)
+        targets = self._collect_task_targets()
+        if not targets:
+            return
+        task = item.data(0, Qt.UserRole) or {}
+        path = task.get("path") or ""
+        line = task.get("line") or 1
+        if not path:
+            return
+        if not str(path).startswith("/"):
+            path = "/" + str(path).lstrip("/")
+        try:
+            line_num = int(line)
+        except (TypeError, ValueError):
+            line_num = 1
+        role = "start" if (self._show_task_start_column and col == 3) else "due"
+        anchor = self._task_date_anchor_for_item(item, col)
+        self._open_task_date_quick_menu(role, targets, anchor)
+
+    def _task_date_anchor_for_item(self, item: QTreeWidgetItem, col: int) -> QPoint:
+        rect = self.task_tree.visualItemRect(item)
+        header = self.task_tree.header()
+        try:
+            col_x = header.sectionViewportPosition(col)
+        except Exception:
+            col_x = rect.left()
+        anchor = QPoint(col_x + rect.left(), rect.bottom() + 2)
+        return self.task_tree.viewport().mapToGlobal(anchor)
+
+    def _open_task_date_context_menu(self, pos) -> None:
+        col = self.task_tree.columnAt(pos.x())
+        if col < 0:
+            return
+        item = self.task_tree.itemAt(pos)
+        if not item:
+            return
+        if not item.isSelected():
+            self.task_tree.clearSelection()
+            item.setSelected(True)
+        due_idx = 2
+        start_idx = 3 if self._show_task_start_column else None
+        if col == due_idx or (start_idx is not None and col == start_idx):
+            targets = self._collect_task_targets()
+            if not targets:
+                return
+            role = "start" if (self._show_task_start_column and col == 3) else "due"
+            anchor = self.task_tree.viewport().mapToGlobal(pos)
+            self._open_task_date_quick_menu(role, targets, anchor)
+            return
+        task = item.data(0, Qt.UserRole) or {}
+        if not task:
+            return
+        targets = self._collect_task_targets()
+        if not targets:
+            return
+        any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
+        any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
+        menu = QMenu(self)
+        if any_open:
+            menu.addAction("Mark Complete").triggered.connect(
+                lambda: self._set_tasks_completed(targets, True)
+            )
+        if any_done:
+            menu.addAction("Reopen Task").triggered.connect(
+                lambda: self._set_tasks_completed(targets, False)
+            )
+        if menu.actions():
+            menu.exec(self.task_tree.viewport().mapToGlobal(pos))
 
     def _mark_activation_source(self, source: str) -> None:
         self._last_activation_source = source
@@ -2518,6 +2924,59 @@ class TaskPanel(QWidget):
 
     def _present_path(self, path: str) -> str:
         return path_to_colon(path)
+
+    def _fetch_tasks_api(
+        self,
+        query: str,
+        tags: list[str],
+        *,
+        include_done: bool,
+        include_ancestors: bool,
+        actionable_only: bool,
+    ) -> list[dict]:
+        if self._http_client:
+            cache_key = (
+                query,
+                tuple(tags),
+                bool(include_done),
+                bool(include_ancestors),
+                bool(actionable_only),
+            )
+            cached = self._api_task_cache.get(cache_key)
+            now = time.monotonic()
+            if cached and (now - cached[0]) <= self._api_task_cache_ttl:
+                return cached[1]
+            params: dict = {
+                "query": query,
+                "include_done": include_done,
+                "include_ancestors": include_ancestors,
+                "actionable_only": actionable_only,
+            }
+            if tags:
+                params["tags"] = tags
+            try:
+                resp = self._http_client.get("/api/tasks", params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+                items = payload.get("items", [])
+                if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+                    print(
+                        f"[TASK_PANEL] /api/tasks count={len(items)} "
+                        f"query={query!r} tags={tags} include_done={include_done} "
+                        f"include_ancestors={include_ancestors} actionable_only={actionable_only}"
+                    )
+                self._api_task_cache[cache_key] = (now, items)
+                return items
+            except Exception as exc:
+                print(f"[TASK_PANEL] Failed to fetch tasks via API: {exc}")
+                return []
+        return config.fetch_tasks(
+            query,
+            tags,
+            include_done=include_done,
+            include_ancestors=include_ancestors,
+            actionable_only=actionable_only,
+        )
     
     def set_vault_root(self, vault_root: str) -> None:
         """Set vault root for task filtering preferences."""
