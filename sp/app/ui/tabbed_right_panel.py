@@ -168,6 +168,14 @@ class TabbedRightPanel(QWidget):
             self.calendar_panel.refresh()
         else:
             self._pending_calendar_refresh = True
+
+    def notify_right_panel_resized(self) -> None:
+        """Let the calendar tab recompute layout when the right panel resizes."""
+        if self.calendar_panel and self._is_calendar_tab_active():
+            try:
+                self.calendar_panel.update_calendar_layout()
+            except Exception:
+                pass
     
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Set the calendar to show a specific date."""

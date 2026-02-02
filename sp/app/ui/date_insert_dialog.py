@@ -6,7 +6,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QDate
+from PySide6.QtCore import Qt, QDate, QPoint, QEvent
+from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QCheckBox,
@@ -200,7 +201,17 @@ def parse_human_date(text: str, today: date, weekdays_only: bool) -> Optional[da
 class DateInsertDialog(QDialog):
     """Dialog for inserting dates via calendar or text expressions."""
 
-    def __init__(self, parent=None, anchor_pos=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        anchor_pos=None,
+        *,
+        accept_on_double_click: bool = False,
+        accept_on_enter: bool = True,
+        allow_nav_keys: bool = True,
+        use_vi_keys: bool = False,
+        keep_edit_focus: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Insert Date")
         self.setModal(True)
@@ -208,6 +219,11 @@ class DateInsertDialog(QDialog):
 
         self._valid_date: Optional[date] = None
         self._default_style = ""
+        self._accept_on_double_click = accept_on_double_click
+        self._accept_on_enter = accept_on_enter
+        self._allow_nav_keys = allow_nav_keys
+        self._use_vi_keys = use_vi_keys
+        self._keep_edit_focus = keep_edit_focus
 
         layout = QVBoxLayout(self)
 
@@ -264,24 +280,42 @@ class DateInsertDialog(QDialog):
         quick_row.addStretch(1)
         layout.addLayout(quick_row)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons = QDialogButtonBox()
         layout.addWidget(self.buttons)
 
         # Wire signals
         self.calendar.selectionChanged.connect(self._on_calendar_changed)
+        self.calendar.activated.connect(self._on_calendar_activated)
         self.date_edit.textChanged.connect(self._on_text_changed)
         self.date_edit.returnPressed.connect(self._try_accept)
         self.weekdays_only.toggled.connect(self._on_constraints_changed)
+        self.date_edit.installEventFilter(self)
 
         # Initialize with today
         today = date.today()
         self._apply_date(today)
         self.date_edit.setFocus()
 
-        # Move near anchor if provided
+        # Move near anchor if provided (clamped to visible screen)
         if anchor_pos is not None:
-            self.move(anchor_pos)
+            self.adjustSize()
+            self.move(self._clamp_to_screen(anchor_pos))
+
+    def _clamp_to_screen(self, pos: QPoint) -> QPoint:
+        screen = QGuiApplication.screenAt(pos)
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return pos
+        geom = screen.availableGeometry()
+        size = self.sizeHint()
+        max_x = geom.right() - size.width() + 1
+        max_y = geom.bottom() - size.height() + 1
+        x = min(max(pos.x(), geom.left()), max_x)
+        y = min(max(pos.y(), geom.top()), max_y)
+        return QPoint(x, y)
 
     def selected_date_text(self) -> Optional[str]:
         if self._valid_date:
@@ -293,6 +327,15 @@ class DateInsertDialog(QDialog):
         picked = date(qd.year(), qd.month(), qd.day())
         picked = _apply_weekday_only(picked, self.weekdays_only.isChecked(), prefer_forward=True)
         self._apply_date(picked, update_calendar=False)
+        self._restore_edit_focus()
+
+    def _on_calendar_activated(self, qd: QDate) -> None:
+        if not self._accept_on_double_click:
+            return
+        picked = date(qd.year(), qd.month(), qd.day())
+        picked = _apply_weekday_only(picked, self.weekdays_only.isChecked(), prefer_forward=True)
+        self._apply_date(picked, update_calendar=False)
+        self.accept()
 
     def _on_text_changed(self, text: str) -> None:
         parsed = parse_human_date(text, date.today(), self.weekdays_only.isChecked())
@@ -333,6 +376,7 @@ class DateInsertDialog(QDialog):
         self.date_edit.setText(dt.isoformat())
         self.date_edit.blockSignals(False)
         self.date_edit.setStyleSheet(self._default_style)
+        self._restore_edit_focus()
 
         if update_calendar:
             self.calendar.blockSignals(True)
@@ -347,6 +391,52 @@ class DateInsertDialog(QDialog):
         self.date_edit.setStyleSheet(self._default_style)
 
     def _try_accept(self) -> None:
+        if not self._accept_on_enter:
+            return
         if self._valid_date is None:
             return
         self.accept()
+
+    def _restore_edit_focus(self) -> None:
+        if not self._keep_edit_focus:
+            return
+        try:
+            self.date_edit.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
+
+    def _move_selection(self, delta_days: int) -> None:
+        if not delta_days:
+            return
+        base = self.calendar.selectedDate()
+        if not base or not base.isValid():
+            base = QDate.currentDate()
+        target = base.addDays(delta_days)
+        picked = date(target.year(), target.month(), target.day())
+        picked = _apply_weekday_only(picked, self.weekdays_only.isChecked(), prefer_forward=delta_days >= 0)
+        self._apply_date(picked, update_calendar=True)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self.date_edit and event.type() == QEvent.KeyPress:
+            key = event.key()
+            if self._allow_nav_keys:
+                if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+                    delta = -1 if key == Qt.Key_Left else 1
+                    if key == Qt.Key_Up:
+                        delta = -7
+                    elif key == Qt.Key_Down:
+                        delta = 7
+                    self._move_selection(delta)
+                    return True
+                if self._use_vi_keys and key in (Qt.Key_H, Qt.Key_L, Qt.Key_J, Qt.Key_K):
+                    delta = -1 if key == Qt.Key_H else 1
+                    if key == Qt.Key_K:
+                        delta = -7
+                    elif key == Qt.Key_J:
+                        delta = 7
+                    self._move_selection(delta)
+                    return True
+            if key in (Qt.Key_Return, Qt.Key_Enter) and self._accept_on_enter:
+                self._try_accept()
+                return True
+        return super().eventFilter(obj, event)

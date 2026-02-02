@@ -1954,6 +1954,7 @@ class TaskPanel(QWidget):
         if event.key() == Qt.Key_Escape:
             self.active_tags.clear()
             self.search.clear()
+            self._clear_date_filter()
             self._refresh_tasks()
             event.accept()
             return
@@ -2609,11 +2610,15 @@ class TaskPanel(QWidget):
 
     def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
         anchor_pos = anchor or self._task_date_anchor()
-        dlg = DateInsertDialog(self, anchor_pos=anchor_pos)
-        try:
-            dlg.calendar.clicked.connect(lambda *_: dlg.accept())
-        except Exception:
-            pass
+        dlg = DateInsertDialog(
+            self,
+            anchor_pos=anchor_pos,
+            accept_on_double_click=True,
+            accept_on_enter=True,
+            allow_nav_keys=False,
+            use_vi_keys=False,
+            keep_edit_focus=True,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         value = dlg.selected_date_text()

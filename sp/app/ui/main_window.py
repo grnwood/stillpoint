@@ -4557,6 +4557,11 @@ class MainWindow(QMainWindow):
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         """Save splitter positions when moved (debounced)."""
         self.geometry_save_timer.start()
+        try:
+            if self.right_panel:
+                self.right_panel.notify_right_panel_resized()
+        except Exception:
+            pass
 
     def _refresh_bookmark_buttons(self) -> None:
         """Refresh the bookmark buttons in the toolbar."""
@@ -7099,7 +7104,15 @@ class MainWindow(QMainWindow):
         saved_anchor_pos = cursor.anchor()
         cursor_rect = self.editor.cursorRect()
         anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
-        dlg = DateInsertDialog(self, anchor_pos=anchor)
+        dlg = DateInsertDialog(
+            self,
+            anchor_pos=anchor,
+            accept_on_double_click=True,
+            accept_on_enter=True,
+            allow_nav_keys=True,
+            use_vi_keys=bool(getattr(self, "_vi_enabled", False)),
+            keep_edit_focus=True,
+        )
         result = dlg.exec()
         # Restore cursor/selection to where the user triggered the dialog
         doc_len = len(self.editor.toPlainText())
@@ -8023,6 +8036,22 @@ class MainWindow(QMainWindow):
         window.setWindowTitle("Calendar")
         window.setCentralWidget(panel)
         window.resize(760, 680)
+        class _CalendarResizeHook(QObject):
+            def __init__(self, target: CalendarPanel) -> None:
+                super().__init__()
+                self._target = target
+
+            def eventFilter(self, obj, event):  # type: ignore[override]
+                if event.type() == QEvent.Resize:
+                    try:
+                        self._target.update_calendar_layout()
+                    except Exception:
+                        pass
+                return False
+
+        hook = _CalendarResizeHook(panel)
+        window.installEventFilter(hook)
+        window._calendar_resize_hook = hook  # type: ignore[attr-defined]
         self._apply_geometry_persistence(window, "calendar_panel_window")
         window.show()
         self._register_detached_panel(window)
@@ -9931,6 +9960,7 @@ class MainWindow(QMainWindow):
             menu.addAction("New Page", lambda checked=False, p=default_parent: self._show_new_page_dialog(parent_path=p))
         if menu.actions():
             menu.exec(global_pos)
+
 
     def _view_page_source(self, file_path: str) -> None:
         """Open the given page's txt file in the OS editor, show modal, and reload on OK."""

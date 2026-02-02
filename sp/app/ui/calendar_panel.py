@@ -330,7 +330,76 @@ class CalendarPanel(QWidget):
         is_light = palette.color(QPalette.Window).lightness() > 128
         self.calendar_delegate.highlight_color = self._calendar_selected_bg
         self.calendar_delegate.text_color = self._calendar_selected_text
-        
+
+        self.prev_calendar = QCalendarWidget()
+        self.prev_calendar.setGridVisible(True)
+        self.prev_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.prev_calendar.setStyleSheet(self.calendar.styleSheet())
+        self.prev_calendar.setStyleSheet(
+            self.calendar.styleSheet()
+            + "\nQCalendarWidget { color: #a0a0a0; }"
+            + "\nQCalendarWidget QTableView::item { color: #a0a0a0; }"
+            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: #a0a0a0; border: none; }"
+        )
+        try:
+            self.prev_calendar.setNavigationBarVisible(False)
+        except Exception:
+            pass
+        try:
+            self.prev_calendar.setSelectionMode(QCalendarWidget.NoSelection)
+        except Exception:
+            pass
+        self.prev_calendar.setEnabled(False)
+        self.prev_calendar.setFocusPolicy(Qt.NoFocus)
+        self.prev_calendar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.prev_month_label = QLabel("")
+        self.prev_month_label.setAlignment(Qt.AlignCenter)
+        self.prev_month_label.setStyleSheet("color: #9a9a9a; font-weight: 600; padding: 2px 0;")
+        self.prev_calendar_container = QWidget()
+        prev_layout = QVBoxLayout(self.prev_calendar_container)
+        prev_layout.setContentsMargins(0, 0, 0, 0)
+        prev_layout.setSpacing(4)
+        prev_layout.addWidget(self.prev_month_label)
+        prev_layout.addWidget(self.prev_calendar)
+        self.prev_calendar_container.setVisible(False)
+
+        self.next_calendar = QCalendarWidget()
+        self.next_calendar.setGridVisible(True)
+        self.next_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.next_calendar.setStyleSheet(self.calendar.styleSheet())
+        self.next_calendar.setStyleSheet(
+            self.calendar.styleSheet()
+            + "\nQCalendarWidget { color: #a0a0a0; }"
+            + "\nQCalendarWidget QTableView::item { color: #a0a0a0; }"
+            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: #a0a0a0; border: none; }"
+        )
+        try:
+            self.next_calendar.setNavigationBarVisible(False)
+        except Exception:
+            pass
+        try:
+            self.next_calendar.setSelectionMode(QCalendarWidget.NoSelection)
+        except Exception:
+            pass
+        self.next_calendar.setEnabled(False)
+        self.next_calendar.setFocusPolicy(Qt.NoFocus)
+        self.next_calendar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.next_month_label = QLabel("")
+        self.next_month_label.setAlignment(Qt.AlignCenter)
+        self.next_month_label.setStyleSheet("color: #9a9a9a; font-weight: 600; padding: 2px 0;")
+        self.next_calendar_container = QWidget()
+        next_layout = QVBoxLayout(self.next_calendar_container)
+        next_layout.setContentsMargins(0, 0, 0, 0)
+        next_layout.setSpacing(4)
+        next_layout.addWidget(self.next_month_label)
+        next_layout.addWidget(self.next_calendar)
+        self.next_calendar_container.setVisible(False)
+
+        self._show_three_calendars = False
+        self._syncing_calendars = False
+        self._hide_insights_tabs = False
+        self._main_splitter_sizes_before_hide: Optional[list[int]] = None
+
         self._attach_calendar_view()
         self.day_insights = QWidget()
         self.day_insights.setMinimumWidth(180)
@@ -426,20 +495,24 @@ class CalendarPanel(QWidget):
         ph_layout.setSpacing(6)
 
         headings_col = QWidget()
+        self._headings_col = headings_col
         headings_col_layout = QVBoxLayout()
         headings_col_layout.setContentsMargins(0, 0, 0, 0)
         headings_col_layout.setSpacing(4)
         headings_label = QLabel("Headings:")
+        self._headings_label = headings_label
         headings_label.setStyleSheet("font-weight: bold;")
         headings_col_layout.addWidget(headings_label)
         headings_col_layout.addWidget(self.headings_list, 1)
         headings_col.setLayout(headings_col_layout)
 
         subpages_col = QWidget()
+        self._subpages_col = subpages_col
         subpages_col_layout = QVBoxLayout()
         subpages_col_layout.setContentsMargins(0, 0, 0, 0)
         subpages_col_layout.setSpacing(4)
         subpages_label = QLabel("Sub Pages:")
+        self._subpages_label = subpages_label
         subpages_label.setStyleSheet("font-weight: bold;")
         subpages_col_layout.addWidget(subpages_label)
         subpages_col_layout.addWidget(self.subpage_list, 1)
@@ -697,7 +770,15 @@ class CalendarPanel(QWidget):
         zoom_row.addWidget(self.zoom_out_btn)
         zoom_row.addWidget(self.zoom_in_btn)
         cal_layout.addLayout(zoom_row)
-        cal_layout.addWidget(self.calendar)
+        self.calendar_row = QWidget()
+        self.calendar_row.installEventFilter(self)
+        self.calendar_row_layout = QHBoxLayout(self.calendar_row)
+        self.calendar_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.calendar_row_layout.setSpacing(8)
+        self.calendar_row_layout.addWidget(self.prev_calendar_container)
+        self.calendar_row_layout.addWidget(self.calendar)
+        self.calendar_row_layout.addWidget(self.next_calendar_container)
+        cal_layout.addWidget(self.calendar_row)
         cal_container.setLayout(cal_layout)
 
         # Horizontal splitter between insights and task/ai tabs (bottom row)
@@ -714,7 +795,10 @@ class CalendarPanel(QWidget):
                 pass
         self.main_splitter.splitterMoved.connect(lambda *_: self._splitter_save_timer.start())
         self.main_splitter.splitterMoved.connect(lambda *_: self._enforce_calendar_min_width())
+        self.main_splitter.splitterMoved.connect(lambda *_: self._update_calendar_layout())
+        self.main_splitter.splitterMoved.connect(lambda *_: self._update_insights_layout_visibility())
         self._apply_font_size()
+        self._update_calendar_layout()
 
         # Vertical splitter for calendar (top) + bottom row
         self.top_splitter = QSplitter(Qt.Vertical)
@@ -760,6 +844,16 @@ class CalendarPanel(QWidget):
         self._attach_calendar_view()
         self._apply_multi_selection_formats()
         self._update_today_visibility()
+        self._update_calendar_layout()
+
+    def resizeEvent(self, event):  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_calendar_layout()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is getattr(self, "calendar_row", None) and event.type() in (QEvent.Resize, QEvent.Show):
+            QTimer.singleShot(0, self._update_calendar_layout)
+        return super().eventFilter(obj, event)
         self._enforce_calendar_min_width()
         self.ensure_splitter_visible()
 
@@ -854,6 +948,8 @@ class CalendarPanel(QWidget):
         font.setPointSize(self._font_size)
         for widget in (
             self.calendar,
+            self.prev_calendar,
+            self.next_calendar,
             self.insight_title,
             self.insight_counts,
             self.insight_tags,
@@ -886,14 +982,15 @@ class CalendarPanel(QWidget):
                 pass
         
         # Apply font to all calendar child widgets (buttons, headers, etc.)
-        try:
-            for child in self.calendar.findChildren(QWidget):
-                try:
-                    child.setFont(font)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        for cal in (self.calendar, self.prev_calendar, self.next_calendar):
+            try:
+                for child in cal.findChildren(QWidget):
+                    try:
+                        child.setFont(font)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         
         if getattr(self, "ai_markdown_view", None):
             try:
@@ -910,6 +1007,10 @@ class CalendarPanel(QWidget):
             base = max(base, self.calendar.minimumSizeHint().width())
         except Exception:
             pass
+        try:
+            base = max(base, self.calendar.sizeHint().width())
+        except Exception:
+            pass
         return max(240, base)
 
     def _enforce_calendar_min_width(self) -> None:
@@ -918,9 +1019,17 @@ class CalendarPanel(QWidget):
             self.calendar.setMinimumWidth(min_w)
         except Exception:
             pass
+        for cal in (self.prev_calendar, self.next_calendar):
+            try:
+                cal.setMinimumWidth(min_w)
+            except Exception:
+                pass
         try:
             if getattr(self, "_calendar_container", None):
-                self._calendar_container.setMinimumWidth(min_w)
+                total = min_w
+                if getattr(self, "_show_three_calendars", False) and getattr(self, "calendar_row_layout", None):
+                    total = min_w * 3 + self.calendar_row_layout.spacing() * 2
+                self._calendar_container.setMinimumWidth(total)
         except Exception:
             pass
 
@@ -1606,6 +1715,7 @@ class CalendarPanel(QWidget):
         self._update_calendar_dates(year, month)
         self._update_day_listing(self.calendar.selectedDate())
         self._apply_multi_selection_formats()
+        self._sync_aux_calendars()
         self._update_insights_for_selection()
         # Also update the due-tasks panel to reflect the visible month range
         try:
@@ -1663,6 +1773,7 @@ class CalendarPanel(QWidget):
         self._update_day_listing(date)
         self._update_insights_for_selection()
         self._update_today_visibility()
+        self._sync_aux_calendars()
         if not is_shift:
             self.dateActivated.emit(date.year(), date.month(), date.day())
 
@@ -1671,6 +1782,128 @@ class CalendarPanel(QWidget):
             return
         today = QDate.currentDate()
         self.today_btn.setVisible(self.calendar.selectedDate() != today)
+
+    def _update_calendar_layout(self) -> None:
+        if not getattr(self, "calendar_row_layout", None):
+            return
+        available = 0
+        try:
+            available = self.calendar_row.width()
+        except Exception:
+            available = 0
+        if available <= 0:
+            try:
+                available = self._calendar_container.width()
+            except Exception:
+                available = 0
+        if available <= 0:
+            return
+        cal_min = self._calendar_min_width()
+        spacing = self.calendar_row_layout.spacing()
+        needed = cal_min * 3 + spacing * 2 + 6
+        show_three = available >= needed
+        if show_three != self._show_three_calendars:
+            self._show_three_calendars = show_three
+            self.prev_calendar_container.setVisible(show_three)
+            self.next_calendar_container.setVisible(show_three)
+        self._enforce_calendar_min_width()
+        self._sync_aux_calendars()
+        self.calendar.update()
+        self.prev_calendar.update()
+        self.next_calendar.update()
+        if self.calendar_row:
+            self.calendar_row.update()
+
+    def update_calendar_layout(self) -> None:
+        """Public hook for parent containers to force layout recalculation."""
+        self._update_calendar_layout()
+        self._update_insights_layout_visibility()
+
+    def _update_insights_layout_visibility(self) -> None:
+        if not getattr(self, "main_splitter", None):
+            return
+        total = self.main_splitter.width()
+        if total <= 0:
+            try:
+                total = sum(self.main_splitter.sizes())
+            except Exception:
+                total = 0
+        if total <= 0:
+            return
+        left_min = max(180, self.day_insights.minimumWidth() or 0)
+        right_hint = 0
+        try:
+            right_hint = self.journal_tabs.minimumSizeHint().width()
+        except Exception:
+            right_hint = 0
+        right_min = max(260, right_hint)
+        should_hide = total < (left_min + right_min)
+        if should_hide == self._hide_insights_tabs:
+            return
+        self._hide_insights_tabs = should_hide
+        if should_hide:
+            try:
+                self._main_splitter_sizes_before_hide = self.main_splitter.sizes()
+            except Exception:
+                self._main_splitter_sizes_before_hide = None
+            self.journal_tabs.setVisible(False)
+            try:
+                self.main_splitter.setSizes([total, 0])
+            except Exception:
+                pass
+        else:
+            self.journal_tabs.setVisible(True)
+            if self._main_splitter_sizes_before_hide and len(self._main_splitter_sizes_before_hide) >= 2:
+                try:
+                    self.main_splitter.setSizes(self._main_splitter_sizes_before_hide)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.main_splitter.setSizes([left_min, max(1, total - left_min)])
+                except Exception:
+                    pass
+
+    def _sync_aux_calendars(self) -> None:
+        if not getattr(self, "_show_three_calendars", False):
+            return
+        if self._syncing_calendars:
+            return
+        self._syncing_calendars = True
+        try:
+            year = self.calendar.yearShown()
+            month = self.calendar.monthShown()
+            base = QDate(year, month, 1)
+            prev = base.addMonths(-1)
+            next_m = base.addMonths(1)
+            self.prev_calendar.setCurrentPage(prev.year(), prev.month())
+            self.next_calendar.setCurrentPage(next_m.year(), next_m.month())
+            self.prev_month_label.setText(prev.toString("MMMM yyyy"))
+            self.next_month_label.setText(next_m.toString("MMMM yyyy"))
+            try:
+                self.prev_calendar.setSelectedDate(QDate())
+                self.next_calendar.setSelectedDate(QDate())
+            except Exception:
+                pass
+        finally:
+            self._syncing_calendars = False
+
+    def _on_aux_calendar_clicked(self, date: QDate) -> None:
+        if self._syncing_calendars:
+            return
+        self.calendar.setSelectedDate(date)
+        self._on_date_clicked(date)
+
+    def _on_aux_calendar_navigate(self, year: int, month: int, offset: int) -> None:
+        if self._syncing_calendars:
+            return
+        base = QDate(year, month, 1)
+        target = base.addMonths(1 if offset < 0 else -1)
+        self._syncing_calendars = True
+        try:
+            self.calendar.setCurrentPage(target.year(), target.month())
+        finally:
+            self._syncing_calendars = False
 
     def _populate_tree(self) -> None:
         """Build a tree rooted at Journal with year/month/day nodes."""
@@ -1745,44 +1978,43 @@ class CalendarPanel(QWidget):
         highlight_color = self._calendar_selected_bg
         text_color = self._calendar_selected_text
         
-        # Get current displayed month
-        year = self.calendar.yearShown()
-        month = self.calendar.monthShown()
-        
-        # Clear ALL date formats (including adjacent month previews)
-        # Go back one month and forward one month to cover all visible dates
-        default_format = QTextCharFormat()
-        for month_offset in [-1, 0, 1]:
-            check_date = QDate(year, month, 1).addMonths(month_offset)
-            check_year = check_date.year()
-            check_month = check_date.month()
-            days_in_month = check_date.daysInMonth()
-            
-            for day in range(1, days_in_month + 1):
-                day_date = QDate(check_year, check_month, day)
-                self.calendar.setDateTextFormat(day_date, default_format)
-        
-        # Now apply highlighting ONLY to multi-selected dates that match exactly
-        highlight_format = QTextCharFormat()
-        highlight_format.setBackground(QBrush(highlight_color))
-        highlight_format.setForeground(QBrush(text_color))
-        bold_font = QFont()
-        bold_font.setBold(True)
-        bold_font.setWeight(QFont.Bold)
-        highlight_format.setFont(bold_font)
-        for date in self.multi_selected_dates:
-            if date.isValid():
-                self.calendar.setDateTextFormat(date, highlight_format)
+        def apply_for_calendar(cal: QCalendarWidget, *, allow_selection: bool) -> None:
+            year = cal.yearShown()
+            month = cal.monthShown()
+            default_format = QTextCharFormat()
+            for month_offset in [-1, 0, 1]:
+                check_date = QDate(year, month, 1).addMonths(month_offset)
+                check_year = check_date.year()
+                check_month = check_date.month()
+                days_in_month = check_date.daysInMonth()
+                for day in range(1, days_in_month + 1):
+                    day_date = QDate(check_year, check_month, day)
+                    cal.setDateTextFormat(day_date, default_format)
 
-        # Ensure today is visible when not multi-selected
-        today = QDate.currentDate()
-        if today.isValid() and today not in self.multi_selected_dates:
-            today_format = QTextCharFormat()
-            today_format.setFontWeight(QFont.Bold)
-            today_format.setForeground(text_color)
-            today_format.setUnderlineStyle(QTextCharFormat.SingleUnderline)
-            today_format.setUnderlineColor(text_color)
-            self.calendar.setDateTextFormat(today, today_format)
+            if allow_selection:
+                highlight_format = QTextCharFormat()
+                highlight_format.setBackground(QBrush(highlight_color))
+                highlight_format.setForeground(QBrush(text_color))
+                bold_font = QFont()
+                bold_font.setBold(True)
+                bold_font.setWeight(QFont.Bold)
+                highlight_format.setFont(bold_font)
+                for date in self.multi_selected_dates:
+                    if date.isValid():
+                        cal.setDateTextFormat(date, highlight_format)
+
+                today = QDate.currentDate()
+                if today.isValid() and today not in self.multi_selected_dates:
+                    today_format = QTextCharFormat()
+                    today_format.setFontWeight(QFont.Bold)
+                    today_format.setForeground(text_color)
+                    today_format.setUnderlineStyle(QTextCharFormat.SingleUnderline)
+                    today_format.setUnderlineColor(text_color)
+                    cal.setDateTextFormat(today, today_format)
+
+        apply_for_calendar(self.calendar, allow_selection=True)
+        apply_for_calendar(self.prev_calendar, allow_selection=False)
+        apply_for_calendar(self.next_calendar, allow_selection=False)
         
         # Force repaint
         if self.calendar_view and Shiboken.isValid(self.calendar_view):
@@ -2180,6 +2412,10 @@ class CalendarPanel(QWidget):
                 # For multi-day selection, show only subpages and hide headings
                 try:
                     self.headings_list.setVisible(False)
+                    if getattr(self, "_headings_col", None):
+                        self._headings_col.setVisible(False)
+                    if getattr(self, "_headings_label", None):
+                        self._headings_label.setVisible(False)
                 except Exception:
                     pass
                 self._update_insights_multi(dates, current_path)
@@ -3176,6 +3412,10 @@ class CalendarPanel(QWidget):
         # Headings only relevant for single-day view
         try:
             self.headings_list.setVisible(True)
+            if getattr(self, "_headings_col", None):
+                self._headings_col.setVisible(True)
+            if getattr(self, "_headings_label", None):
+                self._headings_label.setVisible(True)
         except Exception:
             pass
         main_path = f"/Journal/{date.year():04d}/{date.month():02d}/{date.day():02d}/{date.day():02d}{PAGE_SUFFIX}"

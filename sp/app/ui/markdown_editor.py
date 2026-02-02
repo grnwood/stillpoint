@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     Signal,
     QUrl,
     QPoint,
+    QSize,
     QTimer,
     QSignalBlocker,
 )
@@ -56,6 +57,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QLabel,
+    QToolButton,
+    QWidgetAction,
+    QSizePolicy,
+    QHBoxLayout,
 )
 from shiboken6 import Shiboken
 from markdown import markdown as render_markdown
@@ -3677,6 +3682,10 @@ class MarkdownEditor(QTextEdit):
             _, fmt = image_hit
             image_name = fmt.name()
             menu = QMenu(self)
+            nav_action = self._build_nav_context_row(menu)
+            if nav_action:
+                menu.addAction(nav_action)
+                menu.addSeparator()
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
             for width in (300, 600, 900):
@@ -3704,6 +3713,10 @@ class MarkdownEditor(QTextEdit):
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
+            nav_action = self._build_nav_context_row(menu)
+            if nav_action:
+                menu.addAction(nav_action)
+                menu.addSeparator()
             if heading_action:
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
@@ -3719,6 +3732,8 @@ class MarkdownEditor(QTextEdit):
                 edit_sub.addAction(act)
             insert_link_action = menu.addAction("Insert Link…")
             insert_link_action.triggered.connect(self._request_insert_link)
+            insert_date_action = menu.addAction("Insert Date…")
+            insert_date_action.triggered.connect(self._request_insert_date)
 
             link_sub = menu.addMenu("Link")
             edit_action = link_sub.addAction("Edit Link…")
@@ -3791,6 +3806,10 @@ class MarkdownEditor(QTextEdit):
             except Exception:
                 pass
             menu = QMenu(self)
+            nav_action = self._build_nav_context_row(menu)
+            if nav_action:
+                menu.addAction(nav_action)
+                menu.addSeparator()
             if heading_action:
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
@@ -3801,6 +3820,8 @@ class MarkdownEditor(QTextEdit):
                 edit_sub.addAction(act)
             insert_link_action = menu.addAction("Insert Link…")
             insert_link_action.triggered.connect(self._request_insert_link)
+            insert_date_action = menu.addAction("Insert Date…")
+            insert_date_action.triggered.connect(self._request_insert_date)
 
             page_sub = menu.addMenu("Page")
             new_page_action = page_sub.addAction("New Page...")
@@ -3856,11 +3877,64 @@ class MarkdownEditor(QTextEdit):
         self._context_menu_selection = None
         super().contextMenuEvent(event)
 
+    def _build_nav_context_row(self, menu: QMenu) -> Optional[QWidgetAction]:
+        window = self.window()
+        if not window:
+            return None
+        icon_loader = getattr(window, "_load_icon", None)
+        asset_finder = getattr(window, "_find_asset", None)
+        if not callable(icon_loader) or not callable(asset_finder):
+            return None
+        left_icon = icon_loader(asset_finder("left.svg"), Qt.white, size=18)
+        right_icon = icon_loader(asset_finder("right.svg"), Qt.white, size=18)
+        up_icon = icon_loader(asset_finder("up.svg"), Qt.white, size=18)
+        down_icon = icon_loader(asset_finder("down.svg"), Qt.white, size=18)
+        if not any((left_icon, right_icon, up_icon, down_icon)):
+            return None
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(12)
+
+        def make_btn(icon, tooltip, handler):
+            btn = QToolButton(container)
+            if icon:
+                btn.setIcon(icon)
+            btn.setToolTip(tooltip)
+            btn.setAutoRaise(True)
+            btn.setIconSize(QSize(18, 18))
+            if callable(handler):
+                btn.clicked.connect(lambda checked=False, h=handler: (h(), menu.close()))
+            else:
+                btn.setEnabled(False)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            return btn
+
+        btn_left = make_btn(left_icon, "Back", getattr(window, "_navigate_history_back", None))
+        btn_right = make_btn(right_icon, "Forward", getattr(window, "_navigate_history_forward", None))
+        btn_up = make_btn(up_icon, "Up", lambda: getattr(window, "_navigate_tree", lambda *_: None)(-1, leaves_only=False))
+        btn_down = make_btn(down_icon, "Down", lambda: getattr(window, "_navigate_tree", lambda *_: None)(1, leaves_only=False))
+
+        for btn in (btn_left, btn_right, btn_up, btn_down):
+            layout.addWidget(btn, 1)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(container)
+        return action
+
     def _request_insert_link(self) -> None:
         window = self.window()
         if window and hasattr(window, "_insert_link"):
             try:
                 window._insert_link()
+            except Exception:
+                pass
+
+    def _request_insert_date(self) -> None:
+        window = self.window()
+        if window and hasattr(window, "_insert_date"):
+            try:
+                window._insert_date()
             except Exception:
                 pass
 

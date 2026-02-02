@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from .markdown_editor import MarkdownEditor
 from .insert_link_dialog import InsertLinkDialog
+from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
 from sp.server.adapters.files import PAGE_SUFFIXES
@@ -172,9 +173,50 @@ class PageEditorWindow(QMainWindow):
         link_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         link_action.triggered.connect(self._insert_link)
         self.addAction(link_action)
+
+        date_action = QAction("Insert Date…", self)
+        date_action.setShortcut(QKeySequence("Ctrl+D"))
+        date_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        date_action.triggered.connect(self._insert_date)
+        self.addAction(date_action)
         
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
+
+    def _insert_date(self) -> None:
+        """Show calendar/date dialog and insert selected date."""
+        cursor = self.editor.textCursor()
+        saved_cursor_pos = cursor.position()
+        saved_anchor_pos = cursor.anchor()
+        cursor_rect = self.editor.cursorRect()
+        anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
+        dlg = DateInsertDialog(
+            self,
+            anchor_pos=anchor,
+            accept_on_double_click=True,
+            accept_on_enter=True,
+            allow_nav_keys=True,
+            use_vi_keys=bool(self._vi_enabled),
+            keep_edit_focus=True,
+        )
+        result = dlg.exec()
+        # Restore cursor/selection to where the user triggered the dialog
+        doc_len = len(self.editor.toPlainText())
+        anchor_pos = max(0, min(saved_anchor_pos, doc_len))
+        cursor_pos = max(0, min(saved_cursor_pos, doc_len))
+        restore_cursor = QTextCursor(self.editor.document())
+        restore_cursor.setPosition(anchor_pos)
+        restore_cursor.setPosition(
+            cursor_pos,
+            QTextCursor.KeepAnchor if anchor_pos != cursor_pos else QTextCursor.MoveAnchor,
+        )
+        self.editor.setTextCursor(restore_cursor)
+        if result == QDialog.Accepted:
+            text = dlg.selected_date_text()
+            if text:
+                restore_cursor.insertText(text)
+                self.editor.setTextCursor(restore_cursor)
+                self.statusBar().showMessage(f"Inserted date: {text}", 3000)
 
     def set_read_only(self, read_only: bool) -> None:
         """Toggle read-only state and refresh window badges/title."""
