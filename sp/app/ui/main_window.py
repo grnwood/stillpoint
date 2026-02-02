@@ -260,6 +260,78 @@ class RemoteLoginDialog(QDialog):
         return self._username, self._password, self._remember
 
 
+class RemoteChangePasswordDialog(QDialog):
+    """Prompt to change a remote vault password after server password changes."""
+
+    def __init__(
+        self,
+        parent=None,
+        username: str = "",
+        old_password: str = "",
+        remember_default: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Update Vault Password")
+        self.setModal(True)
+        self.resize(380, 220)
+
+        self._username = ""
+        self._old_password = ""
+        self._new_password = ""
+        self._remember = remember_default
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_edit = QLineEdit()
+        self.username_edit.setText(username)
+        form.addRow("Username:", self.username_edit)
+
+        self.old_password_edit = QLineEdit()
+        self.old_password_edit.setEchoMode(QLineEdit.Password)
+        self.old_password_edit.setText(old_password)
+        form.addRow("Current password:", self.old_password_edit)
+
+        self.new_password_edit = QLineEdit()
+        self.new_password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("New password:", self.new_password_edit)
+
+        self.confirm_password_edit = QLineEdit()
+        self.confirm_password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("Confirm:", self.confirm_password_edit)
+
+        layout.addLayout(form)
+
+        self.remember_checkbox = QCheckBox("Remember on this device")
+        self.remember_checkbox.setChecked(remember_default)
+        layout.addWidget(self.remember_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:  # type: ignore[override]
+        username = self.username_edit.text().strip()
+        old_password = self.old_password_edit.text()
+        new_password = self.new_password_edit.text()
+        confirm = self.confirm_password_edit.text()
+        if not username or not old_password or not new_password:
+            QMessageBox.warning(self, "Missing Info", "Please fill in all password fields.")
+            return
+        if new_password != confirm:
+            QMessageBox.warning(self, "Mismatch", "New password entries do not match.")
+            return
+        self._username = username
+        self._old_password = old_password
+        self._new_password = new_password
+        self._remember = bool(self.remember_checkbox.isChecked())
+        super().accept()
+
+    def values(self) -> tuple[str, str, str, bool]:
+        return self._username, self._old_password, self._new_password, self._remember
+
+
 class AddRemoteDialog(QDialog):
     """Prompt for remote server host/port."""
 
@@ -3729,6 +3801,9 @@ class MainWindow(QMainWindow):
                         detail = data.get("detail") or data.get("message")
                 except Exception:
                     pass
+                if detail and "Server password" in detail:
+                    if self._prompt_remote_password_change(username, password, remember):
+                        return True
                 raise RuntimeError(detail or f"HTTP {resp.status_code}")
             payload = resp.json()
             access = payload.get("access_token")
@@ -3746,6 +3821,54 @@ class MainWindow(QMainWindow):
             self._alert(f"Login failed: {exc}")
             self.statusBar().showMessage(f"Remote vault login failed: {exc}", 5000)
             return False
+
+    def _change_remote_password(self, username: str, old_password: str, new_password: str, remember: bool) -> bool:
+        try:
+            resp = httpx.post(
+                f"{self.api_base}/auth/change",
+                json={
+                    "username": username,
+                    "old_password": old_password,
+                    "new_password": new_password,
+                },
+                timeout=10.0,
+                verify=self._verify_tls,
+            )
+            if resp.status_code != 200:
+                detail = None
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        detail = data.get("detail") or data.get("message")
+                except Exception:
+                    pass
+                raise RuntimeError(detail or f"HTTP {resp.status_code}")
+            payload = resp.json()
+            access = payload.get("access_token")
+            refresh = payload.get("refresh_token")
+            if not access or not refresh:
+                raise RuntimeError("Missing tokens in response")
+            self._remote_username = username
+            self._set_auth_tokens(access, refresh, remember, username)
+            self._rebuild_http_client()
+            self._update_remote_status_badge()
+            self.statusBar().showMessage("Vault password updated.", 3000)
+            return True
+        except Exception as exc:
+            self._alert(f"Password update failed: {exc}")
+            return False
+
+    def _prompt_remote_password_change(self, username: str, old_password: str, remember_default: bool) -> bool:
+        dlg = RemoteChangePasswordDialog(
+            self,
+            username=username,
+            old_password=old_password,
+            remember_default=remember_default,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        new_username, old_pw, new_pw, remember = dlg.values()
+        return self._change_remote_password(new_username, old_pw, new_pw, remember)
 
     def _prompt_remote_login(self) -> bool:
         """Prompt for vault credentials, calling setup or login based on auth status."""

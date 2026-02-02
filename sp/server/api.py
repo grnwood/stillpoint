@@ -254,6 +254,11 @@ class AuthModels:
         username: str
         password: str
 
+    class ChangeRequest(BaseModel):
+        username: str
+        old_password: str = Field(..., min_length=8)
+        new_password: str = Field(..., min_length=8)
+
     class TokenResponse(BaseModel):
         access_token: str
         refresh_token: str
@@ -285,6 +290,41 @@ def _verify_password(plain_password: str, hashed_password: str) -> bool:
 def _hash_password(password: str) -> str:
     return password_hasher.hash(password)
 
+def _server_password_hash() -> Optional[str]:
+    if not SERVER_ADMIN_PASSWORD:
+        return None
+    return hashlib.sha256(SERVER_ADMIN_PASSWORD.encode()).hexdigest()
+
+
+def _combined_vault_password(password: str) -> str:
+    if not SERVER_ADMIN_PASSWORD:
+        return password
+    return f"{password}:{SERVER_ADMIN_PASSWORD}"
+
+
+def _build_auth_config(username: str, password: str) -> dict:
+    combined_password = _combined_vault_password(password)
+    config = {
+        "username": username,
+        "password_hash": _hash_password(combined_password),
+        "vault_password_hash": _hash_password(password),
+        "server_password_hash": _server_password_hash(),
+        "configured_at": datetime.utcnow().isoformat()
+    }
+    return config
+
+
+def _store_auth_config_at_path(db_path: Path, config: dict) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            ("auth_config", json.dumps(config))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def _get_auth_config():
     """Get auth configuration from vault's kv store"""
@@ -311,7 +351,7 @@ def _get_auth_config():
     return None
 
 
-def _set_auth_config(username: str, password_hash: str):
+def _set_auth_config(username: str, password: str):
     """Store auth configuration in vault's kv store"""
     try:
         vault_root = vault_state.get_root()
@@ -321,21 +361,8 @@ def _set_auth_config(username: str, password_hash: str):
         raise HTTPException(status_code=500, detail="No vault selected")
     db_path = vault_root / ".stillpoint" / "settings.db"
 
-    config = {
-        "username": username,
-        "password_hash": password_hash,
-        "configured_at": datetime.utcnow().isoformat()
-    }
-    
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
-            ("auth_config", json.dumps(config))
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    config = _build_auth_config(username, password)
+    _store_auth_config_at_path(db_path, config)
 
 
 def _init_vault_db(root: Path) -> None:
@@ -350,25 +377,12 @@ def _init_vault_db(root: Path) -> None:
         conn.close()
 
 
-def _set_auth_config_for_path(root: Path, username: str, password_hash: str) -> None:
+def _set_auth_config_for_path(root: Path, username: str, password: str) -> None:
     """Store auth configuration for a specific vault path."""
     db_path = root / ".stillpoint" / "settings.db"
 
-    config_payload = {
-        "username": username,
-        "password_hash": password_hash,
-        "configured_at": datetime.utcnow().isoformat()
-    }
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
-            ("auth_config", json.dumps(config_payload))
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    config_payload = _build_auth_config(username, password)
+    _store_auth_config_at_path(db_path, config_payload)
 
 
 def set_local_ui_token(token: Optional[str]) -> None:
@@ -820,10 +834,14 @@ def auth_setup(payload: AuthModels.SetupRequest) -> dict:
     if auth_config:
         raise HTTPException(status_code=400, detail="Authentication already configured")
     
-    # Hash password and store
-    password_hash = _hash_password(payload.password)
-    _set_auth_config(payload.username, password_hash)
+    _set_auth_config(payload.username, payload.password)
     
+    if not vault_hash and combined_ok:
+        try:
+            _set_auth_config(payload.username, payload.password)
+        except Exception:
+            pass
+
     # Generate tokens
     access_token = _create_token(
         {"sub": payload.username},
@@ -859,8 +877,23 @@ def auth_login(payload: AuthModels.LoginRequest) -> dict:
     if payload.username != auth_config["username"]:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not _verify_password(payload.password, auth_config["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    vault_hash = auth_config.get("vault_password_hash")
+    server_hash = auth_config.get("server_password_hash")
+    combined_ok = _verify_password(_combined_vault_password(payload.password), auth_config["password_hash"])
+    if vault_hash:
+        vault_ok = _verify_password(payload.password, vault_hash)
+        current_server_hash = _server_password_hash()
+        if combined_ok:
+            pass
+        elif vault_ok and current_server_hash and server_hash and server_hash != current_server_hash:
+            raise HTTPException(status_code=401, detail="Server password changed; update vault password")
+        elif vault_ok and current_server_hash and not server_hash:
+            raise HTTPException(status_code=401, detail="Server password required; update vault password")
+        else:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+    else:
+        if not combined_ok:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
     
     # Generate tokens
     access_token = _create_token(
@@ -872,6 +905,49 @@ def auth_login(payload: AuthModels.LoginRequest) -> dict:
         timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
     
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@app.post("/auth/change", response_model=AuthModels.TokenResponse)
+def auth_change(payload: AuthModels.ChangeRequest) -> dict:
+    """Change the vault password after validating the old password."""
+    try:
+        vault_root = vault_state.get_root()
+    except Exception:
+        raise HTTPException(status_code=400, detail="No vault selected")
+    if not vault_root:
+        raise HTTPException(status_code=400, detail="No vault selected")
+
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured. Use /auth/setup first.")
+
+    if payload.username != auth_config.get("username"):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    vault_hash = auth_config.get("vault_password_hash")
+    if vault_hash:
+        if not _verify_password(payload.old_password, vault_hash):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+    else:
+        if not _verify_password(_combined_vault_password(payload.old_password), auth_config["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    _set_auth_config(payload.username, payload.new_password)
+
+    access_token = _create_token(
+        {"sub": payload.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = _create_token(
+        {"sub": payload.username, "type": "refresh"},
+        timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -985,11 +1061,10 @@ async def create_vault(request: Request, payload: VaultCreatePayload, _admin: No
         raise HTTPException(status_code=500, detail=f"Failed to create vault: {exc}") from exc
     try:
         _init_vault_db(target)
-        if payload.auth_username or payload.auth_password:
-            if not payload.auth_username or not payload.auth_password:
-                raise HTTPException(status_code=400, detail="Username and password are required to configure auth")
-            password_hash = _hash_password(payload.auth_password)
-            _set_auth_config_for_path(target, payload.auth_username, password_hash)
+    if payload.auth_username or payload.auth_password:
+        if not payload.auth_username or not payload.auth_password:
+            raise HTTPException(status_code=400, detail="Username and password are required to configure auth")
+        _set_auth_config_for_path(target, payload.auth_username, payload.auth_password)
     except HTTPException:
         raise
     except Exception as exc:
