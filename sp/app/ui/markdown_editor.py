@@ -606,11 +606,14 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.checkbox_format.setForeground(QColor("#c8c8c8"))
         self.checkbox_format.setFontFamily("Segoe UI Symbol")
 
+        self._hr_line_color = QColor("#60656f")
+        self._hr_block_color = QColor("#242a33")
         self.hr_format = QTextCharFormat()
-        self.hr_format.setForeground(QColor("#555555"))
-        self.hr_format.setBackground(QColor("#000000"))
+        self.hr_format.setForeground(self._hr_line_color)
+        self.hr_format.setBackground(QColor(0, 0, 0, 0))
         self.hr_hidden_format = QTextCharFormat()
         self.hr_hidden_format.setForeground(QColor(0, 0, 0, 0))
+        self.hr_hidden_format.setFontPointSize(0.01)
 
         self.table_format = QTextCharFormat()
         self.table_format.setFontFamily(mono_family)
@@ -1314,6 +1317,7 @@ class MarkdownEditor(QTextEdit):
         self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
         self._overlay_active: bool = False  # True while inside a ModeWindow
         self._cursor_events_blocked: bool = False
+        self._hr_block_margin_px: int = 6
         self._enforce_display_guard: bool = False
         self._last_heading_block_num: Optional[int] = None
         self._pending_heading_block_num: Optional[int] = None
@@ -1325,6 +1329,8 @@ class MarkdownEditor(QTextEdit):
         self._indent_unit = " " * 4
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.highlighter = MarkdownHighlighter(self.document())
+        self._hr_line_color = getattr(self.highlighter, "_hr_line_color", QColor("#60656f"))
+        self._hr_block_color = getattr(self.highlighter, "_hr_block_color", QColor("#242a33"))
         self.cursorPositionChanged.connect(self._emit_cursor)
         self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
         self._cursor_signals_connected = True
@@ -1618,7 +1624,7 @@ class MarkdownEditor(QTextEdit):
                     except Exception:
                         return
                 painter = QPainter(viewport)
-                pen = QPen(QColor("#cfcfcf"))
+                pen = QPen(self._hr_line_color)
                 pen.setWidth(2)
                 painter.setPen(pen)
                 scroll_bar = self.verticalScrollBar()
@@ -3912,8 +3918,8 @@ class MarkdownEditor(QTextEdit):
 
         btn_left = make_btn(left_icon, "Back", getattr(window, "_navigate_history_back", None))
         btn_right = make_btn(right_icon, "Forward", getattr(window, "_navigate_history_forward", None))
-        btn_up = make_btn(up_icon, "Up", lambda: getattr(window, "_navigate_tree", lambda *_: None)(-1, leaves_only=False))
-        btn_down = make_btn(down_icon, "Down", lambda: getattr(window, "_navigate_tree", lambda *_: None)(1, leaves_only=False))
+        btn_up = make_btn(up_icon, "Up", getattr(window, "_navigate_hierarchy_up", None))
+        btn_down = make_btn(down_icon, "Down", getattr(window, "_navigate_hierarchy_down", None))
 
         for btn in (btn_left, btn_right, btn_up, btn_down):
             layout.addWidget(btn, 1)
@@ -5791,18 +5797,22 @@ class MarkdownEditor(QTextEdit):
 
     def _vi_open_line_below(self) -> None:
         cursor = self.textCursor()
+        was_hr = cursor.block().text().strip() in ("---", "***", "___")
         cursor.movePosition(QTextCursor.EndOfLine)
         self.setTextCursor(cursor)
         if not self._handle_enter_indent_same_level():
             cursor = self.textCursor()
             cursor.insertBlock()
             self.setTextCursor(cursor)
+        if was_hr:
+            self._reset_insert_format(self.textCursor())
         self._enter_vi_insert_mode()
 
     def _vi_open_line_above(self) -> None:
         cursor = self.textCursor()
         block = cursor.block()
         text = block.text()
+        was_hr = text.strip() in ("---", "***", "___")
         indent = text[: len(text) - len(text.lstrip(" \t"))]
         cursor.beginEditBlock()
         cursor.movePosition(QTextCursor.StartOfLine)
@@ -5812,6 +5822,8 @@ class MarkdownEditor(QTextEdit):
         cursor.movePosition(QTextCursor.Right, QTextCursor.MoveAnchor, len(indent))
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        if was_hr:
+            self._reset_insert_format(self.textCursor())
         self._enter_vi_insert_mode()
 
     def _vi_insert_before_cursor(self) -> None:
@@ -6091,17 +6103,32 @@ class MarkdownEditor(QTextEdit):
         selections: list[QTextEdit.ExtraSelection] = []
         block = doc.begin()
         while block.isValid():
-            if block.text().strip() in ("---", "***", "___"):
+            is_hr = block.text().strip() in ("---", "***", "___")
+            if is_hr:
                 cursor = QTextCursor(block)
                 cursor.select(QTextCursor.LineUnderCursor)
                 sel = QTextEdit.ExtraSelection()
                 sel.cursor = cursor
                 fmt = sel.format
-                fmt.setBackground(QColor("#333333"))
-                fmt.setForeground(QColor("#333333"))
+                fmt.setBackground(self._hr_block_color)
                 fmt.setProperty(QTextFormat.FullWidthSelection, True)
                 fmt.setProperty(self._HR_EXTRA_KEY, True)
                 selections.append(sel)
+                block_fmt = block.blockFormat()
+                if (
+                    int(block_fmt.topMargin()) != self._hr_block_margin_px
+                    or int(block_fmt.bottomMargin()) != self._hr_block_margin_px
+                ):
+                    block_fmt.setTopMargin(self._hr_block_margin_px)
+                    block_fmt.setBottomMargin(self._hr_block_margin_px)
+                    cursor.setBlockFormat(block_fmt)
+            else:
+                block_fmt = block.blockFormat()
+                if block_fmt.topMargin() or block_fmt.bottomMargin():
+                    cursor = QTextCursor(block)
+                    block_fmt.setTopMargin(0)
+                    block_fmt.setBottomMargin(0)
+                    cursor.setBlockFormat(block_fmt)
             block = block.next()
         existing = [s for s in self.extraSelections() if s.format.property(self._HR_EXTRA_KEY) is None]
         existing.extend(selections)
@@ -6110,6 +6137,12 @@ class MarkdownEditor(QTextEdit):
     def _retry_refresh_hr(self) -> None:
         self._hr_refresh_retry_pending = False
         self._refresh_hr_selections()
+
+    def _reset_insert_format(self, cursor: QTextCursor) -> None:
+        fmt = QTextCharFormat()
+        cursor.setCharFormat(fmt)
+        cursor.setBlockCharFormat(fmt)
+        self.setCurrentCharFormat(fmt)
 
     def _emit_heading_outline(self) -> None:
         outline: list[dict] = []
@@ -6961,6 +6994,7 @@ class MarkdownEditor(QTextEdit):
         if not block.isValid():
             return False
         text = block.text()
+        was_hr = text.strip() in ("---", "***", "___")
         # Determine leading whitespace (tabs and/or spaces)
         stripped = text.lstrip(" \t")
         indent = text[: len(text) - len(stripped)]
@@ -6968,6 +7002,8 @@ class MarkdownEditor(QTextEdit):
         cursor.beginEditBlock()
         cursor.insertText("\n" + indent)
         cursor.endEditBlock()
+        if was_hr:
+            self._reset_insert_format(self.textCursor())
         return True
 
     def _dedent_line_text(self, text: str, indent_unit: Optional[str] = None) -> tuple[str, int]:
