@@ -60,6 +60,10 @@ TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TAG_PREFIX_PATTERN = re.compile(r"(?<![\w.+-])@[\w_]*$")
 DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
+PRINT_LINK_PATTERN = re.compile(
+    r"(?P<md>\[(?P<md_label>[^\]]+)\]\((?P<md_url>[^\s)]+)\))|"
+    r"(?P<wiki>\[(?P<wiki_link>[^\]|]+)\|(?P<wiki_label>[^\]]+)\])"
+)
 
 
 def _active_tag_token(text: str, cursor: int) -> Optional[str]:
@@ -464,6 +468,42 @@ class TaskPanel(QWidget):
         )
         return rendered
 
+    def _safe_print_href(self, url: str) -> str:
+        cleaned = (url or "").strip()
+        if not cleaned:
+            return ""
+        lowered = cleaned.lower()
+        if lowered.startswith(("javascript:", "data:")):
+            return ""
+        return html.escape(cleaned, quote=True)
+
+    def _linkify_task_text_html(self, text: str) -> str:
+        """Return HTML with link labels rendered as anchors for print views."""
+        if not text:
+            return ""
+        text = text.replace("\n", " ").strip()
+        parts: list[str] = []
+        last = 0
+        for match in PRINT_LINK_PATTERN.finditer(text):
+            if match.start() > last:
+                parts.append(html.escape(text[last:match.start()]))
+            if match.group("md"):
+                label = (match.group("md_label") or "").strip()
+                url = (match.group("md_url") or "").strip()
+            else:
+                label = (match.group("wiki_label") or "").strip()
+                url = (match.group("wiki_link") or "").strip()
+            label = label or url
+            safe_href = self._safe_print_href(url)
+            if safe_href:
+                parts.append(f"<a href=\"{safe_href}\">{html.escape(label)}</a>")
+            else:
+                parts.append(html.escape(label))
+            last = match.end()
+        if last < len(text):
+            parts.append(html.escape(text[last:]))
+        return "".join(parts)
+
     def _setup_focus_defaults(self) -> None:
         """Ensure sensible default focus inside the Tasks tab."""
         self.search.setFocusPolicy(Qt.StrongFocus)
@@ -774,8 +814,7 @@ class TaskPanel(QWidget):
             row_class_attr = f" class=\"{' '.join(row_classes)}\"" if row_classes else ""
 
             checkbox = "☑" if is_done else "☐"
-            task_text = self._format_task_text(task.get("text", "") or "")
-            task_text = html.escape(task_text.replace("\n", " ").strip())
+            task_text = self._linkify_task_text_html(task.get("text", "") or "")
             indent_px = max(0, depth) * 18
             task_html = (
                 f"<span class=\"task-text\" style=\"margin-left: {indent_px}px;\">"

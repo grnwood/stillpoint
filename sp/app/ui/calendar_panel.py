@@ -66,6 +66,10 @@ RECENT_ACTION_ROLE = Qt.UserRole + 50
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
+PRINT_LINK_PATTERN = re.compile(
+    r"(?P<md>\[(?P<md_label>[^\]]+)\]\((?P<md_url>[^\s)]+)\))|"
+    r"(?P<wiki>\[(?P<wiki_link>[^\]|]+)\|(?P<wiki_label>[^\]]+)\])"
+)
 
 
 class MultiSelectCalendarDelegate(QStyledItemDelegate):
@@ -1124,6 +1128,41 @@ class CalendarPanel(QWidget):
         except Exception:
             return "<pre>" + html.escape(cleaned) + "</pre>"
 
+    def _safe_print_href(self, url: str) -> str:
+        cleaned = (url or "").strip()
+        if not cleaned:
+            return ""
+        lowered = cleaned.lower()
+        if lowered.startswith(("javascript:", "data:")):
+            return ""
+        return html.escape(cleaned, quote=True)
+
+    def _linkify_task_text_html(self, text: str) -> str:
+        if not text:
+            return ""
+        text = text.replace("\n", " ").strip()
+        parts: list[str] = []
+        last = 0
+        for match in PRINT_LINK_PATTERN.finditer(text):
+            if match.start() > last:
+                parts.append(html.escape(text[last:match.start()]))
+            if match.group("md"):
+                label = (match.group("md_label") or "").strip()
+                url = (match.group("md_url") or "").strip()
+            else:
+                label = (match.group("wiki_label") or "").strip()
+                url = (match.group("wiki_link") or "").strip()
+            label = label or url
+            safe_href = self._safe_print_href(url)
+            if safe_href:
+                parts.append(f"<a href=\"{safe_href}\">{html.escape(label)}</a>")
+            else:
+                parts.append(html.escape(label))
+            last = match.end()
+        if last < len(text):
+            parts.append(html.escape(text[last:]))
+        return "".join(parts)
+
     def _build_due_tasks_table(self) -> str:
         header = self.tasks_due_list.headerItem()
         headers = []
@@ -1150,7 +1189,10 @@ class CalendarPanel(QWidget):
             row_cells = []
             for col in range(self.tasks_due_list.columnCount()):
                 text = item.text(col)
-                safe = html.escape(text or "")
+                if col == 1:
+                    safe = self._linkify_task_text_html(text or "")
+                else:
+                    safe = html.escape(text or "")
                 cell_style = ""
                 if col == 0 and pri_style:
                     cell_style = pri_style
