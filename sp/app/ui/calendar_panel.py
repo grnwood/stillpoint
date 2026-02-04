@@ -241,6 +241,8 @@ class CalendarPanel(QWidget):
         self._task_date_clear_due = False
         self._task_date_targets: list[dict] = []
         self._suppress_task_activation = False
+        # Avoid syncing the task panel's date filter for programmatic month changes.
+        self._suppress_task_filter_sync = False
         self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
         self._api_task_cache_ttl = 0.5
 
@@ -880,14 +882,18 @@ class CalendarPanel(QWidget):
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Move the calendar to a specific date and expand the tree."""
         target = QDate(year, month, day)
-        self.calendar.setSelectedDate(target)
-        self._set_single_selection(target)
-        self._update_calendar_dates(year, month)
-        self._expand_to_date(target)
-        self._update_day_listing(target)
-        self._apply_multi_selection_formats()
-        self._update_insights_for_selection()
-        self._update_today_visibility()
+        self._suppress_task_filter_sync = True
+        try:
+            self.calendar.setSelectedDate(target)
+            self._set_single_selection(target)
+            self._update_calendar_dates(year, month)
+            self._expand_to_date(target)
+            self._update_day_listing(target)
+            self._apply_multi_selection_formats()
+            self._update_insights_for_selection()
+            self._update_today_visibility()
+        finally:
+            self._suppress_task_filter_sync = False
 
     def set_current_page(self, rel_path: Optional[str]) -> None:
         """Sync calendar and tree based on an opened journal page."""
@@ -1767,13 +1773,14 @@ class CalendarPanel(QWidget):
             self._update_due_tasks([first, last])
         except Exception:
             pass
-        try:
-            if self._task_date_filter_setter:
-                start = Date(year, month, 1)
-                end = Date(year, month, calendar.monthrange(year, month)[1])
-                self._task_date_filter_setter(start, end, "month")
-        except Exception:
-            pass
+        if not self._suppress_task_filter_sync:
+            try:
+                if self._task_date_filter_setter:
+                    start = Date(year, month, 1)
+                    end = Date(year, month, calendar.monthrange(year, month)[1])
+                    self._task_date_filter_setter(start, end, "month")
+            except Exception:
+                pass
         self._update_today_visibility()
 
     def _set_single_selection(self, date: QDate) -> None:

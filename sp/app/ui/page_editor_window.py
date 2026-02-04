@@ -266,20 +266,41 @@ class PageEditorWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Page")
         toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        assets_root = Path(__file__).resolve().parents[2] / "assets"
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence.Save)
-        save_action.setShortcutContext(Qt.WindowShortcut)
+        save_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        save_action.setToolTip("Save (Ctrl+S)")
+        save_icon_path = assets_root / "save.svg"
+        if save_icon_path.exists():
+            save_action.setIcon(QIcon(str(save_icon_path)))
         save_action.triggered.connect(lambda: self._save_current_file(auto=False, reason="manual save"))
         toolbar.addAction(save_action)
         self.addAction(save_action)  # Register shortcut with window
+
+        reload_action = QAction("Reload", self)
+        reload_action.setShortcut(QKeySequence("Ctrl+R"))
+        reload_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        reload_action.setToolTip("Reload current page (Ctrl+R)")
+        reload_icon_path = assets_root / "reload.svg"
+        if reload_icon_path.exists():
+            reload_action.setIcon(QIcon(str(reload_icon_path)))
+        reload_action.triggered.connect(self._reload_current_page)
+        toolbar.addAction(reload_action)
+        self.addAction(reload_action)
+
         insert_link_action = QAction("Insert Link…", self)
         insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
+        link_icon_path = assets_root / "link.svg"
+        if link_icon_path.exists():
+            insert_link_action.setIcon(QIcon(str(link_icon_path)))
         insert_link_action.triggered.connect(self._insert_link)
         toolbar.addAction(insert_link_action)
         toolbar.addSeparator()
         ai_action = QAction("AI Assist...", self)
         ai_action.setToolTip("AI assist (one-shot)")
-        icon_path = Path(__file__).resolve().parents[2] / "assets" / "ai.svg"
+        icon_path = assets_root / "ai.svg"
         if icon_path.exists():
             ai_action.setIcon(QIcon(str(icon_path)))
         ai_action.triggered.connect(self._open_ai_assist)
@@ -299,6 +320,7 @@ class PageEditorWindow(QMainWindow):
         tracer = PageLoadLogger(self._source_path) if PAGE_LOGGING_ENABLED else None
         if tracer:
             tracer.mark("api read start")
+        print(f"[StillPoint Popup] Read request path={self._source_path}")
         try:
             resp = self.http.post("/api/file/read", json={"path": self._source_path})
             resp.raise_for_status()
@@ -401,6 +423,17 @@ class PageEditorWindow(QMainWindow):
         except Exception:
             pass
         self._update_dirty_indicator()
+
+    def _reload_current_page(self) -> None:
+        """Reload the current page from disk."""
+        if not self._source_path:
+            self.statusBar().showMessage("No page to reload", 2000)
+            return
+        print(f"[StillPoint Popup] Reload request path={self._source_path}")
+        if self._is_dirty():
+            self._save_current_file(auto=True, reason="reload")
+        self._load_content()
+        self.statusBar().showMessage("Reloaded current page", 2000)
 
     def _insert_link(self) -> None:
         if not self.vault_root:

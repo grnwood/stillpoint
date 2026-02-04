@@ -3487,7 +3487,9 @@ class MarkdownEditor(QTextEdit):
         # Check for meaningful modifiers (ignore KeypadModifier which Qt may add on some platforms)
         # This is used throughout the keyPressEvent for cross-platform compatibility
         meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
-        
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
+            self._move_cursor_to_link_end_on_enter(self.textCursor())
+
         # Bullet/task mode key handling
         cursor = self.textCursor()
         block = cursor.block()
@@ -4660,6 +4662,45 @@ class MarkdownEditor(QTextEdit):
         rel_pos = cursor.position() - cursor.block().position()
         # Only treat as activation when cursor is strictly inside the link (not touching the ends)
         return start < rel_pos < end
+
+    def _move_cursor_to_link_end_on_enter(self, cursor: QTextCursor) -> bool:
+        """If cursor is inside or at the end of a link, move it past the link to avoid splitting sentinels."""
+        region = self._link_region_at_cursor(cursor)
+        if region:
+            _, start, end = region
+            rel_pos = cursor.position() - cursor.block().position()
+            if start <= rel_pos <= end:
+                new_cursor = QTextCursor(cursor)
+                new_cursor.setPosition(cursor.block().position() + end)
+                self.setTextCursor(new_cursor)
+                return True
+
+        # Handle boundary case for display-format wiki links where cursor is at end of visible text.
+        block = cursor.block()
+        rel_pos = cursor.position() - block.position()
+        text = block.text()
+        idx = 0
+        while idx < len(text):
+            if text[idx] == LINK_SENTINEL:
+                link_start = idx + 1
+                link_end = text.find(LINK_SENTINEL, link_start)
+                if link_end > link_start:
+                    label_start = link_end + 1
+                    label_end = text.find(LINK_SENTINEL, label_start)
+                    if label_end >= label_start:
+                        if label_end == label_start:  # Empty label - link is visible
+                            visible_end = link_end
+                        else:  # Non-empty label - label is visible
+                            visible_end = label_end
+                        if rel_pos == visible_end:
+                            new_cursor = QTextCursor(cursor)
+                            new_cursor.setPosition(block.position() + label_end + 1)
+                            self.setTextCursor(new_cursor)
+                            return True
+                        idx = label_end + 1
+                        continue
+            idx += 1
+        return False
 
     def _link_under_cursor(self, cursor: QTextCursor | None = None) -> Optional[str]:
         if self._cursor_events_blocked or self._display_guard or self._suppress_link_scan or self._overlay_transition:
