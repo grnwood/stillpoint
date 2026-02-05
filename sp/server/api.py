@@ -2489,10 +2489,39 @@ def _normalize_markdown_lists(text: str) -> str:
                 break
         return bool(digits) and trimmed[len(digits):].startswith(". ")
 
+    def _indent_cols(value: str) -> int:
+        cols = 0
+        for ch in value:
+            if ch == " ":
+                cols += 1
+            elif ch == "\t":
+                cols += 4
+            else:
+                break
+        return cols
+
+    def _strip_indent(value: str, cols: int) -> str:
+        if cols <= 0:
+            return value
+        remaining = cols
+        idx = 0
+        while idx < len(value) and remaining > 0:
+            ch = value[idx]
+            if ch == " ":
+                remaining -= 1
+            elif ch == "\t":
+                remaining -= 4
+            else:
+                break
+            idx += 1
+        return value[idx:]
+
     lines = text.splitlines()
     normalized: list[str] = []
     in_fence = False
     fence_marker = ""
+    deindent_active = False
+    deindent_cols = 0
 
     for line in lines:
         stripped = line.strip()
@@ -2511,10 +2540,28 @@ def _normalize_markdown_lists(text: str) -> str:
             normalized.append(line)
             continue
 
-        if _is_list_line(line) and normalized:
-            prev = normalized[-1].strip()
-            if prev and not _is_list_line(prev):
-                normalized.append("")
+        if stripped == "":
+            normalized.append(line)
+            continue
+
+        if not deindent_active and _is_list_line(line):
+            indent = _indent_cols(line)
+            if indent >= 4:
+                deindent_active = True
+                deindent_cols = 4
+
+        if _is_list_line(line):
+            if normalized:
+                prev = normalized[-1].strip()
+                if prev and not _is_list_line(prev):
+                    normalized.append("")
+            if deindent_active:
+                normalized.append(_strip_indent(line, deindent_cols))
+                continue
+        else:
+            if deindent_active:
+                deindent_active = False
+                deindent_cols = 0
 
         normalized.append(line)
 
