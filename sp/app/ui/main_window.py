@@ -1900,9 +1900,8 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("Hel&p")
         documentation_action = QAction("Documentation", self)
-        documentation_action.setShortcut(QKeySequence(Qt.Key_F1))
         documentation_action.setShortcutContext(Qt.ApplicationShortcut)
-        documentation_action.setToolTip("Open the built-in StillPoint documentation (F1)")
+        documentation_action.setToolTip("Open the built-in StillPoint documentation")
         documentation_action.triggered.connect(self._open_help_documentation)
         help_menu.addAction(documentation_action)
         shortcuts_action = QAction("Keyboard Shortcuts", self)

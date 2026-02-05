@@ -80,7 +80,8 @@ class WebServer:
             else:
                 # Fallback to simple rendering
                 import markdown
-                html = markdown.markdown(text, extensions=["fenced_code", "tables"])
+                normalized = self._normalize_markdown_lists(text)
+                html = markdown.markdown(normalized, extensions=["fenced_code", "tables"])
             return Markup(html)
 
     def _render_markdown(self, text: str) -> str:
@@ -95,8 +96,56 @@ class WebServer:
         """
         # TODO: Integrate with StillPoint's markdown renderer
         # For now, use basic markdown
+        text = self._normalize_markdown_lists(text)
         import markdown
         return markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+
+    @staticmethod
+    def _normalize_markdown_lists(text: str) -> str:
+        """Insert blank lines before list blocks when missing (improves list parsing)."""
+        def _is_list_line(value: str) -> bool:
+            trimmed = value.lstrip()
+            if trimmed.startswith(("* ", "- ", "+ ")):
+                return True
+            digits = ""
+            for ch in trimmed:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            return bool(digits) and trimmed[len(digits):].startswith(". ")
+
+        lines = text.splitlines()
+        normalized: list[str] = []
+        in_fence = False
+        fence_marker = ""
+
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+
+            if stripped.startswith(("```", "~~~")):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                normalized.append(line)
+                continue
+
+            if in_fence:
+                normalized.append(line)
+                continue
+
+            if _is_list_line(line) and normalized:
+                prev = normalized[-1].strip()
+                if prev and not _is_list_line(prev):
+                    normalized.append("")
+
+            normalized.append(line)
+
+        return "\n".join(normalized)
 
     def _setup_routes(self):
         """Setup Flask routes."""
