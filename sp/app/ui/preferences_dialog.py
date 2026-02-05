@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QKeySequenceEdit,
     QFrame,
+    QTableWidget,
+    QTableWidgetItem,
+    QFrame,
 )
 from pathlib import Path
 from PySide6.QtGui import QFontDatabase, QFont, QDesktopServices
@@ -94,6 +97,15 @@ class PreferencesDialog(QDialog):
             self.stack.addWidget(page)
             return layout
 
+        def add_divider(layout: QVBoxLayout) -> None:
+            line = QFrame()
+            line.setFrameShape(QFrame.HLine)
+            line.setFrameShadow(QFrame.Sunken)
+            line.setStyleSheet("color: #666;")
+            layout.addSpacing(6)
+            layout.addWidget(line)
+            layout.addSpacing(6)
+
         # General
         general_layout = add_section("General")
         general_layout.addWidget(QLabel("<b>Markdown Editor</b>"))
@@ -101,6 +113,14 @@ class PreferencesDialog(QDialog):
         self.toc_widget_checkbox.setChecked(config.load_toc_widget_enabled())
         self.toc_widget_checkbox.setToolTip("Show floating transparent Heading navigator in editor")
         general_layout.addWidget(self.toc_widget_checkbox)
+        general_layout.addWidget(QLabel("<b>Code Highlighting</b>"))
+        row_pyg = QHBoxLayout()
+        row_pyg.addWidget(QLabel("Pygments style:"))
+        self.pygments_style_combo = QComboBox()
+        self._load_pygments_styles()
+        row_pyg.addWidget(self.pygments_style_combo, 1)
+        general_layout.addLayout(row_pyg)
+        add_divider(general_layout)
 
         general_layout.addWidget(QLabel("<b>Tray</b>"))
         self.tray_icon_checkbox = QCheckBox("Enable system tray icon")
@@ -109,6 +129,7 @@ class PreferencesDialog(QDialog):
         self.minimize_to_tray_checkbox = QCheckBox("Minimize to tray on close")
         self.minimize_to_tray_checkbox.setChecked(config.load_minimize_to_tray_enabled())
         general_layout.addWidget(self.minimize_to_tray_checkbox)
+        add_divider(general_layout)
 
         general_layout.addWidget(QLabel("<b>Features</b>"))
         self.feature_tasks_checkbox = QCheckBox("Enable Tasks")
@@ -140,6 +161,7 @@ class PreferencesDialog(QDialog):
         self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_tags_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_remote_vaults_checkbox.toggled.connect(self._warn_restart_required)
+        add_divider(general_layout)
 
         general_layout.addWidget(QLabel("<b>Capture</b>"))
         row_capture_vault = QHBoxLayout()
@@ -435,7 +457,7 @@ class PreferencesDialog(QDialog):
         task_layout.addStretch(1)
 
         # AI & Code
-        ai_layout = add_section("AI & Code")
+        ai_layout = add_section("AI Chats and Agents")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
         self.enable_ai_chats_checkbox.setChecked(config.load_global_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
@@ -443,6 +465,7 @@ class PreferencesDialog(QDialog):
         self.manage_server_btn = QPushButton("Manage Servers")
         self.manage_server_btn.clicked.connect(self._open_manage_server_dialog)
         ai_layout.addWidget(self.manage_server_btn)
+        add_divider(ai_layout)
         ai_layout.addWidget(QLabel("<b>Default Server and Model</b>"))
         row = QHBoxLayout()
         row.addWidget(QLabel("Server:"))
@@ -460,14 +483,49 @@ class PreferencesDialog(QDialog):
         row2.addWidget(self.refresh_models_btn)
         ai_layout.addLayout(row2)
         self._load_default_server_model()
-
-        ai_layout.addWidget(QLabel("<b>Code Highlighting</b>"))
-        row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Pygments style:"))
-        self.pygments_style_combo = QComboBox()
-        self._load_pygments_styles()
-        row3.addWidget(self.pygments_style_combo, 1)
-        ai_layout.addLayout(row3)
+        add_divider(ai_layout)
+        ai_layout.addWidget(QLabel("<b>Agents</b>"))
+        self.enable_ai_agents_checkbox = QCheckBox("Enable AI Agents in chat")
+        self.enable_ai_agents_checkbox.setChecked(config.load_global_enable_ai_agents())
+        self.enable_ai_agents_checkbox.stateChanged.connect(self._warn_restart_required)
+        ai_layout.addWidget(self.enable_ai_agents_checkbox)
+        self._agents_box = QWidget()
+        agents_layout = QVBoxLayout(self._agents_box)
+        agents_layout.setContentsMargins(8, 4, 8, 4)
+        agents_layout.setSpacing(6)
+        agents_layout.addWidget(
+            QLabel(
+                "<b>Vault Assistant</b><br>"
+                "Understands vault tools (search/read/write, tasks, daily).<br>"
+                "<i>Example:</i> \"Search my vault for SVS and write a summary page.\""
+            )
+        )
+        agents_layout.addWidget(
+            QLabel(
+                "<b>Task Assistant</b><br>"
+                "Finds and organizes tasks based on tags or due dates.<br>"
+                "<i>Example:</i> \"Find tasks tagged @todo and write a new page.\""
+            )
+        )
+        agents_layout.addWidget(
+            QLabel(
+                "<b>Web Research Assistant</b><br>"
+                "Fetches/scrapes URLs or runs a quick web search.<br>"
+                "<i>Example:</i> \"Search the web for ClubGlove history.\""
+            )
+        )
+        self._agents_box.setVisible(self.enable_ai_agents_checkbox.isChecked())
+        self.enable_ai_agents_checkbox.toggled.connect(self._agents_box.setVisible)
+        ai_layout.addWidget(self._agents_box)
+        add_divider(ai_layout)
+        ai_layout.addWidget(QLabel("<b>Agent Tools</b>"))
+        self.agent_tools_table = QTableWidget()
+        self.agent_tools_table.setColumnCount(3)
+        self.agent_tools_table.setHorizontalHeaderLabels(["Tool", "Sample Query", "Tweaks / Dials"])
+        self.agent_tools_table.horizontalHeader().setStretchLastSection(True)
+        self.agent_tools_table.verticalHeader().setVisible(False)
+        self._load_agent_tools_table()
+        ai_layout.addWidget(self.agent_tools_table)
         ai_layout.addStretch(1)
 
         # PlantUML
@@ -886,6 +944,61 @@ class PreferencesDialog(QDialog):
         self.pygments_style_combo.addItems(styles)
         if current in styles:
             self.pygments_style_combo.setCurrentText(current)
+
+    def _default_agent_tools_config(self) -> dict:
+        return {
+            "tools": [
+                {
+                    "name": "web.search",
+                    "sample": "search the web for clubglove history",
+                    "settings": "engine=duckduckgo",
+                },
+                {
+                    "name": "tasks.list",
+                    "sample": "find tasks with @todo",
+                    "settings": "triggers=task,tasks,todo,to-do,overdue",
+                },
+                {
+                    "name": "vault.search",
+                    "sample": "search my vault for SVS references",
+                    "settings": "triggers=search,find references,look for",
+                },
+                {
+                    "name": "vault.write",
+                    "sample": "write a new page titled \"SVS Summary\"",
+                    "settings": "triggers=write,create a page,new page,make a page,add a page",
+                },
+                {
+                    "name": "vault.write.append",
+                    "sample": "add to my favorite poems page a haiku",
+                    "settings": "triggers=add to,append,insert into,update,edit",
+                },
+                {
+                    "name": "daily.open",
+                    "sample": "add to my journal for today",
+                    "settings": "triggers=daily,journal,today",
+                },
+            ]
+        }
+
+    def _load_agent_tools_table(self) -> None:
+        settings = config.load_agent_tool_settings()
+        if not settings:
+            settings = self._default_agent_tools_config()
+        tools = settings.get("tools") if isinstance(settings, dict) else None
+        if not isinstance(tools, list):
+            tools = []
+        self.agent_tools_table.setRowCount(len(tools))
+        for row, tool in enumerate(tools):
+            name = (tool or {}).get("name", "")
+            sample = (tool or {}).get("sample", "")
+            tweaks = (tool or {}).get("settings", "")
+            item_name = QTableWidgetItem(str(name))
+            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
+            self.agent_tools_table.setItem(row, 0, item_name)
+            self.agent_tools_table.setItem(row, 1, QTableWidgetItem(str(sample)))
+            self.agent_tools_table.setItem(row, 2, QTableWidgetItem(str(tweaks)))
+        self.agent_tools_table.resizeColumnsToContents()
     
     def _on_rebuild_clicked(self):
         """Handle rebuild index button click."""
@@ -974,8 +1087,25 @@ class PreferencesDialog(QDialog):
         if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
             print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
+        config.save_enable_ai_agents(self.enable_ai_agents_checkbox.isChecked())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
+        try:
+            tools = []
+            for row in range(self.agent_tools_table.rowCount()):
+                name_item = self.agent_tools_table.item(row, 0)
+                sample_item = self.agent_tools_table.item(row, 1)
+                tweak_item = self.agent_tools_table.item(row, 2)
+                tools.append(
+                    {
+                        "name": name_item.text() if name_item else "",
+                        "sample": sample_item.text() if sample_item else "",
+                        "settings": tweak_item.text() if tweak_item else "",
+                    }
+                )
+            config.save_agent_tool_settings({"tools": tools})
+        except Exception:
+            pass
         if self.force_read_only_checkbox is not None:
             config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())

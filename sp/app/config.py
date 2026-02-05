@@ -972,6 +972,53 @@ def save_enable_ai_chats(enabled: bool) -> None:
     _update_global_config({"enable_ai_chats": bool(enabled)})
 
 
+def load_global_enable_ai_agents() -> bool:
+    """Return global enablement for AI Agents (default False)."""
+    payload = _read_global_config()
+    return bool(payload.get("enable_ai_agents", False))
+
+
+def save_enable_ai_agents(enabled: bool) -> None:
+    """Save preference for enabling AI Agents."""
+    _update_global_config({"enable_ai_agents": bool(enabled)})
+
+
+def load_agent_tool_settings() -> dict:
+    """Load agent tool configuration settings."""
+    payload = _read_global_config()
+    settings = payload.get("agent_tool_settings", {})
+    return settings if isinstance(settings, dict) else {}
+
+
+def save_agent_tool_settings(settings: dict) -> None:
+    """Save agent tool configuration settings."""
+    _update_global_config({"agent_tool_settings": settings or {}})
+
+
+def load_agent_tool_approvals() -> dict:
+    """Load per-vault agent tool approvals from global config."""
+    payload = _read_global_config()
+    approvals = payload.get("agent_tool_approvals", {})
+    return approvals if isinstance(approvals, dict) else {}
+
+
+def is_agent_tool_approved(vault_key: str) -> bool:
+    """Return True if agent tools are approved for the given vault key."""
+    if not vault_key:
+        return False
+    approvals = load_agent_tool_approvals()
+    return bool(approvals.get(vault_key))
+
+
+def approve_agent_tool_for_vault(vault_key: str) -> None:
+    """Persist approval for agent tools for the given vault key."""
+    if not vault_key:
+        return
+    approvals = load_agent_tool_approvals()
+    approvals[vault_key] = True
+    _update_global_config({"agent_tool_approvals": approvals})
+
+
 def _load_vault_override_bool(key: str) -> Optional[bool]:
     """Return per-vault override bool for key, or None if unset."""
     conn = _get_conn()
