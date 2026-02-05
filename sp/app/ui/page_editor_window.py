@@ -640,6 +640,7 @@ class PageEditorWindow(QMainWindow):
         else:
             overlay.show()
 
+
     def _show_editor_context_menu(self, pos) -> None:
         """Show context menu with Edit operations matching main window."""
         from PySide6.QtWidgets import QMenu

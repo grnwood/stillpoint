@@ -36,12 +36,21 @@ from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel, QS
 from PySide6.QtSvg import QSvgRenderer
 from sp.rag.attachment_text import extract_attachment_text
 from markdown import markdown
+import html
 
 # Use stillpoint_config for global config storage
 from sp.app import config, config as stillpoint_config
 from sp.ai.manager import AIManager, ContextItem
+from .agent_tool_loop import (
+    AgentLoopConfig,
+    AgentToolChatWorker,
+    DEFAULT_AGENT_SYSTEM_PROMPT,
+    build_vault_key,
+    parse_agent_message,
+)
+from .ai_api import build_api_request, build_auth_headers, compose_url
 from sp.rag.index import RetrievedChunk
-from .path_utils import path_to_colon
+from .path_utils import path_to_colon, ensure_root_colon_link
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 
 AI_CHAT_COLOR = "\033[34m"
@@ -342,12 +351,6 @@ def normalize_base_url(url: str) -> str:
         return ""
     return url.rstrip("/")
 
-
-def compose_url(base_url: str, path: str) -> str:
-    base = normalize_base_url(base_url)
-    if not path:
-        return base
-    return f"{base}/{path.lstrip('/')}"
 
 
 def to_bool(value, default=False):
@@ -828,25 +831,6 @@ class AIChatStore:
         conn.close()
 
 
-def build_auth_headers(server_config: dict) -> dict:
-    headers = {}
-    auth_mode = (server_config or {}).get("auth_mode", "proxy")
-    if auth_mode == "proxy":
-        token = (server_config or {}).get("api_secret")
-        if token:
-            headers["x-api-secret"] = token
-    elif auth_mode == "openai":
-        api_key = (server_config or {}).get("api_key")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-    else:
-        header_name = (server_config or {}).get("custom_header_name")
-        header_value = (server_config or {}).get("custom_header_value")
-        if header_name and header_value:
-            headers[header_name] = header_value
-    return headers
-
-
 def get_available_models(server_config: Optional[dict]) -> List[str]:
     server = server_config or {}
     fallback_model = server.get("default_model") or "gpt-3.5-turbo"
@@ -858,27 +842,6 @@ def get_available_models(server_config: Optional[dict]) -> List[str]:
     if not models:
         return [fallback_model]
     return sorted(set(models))
-
-
-def build_api_request(server_config: dict, messages: List[dict], model: str, stream: bool = True):
-    server = server_config or {}
-    base_url = server.get("base_url", "")
-    chat_path = server.get("chat_path") or "/v1/chat/completions"
-    if not base_url:
-        raise ValueError("Selected server does not have a base URL configured.")
-    url = compose_url(base_url, chat_path)
-    headers = {"Content-Type": "application/json"}
-    headers.update(build_auth_headers(server))
-    verify = bool(server.get("verify_ssl", True))
-
-    timeout_raw = server.get("timeout", "")
-    try:
-        timeout = float(timeout_raw) if str(timeout_raw).strip() else 120
-    except (ValueError, TypeError):
-        timeout = 120
-
-    payload = {"model": model, "messages": messages, "stream": bool(stream)}
-    return url, headers, verify, timeout, payload
 
 
 class ApiWorker(QtCore.QThread):
@@ -1258,6 +1221,20 @@ class AIChatPanel(QtWidgets.QWidget):
         self.messages = []
         self._api_worker = None
         self._condense_worker = None
+        self._agent_tool_worker = None
+        self._agent_placeholder_index: Optional[int] = None
+        self._pending_agent_prompt: Optional[str] = None
+        try:
+            self._agent_tools_enabled = config.load_global_enable_ai_agents()
+        except Exception:
+            self._agent_tools_enabled = True
+        self._last_agent_read_path: Optional[str] = None
+        self._last_user_prompt: Optional[str] = None
+        self._agent_fallback_in_progress = False
+        self._current_editor_path: Optional[str] = None
+        self._debug_entries: list[dict] = []
+        self._active_think_debug: dict[int, int] = {}
+        self._active_tool_debug: Optional[int] = None
         self.current_session_id = None
         self.current_page_path = None
         self.ai_manager: Optional[AIManager] = None
@@ -1414,6 +1391,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self.prompt_btn.clicked.connect(self._open_prompt_dialog)
         self.prompt_btn.setVisible(False)
         model_row.addWidget(self.prompt_btn)
+        self.debug_checkbox = QtWidgets.QCheckBox("Debug")
+        self.debug_checkbox.setChecked(True)
+        self.debug_checkbox.setToolTip("Show debug traces in chat")
+        self.debug_checkbox.setStyleSheet("color: #9a9a9a;")
+        model_row.addWidget(self.debug_checkbox)
         # Use a compact font size for model/server controls
         compact_css = "font-size: 12px;"
         self.server_config_widget.setStyleSheet(compact_css)
@@ -1582,6 +1564,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._message_think_active.clear()
             self._message_think_expanded.clear()
             self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+            self._clear_debug_entries()
             self._context_popup_position = None
             self._context_popup_width = None
             self._set_status("Chat history cleared.")
@@ -1615,6 +1598,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._message_think_active.clear()
         self._message_think_expanded.clear()
         self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+        self._clear_debug_entries()
         self._context_popup_position = None
         self._context_popup_width = None
         self._load_chat_tree()
@@ -1690,7 +1674,7 @@ class AIChatPanel(QtWidgets.QWidget):
         # Do not auto-refresh models on config toggle
 
     def _has_active_operation(self) -> bool:
-        return bool(self._api_worker or self._condense_worker)
+        return bool(self._api_worker or self._condense_worker or self._agent_tool_worker)
 
     def _update_stop_button(self) -> None:
         if hasattr(self, "stop_btn"):
@@ -1847,6 +1831,11 @@ class AIChatPanel(QtWidgets.QWidget):
             f".user {{ color:#f2e7a1; background:transparent; }}"
             f".assistant {{ color:#8fe39b; background:transparent; }}"
             f".summary {{ border:1px solid #2f4f2f; }}"
+            f".debug {{ color:#888; background:transparent; }}"
+            f".debug details {{ margin-top:4px; }}"
+            f".debug-toggle {{ cursor:pointer; color:{accent}; text-decoration:underline; display:inline-block; }}"
+            f".debug-title {{ color:#9aa39a; }}"
+            f".debug-body {{ margin-top:6px; white-space:pre-wrap; }}"
             f".think-toggle {{ margin-top:6px; color:{accent}; text-decoration:none; display:inline-block; }}"
             f".think-active a {{ animation: thinkPulse 1.2s infinite; }}"
             f".think-body {{ margin-top:6px; padding:6px; border:2px solid #ffffff;"
@@ -1856,6 +1845,27 @@ class AIChatPanel(QtWidgets.QWidget):
             f".role {{ font-weight:bold; color:{accent}; }}</style>"
         )
         self._message_map = {}
+        debug_by_anchor: dict[int, list[dict]] = {}
+        debug_enabled = bool(getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked())
+        if debug_enabled:
+            for entry in self._debug_entries:
+                anchor = int(entry.get("anchor_index", -1))
+                debug_by_anchor.setdefault(anchor, []).append(entry)
+            for entry in debug_by_anchor.get(-1, []):
+                title = html.escape(str(entry.get("title") or "Debug"))
+                content = html.escape(str(entry.get("content") or "")).replace("\n", "<br>")
+                open_attr = " open" if entry.get("open") else ""
+                toggle_label = "▾ Hide" if entry.get("open") else "▸ Show"
+                entry_id = entry.get("id", -1)
+                body = f"<div class='debug-body'>{content}</div>" if entry.get("open") else ""
+                parts.append(
+                    f"<div class='bubble debug'>"
+                    f"<span class='role'>Debug:</span> "
+                    f"<a class='debug-toggle' href='action:debug:{entry_id}'>{toggle_label}</a> "
+                    f"<span class='debug-title'>{title}</span>"
+                    f"{body}"
+                    f"</div>"
+                )
         for idx, (role, content) in enumerate(self.messages):
             cls = "assistant" if role == "assistant" else "user"
             msg_id = f"msg-{idx}"
@@ -1880,15 +1890,17 @@ class AIChatPanel(QtWidgets.QWidget):
                     safe_think = html.escape(think_text).replace("\n", "<br>")
                     if not safe_think:
                         safe_think = "<em>...</em>"
+                    body_style = "color:#888;" if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked() else ""
                     body = (
-                        f"<div class='think-body'>{safe_think}</div>"
+                        f"<div class='think-body' style='{body_style}'>{safe_think}</div>"
                         if idx in self._message_think_expanded
                         else ""
                     )
                     active_class = " think-active" if idx in self._message_think_active else ""
+                    gray_style = "color:#888;" if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked() else ""
                     think_html = (
-                        f"<div class='think-toggle{active_class}'>"
-                        f"<a href='action:think:{msg_id}' title='Toggle thinking details'>{label}</a>"
+                        f"<div class='think-toggle{active_class}' style='{gray_style}'>"
+                        f"<a href='action:think:{msg_id}' title='Toggle thinking details' style='{gray_style}'>{label}</a>"
                         f"{body}</div>"
                     )
             parts.append(
@@ -1898,6 +1910,22 @@ class AIChatPanel(QtWidgets.QWidget):
                 f"</div>"
             )
             self._message_map[msg_id] = (role, content)
+            if debug_enabled:
+                for entry in debug_by_anchor.get(idx, []):
+                    title = html.escape(str(entry.get("title") or "Debug"))
+                    content = html.escape(str(entry.get("content") or "")).replace("\n", "<br>")
+                    open_attr = " open" if entry.get("open") else ""
+                    toggle_label = "▾ Hide" if entry.get("open") else "▸ Show"
+                    entry_id = entry.get("id", -1)
+                    body = f"<div class='debug-body'>{content}</div>" if entry.get("open") else ""
+                    parts.append(
+                        f"<div class='bubble debug'>"
+                        f"<span class='role'>Debug:</span> "
+                        f"<a class='debug-toggle' href='action:debug:{entry_id}'>{toggle_label}</a> "
+                        f"<span class='debug-title'>{title}</span>"
+                        f"{body}"
+                        f"</div>"
+                    )
         if self._condense_buffer or self._summary_content:
             summary_text = self._summary_content or self._condense_buffer
             actions = []
@@ -1920,6 +1948,22 @@ class AIChatPanel(QtWidgets.QWidget):
                 f"{'<div class=\"actions\">' + ' | '.join(actions) + '</div>' if actions else ''}"
                 f"</div>"
             )
+        if debug_enabled:
+            for entry in debug_by_anchor.get(len(self.messages), []):
+                title = html.escape(str(entry.get("title") or "Debug"))
+                content = html.escape(str(entry.get("content") or "")).replace("\n", "<br>")
+                open_attr = " open" if entry.get("open") else ""
+                toggle_label = "▾ Hide" if entry.get("open") else "▸ Show"
+                entry_id = entry.get("id", -1)
+                body = f"<div class='debug-body'>{content}</div>" if entry.get("open") else ""
+                parts.append(
+                    f"<div class='bubble debug'>"
+                    f"<span class='role'>Debug:</span> "
+                    f"<a class='debug-toggle' href='action:debug:{entry_id}'>{toggle_label}</a> "
+                    f"<span class='debug-title'>{title}</span>"
+                    f"{body}"
+                    f"</div>"
+                )
         self.chat_view.setHtml("".join(parts))
         cursor = self.chat_view.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -2123,10 +2167,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._try_open_context_picker(attempt=0)
 
     def _try_open_context_picker(self, attempt: int) -> None:
-        if self._is_global_chat_path(self._current_chat_path):
-            return
         trigger = self._detect_context_trigger()
         if not trigger:
+            return
+        if self._is_global_chat_path(self._current_chat_path) and trigger != "@":
             return
         if not self._ensure_active_chat():
             QtWidgets.QMessageBox.information(self, "Context", "Open or create a chat before adding context.")
@@ -2424,7 +2468,27 @@ class AIChatPanel(QtWidgets.QWidget):
         trigger = self._context_overlay.current_trigger()
         if not trigger:
             return
+        if trigger == "@":
+            self._insert_context_link(candidate)
+            return
         self._apply_context_selection(trigger, candidate)
+
+    def _insert_context_link(self, candidate: ContextCandidate) -> None:
+        if not candidate.page_ref:
+            return
+        try:
+            link = ensure_root_colon_link(path_to_colon(candidate.page_ref))
+            cursor = self.input_edit.textCursor()
+            pos = cursor.position()
+            text = self.input_edit.toPlainText()
+            if pos >= 2 and text[pos - 2 : pos] in ("@ ", "@\u00a0"):
+                cursor.setPosition(pos - 2)
+                cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+            cursor.insertText(f"{link} ")
+            self.input_edit.setTextCursor(cursor)
+        except Exception:
+            pass
 
     def _delete_context_item(self, item: ContextItem) -> None:
         if not self.ai_manager:
@@ -2840,6 +2904,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._message_think.clear()
         self._message_think_active.clear()
         self._message_think_expanded.clear()
+        self._clear_debug_entries()
         self._render_messages()
         session = self.store.get_session_by_id(session_id)
         if session:
@@ -3050,6 +3115,30 @@ class AIChatPanel(QtWidgets.QWidget):
             self._render_messages()
             self._set_status("Cancelled.", "#2ecc71")
         self._update_stop_button()
+        if self._agent_tool_worker:
+            self._stop_agent_worker("Cancelled.")
+
+    def _stop_agent_worker(self, status: str) -> None:
+        worker = self._agent_tool_worker
+        if not worker:
+            return
+        try:
+            worker.request_cancel()
+        except Exception:
+            pass
+        try:
+            worker.wait(2000)
+        except Exception:
+            pass
+        self._agent_tool_worker = None
+        self._agent_placeholder_index = None
+        try:
+            self.send_btn.setEnabled(True)
+        except Exception:
+            pass
+        if status:
+            self._set_status(status, "#2ecc71")
+        self._update_stop_button()
 
     def _send_message(self) -> None:
         content = self.input_edit.toPlainText().strip()
@@ -3119,6 +3208,7 @@ class AIChatPanel(QtWidgets.QWidget):
         content = (content or "").strip()
         if not content:
             return
+        self._last_user_prompt = content
         self._record_chat_history(content)
         _log_ai_chat(f"[AIChat]: prompt: {content}")
         if not self.current_server:
@@ -3126,6 +3216,9 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         if not self._ensure_active_chat():
             QtWidgets.QMessageBox.critical(self, "Chat", "Could not find or create a chat.")
+            return
+        if self._should_use_agent_tools():
+            self._start_agent_send(content, extra_system=extra_system, record_user=True)
             return
         self.messages.append(("user", content))
         if self.current_session_id:
@@ -3152,6 +3245,13 @@ class AIChatPanel(QtWidgets.QWidget):
             if merged_systems:
                 blocks.insert(0, {"role": "system", "content": "\n\n".join(merged_systems)})
                 _log_ai_chat(f"[system prompt] sending {len(merged_systems)} system block(s); primary:\n{merged_systems[-1]}")
+            if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+                try:
+                    debug_payload = json.dumps(blocks, ensure_ascii=False, indent=2)
+                except Exception:
+                    debug_payload = str(blocks)
+                anchor_index = len(self.messages) - 2 if len(self.messages) >= 2 else None
+                self._append_debug_message(f"LLM request:\n{debug_payload}", anchor_index=anchor_index)
             self._api_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
             self._api_worker.chunk.connect(lambda chunk, idx=assistant_index: self._handle_chunk(idx, chunk))
             self._api_worker.finished.connect(lambda full, idx=assistant_index: self._handle_finished(idx, full))
@@ -3164,6 +3264,242 @@ class AIChatPanel(QtWidgets.QWidget):
             self.messages.pop()  # remove assistant placeholder
             QtWidgets.QMessageBox.critical(self, "Send failed", str(exc))
             self._render_messages()
+
+    def _should_use_agent_tools(self) -> bool:
+        try:
+            self._agent_tools_enabled = config.load_global_enable_ai_agents()
+        except Exception:
+            pass
+        if not self._agent_tools_enabled:
+            return False
+        if not self._api_client:
+            return False
+        return True
+
+    def _append_assistant_message(self, text: str) -> None:
+        self.messages.append(("assistant", text))
+        if self.current_session_id:
+            self.store.save_message(self.current_session_id, "assistant", text)
+        self._render_messages()
+
+    def _append_debug_message(self, text: str, *, anchor_index: Optional[int] = None) -> None:
+        if not getattr(self, "debug_checkbox", None):
+            return
+        try:
+            if not self.debug_checkbox.isChecked():
+                return
+        except Exception:
+            return
+        self._append_debug_entry("Debug", text, open_state=True, anchor_index=anchor_index)
+
+    def _append_debug_entry(
+        self,
+        title: str,
+        content: str,
+        *,
+        open_state: bool = False,
+        anchor_index: Optional[int] = None,
+    ) -> int:
+        if anchor_index is None:
+            anchor_index = len(self.messages) - 1 if self.messages else -1
+        entry_id = len(self._debug_entries)
+        entry = {
+            "id": entry_id,
+            "title": title or "Debug",
+            "content": content or "",
+            "open": bool(open_state),
+            "anchor_index": anchor_index,
+        }
+        self._debug_entries.append(entry)
+        self._render_messages()
+        return entry_id
+
+    def _update_debug_entry(self, entry_id: int, content: str, *, open_state: Optional[bool] = None) -> None:
+        if entry_id is None or entry_id < 0 or entry_id >= len(self._debug_entries):
+            return
+        entry = self._debug_entries[entry_id]
+        entry["content"] = content or ""
+        if open_state is not None:
+            entry["open"] = bool(open_state)
+        self._render_messages()
+
+    def _close_debug_entry(self, entry_id: int) -> None:
+        self._update_debug_entry(entry_id, self._debug_entries[entry_id]["content"], open_state=False)
+
+    def _clear_debug_entries(self) -> None:
+        self._debug_entries = []
+        self._active_think_debug = {}
+        self._active_tool_debug = None
+
+    def _start_agent_send(self, content: str, extra_system: Optional[str], record_user: bool) -> None:
+        content = (content or "").strip()
+        if not content:
+            return
+        if self._agent_tool_worker:
+            self._set_status("Agent tools already running…", "#f6c343")
+            return
+        if not self._api_client:
+            QtWidgets.QMessageBox.critical(self, "Agent Tools", "No vault API client available.")
+            return
+        if not self.vault_root:
+            QtWidgets.QMessageBox.critical(self, "Agent Tools", "Open a vault before running Agent tools.")
+            return
+
+        api_base = str(self._api_client.base_url) if getattr(self._api_client, "base_url", None) else ""
+        vault_key = build_vault_key(api_base, self.vault_root)
+        if not config.is_agent_tool_approved(vault_key):
+            if record_user:
+                self.messages.append(("user", content))
+                if self.current_session_id:
+                    self.store.save_message(self.current_session_id, "user", content)
+                approve_msg = (
+                    "Agent tools are disabled for this vault. "
+                    "<a href='action:agent-approve:accept'>Approve</a> to allow tool use."
+                )
+                self._append_assistant_message(approve_msg)
+            self._pending_agent_prompt = content
+            return
+
+        if record_user:
+            self.messages.append(("user", content))
+            if self.current_session_id:
+                self.store.save_message(self.current_session_id, "user", content)
+
+        self.messages.append(("assistant", "Running agent tools..."))
+        self._agent_placeholder_index = len(self.messages) - 1
+        self._render_messages()
+
+        context_prompt = self._build_context_prompt(content)
+        merged_systems: List[str] = [DEFAULT_AGENT_SYSTEM_PROMPT]
+        if context_prompt:
+            merged_systems.append(context_prompt)
+        if self.current_system_prompt:
+            merged_systems.append(self.current_system_prompt)
+        if extra_system:
+            merged_systems.append(extra_system)
+        system_prompt = "\n\n".join([block for block in merged_systems if block])
+
+        config_obj = AgentLoopConfig(
+            server_config=self.current_server,
+            model=self.model_combo.currentText(),
+            system_prompt=system_prompt,
+        )
+        self._agent_tool_worker = AgentToolChatWorker(
+            config=config_obj,
+            client=self._api_client,
+            user_prompt=content,
+            context={
+                "current_path": self.current_page_path or "",
+                "chat_page_path": self._current_chat_path or "",
+                "current_editor_path": self._current_editor_path or "",
+                "chat_scope": "global" if self._is_global_chat_path(self._current_chat_path) else "page",
+                "vault_root_name": Path(self.vault_root).name if self.vault_root else "",
+                "last_read_path": self._last_agent_read_path or "",
+                "debug": bool(getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked()),
+            },
+        )
+        self._agent_tool_worker.toolMessage.connect(self._handle_agent_tool_message)
+        self._agent_tool_worker.finalMessage.connect(self._handle_agent_final)
+        self._agent_tool_worker.failed.connect(self._handle_agent_failed)
+        self._agent_tool_worker.start()
+        self.send_btn.setEnabled(False)
+        self._set_status("Waiting for agent response…", "#f6c343")
+        self._update_stop_button()
+
+    def _handle_agent_tool_message(self, text: str) -> None:
+        if not text:
+            return
+        if "Tool result: vault.read status=ok" in text and "path=" in text:
+            try:
+                path_part = text.split("path=", 1)[1]
+                path = path_part.split()[0].strip()
+                if path:
+                    self._last_agent_read_path = path
+            except Exception:
+                pass
+        if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+            anchor_index = (self._agent_placeholder_index - 1) if self._agent_placeholder_index is not None else None
+            if text.startswith("Tool call:"):
+                title = "Executing tool"
+                parts = text.split("Tool call:", 1)[-1].strip()
+                if parts:
+                    title = f"Executing {parts.split()[0]}"
+                self._active_tool_debug = self._append_debug_entry(
+                    title,
+                    text,
+                    open_state=True,
+                    anchor_index=anchor_index,
+                )
+                return
+            if text.startswith("Tool result:"):
+                if self._active_tool_debug is not None:
+                    entry_id = self._active_tool_debug
+                    content = str(self._debug_entries[entry_id].get("content", ""))
+                    combined = f"{content}\n{text}" if content else text
+                    self._update_debug_entry(entry_id, combined, open_state=False)
+                    self._active_tool_debug = None
+                    return
+                self._append_debug_entry("Tool result", text, open_state=False, anchor_index=anchor_index)
+                return
+            if text.startswith("Thinking:"):
+                think_text = text.split("Thinking:", 1)[-1].strip()
+                self._append_debug_entry(
+                    "Thinking...",
+                    think_text or "Thinking...",
+                    open_state=False,
+                    anchor_index=anchor_index,
+                )
+                return
+        self._append_assistant_message(text)
+
+    def _handle_agent_final(self, text: str) -> None:
+        final_text = text or ""
+        if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
+            self.messages[self._agent_placeholder_index] = ("assistant", final_text)
+            if self.current_session_id:
+                self.store.save_message(self.current_session_id, "assistant", final_text)
+        else:
+            self._append_assistant_message(final_text)
+        self._agent_placeholder_index = None
+        self._agent_tool_worker = None
+        self.send_btn.setEnabled(True)
+        self._set_status("Response received.", "#2ecc71")
+        self._render_messages()
+        self._update_stop_button()
+
+    def _handle_agent_failed(self, err: str) -> None:
+        msg = f"[error] {err}"
+        if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
+            self.messages[self._agent_placeholder_index] = ("assistant", msg)
+            if self.current_session_id:
+                self.store.save_message(self.current_session_id, "assistant", msg)
+        else:
+            self._append_assistant_message(msg)
+        self._agent_placeholder_index = None
+        self._agent_tool_worker = None
+        self.send_btn.setEnabled(True)
+        self._set_status(f"API error: {err}")
+        self._render_messages()
+        self._update_stop_button()
+
+    def _approve_agent_tools(self) -> None:
+        if not self._api_client or not self.vault_root:
+            return
+        api_base = str(self._api_client.base_url) if getattr(self._api_client, "base_url", None) else ""
+        vault_key = build_vault_key(api_base, self.vault_root)
+        config.approve_agent_tool_for_vault(vault_key)
+        self._append_assistant_message("Agent tools approved for this vault.")
+        if self._pending_agent_prompt:
+            pending = self._pending_agent_prompt
+            self._pending_agent_prompt = None
+            self._start_agent_send(pending, extra_system=None, record_user=False)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            self._cancel_active_operation()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _handle_chunk(self, idx: int, chunk: str) -> None:
         if self._cancel_pending_send:
@@ -3188,6 +3524,25 @@ class AIChatPanel(QtWidgets.QWidget):
         if state:
             fallback = str(state.get("visible", ""))
         clean_full = self._strip_think_blocks(full or fallback)
+        if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+            anchor_index = idx - 1
+            self._append_debug_message(f"LLM response:\n{clean_full}", anchor_index=anchor_index)
+        parsed = parse_agent_message(clean_full)
+        if (
+            parsed
+            and parsed.get("type") == "tool_request"
+            and self._should_use_agent_tools()
+            and not self._agent_fallback_in_progress
+            and self._last_user_prompt
+        ):
+            self._agent_fallback_in_progress = True
+            self.messages[idx] = ("assistant", "Tool request received; running tools...")
+            if self.current_session_id:
+                self.store.save_message(self.current_session_id, "assistant", "Tool request received; running tools...")
+            self._render_messages()
+            self._start_agent_send(self._last_user_prompt, extra_system=None, record_user=False)
+            self._agent_fallback_in_progress = False
+            return
         think_text = ""
         if state:
             think_text = str(state.get("think", ""))
@@ -3198,6 +3553,18 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self._message_think.pop(idx, None)
         self._message_think_active.discard(idx)
+        if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+            active_id = self._active_think_debug.pop(idx, None)
+            if active_id is not None:
+                self._close_debug_entry(active_id)
+            if think_text:
+                anchor_index = idx - 1
+                self._append_debug_entry(
+                    "Thinking...",
+                    think_text,
+                    open_state=False,
+                    anchor_index=anchor_index,
+                )
         if 0 <= idx < len(self.messages):
             role, _ = self.messages[idx]
             self.messages[idx] = (role, clean_full)
@@ -3272,6 +3639,28 @@ class AIChatPanel(QtWidgets.QWidget):
                 chunk_text = "".join(chunks)
                 if role == "assistant":
                     self._apply_stream_think_chunk(idx, chunk_text)
+                    if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+                        state = self._stream_think_state.get(idx)
+                        if state:
+                            think_text = str(state.get("think") or "")
+                            in_think = bool(state.get("in_think"))
+                            active_id = self._active_think_debug.get(idx)
+                            if think_text or in_think:
+                                title = "Thinking..."
+                                content = think_text if think_text else "Thinking..."
+                                if active_id is None:
+                                    anchor_index = idx - 1
+                                    self._active_think_debug[idx] = self._append_debug_entry(
+                                        title,
+                                        content,
+                                        open_state=True,
+                                        anchor_index=anchor_index,
+                                    )
+                                else:
+                                    self._update_debug_entry(active_id, content, open_state=True)
+                            elif active_id is not None:
+                                self._close_debug_entry(active_id)
+                                self._active_think_debug.pop(idx, None)
                     updated = True
                 else:
                     self.messages[idx] = (role, existing + chunk_text)
@@ -3409,6 +3798,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._message_think_active.clear()
             self._message_think_expanded.clear()
             self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+            self._clear_debug_entries()
         if was_current:
             sessions = self.store.get_sessions()
             next_chat = next((s for s in sessions if s.get("type") == "chat"), None)
@@ -3434,6 +3824,9 @@ class AIChatPanel(QtWidgets.QWidget):
                     elif msg_id == "reject":
                         self._reject_summary()
                     return
+                if action == "agent-approve":
+                    self._approve_agent_tools()
+                    return
                 if action == "think":
                     try:
                         idx = int(msg_id.split("-")[-1])
@@ -3444,6 +3837,16 @@ class AIChatPanel(QtWidgets.QWidget):
                     else:
                         self._message_think_expanded.add(idx)
                     self._render_messages()
+                    return
+                if action == "debug":
+                    try:
+                        entry_id = int(msg_id)
+                    except Exception:
+                        return
+                    if 0 <= entry_id < len(self._debug_entries):
+                        entry = self._debug_entries[entry_id]
+                        entry["open"] = not bool(entry.get("open"))
+                        self._render_messages()
                     return
                 if action == "copy":
                     content = self._message_map.get(msg_id, ("", ""))[1]
@@ -3703,6 +4106,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def set_current_page(self, rel_path: Optional[str]) -> None:
         """Track the currently open page when the editor changes without auto-switching chats."""
         self.current_page_path = rel_path
+        self._current_editor_path = rel_path
         self._update_load_current_page_button()
 
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
