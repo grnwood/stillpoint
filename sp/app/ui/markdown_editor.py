@@ -2135,10 +2135,10 @@ class MarkdownEditor(QTextEdit):
                 self.setTextCursor(trigger_cursor)
                 cursor_rect = self.cursorRect()
                 anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
-                self.aiInlinePromptRequested.emit(anchor_pos, trigger_cursor.position())
             finally:
                 self._display_guard = prev_display_guard
                 self._processing_inline_trigger = False
+            self.aiInlinePromptRequested.emit(anchor_pos, trigger_cursor.position())
             return
 
         # Check if we're inside a [link|label] construct - skip trigger if so
@@ -2176,12 +2176,12 @@ class MarkdownEditor(QTextEdit):
                 # Get cursor position for dialog placement (after removal)
                 cursor_rect = self.cursorRect()
                 anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
-                # Show quick link dialog near cursor
-                self._trigger_inline_link_insert(anchor_pos)
             finally:
                 self._display_guard = prev_display_guard
                 # Always clear guard flag
                 self._processing_inline_trigger = False
+            # Show quick link dialog near cursor (with display guard released)
+            self._trigger_inline_link_insert(anchor_pos)
             return
     
     def _trigger_inline_link_insert(self, anchor_pos: QPoint) -> None:

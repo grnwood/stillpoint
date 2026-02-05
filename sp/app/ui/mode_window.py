@@ -11,7 +11,9 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPalette,
     QPen,
+    QPixmap,
     QShortcut,
     QTextCursor,
     QTextFormat,
@@ -178,6 +180,7 @@ class ModeWindow(QMainWindow):
         self._scroll_anim: Optional[QPropertyAnimation] = None
         self._ready = False
         self._pending_close = False
+        self._windowed = False
         self._shortcuts: list[QShortcut] = []
         # Heading picker state
         self._popup_items: list = []
@@ -207,9 +210,10 @@ class ModeWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._flash_cursor_line(self.editor))
 
         self.setWindowFlag(Qt.FramelessWindowHint, True)
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        self.setWindowModality(Qt.NonModal)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._update_window_title()
 
         self._build_ui(read_only)
         self._wire_shortcuts()
@@ -220,6 +224,7 @@ class ModeWindow(QMainWindow):
         self.installEventFilter(self)
         
         QTimer.singleShot(0, self.showFullScreen)
+        QTimer.singleShot(0, lambda: self._set_window_button_icon("minimize.svg"))
         QTimer.singleShot(0, self._mark_ready)
 
     # ------------------------------------------------------------------ UI
@@ -234,11 +239,12 @@ class ModeWindow(QMainWindow):
         header.setSpacing(8)
         title_label = QLabel(self._page_title())
         title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+        self._ai_button = self._build_ai_button()
+        if self.mode == "audience" and self._ai_button:
+            header.addWidget(self._ai_button, 0, Qt.AlignVCenter)
         header.addWidget(title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
-        
-        self._ai_button = self._build_ai_button()
-        if self._ai_button:
+        if self.mode != "audience" and self._ai_button:
             header.addWidget(self._ai_button, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         # Add audience tools to header if in audience mode
@@ -246,18 +252,15 @@ class ModeWindow(QMainWindow):
             self._build_audience_tools_in_header(header)
         elif self.mode == "focus":
             self._build_focus_tools_in_header(header)
-        
-        self._header_mode_badge = QLabel(self.mode.upper())
-        self._header_mode_badge.setStyleSheet(
-            "background: #28384a; color: #e8f1ff; padding: 6px 10px; border-radius: 8px; font-weight: bold;"
-        )
-        header.addWidget(self._header_mode_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
         self._vi_badge = QLabel("INS")
         self._vi_badge.setVisible(False)
         self._vi_badge.setStyleSheet(
             "border: 1px solid #666; padding: 2px 6px; border-radius: 3px; margin-right: 6px; background: #ffd54d; color: #000;"
         )
-        header.addWidget(self._vi_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self._window_button = self._build_window_button("maximize.svg", "Toggle windowed/fullscreen")
+        if self._window_button:
+            self._window_button.clicked.connect(self._toggle_window_mode)
+            header.addWidget(self._window_button, 0, Qt.AlignRight | Qt.AlignVCenter)
         self._close_button = QToolButton()
         self._close_button.setText("✕")
         self._close_button.setToolTip("Exit mode")
@@ -332,14 +335,7 @@ class ModeWindow(QMainWindow):
         # Mode indicator footer
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self._mode_indicator = _ClickableLabel(self.mode.upper())
-        self._mode_indicator.setToolTip("Exit this mode")
-        self._mode_indicator.setStyleSheet(
-            "padding: 6px 10px; background: rgba(15, 19, 26, 0.9); color: #eaf1ff; "
-            "border: 1px solid rgba(120, 140, 170, 0.7); border-radius: 10px; font-weight: bold;"
-        )
-        self._mode_indicator.clicked.connect(self._request_close)
-        footer.addWidget(self._mode_indicator, 0, Qt.AlignRight)
+        footer.addWidget(self._vi_badge, 0, Qt.AlignRight)
         root.addLayout(footer)
 
         self._cursor_halo = _CursorHalo(self.editor.viewport())
@@ -368,9 +364,6 @@ class ModeWindow(QMainWindow):
 
         _btn("A+", "Increase text size (Ctrl+Alt+=)", lambda: self._adjust_font_scale(0.05))
         _btn("A-", "Decrease text size (Ctrl+Alt+-)", lambda: self._adjust_font_scale(-0.05))
-        _btn("#", "Jump to heading", self._jump_to_heading)
-        self._highlight_btn = _btn("H", "Toggle paragraph highlight (Ctrl+Alt+H)", self._toggle_paragraph_highlight)
-        self._scroll_btn = _btn("S", "Toggle soft auto-scroll (Ctrl+Alt+S)", self._toggle_soft_scroll)
 
     def _build_focus_tools_in_header(self, header: QHBoxLayout) -> None:
         """Add focus mode tools directly to the header bar."""
@@ -406,6 +399,42 @@ class ModeWindow(QMainWindow):
         )
         btn.clicked.connect(self._open_ai_assist)
         return btn
+
+    def _build_window_button(self, icon_name: str, tooltip: str) -> Optional[QToolButton]:
+        icon_path = Path(__file__).resolve().parents[2] / "assets" / icon_name
+        if not icon_path.exists():
+            return None
+        btn = QToolButton()
+        btn.setAutoRaise(True)
+        icon = self._tinted_icon(icon_path, size=16)
+        btn.setIcon(icon if icon else QIcon(str(icon_path)))
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolTip(tooltip)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            "QToolButton { padding: 4px 6px; color: #e9eef8; background: rgba(40, 56, 74, 0.35); border: 1px solid #3b4555; border-radius: 8px; } "
+            "QToolButton:hover { background: rgba(60, 80, 100, 0.7); }"
+        )
+        return btn
+
+    def _tinted_icon(self, path: Path, size: int = 16) -> Optional[QIcon]:
+        try:
+            icon = QIcon(str(path))
+            pm = icon.pixmap(size, size)
+            if pm.isNull():
+                return None
+            window_color = self.palette().color(QPalette.Window)
+            tint = QColor("#111") if window_color.lightness() > 128 else QColor("#f5f5f5")
+            colored = QPixmap(pm.size())
+            colored.fill(Qt.transparent)
+            painter = QPainter(colored)
+            painter.drawPixmap(0, 0, pm)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(colored.rect(), tint)
+            painter.end()
+            return QIcon(colored)
+        except Exception:
+            return None
 
     def _wire_shortcuts(self) -> None:
         def _add_shortcut(seq: QKeySequence | Qt.Key, handler) -> QShortcut:
@@ -569,7 +598,7 @@ class ModeWindow(QMainWindow):
                 cursor.setPosition(max(0, int(self._initial_cursor)))
                 self.editor.setTextCursor(cursor)
                 # Defer scroll until after window is fully shown and layout is complete
-                QTimer.singleShot(100, lambda: self.editor.ensureCursorVisible())
+                QTimer.singleShot(100, self._safe_ensure_cursor_visible)
             except Exception:
                 pass
 
@@ -585,6 +614,45 @@ class ModeWindow(QMainWindow):
             self._update_cursor_halo()
         else:
             self._cursor_halo.hide()
+
+    def _safe_ensure_cursor_visible(self) -> None:
+        try:
+            if not getattr(self, "_ready", True):
+                return
+            if not self.isVisible():
+                return
+            self.editor.ensureCursorVisible()
+        except Exception:
+            pass
+
+    def _toggle_window_mode(self) -> None:
+        try:
+            if self._windowed:
+                self._windowed = False
+                self.setWindowFlag(Qt.FramelessWindowHint, True)
+                self.show()  # Apply flag change before fullscreen
+                self.showFullScreen()
+                self._set_window_button_icon("minimize.svg")
+            else:
+                self._windowed = True
+                self.setWindowFlag(Qt.FramelessWindowHint, False)
+                self.show()  # Apply flag change before windowed
+                self.showNormal()
+                self._set_window_button_icon("maximize.svg")
+        except Exception:
+            pass
+
+    def _set_window_button_icon(self, icon_name: str) -> None:
+        if not hasattr(self, "_window_button") or not self._window_button:
+            return
+        icon_path = Path(__file__).resolve().parents[2] / "assets" / icon_name
+        if not icon_path.exists():
+            return
+        icon = self._tinted_icon(icon_path, size=16)
+        if icon:
+            self._window_button.setIcon(icon)
+        else:
+            self._window_button.setIcon(QIcon(str(icon_path)))
 
     def _sync_vi_insert_from_base(self) -> None:
         if not config.load_vi_mode_enabled():
@@ -1164,6 +1232,11 @@ class ModeWindow(QMainWindow):
         if not self._page_path:
             return "Untitled"
         return Path(self._page_path).name or self._page_path
+
+    def _update_window_title(self) -> None:
+        mode_label = "Focus" if self.mode == "focus" else "Audience"
+        self.setWindowTitle(f"{self._page_title()} ({mode_label})")
+
 
     def closeEvent(self, event):  # type: ignore[override]
         if not getattr(self, "_ready", True):

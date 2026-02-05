@@ -893,8 +893,8 @@ def load_audience_mode_settings() -> dict:
         "paragraph_highlight": True,
         "soft_autoscroll": True,
         "show_floating_tools": True,
-        "center_column": True,
-        "max_column_width_chars": 120,
+        "center_column": False,
+        "max_column_width_chars": 150,
     }
     payload = _read_global_config()
     settings = payload.get("audience_mode", {})
