@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtCore import QSize
 
 from .markdown_editor import MarkdownEditor
 from .insert_link_dialog import InsertLinkDialog
@@ -267,6 +268,7 @@ class PageEditorWindow(QMainWindow):
         toolbar = QToolBar("Page")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        toolbar.setIconSize(QSize(16, 16))
         assets_root = Path(__file__).resolve().parents[2] / "assets"
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence.Save)
@@ -351,6 +353,9 @@ class PageEditorWindow(QMainWindow):
     def _update_title(self) -> None:
         label = Path(self._source_path).name or self._source_path
         suffix = "StillPoint Editor"
+        h1 = self._first_h1_title()
+        if h1 and h1 != Path(label).stem:
+            label = f"{label} | {h1}"
         if self._read_only:
             self.setWindowTitle(f"{label} | Read-Only | {suffix}")
         else:
@@ -700,6 +705,22 @@ class PageEditorWindow(QMainWindow):
         """Store headings when editor parses them."""
         self._toc_headings = list(headings or [])
         print(f"[PageEditor] Headings changed: {len(self._toc_headings)} headings")
+        self._update_title()
+
+    def _first_h1_title(self) -> Optional[str]:
+        for heading in self._toc_headings:
+            if not heading:
+                continue
+            try:
+                level = int(heading.get("level", 0))
+            except Exception:
+                level = 0
+            if level == 1:
+                title = (heading.get("title") or "").strip()
+                if title:
+                    return title
+                break
+        return None
 
     def _handle_heading_picker_request(self, global_point, prefer_above: bool) -> None:
         """Handle Ctrl+Alt+T heading picker request from editor - show filterable picker."""
