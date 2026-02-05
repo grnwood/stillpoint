@@ -7,6 +7,7 @@ attachment serving, and print/PDF support.
 
 import logging
 import os
+import re
 import socket
 import ssl
 import threading
@@ -97,6 +98,7 @@ class WebServer:
         # TODO: Integrate with StillPoint's markdown renderer
         # For now, use basic markdown
         text = self._normalize_markdown_lists(text)
+        text = self._rewrite_strikethrough(text)
         import markdown
         return markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
 
@@ -191,6 +193,41 @@ class WebServer:
                     deindent_cols = 0
 
             normalized.append(line)
+
+        return "\n".join(normalized)
+
+    @staticmethod
+    def _rewrite_strikethrough(text: str) -> str:
+        """Convert ~~text~~ to <del>text</del> outside code fences/inline code."""
+        lines = text.splitlines()
+        normalized: list[str] = []
+        in_fence = False
+        fence_marker = ""
+
+        def _replace_inline(value: str) -> str:
+            parts = value.split("`")
+            for idx in range(0, len(parts), 2):
+                parts[idx] = re.sub(r"~~(.*?)~~", r"<del>\1</del>", parts[idx])
+            return "`".join(parts)
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                normalized.append(line)
+                continue
+
+            if in_fence:
+                normalized.append(line)
+                continue
+
+            normalized.append(_replace_inline(line))
 
         return "\n".join(normalized)
 

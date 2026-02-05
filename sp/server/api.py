@@ -2472,6 +2472,7 @@ def _render_markdown_html(text: str) -> str:
     normalized = _rewrite_zim_links(text)
     normalized = _rewrite_markdown_image_sizes(normalized)
     normalized = _normalize_markdown_lists(normalized)
+    normalized = _rewrite_strikethrough(normalized)
     return renderer.convert(normalized)
 
 
@@ -2564,6 +2565,41 @@ def _normalize_markdown_lists(text: str) -> str:
                 deindent_cols = 0
 
         normalized.append(line)
+
+    return "\n".join(normalized)
+
+
+def _rewrite_strikethrough(text: str) -> str:
+    """Convert ~~text~~ to <del>text</del> outside code fences/inline code."""
+    lines = text.splitlines()
+    normalized: list[str] = []
+    in_fence = False
+    fence_marker = ""
+
+    def _replace_inline(value: str) -> str:
+        parts = value.split("`")
+        for idx in range(0, len(parts), 2):
+            parts[idx] = re.sub(r"~~(.*?)~~", r"<del>\1</del>", parts[idx])
+        return "`".join(parts)
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            normalized.append(line)
+            continue
+
+        if in_fence:
+            normalized.append(line)
+            continue
+
+        normalized.append(_replace_inline(line))
 
     return "\n".join(normalized)
 
