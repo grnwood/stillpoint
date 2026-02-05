@@ -1206,6 +1206,7 @@ class MainWindow(QMainWindow):
         self._skip_next_selection_open: bool = False
         self._history_popup: Optional[QWidget] = None
         self._history_popup_label: Optional[QLabel] = None
+        self._history_popup_list: Optional[QListWidget] = None
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
@@ -11916,6 +11917,7 @@ class MainWindow(QMainWindow):
                 "QListWidget::item { padding: 4px 6px; }"
                 "QListWidget::item:selected { background: rgba(255,255,255,40); }"
             )
+            self._history_popup_list.viewport().installEventFilter(self)
             layout.addWidget(self._history_popup_list)
             self._history_popup = popup
 
@@ -11924,10 +11926,16 @@ class MainWindow(QMainWindow):
         if not self._history_popup or not self._history_popup_label or not self._history_popup_list:
             return
         self._history_popup_list.clear()
+        max_label = ""
+        max_chars = 75
         if self._popup_mode == "history":
             for path in self._popup_items:
-                display = self._history_leaf_label(path)
-                item = QListWidgetItem(display)
+                display = self._recent_history_display_label(path)
+                candidate = display[:max_chars]
+                if len(candidate) > len(max_label):
+                    max_label = candidate
+                item = QListWidgetItem(self._elide_history_label(display, max_chars))
+                item.setData(Qt.UserRole, path)
                 self._history_popup_list.addItem(item)
             label = "Recent pages"
         elif self._popup_mode == "heading":
@@ -11936,7 +11944,11 @@ class MainWindow(QMainWindow):
                 line = heading.get("line", 1)
                 level = max(1, min(5, int(heading.get("level", 1))))
                 indent = "    " * (level - 1)
-                item = QListWidgetItem(f"{indent}{title}  (line {line})")
+                display = f"{indent}{title}  (line {line})"
+                candidate = display[:max_chars]
+                if len(candidate) > len(max_label):
+                    max_label = candidate
+                item = QListWidgetItem(self._elide_history_label(display, max_chars))
                 self._history_popup_list.addItem(item)
             label = "Headings"
         else:
@@ -11946,7 +11958,11 @@ class MainWindow(QMainWindow):
         self._history_popup_label.setText(label)
         editor_rect = self.editor.rect()
         top_left = self.editor.mapToGlobal(editor_rect.topLeft())
-        popup_width = max(self._history_popup.sizeHint().width(), editor_rect.width() // 3)
+        metrics = self._history_popup_list.fontMetrics()
+        width_label = "M" * max_chars
+        width_hint = metrics.horizontalAdvance(width_label) + 40
+        popup_width = max(self._history_popup.sizeHint().width(), width_hint)
+        popup_width = min(popup_width, editor_rect.width() - 40)
         # Make popup at least half the editor height for easier scanning
         min_height = int(editor_rect.height() * 0.5)
         popup_height = max(self._history_popup.sizeHint().height(), min_height)
@@ -12918,7 +12934,10 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
                 if event.modifiers() & Qt.ShiftModifier:
                     reverse = event.key() == Qt.Key_Backtab
-                    self._cycle_popup("heading", reverse=reverse)
+                    if self._popup_mode == "history":
+                        self._cycle_popup("history", reverse=True)
+                    else:
+                        self._cycle_popup("heading", reverse=reverse)
                 else:
                     self._cycle_popup("history", reverse=event.key() == Qt.Key_Backtab)
                 return True
@@ -13248,16 +13267,82 @@ class MainWindow(QMainWindow):
             pass
         self._debug(f"Write request reason={label} path={path} bytes={size} mode={mode}")
     def _history_leaf_label(self, path: str) -> str:
+        journal_label = self._format_journal_history_label(path)
+        if journal_label:
+            return journal_label
         display = path_to_colon(path) or path
         if ":" in display:
             parts = [segment for segment in display.split(":") if segment]
             if parts:
                 tail = parts[-1]
-                # Show dots for hierarchy depth (max 5)
-                depth = len(parts) - 1  # Root page has 0 depth
-                depth = min(depth, 5)  # Cap at 5 dots
-                dots = "." * depth
-                return f"{dots}{tail}" if depth > 0 else tail
+                return tail
         normalized = path.lstrip("/")
         leaf = Path(normalized).stem or normalized
         return leaf
+
+    def _format_journal_history_label(self, path: str) -> Optional[str]:
+        try:
+            normalized = path.strip().lstrip("/")
+            normalized = normalized.replace(":", "/")
+            match = re.search(
+                r"(?i)(?:^|/)journal/(\d{4})/(\d{2})/(\d{2})(?:/\3(?:\.[^/]+)?)?(?:\.[^/]+)?$",
+                normalized,
+            )
+            if not match:
+                return None
+            year, month, day_file = match.group(1), match.group(2), match.group(3)
+            day_stem = Path(day_file).stem
+            if not (year.isdigit() and month.isdigit() and day_stem.isdigit()):
+                return None
+            y = int(year)
+            m = int(month)
+            d = int(day_stem)
+            from datetime import date
+            dt = date(y, m, d)
+            dow = dt.strftime("%a")
+            mon = dt.strftime("%b")
+            return f"{dow} ({d:02d}) - {mon} {y}"
+        except Exception:
+            return None
+
+    def _recent_history_display_label(self, path: str) -> str:
+        base_label = self._history_leaf_label(path)
+        suffix = self._first_line_title_suffix(path, base_label)
+        if suffix:
+            return f"{base_label} — {suffix}"
+        return base_label
+
+    def _first_line_title_suffix(self, path: str, base_label: str) -> Optional[str]:
+        if not self.vault_root or self._remote_mode:
+            return None
+        try:
+            target = (Path(self.vault_root) / path.lstrip("/")).resolve()
+            if not target.exists() or not target.is_file():
+                return None
+            with target.open("r", encoding="utf-8", errors="ignore") as handle:
+                for _ in range(20):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    cleaned = line.strip()
+                    if not cleaned:
+                        continue
+                    if cleaned.startswith("#"):
+                        cleaned = cleaned.lstrip("#").strip()
+                    if not cleaned:
+                        continue
+                    file_stem = target.stem
+                    if cleaned == file_stem or cleaned == base_label:
+                        return None
+                    return cleaned
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _elide_history_label(text: str, max_chars: int) -> str:
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        if max_chars <= 1:
+            return "…"
+        return text[: max_chars - 1] + "…"
