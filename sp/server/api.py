@@ -2471,7 +2471,54 @@ def _render_markdown_html(text: str) -> str:
     renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
     normalized = _rewrite_zim_links(text)
     normalized = _rewrite_markdown_image_sizes(normalized)
+    normalized = _normalize_markdown_lists(normalized)
     return renderer.convert(normalized)
+
+
+def _normalize_markdown_lists(text: str) -> str:
+    """Insert blank lines before list blocks when missing (improves list parsing)."""
+    def _is_list_line(value: str) -> bool:
+        trimmed = value.lstrip()
+        if trimmed.startswith(("* ", "- ", "+ ")):
+            return True
+        digits = ""
+        for ch in trimmed:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        return bool(digits) and trimmed[len(digits):].startswith(". ")
+
+    lines = text.splitlines()
+    normalized: list[str] = []
+    in_fence = False
+    fence_marker = ""
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            normalized.append(line)
+            continue
+
+        if in_fence:
+            normalized.append(line)
+            continue
+
+        if _is_list_line(line) and normalized:
+            prev = normalized[-1].strip()
+            if prev and not _is_list_line(prev):
+                normalized.append("")
+
+        normalized.append(line)
+
+    return "\n".join(normalized)
 
 
 def _rewrite_markdown_image_sizes(text: str) -> str:
