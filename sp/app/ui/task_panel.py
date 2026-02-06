@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from markdown import markdown as render_markdown
 from sp.app import config
 from sp.app import indexer
+from .theme import theme_color, theme_value
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
 from .date_insert_dialog import DateInsertDialog
@@ -234,21 +235,21 @@ class TaskPanel(QWidget):
             toggle.toggled.connect(slot)
             # Subtle styling to show pressed/depressed states
             toggle.setStyleSheet(
-                """
-                QToolButton {
+                f"""
+                QToolButton {{
                     border: 1px solid transparent;
                     border-radius: 13px;
                     padding: 2px;
                     background: transparent;
-                }
-                QToolButton:hover {
-                    border: 1px solid #666;
-                    background: rgba(255,255,255,0.06);
-                }
-                QToolButton:checked {
-                    border: 1px solid #4a90e2;
-                    background: rgba(74,144,226,0.22);
-                }
+                }}
+                QToolButton:hover {{
+                    border: 1px solid {theme_value('task_panel.toggle.hover_border', '#666666')};
+                    background: {theme_value('task_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+                }}
+                QToolButton:checked {{
+                    border: 1px solid {theme_value('task_panel.toggle.active_border', '#4a90e2')};
+                    background: {theme_value('task_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+                }}
                 """
             )
             return toggle
@@ -415,7 +416,11 @@ class TaskPanel(QWidget):
         self.content_stack = QStackedWidget()
         self.content_stack.addWidget(self.task_content)
         self.summary_footer = QLabel("")
-        self.summary_footer.setStyleSheet("color: #9aa4ad; padding: 2px 6px;")
+        self.summary_footer.setStyleSheet(
+            "color: "
+            f"{theme_value('task_panel.summary_footer.color', '#9aa4ad')}; "
+            "padding: 2px 6px;"
+        )
         self.summary_footer.setWordWrap(True)
         if self._ai_enabled:
             self._setup_ai_panel()
@@ -571,7 +576,11 @@ class TaskPanel(QWidget):
         self.journal_checkbox.setEnabled(self._nav_filter_enabled)
         if self._nav_filter_enabled:
             self.filter_label.setStyleSheet(
-                "color: #ffffff; background-color: #c62828; padding: 1px 6px; border-radius: 4px;"
+                "color: "
+                f"{theme_value('task_panel.filter_badge.text', '#ffffff')}; "
+                "background-color: "
+                f"{theme_value('task_panel.filter_badge.bg', '#c62828')}; "
+                "padding: 1px 6px; border-radius: 4px;"
             )
         else:
             self.filter_label.setStyleSheet("")
@@ -701,7 +710,7 @@ class TaskPanel(QWidget):
 
     def _build_task_print_html(self) -> str:
         css = self._load_print_css()
-        extra_css = """
+        extra_css = f"""
         table.task-print {
             border-collapse: collapse;
             width: 100%;
@@ -713,7 +722,7 @@ class TaskPanel(QWidget):
             vertical-align: top;
         }
         table.task-print th {
-            background: #f0f0f0;
+            background: {theme_value('task_panel.print.table_header_bg', '#f0f0f0')};
             font-weight: 600;
         }
         .task-priority {
@@ -935,7 +944,7 @@ class TaskPanel(QWidget):
         pixmap = base.pixmap(QSize(20, 20))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setBrush(QColor("#4a90e2"))
+        painter.setBrush(theme_color("task_panel.priority_bar", "#4a90e2"))
         painter.setPen(Qt.NoPen)
         radius = 3
         painter.drawEllipse(pixmap.width() - 2 * radius - 1, 1, 2 * radius, 2 * radius)
@@ -1023,23 +1032,23 @@ class TaskPanel(QWidget):
                 btn.setCheckable(True)
                 btn.setAutoRaise(True)
                 btn.setStyleSheet(
-                    """
-                    QToolButton {
-                        border: 1px solid #444;
+                    f"""
+                    QToolButton {{
+                        border: 1px solid {theme_value('task_panel.date_preset.border', '#444444')};
                         border-radius: 10px;
                         padding: 3px 10px;
                         margin: 2px;
                         background: transparent;
-                        color: #ddd;
-                    }
-                    QToolButton:hover {
-                        background: #333;
-                    }
-                    QToolButton:checked {
-                        background: #2b2b2b;
-                        color: #fff;
-                        border: 1px solid #2b2b2b;
-                    }
+                        color: {theme_value('task_panel.date_preset.text', '#dddddd')};
+                    }}
+                    QToolButton:hover {{
+                        background: {theme_value('task_panel.date_preset.hover_bg', '#333333')};
+                    }}
+                    QToolButton:checked {{
+                        background: {theme_value('task_panel.date_preset.active_bg', '#2b2b2b')};
+                        color: {theme_value('task_panel.date_preset.active_text', '#ffffff')};
+                        border: 1px solid {theme_value('task_panel.date_preset.active_border', '#2b2b2b')};
+                    }}
                     """
                 )
                 btn.clicked.connect(lambda _, p=preset: self._apply_date_preset(p))
@@ -1266,7 +1275,10 @@ class TaskPanel(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
         self._ai_title_label = QLabel("AI Insights")
-        self._ai_title_label.setStyleSheet("font-weight: bold;")
+        self._ai_title_label.setStyleSheet(
+            "font-weight: "
+            f"{theme_value('task_panel.ai.title_weight', 'bold')};"
+        )
         self._ai_delete_btn = QToolButton()
         self._ai_delete_btn.setIcon(self._load_svg_icon("icons8-trash.svg", QSize(20, 20)))
         self._ai_delete_btn.setToolTip("Delete AI summary for tasks")
@@ -1294,7 +1306,13 @@ class TaskPanel(QWidget):
         self._ai_markdown_view.anchorClicked.connect(self._on_ai_markdown_link_clicked)
         self._ai_markdown_view.setReadOnly(True)
         self._ai_markdown_view.setStyleSheet(
-            "background:#1f1f1f; color:#f0f0f0; border:1px solid #444; padding:10px;"
+            "background:"
+            f"{theme_value('task_panel.ai.view_bg', '#1f1f1f')}; "
+            "color:"
+            f"{theme_value('task_panel.ai.view_text', '#f0f0f0')}; "
+            "border:1px solid "
+            f"{theme_value('task_panel.ai.view_border', '#444444')}; "
+            "padding:10px;"
         )
         layout.addLayout(header)
         layout.addWidget(self._ai_markdown_view, 1)
@@ -1372,9 +1390,8 @@ class TaskPanel(QWidget):
             font_size = max(6, self._font_size)
             style = f"""
             <style>
-            body {{ background:#1f1f1f; color:#f0f0f0; font-size: {font_size}px;
-                   font-family: 'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial',
-                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }}
+            body {{ background:{theme_value('task_panel.ai.html_bg', '#1f1f1f')}; color:{theme_value('task_panel.ai.html_text', '#f0f0f0')}; font-size: {font_size}px;
+                   font-family: {theme_value('task_panel.ai.html_font', "'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial', 'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif")}; }}
             h1,h2,h3,h4,h5,h6 {{ margin: 0.4em 0 0.2em 0; }}
             ul,ol {{ margin-top: 0.2em; margin-bottom: 0.2em; }}
             </style>
@@ -2104,9 +2121,15 @@ class TaskPanel(QWidget):
             self.search.setStyleSheet("")
             return
         if has_matches:
-            self.search.setStyleSheet("color: #00b33c;")
+            self.search.setStyleSheet(
+                "color: "
+                f"{theme_value('task_panel.search.match_color', '#00b33c')};"
+            )
         elif has_missing:
-            self.search.setStyleSheet("color: #c62828;")  # red when nothing matches
+            self.search.setStyleSheet(
+                "color: "
+                f"{theme_value('task_panel.search.no_match_color', '#c62828')};"
+            )  # red when nothing matches
         else:
             self.search.setStyleSheet("")
 
@@ -2399,7 +2422,7 @@ class TaskPanel(QWidget):
                 for col in range(item.columnCount()):
                     item.setFont(col, font)
             elif not task.get("actionable", True):
-                muted = QColor("#666666")
+                muted = theme_color("task_panel.muted_text", "#666666")
                 for col in range(item.columnCount()):
                     item.setForeground(col, muted)
             parent_id = task.get("parent")

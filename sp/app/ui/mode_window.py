@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from .theme import theme_color, theme_value
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
 
@@ -102,10 +103,15 @@ class _CursorHalo(QWidget):
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        color = QColor("#6fc1ff")
-        color.setAlpha(60)
+        color = theme_color("mode_window.cursor_halo.fill", "#6fc1ff")
+        color.setAlpha(int(theme_value("mode_window.cursor_halo.fill_alpha", 60)))
         painter.setBrush(color if self._mode == "circle" else Qt.NoBrush)
-        painter.setPen(QPen(QColor("#b7e2ff"), 2))
+        painter.setPen(
+            QPen(
+                theme_color("mode_window.cursor_halo.stroke", "#b7e2ff"),
+                float(theme_value("mode_window.cursor_halo.stroke_width", 2)),
+            )
+        )
         if self._mode == "circle":
             radius = self._diameter / 2
             painter.drawEllipse(2, 2, int(radius * 2) - 4, int(radius * 2) - 4)
@@ -238,7 +244,12 @@ class ModeWindow(QMainWindow):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
         title_label = QLabel(self._page_title())
-        title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title_label.setStyleSheet(
+            "font-size: "
+            f"{theme_value('mode_window.title.font_size_px', 18)}px; "
+            "font-weight: "
+            f"{theme_value('mode_window.title.font_weight', 600)};"
+        )
         self._ai_button = self._build_ai_button()
         if self.mode == "audience" and self._ai_button:
             header.addWidget(self._ai_button, 0, Qt.AlignVCenter)
@@ -255,7 +266,11 @@ class ModeWindow(QMainWindow):
         self._vi_badge = QLabel("INS")
         self._vi_badge.setVisible(False)
         self._vi_badge.setStyleSheet(
-            "border: 1px solid #666; padding: 2px 6px; border-radius: 3px; margin-right: 6px; background: #ffd54d; color: #000;"
+            "border: 1px solid "
+            f"{theme_value('mode_window.vi_badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px; margin-right: 6px; background: "
+            f"{theme_value('mode_window.vi_badge.active_bg', '#ffd54d')}; color: "
+            f"{theme_value('mode_window.vi_badge.active_text', '#000000')};"
         )
         self._window_button = self._build_window_button("maximize.svg", "Toggle windowed/fullscreen")
         if self._window_button:
@@ -265,8 +280,13 @@ class ModeWindow(QMainWindow):
         self._close_button.setText("✕")
         self._close_button.setToolTip("Exit mode")
         self._close_button.setStyleSheet(
-            "QToolButton { background: #1c1f24; color: #f0f3f8; border: 1px solid #3b4251; padding: 6px 10px; border-radius: 10px; }"
-            "QToolButton:hover { background: #2a303c; }"
+            "QToolButton { background: "
+            f"{theme_value('mode_window.close_button.bg', '#1c1f24')}; color: "
+            f"{theme_value('mode_window.close_button.text', '#f0f3f8')}; border: 1px solid "
+            f"{theme_value('mode_window.close_button.border', '#3b4251')}; "
+            "padding: 6px 10px; border-radius: 10px; }"
+            "QToolButton:hover { background: "
+            f"{theme_value('mode_window.close_button.bg_hover', '#2a303c')}; }}"
         )
         self._close_button.setEnabled(False)
         self._close_button.clicked.connect(self._request_close)
@@ -355,8 +375,15 @@ class ModeWindow(QMainWindow):
             btn.setToolTip(tooltip)
             btn.setFocusPolicy(Qt.NoFocus)
             btn.setStyleSheet(
-                "QToolButton { padding: 4px 8px; color: #e9eef8; background: rgba(40, 56, 74, 0.7); border: 1px solid #3b4555; border-radius: 6px; font-weight: 600; margin-right: 4px; } "
-                "QToolButton:hover { background: rgba(60, 80, 100, 0.9); }"
+                "QToolButton { padding: 4px 8px; color: "
+                f"{theme_value('mode_window.mode_button.text', '#e9eef8')}; background: "
+                f"{theme_value('mode_window.mode_button.bg', 'rgba(40, 56, 74, 0.7)')}; "
+                "border: 1px solid "
+                f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
+                "border-radius: 6px; font-weight: "
+                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; }} "
+                "QToolButton:hover { background: "
+                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; }}"
             )
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -373,8 +400,15 @@ class ModeWindow(QMainWindow):
             btn.setToolTip(tooltip)
             btn.setFocusPolicy(Qt.NoFocus)
             btn.setStyleSheet(
-                "QToolButton { padding: 4px 8px; color: #e9eef8; background: rgba(40, 56, 74, 0.7); border: 1px solid #3b4555; border-radius: 6px; font-weight: 600; margin-right: 4px; } "
-                "QToolButton:hover { background: rgba(60, 80, 100, 0.9); }"
+                "QToolButton { padding: 4px 8px; color: "
+                f"{theme_value('mode_window.mode_button.text', '#e9eef8')}; background: "
+                f"{theme_value('mode_window.mode_button.bg', 'rgba(40, 56, 74, 0.7)')}; "
+                "border: 1px solid "
+                f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
+                "border-radius: 6px; font-weight: "
+                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; }} "
+                "QToolButton:hover { background: "
+                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; }}"
             )
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -394,8 +428,14 @@ class ModeWindow(QMainWindow):
         btn.setToolTip("AI assist (one-shot)")
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet(
-            "QToolButton { padding: 4px 6px; color: #e9eef8; background: rgba(40, 56, 74, 0.35); border: 1px solid #3b4555; border-radius: 8px; } "
-            "QToolButton:hover { background: rgba(60, 80, 100, 0.7); }"
+            "QToolButton { padding: 4px 6px; color: "
+            f"{theme_value('mode_window.mode_toggle.text', '#e9eef8')}; background: "
+            f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
+            "border: 1px solid "
+            f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
+            "border-radius: 8px; }} "
+            "QToolButton:hover { background: "
+            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; }}"
         )
         btn.clicked.connect(self._open_ai_assist)
         return btn
@@ -412,8 +452,14 @@ class ModeWindow(QMainWindow):
         btn.setToolTip(tooltip)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet(
-            "QToolButton { padding: 4px 6px; color: #e9eef8; background: rgba(40, 56, 74, 0.35); border: 1px solid #3b4555; border-radius: 8px; } "
-            "QToolButton:hover { background: rgba(60, 80, 100, 0.7); }"
+            "QToolButton { padding: 4px 6px; color: "
+            f"{theme_value('mode_window.mode_toggle.text', '#e9eef8')}; background: "
+            f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
+            "border: 1px solid "
+            f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
+            "border-radius: 8px; }} "
+            "QToolButton:hover { background: "
+            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; }}"
         )
         return btn
 
@@ -424,7 +470,11 @@ class ModeWindow(QMainWindow):
             if pm.isNull():
                 return None
             window_color = self.palette().color(QPalette.Window)
-            tint = QColor("#111") if window_color.lightness() > 128 else QColor("#f5f5f5")
+            tint = (
+                theme_color("mode_window.icon_tint.light", "#111111")
+                if window_color.lightness() > 128
+                else theme_color("mode_window.icon_tint.dark", "#f5f5f5")
+            )
             colored = QPixmap(pm.size())
             colored.fill(Qt.transparent)
             painter = QPainter(colored)
@@ -581,14 +631,20 @@ class ModeWindow(QMainWindow):
     # ------------------------------------------------------------------ Behavior
     def _apply_mode_styling(self) -> None:
         base_font: QFont = self._base_editor.font()
-        palette_bg = "#0e121a" if self.mode == "focus" else "#0c1017"
-        text_color = "#cbd4e6"
+        palette_bg = (
+            theme_value("mode_window.editor.focus_bg", "#0e121a")
+            if self.mode == "focus"
+            else theme_value("mode_window.editor.audience_bg", "#0c1017")
+        )
+        text_color = theme_value("mode_window.editor.text", "#cbd4e6")
         padding = "28px 40px" if self.mode == "focus" else "38px 72px"
         line_height_pct = int(self._line_height_scale * 100)
         scaled_size = int(self._base_font_size * self._font_scale)
         self.editor.setStyleSheet(
             f"QTextEdit {{ background: {palette_bg}; color: {text_color}; padding: {padding};"
-            f" border: none; selection-background-color: #2f4c74; line-height: {line_height_pct}%;"
+            " border: none; selection-background-color: "
+            f"{theme_value('mode_window.editor.selection_bg', '#2f4c74')}; "
+            f"line-height: {line_height_pct}%;"
             f" font-family: '{self._base_font_family}'; font-size: {scaled_size}pt; }}"
         )
         self._update_vi_badge(self.editor._vi_insert_mode if hasattr(self.editor, "_vi_insert_mode") else False)
@@ -729,9 +785,20 @@ class ModeWindow(QMainWindow):
             return
         extra = QTextEdit.ExtraSelection()
         extra.cursor = cursor
-        color = QColor("#24466b") if self.mode == "focus" else QColor("#1d4b80")
-        color.setAlpha(110 if self.mode == "audience" else 90)
-        extra.format.setForeground(QColor("#f4f7ff"))
+        color = (
+            theme_color("mode_window.cursor_line.focus_bg", "#24466b")
+            if self.mode == "focus"
+            else theme_color("mode_window.cursor_line.audience_bg", "#1d4b80")
+        )
+        color.setAlpha(
+            int(
+                theme_value(
+                    "mode_window.cursor_line.audience_alpha" if self.mode == "audience" else "mode_window.cursor_line.focus_alpha",
+                    110 if self.mode == "audience" else 90,
+                )
+            )
+        )
+        extra.format.setForeground(theme_color("mode_window.cursor_line.text", "#f4f7ff"))
         extra.format.setBackground(color)
         extra.format.setProperty(self._HIGHLIGHT_KEY, True)
         try:
@@ -918,6 +985,16 @@ class ModeWindow(QMainWindow):
             self._position_overlays()
         return super().eventFilter(obj, event)
 
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() in (
+            Qt.Key_F,
+            Qt.Key_A,
+        ):
+            self._request_close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _position_overlays(self) -> None:
         if self._cursor_halo.isVisible():
             self._update_cursor_halo()
@@ -956,11 +1033,19 @@ class ModeWindow(QMainWindow):
                 pass
         popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         popup.setStyleSheet(
-            "QWidget { background: rgba(32,32,32,240); border: 1px solid #666; border-radius: 6px; }"
-            "QLineEdit { border: 1px solid #777; border-radius: 4px; padding: 4px 6px; }"
-            "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+            "QWidget { background: "
+            f"{theme_value('mode_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('mode_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLineEdit { border: 1px solid "
+            f"{theme_value('mode_window.picker_popup.input_border', '#777777')}; "
+            "border-radius: 4px; padding: 4px 6px; }"
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('mode_window.picker_popup.list_text', '#f5f5f5')}; border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
-            "QListWidget::item:selected { background: rgba(90,161,255,80); }"
+            "QListWidget::item:selected { background: "
+            f"{theme_value('mode_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -1078,18 +1163,29 @@ class ModeWindow(QMainWindow):
             popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             popup.setStyleSheet(
-                "background: rgba(30,30,30,220); border: 1px solid #888; border-radius: 6px; padding: 8px;"
+                "background: "
+                f"{theme_value('mode_window.heading_popup.bg', 'rgba(30,30,30,220)')}; "
+                "border: 1px solid "
+                f"{theme_value('mode_window.heading_popup.border', '#888888')}; "
+                "border-radius: 6px; padding: 8px;"
             )
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._heading_popup_label = QLabel(popup)
-            self._heading_popup_label.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+            self._heading_popup_label.setStyleSheet(
+                "color: "
+                f"{theme_value('mode_window.heading_popup.label_text', '#f5f5f5')}; "
+                "font-weight: bold;"
+            )
             layout.addWidget(self._heading_popup_label)
             self._heading_popup_list = QListWidget(popup)
             self._heading_popup_list.setStyleSheet(
-                "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+                "QListWidget { background: transparent; color: "
+                f"{theme_value('mode_window.heading_popup.list_text', '#f5f5f5')}; "
+                "border: none; }"
                 "QListWidget::item { padding: 4px 6px; }"
-                "QListWidget::item:selected { background: rgba(255,255,255,40); }"
+                "QListWidget::item:selected { background: "
+                f"{theme_value('mode_window.heading_popup.list_selected_bg', 'rgba(255,255,255,40)')}; }}"
             )
             layout.addWidget(self._heading_popup_list)
             self._heading_popup_list.itemActivated.connect(self._activate_heading_popup_selection)
@@ -1189,7 +1285,7 @@ class ModeWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setBackground(theme_color("mode_window.highlight.selection_bg", "#ffd54f"))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9992)  # Different from _flash_cursor_line
             current = self.editor.extraSelections()
@@ -1366,11 +1462,22 @@ class ModeWindow(QMainWindow):
             self._vi_badge.hide()
             return
         self._vi_badge.show()
-        style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px; margin-right: 6px;"
+        style = (
+            "border: 1px solid "
+            f"{theme_value('mode_window.vi_badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px; margin-right: 6px;"
+        )
         if insert_active:
-            style += " background: #ffd54d; color: #000;"
+            style += (
+                " background: "
+                f"{theme_value('mode_window.vi_badge.active_bg', '#ffd54d')}; color: "
+                f"{theme_value('mode_window.vi_badge.active_text', '#000000')};"
+            )
         else:
-            style += " background: transparent; color: #cbd4e6;"
+            style += (
+                " background: transparent; color: "
+                f"{theme_value('mode_window.vi_badge.inactive_text', '#cbd4e6')};"
+            )
         self._vi_badge.setStyleSheet(style)
 
     def _toggle_halo_mode(self) -> None:
@@ -1428,7 +1535,7 @@ class ModeWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setBackground(theme_color("mode_window.highlight.selection_bg", "#ffd54f"))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = editor.extraSelections()

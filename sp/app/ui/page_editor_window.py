@@ -6,7 +6,7 @@ import traceback
 import httpx
 
 from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QColor, QIcon, QTextCursor, QTextFormat
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QColor, QIcon, QTextCursor, QTextFormat, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -28,6 +28,7 @@ from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
+from .theme import theme_color, theme_value
 from sp.server.adapters.files import PAGE_SUFFIXES
 
 
@@ -80,7 +81,11 @@ class PageEditorWindow(QMainWindow):
         self._open_in_main = open_in_main_callback
         headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
         self.http = httpx.Client(base_url=self.api_base, timeout=10.0, headers=headers)
-        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        self._badge_base_style = (
+            "border: 1px solid "
+            f"{theme_value('page_editor_window.badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
         self._font_size = config.load_popup_font_size(14)
 
         self.editor = MarkdownEditor()
@@ -101,6 +106,7 @@ class PageEditorWindow(QMainWindow):
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.setCentralWidget(self.editor)
+        self._apply_theme_palette()
         
         # Vi mode state
         self._vi_enabled = config.load_vi_mode_enabled()
@@ -138,7 +144,10 @@ class PageEditorWindow(QMainWindow):
         # Status badges
         self._dirty_status_label = QLabel("")
         self._dirty_status_label.setObjectName("popupDirtyStatusLabel")
-        self._dirty_status_label.setStyleSheet(self._badge_base_style + " background-color: transparent; margin-right: 6px;")
+        self._dirty_status_label.setStyleSheet(
+            self._badge_base_style
+            + " background-color: transparent; margin-right: 6px;"
+        )
         self._dirty_status_label.setToolTip("Unsaved changes")
         self.statusBar().addPermanentWidget(self._dirty_status_label, 0)
         self._update_dirty_indicator()
@@ -183,6 +192,20 @@ class PageEditorWindow(QMainWindow):
         
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
+
+    def _apply_theme_palette(self) -> None:
+        bg = theme_value("page_editor_window.base.bg", None)
+        text = theme_value("page_editor_window.base.text", None)
+        if bg is None and text is None:
+            return
+        pal = self.palette()
+        if bg is not None:
+            pal.setColor(QPalette.Window, theme_color("page_editor_window.base.bg", bg))
+            pal.setColor(QPalette.Base, theme_color("page_editor_window.base.bg", bg))
+        if text is not None:
+            pal.setColor(QPalette.WindowText, theme_color("page_editor_window.base.text", text))
+            pal.setColor(QPalette.Text, theme_color("page_editor_window.base.text", text))
+        self.setPalette(pal)
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date."""
@@ -511,7 +534,12 @@ class PageEditorWindow(QMainWindow):
         if self._read_only:
             self._dirty_status_label.setText("O/")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #9e9e9e; color: #f5f5f5; margin-right: 6px; text-decoration: line-through;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('page_editor_window.badge.readonly_bg', '#9e9e9e')}; "
+                "color: "
+                f"{theme_value('page_editor_window.badge.readonly_text', '#f5f5f5')}; "
+                "margin-right: 6px; text-decoration: line-through;"
             )
             self._dirty_status_label.setToolTip("Read-only: changes cannot be saved in this window")
             return
@@ -519,13 +547,23 @@ class PageEditorWindow(QMainWindow):
         if dirty:
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #e57373; color: #000; margin-right: 6px;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('page_editor_window.badge.dirty_bg', '#e57373')}; "
+                "color: "
+                f"{theme_value('page_editor_window.badge.dirty_text', '#000000')}; "
+                "margin-right: 6px;"
             )
             self._dirty_status_label.setToolTip("Unsaved changes")
         else:
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #81c784; color: #000; margin-right: 6px;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('page_editor_window.badge.clean_bg', '#81c784')}; "
+                "color: "
+                f"{theme_value('page_editor_window.badge.clean_text', '#000000')}; "
+                "margin-right: 6px;"
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
@@ -741,11 +779,20 @@ class PageEditorWindow(QMainWindow):
                 pass
         popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         popup.setStyleSheet(
-            "QWidget { background: rgba(32,32,32,240); border: 1px solid #666; border-radius: 6px; }"
-            "QLineEdit { border: 1px solid #777; border-radius: 4px; padding: 4px 6px; }"
-            "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+            "QWidget { background: "
+            f"{theme_value('page_editor_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('page_editor_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLineEdit { border: 1px solid "
+            f"{theme_value('page_editor_window.picker_popup.input_border', '#777777')}; "
+            "border-radius: 4px; padding: 4px 6px; }"
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('page_editor_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
-            "QListWidget::item:selected { background: rgba(90,161,255,80); }"
+            "QListWidget::item:selected { background: "
+            f"{theme_value('page_editor_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -860,18 +907,29 @@ class PageEditorWindow(QMainWindow):
         if self._heading_popup is None:
             popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint | Qt.WindowStaysOnTopHint)
             popup.setStyleSheet(
-                "background: rgba(30,30,30,220); border: 1px solid #888; border-radius: 6px; padding: 8px;"
+                "background: "
+                f"{theme_value('page_editor_window.heading_popup.bg', 'rgba(30,30,30,220)')}; "
+                "border: 1px solid "
+                f"{theme_value('page_editor_window.heading_popup.border', '#888888')}; "
+                "border-radius: 6px; padding: 8px;"
             )
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._heading_popup_label = QLabel(popup)
-            self._heading_popup_label.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+            self._heading_popup_label.setStyleSheet(
+                "color: "
+                f"{theme_value('page_editor_window.heading_popup.label_text', '#f5f5f5')}; "
+                "font-weight: bold;"
+            )
             layout.addWidget(self._heading_popup_label)
             self._heading_popup_list = QListWidget(popup)
             self._heading_popup_list.setStyleSheet(
-                "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+                "QListWidget { background: transparent; color: "
+                f"{theme_value('page_editor_window.heading_popup.list_text', '#f5f5f5')}; "
+                "border: none; }}"
                 "QListWidget::item { padding: 4px 6px; }"
-                "QListWidget::item:selected { background: rgba(255,255,255,40); }"
+                "QListWidget::item:selected { background: "
+                f"{theme_value('page_editor_window.heading_popup.list_selected_bg', 'rgba(255,255,255,40)')}; }}"
             )
             layout.addWidget(self._heading_popup_list)
             self._heading_popup_list.itemActivated.connect(self._activate_heading_popup_selection)
@@ -984,7 +1042,7 @@ class PageEditorWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setBackground(theme_color("page_editor_window.highlight.selection_bg", "#ffd54f"))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = self.editor.extraSelections()
@@ -1029,7 +1087,12 @@ class PageEditorWindow(QMainWindow):
             return
         style = self._badge_base_style
         if insert_active:
-            style += " background-color: #ffd54d; color: #000;"
+            style += (
+                " background-color: "
+                f"{theme_value('page_editor_window.vi_badge.active_bg', '#ffd54d')}; "
+                "color: "
+                f"{theme_value('page_editor_window.vi_badge.active_text', '#000000')};"
+            )
         else:
             style += " background-color: transparent;"
         self._vi_status_label.setStyleSheet(style)

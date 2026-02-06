@@ -44,6 +44,7 @@ from PySide6.QtGui import (
     QTextDocument,
     QShortcut,
     QAction,
+    QPalette,
 )
 from PySide6.QtWidgets import (
     QTextEdit,
@@ -70,6 +71,7 @@ from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
 from sp.app import config
+from .theme import theme_color, theme_value
 
 
 logger = logging.getLogger(__name__)
@@ -271,24 +273,50 @@ class AIActionOverlay(QWidget):
         self._groups = AI_ACTION_GROUPS
         self._has_chat = False
         self._chat_active = False
-        self.setStyleSheet("background: #000000; color: white; border-radius: 10px; border: 1px solid #222222;")
+        self.setStyleSheet(
+            "background: "
+            f"{theme_value('markdown_editor.ai_overlay.bg', '#000000')}; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.text', '#ffffff')}; "
+            "border-radius: 10px; border: 1px solid "
+            f"{theme_value('markdown_editor.ai_overlay.border', '#222222')};"
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
         self._selection_label = QLabel()
-        self._selection_label.setStyleSheet("color: #dfe6fa; font-size: 16px;")
+        self._selection_label.setStyleSheet(
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.selection_label', '#dfe6fa')}; "
+            "font-size: "
+            f"{theme_value('markdown_editor.ai_overlay.selection_label_size_px', 16)}px;"
+        )
         self._selection_label.setVisible(False)
         layout.addWidget(self._selection_label)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Send Selection to AI Chat or type action…")
         self._search.setStyleSheet(
-            "font-size: 18px; color: white; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.5); padding: 8px; border-radius: 6px;"
+            "font-size: "
+            f"{theme_value('markdown_editor.ai_overlay.search_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.search_text', '#ffffff')}; "
+            "background: "
+            f"{theme_value('markdown_editor.ai_overlay.search_bg', 'rgba(255, 255, 255, 0.08)')}; "
+            "border: 1px solid "
+            f"{theme_value('markdown_editor.ai_overlay.search_border', 'rgba(255, 255, 255, 0.5)')}; "
+            "padding: 8px; border-radius: 6px;"
         )
         self._search.textChanged.connect(self._refresh_list)
         layout.addWidget(self._search)
         self._list = QListWidget()
         self._list.setUniformItemSizes(True)
-        self._list.setStyleSheet("font-size: 18px; color: white; background: transparent; padding: 4px;")
+        self._list.setStyleSheet(
+            "font-size: "
+            f"{theme_value('markdown_editor.ai_overlay.list_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.list_text', '#ffffff')}; "
+            "background: transparent; padding: 4px;"
+        )
         self._list.itemActivated.connect(self._activate_current_item)
         self._list.itemClicked.connect(lambda *_: self._activate_current_item())
         layout.addWidget(self._list)
@@ -547,8 +575,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._timing_total = 0.0
         self._timing_blocks = 0
         self.heading_format = QTextCharFormat()
-        self.heading_format.setForeground(QColor("#6cb4ff"))
-        self.heading_format.setFontWeight(QFont.Weight.DemiBold)
+        self.heading_format.setForeground(theme_color("markdown_editor.syntax.heading", "#6cb4ff"))
+        self.heading_format.setFontWeight(
+            QFont.Weight(int(theme_value("markdown_editor.syntax.heading_weight", QFont.Weight.DemiBold)))
+        )
         self.hidden_format = QTextCharFormat()
         transparent = QColor(0, 0, 0, 0)
         self.hidden_format.setForeground(transparent)
@@ -565,10 +595,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._apply_heading_sizes(base_pt)
 
         self.bold_format = QTextCharFormat()
-        self.bold_format.setForeground(QColor("#ffd479"))
+        self.bold_format.setForeground(theme_color("markdown_editor.syntax.bold", "#ffd479"))
 
         self.italic_format = QTextCharFormat()
-        self.italic_format.setForeground(QColor("#ffa7c4"))
+        self.italic_format.setForeground(theme_color("markdown_editor.syntax.italic", "#ffa7c4"))
 
         mono_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         if mono_font.family():
@@ -576,38 +606,40 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         else:
             mono_family = "Courier New"
         self.code_format = QTextCharFormat()
-        self.code_format.setForeground(QColor("#a3ffab"))
-        self.code_format.setBackground(QColor("#2a2a2a"))
+        self.code_format.setForeground(theme_color("markdown_editor.syntax.code_text", "#a3ffab"))
+        self.code_format.setBackground(theme_color("markdown_editor.syntax.code_bg", "#2a2a2a"))
         self.code_format.setFontFamily(mono_family)
         self.code_format.setFontFixedPitch(True)
         self.code_format.setFontStyleHint(QFont.StyleHint.Monospace)
 
         self.quote_format = QTextCharFormat()
-        self.quote_format.setForeground(QColor("#7fdbff"))
+        self.quote_format.setForeground(theme_color("markdown_editor.syntax.quote", "#7fdbff"))
         self.quote_format.setFontItalic(True)
 
         self.list_format = QTextCharFormat()
-        self.list_format.setForeground(QColor("#ffffff"))
+        self.list_format.setForeground(theme_color("markdown_editor.syntax.list", "#ffffff"))
 
         self.code_block = QTextCharFormat()
-        self.code_block.setBackground(QColor("#2a2a2a"))
-        self.code_block.setForeground(QColor("#a3ffab"))
+        self.code_block.setBackground(theme_color("markdown_editor.syntax.code_block_bg", "#2a2a2a"))
+        self.code_block.setForeground(theme_color("markdown_editor.syntax.code_block_text", "#a3ffab"))
         self.code_block.setFontFamily(mono_family)
         self.code_block.setFontFixedPitch(True)
         self.code_block.setFontStyleHint(QFont.StyleHint.Monospace)
         
         self.code_fence_format = QTextCharFormat()
-        self.code_fence_format.setForeground(QColor("#555555"))
+        self.code_fence_format.setForeground(theme_color("markdown_editor.syntax.code_fence", "#555555"))
 
         self.tag_format = QTextCharFormat()
-        self.tag_format.setForeground(QColor("#ffa657"))
+        self.tag_format.setForeground(theme_color("markdown_editor.syntax.tag", "#ffa657"))
 
         self.checkbox_format = QTextCharFormat()
-        self.checkbox_format.setForeground(QColor("#c8c8c8"))
-        self.checkbox_format.setFontFamily("Segoe UI Symbol")
+        self.checkbox_format.setForeground(theme_color("markdown_editor.syntax.checkbox", "#c8c8c8"))
+        self.checkbox_format.setFontFamily(
+            theme_value("markdown_editor.syntax.checkbox_font", "Segoe UI Symbol")
+        )
 
-        self._hr_line_color = QColor("#60656f")
-        self._hr_block_color = QColor("#242a33")
+        self._hr_line_color = theme_color("markdown_editor.syntax.hr_line", "#60656f")
+        self._hr_block_color = theme_color("markdown_editor.syntax.hr_block", "#242a33")
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(self._hr_line_color)
         self.hr_format.setBackground(QColor(0, 0, 0, 0))
@@ -625,17 +657,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
-        self.strikethrough_format.setForeground(QColor("#888888"))
+        self.strikethrough_format.setForeground(theme_color("markdown_editor.syntax.strikethrough", "#888888"))
         self.strikethrough_format.setFontStrikeOut(True)
         
         # Highlight format
         self.highlight_format = QTextCharFormat()
-        self.highlight_format.setBackground(QColor("#ffff00"))
-        self.highlight_format.setForeground(QColor("#000000"))
+        self.highlight_format.setBackground(theme_color("markdown_editor.syntax.highlight_bg", "#ffff00"))
+        self.highlight_format.setForeground(theme_color("markdown_editor.syntax.highlight_text", "#000000"))
         
         # Bold+Italic combined format
         self.bold_italic_format = QTextCharFormat()
-        self.bold_italic_format.setForeground(QColor("#ffb8d1"))
+        self.bold_italic_format.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#ffb8d1"))
         self.bold_italic_format.setFontWeight(QFont.Weight.Bold)
         self.bold_italic_format.setFontItalic(True)
 
@@ -1007,7 +1039,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     label_end = text.find(LINK_SENTINEL, label_start)
                     if label_end >= label_start:
                         link_fmt = QTextCharFormat()
-                        link_fmt.setForeground(QColor("#4fa3ff"))
+                        link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                         link_fmt.setFontUnderline(True)
                         # Hide opening sentinel and link
                         self.setFormat(idx, label_start - idx, self.hidden_format)
@@ -1051,7 +1083,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     fmt = QTextCharFormat()
                     fmt.setFontWeight(QFont.Weight.Bold)
                     fmt.setFontItalic(True)
-                    fmt.setForeground(QColor("#ffb8d1"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#ffb8d1"))
                     self.setFormat(start + 3, length - 6, fmt)
                     self.setFormat(start + length - 3, 3, self.hidden_format)
                 
@@ -1063,7 +1095,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     self.setFormat(start, 2, self.hidden_format)
                     fmt = QTextCharFormat()
                     fmt.setFontWeight(QFont.Weight.Bold)
-                    fmt.setForeground(QColor("#ffd479"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.bold", "#ffd479"))
                     self.setFormat(start + 2, length - 4, fmt)
                     self.setFormat(start + length - 2, 2, self.hidden_format)
                     
@@ -1075,7 +1107,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     self.setFormat(start, 1, self.hidden_format)
                     fmt = QTextCharFormat()
                     fmt.setFontItalic(True)
-                    fmt.setForeground(QColor("#ffa7c4"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.italic", "#ffa7c4"))
                     self.setFormat(start + 1, length - 2, fmt)
                     self.setFormat(start + length - 1, 1, self.hidden_format)
                     
@@ -1105,7 +1137,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     label_start = pipe_pos + 1
                     label_length = end - label_start - 1  # -1 for closing ]
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(label_start, label_length, link_fmt)
                     
@@ -1114,7 +1146,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_wiki and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
                     
@@ -1123,7 +1155,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_wiki and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
                     
@@ -1136,7 +1168,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                         label_start = start + 1
                         label_length = bracket_end - label_start
                         link_fmt = QTextCharFormat()
-                        link_fmt.setForeground(QColor("#4fa3ff"))
+                        link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                         link_fmt.setFontUnderline(True)
                         self.setFormat(start, 1, self.hidden_format)  # [
                         self.setFormat(label_start, label_length, link_fmt)
@@ -1147,7 +1179,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_display and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(QColor("#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
         
@@ -1329,8 +1361,13 @@ class MarkdownEditor(QTextEdit):
         self._indent_unit = " " * 4
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.highlighter = MarkdownHighlighter(self.document())
-        self._hr_line_color = getattr(self.highlighter, "_hr_line_color", QColor("#60656f"))
-        self._hr_block_color = getattr(self.highlighter, "_hr_block_color", QColor("#242a33"))
+        self._apply_theme_palette()
+        self._hr_line_color = getattr(
+            self.highlighter, "_hr_line_color", theme_color("markdown_editor.syntax.hr_line", "#60656f")
+        )
+        self._hr_block_color = getattr(
+            self.highlighter, "_hr_block_color", theme_color("markdown_editor.syntax.hr_block", "#242a33")
+        )
         self.cursorPositionChanged.connect(self._emit_cursor)
         self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
         self._cursor_signals_connected = True
@@ -1394,6 +1431,24 @@ class MarkdownEditor(QTextEdit):
         viewport = self.viewport()
         if viewport is not None:
             viewport.destroyed.connect(self._on_viewport_destroyed)
+
+    def _apply_theme_palette(self) -> None:
+        bg = theme_value("markdown_editor.base.bg", None)
+        text = theme_value("markdown_editor.base.text", None)
+        selection_bg = theme_value("markdown_editor.base.selection_bg", None)
+        selection_text = theme_value("markdown_editor.base.selection_text", None)
+        if bg is None and text is None and selection_bg is None and selection_text is None:
+            return
+        pal = self.palette()
+        if bg is not None:
+            pal.setColor(QPalette.Base, theme_color("markdown_editor.base.bg", bg))
+        if text is not None:
+            pal.setColor(QPalette.Text, theme_color("markdown_editor.base.text", text))
+        if selection_bg is not None:
+            pal.setColor(QPalette.Highlight, theme_color("markdown_editor.base.selection_bg", selection_bg))
+        if selection_text is not None:
+            pal.setColor(QPalette.HighlightedText, theme_color("markdown_editor.base.selection_text", selection_text))
+        self.setPalette(pal)
 
     def _status_message(self, msg: str, duration: int = 2000) -> None:
         window = self.window()
@@ -6007,8 +6062,8 @@ class MarkdownEditor(QTextEdit):
         extra = QTextEdit.ExtraSelection()
         extra.cursor = block_cursor
         fmt = extra.format
-        fmt.setBackground(QColor("#b259ff"))  # purple block
-        fmt.setForeground(QColor("#111"))     # dark text for contrast
+        fmt.setBackground(theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff"))
+        fmt.setForeground(theme_color("markdown_editor.vi_block_cursor.text", "#111111"))
         fmt.setProperty(QTextFormat.FullWidthSelection, False)
         fmt.setProperty(self._VI_EXTRA_KEY, True)
         existing = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]

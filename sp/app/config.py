@@ -171,6 +171,19 @@ def save_last_vault(path: str) -> None:
     _update_global_config({"last_vault": path})
 
 
+def load_theme_preference() -> str:
+    payload = _read_global_config()
+    theme_name = payload.get("theme_name")
+    if not isinstance(theme_name, str) or not theme_name.strip():
+        return "default"
+    return theme_name.strip()
+
+
+def save_theme_preference(theme_name: str) -> None:
+    name = (theme_name or "").strip()
+    _update_global_config({"theme_name": name or "default"})
+
+
 def _is_help_vault_path(path: str) -> bool:
     try:
         return Path(path).name.lower() == "help-vault"

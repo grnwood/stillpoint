@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .theme import theme_color, theme_value
+
 
 class MergeConflictDialog(QDialog):
     """Resolve conflicts between local and remote text with per-diff decisions."""
@@ -44,24 +46,27 @@ class MergeConflictDialog(QDialog):
         self._merged_ranges: dict[int, tuple[int, int]] = {}
 
         self.setStyleSheet(
-            """
-            QDialog { background-color: #0b0b0b; }
-            QLabel { color: #e8e8e8; }
-            QPushButton {
-                background-color: #1a1a1a;
-                color: #e8e8e8;
-                border: 1px solid #2a2a2a;
+            f"""
+            QDialog {{ background-color: {theme_value('merge_conflict.dialog.bg', '#0b0b0b')}; }}
+            QLabel {{ color: {theme_value('merge_conflict.label.text', '#e8e8e8')}; }}
+            QPushButton {{
+                background-color: {theme_value('merge_conflict.button.bg', '#1a1a1a')};
+                color: {theme_value('merge_conflict.button.text', '#e8e8e8')};
+                border: 1px solid {theme_value('merge_conflict.button.border', '#2a2a2a')};
                 padding: 6px 12px;
-            }
-            QPushButton:disabled {
-                color: #777;
-                border-color: #222;
-            }
+            }}
+            QPushButton:disabled {{
+                color: {theme_value('merge_conflict.button.disabled_text', '#777777')};
+                border-color: {theme_value('merge_conflict.button.disabled_border', '#222222')};
+            }}
             """
         )
         layout = QVBoxLayout(self)
         title = QLabel(f"Resolve conflict for {path}" if path else "Resolve conflict")
-        title.setStyleSheet("font-weight: bold;")
+        title.setStyleSheet(
+            "font-weight: "
+            f"{theme_value('merge_conflict.title.weight', 'bold')};"
+        )
         layout.addWidget(title)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -73,7 +78,10 @@ class MergeConflictDialog(QDialog):
         self._left_edit = QPlainTextEdit()
         self._left_edit.setReadOnly(True)
         self._left_edit.setStyleSheet(
-            "QPlainTextEdit { background-color: #101010; color: #e6e6e6; border: 1px solid #222; }"
+            "QPlainTextEdit { background-color: "
+            f"{theme_value('merge_conflict.editor.bg', '#101010')}; color: "
+            f"{theme_value('merge_conflict.editor.text', '#e6e6e6')}; border: 1px solid "
+            f"{theme_value('merge_conflict.editor.border', '#222222')}; }}"
         )
         left_layout.addWidget(left_label)
         left_layout.addWidget(self._left_edit)
@@ -95,7 +103,10 @@ class MergeConflictDialog(QDialog):
         self._right_edit = QPlainTextEdit()
         self._right_edit.setReadOnly(True)
         self._right_edit.setStyleSheet(
-            "QPlainTextEdit { background-color: #101010; color: #e6e6e6; border: 1px solid #222; }"
+            "QPlainTextEdit { background-color: "
+            f"{theme_value('merge_conflict.editor.bg', '#101010')}; color: "
+            f"{theme_value('merge_conflict.editor.text', '#e6e6e6')}; border: 1px solid "
+            f"{theme_value('merge_conflict.editor.border', '#222222')}; }}"
         )
         right_layout.addWidget(right_label)
         right_layout.addWidget(self._right_edit)
@@ -205,8 +216,18 @@ class MergeConflictDialog(QDialog):
             return
         tag, i1, i2, j1, j2 = self._diffs[self._current_diff]
         left_range = self._merged_ranges.get(self._current_diff, (i1, i2))
-        self._highlight_range(self._left_edit, left_range[0], left_range[1], QColor("#f6d365"))
-        self._highlight_range(self._right_edit, j1, j2, QColor("#a8dadc"))
+        self._highlight_range(
+            self._left_edit,
+            left_range[0],
+            left_range[1],
+            theme_color("merge_conflict.highlight.left", "#f6d365"),
+        )
+        self._highlight_range(
+            self._right_edit,
+            j1,
+            j2,
+            theme_color("merge_conflict.highlight.right", "#a8dadc"),
+        )
 
     def _highlight_range(self, editor: QPlainTextEdit, start: int, end: int, color: QColor) -> None:
         doc = editor.document()
@@ -224,7 +245,7 @@ class MergeConflictDialog(QDialog):
         cursor.setPosition(end_block.position() + end_block.length() - 1, QTextCursor.KeepAnchor)
         fmt = QTextCharFormat()
         fmt.setBackground(color)
-        fmt.setForeground(QColor("#111111"))
+        fmt.setForeground(theme_color("merge_conflict.highlight.text", "#111111"))
         selection = QTextEdit.ExtraSelection()
         selection.cursor = cursor
         selection.format = fmt

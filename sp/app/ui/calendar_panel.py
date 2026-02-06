@@ -47,6 +47,7 @@ from shiboken6 import Shiboken
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.app import config
 from sp.app import indexer
+from .theme import theme_color, theme_value
 from .path_utils import path_to_colon
 from .task_style import (
     contrast_text_color,
@@ -78,8 +79,8 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, calendar_widget=None):
         super().__init__(parent)
         self.multi_selected_dates = set()
-        self.highlight_color = QColor("#4A90E2")
-        self.text_color = QColor("#FFFFFF")
+        self.highlight_color = theme_color("calendar_panel.multi_select.highlight", "#4A90E2")
+        self.text_color = theme_color("calendar_panel.multi_select.text", "#FFFFFF")
         self.calendar_widget = calendar_widget
 
     def _date_for_index(self, index) -> QDate:
@@ -257,14 +258,22 @@ class CalendarPanel(QWidget):
         text_fg = palette.color(QPalette.Text)
         
         # Prominent selected day colors
-        selected_bg = "#2D7FF9"
-        selected_text = "#FFFFFF"
+        selected_bg = theme_value("calendar_panel.calendar.selected_bg", "#2D7FF9")
+        selected_text = theme_value("calendar_panel.calendar.selected_text", "#FFFFFF")
         self._calendar_selected_bg = QColor(selected_bg)
         self._calendar_selected_text = QColor(selected_text)
         
         # Friendly calendar styling
-        grid_color = "#DDDDDD" if is_light else "#555555"
-        header_bg = alt_bg.name() if alt_bg.isValid() else ("#3A3A3A" if not is_light else "#F5F5F5")
+        grid_color = (
+            theme_value("calendar_panel.calendar.grid_light", "#DDDDDD")
+            if is_light
+            else theme_value("calendar_panel.calendar.grid_dark", "#555555")
+        )
+        header_bg = alt_bg.name() if alt_bg.isValid() else (
+            theme_value("calendar_panel.calendar.header_dark", "#3A3A3A")
+            if not is_light
+            else theme_value("calendar_panel.calendar.header_light", "#F5F5F5")
+        )
         
         self.calendar.setStyleSheet(
             f"""
@@ -343,9 +352,12 @@ class CalendarPanel(QWidget):
         self.prev_calendar.setStyleSheet(self.calendar.styleSheet())
         self.prev_calendar.setStyleSheet(
             self.calendar.styleSheet()
-            + "\nQCalendarWidget { color: #a0a0a0; }"
-            + "\nQCalendarWidget QTableView::item { color: #a0a0a0; }"
-            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: #a0a0a0; border: none; }"
+            + "\nQCalendarWidget { color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; }}"
+            + "\nQCalendarWidget QTableView::item { color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; }}"
+            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; border: none; }}"
         )
         try:
             self.prev_calendar.setNavigationBarVisible(False)
@@ -360,7 +372,13 @@ class CalendarPanel(QWidget):
         self.prev_calendar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.prev_month_label = QLabel("")
         self.prev_month_label.setAlignment(Qt.AlignCenter)
-        self.prev_month_label.setStyleSheet("color: #9a9a9a; font-weight: 600; padding: 2px 0;")
+        self.prev_month_label.setStyleSheet(
+            "color: "
+            f"{theme_value('calendar_panel.month_label.color', '#9a9a9a')}; "
+            "font-weight: "
+            f"{theme_value('calendar_panel.month_label.weight', 600)}; "
+            "padding: 2px 0;"
+        )
         self.prev_calendar_container = QWidget()
         prev_layout = QVBoxLayout(self.prev_calendar_container)
         prev_layout.setContentsMargins(0, 0, 0, 0)
@@ -375,9 +393,12 @@ class CalendarPanel(QWidget):
         self.next_calendar.setStyleSheet(self.calendar.styleSheet())
         self.next_calendar.setStyleSheet(
             self.calendar.styleSheet()
-            + "\nQCalendarWidget { color: #a0a0a0; }"
-            + "\nQCalendarWidget QTableView::item { color: #a0a0a0; }"
-            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: #a0a0a0; border: none; }"
+            + "\nQCalendarWidget { color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; }}"
+            + "\nQCalendarWidget QTableView::item { color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; }}"
+            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: "
+            + f"{theme_value('calendar_panel.calendar.dim_text', '#a0a0a0')}; border: none; }}"
         )
         try:
             self.next_calendar.setNavigationBarVisible(False)
@@ -392,7 +413,13 @@ class CalendarPanel(QWidget):
         self.next_calendar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.next_month_label = QLabel("")
         self.next_month_label.setAlignment(Qt.AlignCenter)
-        self.next_month_label.setStyleSheet("color: #9a9a9a; font-weight: 600; padding: 2px 0;")
+        self.next_month_label.setStyleSheet(
+            "color: "
+            f"{theme_value('calendar_panel.month_label.color', '#9a9a9a')}; "
+            "font-weight: "
+            f"{theme_value('calendar_panel.month_label.weight', 600)}; "
+            "padding: 2px 0;"
+        )
         self.next_calendar_container = QWidget()
         next_layout = QVBoxLayout(self.next_calendar_container)
         next_layout.setContentsMargins(0, 0, 0, 0)
@@ -414,7 +441,13 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.setSpacing(6)
         self.insight_title = QLabel("No date selected")
         self.insight_title.setStyleSheet(
-            "font-weight: bold; background:#30475e; color:white; padding:4px 8px; border-radius:4px;"
+            "font-weight: "
+            f"{theme_value('calendar_panel.insight_title.weight', 'bold')}; "
+            "background:"
+            f"{theme_value('calendar_panel.insight_title.bg', '#30475e')}; "
+            "color:"
+            f"{theme_value('calendar_panel.insight_title.text', '#ffffff')}; "
+            "padding:4px 8px; border-radius:4px;"
         )
         # Title row with an optional Clear button when multiple days are selected
         title_row = QHBoxLayout()
@@ -422,7 +455,15 @@ class CalendarPanel(QWidget):
         title_row.setSpacing(6)
         self.filter_btn = QPushButton("Clear")
         self.filter_btn.setVisible(False)
-        self.filter_btn.setStyleSheet("background:#e53935; color:white; font-weight:bold; padding:2px 6px;")
+        self.filter_btn.setStyleSheet(
+            "background:"
+            f"{theme_value('calendar_panel.filter_button.bg', '#e53935')}; "
+            "color:"
+            f"{theme_value('calendar_panel.filter_button.text', '#ffffff')}; "
+            "font-weight:"
+            f"{theme_value('calendar_panel.filter_button.weight', 'bold')}; "
+            "padding:2px 6px;"
+        )
         self.filter_btn.setCursor(self.insight_title.cursor())
         self.filter_btn.clicked.connect(self._clear_filter)
         title_row.addWidget(self.insight_title)
@@ -464,10 +505,10 @@ class CalendarPanel(QWidget):
         self.subpage_list.setDragEnabled(True)
         self.subpage_list.setAlternatingRowColors(True)
         self.subpage_list.setStyleSheet(
-            """
-            QListWidget { background: #2f2f2f; color: #f0f0f0; }
-            QListWidget::item { padding: 2px 4px; background: #2f2f2f; }
-            QListWidget::item:alternate { background: #3a3a3a; }
+            f"""
+            QListWidget {{ background: {theme_value('calendar_panel.list.bg', '#2f2f2f')}; color: {theme_value('calendar_panel.list.text', '#f0f0f0')}; }}
+            QListWidget::item {{ padding: 2px 4px; background: {theme_value('calendar_panel.list.bg', '#2f2f2f')}; }}
+            QListWidget::item:alternate {{ background: {theme_value('calendar_panel.list.alt_bg', '#3a3a3a')}; }}
             """
         )
         # Ensure items do not wrap (single-line, elide) and use uniform sizing
@@ -483,10 +524,10 @@ class CalendarPanel(QWidget):
         self.headings_list.setDragEnabled(True)
         self.headings_list.setAlternatingRowColors(True)
         self.headings_list.setStyleSheet(
-            """
-            QListWidget { background: #2f2f2f; color: #f0f0f0; }
-            QListWidget::item { padding: 2px 4px; background: #2f2f2f; }
-            QListWidget::item:alternate { background: #363636; }
+            f"""
+            QListWidget {{ background: {theme_value('calendar_panel.list.bg', '#2f2f2f')}; color: {theme_value('calendar_panel.list.text', '#f0f0f0')}; }}
+            QListWidget::item {{ padding: 2px 4px; background: {theme_value('calendar_panel.list.bg', '#2f2f2f')}; }}
+            QListWidget::item:alternate {{ background: {theme_value('calendar_panel.list.alt_bg_alt', '#363636')}; }}
             """
         )
         try:
@@ -625,21 +666,21 @@ class CalendarPanel(QWidget):
         self.overdue_checkbox.setAutoRaise(True)
         self.overdue_checkbox.setToolTip("Include overdue tasks")
         self.overdue_checkbox.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 border: 1px solid transparent;
                 border-radius: 13px;
                 background: transparent;
                 padding: 2px;
-            }
-            QToolButton:hover {
-                border: 1px solid #666666;
-                background: rgba(255,255,255,0.06);
-            }
-            QToolButton:checked {
-                border: 1px solid #4a90e2;
-                background: rgba(74,144,226,0.22);
-            }
+            }}
+            QToolButton:hover {{
+                border: 1px solid {theme_value('calendar_panel.toggle.hover_border', '#666666')};
+                background: {theme_value('calendar_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+            }}
+            QToolButton:checked {{
+                border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
+                background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
             """
         )
         self.overdue_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
@@ -654,21 +695,21 @@ class CalendarPanel(QWidget):
         self.date_filter_btn.setEnabled(False)
         self.date_filter_btn.setFixedSize(26, 26)
         self.date_filter_btn.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 border: 1px solid transparent;
                 border-radius: 13px;
                 padding: 2px;
                 background: transparent;
-            }
-            QToolButton:hover {
-                border: 1px solid #666666;
-                background: rgba(255,255,255,0.06);
-            }
-            QToolButton:pressed {
-                border: 1px solid #4a90e2;
-                background: rgba(74,144,226,0.22);
-            }
+            }}
+            QToolButton:hover {{
+                border: 1px solid {theme_value('calendar_panel.toggle.hover_border', '#666666')};
+                background: {theme_value('calendar_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+            }}
+            QToolButton:pressed {{
+                border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
+                background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
             """
         )
         due_row_layout.addWidget(self.date_filter_btn)
@@ -682,21 +723,21 @@ class CalendarPanel(QWidget):
         self.future_checkbox.setAutoRaise(True)
         self.future_checkbox.setToolTip("Include future-starting tasks in this month")
         self.future_checkbox.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 border: 1px solid transparent;
                 border-radius: 13px;
                 background: transparent;
                 padding: 2px;
-            }
-            QToolButton:hover {
-                border: 1px solid #666666;
-                background: rgba(255,255,255,0.06);
-            }
-            QToolButton:checked {
-                border: 1px solid #4a90e2;
-                background: rgba(74,144,226,0.22);
-            }
+            }}
+            QToolButton:hover {{
+                border: 1px solid {theme_value('calendar_panel.toggle.hover_border', '#666666')};
+                background: {theme_value('calendar_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+            }}
+            QToolButton:checked {{
+                border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
+                background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
             """
         )
         self.future_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
@@ -755,20 +796,20 @@ class CalendarPanel(QWidget):
             pass
         self.today_btn.setMinimumHeight(28)
         self.today_btn.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 padding: 4px 10px;
                 border-radius: 6px;
-                border: 1px solid #2b6cb0;
-                background: #2b6cb0;
-                color: #ffffff;
-            }
-            QToolButton:hover {
-                background: #2f76c6;
-            }
-            QToolButton:pressed {
-                background: #255a92;
-            }
+                border: 1px solid {theme_value('calendar_panel.today.border', '#2b6cb0')};
+                background: {theme_value('calendar_panel.today.bg', '#2b6cb0')};
+                color: {theme_value('calendar_panel.today.text', '#ffffff')};
+            }}
+            QToolButton:hover {{
+                background: {theme_value('calendar_panel.today.hover_bg', '#2f76c6')};
+            }}
+            QToolButton:pressed {{
+                background: {theme_value('calendar_panel.today.pressed_bg', '#255a92')};
+            }}
             """
         )
         self.today_btn.clicked.connect(lambda: self.set_calendar_date(QDate.currentDate().year(), QDate.currentDate().month(), QDate.currentDate().day()))
@@ -1242,7 +1283,7 @@ class CalendarPanel(QWidget):
         future_on = "On" if self.future_checkbox.isChecked() else "Off"
         due_filters = f"Overdue: {overdue_on} · Future: {future_on}"
 
-        extra_css = """
+        extra_css = f"""
         .calendar-print {
             width: 100%;
             border-collapse: collapse;
@@ -1256,16 +1297,16 @@ class CalendarPanel(QWidget):
             width: 14.28%;
         }
         .calendar-day.today {
-            background: #4A90E2;
-            color: #fff;
+            background: {theme_value('calendar_panel.print.today_bg', '#4A90E2')};
+            color: {theme_value('calendar_panel.print.today_text', '#ffffff')};
             font-weight: 700;
         }
         .calendar-day.selected {
-            background: #d9e9ff;
+            background: {theme_value('calendar_panel.print.selected_bg', '#d9e9ff')};
             font-weight: 600;
         }
         .calendar-day.empty {
-            background: #fafafa;
+            background: {theme_value('calendar_panel.print.empty_bg', '#fafafa')};
         }
         .section {
             margin: 1em 0 1.4em;
@@ -1288,7 +1329,7 @@ class CalendarPanel(QWidget):
             vertical-align: top;
         }
         table.task-print th {
-            background: #f0f0f0;
+            background: {theme_value('calendar_panel.print.table_header_bg', '#f0f0f0')};
             font-weight: 600;
         }
         .task-text {
@@ -1388,7 +1429,10 @@ class CalendarPanel(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
         self.ai_title_label = QLabel("AI Insights")
-        self.ai_title_label.setStyleSheet("font-weight: bold;")
+        self.ai_title_label.setStyleSheet(
+            "font-weight: "
+            f"{theme_value('calendar_panel.ai.title_weight', 'bold')};"
+        )
         self.ai_delete_btn = QToolButton()
         self.ai_delete_btn.setIcon(self._load_svg_icon("icons8-trash.svg", QSize(20, 20)))
         self.ai_delete_btn.setToolTip("Delete AI summary for this day")
@@ -1413,7 +1457,15 @@ class CalendarPanel(QWidget):
         self.ai_markdown_view = QTextBrowser()
         self.ai_markdown_view.setOpenExternalLinks(True)
         self.ai_markdown_view.setReadOnly(True)
-        self.ai_markdown_view.setStyleSheet("background:#1f1f1f; color:#f0f0f0; border:1px solid #444; padding:10px;")
+        self.ai_markdown_view.setStyleSheet(
+            "background:"
+            f"{theme_value('calendar_panel.ai.view_bg', '#1f1f1f')}; "
+            "color:"
+            f"{theme_value('calendar_panel.ai.view_text', '#f0f0f0')}; "
+            "border:1px solid "
+            f"{theme_value('calendar_panel.ai.view_border', '#444444')}; "
+            "padding:10px;"
+        )
         layout.addLayout(header)
         layout.addWidget(self.ai_markdown_view, 1)
         self._set_ai_markdown("Click buton to generate a AI summary")
@@ -1464,9 +1516,8 @@ class CalendarPanel(QWidget):
             font_size = max(6, self._font_size)
             style = f"""
             <style>
-            body {{ background:#1f1f1f; color:#f0f0f0; font-size: {font_size}px;
-                   font-family: 'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial',
-                   'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif; }}
+            body {{ background:{theme_value('calendar_panel.ai.html_bg', '#1f1f1f')}; color:{theme_value('calendar_panel.ai.html_text', '#f0f0f0')}; font-size: {font_size}px;
+                   font-family: {theme_value('calendar_panel.ai.html_font', "'Noto Sans', 'Segoe UI', 'Helvetica', 'Arial', 'Noto Color Emoji', 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif")}; }}
             h1,h2,h3,h4,h5,h6 {{ margin: 0.4em 0 0.2em 0; }}
             ul,ol {{ margin-top: 0.2em; margin-bottom: 0.2em; }}
             </style>
@@ -2568,8 +2619,8 @@ class CalendarPanel(QWidget):
         font = row.font(0)
         font.setBold(True)
         row.setFont(0, font)
-        header_bg = QColor("#30475e")
-        header_fg = QColor("#FFFFFF")
+        header_bg = theme_color("calendar_panel.task_section.bg", "#30475e")
+        header_fg = theme_color("calendar_panel.task_section.text", "#FFFFFF")
         for col in range(self.tasks_due_list.columnCount()):
             row.setBackground(col, header_bg)
             row.setForeground(col, header_fg)
@@ -2651,7 +2702,7 @@ class CalendarPanel(QWidget):
         if not self._recent_data_loaded:
             load_item = QListWidgetItem("Click to load...")
             load_item.setData(RECENT_ACTION_ROLE, "load")
-            load_item.setForeground(QColor("#0066CC"))
+            load_item.setForeground(theme_color("calendar_panel.recent.load_link", "#0066CC"))
             try:
                 load_item.setToolTip("Click to load recently edited pages")
             except Exception:
@@ -2664,7 +2715,7 @@ class CalendarPanel(QWidget):
         # Show "Fetching data..." while loading
         if self._recent_fetching:
             fetch_item = QListWidgetItem("Fetching data...")
-            fetch_item.setForeground(QColor("#666666"))
+            fetch_item.setForeground(theme_color("calendar_panel.recent.fetching", "#666666"))
             self.recent_list.addItem(fetch_item)
             return
         
@@ -3556,7 +3607,7 @@ class CalendarPanel(QWidget):
         # Clear and show fetching message
         self.recent_list.clear()
         fetch_item = QListWidgetItem("Fetching data...")
-        fetch_item.setForeground(QColor("#666666"))
+        fetch_item.setForeground(theme_color("calendar_panel.recent.fetching", "#666666"))
         self.recent_list.addItem(fetch_item)
         
         # Use QTimer to allow UI to update before blocking call

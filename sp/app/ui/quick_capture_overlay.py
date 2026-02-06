@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
 )
 
+from .theme import theme_color, theme_value
+
 
 class QuickCaptureInput(QTextEdit):
     captureRequested = Signal()
@@ -133,8 +135,10 @@ class QuickCaptureOverlay(QDialog):
         card.setObjectName("QuickCaptureCard")
         card.setStyleSheet(
             "QFrame#QuickCaptureCard {"
-            "  background: #000000;"
-            "  border: 1px solid #222222;"
+            "  background: "
+            f"{theme_value('quick_capture.card.bg', '#000000')};"
+            "  border: 1px solid "
+            f"{theme_value('quick_capture.card.border', '#222222')};"
             "  border-radius: 10px;"
             "}"
         )
@@ -142,7 +146,9 @@ class QuickCaptureOverlay(QDialog):
             shadow = QGraphicsDropShadowEffect(card)
             shadow.setBlurRadius(24)
             shadow.setOffset(0, 6)
-            shadow.setColor(QColor(0, 0, 0, 90))
+            shadow.setColor(
+                QColor(0, 0, 0, int(theme_value("quick_capture.card.shadow_alpha", 90)))
+            )
             card.setGraphicsEffect(shadow)
         except Exception:
             pass
@@ -157,8 +163,15 @@ class QuickCaptureOverlay(QDialog):
         self.input.setMinimumHeight(90)
         self.input.setFocusPolicy(Qt.StrongFocus)
         self.input.setStyleSheet(
-            "font-size: 18px; color: white; background: rgba(255, 255, 255, 0.08);"
-            "border: 1px solid rgba(255, 255, 255, 0.5); padding: 8px; border-radius: 6px;"
+            "font-size: "
+            f"{theme_value('quick_capture.input.size_px', 18)}px; "
+            "color: "
+            f"{theme_value('quick_capture.input.text', '#ffffff')}; "
+            "background: "
+            f"{theme_value('quick_capture.input.bg', 'rgba(255, 255, 255, 0.08)')}; "
+            "border: 1px solid "
+            f"{theme_value('quick_capture.input.border', 'rgba(255, 255, 255, 0.5)')}; "
+            "padding: 8px; border-radius: 6px;"
         )
         self.input.captureRequested.connect(self._capture)
         self.input.dismissRequested.connect(self.reject)
@@ -167,24 +180,44 @@ class QuickCaptureOverlay(QDialog):
         layout.addWidget(self.input)
 
         hint = QLabel("Enter to capture, Esc to dismiss", card)
-        hint.setStyleSheet("color: #dfe6fa; font-size: 12px;")
+        hint.setStyleSheet(
+            "color: "
+            f"{theme_value('quick_capture.hint.color', '#dfe6fa')}; "
+            "font-size: "
+            f"{theme_value('quick_capture.hint.size_px', 12)}px;"
+        )
         layout.addWidget(hint)
 
         self.attachments_label = QLabel("", card)
-        self.attachments_label.setStyleSheet("color: #dfe6fa; font-size: 11px;")
+        self.attachments_label.setStyleSheet(
+            "color: "
+            f"{theme_value('quick_capture.attachments.color', '#dfe6fa')}; "
+            "font-size: "
+            f"{theme_value('quick_capture.attachments.size_px', 11)}px;"
+        )
         self.attachments_label.setWordWrap(True)
         layout.addWidget(self.attachments_label)
 
         if self._subtitle:
             sub = QLabel(self._subtitle, card)
-            sub.setStyleSheet("color: #9aa4b2; font-size: 11px;")
+            sub.setStyleSheet(
+                "color: "
+                f"{theme_value('quick_capture.subtitle.color', '#9aa4b2')}; "
+                "font-size: "
+                f"{theme_value('quick_capture.subtitle.size_px', 11)}px;"
+            )
             sub.setWordWrap(True)
             layout.addWidget(sub)
 
         if self._vault_options:
             vault_row = QHBoxLayout()
             vault_label = QLabel("Dropping to:", card)
-            vault_label.setStyleSheet("color: #9aa4b2; font-size: 11px;")
+            vault_label.setStyleSheet(
+                "color: "
+                f"{theme_value('quick_capture.vault_label.color', '#9aa4b2')}; "
+                "font-size: "
+                f"{theme_value('quick_capture.vault_label.size_px', 11)}px;"
+            )
             vault_row.addWidget(vault_label)
             self.vault_combo = QComboBox(card)
             for entry in self._vault_options:

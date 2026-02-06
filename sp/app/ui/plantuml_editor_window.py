@@ -35,6 +35,7 @@ from PySide6.QtGui import QPainter, QColor, QTextFormat
 from sp.app.plantuml_renderer import PlantUMLRenderer, RenderResult
 from .ai_chat_panel import ApiWorker, ServerManager
 from sp.app import config
+from .theme import theme_color, theme_value
 
 _LOGGING = os.getenv("ZIMX_PLANTUML_DEBUG", "0") not in ("0", "false", "False", "", None)
 
@@ -52,7 +53,10 @@ class LineNumberArea(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         # Slightly lighter than editor background (editor is ~30, line numbers ~40)
-        painter.fillRect(event.rect(), QColor(40, 40, 40))
+        painter.fillRect(
+            event.rect(),
+            theme_color("plantuml_editor.line_number.bg", "#282828"),
+        )
         
         block = self.editor.firstVisibleBlock()
         blockNumber = block.blockNumber()
@@ -60,7 +64,7 @@ class LineNumberArea(QWidget):
         bottom = top + self.editor.blockBoundingRect(block).height()
         
         # Line number text color: light gray
-        painter.setPen(QColor(128, 128, 128))
+        painter.setPen(theme_color("plantuml_editor.line_number.text", "#808080"))
         
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
@@ -612,21 +616,35 @@ def _generate_error_svg(error_msg: str, line_num: int = 0) -> str:
     
     line_info = f" (line {line_num})" if line_num > 0 else ""
     
+    bg = theme_value("plantuml_editor.error.bg", "#ffeeee")
+    title = theme_value("plantuml_editor.error.title", "#cc0000")
+    msg = theme_value("plantuml_editor.error.message", "#333333")
+    line = theme_value("plantuml_editor.error.line", "#666666")
+    box_fill = theme_value("plantuml_editor.error.box_fill", "#ffe6e6")
+    box_stroke = theme_value("plantuml_editor.error.box_stroke", "#ff9999")
+    box_text = theme_value("plantuml_editor.error.box_text", "#333333")
+    error_font = theme_value("plantuml_editor.error.font_family", "monospace")
+    title_size = theme_value("plantuml_editor.error.title_size_px", 24)
+    title_weight = theme_value("plantuml_editor.error.title_weight", "bold")
+    message_size = theme_value("plantuml_editor.error.message_size_px", 14)
+    line_size = theme_value("plantuml_editor.error.line_size_px", 12)
+    box_font_size = theme_value("plantuml_editor.error.box_font_size_px", 13)
+    box_line_height = theme_value("plantuml_editor.error.box_line_height", 1.4)
     svg = f"""<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentScriptType="application/ecmascript" contentStyleType="text/css" height="400px" preserveAspectRatio="none" style="width:800px;height:400px;background:#ffeeee" version="1.1" viewBox="0 0 800 400" width="800px" zoomAndPan="magnify">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentScriptType="application/ecmascript" contentStyleType="text/css" height="400px" preserveAspectRatio="none" style="width:800px;height:400px;background:{bg}" version="1.1" viewBox="0 0 800 400" width="800px" zoomAndPan="magnify">
     <defs>
         <style type="text/css"><![CDATA[
             * {{ margin: 0; padding: 0; }}
-            .error-title {{ font-size: 24px; font-weight: bold; fill: #cc0000; font-family: monospace; }}
-            .error-message {{ font-size: 14px; fill: #333333; font-family: monospace; word-wrap: break-word; }}
-            .error-line {{ font-size: 12px; fill: #666666; font-family: monospace; }}
-            .error-box {{ fill: #ffe6e6; stroke: #ff9999; stroke-width: 2; }}
+            .error-title {{ font-size: {title_size}px; font-weight: {title_weight}; fill: {title}; font-family: {error_font}; }}
+            .error-message {{ font-size: {message_size}px; fill: {msg}; font-family: {error_font}; word-wrap: break-word; }}
+            .error-line {{ font-size: {line_size}px; fill: {line}; font-family: {error_font}; }}
+            .error-box {{ fill: {box_fill}; stroke: {box_stroke}; stroke-width: 2; }}
         ]]></style>
     </defs>
     <rect class="error-box" x="20" y="20" width="760" height="360" rx="5" ry="5"/>
     <text class="error-title" x="40" y="60">⚠ PlantUML Render Error{line_info}</text>
     <foreignObject x="40" y="90" width="720" height="280">
-        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: monospace; font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; line-height: 1.4;">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: {error_font}; font-size: {box_font_size}px; color: {box_text}; white-space: pre-wrap; word-break: break-word; line-height: {box_line_height};">
             {error_display}
         </div>
     </foreignObject>
@@ -704,7 +722,11 @@ class PlantUMLEditorWindow(QMainWindow):
         
         # Manual render status label
         self.render_status_label = QLabel()
-        self.render_status_label.setStyleSheet("color: #ffa500; font-style: italic; margin-left: 10px;")
+        self.render_status_label.setStyleSheet(
+            "color: "
+            f"{theme_value('plantuml_editor.render_status.color', '#ffa500')}; "
+            "font-style: italic; margin-left: 10px;"
+        )
         editor_section.addWidget(self.render_status_label)
         self._update_render_status_label()
         
@@ -819,16 +841,18 @@ class PlantUMLEditorWindow(QMainWindow):
         self.editor.setPlaceholderText("Enter PlantUML diagram code here...")
         self.editor.setFont(self._get_monospace_font())
         # Style editor to look more like a code editor
-        self.editor.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3e3e3e;
+        self.editor.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                background-color: {theme_value('plantuml_editor.editor.bg', '#1e1e1e')};
+                color: {theme_value('plantuml_editor.editor.text', '#d4d4d4')};
+                border: 1px solid {theme_value('plantuml_editor.editor.border', '#3e3e3e')};
                 padding: 8px;
-                selection-background-color: #264f78;
-                selection-color: #ffffff;
-            }
-        """)
+                selection-background-color: {theme_value('plantuml_editor.editor.selection_bg', '#264f78')};
+                selection-color: {theme_value('plantuml_editor.editor.selection_text', '#ffffff')};
+            }}
+        """
+        )
         self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
         main_h_splitter.addWidget(self.editor)
         
@@ -842,11 +866,16 @@ class PlantUMLEditorWindow(QMainWindow):
         
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
-        self.preview_scroll.setStyleSheet("QScrollArea { background-color: #f0f0f0; }")
+        self.preview_scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {theme_value('plantuml_editor.preview.bg', '#f0f0f0')}; }}"
+        )
         
         self.preview_label = ZoomablePreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setStyleSheet("QLabel { background-color: white; border: 1px solid #ccc; }")
+        self.preview_label.setStyleSheet(
+            f"QLabel {{ background-color: {theme_value('plantuml_editor.preview.label_bg', '#ffffff')}; "
+            f"border: 1px solid {theme_value('plantuml_editor.preview.border', '#cccccc')}; }}"
+        )
         self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
         self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
@@ -908,7 +937,11 @@ class PlantUMLEditorWindow(QMainWindow):
         self._restore_geometry_prefs()
 
         # Status badge for vi insert mode (INS)
-        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        self._badge_base_style = (
+            "border: 1px solid "
+            f"{theme_value('plantuml_editor.badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label = QLabel("INS")
         self._vi_status_label.setObjectName("viStatusLabel")
@@ -979,13 +1012,16 @@ class PlantUMLEditorWindow(QMainWindow):
         if not hasattr(self, "_vi_status_label"):
             return
         style = self._vi_badge_base_style
+        active_bg = theme_value("plantuml_editor.vi_badge.active_bg", "#ffd54d")
+        active_text = theme_value("plantuml_editor.vi_badge.active_text", "#000000")
+        inactive_text = theme_value("plantuml_editor.vi_badge.inactive_text", "#e0e0e0")
         if self._vi_enabled:
             if insert_active:
-                style += " background-color: #ffd54d; color: #000;"
+                style += f" background-color: {active_bg}; color: {active_text};"
             else:
-                style += " background-color: transparent; color: #e0e0e0;"
+                style += f" background-color: transparent; color: {inactive_text};"
         else:
-            style += " background-color: transparent; color: #e0e0e0;"
+            style += f" background-color: transparent; color: {inactive_text};"
         self._vi_status_label.setStyleSheet(style)
 
     def _on_auto_render_toggled(self, checked: bool) -> None:
@@ -1010,23 +1046,31 @@ class PlantUMLEditorWindow(QMainWindow):
         """Create a loading overlay widget with spinner."""
         overlay = QWidget(parent)
         overlay.setObjectName("loadingOverlay")
-        overlay.setStyleSheet("""
-            QWidget#loadingOverlay {
-                background-color: rgba(0, 0, 0, 220);
-            }
-            QLabel {
-                color: white;
-                font-size: 16px;
-                font-weight: bold;
-            }
-        """)
+        overlay_bg = theme_value("plantuml_editor.loading.overlay_bg", "rgba(0, 0, 0, 220)")
+        label_color = theme_value("plantuml_editor.loading.label_text", "#ffffff")
+        label_size = theme_value("plantuml_editor.loading.label_size_px", 16)
+        label_weight = theme_value("plantuml_editor.loading.label_weight", "bold")
+        overlay.setStyleSheet(
+            f"""
+            QWidget#loadingOverlay {{
+                background-color: {overlay_bg};
+            }}
+            QLabel {{
+                color: {label_color};
+                font-size: {label_size}px;
+                font-weight: {label_weight};
+            }}
+        """
+        )
         
         layout = QVBoxLayout(overlay)
         layout.setAlignment(Qt.AlignCenter)
         
         # Spinner label (using Unicode spinner character)
         self.spinner_label = QLabel("⟳")
-        self.spinner_label.setStyleSheet("font-size: 80px; color: #4CAF50;")
+        spinner_size = theme_value("plantuml_editor.loading.spinner_size_px", 80)
+        spinner_color = theme_value("plantuml_editor.loading.spinner_color", "#4CAF50")
+        self.spinner_label.setStyleSheet(f"font-size: {spinner_size}px; color: {spinner_color};")
         self.spinner_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.spinner_label)
         
@@ -1303,7 +1347,15 @@ class PlantUMLEditorWindow(QMainWindow):
     def _create_ai_chat_panel(self) -> QWidget:
         """Create AI chat panel with message input and send button."""
         panel = QWidget()
-        panel.setStyleSheet("QWidget { background-color: #1e1e1e; border-top: 1px solid #444; } QLineEdit { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #444; }")
+        panel_bg = theme_value("plantuml_editor.chat_panel.bg", "#1e1e1e")
+        panel_border = theme_value("plantuml_editor.chat_panel.border", "#444444")
+        input_bg = theme_value("plantuml_editor.chat_panel.input_bg", "#2d2d2d")
+        input_text = theme_value("plantuml_editor.chat_panel.input_text", "#e0e0e0")
+        input_border = theme_value("plantuml_editor.chat_panel.input_border", "#444444")
+        panel.setStyleSheet(
+            f"QWidget {{ background-color: {panel_bg}; border-top: 1px solid {panel_border}; }} "
+            f"QLineEdit {{ background-color: {input_bg}; color: {input_text}; border: 1px solid {input_border}; }}"
+        )
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1559,30 +1611,44 @@ class PlantUMLEditorWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Review AI Generated Diagram - Accept or Decline")
         dialog.setGeometry(50, 50, 1400, 800)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #1e1e1e;
-            }
-            QLabel {
-                color: #e0e0e0;
-            }
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #444;
+        dialog_bg = theme_value("plantuml_editor.diff_dialog.bg", "#1e1e1e")
+        dialog_label = theme_value("plantuml_editor.diff_dialog.label", "#e0e0e0")
+        button_bg = theme_value("plantuml_editor.diff_dialog.button_bg", "#2d2d2d")
+        button_text = theme_value("plantuml_editor.diff_dialog.button_text", "#e0e0e0")
+        button_border = theme_value("plantuml_editor.diff_dialog.button_border", "#444444")
+        button_hover = theme_value("plantuml_editor.diff_dialog.button_hover", "#3d3d3d")
+        button_weight = theme_value("plantuml_editor.diff_dialog.button_weight", "bold")
+        dialog.setStyleSheet(
+            f"""
+            QDialog {{
+                background-color: {dialog_bg};
+            }}
+            QLabel {{
+                color: {dialog_label};
+            }}
+            QPushButton {{
+                background-color: {button_bg};
+                color: {button_text};
+                border: 1px solid {button_border};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #3d3d3d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {button_hover};
+            }}
+        """
+        )
         
         layout = QVBoxLayout()
         
         # Title
         title = QLabel("Review Changes - Left: Current | Right: AI Generated")
-        title.setStyleSheet("color: #e0e0e0; font-weight: bold; font-size: 12px; padding: 5px;")
+        title_color = theme_value("plantuml_editor.diff_dialog.title_color", "#e0e0e0")
+        title_weight = theme_value("plantuml_editor.diff_dialog.title_weight", "bold")
+        title_size = theme_value("plantuml_editor.diff_dialog.title_size_px", 12)
+        title.setStyleSheet(
+            f"color: {title_color}; font-weight: {title_weight}; font-size: {title_size}px; padding: 5px;"
+        )
         layout.addWidget(title)
         
         # Side-by-side diff comparison
@@ -1593,7 +1659,8 @@ class PlantUMLEditorWindow(QMainWindow):
         left_layout = QVBoxLayout()
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_label = QLabel("Current PlantUML")
-        left_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        label_weight = theme_value("plantuml_editor.diff_dialog.label_weight", "bold")
+        left_label.setStyleSheet(f"color: {dialog_label}; font-weight: {label_weight};")
         left_layout.addWidget(left_label)
         
         original_text = self.editor.toPlainText()
@@ -1606,7 +1673,7 @@ class PlantUMLEditorWindow(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_label = QLabel("AI Generated PlantUML")
-        right_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        right_label.setStyleSheet(f"color: {dialog_label}; font-weight: {label_weight};")
         right_layout.addWidget(right_label)
         
         right_display = self._create_diff_display(original_text, ai_text, is_original=False)
@@ -1624,35 +1691,47 @@ class PlantUMLEditorWindow(QMainWindow):
         
         accept_btn = QPushButton("✓ Accept Changes")
         accept_btn.setMinimumWidth(150)
-        accept_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1e5c1e;
-                color: #90ee90;
-                border: 1px solid #4caf50;
+        accept_bg = theme_value("plantuml_editor.diff_dialog.accept_bg", "#1e5c1e")
+        accept_text = theme_value("plantuml_editor.diff_dialog.accept_text", "#90ee90")
+        accept_border = theme_value("plantuml_editor.diff_dialog.accept_border", "#4caf50")
+        accept_hover = theme_value("plantuml_editor.diff_dialog.accept_hover", "#2d7a2d")
+        accept_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {accept_bg};
+                color: {accept_text};
+                border: 1px solid {accept_border};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2d7a2d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {accept_hover};
+            }}
+        """
+        )
         accept_btn.clicked.connect(lambda: self._accept_ai_response(ai_text, dialog))
         button_layout.addWidget(accept_btn)
         
         decline_btn = QPushButton("✗ Decline")
         decline_btn.setMinimumWidth(150)
-        decline_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5c1e1e;
-                color: #ff6b6b;
-                border: 1px solid #f44336;
+        decline_bg = theme_value("plantuml_editor.diff_dialog.decline_bg", "#5c1e1e")
+        decline_text = theme_value("plantuml_editor.diff_dialog.decline_text", "#ff6b6b")
+        decline_border = theme_value("plantuml_editor.diff_dialog.decline_border", "#f44336")
+        decline_hover = theme_value("plantuml_editor.diff_dialog.decline_hover", "#7a2d2d")
+        decline_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {decline_bg};
+                color: {decline_text};
+                border: 1px solid {decline_border};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7a2d2d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {decline_hover};
+            }}
+        """
+        )
         decline_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(decline_btn)
         
@@ -1672,16 +1751,23 @@ class PlantUMLEditorWindow(QMainWindow):
         """Create a text display with diff highlighting."""
         display = QTextEdit()
         display.setReadOnly(True)
-        display.setStyleSheet("""
-            QTextEdit {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #444;
+        diff_bg = theme_value("plantuml_editor.diff_display.bg", "#2d2d2d")
+        diff_text = theme_value("plantuml_editor.diff_display.text", "#e0e0e0")
+        diff_border = theme_value("plantuml_editor.diff_display.border", "#444444")
+        diff_font = theme_value("plantuml_editor.diff_display.font_family", "Courier, monospace")
+        diff_size = theme_value("plantuml_editor.diff_display.font_size_px", 10)
+        display.setStyleSheet(
+            f"""
+            QTextEdit {{
+                background-color: {diff_bg};
+                color: {diff_text};
+                border: 1px solid {diff_border};
                 padding: 5px;
-                font-family: Courier, monospace;
-                font-size: 10px;
-            }
-        """)
+                font-family: {diff_font};
+                font-size: {diff_size}px;
+            }}
+        """
+        )
         
         if is_original:
             # Show original text with removed lines highlighted in red
@@ -1712,13 +1798,13 @@ class PlantUMLEditorWindow(QMainWindow):
                     if line != original_lines[i]:
                         # Changed line - orange/yellow
                         fmt = QTextCharFormat()
-                        fmt.setBackground(QBrush(QColor(100, 80, 0)))  # Dark orange
+                        fmt.setBackground(QBrush(theme_color("plantuml_editor.diff.changed_bg", "#645000")))
                         cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                         cursor.setCharFormat(fmt)
                 else:
                     # New line - green
                     fmt = QTextCharFormat()
-                    fmt.setBackground(QBrush(QColor(0, 80, 0)))  # Dark green
+                    fmt.setBackground(QBrush(theme_color("plantuml_editor.diff.added_bg", "#005000")))
                     cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                     cursor.setCharFormat(fmt)
                 
@@ -1732,13 +1818,13 @@ class PlantUMLEditorWindow(QMainWindow):
                     if line != modified_lines[i]:
                         # Changed line - orange/yellow
                         fmt = QTextCharFormat()
-                        fmt.setBackground(QBrush(QColor(100, 80, 0)))  # Dark orange
+                        fmt.setBackground(QBrush(theme_color("plantuml_editor.diff.changed_bg", "#645000")))
                         cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                         cursor.setCharFormat(fmt)
                 else:
                     # Removed line - red
                     fmt = QTextCharFormat()
-                    fmt.setBackground(QBrush(QColor(80, 0, 0)))  # Dark red
+                    fmt.setBackground(QBrush(theme_color("plantuml_editor.diff.removed_bg", "#500000")))
                     cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                     cursor.setCharFormat(fmt)
                 

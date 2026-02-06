@@ -39,6 +39,7 @@ from markdown import markdown
 
 # Use stillpoint_config for global config storage
 from sp.app import config, config as stillpoint_config
+from .theme import theme_color, theme_value
 from sp.ai.manager import AIManager, ContextItem
 from sp.rag.index import RetrievedChunk
 from .path_utils import path_to_colon
@@ -995,7 +996,12 @@ class ServerConfigDialog(QtWidgets.QDialog):
         self.verify_status_label = QtWidgets.QLabel("")
         self.verify_status_label.setWordWrap(True)
         self.duplicate_label = QtWidgets.QLabel("")
-        self.duplicate_label.setStyleSheet("color: red; font-weight: bold;")
+        self.duplicate_label.setStyleSheet(
+            "color: "
+            f"{theme_value('ai_chat_panel.duplicate.color', '#ff0000')}; "
+            "font-weight: "
+            f"{theme_value('ai_chat_panel.duplicate.weight', 'bold')};"
+        )
         self.duplicate_label.hide()
         layout.addRow("Name", self.name_edit)
         layout.addRow("Base URL", self.base_edit)
@@ -1351,7 +1357,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self.global_btn.clicked.connect(lambda: self.open_chat_for_page(None))
         icon_row.addWidget(self.global_btn)
         self.context_label = QtWidgets.QLabel("")
-        self.context_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        self.context_label.setStyleSheet(
+            "color: "
+            f"{theme_value('ai_chat_panel.context_label.color', '#e0e0e0')}; "
+            "font-weight: "
+            f"{theme_value('ai_chat_panel.context_label.weight', 'bold')};"
+        )
         icon_row.addWidget(self.context_label)
         icon_row.addStretch()
         # Move toggles to the right
@@ -1386,7 +1397,12 @@ class AIChatPanel(QtWidgets.QWidget):
         icon_row.addWidget(self.zoom_out_btn)
         icon_row.addWidget(self.zoom_in_btn)
         self.load_page_chat_label = ClickableLabel("")
-        self.load_page_chat_label.setStyleSheet("color:#cc2222; font-weight:bold;")
+        self.load_page_chat_label.setStyleSheet(
+            "color:"
+            f"{theme_value('ai_chat_panel.load_page.color', '#cc2222')}; "
+            "font-weight:"
+            f"{theme_value('ai_chat_panel.load_page.weight', 'bold')};"
+        )
         self.load_page_chat_label.setVisible(False)
         self.load_page_chat_label.clicked.connect(self._load_current_page_chat)
         icon_row.addWidget(self.load_page_chat_label)
@@ -1415,7 +1431,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.prompt_btn.setVisible(False)
         model_row.addWidget(self.prompt_btn)
         # Use a compact font size for model/server controls
-        compact_css = "font-size: 12px;"
+        compact_css = f"font-size: {theme_value('ai_chat_panel.compact_font_size_px', 12)}px;"
         self.server_config_widget.setStyleSheet(compact_css)
         self.prompt_btn.setStyleSheet(compact_css)
         refresh_models_btn.setStyleSheet(compact_css)
@@ -1432,7 +1448,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self.context_refresh_btn.clicked.connect(self._refresh_current_page_context)
         context_layout.addWidget(self.context_refresh_btn)
         self.context_summary_label = ClickableLabel("Context: —")
-        self.context_summary_label.setStyleSheet("color: #007acc; text-decoration: underline;")
+        self.context_summary_label.setStyleSheet(
+            "color: "
+            f"{theme_value('ai_chat_panel.context_summary.color', '#007acc')}; "
+            "text-decoration: underline;"
+        )
         self.context_summary_label.clicked.connect(self._show_context_popup)
         context_layout.addWidget(self.context_summary_label)
         context_layout.addStretch()
@@ -1471,9 +1491,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setStyleSheet(
             "QTextBrowser {"
             "  padding: 6px;"
-            "  background: #0b0b0b;"
-            "  color: #d6f5d6;"
-            "  border: 1px solid #1f1f1f;"
+            "  background: "
+            f"{theme_value('ai_chat_panel.chat_view.bg', '#0b0b0b')};"
+            "  color: "
+            f"{theme_value('ai_chat_panel.chat_view.text', '#d6f5d6')};"
+            "  border: 1px solid "
+            f"{theme_value('ai_chat_panel.chat_view.border', '#1f1f1f')};"
             "}"
         )
         self.chat_view.installEventFilter(self)
@@ -1508,7 +1531,14 @@ class AIChatPanel(QtWidgets.QWidget):
         self.stop_btn.setIconSize(QSize(10, 10))
         self.stop_btn.clicked.connect(self._cancel_active_operation)
         self.stop_btn.setFixedWidth(28)
-        self.stop_btn.setStyleSheet("background:#e53935; color:white; border:1px solid #c62828;")
+        self.stop_btn.setStyleSheet(
+            "background:"
+            f"{theme_value('ai_chat_panel.stop_button.bg', '#e53935')}; "
+            "color:"
+            f"{theme_value('ai_chat_panel.stop_button.text', '#ffffff')}; "
+            "border:1px solid "
+            f"{theme_value('ai_chat_panel.stop_button.border', '#c62828')};"
+        )
         self.send_btn = QtWidgets.QToolButton()
         self.send_btn.setToolTip("Send message (Ctrl+Enter)")
         send_icon = _load_icon("send-message.svg", QSize(10, 10))
@@ -1534,7 +1564,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel()
         right_layout.addWidget(self.status_label)
         self.model_status_label = QtWidgets.QLabel()
-        self.model_status_label.setStyleSheet("font-size: 10px; color: #888;")
+        self.model_status_label.setStyleSheet(
+            "font-size: "
+            f"{theme_value('ai_chat_panel.model_status.size_px', 10)}px; "
+            "color: "
+            f"{theme_value('ai_chat_panel.model_status.color', '#888888')};"
+        )
         self.model_status_label.setWordWrap(False)
         self.model_status_label.setMinimumWidth(0)
         self.model_status_label.setMaximumWidth(500)
@@ -1834,9 +1869,9 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _render_messages(self) -> None:
         parts: List[str] = []
-        base_color = "#0b0b0b"
-        text_color = "#d6f5d6"
-        accent = "#7fd4a7"
+        base_color = theme_value("ai_chat_panel.chat_html.base_bg", "#0b0b0b")
+        text_color = theme_value("ai_chat_panel.chat_html.text", "#d6f5d6")
+        accent = theme_value("ai_chat_panel.chat_html.accent", "#7fd4a7")
         parts.append(
             f"<style>body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
@@ -1844,14 +1879,15 @@ class AIChatPanel(QtWidgets.QWidget):
             f".actions {{ text-align:left; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
-            f".user {{ color:#f2e7a1; background:transparent; }}"
-            f".assistant {{ color:#8fe39b; background:transparent; }}"
-            f".summary {{ border:1px solid #2f4f2f; }}"
+            f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', '#f2e7a1')}; background:transparent; }}"
+            f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', '#8fe39b')}; background:transparent; }}"
+            f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', '#2f4f2f')}; }}"
             f".think-toggle {{ margin-top:6px; color:{accent}; text-decoration:none; display:inline-block; }}"
             f".think-active a {{ animation: thinkPulse 1.2s infinite; }}"
-            f".think-body {{ margin-top:6px; padding:6px; border:2px solid #ffffff;"
+            f".think-body {{ margin-top:6px; padding:6px; border:2px solid "
+            f"{theme_value('ai_chat_panel.chat_html.think_border', '#ffffff')};"
             f" background:rgba(0,0,0,0.35); max-height:7em; overflow:auto; white-space:pre-wrap;"
-            f" color:#bdbdbd; }}"
+            f" color:{theme_value('ai_chat_panel.chat_html.think_text', '#bdbdbd')}; }}"
             f"@keyframes thinkPulse {{ 0% {{ opacity:0.4; }} 50% {{ opacity:1; }} 100% {{ opacity:0.4; }} }}"
             f".role {{ font-weight:bold; color:{accent}; }}</style>"
         )
@@ -2143,12 +2179,18 @@ class AIChatPanel(QtWidgets.QWidget):
         if not candidates:
             if trigger in ("@", "#") and self.vault_root:
                 if self._context_reload_in_progress:
-                    self._set_status("Building context index…", "#f6c343")
+                    self._set_status(
+                        "Building context index…",
+                        theme_value("ai_chat_panel.status.warning", "#f6c343"),
+                    )
                     if attempt < 6:
                         QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
                     return
                 self._reload_context_index()
-                self._set_status("Building context index…", "#f6c343")
+                self._set_status(
+                    "Building context index…",
+                    theme_value("ai_chat_panel.status.warning", "#f6c343"),
+                )
                 if attempt < 6:
                     QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
                 return
@@ -2454,7 +2496,10 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self._vector_api.available():
             _log_vector(f"Skipping refresh for context {item.page_ref} ({item.kind}) — client unavailable.")
             return
-        self._set_status("Refreshing context...", "#f6c343")
+        self._set_status(
+            "Refreshing context...",
+            theme_value("ai_chat_panel.status.warning", "#f6c343"),
+        )
         try:
             self._delete_context_source(item)
         except Exception:
@@ -2489,7 +2534,10 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         kind = {"@": "page", "#": "page-tree"}.get(trigger, "attachment")
         _log_vector(f"Indexing {kind} context for {candidate.page_ref}")
-        self._set_status(f"Indexing context: {kind}", "#f6c343")
+        self._set_status(
+            f"Indexing context: {kind}",
+            theme_value("ai_chat_panel.status.warning", "#f6c343"),
+        )
         if trigger == "@":
             text = self._read_page_text(candidate.page_ref)
             self._vector_api.index_text(candidate.page_ref, text, kind="page")
@@ -2510,7 +2558,10 @@ class AIChatPanel(QtWidgets.QWidget):
                 f"({attachment_path or 'path unavailable'})"
             )
             self._vector_api.index_text(candidate.page_ref, text, kind="attachment", attachment=candidate.attachment_name)
-        self._set_status("Context indexed.", "#2ecc71")
+        self._set_status(
+            "Context indexed.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
 
     def _delete_context_source(self, item: ContextItem) -> None:
         if not self._vector_api.available():
@@ -3048,7 +3099,10 @@ class AIChatPanel(QtWidgets.QWidget):
             self.condense_btn.setEnabled(True)
         if cancelled:
             self._render_messages()
-            self._set_status("Cancelled.", "#2ecc71")
+            self._set_status(
+                "Cancelled.",
+                theme_value("ai_chat_panel.status.success", "#2ecc71"),
+            )
         self._update_stop_button()
 
     def _send_message(self) -> None:
@@ -3108,7 +3162,10 @@ class AIChatPanel(QtWidgets.QWidget):
             self._condense_worker.finished.connect(self._handle_condense_finished)
             self._condense_worker.failed.connect(self._handle_condense_error)
             self._condense_worker.start()
-            self._set_status("Condensing chat…", "#f6c343")
+            self._set_status(
+                "Condensing chat…",
+                theme_value("ai_chat_panel.status.warning", "#f6c343"),
+            )
             self.condense_btn.setEnabled(False)
             self._update_stop_button()
         except Exception as exc:
@@ -3158,7 +3215,10 @@ class AIChatPanel(QtWidgets.QWidget):
             self._api_worker.failed.connect(self._handle_error)
             self._api_worker.start()
             self.send_btn.setEnabled(False)
-            self._set_status("Waiting for response…", "#f6c343")
+            self._set_status(
+                "Waiting for response…",
+                theme_value("ai_chat_panel.status.warning", "#f6c343"),
+            )
             self._update_stop_button()
         except Exception as exc:
             self.messages.pop()  # remove assistant placeholder
@@ -3206,7 +3266,10 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
         self._render_messages()
-        self._set_status("Response received.", "#2ecc71")
+        self._set_status(
+            "Response received.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
         try:
             if clean_full:
                 QtWidgets.QApplication.clipboard().setText(self._sanitize_for_clipboard(clean_full))
@@ -3241,7 +3304,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self.condense_btn.setEnabled(True)
         self._render_messages()
-        self._set_status("Condensed chat ready.", "#2ecc71")
+        self._set_status(
+            "Condensed chat ready.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
         self._update_stop_button()
 
     def _handle_condense_error(self, err: str) -> None:
@@ -3254,7 +3320,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self.condense_btn.setEnabled(True)
         self._render_messages()
         if err == "Cancelled":
-            self._set_status("Condense cancelled.", "#2ecc71")
+            self._set_status(
+                "Condense cancelled.",
+                theme_value("ai_chat_panel.status.success", "#2ecc71"),
+            )
         else:
             self._set_status(f"Condense failed: {err}")
         self._update_stop_button()
@@ -3293,7 +3362,10 @@ class AIChatPanel(QtWidgets.QWidget):
             self.messages[-1] = ("assistant", f"[error] {err}")
         self._render_messages()
         if err == "Cancelled":
-            self._set_status("Cancelled.", "#2ecc71")
+            self._set_status(
+                "Cancelled.",
+                theme_value("ai_chat_panel.status.success", "#2ecc71"),
+            )
         else:
             self._set_status(f"API error: {err}")
         self.send_btn.setEnabled(True)
@@ -3420,7 +3492,10 @@ class AIChatPanel(QtWidgets.QWidget):
                 self._select_default_chat()
         else:
             self._load_chat_tree()
-        self._set_status("Chat deleted.", "#2ecc71")
+        self._set_status(
+            "Chat deleted.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()
@@ -3484,7 +3559,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_buffer = ""
         self._summary_content = None
         self._render_messages()
-        self._set_status("Chat condensed.", "#2ecc71")
+        self._set_status(
+            "Chat condensed.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
 
     def _reject_summary(self) -> None:
         self._condense_buffer = ""
@@ -3904,11 +3982,15 @@ class ContextOverlay(QtWidgets.QFrame):
         layout.setSpacing(4)
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter context…")
-        self.filter_edit.setStyleSheet("font-size: 9px;")
+        self.filter_edit.setStyleSheet(
+            f"font-size: {theme_value('ai_chat_panel.context_picker.font_size_px', 9)}px;"
+        )
         self.filter_edit.textChanged.connect(self._filter_items)
         layout.addWidget(self.filter_edit)
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("font-size: 9px;")
+        self.list_widget.setStyleSheet(
+            f"font-size: {theme_value('ai_chat_panel.context_picker.font_size_px', 9)}px;"
+        )
         # Accept selection via keyboard (Enter) or mouse click
         self.list_widget.itemActivated.connect(self._on_item_activated)
         self.list_widget.itemClicked.connect(self._on_item_activated)
@@ -4042,7 +4124,9 @@ class ContextListPopup(QtWidgets.QFrame):
         layout.addWidget(header)
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Action", "Name", "Type"])
-        self.table.setStyleSheet("font-size: 9px;")
+        self.table.setStyleSheet(
+            f"font-size: {theme_value('ai_chat_panel.context_picker.font_size_px', 9)}px;"
+        )
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)

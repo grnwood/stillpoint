@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import sys
+import shutil
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -28,10 +30,12 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from pathlib import Path
-from PySide6.QtGui import QFontDatabase, QFont
+from PySide6.QtGui import QFontDatabase, QFont, QDesktopServices
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QUrl
 
 from sp.app import config
+from . import theme as theme_module
 
 
 class PreferencesDialog(QDialog):
@@ -169,6 +173,105 @@ class PreferencesDialog(QDialog):
         general_layout.addLayout(row_capture_hotkey)
 
         general_layout.addStretch(1)
+
+        # Appearance
+        appearance_layout = add_section("Appearance")
+        appearance_layout.addWidget(QLabel("<b>Fonts</b>"))
+        row_fonts_app = QHBoxLayout()
+        row_fonts_app.addWidget(QLabel("Application font:"))
+        self.application_font_combo = self._build_font_combo("System Default")
+        try:
+            app_font = config.load_application_font()
+        except Exception:
+            app_font = None
+        self._select_font(self.application_font_combo, app_font)
+        self.application_font_combo.currentIndexChanged.connect(self._apply_application_font_live)
+        row_fonts_app.addWidget(self.application_font_combo, 1)
+        appearance_layout.addLayout(row_fonts_app)
+
+        row_fonts_size = QHBoxLayout()
+        row_fonts_size.addWidget(QLabel("Application font size:"))
+        self.application_font_size_spin = QSpinBox()
+        self.application_font_size_spin.setRange(0, 72)
+        try:
+            size_val = config.load_application_font_size()
+        except Exception:
+            size_val = None
+        default_size = 11
+        self.application_font_size_spin.setValue(size_val if size_val is not None else default_size)
+        self.application_font_size_spin.setToolTip("Set 0 to use system default size.")
+        self.application_font_size_spin.valueChanged.connect(self._apply_application_font_live)
+        row_fonts_size.addWidget(self.application_font_size_spin, 1)
+        appearance_layout.addLayout(row_fonts_size)
+
+        row_fonts_md = QHBoxLayout()
+        row_fonts_md.addWidget(QLabel("Default Markdown font:"))
+        self.markdown_font_combo = self._build_font_combo("Editor default")
+        try:
+            md_font = config.load_default_markdown_font()
+        except Exception:
+            md_font = None
+        self._select_font(self.markdown_font_combo, md_font)
+        self.markdown_font_combo.currentIndexChanged.connect(self._warn_restart_required)
+        row_fonts_md.addWidget(self.markdown_font_combo, 1)
+        appearance_layout.addLayout(row_fonts_md)
+        row_fonts_md_size = QHBoxLayout()
+        row_fonts_md_size.addWidget(QLabel("Default Markdown font size:"))
+        self.markdown_font_size_spin = QSpinBox()
+        self.markdown_font_size_spin.setRange(6, 72)
+        try:
+            md_font_size = config.load_default_markdown_font_size()
+        except Exception:
+            md_font_size = 12
+        self.markdown_font_size_spin.setValue(md_font_size)
+        row_fonts_md_size.addWidget(self.markdown_font_size_spin, 1)
+        appearance_layout.addLayout(row_fonts_md_size)
+
+        row_fonts_ai = QHBoxLayout()
+        row_fonts_ai.addWidget(QLabel("AI chat font:"))
+        self.ai_chat_font_combo = self._build_font_combo("default")
+        try:
+            ai_font = config.load_ai_chat_font_family()
+        except Exception:
+            ai_font = None
+        self._select_font(self.ai_chat_font_combo, ai_font)
+        row_fonts_ai.addWidget(self.ai_chat_font_combo, 1)
+        appearance_layout.addLayout(row_fonts_ai)
+
+        self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
+        try:
+            self.minimal_font_scan_checkbox.setChecked(config.load_minimal_font_scan_enabled())
+        except Exception:
+            self.minimal_font_scan_checkbox.setChecked(True)
+        self.minimal_font_scan_checkbox.setToolTip(
+            "Limit Qt to a tiny font set to reduce startup time. Requires restart to take effect."
+        )
+        self.minimal_font_scan_checkbox.stateChanged.connect(lambda *_: None)
+        appearance_layout.addWidget(self.minimal_font_scan_checkbox)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        appearance_layout.addWidget(divider)
+
+        appearance_layout.addWidget(QLabel("<b>Theme</b>"))
+        row_theme = QHBoxLayout()
+        row_theme.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self._populate_theme_options()
+        row_theme.addWidget(self.theme_combo, 1)
+        appearance_layout.addLayout(row_theme)
+
+        row_theme_actions = QHBoxLayout()
+        self.refresh_theme_list_btn = QPushButton("Refresh Themes")
+        self.refresh_theme_list_btn.clicked.connect(self._refresh_theme_options)
+        row_theme_actions.addWidget(self.refresh_theme_list_btn)
+        self.open_theme_folder_btn = QPushButton("Open Theme Folder")
+        self.open_theme_folder_btn.clicked.connect(self._open_theme_folder)
+        row_theme_actions.addWidget(self.open_theme_folder_btn)
+        row_theme_actions.addStretch(1)
+        appearance_layout.addLayout(row_theme_actions)
+        appearance_layout.addStretch(1)
 
         # Modes
         modes_layout = add_section("Modes")
@@ -321,81 +424,6 @@ class PreferencesDialog(QDialog):
         self.show_task_page_checkbox.setChecked(config.load_show_task_page())
         task_layout.addWidget(self.show_task_page_checkbox)
         task_layout.addStretch(1)
-
-        # Fonts
-        font_layout = add_section("Fonts")
-        row_fonts_app = QHBoxLayout()
-        row_fonts_app.addWidget(QLabel("Application font:"))
-        self.application_font_combo = self._build_font_combo("System Default")
-        try:
-            app_font = config.load_application_font()
-        except Exception:
-            app_font = None
-        self._select_font(self.application_font_combo, app_font)
-        self.application_font_combo.currentIndexChanged.connect(self._apply_application_font_live)
-        row_fonts_app.addWidget(self.application_font_combo, 1)
-        font_layout.addLayout(row_fonts_app)
-
-        row_fonts_size = QHBoxLayout()
-        row_fonts_size.addWidget(QLabel("Application font size:"))
-        self.application_font_size_spin = QSpinBox()
-        self.application_font_size_spin.setRange(0, 72)
-        try:
-            size_val = config.load_application_font_size()
-        except Exception:
-            size_val = None
-        default_size = 11
-        self.application_font_size_spin.setValue(size_val if size_val is not None else default_size)
-        self.application_font_size_spin.setToolTip("Set 0 to use system default size.")
-        self.application_font_size_spin.valueChanged.connect(self._apply_application_font_live)
-        row_fonts_size.addWidget(self.application_font_size_spin, 1)
-        font_layout.addLayout(row_fonts_size)
-
-        row_fonts_md = QHBoxLayout()
-        row_fonts_md.addWidget(QLabel("Default Markdown font:"))
-        self.markdown_font_combo = self._build_font_combo("Editor default")
-        try:
-            md_font = config.load_default_markdown_font()
-        except Exception:
-            md_font = None
-        self._select_font(self.markdown_font_combo, md_font)
-        self.markdown_font_combo.currentIndexChanged.connect(self._warn_restart_required)
-        row_fonts_md.addWidget(self.markdown_font_combo, 1)
-        font_layout.addLayout(row_fonts_md)
-        row_fonts_md_size = QHBoxLayout()
-        row_fonts_md_size.addWidget(QLabel("Default Markdown font size:"))
-        self.markdown_font_size_spin = QSpinBox()
-        self.markdown_font_size_spin.setRange(6, 72)
-        try:
-            md_font_size = config.load_default_markdown_font_size()
-        except Exception:
-            md_font_size = 12
-        self.markdown_font_size_spin.setValue(md_font_size)
-        row_fonts_md_size.addWidget(self.markdown_font_size_spin, 1)
-        font_layout.addLayout(row_fonts_md_size)
-
-        row_fonts_ai = QHBoxLayout()
-        row_fonts_ai.addWidget(QLabel("AI chat font:"))
-        self.ai_chat_font_combo = self._build_font_combo("default")
-        try:
-            ai_font = config.load_ai_chat_font_family()
-        except Exception:
-            ai_font = None
-        self._select_font(self.ai_chat_font_combo, ai_font)
-        row_fonts_ai.addWidget(self.ai_chat_font_combo, 1)
-        font_layout.addLayout(row_fonts_ai)
-
-        self.minimal_font_scan_checkbox = QCheckBox("Use Minimal Font Scan (For Fast Window Startup)")
-        try:
-            self.minimal_font_scan_checkbox.setChecked(config.load_minimal_font_scan_enabled())
-        except Exception:
-            self.minimal_font_scan_checkbox.setChecked(True)
-        self.minimal_font_scan_checkbox.setToolTip(
-            "Limit Qt to a tiny font set to reduce startup time. Requires restart to take effect."
-        )
-        self.minimal_font_scan_checkbox.stateChanged.connect(lambda *_: None)
-        font_layout.addWidget(self.minimal_font_scan_checkbox)
-        font_layout.addStretch(1)
 
         # AI & Code
         ai_layout = add_section("AI & Code")
@@ -843,6 +871,17 @@ class PreferencesDialog(QDialog):
         config.save_feature_link_navigator_enabled(self.feature_link_navigator_checkbox.isChecked())
         config.save_feature_tags_enabled(self.feature_tags_checkbox.isChecked())
         config.save_feature_remote_vaults_enabled(self.feature_remote_vaults_checkbox.isChecked())
+        selected_theme = self.theme_combo.currentData() or "default"
+        if not self._validate_theme_selection(selected_theme):
+            return
+        if selected_theme != getattr(self, "_initial_theme_selection", "default"):
+            config.save_theme_preference(selected_theme)
+            theme_module.reload_theme()
+            QMessageBox.information(
+                self,
+                "Theme Applied",
+                "Theme changes will take effect after restarting the app.",
+            )
         config.save_quick_capture_vault(self.quick_capture_vault_combo.currentData())
         capture_mode = "today" if self.quick_capture_page_combo.currentIndex() == 0 else "custom"
         config.save_quick_capture_page_mode(capture_mode)
@@ -957,6 +996,101 @@ class PreferencesDialog(QDialog):
     def _update_quick_capture_custom_visibility(self) -> None:
         is_custom = self.quick_capture_page_combo.currentIndex() == 1
         self.quick_capture_custom_edit.setVisible(is_custom)
+
+    def _theme_dir(self) -> Path:
+        return Path.home() / ".stillpoint" / "themes"
+
+    def _list_theme_files(self) -> list[Path]:
+        theme_dir = self._theme_dir()
+        if not theme_dir.exists():
+            return []
+        try:
+            return sorted(
+                [
+                    path
+                    for path in theme_dir.iterdir()
+                    if path.is_file()
+                    and path.suffix.lower() == ".json"
+                    and path.name != "theme-config.json"
+                ],
+                key=lambda p: p.name.lower(),
+            )
+        except Exception:
+            return []
+
+    def _populate_theme_options(self) -> None:
+        self.theme_combo.clear()
+        self.theme_combo.addItem("Default Theme", "default")
+        for path in self._list_theme_files():
+            self.theme_combo.addItem(path.name, path.name)
+        current = config.load_theme_preference()
+        idx = self.theme_combo.findData(current)
+        if idx == -1:
+            idx = 0
+        self.theme_combo.setCurrentIndex(idx)
+        self._initial_theme_selection = self.theme_combo.currentData()
+
+    def _refresh_theme_options(self) -> None:
+        current = self.theme_combo.currentData() or "default"
+        self._populate_theme_options()
+        idx = self.theme_combo.findData(current)
+        if idx != -1:
+            self.theme_combo.setCurrentIndex(idx)
+
+    def _validate_theme_selection(self, theme_name: str) -> bool:
+        if not theme_name or theme_name == "default":
+            return True
+        candidate = Path(theme_name)
+        if candidate.suffix.lower() != ".json":
+            candidate = candidate.with_suffix(".json")
+        if not candidate.is_absolute():
+            candidate = self._theme_dir() / candidate.name
+        if not candidate.exists():
+            QMessageBox.warning(
+                self,
+                "Theme Not Found",
+                f"Theme file not found:\n{candidate}",
+            )
+            return False
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Theme Parse Error",
+                f"Failed to parse theme JSON:\n{candidate}\n\n{exc}",
+            )
+            return False
+        if not isinstance(payload, dict):
+            QMessageBox.warning(
+                self,
+                "Theme Parse Error",
+                f"Theme JSON must be an object at the top level:\n{candidate}",
+            )
+            return False
+        return True
+
+    def _open_theme_folder(self) -> None:
+        theme_dir = self._theme_dir()
+        try:
+            theme_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if not any(theme_dir.iterdir()):
+                default_theme = theme_module.default_theme_path()
+                if default_theme.exists():
+                    shutil.copy2(default_theme, theme_dir / "theme-config.json")
+        except Exception:
+            pass
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(theme_dir)))
+        except Exception:
+            QMessageBox.information(
+                self,
+                "Theme Folder",
+                f"Theme folder path:\n{theme_dir}",
+            )
 
     def _warn_restart_required(self) -> None:
         QMessageBox.information(

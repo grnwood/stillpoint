@@ -103,6 +103,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config, indexer
+from .theme import theme_color, theme_value
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
@@ -824,8 +825,8 @@ class NavTreeDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):  # type: ignore[override]
         if index.data(PATH_ROLE) == FILTER_BANNER:
             painter.save()
-            painter.fillRect(option.rect, QColor("#c62828"))
-            painter.setPen(QColor("#ffffff"))
+            painter.fillRect(option.rect, theme_color("main_window.tree.drag_invalid_bg", "#c62828"))
+            painter.setPen(theme_color("main_window.tree.drag_invalid_text", "#ffffff"))
             text = index.data(Qt.DisplayRole) or ""
             text_rect = option.rect.adjusted(6, 0, -6, 0)
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, str(text))
@@ -1023,20 +1024,41 @@ class MenuCommandBar(QWidget):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._entries: list[MenuCommandBar.Entry] = []
-        self.setStyleSheet("background: #000000; color: white; border-radius: 10px; border: 1px solid #222222;")
+        self.setStyleSheet(
+            "background: "
+            f"{theme_value('main_window.menu_command_bar.bg', '#000000')}; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.text', '#ffffff')}; "
+            "border-radius: 10px; border: 1px solid "
+            f"{theme_value('main_window.menu_command_bar.border', '#222222')};"
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Type a command…")
         self._search.setStyleSheet(
-            "font-size: 18px; color: white; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.5); padding: 8px; border-radius: 6px;"
+            "font-size: "
+            f"{theme_value('main_window.menu_command_bar.search_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.search_text', '#ffffff')}; "
+            "background: "
+            f"{theme_value('main_window.menu_command_bar.search_bg', 'rgba(255, 255, 255, 0.08)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.menu_command_bar.search_border', 'rgba(255, 255, 255, 0.5)')}; "
+            "padding: 8px; border-radius: 6px;"
         )
         self._search.textChanged.connect(self._refresh_list)
         layout.addWidget(self._search)
         self._list = QListWidget()
         self._list.setUniformItemSizes(True)
-        self._list.setStyleSheet("font-size: 18px; color: white; background: transparent; padding: 4px;")
+        self._list.setStyleSheet(
+            "font-size: "
+            f"{theme_value('main_window.menu_command_bar.list_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.list_text', '#ffffff')}; "
+            "background: transparent; padding: 4px;"
+        )
         self._list.itemActivated.connect(self._activate_current_item)
         self._list.itemClicked.connect(lambda *_: self._activate_current_item())
         layout.addWidget(self._list)
@@ -1292,8 +1314,12 @@ class MainWindow(QMainWindow):
         self.tree_view.expanded.connect(self._on_tree_expanded)
         self.tree_view.collapsed.connect(self._on_tree_collapsed)
         pal = QApplication.instance().palette() if QApplication.instance() else None
-        base_color = pal.color(QPalette.Base) if pal else QColor("#ffffff")
-        icon_color = QColor("#ffffff") if base_color.lightness() < 128 else QColor("#000000")
+        base_color = pal.color(QPalette.Base) if pal else theme_color("main_window.icon.base_light", "#ffffff")
+        icon_color = (
+            theme_color("main_window.icon.on_dark", "#ffffff")
+            if base_color.lightness() < 128
+            else theme_color("main_window.icon.on_light", "#000000")
+        )
         self._tree_parent_expanded_icon = QIcon()
         self._tree_parent_collapsed_icon = QIcon()
         self._tree_arrow_focus_pending = False
@@ -1365,7 +1391,10 @@ class MainWindow(QMainWindow):
         self.collapse_tree_button.setIcon(base_icon)
         self.collapse_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.collapse_tree_button.setAutoRaise(True)
-        self.collapse_tree_button.setStyleSheet("QToolButton { color: white; }")
+        self.collapse_tree_button.setStyleSheet(
+            "QToolButton { color: "
+            f"{theme_value('main_window.tree.collapse_button', '#ffffff')}; }}"
+        )
         self.collapse_tree_button.setToolTip(
             f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Collapse all folders</div>"
         )
@@ -1373,7 +1402,10 @@ class MainWindow(QMainWindow):
         tree_header_layout.addWidget(self.collapse_tree_button)
 
         self.tree_header_widget.setLayout(tree_header_layout)
-        self.tree_header_widget.setStyleSheet("background: palette(midlight); border-bottom: 1px solid #555;")
+        self.tree_header_widget.setStyleSheet(
+            "background: palette(midlight); border-bottom: 1px solid "
+            f"{theme_value('main_window.tree.header_border', '#555555')};"
+        )
         
         # Set the custom header widget
         self.tree_view.header().hide()
@@ -1664,7 +1696,10 @@ class MainWindow(QMainWindow):
         # Create history bar (separate row for history buttons)
         self.history_bar = QWidget()
         self.history_bar.setMaximumHeight(40)
-        self.history_bar.setStyleSheet("border-top: 1px solid #555;")
+        self.history_bar.setStyleSheet(
+            "border-top: 1px solid "
+            f"{theme_value('main_window.history.border', '#555555')};"
+        )
         history_bar_layout = QHBoxLayout(self.history_bar)
         history_bar_layout.setContentsMargins(5, 2, 5, 2)
         history_bar_layout.setSpacing(4)
@@ -1944,9 +1979,17 @@ class MainWindow(QMainWindow):
         self._setup_eventloop_watchdog()
 
         # Create status badges (Dirty + VI)
-        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        self._badge_base_style = (
+            "border: 1px solid "
+            f"{theme_value('main_window.badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
 
-        focus_icon = self._load_icon(self._find_asset("focus-mode.svg"), QColor("#ffffff"), size=16)
+        focus_icon = self._load_icon(
+            self._find_asset("focus-mode.svg"),
+            theme_color("main_window.mode_button.icon", "#ffffff"),
+            size=16,
+        )
         self._focus_mode_button = QToolButton()
         self._focus_mode_button.setAutoRaise(True)
         if focus_icon:
@@ -1955,13 +1998,20 @@ class MainWindow(QMainWindow):
         self._focus_mode_button.setToolTip("Open in Focus Mode")
         self._focus_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
         self._focus_mode_button.setStyleSheet(
-            "QToolButton { border: none; padding: 2px 4px; color: #ffffff; }"
-            "QToolButton:hover { background: #2a2f36; border-radius: 3px; }"
+            "QToolButton { border: none; padding: 2px 4px; color: "
+            f"{theme_value('main_window.mode_button.text', '#ffffff')}; }}"
+            "QToolButton:hover { background: "
+            f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
+            "border-radius: 3px; }}"
         )
         self._focus_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("focus"))
         self.statusBar().addPermanentWidget(self._focus_mode_button, 0)
 
-        audience_icon = self._load_icon(self._find_asset("present-mode.svg"), QColor("#ffffff"), size=16)
+        audience_icon = self._load_icon(
+            self._find_asset("present-mode.svg"),
+            theme_color("main_window.mode_button.icon", "#ffffff"),
+            size=16,
+        )
         self._audience_mode_button = QToolButton()
         self._audience_mode_button.setAutoRaise(True)
         if audience_icon:
@@ -1970,8 +2020,11 @@ class MainWindow(QMainWindow):
         self._audience_mode_button.setToolTip("Open in Audience Mode")
         self._audience_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
         self._audience_mode_button.setStyleSheet(
-            "QToolButton { border: none; padding: 2px 4px; color: #ffffff; }"
-            "QToolButton:hover { background: #2a2f36; border-radius: 3px; }"
+            "QToolButton { border: none; padding: 2px 4px; color: "
+            f"{theme_value('main_window.mode_button.text', '#ffffff')}; }}"
+            "QToolButton:hover { background: "
+            f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
+            "border-radius: 3px; }}"
         )
         self._audience_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("audience"))
         self.statusBar().addPermanentWidget(self._audience_mode_button, 0)
@@ -1987,8 +2040,13 @@ class MainWindow(QMainWindow):
         self._filter_status_label.setStyleSheet(
             "QLabel { "
             + self._badge_base_style
-            + " background-color: #c62828; margin-right: 6px; color: #ffffff; }"
-            + " QLabel a { color: #ffffff; text-decoration: none; }"
+            + " background-color: "
+            f"{theme_value('main_window.filter_badge.bg', '#c62828')}; "
+            "margin-right: 6px; color: "
+            f"{theme_value('main_window.filter_badge.text', '#ffffff')}; }}"
+            + " QLabel a { color: "
+            f"{theme_value('main_window.filter_badge.link', '#ffffff')}; "
+            "text-decoration: none; }"
             + " QLabel a:hover { text-decoration: underline; }"
         )
         self._filter_status_label.setToolTip("Navigation filtered (click to clear)")
@@ -2007,7 +2065,11 @@ class MainWindow(QMainWindow):
         self._remote_status_label = QLabel("REMOTE")
         self._remote_status_label.setObjectName("remoteStatusLabel")
         self._remote_status_label.setStyleSheet(
-            self._badge_base_style + " background-color: #1e88e5; margin-right: 6px; color: #ffffff;"
+            self._badge_base_style
+            + " background-color: "
+            f"{theme_value('main_window.remote_badge.bg', '#1e88e5')}; "
+            "margin-right: 6px; color: "
+            f"{theme_value('main_window.remote_badge.text', '#ffffff')};"
         )
         self._remote_status_label.setToolTip("")
         self._remote_status_label.hide()
@@ -2190,13 +2252,16 @@ class MainWindow(QMainWindow):
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
         
         # Apply blue color to bookmark button via stylesheet
-        self.toolbar.setStyleSheet("""
-            QToolButton[text="+"] {
-                color: #4A90E2;
-                font-size: 20pt;
-                font-weight: bold;
-            }
-        """)
+        self.toolbar.setStyleSheet(
+            "QToolButton[text=\"+\"] { "
+            "color: "
+            f"{theme_value('main_window.toolbar.bookmark_color', '#4A90E2')}; "
+            "font-size: "
+            f"{theme_value('main_window.toolbar.bookmark_size_pt', 20)}pt; "
+            "font-weight: "
+            f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
+            "}"
+        )
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
@@ -3464,16 +3529,22 @@ class MainWindow(QMainWindow):
             # Add authentication status and set badge color
             if self._access_token:
                 tooltip_parts.append("Auth: ✓ Active (access token valid)")
-                badge_color = "#1e88e5"  # Blue - authenticated
+                badge_color = theme_value(
+                    "main_window.remote_badge.authenticated_bg", "#1e88e5"
+                )
             elif self._refresh_token:
                 if self._remember_refresh:
                     tooltip_parts.append("Auth: ✓ Saved (refresh token available)")
                 else:
                     tooltip_parts.append("Auth: Session only (refresh token)")
-                badge_color = "#1e88e5"  # Blue - authenticated
+                badge_color = theme_value(
+                    "main_window.remote_badge.authenticated_bg", "#1e88e5"
+                )
             else:
                 tooltip_parts.append("Auth: ✗ Not authenticated")
-                badge_color = "#ff9800"  # Orange - not authenticated
+                badge_color = theme_value(
+                    "main_window.remote_badge.unauthenticated_bg", "#ff9800"
+                )
             
             # Add username if known
             if self._remote_username:
@@ -3482,7 +3553,9 @@ class MainWindow(QMainWindow):
             tooltip = "\n".join(tooltip_parts) if tooltip_parts else ""
             self._remote_status_label.setToolTip(tooltip)
             self._remote_status_label.setStyleSheet(
-                self._badge_base_style + f" background-color: {badge_color}; margin-right: 6px; color: #ffffff;"
+                self._badge_base_style
+                + f" background-color: {badge_color}; margin-right: 6px; color: "
+                f"{theme_value('main_window.remote_badge.text', '#ffffff')};"
             )
             self._remote_status_label.show()
         else:
@@ -4181,7 +4254,11 @@ class MainWindow(QMainWindow):
                 self._ai_chat_store = AIChatStore(vault_root=ai_root)
                 if self._ai_badge_icon is None:
                     ai_path = self._find_asset("ai.svg")
-                    self._ai_badge_icon = self._load_icon(ai_path, QColor("#4A90E2"), size=14)
+                    self._ai_badge_icon = self._load_icon(
+                        ai_path,
+                        theme_color("main_window.ai_badge.icon", "#4A90E2"),
+                        size=14,
+                    )
             except Exception:
                 self._ai_chat_store = None
             if self._remote_mode:
@@ -4716,7 +4793,11 @@ class MainWindow(QMainWindow):
 
             # Create button with border styling
             btn = QPushButton(page_name)
-            btn.setStyleSheet("QPushButton { border: 1px solid #555; padding: 2px 6px; border-radius: 3px; }")
+            btn.setStyleSheet(
+                "QPushButton { border: 1px solid "
+                f"{theme_value('main_window.history.button_border', '#555555')}; "
+                "padding: 2px 6px; border-radius: 3px; }"
+            )
             btn.setToolTip(path_to_colon(page_path) or page_path)
             btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -5035,11 +5116,20 @@ class MainWindow(QMainWindow):
         self.autosave_timer.stop()
         popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         popup.setStyleSheet(
-            "QWidget { background: rgba(32,32,32,240); border: 1px solid #666; border-radius: 6px; }"
-            "QLineEdit { border: 1px solid #777; border-radius: 4px; padding: 4px 6px; }"
-            "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+            "QWidget { background: "
+            f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLineEdit { border: 1px solid "
+            f"{theme_value('main_window.picker_popup.input_border', '#777777')}; "
+            "border-radius: 4px; padding: 4px 6px; }"
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
-            "QListWidget::item:selected { background: rgba(90,161,255,80); }"
+            "QListWidget::item:selected { background: "
+            f"{theme_value('main_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -5297,8 +5387,8 @@ class MainWindow(QMainWindow):
                 font.setBold(True)
                 banner.setFont(font)
                 banner.setEditable(False)
-                banner.setForeground(QBrush(QColor("#ffffff")))
-                banner.setBackground(QBrush(QColor("#c62828")))
+                banner.setForeground(QBrush(theme_color("main_window.banner.text", "#ffffff")))
+                banner.setBackground(QBrush(theme_color("main_window.banner.bg", "#c62828")))
                 display_path = path_to_colon(self._nav_filter_path) or self._nav_filter_path
                 if display_path:
                     banner.setToolTip(f"{display_path} (click to clear)")
@@ -8577,8 +8667,12 @@ class MainWindow(QMainWindow):
             bar.addTab(label)
         bar.setStyleSheet(
             "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
-            "QTabBar::tab:selected { background: #2b2b2b; color: #fff; }"
-            "QTabBar::tab:!selected { color: #c0c0c0; }"
+            "QTabBar::tab:selected { background: "
+            f"{theme_value('main_window.minibar.selected_bg', '#2b2b2b')}; "
+            "color: "
+            f"{theme_value('main_window.minibar.selected_text', '#ffffff')}; }}"
+            "QTabBar::tab:!selected { color: "
+            f"{theme_value('main_window.minibar.unselected_text', '#c0c0c0')}; }}"
         )
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
@@ -9689,7 +9783,11 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
-        focus_border = "#D9534F" if getattr(self, "_nav_filter_path", None) else "#4A90E2"
+        focus_border = (
+            theme_value("main_window.focus_border.filtered", "#D9534F")
+            if getattr(self, "_nav_filter_path", None)
+            else theme_value("main_window.focus_border.default", "#4A90E2")
+        )
         editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
         right_arrow_path = self._find_asset("right-arrow.svg")
         down_arrow_path = self._find_asset("down.svg")
@@ -11904,18 +12002,29 @@ class MainWindow(QMainWindow):
             popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             popup.setStyleSheet(
-                "background: rgba(30,30,30,220); border: 1px solid #888; border-radius: 6px; padding: 8px;"
+                "background: "
+                f"{theme_value('main_window.history_popup.bg', 'rgba(30,30,30,220)')}; "
+                "border: 1px solid "
+                f"{theme_value('main_window.history_popup.border', '#888888')}; "
+                "border-radius: 6px; padding: 8px;"
             )
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._history_popup_label = QLabel(popup)
-            self._history_popup_label.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+            self._history_popup_label.setStyleSheet(
+                "color: "
+                f"{theme_value('main_window.history_popup.label_text', '#f5f5f5')}; "
+                "font-weight: bold;"
+            )
             layout.addWidget(self._history_popup_label)
             self._history_popup_list = QListWidget(popup)
             self._history_popup_list.setStyleSheet(
-                "QListWidget { background: transparent; color: #f5f5f5; border: none; }"
+                "QListWidget { background: transparent; color: "
+                f"{theme_value('main_window.history_popup.list_text', '#f5f5f5')}; "
+                "border: none; }}"
                 "QListWidget::item { padding: 4px 6px; }"
-                "QListWidget::item:selected { background: rgba(255,255,255,40); }"
+                "QListWidget::item:selected { background: "
+                f"{theme_value('main_window.history_popup.list_selected_bg', 'rgba(255,255,255,40)')}; }}"
             )
             self._history_popup_list.viewport().installEventFilter(self)
             layout.addWidget(self._history_popup_list)
@@ -12206,7 +12315,7 @@ class MainWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(QColor("#ffd54f"))
+            sel.format.setBackground(theme_color("main_window.highlight.selection_bg", "#ffd54f"))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = self.editor.extraSelections()
@@ -12957,7 +13066,12 @@ class MainWindow(QMainWindow):
         if self._read_only:
             self._dirty_status_label.setText("O/")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #9e9e9e; color: #f5f5f5; margin-right: 6px; text-decoration: line-through;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('main_window.badge.readonly_bg', '#9e9e9e')}; "
+                "color: "
+                f"{theme_value('main_window.badge.readonly_text', '#f5f5f5')}; "
+                "margin-right: 6px; text-decoration: line-through;"
             )
             self._dirty_status_label.setToolTip("Read-only: changes cannot be saved in this window")
             return
@@ -12965,13 +13079,23 @@ class MainWindow(QMainWindow):
         if dirty:
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #e57373; color: #000; margin-right: 6px;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('main_window.badge.dirty_bg', '#e57373')}; "
+                "color: "
+                f"{theme_value('main_window.badge.dirty_text', '#000000')}; "
+                "margin-right: 6px;"
             )
             self._dirty_status_label.setToolTip("Unsaved changes")
         else:
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
-                self._badge_base_style + " background-color: #81c784; color: #000; margin-right: 6px;"
+                self._badge_base_style
+                + " background-color: "
+                f"{theme_value('main_window.badge.clean_bg', '#81c784')}; "
+                "color: "
+                f"{theme_value('main_window.badge.clean_text', '#000000')}; "
+                "margin-right: 6px;"
             )
             self._dirty_status_label.setToolTip("All changes saved")
 
@@ -13048,7 +13172,12 @@ class MainWindow(QMainWindow):
             return
         style = self._vi_badge_base_style
         if insert_active:
-            style += " background-color: #ffd54d; color: #000;"
+            style += (
+                " background-color: "
+                f"{theme_value('main_window.vi_badge.active_bg', '#ffd54d')}; "
+                "color: "
+                f"{theme_value('main_window.vi_badge.active_text', '#000000')};"
+            )
         else:
             style += " background-color: transparent;"
         self._vi_status_label.setStyleSheet(style)

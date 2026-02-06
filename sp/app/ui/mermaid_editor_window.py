@@ -32,6 +32,7 @@ from PySide6.QtGui import QDesktopServices
 
 from sp.app.mermaid_renderer import MermaidRenderer
 from sp.app import config
+from .theme import theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 
@@ -46,20 +47,34 @@ def _generate_error_svg(error_message: str, line_number: int = 0) -> str:
         .replace(">", "&gt;")
         .replace("\n", "<br>")
     )
+    bg = theme_value("mermaid_editor.error.bg", "#f8f8f8")
+    title = theme_value("mermaid_editor.error.title", "#cc0000")
+    msg = theme_value("mermaid_editor.error.message", "#333333")
+    line = theme_value("mermaid_editor.error.line", "#666666")
+    box_fill = theme_value("mermaid_editor.error.box_fill", "#ffe6e6")
+    box_stroke = theme_value("mermaid_editor.error.box_stroke", "#ff9999")
+    box_text = theme_value("mermaid_editor.error.box_text", "#333333")
+    error_font = theme_value("mermaid_editor.error.font_family", "monospace")
+    title_size = theme_value("mermaid_editor.error.title_size_px", 24)
+    title_weight = theme_value("mermaid_editor.error.title_weight", "bold")
+    message_size = theme_value("mermaid_editor.error.message_size_px", 14)
+    line_size = theme_value("mermaid_editor.error.line_size_px", 12)
+    box_font_size = theme_value("mermaid_editor.error.box_font_size_px", 13)
+    box_line_height = theme_value("mermaid_editor.error.box_line_height", 1.4)
     svg = f"""<svg width="800" height="400" xmlns="http://www.w3.org/2000/svg">
-    <rect width="800" height="400" fill="#f8f8f8"/>
+    <rect width="800" height="400" fill="{bg}"/>
     <defs>
         <style type="text/css"><![CDATA[
-            .error-title {{ font-size: 24px; font-weight: bold; fill: #cc0000; font-family: monospace; }}
-            .error-message {{ font-size: 14px; fill: #333333; font-family: monospace; word-wrap: break-word; }}
-            .error-line {{ font-size: 12px; fill: #666666; font-family: monospace; }}
-            .error-box {{ fill: #ffe6e6; stroke: #ff9999; stroke-width: 2; }}
+            .error-title {{ font-size: {title_size}px; font-weight: {title_weight}; fill: {title}; font-family: {error_font}; }}
+            .error-message {{ font-size: {message_size}px; fill: {msg}; font-family: {error_font}; word-wrap: break-word; }}
+            .error-line {{ font-size: {line_size}px; fill: {line}; font-family: {error_font}; }}
+            .error-box {{ fill: {box_fill}; stroke: {box_stroke}; stroke-width: 2; }}
         ]]></style>
     </defs>
     <rect class="error-box" x="20" y="20" width="760" height="360" rx="5" ry="5"/>
     <text class="error-title" x="40" y="60">Mermaid Render Error{line_info}</text>
     <foreignObject x="40" y="90" width="720" height="280">
-        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: monospace; font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; line-height: 1.4;">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: {error_font}; font-size: {box_font_size}px; color: {box_text}; white-space: pre-wrap; word-break: break-word; line-height: {box_line_height};">
             {error_display}
         </div>
     </foreignObject>
@@ -128,7 +143,11 @@ class MermaidEditorWindow(QMainWindow):
         editor_section.addWidget(self.auto_render_checkbox)
 
         self.render_status_label = QLabel()
-        self.render_status_label.setStyleSheet("color: #ffa500; font-style: italic; margin-left: 10px;")
+        self.render_status_label.setStyleSheet(
+            "color: "
+            f"{theme_value('mermaid_editor.render_status.color', '#ffa500')}; "
+            "font-style: italic; margin-left: 10px;"
+        )
         editor_section.addWidget(self.render_status_label)
         self._update_render_status_label()
 
@@ -230,16 +249,18 @@ class MermaidEditorWindow(QMainWindow):
         self.editor = ViPlainTextEdit()
         self.editor.setPlaceholderText("Enter Mermaid diagram code here...")
         self.editor.setFont(self._get_monospace_font())
-        self.editor.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3e3e3e;
+        self.editor.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                background-color: {theme_value('mermaid_editor.editor.bg', '#1e1e1e')};
+                color: {theme_value('mermaid_editor.editor.text', '#d4d4d4')};
+                border: 1px solid {theme_value('mermaid_editor.editor.border', '#3e3e3e')};
                 padding: 8px;
-                selection-background-color: #264f78;
-                selection-color: #ffffff;
-            }
-        """)
+                selection-background-color: {theme_value('mermaid_editor.editor.selection_bg', '#264f78')};
+                selection-color: {theme_value('mermaid_editor.editor.selection_text', '#ffffff')};
+            }}
+        """
+        )
         self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
 
         editor_container = QWidget()
@@ -258,7 +279,12 @@ class MermaidEditorWindow(QMainWindow):
         self.preview_label = ZoomablePreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(400, 300)
-        self.preview_label.setStyleSheet("background-color: #f8f8f8; color: #000;")
+        self.preview_label.setStyleSheet(
+            "background-color: "
+            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
+            "color: "
+            f"{theme_value('mermaid_editor.preview.text', '#000000')};"
+        )
         self.preview_label.setWordWrap(True)
         self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
         self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -267,7 +293,10 @@ class MermaidEditorWindow(QMainWindow):
         self.preview_scroll_area = QScrollArea()
         self.preview_scroll_area.setWidgetResizable(True)
         self.preview_scroll_area.setWidget(self.preview_label)
-        self.preview_scroll_area.setStyleSheet("background-color: #f8f8f8;")
+        self.preview_scroll_area.setStyleSheet(
+            "background-color: "
+            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
+        )
         preview_layout.addWidget(self.preview_scroll_area)
         preview_container.setLayout(preview_layout)
         right_v_splitter.addWidget(preview_container)
@@ -314,7 +343,11 @@ class MermaidEditorWindow(QMainWindow):
         self._preview_pan_start = None
         self._preview_pan_origin = None
 
-        self._badge_base_style = "border: 1px solid #666; padding: 2px 6px; border-radius: 3px;"
+        self._badge_base_style = (
+            "border: 1px solid "
+            f"{theme_value('mermaid_editor.badge.border', '#666666')}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
         self._vi_badge_base_style = self._badge_base_style
         self._vi_status_label = QLabel("INS")
         self._vi_status_label.setObjectName("viStatusLabel")
@@ -559,8 +592,11 @@ class MermaidEditorWindow(QMainWindow):
         """Create AI chat panel with message input and send button."""
         panel = QWidget()
         panel.setStyleSheet(
-            "QWidget { background-color: #1e1e1e; border-top: 1px solid #444; } "
-            "QLineEdit { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #444; }"
+            f"QWidget {{ background-color: {theme_value('mermaid_editor.chat_panel.bg', '#1e1e1e')}; "
+            f"border-top: 1px solid {theme_value('mermaid_editor.chat_panel.border', '#444444')}; }} "
+            f"QLineEdit {{ background-color: {theme_value('mermaid_editor.chat_panel.input_bg', '#2d2d2d')}; "
+            f"color: {theme_value('mermaid_editor.chat_panel.input_text', '#e0e0e0')}; border: 1px solid "
+            f"{theme_value('mermaid_editor.chat_panel.input_border', '#444444')}; }}"
         )
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -780,29 +816,43 @@ class MermaidEditorWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Review AI Generated Diagram - Accept or Decline")
         dialog.setGeometry(50, 50, 1400, 800)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #1e1e1e;
-            }
-            QLabel {
-                color: #e0e0e0;
-            }
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #444;
+        dialog_bg = theme_value("mermaid_editor.diff_dialog.bg", "#1e1e1e")
+        dialog_label = theme_value("mermaid_editor.diff_dialog.label", "#e0e0e0")
+        button_bg = theme_value("mermaid_editor.diff_dialog.button_bg", "#2d2d2d")
+        button_text = theme_value("mermaid_editor.diff_dialog.button_text", "#e0e0e0")
+        button_border = theme_value("mermaid_editor.diff_dialog.button_border", "#444444")
+        button_hover = theme_value("mermaid_editor.diff_dialog.button_hover", "#3d3d3d")
+        button_weight = theme_value("mermaid_editor.diff_dialog.button_weight", "bold")
+        dialog.setStyleSheet(
+            f"""
+            QDialog {{
+                background-color: {dialog_bg};
+            }}
+            QLabel {{
+                color: {dialog_label};
+            }}
+            QPushButton {{
+                background-color: {button_bg};
+                color: {button_text};
+                border: 1px solid {button_border};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #3d3d3d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {button_hover};
+            }}
+        """
+        )
 
         layout = QVBoxLayout()
 
         title = QLabel("Review Changes - Left: Current | Right: AI Generated")
-        title.setStyleSheet("color: #e0e0e0; font-weight: bold; font-size: 12px; padding: 5px;")
+        title_color = theme_value("mermaid_editor.diff_dialog.title_color", "#e0e0e0")
+        title_weight = theme_value("mermaid_editor.diff_dialog.title_weight", "bold")
+        title_size = theme_value("mermaid_editor.diff_dialog.title_size_px", 12)
+        title.setStyleSheet(
+            f"color: {title_color}; font-weight: {title_weight}; font-size: {title_size}px; padding: 5px;"
+        )
         layout.addWidget(title)
 
         diff_layout = QHBoxLayout()
@@ -811,7 +861,8 @@ class MermaidEditorWindow(QMainWindow):
         left_layout = QVBoxLayout()
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_label = QLabel("Current Mermaid")
-        left_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        label_weight = theme_value("mermaid_editor.diff_dialog.label_weight", "bold")
+        left_label.setStyleSheet(f"color: {dialog_label}; font-weight: {label_weight};")
         left_layout.addWidget(left_label)
 
         original_text = self.editor.toPlainText()
@@ -823,7 +874,7 @@ class MermaidEditorWindow(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_label = QLabel("AI Generated Mermaid")
-        right_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        right_label.setStyleSheet(f"color: {dialog_label}; font-weight: {label_weight};")
         right_layout.addWidget(right_label)
 
         right_display = self._create_diff_display(original_text, ai_text, is_original=False)
@@ -839,35 +890,39 @@ class MermaidEditorWindow(QMainWindow):
 
         accept_btn = QPushButton("Accept Changes")
         accept_btn.setMinimumWidth(150)
-        accept_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1e5c1e;
-                color: #7CFC98;
-                border: 1px solid #4caf50;
+        accept_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {theme_value('mermaid_editor.diff_dialog.accept_bg', '#1e5c1e')};
+                color: {theme_value('mermaid_editor.diff_dialog.accept_text', '#7CFC98')};
+                border: 1px solid {theme_value('mermaid_editor.diff_dialog.accept_border', '#4caf50')};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2d7a2d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {theme_value('mermaid_editor.diff_dialog.accept_hover', '#2d7a2d')};
+            }}
+        """
+        )
         accept_btn.clicked.connect(lambda: self._accept_ai_response(ai_text, dialog))
         button_layout.addWidget(accept_btn)
 
         decline_btn = QPushButton("Decline")
         decline_btn.setMinimumWidth(150)
-        decline_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5c1e1e;
-                color: #ff6b6b;
-                border: 1px solid #f44336;
+        decline_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {theme_value('mermaid_editor.diff_dialog.decline_bg', '#5c1e1e')};
+                color: {theme_value('mermaid_editor.diff_dialog.decline_text', '#ff6b6b')};
+                border: 1px solid {theme_value('mermaid_editor.diff_dialog.decline_border', '#f44336')};
                 padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7a2d2d;
-            }
-        """)
+                font-weight: {button_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {theme_value('mermaid_editor.diff_dialog.decline_hover', '#7a2d2d')};
+            }}
+        """
+        )
         decline_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(decline_btn)
 
@@ -880,16 +935,18 @@ class MermaidEditorWindow(QMainWindow):
     def _create_diff_display(self, original: str, modified: str, is_original: bool) -> QTextEdit:
         display = QTextEdit()
         display.setReadOnly(True)
-        display.setStyleSheet("""
-            QTextEdit {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #444;
+        display.setStyleSheet(
+            f"""
+            QTextEdit {{
+                background-color: {theme_value('mermaid_editor.diff_display.bg', '#2d2d2d')};
+                color: {theme_value('mermaid_editor.diff_display.text', '#e0e0e0')};
+                border: 1px solid {theme_value('mermaid_editor.diff_display.border', '#444444')};
                 padding: 5px;
-                font-family: Courier, monospace;
-                font-size: 10px;
-            }
-        """)
+                font-family: {theme_value('mermaid_editor.diff_display.font_family', 'Courier, monospace')};
+                font-size: {theme_value('mermaid_editor.diff_display.font_size_px', 10)}px;
+            }}
+        """
+        )
 
         if is_original:
             display.setPlainText(original)
@@ -916,12 +973,12 @@ class MermaidEditorWindow(QMainWindow):
                 if i < len(original_lines):
                     if line != original_lines[i]:
                         fmt = QTextCharFormat()
-                        fmt.setBackground(QBrush(QColor(100, 80, 0)))
+                        fmt.setBackground(QBrush(theme_color("mermaid_editor.diff.changed_bg", "#645000")))
                         cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                         cursor.setCharFormat(fmt)
                 else:
                     fmt = QTextCharFormat()
-                    fmt.setBackground(QBrush(QColor(0, 80, 0)))
+                    fmt.setBackground(QBrush(theme_color("mermaid_editor.diff.added_bg", "#005000")))
                     cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                     cursor.setCharFormat(fmt)
 
@@ -932,12 +989,12 @@ class MermaidEditorWindow(QMainWindow):
                 if i < len(modified_lines):
                     if line != modified_lines[i]:
                         fmt = QTextCharFormat()
-                        fmt.setBackground(QBrush(QColor(100, 80, 0)))
+                        fmt.setBackground(QBrush(theme_color("mermaid_editor.diff.changed_bg", "#645000")))
                         cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                         cursor.setCharFormat(fmt)
                 else:
                     fmt = QTextCharFormat()
-                    fmt.setBackground(QBrush(QColor(80, 0, 0)))
+                    fmt.setBackground(QBrush(theme_color("mermaid_editor.diff.removed_bg", "#500000")))
                     cursor.select(QtgQTextCursor.SelectionType.LineUnderCursor)
                     cursor.setCharFormat(fmt)
 
@@ -974,11 +1031,22 @@ class MermaidEditorWindow(QMainWindow):
         style = self._vi_badge_base_style
         if self._vi_enabled:
             if insert_active:
-                style += " background-color: #ffd54d; color: #000;"
+                style += (
+                    " background-color: "
+                    f"{theme_value('mermaid_editor.vi_badge.active_bg', '#ffd54d')}; "
+                    "color: "
+                    f"{theme_value('mermaid_editor.vi_badge.active_text', '#000000')};"
+                )
             else:
-                style += " background-color: transparent; color: #e0e0e0;"
+                style += (
+                    " background-color: transparent; color: "
+                    f"{theme_value('mermaid_editor.vi_badge.inactive_text', '#e0e0e0')};"
+                )
         else:
-            style += " background-color: transparent; color: #e0e0e0;"
+            style += (
+                " background-color: transparent; color: "
+                f"{theme_value('mermaid_editor.vi_badge.inactive_text', '#e0e0e0')};"
+            )
         self._vi_status_label.setStyleSheet(style)
 
     def _on_auto_render_toggled(self, checked: bool) -> None:

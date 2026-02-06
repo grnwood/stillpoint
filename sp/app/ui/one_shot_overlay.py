@@ -23,6 +23,7 @@ from markdown import markdown
 import platform
 
 from sp.app import config
+from .theme import theme_value
 
 
 class OneShotChatInput(QTextEdit):
@@ -168,7 +169,7 @@ class OneShotPromptOverlay(QDialog):
             shadow = QGraphicsDropShadowEffect(card)
             shadow.setBlurRadius(24)
             shadow.setOffset(0, 8)
-            shadow.setColor(QColor(0, 0, 0, 140))
+            shadow.setColor(QColor(0, 0, 0, int(theme_value("one_shot.shadow_alpha", 140))))
             card.setGraphicsEffect(shadow)
         except Exception:
             pass
@@ -180,11 +181,23 @@ class OneShotPromptOverlay(QDialog):
 
         title_row = QHBoxLayout()
         title = QLabel("One‑Shot")
-        title.setStyleSheet("font-weight: 600; font-size: 13px; color: #888;")
+        title.setStyleSheet(
+            "font-weight: "
+            f"{theme_value('one_shot.title.weight', 600)}; "
+            "font-size: "
+            f"{theme_value('one_shot.title.size_px', 13)}px; "
+            "color: "
+            f"{theme_value('one_shot.title.color', '#888888')};"
+        )
         title_row.addWidget(title, 0)
         title_row.addStretch(1)
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #888; font-size: 12px;")
+        self._status.setStyleSheet(
+            "color: "
+            f"{theme_value('one_shot.status.color', '#888888')}; "
+            "font-size: "
+            f"{theme_value('one_shot.status.size_px', 12)}px;"
+        )
         title_row.addWidget(self._status)
         layout.addLayout(title_row)
 
@@ -194,11 +207,14 @@ class OneShotPromptOverlay(QDialog):
         self.chat_view.anchorClicked.connect(self._on_anchor_clicked)
         self.chat_view.setStyleSheet(
             "QTextBrowser {"
-            "  border: 1px solid #1f1f1f;"
+            "  border: 1px solid "
+            f"{theme_value('one_shot.chat.border', '#1f1f1f')};"
             "  border-radius: 10px;"
             "  padding: 8px;"
-            "  background: #0b0b0b;"
-            "  color: #d6f5d6;"
+            "  background: "
+            f"{theme_value('one_shot.chat.bg', '#0b0b0b')};"
+            "  color: "
+            f"{theme_value('one_shot.chat.text', '#d6f5d6')};"
             "}"
         )
         layout.addWidget(self.chat_view, 1)
@@ -208,9 +224,12 @@ class OneShotPromptOverlay(QDialog):
         self.input.setFixedHeight(54)
         self.input.setStyleSheet(
             " padding: 6px;"
-            " background: #111;"
-            " color: #d6f5d6;"
-            " border: 1px solid #1f1f1f;"
+            " background: "
+            f"{theme_value('one_shot.input.bg', '#111111')};"
+            " color: "
+            f"{theme_value('one_shot.input.text', '#d6f5d6')};"
+            " border: 1px solid "
+            f"{theme_value('one_shot.input.border', '#1f1f1f')};"
         )
         self.input.sendRequested.connect(self._send_input)
         self.input.acceptRequested.connect(self._accept_last_message)
@@ -241,7 +260,8 @@ class OneShotPromptOverlay(QDialog):
 
         self.setStyleSheet(
             "QDialog { background: transparent; }"
-            "QFrame#OneShotCard { background: #0b0b0b; border-radius: 14px; }"
+            "QFrame#OneShotCard { background: "
+            f"{theme_value('one_shot.card.bg', '#0b0b0b')}; border-radius: 14px; }}"
         )
         self.resize(680, 480)
         self._apply_font()
@@ -462,16 +482,16 @@ class OneShotPromptOverlay(QDialog):
         self._render_timer.start()
 
     def _render(self) -> None:
-        base_color = "#0b0b0b"
-        text_color = "#d6f5d6"
-        accent = "#7fd4a7"
+        base_color = theme_value("one_shot.html.base_bg", "#0b0b0b")
+        text_color = theme_value("one_shot.html.text", "#d6f5d6")
+        accent = theme_value("one_shot.html.accent", "#7fd4a7")
         parts: list[str] = []
         parts.append(
             f"<style>"
             f"body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ border-radius:8px; padding:8px 10px; margin:8px 0; }}"
-            f".user {{ background:rgba(80,160,220,0.10); }}"
-            f".assistant {{ background:rgba(60,200,140,0.10); }}"
+            f".user {{ background:{theme_value('one_shot.html.user_bg', 'rgba(80,160,220,0.10)')}; }}"
+            f".assistant {{ background:{theme_value('one_shot.html.assistant_bg', 'rgba(60,200,140,0.10)')}; }}"
             f".role {{ font-weight:bold; color:{accent}; }}"
             f".actions {{ margin-top:8px; }}"
             f".actions a {{ margin-right:16px; text-decoration:none; color:{accent}; font-weight:bold; }}"
