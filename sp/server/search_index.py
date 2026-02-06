@@ -258,7 +258,7 @@ def search_pages(
     normalized_subtree = _normalize_subtree_filter(subtree)
     
     # Extract #tags from query
-    tag_pattern = r'#([A-Za-z0-9]+)'
+    tag_pattern = r'#([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)'
     tags = re.findall(tag_pattern, query)
     # Remove #tags from FTS query
     fts_query = re.sub(tag_pattern, '', query).strip()

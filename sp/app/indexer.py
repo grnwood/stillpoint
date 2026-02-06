@@ -14,8 +14,9 @@ INDEX_SCHEMA_VERSION = "task-parse-v6"
 
 # Match @tags that are not part of email addresses or similar identifiers.
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
-# Match page #tags (alphanumeric only) followed by whitespace or end.
-PAGE_TAG_PATTERN = re.compile(r"(?<![A-Za-z0-9_])#([A-Za-z0-9]+)(?=\s|$)")
+# Match page #tags (alphanumeric, must include at least one alpha).
+# Require start-of-line or whitespace before '#', and whitespace/end after.
+PAGE_TAG_PATTERN = re.compile(r"(?<!\S)#([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)(?=\s|$)")
 # Match URLs to exclude tags within them
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]\)]+")
 # Markdown-style links: [label](target)

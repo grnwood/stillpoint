@@ -1006,7 +1006,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             r'(?P<italic>(?<!\*)\*[^*]+\*(?!\*))|'
             r'(?P<strike>~~[^~]+~~)|'
             r'(?P<highlight>==[^=]+==)|'
-            r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+|(?<![A-Za-z0-9_])#[A-Za-z0-9]+(?=\s|$))|'
+            r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+|(?<!\S)#[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*(?=\s|$))|'
             r'(?P<wiki_link>\[[^\]|]+\|[^\]]*\])|'
             r'(?P<camel_link>(?<!\S)\+[A-Za-z][\w]*(?=\s|$))|'
             r'(?P<colon_link>(?<!\S):[^\s\[\]]+(?:#[^\s\[\]]+)?)|'
