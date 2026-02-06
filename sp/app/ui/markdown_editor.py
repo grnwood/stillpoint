@@ -1572,6 +1572,12 @@ class MarkdownEditor(QTextEdit):
         self._tag_suggest_trigger_pos: Optional[int] = None
         self._tag_suggest_end_pos: Optional[int] = None
         self._tag_suggest_active: bool = False
+        self._task_tag_suggest_overlay = TagSuggestOverlay(self)
+        self._task_tag_suggest_overlay.tagAccepted.connect(self._insert_task_tag)
+        self._task_tag_suggest_overlay.closed.connect(self._clear_task_tag_suggest_state)
+        self._task_tag_suggest_trigger_pos: Optional[int] = None
+        self._task_tag_suggest_end_pos: Optional[int] = None
+        self._task_tag_suggest_active: bool = False
         self._overlay_vi_mode_before: Optional[bool] = None
         self._document_alive = True
         self._editor_alive = True
@@ -1582,6 +1588,8 @@ class MarkdownEditor(QTextEdit):
         self._saved_updates_enabled: Optional[bool] = None
         self.textChanged.connect(self._update_tag_suggest)
         self.cursorPositionChanged.connect(self._maybe_close_tag_suggest)
+        self.textChanged.connect(self._update_task_tag_suggest)
+        self.cursorPositionChanged.connect(self._maybe_close_task_tag_suggest)
         self._scroll_margin_retry_pending = False
         self._render_images_retry_pending = False
         self._hr_refresh_retry_pending = False
@@ -3619,6 +3627,34 @@ class MarkdownEditor(QTextEdit):
         if self._read_only_mode:
             if self._handle_read_only_keypress(event):
                 return
+        if self._task_tag_suggest_active and self._task_tag_suggest_overlay.isVisible():
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if event.key() == Qt.Key_Escape:
+                self._close_task_tag_suggest()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab) and not mods:
+                tag = self._task_tag_suggest_overlay.current_tag()
+                if tag:
+                    self._insert_task_tag(tag)
+                else:
+                    token = (self._task_tag_suggest_overlay.search_text() or "").strip()
+                    if token:
+                        self._insert_task_tag(token)
+                    else:
+                        self._close_task_tag_suggest()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Up, Qt.Key_Down) and not mods:
+                delta = -1 if event.key() == Qt.Key_Up else 1
+                self._task_tag_suggest_overlay.move_selection(delta)
+                event.accept()
+                return
+            if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() in (Qt.Key_J, Qt.Key_K):
+                delta = 1 if event.key() == Qt.Key_J else -1
+                self._task_tag_suggest_overlay.move_selection(delta)
+                event.accept()
+                return
         if self._tag_suggest_active and self._tag_suggest_overlay.isVisible():
             mods = event.modifiers() & ~Qt.KeypadModifier
             if event.key() == Qt.Key_Escape:
@@ -3889,6 +3925,7 @@ class MarkdownEditor(QTextEdit):
                 # Prevent duplicate processing
                 if not self._processing_inline_trigger:
                     self._check_inline_link_trigger()
+            self._maybe_trigger_task_tag_suggest()
             self._maybe_trigger_tag_suggest()
         
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -3905,7 +3942,7 @@ class MarkdownEditor(QTextEdit):
             return
         text = block.text()
         col = cursor.positionInBlock()
-        if col < 3 or text[col - 3:col] != "## ":
+        if col < 3 or text[col - 3:col] != "/# ":
             return
         if col > 3 and not text[col - 4].isspace():
             return
@@ -3957,7 +3994,7 @@ class MarkdownEditor(QTextEdit):
         cursor = QTextCursor(doc)
         cursor.setPosition(self._tag_suggest_trigger_pos)
         cursor.setPosition(self._tag_suggest_trigger_pos + 3, QTextCursor.KeepAnchor)
-        return cursor.selectedText() == "## "
+        return cursor.selectedText() == "/# "
 
     def _insert_suggested_tag(self, tag: str) -> None:
         if self._tag_suggest_trigger_pos is None:
@@ -3994,6 +4031,102 @@ class MarkdownEditor(QTextEdit):
             self._tag_suggest_overlay.hide()
         else:
             self._clear_tag_suggest_state()
+
+    def _maybe_trigger_task_tag_suggest(self) -> None:
+        if not config.has_active_vault():
+            return
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+        text = block.text()
+        col = cursor.positionInBlock()
+        if col < 3 or text[col - 3:col] != "/@ ":
+            return
+        if col > 3 and not text[col - 4].isspace():
+            return
+        is_task, *_ = self._is_task_line(text)
+        if not is_task:
+            return
+        trigger_pos = cursor.position() - 3
+        self._open_task_tag_suggest(trigger_pos, cursor.position())
+
+    def _available_task_tags(self) -> list[str]:
+        try:
+            rows = config.fetch_task_tags()
+        except Exception:
+            rows = []
+        tags = [tag for tag, _ in rows]
+        return tags
+
+    def _open_task_tag_suggest(self, trigger_pos: int, end_pos: int) -> None:
+        tags = self._available_task_tags()
+        if not tags:
+            return
+        cursor_rect = self.cursorRect()
+        anchor = self.mapToGlobal(cursor_rect.bottomRight())
+        self._task_tag_suggest_trigger_pos = trigger_pos
+        self._task_tag_suggest_end_pos = end_pos
+        self._task_tag_suggest_active = True
+        self._task_tag_suggest_overlay.open(tags, anchor=anchor)
+        self._update_task_tag_suggest()
+
+    def _update_task_tag_suggest(self) -> None:
+        if not self._task_tag_suggest_active or not self._task_tag_suggest_overlay.isVisible():
+            return
+        if not self._task_tag_suggest_trigger_valid():
+            self._close_task_tag_suggest()
+
+    def _maybe_close_task_tag_suggest(self) -> None:
+        if not self._task_tag_suggest_active:
+            return
+        if not self._task_tag_suggest_trigger_valid():
+            self._close_task_tag_suggest()
+
+    def _task_tag_suggest_trigger_valid(self) -> bool:
+        if self._task_tag_suggest_trigger_pos is None:
+            return False
+        doc = self.document()
+        if self._task_tag_suggest_trigger_pos + 3 > doc.characterCount():
+            return False
+        cursor = QTextCursor(doc)
+        cursor.setPosition(self._task_tag_suggest_trigger_pos)
+        cursor.setPosition(self._task_tag_suggest_trigger_pos + 3, QTextCursor.KeepAnchor)
+        return cursor.selectedText() == "/@ "
+
+    def _insert_task_tag(self, tag: str) -> None:
+        if self._task_tag_suggest_trigger_pos is None:
+            return
+        tag = tag.lstrip("@").strip()
+        if not tag:
+            self._close_task_tag_suggest()
+            return
+        cursor = self.textCursor()
+        end_pos = self._task_tag_suggest_end_pos or cursor.position()
+        cursor.beginEditBlock()
+        cursor.setPosition(self._task_tag_suggest_trigger_pos)
+        cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        cursor.insertText(f"@{tag} ")
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._task_tag_suggest_overlay.add_tag(tag)
+        if self._current_path and not self._read_only_mode:
+            try:
+                indexer.index_page(self._current_path, self.to_markdown())
+            except Exception:
+                pass
+        self._close_task_tag_suggest()
+
+    def _clear_task_tag_suggest_state(self) -> None:
+        self._task_tag_suggest_trigger_pos = None
+        self._task_tag_suggest_end_pos = None
+        self._task_tag_suggest_active = False
+
+    def _close_task_tag_suggest(self) -> None:
+        if self._task_tag_suggest_overlay.isVisible():
+            self._task_tag_suggest_overlay.hide()
+        else:
+            self._clear_task_tag_suggest_state()
 
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()

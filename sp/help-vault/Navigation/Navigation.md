@@ -10,7 +10,8 @@ The left sidebar shows your vault's folder structure.
 Tags help group related pages.
 - Page tags use `#tagname` and can appear anywhere in a page (task lines are ignored).
 - Task tags use `@tagname` and stay scoped to tasks.
-- Tag picker: type `## ` in the editor to browse existing page tags and insert one.
+- Tag picker: type `/# ` in the editor to browse existing page tags and insert one.
+- Task tag picker: type `/@ ` on a task line to browse existing task tags and insert one.
 - Click a tag in the Tags panel to see all pages with that tag.
 - Use tags to organize by project, topic, or status.
 Example:

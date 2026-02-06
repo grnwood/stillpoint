@@ -74,7 +74,8 @@ Key UI features:
 - Focus/Audience modes for distraction-free reading.
 - Page tags use `#tag` and can appear anywhere in a page (task lines are excluded).
 - Task tags use `@tag` and stay scoped to tasks.
-- Tag picker: type `## ` in the editor to browse existing page tags and insert one.
+- Tag picker: type `/# ` in the editor to browse existing page tags and insert one.
+- Task tag picker: type `/@ ` on a task line to browse existing task tags and insert one.
 
 ## Graph / Project Mode
 
