@@ -13010,7 +13010,7 @@ class MainWindow(QMainWindow):
         if self.current_path:
             colon = path_to_colon(self.current_path)
             if colon:
-                parts.append(colon)
+                parts.append(self._format_window_path(colon))
         if self.vault_root_name:
             parts.append(self.vault_root_name)
         if self._read_only:
@@ -13018,6 +13018,15 @@ class MainWindow(QMainWindow):
         suffix = "StillPoint Desktop"
         title = " | ".join(parts + [suffix]) if parts else suffix
         self.setWindowTitle(title)
+
+    @staticmethod
+    def _format_window_path(colon_path: str) -> str:
+        segments = [seg for seg in (colon_path or "").split(":") if seg]
+        if not segments:
+            return colon_path
+        if len(segments) <= 2:
+            return " ▸ ".join(segments)
+        return f"{segments[0]} ▸ … ▸ {segments[-1]}"
 
     def _apply_read_only_state(self) -> None:
         """Sync editor/widgets to the current read-only flag."""
