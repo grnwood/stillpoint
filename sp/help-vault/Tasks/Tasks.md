@@ -39,7 +39,7 @@ The 'Show tasks you can act on now' toggle hides:
 
 ## Organizing Tasks
 - Group related tasks under headings.
-- Use tags for categories.
+- Use `@tags` for task categories (page tags use `#tags`).
 - Create separate pages for big projects.
 
 ## Tips

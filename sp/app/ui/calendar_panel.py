@@ -64,7 +64,6 @@ from .date_insert_dialog import DateInsertDialog
 PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
 RECENT_ACTION_ROLE = Qt.UserRole + 50
-TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 PRINT_LINK_PATTERN = re.compile(
@@ -1284,57 +1283,57 @@ class CalendarPanel(QWidget):
         due_filters = f"Overdue: {overdue_on} · Future: {future_on}"
 
         extra_css = f"""
-        .calendar-print {
+        .calendar-print {{
             width: 100%;
             border-collapse: collapse;
             margin: 0.5em 0 1.25em;
-        }
+        }}
         .calendar-print th,
-        .calendar-print td {
+        .calendar-print td {{
             border: 1px solid var(--border);
             text-align: center;
             padding: 0.35em;
             width: 14.28%;
-        }
-        .calendar-day.today {
+        }}
+        .calendar-day.today {{
             background: {theme_value('calendar_panel.print.today_bg', '#4A90E2')};
             color: {theme_value('calendar_panel.print.today_text', '#ffffff')};
             font-weight: 700;
-        }
-        .calendar-day.selected {
+        }}
+        .calendar-day.selected {{
             background: {theme_value('calendar_panel.print.selected_bg', '#d9e9ff')};
             font-weight: 600;
-        }
-        .calendar-day.empty {
+        }}
+        .calendar-day.empty {{
             background: {theme_value('calendar_panel.print.empty_bg', '#fafafa')};
-        }
-        .section {
+        }}
+        .section {{
             margin: 1em 0 1.4em;
-        }
-        .section h2 {
+        }}
+        .section h2 {{
             margin: 0 0 0.4em;
             font-size: 1.2em;
-        }
-        .section ul {
+        }}
+        .section ul {{
             margin: 0.2em 0 0.2em 1.2em;
-        }
-        table.task-print {
+        }}
+        table.task-print {{
             border-collapse: collapse;
             width: 100%;
-        }
+        }}
         table.task-print th,
-        table.task-print td {
+        table.task-print td {{
             border: 1px solid var(--border);
             padding: 0.35em 0.5em;
             vertical-align: top;
-        }
-        table.task-print th {
+        }}
+        table.task-print th {{
             background: {theme_value('calendar_panel.print.table_header_bg', '#f0f0f0')};
             font-weight: 600;
-        }
-        .task-text {
+        }}
+        .task-text {{
             white-space: normal;
-        }
+        }}
         """
 
         def _list_html(items: list[str]) -> str:
@@ -2569,7 +2568,7 @@ class CalendarPanel(QWidget):
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tags.extend(TAG_PATTERN.findall(text))
+            tags.extend(indexer._extract_page_tags(text))
         unique_tags = sorted(set(tags))
         entries_count = len(total_files)
         subpages_count = max(0, entries_count - day_entries)
@@ -3491,7 +3490,7 @@ class CalendarPanel(QWidget):
                 text = file.read_text(encoding="utf-8")
             except Exception:
                 continue
-            tags.extend(TAG_PATTERN.findall(text))
+            tags.extend(indexer._extract_page_tags(text))
         unique_tags = sorted(set(tags))
         subpages_count = max(0, len(files) - 1)
         self.insight_title.setText(self._pretty_date_label(date))

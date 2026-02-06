@@ -71,6 +71,7 @@ from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
 from sp.app import config
+from sp.app import indexer
 from .theme import theme_color, theme_value
 
 
@@ -522,6 +523,155 @@ class AIActionOverlay(QWidget):
     def is_visible(self) -> bool:
         """Helper so parents can detect when the overlay is open."""
         return self.isVisible()
+
+
+class TagSuggestOverlay(QWidget):
+    """Popup list for inserting page #tags."""
+
+    tagAccepted = Signal(str)
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._all_tags: list[str] = []
+        self._filter: str = ""
+
+        self.setStyleSheet(
+            "background: "
+            f"{theme_value('markdown_editor.ai_overlay.bg', '#000000')}; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.text', '#ffffff')}; "
+            "border-radius: 8px; border: 1px solid "
+            f"{theme_value('markdown_editor.ai_overlay.border', '#222222')};"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Type to filter tags…")
+        self._search.setStyleSheet(
+            "font-size: "
+            f"{theme_value('markdown_editor.ai_overlay.search_font_size_px', 16)}px; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.search_text', '#ffffff')}; "
+            "background: "
+            f"{theme_value('markdown_editor.ai_overlay.search_bg', 'rgba(255, 255, 255, 0.08)')}; "
+            "border: 1px solid "
+            f"{theme_value('markdown_editor.ai_overlay.search_border', 'rgba(255, 255, 255, 0.5)')}; "
+            "padding: 6px; border-radius: 6px;"
+        )
+        self._search.textChanged.connect(self._refresh_list)
+        self._search.installEventFilter(self)
+        layout.addWidget(self._search)
+        self._list = QListWidget()
+        self._list.setUniformItemSizes(True)
+        self._list.setStyleSheet(
+            "font-size: "
+            f"{theme_value('markdown_editor.ai_overlay.list_font_size_px', 16)}px; "
+            "color: "
+            f"{theme_value('markdown_editor.ai_overlay.list_text', '#ffffff')}; "
+            "background: transparent; padding: 2px;"
+        )
+        self._list.itemActivated.connect(self._accept_current)
+        self._list.itemClicked.connect(lambda *_: self._accept_current())
+        layout.addWidget(self._list)
+
+    def open(self, tags: list[str], anchor: Optional[QPoint] = None) -> None:
+        self._all_tags = list(tags)
+        self._search.blockSignals(True)
+        self._search.clear()
+        self._search.blockSignals(False)
+        self._refresh_list()
+        parent = self.parent()
+        if parent:
+            width = max(220, min(420, parent.width() // 2))
+            height = min(260, max(140, parent.height() // 4))
+            if anchor:
+                screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+                left = max(screen_geo.left(), min(anchor.x(), screen_geo.right() - width))
+                top = max(screen_geo.top(), min(anchor.y(), screen_geo.bottom() - height))
+            else:
+                center = parent.mapToGlobal(parent.rect().center())
+                left = center.x() - width // 2
+                top = center.y() - height // 2
+            self.setGeometry(left, top, width, height)
+        self.show()
+        self.raise_()
+        if self._list.count():
+            self._list.setCurrentRow(0)
+        self._search.setFocus()
+
+    def update_filter(self, text: str) -> None:
+        self._search.setText(text or "")
+
+    def move_selection(self, delta: int) -> None:
+        count = self._list.count()
+        if not count:
+            return
+        row = self._list.currentRow()
+        row = max(0, min(count - 1, row + delta))
+        self._list.setCurrentRow(row)
+
+    def current_tag(self) -> Optional[str]:
+        item = self._list.currentItem()
+        return item.text() if item else None
+
+    def search_text(self) -> str:
+        return self._search.text()
+
+    def add_tag(self, tag: str) -> None:
+        cleaned = tag.strip()
+        if not cleaned:
+            return
+        if cleaned not in self._all_tags:
+            self._all_tags.append(cleaned)
+            self._all_tags.sort(key=lambda t: t.lower())
+            self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        needle = self._search.text().lower().strip()
+        self._list.clear()
+        for tag in self._all_tags:
+            if needle and not tag.lower().startswith(needle):
+                continue
+            self._list.addItem(QListWidgetItem(tag))
+
+    def _accept_current(self) -> None:
+        tag = self.current_tag()
+        if tag:
+            self.tagAccepted.emit(tag)
+        self.hide()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj == self._search and event.type() == QEvent.KeyPress:
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if event.key() == Qt.Key_Escape and mods == Qt.NoModifier:
+                self.hide()
+                return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab) and mods == Qt.NoModifier:
+                tag = self.current_tag() or self._search.text().strip()
+                if tag:
+                    self.tagAccepted.emit(tag)
+                self.hide()
+                return True
+            if event.key() in (Qt.Key_Up, Qt.Key_Down) and mods == Qt.NoModifier:
+                delta = -1 if event.key() == Qt.Key_Up else 1
+                self.move_selection(delta)
+                return True
+            if event.key() in (Qt.Key_J, Qt.Key_K) and mods == (Qt.ControlModifier | Qt.ShiftModifier):
+                delta = 1 if event.key() == Qt.Key_J else -1
+                self.move_selection(delta)
+                return True
+        return super().eventFilter(obj, event)
+
+    def focusOutEvent(self, event) -> None:
+        self.hide()
+        super().focusOutEvent(event)
+
+    def hide(self) -> None:  # type: ignore[override]
+        super().hide()
+        self.closed.emit()
 HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
 HEADING_SENTINEL_CHARS = "".join(chr(HEADING_SENTINEL_BASE + lvl) for lvl in range(1, HEADING_MAX_LEVEL + 1))
@@ -856,7 +1006,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             r'(?P<italic>(?<!\*)\*[^*]+\*(?!\*))|'
             r'(?P<strike>~~[^~]+~~)|'
             r'(?P<highlight>==[^=]+==)|'
-            r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+)|'
+            r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+|(?<![A-Za-z0-9_])#[A-Za-z0-9]+(?=\s|$))|'
             r'(?P<wiki_link>\[[^\]|]+\|[^\]]*\])|'
             r'(?P<camel_link>(?<!\S)\+[A-Za-z][\w]*(?=\s|$))|'
             r'(?P<colon_link>(?<!\S):[^\s\[\]]+(?:#[^\s\[\]]+)?)|'
@@ -1126,7 +1276,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     self.setFormat(start + length - 2, 2, self.hidden_format)
                 
             elif token_type == 'tag':
-                # @tag
+                # @tag or #tag
                 self.setFormat(start, length, self.tag_format)
                 
             elif token_type == 'wiki_link':
@@ -1297,6 +1447,7 @@ class MarkdownEditor(QTextEdit):
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
+    pageTagInserted = Signal(str)  # Emits tag when a new page tag is inserted
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
@@ -1415,6 +1566,12 @@ class MarkdownEditor(QTextEdit):
         self._ai_focus_shortcut.activated.connect(self._emit_ai_chat_focus)
 
         self._ai_action_overlay = None
+        self._tag_suggest_overlay = TagSuggestOverlay(self)
+        self._tag_suggest_overlay.tagAccepted.connect(self._insert_suggested_tag)
+        self._tag_suggest_overlay.closed.connect(self._clear_tag_suggest_state)
+        self._tag_suggest_trigger_pos: Optional[int] = None
+        self._tag_suggest_end_pos: Optional[int] = None
+        self._tag_suggest_active: bool = False
         self._overlay_vi_mode_before: Optional[bool] = None
         self._document_alive = True
         self._editor_alive = True
@@ -1423,6 +1580,8 @@ class MarkdownEditor(QTextEdit):
         self._suppress_paint = False
         self._suppress_paint_depth = 0
         self._saved_updates_enabled: Optional[bool] = None
+        self.textChanged.connect(self._update_tag_suggest)
+        self.cursorPositionChanged.connect(self._maybe_close_tag_suggest)
         self._scroll_margin_retry_pending = False
         self._render_images_retry_pending = False
         self._hr_refresh_retry_pending = False
@@ -3460,6 +3619,34 @@ class MarkdownEditor(QTextEdit):
         if self._read_only_mode:
             if self._handle_read_only_keypress(event):
                 return
+        if self._tag_suggest_active and self._tag_suggest_overlay.isVisible():
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if event.key() == Qt.Key_Escape:
+                self._close_tag_suggest()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab) and not mods:
+                tag = self._tag_suggest_overlay.current_tag()
+                if tag:
+                    self._insert_suggested_tag(tag)
+                else:
+                    token = (self._tag_suggest_overlay.search_text() or "").strip()
+                    if token:
+                        self._insert_suggested_tag(token)
+                    else:
+                        self._close_tag_suggest()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Up, Qt.Key_Down) and not mods:
+                delta = -1 if event.key() == Qt.Key_Up else 1
+                self._tag_suggest_overlay.move_selection(delta)
+                event.accept()
+                return
+            if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() in (Qt.Key_J, Qt.Key_K):
+                delta = 1 if event.key() == Qt.Key_J else -1
+                self._tag_suggest_overlay.move_selection(delta)
+                event.accept()
+                return
         if self._vi_feature_enabled:
             mods = event.modifiers() & ~Qt.KeypadModifier
             if mods == Qt.AltModifier:
@@ -3702,11 +3889,111 @@ class MarkdownEditor(QTextEdit):
                 # Prevent duplicate processing
                 if not self._processing_inline_trigger:
                     self._check_inline_link_trigger()
+            self._maybe_trigger_tag_suggest()
         
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             block = self.textCursor().block().previous()
             if block.isValid():
                 self._finalize_heading_block(block)
+
+    def _maybe_trigger_tag_suggest(self) -> None:
+        if not config.has_active_vault():
+            return
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+        text = block.text()
+        col = cursor.positionInBlock()
+        if col < 3 or text[col - 3:col] != "## ":
+            return
+        if col > 3 and not text[col - 4].isspace():
+            return
+        is_task, *_ = self._is_task_line(text)
+        if is_task:
+            return
+        trigger_pos = cursor.position() - 3
+        self._open_tag_suggest(trigger_pos, cursor.position())
+
+    def _available_page_tags(self) -> list[str]:
+        try:
+            rows = config.fetch_tag_summary()
+        except Exception:
+            rows = []
+        tags = [tag for tag, _ in rows]
+        return tags
+
+    def _open_tag_suggest(self, trigger_pos: int, end_pos: int) -> None:
+        tags = self._available_page_tags()
+        if not tags:
+            return
+        cursor_rect = self.cursorRect()
+        anchor = self.mapToGlobal(cursor_rect.bottomRight())
+        self._tag_suggest_trigger_pos = trigger_pos
+        self._tag_suggest_end_pos = end_pos
+        self._tag_suggest_active = True
+        self._tag_suggest_overlay.open(tags, anchor=anchor)
+        self._update_tag_suggest()
+
+    def _update_tag_suggest(self) -> None:
+        if not self._tag_suggest_active or not self._tag_suggest_overlay.isVisible():
+            return
+        if not self._tag_suggest_trigger_valid():
+            self._close_tag_suggest()
+            return
+
+    def _maybe_close_tag_suggest(self) -> None:
+        if not self._tag_suggest_active:
+            return
+        if not self._tag_suggest_trigger_valid():
+            self._close_tag_suggest()
+
+    def _tag_suggest_trigger_valid(self) -> bool:
+        if self._tag_suggest_trigger_pos is None:
+            return False
+        doc = self.document()
+        if self._tag_suggest_trigger_pos + 3 > doc.characterCount():
+            return False
+        cursor = QTextCursor(doc)
+        cursor.setPosition(self._tag_suggest_trigger_pos)
+        cursor.setPosition(self._tag_suggest_trigger_pos + 3, QTextCursor.KeepAnchor)
+        return cursor.selectedText() == "## "
+
+    def _insert_suggested_tag(self, tag: str) -> None:
+        if self._tag_suggest_trigger_pos is None:
+            return
+        tag = tag.lstrip("#").strip()
+        if not tag:
+            self._close_tag_suggest()
+            return
+        was_known = tag in self._available_page_tags()
+        cursor = self.textCursor()
+        end_pos = self._tag_suggest_end_pos or cursor.position()
+        cursor.beginEditBlock()
+        cursor.setPosition(self._tag_suggest_trigger_pos)
+        cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        cursor.insertText(f"#{tag} ")
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._tag_suggest_overlay.add_tag(tag)
+        if not was_known and self._current_path and not self._read_only_mode:
+            try:
+                indexer.index_page(self._current_path, self.to_markdown())
+            except Exception:
+                pass
+            self.pageTagInserted.emit(tag)
+        self._close_tag_suggest()
+
+    def _clear_tag_suggest_state(self) -> None:
+        self._tag_suggest_trigger_pos = None
+        self._tag_suggest_end_pos = None
+        self._tag_suggest_active = False
+
+    def _close_tag_suggest(self) -> None:
+        if self._tag_suggest_overlay.isVisible():
+            self._tag_suggest_overlay.hide()
+        else:
+            self._clear_tag_suggest_state()
 
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()

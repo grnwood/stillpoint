@@ -9,11 +9,13 @@ from sp.app import config
 from sp.app.ui.path_utils import colon_to_path, normalize_link_target
 from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES
 
-# Bump this when task parsing logic changes to force re-index even if file hash is unchanged.
-INDEX_SCHEMA_VERSION = "task-parse-v5"
+# Bump this when parsing logic changes to force re-index even if file hash is unchanged.
+INDEX_SCHEMA_VERSION = "task-parse-v6"
 
 # Match @tags that are not part of email addresses or similar identifiers.
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
+# Match page #tags (alphanumeric only) followed by whitespace or end.
+PAGE_TAG_PATTERN = re.compile(r"(?<![A-Za-z0-9_])#([A-Za-z0-9]+)(?=\s|$)")
 # Match URLs to exclude tags within them
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]\)]+")
 # Markdown-style links: [label](target)
@@ -43,12 +45,12 @@ def _indent_width(indent: str) -> int:
 
 def _extract_tags(text: str) -> list[str]:
     """Extract @tags from text, excluding tags that appear within URLs.
-    
+
     Example: "Check @issue http://example.com?@thread=123 @bug" returns ["issue", "bug"]
     """
     # Find all URL positions
     url_ranges = [(m.start(), m.end()) for m in URL_PATTERN.finditer(text)]
-    
+
     # Find all tag matches
     all_tags = []
     for match in TAG_PATTERN.finditer(text):
@@ -57,8 +59,40 @@ def _extract_tags(text: str) -> list[str]:
         in_url = any(start <= tag_pos < end for start, end in url_ranges)
         if not in_url:
             all_tags.append(match.group(1))
-    
+
     return all_tags
+
+
+def _tag_exclusion_ranges(content: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for match in URL_PATTERN.finditer(content):
+        ranges.append((match.start(), match.end()))
+    for match in MARKDOWN_LINK_PATTERN.finditer(content):
+        ranges.append((match.start(1), match.end(1)))
+    for match in WIKI_LINK_PATTERN.finditer(content):
+        ranges.append((match.start("link"), match.end("link")))
+    for match in PLAIN_COLON_LINK_PATTERN.finditer(content):
+        ranges.append((match.start("link"), match.end("link")))
+    return ranges
+
+
+def _extract_page_tags(content: str) -> list[str]:
+    """Extract #tags for pages, excluding task lines, URLs, and link anchors."""
+    excluded = _tag_exclusion_ranges(content)
+    tags: list[str] = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        line_body = line.rstrip("\n")
+        if TASK_PATTERN.match(line_body):
+            offset += len(line)
+            continue
+        for match in PAGE_TAG_PATTERN.finditer(line_body):
+            tag_pos = offset + match.start()
+            in_excluded = any(start <= tag_pos < end for start, end in excluded)
+            if not in_excluded:
+                tags.append(match.group(1))
+        offset += len(line)
+    return tags
 
 
 def index_page(path: str, content: str) -> bool:
@@ -74,7 +108,7 @@ def index_page(path: str, content: str) -> bool:
     if prev == digest:
         return False
 
-    tags = sorted(set(_extract_tags(content)))
+    tags = sorted(set(_extract_page_tags(content)))
     link_targets = _extract_link_targets(content, path)
     # Automatically add a link from the parent page to this page if it is a child
     parent = Path(path).parent

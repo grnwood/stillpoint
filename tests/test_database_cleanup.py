@@ -26,7 +26,7 @@ def test_delete_single_page_cleans_database(test_db):
     config.update_page_index(
         path=path,
         title="Test Page",
-        tags=["@work", "@urgent"],
+        tags=["work", "urgent"],
         links=["/OtherPage.md"],
         tasks=[
             {
@@ -60,7 +60,7 @@ def test_delete_single_page_cleans_database(test_db):
     assert len(tasks) == 2
     
     tags = config.fetch_tag_summary()
-    assert len(tags) == 2  # @work, @urgent
+    assert len(tags) == 2  # work, urgent
     
     task_tags = config.fetch_task_tags()
     assert len(task_tags) == 1  # @bug
@@ -102,7 +102,7 @@ def test_delete_folder_cleans_all_subpages(test_db):
         config.update_page_index(
             path=path,
             title=f"Page {i}",
-            tags=[f"@tag{i}"],
+            tags=[f"tag{i}"],
             links=[],
             tasks=[
                 {
@@ -122,7 +122,7 @@ def test_delete_folder_cleans_all_subpages(test_db):
     config.update_page_index(
         path="/Other/Other.md",
         title="Other Page",
-        tags=["@other"],
+        tags=["other"],
         links=[],
         tasks=[
             {
@@ -160,7 +160,7 @@ def test_delete_folder_cleans_all_subpages(test_db):
     # Verify the tags from folder pages are gone
     remaining_tags = config.fetch_tag_summary()
     assert len(remaining_tags) == 1
-    assert remaining_tags[0][0] == "@other"
+    assert remaining_tags[0][0] == "other"
     
     remaining_task_tags = config.fetch_task_tags()
     assert len(remaining_task_tags) == 1
@@ -173,7 +173,7 @@ def test_delete_folder_with_no_leading_slash(test_db):
     config.update_page_index(
         path=path,
         title="Test",
-        tags=["@test"],
+        tags=["test"],
         links=[],
         tasks=[],
     )
@@ -191,7 +191,7 @@ def test_delete_folder_with_trailing_slash(test_db):
     config.update_page_index(
         path=path,
         title="Test",
-        tags=["@test"],
+        tags=["test"],
         links=[],
         tasks=[],
     )

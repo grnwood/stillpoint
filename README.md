@@ -72,6 +72,9 @@ Key UI features:
 - Attachments, link navigator, and AI panels (optional).
 - Inline editor triggers: type `//` to insert a page link, or `[[` to open the inline AI prompt (when AI is enabled).
 - Focus/Audience modes for distraction-free reading.
+- Page tags use `#tag` and can appear anywhere in a page (task lines are excluded).
+- Task tags use `@tag` and stay scoped to tasks.
+- Tag picker: type `## ` in the editor to browse existing page tags and insert one.
 
 ## Graph / Project Mode
 
@@ -175,6 +178,15 @@ Benefits:
 Local overrides:
 
 - If `print.html` or `print.css` exist under `~/.stillpoint/templates` or `<vault>/.stillpoint/templates`, StillPoint uses those instead of the defaults.
+
+## Themes
+
+StillPoint uses a JSON-based theming engine:
+
+- Base theme: `sp/app/theme-config.json`.
+- Overrides: `~/.stillpoint/themes/<theme>.json`.
+- Custom themes are deep-merged over the base theme (only specify the keys you want to change).
+- Select themes in Preferences → Appearance → Theme (then refresh the theme list if you add new files).
 
 ## Templates
 

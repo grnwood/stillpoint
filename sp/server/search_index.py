@@ -245,7 +245,7 @@ def search_pages(
     Args:
         conn: Database connection
         query: Search query supporting FTS5 syntax (AND/OR/NEAR/NOT/"exact phrase")
-               and @tag filtering (e.g., "search term @tag1 @tag2")
+               and #tag filtering (e.g., "search term #tag1 #tag2")
         subtree: Optional path prefix to limit search (e.g., "/Projects/StillPoint")
         limit: Maximum number of results to return
     
@@ -257,10 +257,10 @@ def search_pages(
 
     normalized_subtree = _normalize_subtree_filter(subtree)
     
-    # Extract @tags from query
-    tag_pattern = r'@(\w+)'
+    # Extract #tags from query
+    tag_pattern = r'#([A-Za-z0-9]+)'
     tags = re.findall(tag_pattern, query)
-    # Remove @tags from FTS query
+    # Remove #tags from FTS query
     fts_query = re.sub(tag_pattern, '', query).strip()
     
     # Add prefix matching to FTS query terms

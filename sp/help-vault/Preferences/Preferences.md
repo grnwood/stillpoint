@@ -14,8 +14,10 @@ There are two levels of preferences:
 
 ### Appearance
 - **Font**: Choose your preferred font and size
-- **Theme**: Light or dark mode
+- **Theme**: Select a JSON theme (base + overrides)
 - **Line Numbers**: Show/hide line numbers in editor
+
+Themes live in `~/.stillpoint/themes`. The base theme is `sp/app/theme-config.json`, and custom themes are deep-merged on top of it so you can override only the keys you need.
 
 ### Features
 - **Tasks Panel**: Enable/disable task tracking

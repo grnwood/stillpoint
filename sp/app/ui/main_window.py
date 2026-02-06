@@ -1451,6 +1451,7 @@ class MainWindow(QMainWindow):
         self.editor.set_filter_nav_callback(self._set_nav_filter)
         self.editor.set_move_text_callback(self._append_text_to_page_from_editor)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
+        self.editor.pageTagInserted.connect(self._on_page_tag_inserted)
         self.find_bar = FindReplaceBar(self)
         self.find_bar.findNextRequested.connect(self._on_find_next_requested)
         self.find_bar.replaceRequested.connect(self._on_replace_requested)
@@ -7019,7 +7020,7 @@ class MainWindow(QMainWindow):
         # Search term input
         layout.addWidget(QLabel("Search query:"))
         search_input = QLineEdit()
-        search_input.setPlaceholderText("Enter search query (supports AND, OR, NOT, \"phrases\", @tags)")
+        search_input.setPlaceholderText("Enter search query (supports AND, OR, NOT, \"phrases\", #tags)")
         layout.addWidget(search_input)
         
         # Limit by path checkbox and input
@@ -10434,6 +10435,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         overlay.show()
+
+    def _on_page_tag_inserted(self, tag: str) -> None:
+        if self.tags_tab:
+            self.tags_tab.add_tag(tag)
 
     def _start_inline_ai_stream(self, prompt: str, insert_pos: int) -> None:
         if not prompt.strip():

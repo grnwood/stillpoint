@@ -8,14 +8,16 @@ The left sidebar shows your vault's folder structure.
 
 ## Tags
 Tags help group related pages.
-- Add tags in your notes with `@tagname` or `#tagname`.
+- Page tags use `#tagname` and can appear anywhere in a page (task lines are ignored).
+- Task tags use `@tagname` and stay scoped to tasks.
+- Tag picker: type `## ` in the editor to browse existing page tags and insert one.
 - Click a tag in the Tags panel to see all pages with that tag.
 - Use tags to organize by project, topic, or status.
 Example:
 ```markdown
 # Project Plan
 
-Status: @active #project
+Status: #active #project
 
 - [ ] Research phase
 - [ ] Design phase

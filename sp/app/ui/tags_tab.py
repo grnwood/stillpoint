@@ -117,7 +117,7 @@ class TagChicklet(QPushButton):
     """A clickable tag button."""
     
     def __init__(self, tag: str, parent=None):
-        super().__init__(f"@{tag}", parent)
+        super().__init__(f"#{tag}", parent)
         self.tag = tag
         self.selected = False
         self.setCheckable(True)
@@ -176,7 +176,7 @@ class TagsTab(QWidget):
         self.tag_chicklets = {}  # tag -> TagChicklet widget
         self.selected_tags = set()  # Currently selected tags
         self._tags_loaded = False  # Track if tags have been loaded
-        self.include_task_tags = False  # Whether to include task tags (default false)
+        self._pending_new_tags: set[str] = set()
         
         self._init_ui()
         # Don't load tags immediately - wait for vault to be opened
@@ -200,8 +200,8 @@ class TagsTab(QWidget):
         self.tags_container.setLayout(self.tags_layout)
         scroll_area.setWidget(self.tags_container)
         
-        # Tags header with checkbox
-        from PySide6.QtWidgets import QCheckBox, QToolButton
+        # Tags header
+        from PySide6.QtWidgets import QToolButton
         from PySide6.QtWidgets import QStyle
         from PySide6.QtGui import QPalette
         header_layout = QHBoxLayout()
@@ -210,12 +210,6 @@ class TagsTab(QWidget):
         tags_label = QLabel("Tags:")
         tags_label.setStyleSheet("font-weight: bold;")
         header_layout.addWidget(tags_label)
-
-        self.task_tags_checkbox = QCheckBox("Tasks?")
-        self.task_tags_checkbox.setChecked(False)
-        self.task_tags_checkbox.setToolTip("Include tags from tasks (reduces clutter when off)")
-        self.task_tags_checkbox.toggled.connect(self._on_task_tags_toggled)
-        header_layout.addWidget(self.task_tags_checkbox)
 
         header_layout.addStretch()
 
@@ -323,26 +317,26 @@ class TagsTab(QWidget):
         """Filter visible tags based on search text and auto-select exact matches."""
         search_lower = search_text.lower().strip()
         
-        # Parse out potential tag names (words starting with @)
+        # Parse out potential tag names (words starting with #)
         potential_tags = []
-        # For filtering visibility, we'll collect all filter terms (with @ stripped)
+        # For filtering visibility, we'll collect all filter terms (with # stripped)
         filter_terms = []
         
         if search_lower:
-            # Split by whitespace and look for @-prefixed words
+            # Split by whitespace and look for #-prefixed words
             words = search_lower.split()
             for word in words:
-                if word.startswith('@'):
-                    # Remove the @ prefix for matching
+                if word.startswith('#'):
+                    # Remove the # prefix for matching
                     tag_name = word[1:]
                     if tag_name:
                         potential_tags.append(tag_name)
                         filter_terms.append(tag_name)
                     else:
-                        # Just '@' with nothing after - show all tags
+                        # Just '#' with nothing after - show all tags
                         filter_terms.append('')
                 else:
-                    # Non-@ prefixed text - use as-is for filtering
+                    # Non-# prefixed text - use as-is for filtering
                     filter_terms.append(word)
         
         # First pass: check for exact matches and auto-select them
@@ -399,12 +393,6 @@ class TagsTab(QWidget):
                 conn = sqlite3.connect(str(db_path), check_same_thread=False)
                 should_close = True
             rows = config.fetch_tag_summary()
-            if self.include_task_tags:
-                task_rows = conn.execute("SELECT DISTINCT tag FROM task_tags").fetchall()
-                task_tags = {row[0] for row in task_rows}
-                existing = {tag for tag, _ in rows}
-                for tag in sorted(task_tags - existing):
-                    rows.append((tag, 0))
             if should_close:
                 conn.close()
             
@@ -417,34 +405,25 @@ class TagsTab(QWidget):
             
             # Create chicklets for each tag
             for tag, count in rows:
-                chicklet = TagChicklet(tag, self.tags_container)
-                chicklet.setToolTip(f"@{tag} ({count} pages)")
-                chicklet.clicked.connect(lambda checked, t=tag: self._on_tag_clicked(t, checked))
-                self.tags_layout.addWidget(chicklet)
-                self.tag_chicklets[tag] = chicklet
+                self._add_tag_chicklet(tag, count_label=f"{count} pages")
+
+            # Apply any pending tags that arrived before the tab loaded
+            if self._pending_new_tags:
+                for tag in sorted(self._pending_new_tags):
+                    if tag not in self.tag_chicklets:
+                        self._add_tag_chicklet(tag, count_label="new")
+                self._pending_new_tags.clear()
 
             self.tags_layout.invalidate()
             self.tags_container.adjustSize()
             self.tags_container.updateGeometry()
-            
+
             print(f"[TagsTab] Loaded {len(rows)} tags")
-            
+
         except Exception as e:
             import traceback
             print(f"[TagsTab] Error loading tags: {str(e)}")
             traceback.print_exc()
-    
-    def _on_task_tags_toggled(self, checked: bool):
-        """Handle task tags checkbox toggle."""
-        self.include_task_tags = checked
-        print(f"[TagsTab] Task tags checkbox toggled: {checked}")
-        # Clear selection since tags will change
-        self.selected_tags.clear()
-        # Reload tags with new filter
-        self._load_tags()
-        # Clear results
-        self.results_tree.clear()
-        self.status_label.setText("Select tags to filter pages")
     
     def _on_tag_clicked(self, tag: str, checked: bool):
         """Handle tag chicklet click."""
@@ -491,7 +470,7 @@ class TagsTab(QWidget):
             # Display results
             self._display_results([row[0] for row in rows])
             
-            tag_list = ", ".join(f"@{t}" for t in sorted(self.selected_tags))
+            tag_list = ", ".join(f"#{t}" for t in sorted(self.selected_tags))
             self.status_label.setText(f"Found {len(rows)} page(s) with tags: {tag_list}")
             
         except Exception as e:
@@ -658,3 +637,24 @@ class TagsTab(QWidget):
         self.results_tree.clear()
         self.status_label.setText("Select tags to filter pages")
         self._tags_loaded = True
+
+    def add_tag(self, tag: str) -> None:
+        """Insert a new tag into the chicklet list without refreshing from DB."""
+        cleaned = (tag or "").lstrip("#").strip()
+        if not cleaned:
+            return
+        if cleaned in self.tag_chicklets:
+            return
+        if not self._tags_loaded:
+            self._pending_new_tags.add(cleaned)
+            return
+        self._add_tag_chicklet(cleaned, count_label="new")
+        self._filter_tags(self.tag_search.text())
+
+    def _add_tag_chicklet(self, tag: str, count_label: str | int = 0) -> None:
+        chicklet = TagChicklet(tag, self.tags_container)
+        suffix = f"{count_label}" if isinstance(count_label, int) else count_label
+        chicklet.setToolTip(f"#{tag} ({suffix})")
+        chicklet.clicked.connect(lambda checked, t=tag: self._on_tag_clicked(t, checked))
+        self.tags_layout.addWidget(chicklet)
+        self.tag_chicklets[tag] = chicklet

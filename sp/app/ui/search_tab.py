@@ -361,12 +361,12 @@ class SearchTab(QWidget):
 • <code>"exact phrase"</code> - Match exact phrase<br>
 • <code>term1 NEAR term2</code> - Terms close to each other<br><br>
 <b>Tag Filtering:</b><br>
-• <code>search @tag1</code> - Pages with content AND tag<br>
-• <code>@tag1 @tag2</code> - Pages with these tags<br><br>
+• <code>search #tag1</code> - Pages with content AND tag<br>
+• <code>#tag1 #tag2</code> - Pages with these tags<br><br>
 <b>Examples:</b><br>
 • <code>python AND (function OR method)</code><br>
-• <code>"design pattern" @architecture</code><br>
-• <code>bug NOT fixed @priority</code>
+• <code>"design pattern" #architecture</code><br>
+• <code>bug NOT fixed #priority</code>
 </body></html>"""
     
     def _select_subtree(self):
