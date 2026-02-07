@@ -3478,6 +3478,36 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+    def _apply_help_vault_defaults_once(self) -> None:
+        if not self.vault_root or not self.vault_root_name:
+            return
+        if self.vault_root_name.lower() != "help-vault":
+            return
+        db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
+        if not db_path.exists():
+            return
+        try:
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM kv WHERE key = ?",
+                    ("help_vault_order_fixed",),
+                ).fetchone()
+                if row and str(row[0]).strip().lower() in {"1", "true", "yes"}:
+                    return
+        except Exception:
+            # If we can't read the flag, still attempt to apply once.
+            pass
+        self._apply_help_vault_defaults(Path(self.vault_root))
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                    ("help_vault_order_fixed", "true"),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
     def _open_help_documentation(self) -> None:
         """Open the built-in help vault in a new StillPoint window."""
         if not self._require_local_mode("Open help documentation"):
@@ -4541,6 +4571,10 @@ class MainWindow(QMainWindow):
                 needs_index = index_dir_missing or config.is_vault_index_empty()
                 if needs_index:
                     self._reindex_vault(show_progress=True)
+                self._apply_help_vault_defaults_once()
+                # Refresh tree if we just normalized help-vault ordering.
+                if self.vault_root_name and self.vault_root_name.lower() == "help-vault":
+                    self._refresh_tree()
 
                 self._load_bookmarks()
                 if self.vault_root:
