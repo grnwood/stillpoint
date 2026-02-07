@@ -9,17 +9,26 @@ StillPoint is a local-first, markdown note system with a PySide6 desktop app and
 ## Highlights
 
 - Local-first vaults on disk (folders + Markdown files).
+
+<img src="docs/img/full-notebook-app.png"/>
+
 - Fast tree navigation, history popup, and heading switcher.
 - Markdown editor with formatting shortcuts, task parsing, inline images, and inline link triggers (`//` quick link, `[[` inline AI prompt).
 - Journaling workflows with date navigation and templates.
+
+<img src="docs/img/calendar-page.png"/>
+
 - Quick Capture (tray/menu/CLI) for low-friction capture into today's page.
 - Focus and Audience modes for distraction-free writing and reading.
 - Link graph / navigator and filtered navigation for working in a project context.
 - Print to browser with clean HTML output, print CSS, and image support.
 - Optional vi-mode navigation/editing.
 - Built-in help vault and keyboard shortcuts guide.
-- PlantUML diagramming with AI-assisted generation and templates.
+- PlantUML and Mermaid diagramming with AI-assisted generation and templates.
 
+<img src="docs/img/puml-render.png"/>
+- Mermaid 
+<img src="docs/img/mermaid2.png"/>
 ## License
 
 StillPoint is licensed under the Apache License, Version 2.0.
@@ -99,6 +108,8 @@ AI features are opt-in and require configuration. Current capabilities include:
 - One-shot prompting in-flow (quick refine/transform actions).
 - Page chat (contextual chat scoped to the current page).
 - Global chat (vault-wide or general context).
+
+<img src="docs/img/ai-chat-panel.png">
 - AI actions menu for common edits and transformations.
 - Embedded RAG capabilities.
 - PDF and .docx extraction with vector indexing (pdfminer, python-docx).
