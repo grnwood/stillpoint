@@ -84,8 +84,8 @@ Write-Host ""
 
 $IconSource = $null
 
-$IconIco = Join-Path $AssetsDir "sp-icon.ico"
-$IconPng = Join-Path $AssetsDir "sp-icon.png"
+$IconIco = Join-Path $AssetsDir "icons\\StillPoint.ico"
+$IconPng = Join-Path $AssetsDir "icons\\linux-png\\stillpoint-512x512.png"
 
 if (Test-Path $IconIco) {
     $IconSource = $IconIco

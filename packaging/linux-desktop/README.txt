@@ -76,7 +76,7 @@ TROUBLESHOOTING
 ---------------
 
 If the icon doesn't appear:
-  - Make sure sp-icon.png exists in _internal/sp/assets/
+  - Make sure icons/linux-png/stillpoint-512x512.png exists in _internal/sp/assets/
   - Run: sudo update-desktop-database
 
 If you see "Permission denied":

@@ -99,12 +99,23 @@ def get_app_icon() -> QIcon:
     if not hasattr(get_app_icon, '_cached_icon'):
         icon_candidates = []
         if sys.platform == "win32":
-            icon_candidates = ["sp-icon.ico", "icon.ico", "sp-icon.png"]
+            icon_candidates = [
+                os.path.join("assets", "icons", "StillPoint.ico"),
+                os.path.join("assets", "icons", "linux-png", "stillpoint-512x512.png"),
+            ]
+        elif sys.platform == "darwin":
+            icon_candidates = [
+                os.path.join("assets", "icons", "StillPoint.icns"),
+                os.path.join("assets", "icons", "linux-png", "stillpoint-512x512.png"),
+            ]
         else:
-            icon_candidates = ["sp-icon.png", "sp-icon.ico"]
-        
-        for icon_name in icon_candidates:
-            for path in _resource_candidates(os.path.join("assets", icon_name)):
+            icon_candidates = [
+                os.path.join("assets", "icons", "linux-png", "stillpoint-512x512.png"),
+                os.path.join("assets", "icons", "StillPoint.ico"),
+            ]
+
+        for rel_path in icon_candidates:
+            for path in _resource_candidates(rel_path):
                 if os.path.exists(path):
                     get_app_icon._cached_icon = QIcon(path)
                     return get_app_icon._cached_icon

@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ICON_PNG="$ROOT_DIR/sp/assets/sp-icon.png"
+ICON_PNG="$ROOT_DIR/sp/assets/icons/linux-png/stillpoint-1024x1024.png"
 OUTPUT_ICNS="$ROOT_DIR/sp/assets/StillPoint.icns"
 
 if [ ! -f "$ICON_PNG" ]; then

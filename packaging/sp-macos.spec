@@ -87,7 +87,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 _assets_dir = os.path.join(ROOT, 'sp', 'assets')
-_icon_icns = os.path.join(_assets_dir, 'StillPoint.icns')
+_icon_icns = os.path.join(_assets_dir, 'icons', 'StillPoint.icns')
 
 exe = EXE(
     pyz,

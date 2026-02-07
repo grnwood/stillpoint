@@ -22,7 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 REQ_FILE="$PROJECT_DIR/sp/requirements.txt"
-ICON_PNG="$PROJECT_DIR/sp/assets/sp-icon.png"
+ICON_PNG="$PROJECT_DIR/sp/assets/icons/linux-png/stillpoint-1024x1024.png"
+ICON_ICNS="$PROJECT_DIR/sp/assets/icons/${APP_NAME}.icns"
 
 VENV_DIR="$PROJECT_DIR/.venv"
 APP_DIR="$PROJECT_DIR/${APP_NAME}.app"
@@ -89,7 +90,7 @@ python -m pip install pyinstaller
 # Build .icns
 # ------------------------------------------------------------
 ICONSET_DIR="$PROJECT_DIR/sp/assets/${APP_NAME}.iconset"
-ICNS_OUT="$PROJECT_DIR/sp/assets/${APP_NAME}.icns"
+ICNS_OUT="$ICON_ICNS"
 
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"

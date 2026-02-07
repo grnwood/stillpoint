@@ -39,7 +39,7 @@ Use the provided screenshot to set up a Quick Capture shortcut:
 
 See: packaging/win32/windows-quicklaunch-shortcut.png
 
-Note: The taskbar icon may not display correctly unless you 
+Note: The taskbar icon may not display correctly unless you
       use the install.ps1 script.
 
 UNINSTALL

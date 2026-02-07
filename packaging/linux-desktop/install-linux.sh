@@ -43,7 +43,7 @@ else
     fi
 fi
 
-ICON_SOURCE="$DIST_DIR/_internal/sp/assets/sp-icon.png"
+ICON_SOURCE="$DIST_DIR/_internal/sp/assets/icons/linux-png/stillpoint-512x512.png"
 CAPTURE_DIST_DIR="$SCRIPT_DIR/../stillpoint-capture"
 if [[ -d "$SCRIPT_DIR/$CAPTURE_NAME" ]]; then
     CAPTURE_DIST_DIR="$SCRIPT_DIR/$CAPTURE_NAME"
