@@ -1,5 +1,9 @@
 # StillPoint
 
+<p align="center">
+  <img src="sp/assets/sp-full-transparent.png" alt="StillPoint logo" width="400">
+  </p>
+
 StillPoint is a local-first, markdown note system with a PySide6 desktop app and an embedded FastAPI backend. It is built around a folder-per-page vault structure, fast navigation, and Markdown-first editing.  Local and Remote LLM infused alongside your thoughts and writing where you want it.
 
 ## Highlights
