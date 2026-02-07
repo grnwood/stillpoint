@@ -316,3 +316,21 @@ The same entry point works for overlay capture or text capture via `--text`/stdi
 ## Notes
 
 StillPoint stores settings per-vault in `.stillpoint/settings.db` (SQLite). Vault contents always live where the user chooses and remain plain files on disk.
+
+## Funding & Support
+
+This project is developed with a long-term, local-first philosophy:
+- Your data stays yours
+- Offline-first by default
+- No telemetry, ads, or data monetization
+
+If you find this project useful and would like to support its continued development and maintenance, you can do so here:
+
+- ❤️ **GitHub Sponsors** (monthly or one-time):  
+  https://github.com/sponsors/grnwood
+
+- ☕ **Ko-fi** (one-time support):  
+  https://ko-fi.com/grnwood
+
+Support is always optional. The core project remains fully open source and usable without payment.
+
