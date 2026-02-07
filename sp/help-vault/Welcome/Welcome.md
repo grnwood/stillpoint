@@ -27,7 +27,6 @@ This help vault explains the main areas of the app and how they fit together.
 - [:Tasks|Tasks] - Track and manage to-dos.
 - [:Calendar|Calendar] - Journal navigation and date browsing.
 - [:Attachments|Attachments] - Add files and media to pages.
-- [:Remote-Vaults|Remote Vaults] - Access vaults from a server across devices.
 - [:Modes|Modes] - VI, Focus, and Audience modes for different workflows.
 - [:Rendering|Rendering] - PlantUML and Mermaid diagram rendering.
 - [:AI|AI] - Optional AI features and workflows.

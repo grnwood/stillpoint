@@ -266,6 +266,10 @@ def _format_tags(tags: list[str]) -> str:
     return " ".join(f"@{tag}" for tag in tags)
 
 
+def _format_hash_tags(tags: list[str]) -> str:
+    return " ".join(f"#{tag}" for tag in tags)
+
+
 def _generate_task_text() -> str:
     buzz = "-".join(FAKER.words(nb=random.randint(2, 4)))
     action = FAKER.bs()
@@ -359,6 +363,7 @@ def _build_content(
         f"This page lives at :{colon_path} in the StillPoint vault.",
         "It describes features, workflows, and ideas for StillPoint while acting as link data.",
         f"Tags: {_format_tags(page_tags) if page_tags else '@general'}",
+        f"Hashtags: {_format_hash_tags(page_tags) if page_tags else '#notes'}",
         "",
         "Links to explore:",
         *[f"- [:{link}|{link}]" for link in dedup_links],
@@ -398,8 +403,11 @@ def _build_content(
             tag_note = None
             if random.random() < 0.55:
                 tag_note = f"Related tags: {_format_tags(_sample_tags(2, 4))}"
+            hash_note = None
+            if random.random() < 0.45:
+                hash_note = f"Hashtags: {_format_hash_tags(_sample_tags(2, 4))}"
             level = ((paragraph_counter + idx) % 5) + 1
-            paragraphs_for_section.append(_headered_paragraph(level, extra_note, tag_note))
+            paragraphs_for_section.append(_headered_paragraph(level, extra_note, tag_note, hash_note))
         paragraph_counter += count
         section_body = "\n\n".join(paragraphs_for_section)
         body_sections.append(f"## {label}\n\n{section_body}")
@@ -412,6 +420,7 @@ def _headered_paragraph(
     header_level: int,
     extra_note: str | None = None,
     tag_note: str | None = None,
+    hash_note: str | None = None,
 ) -> str:
     level = max(1, min(5, header_level))
     heading_words = " ".join(word.capitalize() for word in FAKER.words(nb=random.randint(2, 4)))
@@ -422,6 +431,8 @@ def _headered_paragraph(
         body = f"{body}\n\n{extra_note}"
     if tag_note:
         body = f"{body}\n\n{tag_note}"
+    if hash_note:
+        body = f"{body}\n\n{hash_note}"
     return f"{heading}\n\n{body}"
 
 

@@ -26,10 +26,21 @@ The Tasks panel shows all tasks from your vault.
 ## Filtering Tasks
 - Type keywords to find specific tasks.
 - Use tags like `@work` or `@personal`.
+- Type `/@ ` on a task line to insert a task tag from the picker.
 - Add dates like `2025-01-15` for scheduling.
 Example filters:
 - `@work` - show work-related tasks
 - `meeting` - show tasks mentioning meetings
+
+## Task Date Formats
+Use date markers directly in task lines:
+- `>YYYY-MM-DD` = start on/after date (hide until then)
+- `<YYYY-MM-DD` = due by date
+You can include both on the same task line.
+Example:
+```markdown
+- [ ] Draft proposal >2026-02-10 <2026-02-14
+```
 
 ## Actionable Tasks
 The 'Show tasks you can act on now' toggle hides:
@@ -41,6 +52,17 @@ The 'Show tasks you can act on now' toggle hides:
 - Group related tasks under headings.
 - Use `@tags` for task categories (page tags use `#tags`).
 - Create separate pages for big projects.
+Example nested tags:
+```markdown
+# Launch Plan
+
+Tags: #launch #marketing
+
+- [ ] Write announcement @writing
+  - [ ] Review copy @review
+  - [ ] Schedule post @social
+- [ ] Collect feedback @research
+```
 
 ## Tips
 - Keep tasks near the notes they relate to.

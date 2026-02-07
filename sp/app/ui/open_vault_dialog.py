@@ -91,6 +91,14 @@ class AddVaultDialog(QDialog):
 
 class OpenVaultDialog(QDialog):
     """Dialog for selecting, adding, and managing vaults."""
+    @staticmethod
+    def _is_help_vault_path(path: Optional[str]) -> bool:
+        if not path:
+            return False
+        try:
+            return Path(path).name.lower() == "help-vault"
+        except Exception:
+            return False
 
     def __init__(
         self,
@@ -109,7 +117,8 @@ class OpenVaultDialog(QDialog):
         self._on_add_remote = on_add_remote
         self._on_load_remote = on_load_remote
         self.local_vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
-        if not self.local_vaults and current_vault:
+        self.local_vaults = [v for v in self.local_vaults if not self._is_help_vault_path(v.get("path"))]
+        if not self.local_vaults and current_vault and not self._is_help_vault_path(current_vault):
             self.local_vaults.append({"name": Path(current_vault).name, "path": current_vault})
         self.remote_vaults: list[dict[str, str]] = []
         self.remote_status_entries: list[dict[str, str]] = []
@@ -238,12 +247,16 @@ class OpenVaultDialog(QDialog):
 
         if vaults:
             target_id = select_id or select_path or vaults[0].get("path")
+            if target_id and self._is_help_vault_path(str(target_id)):
+                target_id = vaults[0].get("path")
             for idx in range(list_widget.count()):
                 item = list_widget.item(idx)
                 data = item.data(Qt.UserRole)
                 if data and data.get("id") == target_id:
                     list_widget.setCurrentItem(item)
                     break
+            if list_widget.currentItem() is None and list_widget.count() > 0:
+                list_widget.setCurrentItem(list_widget.item(0))
 
     def _refresh_local_list(self, select_path: Optional[str] = None) -> None:
         self._populate_list(
@@ -266,6 +279,8 @@ class OpenVaultDialog(QDialog):
         self.default_combo.clear()
         self.default_combo.addItem("No default", None)
         for vault in self.local_vaults:
+            if self._is_help_vault_path(vault.get("path")):
+                continue
             self.default_combo.addItem(vault["name"], vault["path"])
         idx = self.default_combo.findData(self.default_vault)
         if idx != -1:

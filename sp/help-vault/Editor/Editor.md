@@ -21,6 +21,7 @@ StillPoint uses Markdown for formatting. It's simple text with special symbols.
 - `[text](url)` for external links
 - `:PageName` for internal pages
 - `[:PageName|Display Text]` for custom link text
+- Type `// ` to open the quick link picker and insert a colon link.
 
 ### Code Blocks
 ```language
@@ -30,7 +31,13 @@ code here
 ## Writing in the Editor
 - Type normally - StillPoint saves as you go.
 - Use Ctrl+L to insert links quickly.
+- Use `// ` to insert an internal link inline.
 - Press F12 to toggle task checkboxes.
+
+## Inline Helpers
+- Page tags: type `/# ` to browse existing page tags and insert one.
+- Task tags: type `/@ ` on a task line to browse task tags and insert one.
+- Inline AI prompt: type `[[ ` (with a trailing space) to open the AI prompt if AI is enabled.
 
 ## Tasks in Notes
 - Use `- [ ]` for open tasks

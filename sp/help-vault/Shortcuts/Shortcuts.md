@@ -42,10 +42,41 @@ These shortcuts will speed up your workflow:
 
 ## VI Mode Shortcuts
 If VI mode is enabled:
-- `Esc`: Enter command mode
-- `i`: Enter insert mode
-- `:`: Enter command line
-- `h/j/k/l`: Navigate (left/down/up/right)
+- `Esc`: Return to navigation mode
+- `i`: Insert before cursor
+- `a`: Insert after cursor
+- `o`: Open new line below
+- `O`: Open new line above
+- `h/j/k/l`: Move left/down/up/right
+- `Shift+H`: Select left
+- `Shift+L`: Select right
+- `Shift+N`: Select down
+- `Shift+U`: Select up
+- `0` or `q`: Jump to line start
+- `^`: Jump to first non-blank character
+- `$` or `;`: Jump to line end (`:` selects to end)
+- `w`: Next word
+- `b`: Previous word
+- `g`: Go to top of file
+- `Shift+G`: Go to bottom of file
+- `/`: Find forward
+- `?`: Find backward
+- `n`: Repeat last find
+- `*`: Find word under cursor (forward)
+- `#`: Find word under cursor (backward)
+- `t`: Open heading picker
+- `c`: Copy selection or current line
+- `x`: Cut selection or current character
+- `d`: Delete selection or current line
+- `r`: Replace next character
+- `p`: Paste
+- `u`: Undo
+- `y`: Redo
+- `.`: Repeat last edit
+- `m`: Move selected text to another location
+- `Ctrl+Shift+L`: Copy link or heading (also stores it for `p`)
+- `Alt+h/j/k/l`: History navigation (back/forward/down/up)
+- With a selection: `-`, `*`, `>` apply list or quote styles
 
 ## Tips
 - Use the command bar (Ctrl+Shift+P) to discover more actions.

@@ -1393,7 +1393,8 @@ class MainWindow(QMainWindow):
         self.collapse_tree_button.setAutoRaise(True)
         self.collapse_tree_button.setStyleSheet(
             "QToolButton { color: "
-            f"{theme_value('main_window.tree.collapse_button', '#ffffff')}; }}"
+            f"{theme_value('main_window.tree.collapse_button', '#ffffff')}; "
+            "}"
         )
         self.collapse_tree_button.setToolTip(
             f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Collapse all folders</div>"
@@ -2000,10 +2001,12 @@ class MainWindow(QMainWindow):
         self._focus_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
         self._focus_mode_button.setStyleSheet(
             "QToolButton { border: none; padding: 2px 4px; color: "
-            f"{theme_value('main_window.mode_button.text', '#ffffff')}; }}"
+            f"{theme_value('main_window.mode_button.text', '#ffffff')}; "
+            "}"
             "QToolButton:hover { background: "
             f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
-            "border-radius: 3px; }}"
+            "border-radius: 3px; "
+            "}"
         )
         self._focus_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("focus"))
         self.statusBar().addPermanentWidget(self._focus_mode_button, 0)
@@ -2022,10 +2025,12 @@ class MainWindow(QMainWindow):
         self._audience_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
         self._audience_mode_button.setStyleSheet(
             "QToolButton { border: none; padding: 2px 4px; color: "
-            f"{theme_value('main_window.mode_button.text', '#ffffff')}; }}"
+            f"{theme_value('main_window.mode_button.text', '#ffffff')}; "
+            "}"
             "QToolButton:hover { background: "
             f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
-            "border-radius: 3px; }}"
+            "border-radius: 3px; "
+            "}"
         )
         self._audience_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("audience"))
         self.statusBar().addPermanentWidget(self._audience_mode_button, 0)
@@ -3272,25 +3277,42 @@ class MainWindow(QMainWindow):
         candidates: list[Path] = []
         base = getattr(sys, "_MEIPASS", None)
         if base:
-            candidates.append(Path(base) / "sp" / "help-vault" / "help-vault")
-            candidates.append(Path(base) / "_internal" / "sp" / "help-vault" / "help-vault")
-            candidates.append(Path(base) / "help-vault" / "help-vault")
-            candidates.append(Path(base) / "_internal" / "help-vault" / "help-vault")
+            candidates.append(Path(base) / "sp" / "help-vault")
+            candidates.append(Path(base) / "_internal" / "sp" / "help-vault")
+            candidates.append(Path(base) / "help-vault")
+            candidates.append(Path(base) / "_internal" / "help-vault")
         try:
             exe_dir = Path(os.path.abspath(os.path.dirname(sys.argv[0])))
-            candidates.append(exe_dir / "sp" / "help-vault" / "help-vault")
-            candidates.append(exe_dir / "_internal" / "sp" /"help-vault" / "help-vault")
-            candidates.append(exe_dir / "help-vault" / "help-vault")
-            candidates.append(exe_dir / "_internal" / "help-vault" / "help-vault")
+            candidates.append(exe_dir / "sp" / "help-vault")
+            candidates.append(exe_dir / "_internal" / "sp" / "help-vault")
+            candidates.append(exe_dir / "help-vault")
+            candidates.append(exe_dir / "_internal" / "help-vault")
         except Exception:
             pass
-        pkg_root = Path(__file__).resolve().parents[2]  # .../stillpoint
-        candidates.append(pkg_root / "sp" / "help-vault" / "help-vault")
+        # Walk up from this file to locate the repo root (contains sp/help-vault)
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            if (parent / "sp" / "help-vault").exists():
+                candidates.append(parent / "sp" / "help-vault")
+                break
+
+        def _is_help_vault_root(root: Path) -> bool:
+            return (
+                (root / "help-vault.md").exists()
+                or (root / "help-vault.txt").exists()
+                or (root / "Welcome" / "Welcome.md").exists()
+                or (root / "help-vault" / "help-vault.md").exists()
+            )
 
         for cand in candidates:
             try:
-                if (cand / "help-vault.md").exists() or (cand / "help-vault.txt").exists():
-                    return cand
+                root = cand
+                if root.name == "help-vault":
+                    parent = root.parent
+                    if (parent / "Welcome" / "Welcome.md").exists():
+                        root = parent
+                if _is_help_vault_root(root):
+                    return root
             except Exception:
                 continue
         return None
@@ -3304,8 +3326,40 @@ class MainWindow(QMainWindow):
         user_root = Path.home() / ".stillpoint" / "help-vault"
         user_root.parent.mkdir(parents=True, exist_ok=True)
 
-        # Only seed when missing or effectively empty; do not overwrite user edits.
-        if (user_root / "help-vault.md").exists() or (user_root / "help-vault.txt").exists():
+        def _has_help_vault_content(root: Path) -> bool:
+            return (
+                (root / "Welcome" / "Welcome.md").exists()
+                or (root / "Getting-Started" / "Getting-Started.md").exists()
+                or (root / "help-vault" / "help-vault.md").exists()
+                or (root / "help-vault.md").exists()
+                or (root / "help-vault.txt").exists()
+            )
+
+        def _copy_missing_files(src_root: Path, dst_root: Path) -> None:
+            for dirpath, dirnames, filenames in os.walk(src_root):
+                rel = os.path.relpath(dirpath, src_root)
+                if rel == ".":
+                    rel = ""
+                if rel and rel.startswith(".stillpoint"):
+                    continue
+                if rel and (".db" in rel or ".lock" in rel):
+                    continue
+                dst_dir = dst_root / rel if rel else dst_root
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                for name in filenames:
+                    if name.endswith((".db", ".lock")):
+                        continue
+                    src_file = Path(dirpath) / name
+                    dst_file = dst_dir / name
+                    if not dst_file.exists():
+                        shutil.copy2(src_file, dst_file)
+
+        # Seed when missing or incomplete; avoid overwriting existing user edits.
+        if user_root.exists() and _has_help_vault_content(user_root):
+            # If the vault only contains the inner help-vault page, backfill the rest.
+            if not (user_root / "Welcome" / "Welcome.md").exists():
+                _copy_missing_files(src, user_root)
+            self._apply_help_vault_defaults(user_root)
             return user_root
 
         # Seed via a temp dir to avoid leaving a half-copied vault behind.
@@ -3319,7 +3373,110 @@ class MainWindow(QMainWindow):
                 ignore=shutil.ignore_patterns(".stillpoint", "*.db", "*.lock"),
             )
             shutil.copytree(staged, user_root, dirs_exist_ok=True)
+        self._apply_help_vault_defaults(user_root)
         return user_root
+
+    def _apply_help_vault_defaults(self, vault_root: Path) -> None:
+        """Normalize help-vault ordering and defaults without overwriting user edits."""
+        # Remove deprecated help-vault page if present.
+        deprecated_page = vault_root / "help-vault" / "help-vault.md"
+        if deprecated_page.exists():
+            try:
+                deprecated_page.unlink()
+            except Exception:
+                pass
+            try:
+                deprecated_page.parent.rmdir()
+            except Exception:
+                pass
+        db_path = vault_root / ".stillpoint" / "settings.db"
+        if not db_path.exists():
+            return
+        desired_order = [
+            "/Welcome/Welcome.md",
+            "/Getting-Started/Getting-Started.md",
+            "/Navigation/Navigation.md",
+            "/Editor/Editor.md",
+            "/Shortcuts/Shortcuts.md",
+            "/Tasks/Tasks.md",
+            "/Calendar/Calendar.md",
+            "/Attachments/Attachments.md",
+            "/Rendering/Rendering.md",
+            "/Modes/Modes.md",
+            "/Preferences/Preferences.md",
+            "/Remote Vaults/Remote Vaults.md",
+            "/Web Client/Web Client.md",
+            "/AI/AI.md",
+            "/Troubleshooting/Troubleshooting.md",
+        ]
+        try:
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("BEGIN")
+                cur.execute("DELETE FROM pages WHERE path = ?", ("/help-vault/help-vault.md",))
+                cur.execute("DELETE FROM pages WHERE path = ?", ("/Remote-Vaults/Remote-Vaults.md",))
+                for idx, page in enumerate(desired_order, start=1):
+                    cur.execute(
+                        "UPDATE pages SET display_order = ? WHERE path = ?",
+                        (idx, page),
+                    )
+                # Bump tree_version in the help-vault DB to force a refresh.
+                row = cur.execute(
+                    "SELECT value FROM kv WHERE key = ?",
+                    ("tree_version",),
+                ).fetchone()
+                try:
+                    current_version = int(row[0]) if row and row[0] is not None else 0
+                except Exception:
+                    current_version = 0
+                cur.execute(
+                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                    ("tree_version", str(current_version + 1)),
+                )
+                cur.execute(
+                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                    ("last_file", "/Welcome/Welcome.md"),
+                )
+                # Clean up recent history entries for removed page.
+                row = cur.execute(
+                    "SELECT value FROM kv WHERE key = ?",
+                    ("recent_history",),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        history = json.loads(row[0])
+                        if isinstance(history, list):
+                            history = [h for h in history if h != "/help-vault/help-vault.md"]
+                            history = [h for h in history if h != "/Remote-Vaults/Remote-Vaults.md"]
+                            if "/Welcome/Welcome.md" in history:
+                                history.remove("/Welcome/Welcome.md")
+                            history.insert(0, "/Welcome/Welcome.md")
+                            cur.execute(
+                                "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                                ("recent_history", json.dumps(history)),
+                            )
+                    except Exception:
+                        pass
+                row = cur.execute(
+                    "SELECT value FROM kv WHERE key = ?",
+                    ("recent_history_positions",),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        positions = json.loads(row[0])
+                        if isinstance(positions, dict):
+                            positions.pop("/help-vault/help-vault.md", None)
+                            positions.pop("/Remote-Vaults/Remote-Vaults.md", None)
+                            positions.setdefault("/Welcome/Welcome.md", 0)
+                            cur.execute(
+                                "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                                ("recent_history_positions", json.dumps(positions)),
+                            )
+                    except Exception:
+                        pass
+                conn.commit()
+        except Exception:
+            return
 
     def _open_help_documentation(self) -> None:
         """Open the built-in help vault in a new StillPoint window."""
@@ -3352,7 +3509,7 @@ class MainWindow(QMainWindow):
             return
         try:
             vault_path = self._ensure_user_help_vault()
-            rel_path = "/Keyboard Shortcuts/Keyboard Shortcuts.md"
+            rel_path = "/Shortcuts/Shortcuts.md"
             if self.vault_root and Path(self.vault_root).resolve() == vault_path.resolve():
                 self._open_file(rel_path)
                 return

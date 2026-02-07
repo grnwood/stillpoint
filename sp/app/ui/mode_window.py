@@ -286,7 +286,8 @@ class ModeWindow(QMainWindow):
             f"{theme_value('mode_window.close_button.border', '#3b4251')}; "
             "padding: 6px 10px; border-radius: 10px; }"
             "QToolButton:hover { background: "
-            f"{theme_value('mode_window.close_button.bg_hover', '#2a303c')}; }}"
+            f"{theme_value('mode_window.close_button.bg_hover', '#2a303c')}; "
+            "}"
         )
         self._close_button.setEnabled(False)
         self._close_button.clicked.connect(self._request_close)
@@ -381,9 +382,11 @@ class ModeWindow(QMainWindow):
                 "border: 1px solid "
                 f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
                 "border-radius: 6px; font-weight: "
-                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; }} "
+                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; "
+                "} "
                 "QToolButton:hover { background: "
-                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; }}"
+                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; "
+                "}"
             )
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -406,9 +409,11 @@ class ModeWindow(QMainWindow):
                 "border: 1px solid "
                 f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
                 "border-radius: 6px; font-weight: "
-                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; }} "
+                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; "
+                "} "
                 "QToolButton:hover { background: "
-                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; }}"
+                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; "
+                "}"
             )
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -433,9 +438,11 @@ class ModeWindow(QMainWindow):
             f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
             "border: 1px solid "
             f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
-            "border-radius: 8px; }} "
+            "border-radius: 8px; "
+            "} "
             "QToolButton:hover { background: "
-            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; }}"
+            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; "
+            "}"
         )
         btn.clicked.connect(self._open_ai_assist)
         return btn
@@ -457,9 +464,11 @@ class ModeWindow(QMainWindow):
             f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
             "border: 1px solid "
             f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
-            "border-radius: 8px; }} "
+            "border-radius: 8px; "
+            "} "
             "QToolButton:hover { background: "
-            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; }}"
+            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; "
+            "}"
         )
         return btn
 

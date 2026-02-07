@@ -14,6 +14,11 @@ The AI Chat panel provides conversational AI assistance:
 - Request summaries or explanations.
 - Get help with writing or editing.
 
+## Inline AI Prompt
+You can open a compact AI prompt directly from the editor:
+- Type `[[ ` (double bracket, then space) to open the inline prompt.
+- Requires AI to be enabled in Preferences.
+
 ## AI Actions
 Use the command bar (Ctrl+Shift+P) for AI actions:
 - 'AI: Summarize Page' - create a summary of the current page.

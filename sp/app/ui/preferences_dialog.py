@@ -126,6 +126,15 @@ class PreferencesDialog(QDialog):
         self.feature_remote_vaults_checkbox = QCheckBox("Enable Remote Vaults")
         self.feature_remote_vaults_checkbox.setChecked(config.load_global_feature_remote_vaults_enabled())
         general_layout.addWidget(self.feature_remote_vaults_checkbox)
+        self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
+        self.force_read_only_checkbox.setToolTip(
+            "Open this vault without taking a lock or allowing writes from this window."
+        )
+        try:
+            self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
+        except Exception:
+            self.force_read_only_checkbox.setChecked(False)
+        general_layout.addWidget(self.force_read_only_checkbox)
         self.feature_tasks_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_calendar_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
@@ -609,16 +618,6 @@ class PreferencesDialog(QDialog):
 
         # Vault & Links
         vault_layout = add_section("Vault & Links")
-        self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
-        self.force_read_only_checkbox.setToolTip(
-            "Open this vault without taking a lock or allowing writes from this window."
-        )
-        try:
-            self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
-        except Exception:
-            self.force_read_only_checkbox.setChecked(False)
-        vault_layout.addWidget(self.force_read_only_checkbox)
-
         self.rebuild_button = QPushButton("Rebuild Vault Index")
         self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
         vault_layout.addWidget(self.rebuild_button)
