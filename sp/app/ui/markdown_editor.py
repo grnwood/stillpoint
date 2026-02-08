@@ -3766,7 +3766,18 @@ class MarkdownEditor(QTextEdit):
         # This is used throughout the keyPressEvent for cross-platform compatibility
         meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
-            self._move_cursor_to_link_end_on_enter(self.textCursor())
+            cursor = self.textCursor()
+            vi_insert = self._vi_feature_enabled and self._vi_insert_mode
+            # Non-vi: Enter on a link should activate it immediately.
+            if not vi_insert:
+                link = self._link_under_cursor(cursor)
+                if link:
+                    self.linkActivated.emit(link)
+                    event.accept()
+                    return
+            # Vi insert: keep link intact by moving past sentinels before newline handling.
+            if vi_insert:
+                self._move_cursor_to_link_end_on_enter(cursor)
 
         # Bullet/task mode key handling
         cursor = self.textCursor()
@@ -3837,8 +3848,9 @@ class MarkdownEditor(QTextEdit):
                 return
         # Enter: continue task checkbox lines
         if is_task and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
-            # If the caret sits inside a link on a task line, activate the link instead of inserting a new task
-            if self._is_cursor_at_link_activation_point(cursor):
+            vi_insert = self._vi_feature_enabled and self._vi_insert_mode
+            # In non-vi or vi navigation mode, Enter on a link should activate it.
+            if not vi_insert:
                 link = self._link_under_cursor(cursor)
                 if link:
                     self.linkActivated.emit(link)
@@ -3877,27 +3889,27 @@ class MarkdownEditor(QTextEdit):
                 return
         
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
-            # Check if cursor is within a link - if so, just insert newline, don't activate
             cursor = self.textCursor()
-            if not self._is_cursor_at_link_activation_point(cursor):
-                # Handle bullet list continuation (non-bullet lines)
-                if self._handle_bullet_enter():
-                    event.accept()
-                    return
-                # Handle dash list continuation (non-dash lines)
-                if self._handle_dash_enter():
-                    event.accept()
-                    return
-                # For non-bullets: carry over leading indentation on new line
-                if self._handle_enter_indent_same_level():
-                    event.accept()
-                    return
-            else:
-                # Cursor is at a link activation point - activate the link
-                link = self._link_under_cursor()
+            vi_insert = self._vi_feature_enabled and self._vi_insert_mode
+            # In non-vi or vi navigation mode, Enter on a link should activate it.
+            if not vi_insert:
+                link = self._link_under_cursor(cursor)
                 if link:
                     self.linkActivated.emit(link)
                     return
+            # In vi insert mode, Enter should insert a newline without activating links.
+            # Handle bullet list continuation (non-bullet lines)
+            if self._handle_bullet_enter():
+                event.accept()
+                return
+            # Handle dash list continuation (non-dash lines)
+            if self._handle_dash_enter():
+                event.accept()
+                return
+            # For non-bullets: carry over leading indentation on new line
+            if self._handle_enter_indent_same_level():
+                event.accept()
+                return
         # ...existing code...
         super().keyPressEvent(event)
 
