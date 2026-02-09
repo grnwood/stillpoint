@@ -24,8 +24,8 @@ Name: "{app}\stillpoint"
 Name: "{app}\stillpoint-capture"
 
 [Files]
-Source: "dist\stillpoint\*"; DestDir: "{app}\stillpoint"; Flags: recursesubdirs createallsubdirs
-Source: "dist\stillpoint-capture\*"; DestDir: "{app}\stillpoint-capture"; Flags: recursesubdirs createallsubdirs
+Source: "..\..\dist\stillpoint\*"; DestDir: "{app}\stillpoint"; Flags: recursesubdirs createallsubdirs
+Source: "..\..\dist\stillpoint-capture\*"; DestDir: "{app}\stillpoint-capture"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\StillPoint"; Filename: "{app}\stillpoint\stillpoint.exe"
