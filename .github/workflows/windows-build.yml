@@ -58,26 +58,26 @@ jobs:
           New-Item -ItemType Directory -Path bundle | Out-Null
           Copy-Item -Recurse -Force dist\stillpoint bundle\
           Copy-Item -Recurse -Force dist\stillpoint-capture bundle\
-          Compress-Archive -Path bundle\* -DestinationPath StillPoint-x86_64.zip
+          Compress-Archive -Path bundle\* -DestinationPath StillPoint-win-x64.zip
 
       - name: Upload zip artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: StillPoint-x86_64
-          path: StillPoint-x86_64.zip
+          name: StillPoint-win-x64
+          path: StillPoint-win-x64.zip
 
       - name: Upload installer artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: StillPointSetup
-          path: packaging/win32/Output/StillPointSetup-x86_64.exe
+          path: packaging/win32/Output/StillPointSetup-win-x64.exe
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            StillPoint-x86_64.zip
-            packaging/win32/Output/StillPointSetup-x86_64.exe
+            StillPoint-win-x64.zip
+            packaging/win32/Output/StillPointSetup-win-x64.exe
