@@ -13235,13 +13235,21 @@ class MainWindow(QMainWindow):
             box.setDetailedText("\n\n".join(detail_lines))
         report_btn = box.addButton("Report Issue", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)
-        box.exec()
-        if box.clickedButton() == report_btn:
-            url = self._build_issue_url(exception, stacktrace)
-            if url:
-                QDesktopServices.openUrl(url)
-            return True
-        return False
+        url = self._build_issue_url(exception, stacktrace)
+        reported = False
+        while True:
+            box.exec()
+            if box.clickedButton() == report_btn:
+                if url:
+                    QDesktopServices.openUrl(url)
+                    reported = True
+                    link = url.toString()
+                    box.setText("Report Issue URL opened. Use the link below to open it again.")
+                    box.setDetailedText(link)
+                    report_btn.setText("Open Link Again")
+                    continue
+                return reported
+            return reported
 
     def _alert_api_error(self, exc: httpx.HTTPError, fallback: str) -> None:
         detail = None
