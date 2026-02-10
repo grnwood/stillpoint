@@ -4,6 +4,7 @@ This installer is unsigned, so Windows SmartScreen may show a warning.
 
 Install:
 - Run `StillPointSetup-win-x64.exe`
+- Or run the helper script: `.\install-win32.ps1`
 
 If SmartScreen appears:
 - Click "More info"

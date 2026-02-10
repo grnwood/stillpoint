@@ -4,6 +4,7 @@ This app is unsigned and not notarized, so Gatekeeper may block it.
 
 Install:
 - Open `StillPoint.app` from the `dist/` folder or from a ZIP
+- Or run the helper script: `./install-mac.sh`
 
 If macOS blocks it:
 - Right-click `StillPoint.app` -> Open -> Open

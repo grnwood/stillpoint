@@ -30,8 +30,11 @@ ALTERNATIVE: Using Terminal
 
 If you prefer, you can remove the quarantine flag:
 
-  xattr -cr /Applications/StillPoint.app
+  xattr -dr com.apple.quarantine /Applications/StillPoint.app
   open /Applications/StillPoint.app
+
+Helper script:
+  ./install-mac.sh
 
 UNINSTALL
 ---------
