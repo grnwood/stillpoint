@@ -12,6 +12,7 @@ DefaultDirName={localappdata}\StillPoint
 DefaultGroupName=StillPoint
 DisableProgramGroupPage=yes
 OutputBaseFilename=StillPointSetup-x86_64
+SetupIconFile=..\..\sp\assets\icons\sp-full-transparent.ico
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
