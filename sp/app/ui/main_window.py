@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Callable
 import errno
+import ctypes
 import hashlib
 import json
 import os
 import shutil
 import socket
+import platform
 import sqlite3
 import subprocess
 import sys
@@ -15,7 +17,7 @@ import tempfile
 import time
 import faulthandler
 import re
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import traceback
@@ -103,6 +105,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config, indexer
+from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from .theme import theme_color, theme_value
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -1949,6 +1952,11 @@ class MainWindow(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
+        if os.getenv("STILLPOINT_ENABLE_CRASH_TEST") == "1":
+            crash_action = QAction("Debug: Crash (Segfault)", self)
+            crash_action.setToolTip("Force a native crash for testing error reporting")
+            crash_action.triggered.connect(self._debug_crash_segfault)
+            help_menu.addAction(crash_action)
 
         self._menu_roots = [
             vault_menu,
@@ -2703,9 +2711,73 @@ class MainWindow(QMainWindow):
         if default_vault:
             if self._set_vault(default_vault):
                 QTimer.singleShot(100, self._auto_load_initial_file)
+                QTimer.singleShot(500, self._maybe_prompt_crash_report)
                 return True
             # Fall through to prompt for another vault if lock/bind failed
-        return self._select_vault(startup=True)
+        started = self._select_vault(startup=True)
+        if started:
+            QTimer.singleShot(500, self._maybe_prompt_crash_report)
+        return started
+
+    def _get_faulthandler_log_path(self) -> Optional[Path]:
+        env_path = os.getenv("STILLPOINT_FAULTHANDLER_LOG")
+        if env_path:
+            return Path(env_path)
+        try:
+            return Path(tempfile.gettempdir()) / "stillpoint-faulthandler.log"
+        except Exception:
+            return None
+
+    def _maybe_prompt_crash_report(self) -> None:
+        log_path = self._get_faulthandler_log_path()
+        if not log_path or not log_path.exists():
+            return
+        try:
+            stat = log_path.stat()
+        except Exception:
+            return
+        if stat.st_size <= 0:
+            return
+        state_path = Path.home() / ".stillpoint" / "last-crash.json"
+        last_mtime = None
+        last_size = None
+        try:
+            if state_path.exists():
+                data = json.loads(state_path.read_text(encoding="utf-8"))
+                last_mtime = data.get("mtime")
+                last_size = data.get("size")
+        except Exception:
+            pass
+        if last_mtime == stat.st_mtime and last_size == stat.st_size:
+            return
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            content = ""
+        if not content.strip():
+            return
+        tail = content[-4000:]
+        exception_line = ""
+        for line in reversed(tail.splitlines()):
+            if "Fatal Python error" in line or "Segmentation fault" in line or "SIGSEGV" in line:
+                exception_line = line.strip()
+                break
+        exception = exception_line or "Fatal crash detected (faulthandler log)"
+        message = "StillPoint detected a previous crash. You can report it now."
+        reported = self._alert_issue_report(message, exception, tail.strip())
+        if reported:
+            try:
+                log_path.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps({"mtime": stat.st_mtime, "size": stat.st_size}),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     # --- Vault actions -------------------------------------------------
     def _fetch_remote_vaults_with_status(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -11710,8 +11782,8 @@ class MainWindow(QMainWindow):
             try:
                 resp = self.http.post("/api/path/delete", json={"path": folder_path})
                 resp.raise_for_status()
-            except Exception as exc:
-                self._alert(f"Failed to delete {folder_path}: {exc}")
+            except httpx.HTTPError as exc:
+                self._alert_api_error(exc, f"Failed to delete {folder_path}")
                 return
             
             # Remove deleted paths from history buffer
@@ -13130,6 +13202,47 @@ class MainWindow(QMainWindow):
     def _alert(self, message: str) -> None:
         QMessageBox.critical(self, "StillPoint", message)
 
+    def _build_issue_url(self, exception: str, stacktrace: str) -> Optional[QUrl]:
+        if not (GITHUB_ISSUE_URL and GITHUB_OWNER and GITHUB_PROJECT):
+            return None
+        title = f"Stillpoint version {SP_VERSION} Issue"
+        body_lines = [
+            f"OS level: {platform.platform()}",
+            f"version: {SP_VERSION}",
+            f"exception: {exception or ''}",
+            "stacktrace:",
+            stacktrace or "",
+            "",
+            "User notes:",
+            "",
+        ]
+        body = "\n".join(body_lines)
+        url = GITHUB_ISSUE_URL.replace("<owner>", GITHUB_OWNER).replace("<repo>", GITHUB_PROJECT)
+        url = url.format(title=quote(title), body=quote(body))
+        return QUrl(url)
+
+    def _alert_issue_report(self, message: str, exception: str, stacktrace: str) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("StillPoint")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(message)
+        detail_lines = []
+        if exception:
+            detail_lines.append(exception)
+        if stacktrace:
+            detail_lines.append(stacktrace)
+        if detail_lines:
+            box.setDetailedText("\n\n".join(detail_lines))
+        report_btn = box.addButton("Report Issue", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() == report_btn:
+            url = self._build_issue_url(exception, stacktrace)
+            if url:
+                QDesktopServices.openUrl(url)
+            return True
+        return False
+
     def _alert_api_error(self, exc: httpx.HTTPError, fallback: str) -> None:
         detail = None
         resp = getattr(exc, "response", None)
@@ -13138,6 +13251,14 @@ class MainWindow(QMainWindow):
                 data = resp.json()
                 if isinstance(data, dict):
                     detail = data.get("detail") or data.get("message")
+                    if isinstance(detail, dict):
+                        message = detail.get("message") or fallback or str(exc)
+                        exception = detail.get("exception") or ""
+                        stacktrace = detail.get("traceback") or ""
+                        if exception or stacktrace:
+                            self._alert_issue_report(message, exception or str(exc), stacktrace)
+                            return
+                        detail = message
             except Exception:
                 pass
             if resp.status_code == 401 and self._remote_mode:
@@ -13195,6 +13316,10 @@ class MainWindow(QMainWindow):
             pass
         box.setStandardButtons(QMessageBox.Ok)
         box.exec()
+
+    def _debug_crash_segfault(self) -> None:
+        """Force a native crash for testing; guarded by env var in menu setup."""
+        ctypes.string_at(0)
 
     def _update_window_title(self) -> None:
         parts: list[str] = []

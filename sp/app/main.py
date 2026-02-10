@@ -565,6 +565,7 @@ def _enable_faulthandler_log() -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         _FAULTHANDLER_FILE = open(log_path, "a", buffering=1)
         faulthandler.enable(_FAULTHANDLER_FILE)
+        os.environ["STILLPOINT_FAULTHANDLER_LOG"] = str(log_path)
         _diag(f"Faulthandler logging to {log_path}")
     except Exception as exc:
         try:

@@ -102,6 +102,18 @@ def _normalize_tree_path(path: str) -> str:
     return cleaned or "/"
 
 
+def _format_file_op_detail(context: str, exc: BaseException) -> dict:
+    return {
+        "message": f"{context}: {exc}",
+        "exception": f"{exc.__class__.__name__}: {exc}",
+        "traceback": traceback.format_exc(),
+    }
+
+
+def _raise_file_http(status_code: int, context: str, exc: BaseException) -> None:
+    raise HTTPException(status_code=status_code, detail=_format_file_op_detail(context, exc)) from exc
+
+
 def _colon_to_page_path(colon_path: str) -> str:
     cleaned = (colon_path or "").strip()
     if cleaned.startswith(":"):
@@ -1251,7 +1263,16 @@ def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = 
     tree = _get_cached_tree(root, normalized_path, recursive, include_journal, version)
     cache_hit = tree is not None
     if not cache_hit:
-        tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+        try:
+            tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, f"List directory failed for {normalized_path}", exc)
+        except FileAccessError as exc:
+            _raise_file_http(400, f"List directory blocked for {normalized_path}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"List directory error for {normalized_path}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"List directory error for {normalized_path}", exc)
         if normalized_path in ("/", "") and not include_journal:
             tree = _filter_out_journal(tree)
         order_map = config.fetch_display_order_map()
@@ -1284,9 +1305,13 @@ def file_read(payload: FilePathPayload) -> dict:
     try:
         content = files.read_file(root, payload.path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _raise_file_http(404, f"Read file failed for {payload.path}", exc)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Read file blocked for {payload.path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Read file error for {payload.path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Read file error for {payload.path}", exc)
     mtime_ns = None
     try:
         mtime_ns = file_path.stat().st_mtime_ns
@@ -1516,7 +1541,13 @@ def file_write(
             finally:
                 conn.close()
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Write file blocked for {payload.path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Write file failed for {payload.path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Write file error for {payload.path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Write file error for {payload.path}", exc)
     
     return {"ok": True, "mtime_ns": mtime_ns}
 
@@ -1533,7 +1564,11 @@ def files_modified(payload: ModifiedRangePayload) -> dict:
     try:
         items = files.list_files_modified_between(root, start, end)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"List modified files blocked for {payload.start_date} -> {payload.end_date}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"List modified files error for {payload.start_date} -> {payload.end_date}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"List modified files error for {payload.start_date} -> {payload.end_date}", exc)
     return {"items": items}
 
 
@@ -1541,7 +1576,16 @@ def files_modified(payload: ModifiedRangePayload) -> dict:
 def journal_today(payload: JournalPayload) -> dict:
     root = vault_state.get_root()
     # Pass template through so the initial content becomes the user's day template
-    target, created = files.ensure_journal_today(root, template=payload.template)
+    try:
+        target, created = files.ensure_journal_today(root, template=payload.template)
+    except FileAccessError as exc:
+        _raise_file_http(400, "Create journal entry blocked", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, "Create journal entry failed", exc)
+    except OSError as exc:
+        _raise_file_http(500, "Create journal entry error", exc)
+    except Exception as exc:
+        _raise_file_http(500, "Create journal entry error", exc)
     rel = f"/{target.relative_to(root).as_posix()}"
     return {"path": rel, "created": created}
 
@@ -1576,12 +1620,27 @@ def quick_capture(
             raise HTTPException(status_code=400, detail="Custom capture page is required")
         rel_path = _colon_to_page_path(payload.page_ref)
     else:
-        target, _created = files.ensure_journal_today(root, template=None)
+        try:
+            target, _created = files.ensure_journal_today(root, template=None)
+        except FileAccessError as exc:
+            _raise_file_http(400, "Quick capture journal blocked", exc)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, "Quick capture journal failed", exc)
+        except OSError as exc:
+            _raise_file_http(500, "Quick capture journal error", exc)
+        except Exception as exc:
+            _raise_file_http(500, "Quick capture journal error", exc)
         rel_path = f"/{target.relative_to(root).as_posix()}"
     try:
         content = files.read_file(root, rel_path)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Quick capture read blocked for {rel_path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Quick capture read failed for {rel_path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Quick capture read error for {rel_path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Quick capture read error for {rel_path}", exc)
     now = datetime.now()
     is_journal = rel_path.startswith("/Journal/")
     if is_journal:
@@ -1593,7 +1652,13 @@ def quick_capture(
     try:
         files.write_file(root, rel_path, updated)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Quick capture write blocked for {rel_path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Quick capture write failed for {rel_path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Quick capture write error for {rel_path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Quick capture write error for {rel_path}", exc)
     db_path = root / ".stillpoint" / "settings.db"
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -1669,9 +1734,13 @@ def api_update_task_dates(
         try:
             content = files.read_file(root, rel_path)
         except FileAccessError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _raise_file_http(400, f"Update tasks read blocked for {rel_path}", exc)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            _raise_file_http(404, f"Update tasks read failed for {rel_path}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"Update tasks read error for {rel_path}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"Update tasks read error for {rel_path}", exc)
         lines = content.splitlines(keepends=True)
         changed = False
         for target in items:
@@ -1698,7 +1767,13 @@ def api_update_task_dates(
         try:
             files.write_file(root, rel_path, new_content)
         except FileAccessError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _raise_file_http(400, f"Update tasks write blocked for {rel_path}", exc)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, f"Update tasks write failed for {rel_path}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"Update tasks write error for {rel_path}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"Update tasks write error for {rel_path}", exc)
         try:
             app_indexer.index_page(rel_path, new_content)
         except Exception:
@@ -2044,9 +2119,13 @@ def create_path(payload: CreatePathPayload) -> dict:
                 conn.close()
         version = config.bump_tree_version()
     except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _raise_file_http(409, f"Create path failed for {payload.path}", exc)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Create path blocked for {payload.path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Create path error for {payload.path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Create path error for {payload.path}", exc)
     return {"ok": True, "version": version}
 
 
@@ -2062,9 +2141,20 @@ def delete_path(payload: DeletePathPayload) -> dict:
             search_index.delete_tree(conn, payload.path)
             conn.close()
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_format_file_op_detail(f"Delete path failed for {payload.path}", exc),
+        ) from exc
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=_format_file_op_detail(f"Delete path blocked for {payload.path}", exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_format_file_op_detail(f"Delete path error for {payload.path}", exc),
+        ) from exc
     return {"ok": True, **result}
 
 
@@ -2080,13 +2170,21 @@ def file_rename(payload: RenameMovePayload) -> dict:
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "rename", payload.from_path, payload.to_path)
     if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+        exc = RuntimeError(reason or "Preflight failed")
+        raise HTTPException(
+            status_code=400,
+            detail=_format_file_op_detail(f"Rename preflight failed for {payload.from_path}", exc),
+        ) from exc
     try:
         result = file_ops.rename_folder(root, payload.from_path, payload.to_path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _raise_file_http(404, f"Rename failed for {payload.from_path}", exc)
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Rename blocked for {payload.from_path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
     return {"ok": True, **result}
 
 
@@ -2097,15 +2195,23 @@ def file_move(payload: RenameMovePayload) -> dict:
     ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
     if not ok:
         print(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
-        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+        exc = RuntimeError(reason or "Preflight failed")
+        raise HTTPException(
+            status_code=400,
+            detail=_format_file_op_detail(f"Move preflight failed for {payload.from_path}", exc),
+        ) from exc
     try:
         result = file_ops.move_folder(root, payload.from_path, payload.to_path, rewrite_links=payload.rewrite_links)
     except FileNotFoundError as exc:
         print(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _raise_file_http(404, f"Move failed for {payload.from_path}", exc)
     except FileAccessError as exc:
         print(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_file_http(400, f"Move blocked for {payload.from_path}", exc)
+    except OSError as exc:
+        _raise_file_http(500, f"Move error for {payload.from_path}", exc)
+    except Exception as exc:
+        _raise_file_http(500, f"Move error for {payload.from_path}", exc)
     return {"ok": True, **result}
 
 
@@ -2114,13 +2220,28 @@ def file_delete(payload: FileDeletePayload) -> dict:
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "delete", payload.path)
     if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Preflight failed")
+        exc = RuntimeError(reason or "Preflight failed")
+        raise HTTPException(
+            status_code=400,
+            detail=_format_file_op_detail(f"Delete preflight failed for {payload.path}", exc),
+        ) from exc
     try:
         result = file_ops.delete_folder(root, payload.path)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404,
+            detail=_format_file_op_detail(f"Delete file failed for {payload.path}", exc),
+        ) from exc
     except FileAccessError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=_format_file_op_detail(f"Delete file blocked for {payload.path}", exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_format_file_op_detail(f"Delete file error for {payload.path}", exc),
+        ) from exc
     return {"ok": True, **result}
 
 
@@ -2143,7 +2264,16 @@ def tree_reorder(payload: ReorderPayload) -> dict:
 @app.post("/api/vault/update-links")
 def vault_update_links(payload: UpdateLinksPayload) -> dict:
     root = vault_state.get_root()
-    touched = file_ops.update_links_on_disk(root, payload.path_map)
+    try:
+        touched = file_ops.update_links_on_disk(root, payload.path_map)
+    except FileAccessError as exc:
+        _raise_file_http(400, "Update links blocked", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, "Update links failed", exc)
+    except OSError as exc:
+        _raise_file_http(500, "Update links error", exc)
+    except Exception as exc:
+        _raise_file_http(500, "Update links error", exc)
     return {"ok": True, "touched": touched}
 
 
@@ -2160,7 +2290,18 @@ def attach_files(
     stored_paths: list[str] = []
     use_local_ops = _should_use_local_file_ops(request)
     for upload in files:
-        stored_paths.append(_store_attachment(root, normalized_page, upload, use_local_ops))
+        try:
+            stored_paths.append(_store_attachment(root, normalized_page, upload, use_local_ops))
+        except HTTPException:
+            raise
+        except FileAccessError as exc:
+            _raise_file_http(400, f"Attach file blocked for {normalized_page}", exc)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, f"Attach file failed for {normalized_page}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"Attach file error for {normalized_page}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"Attach file error for {normalized_page}", exc)
     _log_attachment(f"Attached {len(stored_paths)} file(s) for {normalized_page}")
     return {"ok": True, "page": normalized_page, "attachments": stored_paths}
 
@@ -2874,7 +3015,14 @@ def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_
     attachment_rel = page_parts.parent / filename
     attachment_normalized = f"/{attachment_rel.as_posix()}" if attachment_rel.as_posix() else f"/{filename}"
     dest_path = root / attachment_rel
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log_attachment(f"Failed to create attachment folder {dest_path.parent}: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_format_file_op_detail(f"Create attachment folder failed for {attachment_normalized}", exc),
+        ) from exc
     log_msg = f"receive file {attachment_normalized} to vault {dest_path}"
     if use_local_ops and dest_path.exists():
         log_msg += " (server==client)"
@@ -2885,7 +3033,10 @@ def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_
                 shutil.copyfileobj(upload.file, dest)
         except OSError as exc:
             _log_attachment(f"Failed to persist {attachment_normalized}: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to persist attachment: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=_format_file_op_detail(f"Persist attachment failed for {attachment_normalized}", exc),
+            ) from exc
     _log_attachment(log_msg)
     config.upsert_attachment_entry(page_path, attachment_normalized, str(dest_path))
     return attachment_normalized
