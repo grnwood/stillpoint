@@ -137,6 +137,14 @@ class JumpToPageDialog(QDialog):
             self.rewrite_links_checkbox.setChecked(True)  # Pre-selected
             layout.addWidget(self.rewrite_links_checkbox)
 
+        self.insert_link_checkbox = None
+        if self._launch_mode == "move_text":
+            from PySide6.QtWidgets import QCheckBox
+            self.insert_link_checkbox = QCheckBox("Insert link to this page")
+            self.insert_link_checkbox.setChecked(config.load_move_text_insert_link_enabled())
+            self.insert_link_checkbox.toggled.connect(config.save_move_text_insert_link_enabled)
+            layout.addWidget(self.insert_link_checkbox)
+
         self.search = QLineEdit()
         self.search.setPlaceholderText("Start typing to filter pages…")
         self.search.textChanged.connect(self._refresh)
@@ -148,8 +156,11 @@ class JumpToPageDialog(QDialog):
         self.list_widget.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self.list_widget, 1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox()
+        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
         buttons.rejected.connect(self.reject)
+        if cancel_button is not None:
+            cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
 
         self.setLayout(layout)
@@ -179,6 +190,12 @@ class JumpToPageDialog(QDialog):
         if self.rewrite_links_checkbox:
             return self.rewrite_links_checkbox.isChecked()
         return True  # Default to true if checkbox not shown
+
+    def should_insert_link(self) -> bool:
+        """Return whether move-text should insert a link to the destination."""
+        if self.insert_link_checkbox:
+            return self.insert_link_checkbox.isChecked()
+        return True
 
     def keyPressEvent(self, event):  # type: ignore[override]
         # Handle arrow keys and vi-mode shortcuts (Shift+J/K)

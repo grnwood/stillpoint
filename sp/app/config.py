@@ -596,6 +596,30 @@ def save_prefer_short_links(enabled: bool) -> None:
     _update_global_config({"prefer_short_links": bool(enabled)})
 
 
+_MOVE_TEXT_INSERT_LINK_CACHE: Optional[bool] = None
+
+
+def load_move_text_insert_link_enabled() -> bool:
+    """Return whether moving text should insert a link back to the destination (default: True)."""
+    global _MOVE_TEXT_INSERT_LINK_CACHE
+    if _MOVE_TEXT_INSERT_LINK_CACHE is not None:
+        return _MOVE_TEXT_INSERT_LINK_CACHE
+    payload = _read_global_config()
+    val = payload.get("move_text_insert_link")
+    if val is None:
+        _MOVE_TEXT_INSERT_LINK_CACHE = True
+        return True
+    _MOVE_TEXT_INSERT_LINK_CACHE = bool(val)
+    return _MOVE_TEXT_INSERT_LINK_CACHE
+
+
+def save_move_text_insert_link_enabled(enabled: bool) -> None:
+    """Persist preference for inserting a link when moving text."""
+    global _MOVE_TEXT_INSERT_LINK_CACHE
+    _MOVE_TEXT_INSERT_LINK_CACHE = bool(enabled)
+    _update_global_config({"move_text_insert_link": bool(enabled)})
+
+
 def save_minimal_font_scan_enabled(enabled: bool) -> None:
     """Persist preference for enabling minimal font scanning."""
     _update_global_config({"minimal_font_scan": bool(enabled)})

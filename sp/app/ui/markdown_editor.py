@@ -1947,7 +1947,7 @@ class MarkdownEditor(QTextEdit):
             text = cursor.selectedText()
         return (text or "").replace("\u2029", "\n")
 
-    def _move_selected_text_to_page(self, dest_page_path: str) -> bool:
+    def _move_selected_text_to_page(self, dest_page_path: str, *, insert_link: bool = True) -> bool:
         """Append selection to dest page (via callback) and replace selection with a link."""
         if not dest_page_path:
             return False
@@ -1965,11 +1965,41 @@ class MarkdownEditor(QTextEdit):
             ok = False
         if not ok:
             return False
-        colon = path_to_colon(dest_page_path) or ""
-        if not colon:
-            return False
-        self.insert_link(colon)
+        if insert_link:
+            colon = path_to_colon(dest_page_path) or ""
+            if not colon:
+                return False
+            self.insert_link(colon)
+            self._strip_heading_on_current_block()
+        else:
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                cursor.beginEditBlock()
+                cursor.removeSelectedText()
+                cursor.endEditBlock()
         return True
+
+    def _strip_heading_on_current_block(self) -> None:
+        """If current line is a heading, remove the heading marker."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+        text = block.text()
+        indent, content = self._strip_heading(text)
+        new_line = indent + content
+        if new_line == text:
+            return
+        rel_pos = cursor.position() - block.position()
+        line_cursor = QTextCursor(block)
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        new_pos = block.position() + min(rel_pos, len(new_line))
+        cursor.setPosition(new_pos)
+        self.setTextCursor(cursor)
+        self._pending_heading_block_num = None
+        self._pending_heading_level = None
+        self._schedule_heading_outline()
 
     def _move_text_via_jump_dialog(self) -> None:
         cursor = self.textCursor()
@@ -1996,7 +2026,12 @@ class MarkdownEditor(QTextEdit):
         dest = dialog.selected_path()
         if not dest:
             return
-        self._move_selected_text_to_page(dest)
+        insert_link = True
+        try:
+            insert_link = dialog.should_insert_link()
+        except Exception:
+            insert_link = True
+        self._move_selected_text_to_page(dest, insert_link=insert_link)
 
     def _mark_page_load(self, label: str) -> None:
         if self._page_load_logger:
@@ -4754,45 +4789,15 @@ class MarkdownEditor(QTextEdit):
                 from .path_utils import path_to_colon, ensure_root_colon_link
             except Exception:
                 return super().dropEvent(event)
-            
-            # Check if dropped path is a child of the current page
-            current_path = self.current_relative_path() if hasattr(self, "current_relative_path") else None
-            link_text = None
-            
-            if current_path:
-                try:
-                    from pathlib import Path
-                    from sp.server.adapters.files import PAGE_SUFFIXES
-                    
-                    # Get the parent directory of the current page
-                    current = Path(current_path)
-                    if current.suffix in PAGE_SUFFIXES:
-                        parent_dir = current.parent
-                    else:
-                        parent_dir = current
-                    
-                    # Check if dropped path is a direct child
-                    dropped = Path(dropped_path_text.lstrip("/"))
-                    
-                    # If dropped path is under parent_dir, use +CamelCase format
-                    if str(dropped.parent) == str(parent_dir) and dropped.suffix in PAGE_SUFFIXES:
-                        # Extract the page name (without .md extension)
-                        page_name = dropped.stem
-                        link_text = f"+{page_name}"
-                except Exception:
-                    pass
-            
-            # Fall back to colon link if not a child
-            if not link_text:
-                colon = path_to_colon(dropped_path_text) or dropped_path_text
-                link_target = ensure_root_colon_link(colon)
-                label = label_override or Path(dropped_path_text).stem or link_target
-                link_text = f"[{link_target}|{label}]"
-            
+
+            # Always insert as a colon-style link to keep undo intact and avoid mangled labels.
+            colon = path_to_colon(dropped_path_text) or dropped_path_text
+            link_target = ensure_root_colon_link(colon)
+            label = label_override or Path(dropped_path_text).stem or link_target
+
             cursor = self.cursorForPosition(event.pos())
             self.setTextCursor(cursor)
-            cursor.insertText(link_text)
-            self._refresh_display()
+            self.insert_link(link_target, label)
             event.acceptProposedAction()
             return
         
