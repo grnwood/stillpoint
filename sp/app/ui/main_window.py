@@ -5207,15 +5207,36 @@ class MainWindow(QMainWindow):
         if not self.vault_root or not self.vault_root_name:
             self.statusBar().showMessage("No vault selected", 3000)
             return
-        
+
+        # If navigation is filtered, go to the top of the filtered tree instead.
+        if self._nav_filter_path and self._nav_filter_path != "/":
+            filtered_path = None
+            try:
+                root_item = self._find_item(self.tree_model.invisibleRootItem(), self._nav_filter_path)
+                if root_item:
+                    filtered_path = root_item.data(OPEN_ROLE) or root_item.data(PATH_ROLE)
+            except Exception:
+                filtered_path = None
+            if not filtered_path:
+                filtered_path = self._first_tree_page_path()
+            if not filtered_path:
+                display = path_to_colon(self._nav_filter_path) or self._nav_filter_path
+                self.statusBar().showMessage(f"No pages under filter: {display}", 3000)
+                return
+            self.tree_view.clearSelection()
+            self._open_file(filtered_path)
+            display = path_to_colon(filtered_path) or self.vault_root_name
+            self.statusBar().showMessage(f"Filtered Home: {display}", 2000)
+            return
+
         home_path = self._home_page_path()
         if not home_path:
             self.statusBar().showMessage("No home page found", 3000)
             return
-        
+
         # Clear tree selection
         self.tree_view.clearSelection()
-        
+
         # Open the home page
         self._open_file(home_path)
         display = path_to_colon(home_path) or self.vault_root_name

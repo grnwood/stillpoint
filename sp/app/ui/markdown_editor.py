@@ -21,7 +21,11 @@ from PySide6.QtCore import (
     Signal,
     QUrl,
     QPoint,
+    QPointF,
+    QRect,
+    QRectF,
     QSize,
+    QSizeF,
     QTimer,
     QSignalBlocker,
 )
@@ -8052,7 +8056,75 @@ class MarkdownEditor(QTextEdit):
         return normalized
 
     def _image_at_position(self, pos: Optional[QPoint]) -> Optional[tuple[QTextCursor, QTextImageFormat]]:
-        cursor = self.cursorForPosition(pos) if pos is not None else self.textCursor()
+        """Return the image under the given viewport position, if any."""
+        if pos is None:
+            cursor = self.textCursor()
+        else:
+            cursor = self.cursorForPosition(pos)
+
+        def _scan_block(block) -> Optional[tuple[QTextCursor, QTextImageFormat]]:
+            if not block or not block.isValid():
+                return None
+            layout = block.layout()
+            doc_layout = self.document().documentLayout()
+            block_rect = QRectF()
+            if doc_layout is not None:
+                try:
+                    block_rect = doc_layout.blockBoundingRect(block)
+                except Exception:
+                    block_rect = QRectF()
+            h_scroll = self.horizontalScrollBar().value() if self.horizontalScrollBar() else 0
+            v_scroll = self.verticalScrollBar().value() if self.verticalScrollBar() else 0
+            content_offset = QPointF(h_scroll, v_scroll)
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    fmt = fragment.charFormat()
+                    if fmt.isImageFormat():
+                        img_fmt = fmt.toImageFormat()
+                        img_cursor = QTextCursor(self.document())
+                        img_cursor.setPosition(fragment.position())
+                        width = float(img_fmt.width() or 0)
+                        height = float(img_fmt.height() or 0)
+                        rect = QRectF()
+                        if layout is not None and width > 0 and height > 0:
+                            try:
+                                pos_in_block = max(0, fragment.position() - block.position())
+                                line = layout.lineForTextPosition(pos_in_block)
+                                if line.isValid():
+                                    x = line.cursorToX(pos_in_block)
+                                    y = line.y()
+                                    rect = QRectF(
+                                        block_rect.left() + x,
+                                        block_rect.top() + y,
+                                        width,
+                                        height,
+                                    )
+                            except Exception:
+                                rect = QRectF()
+                        if rect.isNull() or rect.isEmpty():
+                            rect = QRectF(self.cursorRect(img_cursor))
+                        rect = rect.translated(-content_offset)
+                        if pos is None or rect.contains(QPointF(pos)):
+                            return img_cursor, img_fmt
+                it += 1
+            return None
+
+        block = cursor.block()
+        hit = _scan_block(block)
+        if hit:
+            return hit
+        # Check neighboring blocks to avoid mis-targeting stacked images.
+        if pos is not None:
+            hit = _scan_block(block.previous())
+            if hit:
+                return hit
+            hit = _scan_block(block.next())
+            if hit:
+                return hit
+
+        # Fallback to character format checks.
         fmt = cursor.charFormat()
         if fmt.isImageFormat():
             return cursor, fmt.toImageFormat()

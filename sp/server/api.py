@@ -254,6 +254,10 @@ _IMAGE_MD_SIZE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<path>[^)\s]+)(?:\s+"(?P<title>[^"]*)")?\)\{width=(?P<width>\d+)\}',
     re.MULTILINE,
 )
+_IMAGE_MD_ANY_RE = re.compile(
+    r'!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\)(?:\{width=\d+\})?',
+    re.MULTILINE,
+)
 _ZIM_LINK_RE = re.compile(r"\[(?P<target>[^\]|]+)\|(?P<label>[^\]]*)\]")
 
 
@@ -2611,10 +2615,49 @@ def _resolve_tree_root(root: Path, path: str) -> Path:
 def _render_markdown_html(text: str) -> str:
     renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
     normalized = _rewrite_zim_links(text)
+    normalized = _normalize_markdown_image_blocks(normalized)
     normalized = _rewrite_markdown_image_sizes(normalized)
     normalized = _normalize_markdown_lists(normalized)
     normalized = _rewrite_strikethrough(normalized)
     return renderer.convert(normalized)
+
+
+def _normalize_markdown_image_blocks(text: str) -> str:
+    """De-indent image-only lines so they don't become code blocks in print."""
+    lines = text.splitlines()
+    normalized: list[str] = []
+    in_fence = False
+    fence_marker = ""
+
+    def _is_image_line(value: str) -> bool:
+        if not value:
+            return False
+        remaining = _IMAGE_MD_ANY_RE.sub("", value)
+        return not remaining.strip()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            normalized.append(line)
+            continue
+
+        if in_fence:
+            normalized.append(line)
+            continue
+
+        if _is_image_line(stripped):
+            normalized.append(stripped)
+        else:
+            normalized.append(line)
+
+    return "\n".join(normalized)
 
 
 def _normalize_markdown_lists(text: str) -> str:
