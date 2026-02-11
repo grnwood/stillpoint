@@ -4941,6 +4941,7 @@ class MainWindow(QMainWindow):
             
             # Add to layout
             self.bookmark_layout.addWidget(btn)
+        self._update_bookmark_filter_highlights()
         self._update_bookmark_strip_width()
         self._sync_bookmark_scroll_range()
         self._update_bookmark_scroll_buttons()
@@ -4963,6 +4964,38 @@ class MainWindow(QMainWindow):
             step = abs(delta)
         bar.setValue(max(0, min(bar.maximum(), bar.value() + (step if delta > 0 else -step))))
         self._update_bookmark_scroll_buttons()
+
+    def _bookmark_matches_nav_filter(self, bookmark_path: str) -> bool:
+        filter_path = getattr(self, "_nav_filter_path", None)
+        if not filter_path or filter_path == "/":
+            return False
+        try:
+            normalized_filter = self._normalize_tree_path(filter_path)
+        except Exception:
+            normalized_filter = filter_path.rstrip("/") or "/"
+        try:
+            bookmark_folder = self._file_path_to_folder(
+                bookmark_path if bookmark_path.startswith("/") else f"/{bookmark_path}"
+            )
+        except Exception:
+            bookmark_folder = bookmark_path
+        try:
+            normalized_bookmark = self._normalize_tree_path(bookmark_folder)
+        except Exception:
+            normalized_bookmark = bookmark_folder.rstrip("/") or "/"
+        return normalized_bookmark == normalized_filter
+
+    def _update_bookmark_filter_highlights(self) -> None:
+        if not getattr(self, "bookmark_buttons", None):
+            return
+        highlight_border = theme_value("main_window.bookmark.filtered_border", "#D9534F")
+        for path, btn in self.bookmark_buttons.items():
+            is_highlighted = self._bookmark_matches_nav_filter(path)
+            border_color = highlight_border if is_highlighted else "transparent"
+            btn.setStyleSheet(
+                "QPushButton { border: 1px solid "
+                f"{border_color}; padding: 2px 6px; border-radius: 3px; }"
+            )
 
     def _update_bookmark_scroll_buttons(self) -> None:
         if not getattr(self, "bookmark_scroll_area", None):
@@ -5338,6 +5371,7 @@ class MainWindow(QMainWindow):
         """Refresh focus borders to reflect filter state."""
         self._apply_focus_borders()
         self._update_filter_indicator()
+        self._update_bookmark_filter_highlights()
 
     def _sync_detached_task_filters(self, filter_path: Optional[str]) -> None:
         """Ensure detached task windows stay in sync with navigation filtering."""
