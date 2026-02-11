@@ -2776,6 +2776,7 @@ class MarkdownEditor(QTextEdit):
         if source.hasImage() and self._vault_root and self._current_path:
             image = source.imageData()
             if isinstance(image, QImage):
+                self._prepare_image_paste_target()
                 if self._remote_mode:
                     filename = self._next_remote_paste_image_name()
                     payload = self._encode_image_png(image)
@@ -2811,6 +2812,19 @@ class MarkdownEditor(QTextEdit):
 
         # 4) Default paste without auto-link munging
         super().insertFromMimeData(source)
+
+    def _prepare_image_paste_target(self) -> None:
+        """If pasting on a list/task line, move the cursor to a new plain line."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        kind, _, _ = self._list_line_info(block.text())
+        if kind not in {"task", "bullet", "dash"}:
+            return
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.EndOfBlock)
+        cursor.insertBlock()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
 
     def _html_to_plaintext_with_links(self, html: str) -> str:
         """Strip HTML to plain text, converting anchors to [url|label] links."""
@@ -4208,6 +4222,13 @@ class MarkdownEditor(QTextEdit):
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
+            self._add_copy_actions_header(menu)
+            self._add_paste_action_header(menu)
+            link_for_copy = md_link[3] if md_link else plain_link
+            copy_action = menu.addAction("Copy Link Target")
+            copy_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+            copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
+            menu.addSeparator()
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
                 menu.addAction(nav_action)
@@ -4236,8 +4257,8 @@ class MarkdownEditor(QTextEdit):
             remove_action = link_sub.addAction("Remove Link")
             remove_action.triggered.connect(lambda: self._remove_link_at_cursor(click_cursor))
             link_sub.addSeparator()
-            link_for_copy = md_link[3] if md_link else plain_link
             copy_action = link_sub.addAction("Copy Link Target")
+            copy_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
 
             if self._current_path:
@@ -4301,6 +4322,8 @@ class MarkdownEditor(QTextEdit):
             except Exception:
                 pass
             menu = QMenu(self)
+            self._add_copy_actions_header(menu)
+            self._add_paste_action_header(menu)
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
                 menu.addAction(nav_action)
@@ -4371,6 +4394,30 @@ class MarkdownEditor(QTextEdit):
        
         self._context_menu_selection = None
         super().contextMenuEvent(event)
+
+    def _add_copy_actions_header(self, menu: QMenu) -> None:
+        if not menu:
+            return
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        copy_action, md_action = self._build_copy_actions(menu)
+        menu.addAction(copy_action)
+        menu.addAction(md_action)
+        menu.addSeparator()
+
+    def _add_paste_action_header(self, menu: QMenu) -> None:
+        if not menu:
+            return
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return
+        paste_action = QAction("Paste", menu)
+        paste_action.setShortcut(QKeySequence.Paste)
+        paste_action.triggered.connect(self.paste)
+        paste_action.setEnabled(self.canPaste())
+        menu.addAction(paste_action)
+        menu.addSeparator()
 
     def _build_nav_context_row(self, menu: QMenu) -> Optional[QWidgetAction]:
         window = self.window()
@@ -4528,14 +4575,11 @@ class MarkdownEditor(QTextEdit):
         """Replace the default Copy action with sanitized versions and add 'Copy As Markdown'."""
         if not menu:
             return
-        actions = menu.actions()
-        copy_act = None
-        for a in actions:
-            t = (a.text() or "").lower()
-            if t.startswith("copy"):
-                copy_act = a
-                break
-        # Create sanitized copy action
+        copy_action, md_action = self._build_copy_actions(menu)
+        menu.addAction(copy_action)
+        menu.addAction(md_action)
+
+    def _build_copy_actions(self, parent) -> tuple[QAction, QAction]:
         def do_copy():
             cursor = self.textCursor()
             if cursor.hasSelection():
@@ -4544,26 +4588,23 @@ class MarkdownEditor(QTextEdit):
                 txt = self.toPlainText()
             QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
 
-        # Create 'Copy As Markdown' action
         def do_copy_md():
             cursor = self.textCursor()
             if cursor.hasSelection():
-                # Convert the selected display text back to storage markdown
                 display_text = cursor.selection().toPlainText()
                 try:
                     txt = self._from_display(display_text)
                 except Exception:
                     txt = display_text
             else:
-                # Use full-document conversion which handles images and link conversions
                 txt = self.to_markdown()
-            # For markdown, keep markup characters but still normalize control chars
             QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
 
-        new_copy = menu.addAction("Copy")
-        new_copy.triggered.connect(lambda checked=False: do_copy())
-        md_action = menu.addAction("Copy As Markdown")
+        copy_action = QAction("Copy", parent)
+        copy_action.triggered.connect(lambda checked=False: do_copy())
+        md_action = QAction("Copy As Markdown", parent)
         md_action.triggered.connect(lambda checked=False: do_copy_md())
+        return copy_action, md_action
         # Remove original copy action if present
         if copy_act:
             menu.removeAction(copy_act)

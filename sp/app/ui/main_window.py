@@ -1846,6 +1846,12 @@ class MainWindow(QMainWindow):
         webserver_action.setToolTip("Start local web server to serve vault as HTML")
         webserver_action.triggered.connect(self._open_webserver_dialog)
         tools_menu.addAction(webserver_action)
+        move_text_action = QAction("Move Text…", self)
+        move_text_action.setToolTip("Move selected text to another page (Ctrl+Shift+M)")
+        move_text_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        move_text_action.setShortcutContext(Qt.ApplicationShortcut)
+        move_text_action.triggered.connect(self.editor._move_text_via_jump_dialog)
+        tools_menu.addAction(move_text_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self._action_quick_capture)
         self._action_view_vault_disk = view_vault_disk_action
@@ -7353,6 +7359,7 @@ class MainWindow(QMainWindow):
         if result == QDialog.Accepted:
             target = dlg.selected_path()
             if target:
+                self._exit_vi_insert_on_activate()
                 self._open_file(target)
         
 
