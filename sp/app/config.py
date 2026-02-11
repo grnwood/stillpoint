@@ -1335,6 +1335,34 @@ def save_show_journal(show: bool) -> None:
     conn.commit()
 
 
+def load_nav_filter_path() -> Optional[str]:
+    """Load persisted navigation filter path for this vault."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("nav_filter_path",))
+        row = cur.fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def save_nav_filter_path(path: Optional[str]) -> None:
+    """Persist navigation filter path for this vault, or clear if None."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        if not path or path == "/":
+            conn.execute("DELETE FROM kv WHERE key = ?", ("nav_filter_path",))
+        else:
+            conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("nav_filter_path", path))
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
 def load_popup_editor_geometry() -> Optional[str]:
     """Return the saved geometry for popup editors, if any."""
     conn = _get_conn()

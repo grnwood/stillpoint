@@ -4643,6 +4643,7 @@ class MainWindow(QMainWindow):
                 self.right_panel.set_current_page(None, None)
                 self.statusBar().showMessage(f"Vault: {self.vault_root}")
                 self._update_window_title()
+                self._restore_nav_filter_state()
                 self._populate_vault_tree()
 
                 # Check if index is empty and rebuild if needed
@@ -4731,21 +4732,10 @@ class MainWindow(QMainWindow):
         if not self._show_journal_in_nav and self._is_journal_path(self._nav_filter_path):
             self._nav_filter_path = None
             try:
-                if self.right_panel.task_panel:
-                    self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+                config.save_nav_filter_path(None)
             except Exception:
                 pass
-            try:
-                if self.right_panel.link_panel:
-                    self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
-            except Exception:
-                pass
-            for panel in list(getattr(self, "_detached_link_panels", [])):
-                try:
-                    panel.set_navigation_filter(None, refresh=False)
-                except Exception:
-                    pass
-            self._sync_detached_task_filters(None)
+            self._sync_nav_filter_to_panels(None)
             self._apply_nav_filter_style()
         
         # When enabling journal view, set Journal page as pending selection
@@ -4771,6 +4761,26 @@ class MainWindow(QMainWindow):
             return
         self.bookmarks = config.load_bookmarks()
         self._refresh_bookmark_buttons()
+
+    def _restore_nav_filter_state(self) -> None:
+        """Load the persisted navigation filter and apply it without rebuilding the tree."""
+        try:
+            persisted = config.load_nav_filter_path()
+        except Exception:
+            persisted = None
+        if not persisted:
+            self._nav_filter_path = None
+            return
+        normalized = self._file_path_to_folder(persisted if persisted.startswith("/") else f"/{persisted}")
+        if self._is_journal_path(normalized) and not self._show_journal_in_nav:
+            self._nav_filter_path = None
+            try:
+                config.save_nav_filter_path(None)
+            except Exception:
+                pass
+            return
+        self._nav_filter_path = normalized or "/"
+        self._sync_nav_filter_to_panels(self._nav_filter_path)
 
     def _save_geometry(self) -> None:
         """Save window geometry and splitter positions."""
@@ -4993,8 +5003,8 @@ class MainWindow(QMainWindow):
             is_highlighted = self._bookmark_matches_nav_filter(path)
             border_color = highlight_border if is_highlighted else "transparent"
             btn.setStyleSheet(
-                "QPushButton { border: 1px solid "
-                f"{border_color}; padding: 2px 6px; border-radius: 3px; }"
+                f"QPushButton {{ border: 1px solid {border_color}; "
+                "padding: 2px 6px; border-radius: 3px; }}"
             )
 
     def _update_bookmark_scroll_buttons(self) -> None:
@@ -5312,26 +5322,19 @@ class MainWindow(QMainWindow):
         if self._is_journal_path(normalized) and not self._show_journal_in_nav:
             logNav(f"_set_nav_filter: ignoring Journal path {normalized}")
             self._nav_filter_path = None
+            try:
+                config.save_nav_filter_path(None)
+            except Exception:
+                pass
             self._apply_nav_filter_style()
             return
         self._nav_filter_path = normalized or "/"
         logNav(f"_set_nav_filter: filtered to {self._nav_filter_path}")
         try:
-            if self.right_panel.task_panel:
-                self.right_panel.task_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
+            config.save_nav_filter_path(self._nav_filter_path)
         except Exception:
             pass
-        try:
-            if self.right_panel.link_panel:
-                self.right_panel.link_panel.set_navigation_filter(self._nav_filter_path, refresh=False)
-        except Exception:
-            pass
-        for panel in list(getattr(self, "_detached_link_panels", [])):
-            try:
-                panel.set_navigation_filter(self._nav_filter_path, refresh=False)
-            except Exception:
-                pass
-        self._sync_detached_task_filters(self._nav_filter_path)
+        self._sync_nav_filter_to_panels(self._nav_filter_path)
         self._populate_vault_tree()
         try:
             self.tree_view.expandToDepth(1)
@@ -5348,21 +5351,10 @@ class MainWindow(QMainWindow):
         logNav(f"_clear_nav_filter: restoring full tree view")
         self._nav_filter_path = None
         try:
-            if self.right_panel.task_panel:
-                self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+            config.save_nav_filter_path(None)
         except Exception:
             pass
-        try:
-            if self.right_panel.link_panel:
-                self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
-        except Exception:
-            pass
-        for panel in list(getattr(self, "_detached_link_panels", [])):
-            try:
-                panel.set_navigation_filter(None, refresh=False)
-            except Exception:
-                pass
-        self._sync_detached_task_filters(None)
+        self._sync_nav_filter_to_panels(None)
         self._populate_vault_tree()
         self.tree_view.collapseAll()
         self._apply_nav_filter_style()
@@ -5372,6 +5364,24 @@ class MainWindow(QMainWindow):
         self._apply_focus_borders()
         self._update_filter_indicator()
         self._update_bookmark_filter_highlights()
+
+    def _sync_nav_filter_to_panels(self, filter_path: Optional[str]) -> None:
+        try:
+            if self.right_panel.task_panel:
+                self.right_panel.task_panel.set_navigation_filter(filter_path, refresh=False)
+        except Exception:
+            pass
+        try:
+            if self.right_panel.link_panel:
+                self.right_panel.link_panel.set_navigation_filter(filter_path, refresh=False)
+        except Exception:
+            pass
+        for panel in list(getattr(self, "_detached_link_panels", [])):
+            try:
+                panel.set_navigation_filter(filter_path, refresh=False)
+            except Exception:
+                pass
+        self._sync_detached_task_filters(filter_path)
 
     def _sync_detached_task_filters(self, filter_path: Optional[str]) -> None:
         """Ensure detached task windows stay in sync with navigation filtering."""
@@ -11973,21 +11983,10 @@ class MainWindow(QMainWindow):
         if self._nav_filter_path and not self._is_journal_path(self._nav_filter_path):
             self._nav_filter_path = None
             try:
-                if self.right_panel.task_panel:
-                    self.right_panel.task_panel.set_navigation_filter(None, refresh=False)
+                config.save_nav_filter_path(None)
             except Exception:
                 pass
-            try:
-                if self.right_panel.link_panel:
-                    self.right_panel.link_panel.set_navigation_filter(None, refresh=False)
-            except Exception:
-                pass
-            for panel in list(getattr(self, "_detached_link_panels", [])):
-                try:
-                    panel.set_navigation_filter(None, refresh=False)
-                except Exception:
-                    pass
-            self._sync_detached_task_filters(None)
+            self._sync_nav_filter_to_panels(None)
             self._apply_nav_filter_style()
             self._pending_selection = path
             self._populate_vault_tree()
