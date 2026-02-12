@@ -682,8 +682,11 @@ HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
 HEADING_SENTINEL_CHARS = "".join(chr(HEADING_SENTINEL_BASE + lvl) for lvl in range(1, HEADING_MAX_LEVEL + 1))
 HEADING_DISPLAY_PATTERN = re.compile(rf"^(\s*)([{HEADING_SENTINEL_CHARS}])(.*)$", re.MULTILINE)
-# Pattern to catch stray sentinel characters anywhere (not just at line start)
+# Pattern to catch ALL sentinel characters (used in _from_display to strip any remaining after decoding)
 STRAY_SENTINEL_PATTERN = re.compile(rf"[{HEADING_SENTINEL_CHARS}]")
+# Pattern to catch ROGUE sentinels: those NOT at line start (after optional whitespace)
+# Matches sentinels that appear after any non-whitespace character (embedded in text)
+ROGUE_SENTINEL_PATTERN = re.compile(rf"(?<=[^\s\n])[{HEADING_SENTINEL_CHARS}]")
 IMAGE_PATTERN = re.compile(
     r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)\s]+)\)(?:\{width=(?P<width>\d+)\})?", re.MULTILINE
 )
@@ -6808,13 +6811,19 @@ class MarkdownEditor(QTextEdit):
         return restored
 
     def _sanitize_input_markdown(self, text: str) -> str:
-        """Remove any sentinel characters from input markdown (e.g., from corrupted files or copy/paste).
+        """Remove rogue sentinel characters from input markdown while preserving valid heading sentinels.
         
-        Sentinel characters should never exist in stored markdown - they're only used
-        internally for display. This prevents them from breaking the editor if they
-        somehow end up in the input.
+        When pasting text copied from within the editor, we want to preserve heading sentinels
+        that are at the start of lines (legitimate heading structure). However, sentinel
+        characters embedded in the middle of text (corrupted/rogue) should be stripped.
+        
+        This allows copying blocks with headings to work correctly while still protecting
+        against sentinel corruption from other sources.
         """
-        return STRAY_SENTINEL_PATTERN.sub("", text)
+        # Remove rogue sentinels: those that appear after any non-whitespace character
+        # This preserves sentinels at line start (valid headings) but strips embedded ones
+        cleaned = ROGUE_SENTINEL_PATTERN.sub("", text)
+        return cleaned
     
     def _encode_heading(self, match: re.Match[str]) -> str:
         indent, hashes, _, body = match.groups()
