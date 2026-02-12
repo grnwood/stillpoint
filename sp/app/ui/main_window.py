@@ -10163,7 +10163,7 @@ class MainWindow(QMainWindow):
         )
         editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
         right_arrow_path = self._find_asset("right-arrow.svg")
-        down_arrow_path = self._find_asset("down.svg")
+        down_arrow_path = self._find_asset("down-arrow.svg")
         arrow_closed = (
             str(right_arrow_path).replace("\\", "/") if right_arrow_path else ""
         )

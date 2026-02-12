@@ -3078,30 +3078,29 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
 
-        # 2) Rich HTML → prefer plain text if available to avoid style noise
-        if source.hasHtml() and source.hasText():
-            plain = source.text()
-            if plain:
-                # SAFETY: Strip sentinel characters before inserting
-                plain = self._sanitize_input_markdown(plain)
-                self.textCursor().insertText(plain)
-                return
-
-        # 3) Rich HTML → markdown (avoid pasting styled fragments)
+        # 2) Rich HTML → convert links to markdown format
         if source.hasHtml():
             html = source.html()
-            plain_from_html = self._html_to_plaintext_with_links(html)
-            if not plain_from_html and source.hasText():
-                plain_from_html = source.text()
-            if plain_from_html:
-                # SAFETY: Strip sentinel characters before inserting
-                plain_from_html = self._sanitize_input_markdown(plain_from_html)
-                self.textCursor().insertText(plain_from_html)
-                if "[" in plain_from_html and "|" in plain_from_html:
-                    self._refresh_display()
-                return
+            # Check if HTML contains links - if so, parse it
+            if "<a " in html.lower():
+                plain_from_html = self._html_to_plaintext_with_links(html)
+                if plain_from_html:
+                    # SAFETY: Strip sentinel characters before inserting
+                    plain_from_html = self._sanitize_input_markdown(plain_from_html)
+                    self.textCursor().insertText(plain_from_html)
+                    if "[" in plain_from_html and "|" in plain_from_html:
+                        self._refresh_display()
+                    return
+            # No links - prefer plain text to avoid style noise
+            elif source.hasText():
+                plain = source.text()
+                if plain:
+                    # SAFETY: Strip sentinel characters before inserting
+                    plain = self._sanitize_input_markdown(plain)
+                    self.textCursor().insertText(plain)
+                    return
 
-        # 4) Default paste - also sanitize to prevent sentinel character injection
+        # 3) Default paste - also sanitize to prevent sentinel character injection
         # Extract and sanitize text before allowing default paste behavior
         if source.hasText():
             text = source.text()
@@ -3131,6 +3130,9 @@ class MarkdownEditor(QTextEdit):
         """Strip HTML to plain text, converting anchors to [url|label] links."""
         if not html:
             return ""
+
+        # Capture outer scope reference for link normalization
+        normalize_link = self._normalize_external_link
 
         class _PlainLinkParser(HTMLParser):
             block_tags = {
@@ -3173,7 +3175,7 @@ class MarkdownEditor(QTextEdit):
                     label = "".join(self._link_text).strip()
                     href = self._link_href or ""
                     if href:
-                        link_target = self._normalize_external_link(href)
+                        link_target = normalize_link(href)
                         display = label or ""
                         self.parts.append(f"[{link_target}|{display}]")
                     else:
@@ -4738,15 +4740,15 @@ class MarkdownEditor(QTextEdit):
         has_html = mime_data and mime_data.hasHtml()
         
         if has_html:
-            # Show both plain text and HTML paste options
+            # Show both plain text and regular paste options
             paste_plain_action = QAction("Paste as Plain Text", menu)
             paste_plain_action.setShortcut(QKeySequence.Paste)
             paste_plain_action.triggered.connect(lambda: self._paste_as_plain_text())
             menu.addAction(paste_plain_action)
             
-            paste_html_action = QAction("Paste as HTML", menu)
-            paste_html_action.triggered.connect(self.paste)
-            menu.addAction(paste_html_action)
+            paste_action = QAction("Paste", menu)
+            paste_action.triggered.connect(self.paste)
+            menu.addAction(paste_action)
         else:
             # Just show regular paste
             paste_action = QAction("Paste", menu)
