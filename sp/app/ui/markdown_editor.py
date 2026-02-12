@@ -1533,7 +1533,7 @@ class MarkdownEditor(QTextEdit):
         self._pending_heading_block_num: Optional[int] = None
         self._pending_heading_level: Optional[int] = None
         self._search_engine = SearchEngine(self)
-        self.setPlaceholderText("Open a Markdown file to begin editing…")
+        self.setPlaceholderText("Pick a page in your vault to view and edit…")
         self.setAcceptRichText(True)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self._indent_unit = " " * 4
@@ -5374,6 +5374,10 @@ class MarkdownEditor(QTextEdit):
 
     def _trigger_history_navigation(self, qt_key: int) -> None:
         """Simulate Alt+Left/Right to leverage MainWindow history shortcuts."""
+        # Guard: Don't navigate if no file is loaded (prevents crash on empty editor)
+        if not self._current_path:
+            return
+        
         window = self.window()
         if not window:
             return
