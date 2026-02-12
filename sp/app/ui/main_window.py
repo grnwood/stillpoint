@@ -1668,6 +1668,15 @@ class MainWindow(QMainWindow):
             self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
             self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
             self.left_tab_widget.addTab(self.tags_tab, "Tags")
+            if self._nav_filter_path:
+                try:
+                    self.tags_tab.set_navigation_filter(
+                        self._nav_filter_path,
+                        path_to_colon(self._nav_filter_path),
+                        self._clear_nav_filter,
+                    )
+                except Exception:
+                    pass
         
         # Search tab
         self.search_tab = SearchTab(http_client=self.http)
@@ -4459,6 +4468,15 @@ class MainWindow(QMainWindow):
             self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
             self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
             self.left_tab_widget.insertTab(1, self.tags_tab, "Tags")
+            if self._nav_filter_path:
+                try:
+                    self.tags_tab.set_navigation_filter(
+                        self._nav_filter_path,
+                        path_to_colon(self._nav_filter_path),
+                        self._clear_nav_filter,
+                    )
+                except Exception:
+                    pass
         elif not new_tags and self.tags_tab is not None:
             idx = self.left_tab_widget.indexOf(self.tags_tab)
             if idx != -1:
@@ -5366,6 +5384,7 @@ class MainWindow(QMainWindow):
         self._update_bookmark_filter_highlights()
 
     def _sync_nav_filter_to_panels(self, filter_path: Optional[str]) -> None:
+        filter_label = path_to_colon(filter_path) if filter_path else None
         try:
             if self.right_panel.task_panel:
                 self.right_panel.task_panel.set_navigation_filter(filter_path, refresh=False)
@@ -5374,6 +5393,16 @@ class MainWindow(QMainWindow):
         try:
             if self.right_panel.link_panel:
                 self.right_panel.link_panel.set_navigation_filter(filter_path, refresh=False)
+        except Exception:
+            pass
+        try:
+            if self.search_tab:
+                self.search_tab.set_navigation_filter(filter_path, filter_label, self._clear_nav_filter)
+        except Exception:
+            pass
+        try:
+            if self.tags_tab and hasattr(self.tags_tab, "set_navigation_filter"):
+                self.tags_tab.set_navigation_filter(filter_path, filter_label, self._clear_nav_filter)
         except Exception:
             pass
         for panel in list(getattr(self, "_detached_link_panels", [])):

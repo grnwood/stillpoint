@@ -263,6 +263,9 @@ class SearchTab(QWidget):
         self.http = http_client
         self._remote_mode = False
         self.current_subtree = None  # Optional path filter
+        self._nav_filter_prefix = None
+        self._filter_label = None
+        self._clear_filter_cb = None
         
         self._init_ui()
 
@@ -303,6 +306,15 @@ class SearchTab(QWidget):
         search_row.addWidget(self.help_button)
         
         layout.addLayout(search_row)
+
+        # Navigation filter banner (shown when nav filter is active)
+        self.filter_banner = QLabel()
+        self.filter_banner.setTextFormat(Qt.RichText)
+        self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.filter_banner.setOpenExternalLinks(False)
+        self.filter_banner.linkActivated.connect(self._on_remove_filter)
+        self.filter_banner.hide()
+        layout.addWidget(self.filter_banner)
         
         # Subtree filter row
         filter_row = QHBoxLayout()
@@ -346,6 +358,50 @@ class SearchTab(QWidget):
         layout.addWidget(self.results_tree, 1)
         
         self.setLayout(layout)
+
+    def set_navigation_filter(
+        self,
+        filter_prefix: str | None,
+        filter_label: str | None = None,
+        clear_filter_cb=None,
+    ) -> None:
+        """Apply navigation filter state to the search tab."""
+        previous_prefix = self._nav_filter_prefix
+        self._nav_filter_prefix = filter_prefix if filter_prefix else None
+        self._filter_label = filter_label
+        self._clear_filter_cb = clear_filter_cb
+        if self._nav_filter_prefix:
+            self.current_subtree = self._nav_filter_prefix
+            self.subtree_entry.setText(path_to_colon(self._nav_filter_prefix))
+            self.clear_subtree_button.setEnabled(True)
+        else:
+            if previous_prefix and self.current_subtree == previous_prefix:
+                self.current_subtree = None
+                self.subtree_entry.clear()
+                self.clear_subtree_button.setEnabled(False)
+        self._update_filter_banner()
+
+    def _update_filter_banner(self) -> None:
+        if not self._nav_filter_prefix:
+            self.filter_banner.hide()
+            return
+        label = self._filter_label or path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
+        self.filter_banner.setText(
+            f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+            f"Filtered by {label} "
+            f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+            f"</div>"
+        )
+        self.filter_banner.show()
+
+    def _on_remove_filter(self, link: str) -> None:
+        if self._clear_filter_cb:
+            try:
+                self._clear_filter_cb()
+                return
+            except Exception:
+                pass
+        self.set_navigation_filter(None, None, None)
     
     def _get_help_text(self) -> str:
         """Generate help tooltip with FTS5 syntax examples."""
@@ -381,6 +437,12 @@ class SearchTab(QWidget):
     
     def _clear_subtree(self):
         """Clear the subtree filter."""
+        if self._nav_filter_prefix and self._clear_filter_cb:
+            try:
+                self._clear_filter_cb()
+                return
+            except Exception:
+                pass
         self.current_subtree = None
         self.subtree_entry.clear()
         self.clear_subtree_button.setEnabled(False)

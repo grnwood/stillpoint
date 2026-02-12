@@ -177,6 +177,9 @@ class TagsTab(QWidget):
         self.selected_tags = set()  # Currently selected tags
         self._tags_loaded = False  # Track if tags have been loaded
         self._pending_new_tags: set[str] = set()
+        self._nav_filter_prefix = None
+        self._filter_label = None
+        self._clear_filter_cb = None
         
         self._init_ui()
         # Don't load tags immediately - wait for vault to be opened
@@ -268,6 +271,14 @@ class TagsTab(QWidget):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
         splitter.setSizes([260, 300])
+        # Navigation filter banner (shown when nav filter is active)
+        self.filter_banner = QLabel()
+        self.filter_banner.setTextFormat(Qt.RichText)
+        self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.filter_banner.setOpenExternalLinks(False)
+        self.filter_banner.linkActivated.connect(self._on_remove_filter)
+        self.filter_banner.hide()
+        layout.addWidget(self.filter_banner)
         layout.addWidget(splitter, 1)
         
         self.setLayout(layout)
@@ -392,7 +403,7 @@ class TagsTab(QWidget):
                 import sqlite3
                 conn = sqlite3.connect(str(db_path), check_same_thread=False)
                 should_close = True
-            rows = config.fetch_tag_summary()
+            rows = self._fetch_tag_summary(conn)
             if should_close:
                 conn.close()
             
@@ -413,6 +424,12 @@ class TagsTab(QWidget):
                     if tag not in self.tag_chicklets:
                         self._add_tag_chicklet(tag, count_label="new")
                 self._pending_new_tags.clear()
+
+            # Restore selected tags after reload
+            for tag in list(self.selected_tags):
+                chicklet = self.tag_chicklets.get(tag)
+                if chicklet:
+                    chicklet.setChecked(True)
 
             self.tags_layout.invalidate()
             self.tags_container.adjustSize()
@@ -460,10 +477,18 @@ class TagsTab(QWidget):
                     FROM page_tags pt
                     WHERE pt.page = p.path AND pt.tag IN ({placeholders})
                 ) = ?
+                {{filter_clause}}
                 ORDER BY p.path
             """
-            
+            filter_clause = ""
             params = list(self.selected_tags) + [len(self.selected_tags)]
+            if self._nav_filter_prefix and self._nav_filter_prefix != "/":
+                prefix = self._nav_filter_prefix.rstrip("/") or "/"
+                like_prefix = prefix.rstrip("/") + "/%"
+                filter_clause = "AND (p.path = ? OR p.path LIKE ?)"
+                params.extend([prefix, like_prefix])
+            query = query.format(filter_clause=filter_clause)
+
             rows = conn.execute(query, params).fetchall()
             conn.close()
             
@@ -637,6 +662,66 @@ class TagsTab(QWidget):
         self.results_tree.clear()
         self.status_label.setText("Select tags to filter pages")
         self._tags_loaded = True
+
+    def set_navigation_filter(
+        self,
+        filter_prefix: str | None,
+        filter_label: str | None = None,
+        clear_filter_cb=None,
+    ) -> None:
+        """Apply navigation filter state to the tags tab."""
+        self._nav_filter_prefix = filter_prefix if filter_prefix else None
+        self._filter_label = filter_label
+        self._clear_filter_cb = clear_filter_cb
+        self._update_filter_banner()
+        if self._tags_loaded:
+            self._load_tags()
+            if self.selected_tags:
+                self._refresh_results()
+
+    def _update_filter_banner(self) -> None:
+        if not self._nav_filter_prefix:
+            self.filter_banner.hide()
+            return
+        label = self._filter_label or path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
+        self.filter_banner.setText(
+            f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+            f"Filtered by {label} "
+            f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+            f"</div>"
+        )
+        self.filter_banner.show()
+
+    def _on_remove_filter(self, link: str) -> None:
+        if self._clear_filter_cb:
+            try:
+                self._clear_filter_cb()
+                return
+            except Exception:
+                pass
+        self.set_navigation_filter(None, None, None)
+
+    def _fetch_tag_summary(self, conn) -> list[tuple[str, int]]:
+        from sp.app import config
+        if self._nav_filter_prefix and self._nav_filter_prefix != "/":
+            prefix = self._nav_filter_prefix.rstrip("/") or "/"
+            like_prefix = prefix.rstrip("/") + "/%"
+            try:
+                cur = conn.execute(
+                    "SELECT tag, COUNT(DISTINCT page) FROM page_tags "
+                    "WHERE page = ? OR page LIKE ? GROUP BY tag ORDER BY tag",
+                    (prefix, like_prefix),
+                )
+                return [(row[0], row[1]) for row in cur.fetchall()]
+            except Exception:
+                return []
+        try:
+            if not conn:
+                return config.fetch_tag_summary()
+            cur = conn.execute("SELECT tag, COUNT(DISTINCT page) FROM page_tags GROUP BY tag ORDER BY tag")
+            return [(row[0], row[1]) for row in cur.fetchall()]
+        except Exception:
+            return []
 
     def add_tag(self, tag: str) -> None:
         """Insert a new tag into the chicklet list without refreshing from DB."""
