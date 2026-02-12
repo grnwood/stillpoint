@@ -5012,9 +5012,10 @@ class MainWindow(QMainWindow):
         if not getattr(self, "bookmark_buttons", None):
             return
         highlight_border = theme_value("main_window.bookmark.filtered_border", "#D9534F")
+        normal_border = theme_value("main_window.bookmark.normal_border", "#555555")
         for path, btn in self.bookmark_buttons.items():
             is_highlighted = self._bookmark_matches_nav_filter(path)
-            border_color = highlight_border if is_highlighted else "transparent"
+            border_color = highlight_border if is_highlighted else normal_border
             btn.setStyleSheet(
                 f"QPushButton {{ border: 1px solid {border_color}; "
                 "padding: 2px 6px; border-radius: 3px; }}"
@@ -10295,6 +10296,24 @@ class MainWindow(QMainWindow):
                 if child.isValid():
                     stack.append(child)
 
+    def _collapse_subtree_recursive(self, index: QModelIndex) -> None:
+        """Recursively collapse all descendants first, then collapse the given node."""
+        if not index.isValid():
+            return
+        
+        model = index.model()
+        if not model:
+            return
+        
+        # Recursively collapse all children first (depth-first, bottom-up)
+        for row in range(model.rowCount(index)):
+            child = model.index(row, 0, index)
+            if child.isValid():
+                self._collapse_subtree_recursive(child)
+        
+        # Finally collapse this node after all children are collapsed
+        self.tree_view.collapse(index)
+
     def _collapse_other_folders(self, keep_path: str) -> None:
         """Collapse all folders except those in the path to keep_path."""
         if not keep_path:
@@ -10373,7 +10392,7 @@ class MainWindow(QMainWindow):
                 )
             collapse_action = menu.addAction("Collapse")
             collapse_action.triggered.connect(
-                lambda checked=False, idx=index: self.tree_view.collapse(idx if idx.isValid() else QModelIndex())
+                lambda checked=False, idx=index: self._collapse_subtree_recursive(idx if idx.isValid() else QModelIndex())
             )
             expand_action = menu.addAction("Expand")
             expand_action.triggered.connect(
