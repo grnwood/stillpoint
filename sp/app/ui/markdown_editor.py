@@ -4493,10 +4493,15 @@ class MarkdownEditor(QTextEdit):
             _, fmt = image_hit
             image_name = fmt.name()
             menu = QMenu(self)
+            # Nav arrows first
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
                 menu.addAction(nav_action)
                 menu.addSeparator()
+            # Then copy/paste actions
+            self._add_copy_actions_header(menu)
+            self._add_paste_action_header(menu)
+            # Then image-specific actions
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
             for width in (300, 600, 900):
@@ -4524,17 +4529,20 @@ class MarkdownEditor(QTextEdit):
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
+            # Nav arrows first
+            nav_action = self._build_nav_context_row(menu)
+            if nav_action:
+                menu.addAction(nav_action)
+                menu.addSeparator()
+            # Then copy/paste actions
             self._add_copy_actions_header(menu)
             self._add_paste_action_header(menu)
+            # Then link-specific actions
             link_for_copy = md_link[3] if md_link else plain_link
             copy_action = menu.addAction("Copy Link Target")
             copy_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
             copy_action.triggered.connect(lambda: self._copy_link_to_location(link_for_copy))
             menu.addSeparator()
-            nav_action = self._build_nav_context_row(menu)
-            if nav_action:
-                menu.addAction(nav_action)
-                menu.addSeparator()
             if heading_action:
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
@@ -4626,12 +4634,14 @@ class MarkdownEditor(QTextEdit):
             except Exception:
                 pass
             menu = QMenu(self)
-            self._add_copy_actions_header(menu)
-            self._add_paste_action_header(menu)
+            # Nav arrows first
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
                 menu.addAction(nav_action)
                 menu.addSeparator()
+            # Then copy/paste actions
+            self._add_copy_actions_header(menu)
+            self._add_paste_action_header(menu)
             if heading_action:
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
@@ -4718,12 +4728,45 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         if cursor.hasSelection():
             return
-        paste_action = QAction("Paste", menu)
-        paste_action.setShortcut(QKeySequence.Paste)
-        paste_action.triggered.connect(self.paste)
-        paste_action.setEnabled(self.canPaste())
-        menu.addAction(paste_action)
+        
+        # Check if clipboard has content
+        if not self.canPaste():
+            return
+        
+        # Check if clipboard has HTML
+        clipboard = QGuiApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        has_html = mime_data and mime_data.hasHtml()
+        
+        if has_html:
+            # Show both plain text and HTML paste options
+            paste_plain_action = QAction("Paste as Plain Text", menu)
+            paste_plain_action.setShortcut(QKeySequence.Paste)
+            paste_plain_action.triggered.connect(lambda: self._paste_as_plain_text())
+            menu.addAction(paste_plain_action)
+            
+            paste_html_action = QAction("Paste as HTML", menu)
+            paste_html_action.triggered.connect(self.paste)
+            menu.addAction(paste_html_action)
+        else:
+            # Just show regular paste
+            paste_action = QAction("Paste", menu)
+            paste_action.setShortcut(QKeySequence.Paste)
+            paste_action.triggered.connect(self.paste)
+            menu.addAction(paste_action)
+        
         menu.addSeparator()
+
+    def _paste_as_plain_text(self) -> None:
+        """Paste only plain text from clipboard, ignoring HTML formatting."""
+        clipboard = QGuiApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if mime_data and mime_data.hasText():
+            plain_text = mime_data.text()
+            # Create a clean mime data with only plain text
+            clean_mime = QMimeData()
+            clean_mime.setText(plain_text)
+            self.insertFromMimeData(clean_mime)
 
     def _build_nav_context_row(self, menu: QMenu) -> Optional[QWidgetAction]:
         window = self.window()
