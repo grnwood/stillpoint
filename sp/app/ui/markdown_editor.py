@@ -2331,12 +2331,15 @@ class MarkdownEditor(QTextEdit):
                         f"[MD_TIMING] Incremental batches={batches} cumulative_insert={batch_ms_total:.1f}ms "
                         f"avg_batch={(batch_ms_total/max(batches,1)):.1f}ms"
                     )
+                # Always print syntax cache stats (even without timing) for diagnostics
+                total_cache_ops = type(self.highlighter)._cache_hits + type(self.highlighter)._cache_misses
+                if total_cache_ops > 0:
+                    hit_rate = (type(self.highlighter)._cache_hits / total_cache_ops) * 100
+                    print(f"[MD_CACHE] Syntax cache: hits={type(self.highlighter)._cache_hits} misses={type(self.highlighter)._cache_misses} hit_rate={hit_rate:.1f}% size={len(type(self.highlighter)._persistent_block_cache)}")
                 if self.highlighter._timing_blocks:
                     avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
                     total = self.highlighter._timing_total * 1000.0
-                    hit_rate = (type(self.highlighter)._cache_hits / max(1, type(self.highlighter)._cache_hits + type(self.highlighter)._cache_misses)) * 100
                     print(f"[MD_TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
-                    print(f"[MD_CACHE] Syntax cache: hits={type(self.highlighter)._cache_hits} misses={type(self.highlighter)._cache_misses} hit_rate={hit_rate:.1f}% size={len(type(self.highlighter)._persistent_block_cache)}")
             self.highlighter.enable_timing(False)
             self._mark_page_load("editor focus ready")
             self.setFocus()
