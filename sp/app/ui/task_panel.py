@@ -712,49 +712,49 @@ class TaskPanel(QWidget):
     def _build_task_print_html(self) -> str:
         css = self._load_print_css()
         extra_css = f"""
-        table.task-print {
+        table.task-print {{
             border-collapse: collapse;
             width: 100%;
-        }
+        }}
         table.task-print th,
-        table.task-print td {
+        table.task-print td {{
             border: 1px solid var(--border);
             padding: 0.35em 0.5em;
             vertical-align: top;
-        }
-        table.task-print th {
+        }}
+        table.task-print th {{
             background: {theme_value('task_panel.print.table_header_bg', '#f0f0f0')};
             font-weight: 600;
-        }
-        .task-priority {
+        }}
+        .task-priority {{
             text-align: center;
             white-space: nowrap;
             width: 4.5em;
-        }
+        }}
         .task-due,
-        .task-start {
+        .task-start {{
             white-space: nowrap;
-        }
-        .task-path {
+        }}
+        .task-path {{
             font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
             font-size: 0.95em;
-        }
-        .task-checkbox {
+        }}
+        .task-checkbox {{
             display: inline-block;
             width: 1.1em;
             margin-right: 0.35em;
             text-align: center;
-        }
-        .task-text {
+        }}
+        .task-text {{
             display: inline-block;
             vertical-align: top;
-        }
-        .task-done .task-text {
+        }}
+        .task-done .task-text {{
             text-decoration: line-through;
-        }
-        .task-muted td {
+        }}
+        .task-muted td {{
             color: var(--muted);
-        }
+        }}
         """
 
         items = self._iter_task_items()
