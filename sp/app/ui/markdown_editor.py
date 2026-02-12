@@ -2189,6 +2189,7 @@ class MarkdownEditor(QTextEdit):
                     type(self)._display_cache_order.remove(cache_key)
                     type(self)._display_cache_order.append(cache_key)
                     cache_hit = True
+                    print(f"[MD_CACHE] ✓ HIT: {self._current_path} (cached display text)")
             
             if not cache_hit:
                 display = self._to_display(normalized)
@@ -2203,6 +2204,7 @@ class MarkdownEditor(QTextEdit):
                     if len(type(self)._display_cache_order) > type(self)._display_cache_max_size:
                         oldest = type(self)._display_cache_order.pop(0)
                         type(self)._display_cache.pop(oldest, None)
+                    print(f"[MD_CACHE] ✗ MISS: {self._current_path} (converted and cached, cache size: {len(type(self)._display_cache)})")
             t2 = time.perf_counter()
             self._mark_page_load("convert to display text")
             self.highlighter.enable_timing(True)
