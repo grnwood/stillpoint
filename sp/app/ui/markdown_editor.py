@@ -722,6 +722,14 @@ def heading_level_from_char(char: str) -> int:
 
 class MarkdownHighlighter(QSyntaxHighlighter):
     CODE_BLOCK_STATE = 1
+    
+    # Persistent class-level cache for highlighted blocks (survives page changes)
+    # Key: content_hash → format_spans
+    _persistent_block_cache: dict[str, list[tuple[int, int, QTextCharFormat]]] = {}
+    _persistent_cache_order: list[str] = []  # LRU tracking
+    _persistent_cache_max_size: int = 500  # Can cache ~500 code blocks across all files
+    _cache_hits: int = 0
+    _cache_misses: int = 0
 
     def __init__(self, parent) -> None:  # type: ignore[override]
         super().__init__(parent)
@@ -836,12 +844,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._reset_code_block_cache()
         self._init_pygments(config.load_pygments_style("monokai"))
         
-        # Block-level highlighting cache for performance
-        self._block_cache: dict[int, tuple[int, list[tuple[int, int, QTextCharFormat]]]] = {}
-        self._cache_access_order: list[int] = []
-        self._cache_max_size: int = 1000
-        self._cache_hits: int = 0
-        self._cache_misses: int = 0
+        # Persistent block-level highlighting cache (shared across all documents)
+        # Cache key: content_hash → (format_spans, access_time)
+        # This persists across page loads for dramatic speedup on code-heavy pages
 
     def _apply_heading_sizes(self, base_pt: float) -> None:
         """Recompute heading sizes from the current base font size."""
@@ -1065,26 +1070,27 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         block = self.currentBlock()
         block_num = block.blockNumber()
-        block_revision = block.revision()
         
-        # Check cache for this block
-        if block_num in self._block_cache:
-            cached_revision, cached_spans = self._block_cache[block_num]
-            if cached_revision == block_revision:
-                # Cache hit - apply cached formats and return
-                for start, length, fmt in cached_spans:
-                    self.setFormat(start, length, fmt)
-                # Update LRU access order
-                if block_num in self._cache_access_order:
-                    self._cache_access_order.remove(block_num)
-                self._cache_access_order.append(block_num)
-                self._cache_hits += 1
-                if self._timing_enabled:
-                    self._timing_blocks += 1
-                    self._timing_total += time.perf_counter() - t0
-                return
+        # Use content hash for persistent caching across page loads
+        content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:16]
         
-        self._cache_misses += 1
+        # Check persistent cache for this block content
+        if content_hash in type(self)._persistent_block_cache:
+            cached_spans = type(self)._persistent_block_cache[content_hash]
+            # Cache hit - apply cached formats and return
+            for start, length, fmt in cached_spans:
+                self.setFormat(start, length, fmt)
+            # Update LRU access order
+            if content_hash in type(self)._persistent_cache_order:
+                type(self)._persistent_cache_order.remove(content_hash)
+            type(self)._persistent_cache_order.append(content_hash)
+            type(self)._cache_hits += 1
+            if self._timing_enabled:
+                self._timing_blocks += 1
+                self._timing_total += time.perf_counter() - t0
+            return
+        
+        type(self)._cache_misses += 1
         # Track all format operations for caching
         self._current_format_spans: list[tuple[int, int, QTextCharFormat]] = []
         self._capturing_formats = True
@@ -1353,18 +1359,18 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
 
 
-        # Store computed formats in cache
+        # Store computed formats in persistent cache
         self._capturing_formats = False
-        self._block_cache[block_num] = (block_revision, self._current_format_spans)
+        type(self)._persistent_block_cache[content_hash] = self._current_format_spans
         self._current_format_spans = []
         # Update LRU access order
-        if block_num in self._cache_access_order:
-            self._cache_access_order.remove(block_num)
-        self._cache_access_order.append(block_num)
+        if content_hash in type(self)._persistent_cache_order:
+            type(self)._persistent_cache_order.remove(content_hash)
+        type(self)._persistent_cache_order.append(content_hash)
         # Evict oldest if cache exceeds limit
-        if len(self._block_cache) > self._cache_max_size:
-            oldest = self._cache_access_order.pop(0)
-            self._block_cache.pop(oldest, None)
+        if len(type(self)._persistent_block_cache) > type(self)._persistent_cache_max_size:
+            oldest = type(self)._persistent_cache_order.pop(0)
+            type(self)._persistent_block_cache.pop(oldest, None)
         
         if self._timing_enabled:
             self._timing_total += (time.perf_counter() - t0)
@@ -2329,9 +2335,9 @@ class MarkdownEditor(QTextEdit):
                 if self.highlighter._timing_blocks:
                     avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
                     total = self.highlighter._timing_total * 1000.0
-                    hit_rate = (self.highlighter._cache_hits / max(1, self.highlighter._cache_hits + self.highlighter._cache_misses)) * 100
+                    hit_rate = (type(self.highlighter)._cache_hits / max(1, type(self.highlighter)._cache_hits + type(self.highlighter)._cache_misses)) * 100
                     print(f"[MD_TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
-                    print(f"[MD_CACHE] hits={self.highlighter._cache_hits} misses={self.highlighter._cache_misses} hit_rate={hit_rate:.1f}% size={len(self.highlighter._block_cache)}")
+                    print(f"[MD_CACHE] Syntax cache: hits={type(self.highlighter)._cache_hits} misses={type(self.highlighter)._cache_misses} hit_rate={hit_rate:.1f}% size={len(type(self.highlighter)._persistent_block_cache)}")
             self.highlighter.enable_timing(False)
             self._mark_page_load("editor focus ready")
             self.setFocus()
@@ -2350,10 +2356,7 @@ class MarkdownEditor(QTextEdit):
         # Show busy cursor during document replacement
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         
-        # Clear highlighter cache when replacing content
-        if hasattr(self.highlighter, '_block_cache'):
-            self.highlighter._block_cache.clear()
-            self.highlighter._cache_access_order.clear()
+        # Don't clear syntax cache - it persists across documents for speedup
         if content.endswith("\n"):
             stripped = content.rstrip("\n")
             trailing_count = len(content) - len(stripped)
@@ -7273,16 +7276,14 @@ class MarkdownEditor(QTextEdit):
             self._enforce_display_guard = False
     
     def _check_block_count_change(self) -> None:
-        """Clear highlighter cache when block count changes (lines added/deleted)."""
+        """Check for block count changes (lines added/deleted)."""
         if self._block_count_guard or self._processing_inline_trigger or self._display_guard:
             return
         self._block_count_guard = True
         current_count = self.document().blockCount()
         if hasattr(self, '_last_block_count') and self._last_block_count != current_count:
-            # Block structure changed - invalidate highlighter cache
-            if hasattr(self.highlighter, '_block_cache'):
-                self.highlighter._block_cache.clear()
-                self.highlighter._cache_access_order.clear()
+            # Block structure changed - persistent cache doesn't need invalidation (content-based)
+            # But rehighlight to ensure UI consistency
             try:
                 if self._is_alive(self.highlighter):
                     self.highlighter.rehighlight()
