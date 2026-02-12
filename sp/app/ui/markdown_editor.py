@@ -7,6 +7,7 @@ import os
 import re
 import itertools
 import shlex
+import hashlib
 from pathlib import Path
 from typing import Optional, Callable
 import httpx
@@ -1465,6 +1466,13 @@ class MarkdownEditor(QTextEdit):
     _HR_EXTRA_KEY = QTextFormat.UserProperty + 3
     _LOAD_GUARD_DEPTH = 0  # class-level: block cursor/link work during any markdown load
     _block_count_guard: bool = False
+    
+    # Small LRU cache for converted display text (optimizes back/forth navigation)
+    # Cache key: (file_path, content_hash) → display_text
+    # Keeps ~5 recently viewed pages hot for fast re-loading
+    _display_cache: dict[tuple[str, str], str] = {}
+    _display_cache_order: list[tuple[str, str]] = []  # LRU tracking
+    _display_cache_max_size: int = 5
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1952,6 +1960,26 @@ class MarkdownEditor(QTextEdit):
         """Provide a handler that appends markdown text to a target page path."""
         self._move_text_callback = callback
 
+    @classmethod
+    def clear_display_cache(cls, path: Optional[str] = None) -> None:
+        """Clear page display cache - either specific path or entire cache.
+        
+        Call this when:
+        - A file is modified externally (invalidate that specific path)
+        - Vault settings change that affect rendering (clear all)
+        - Memory pressure (clear all)
+        """
+        if path:
+            # Remove all entries for this path (any content hash)
+            keys_to_remove = [key for key in cls._display_cache_order if key[0] == path]
+            for key in keys_to_remove:
+                cls._display_cache.pop(key, None)
+                cls._display_cache_order.remove(key)
+        else:
+            # Clear entire cache
+            cls._display_cache.clear()
+            cls._display_cache_order.clear()
+
     def _selected_display_text(self) -> str:
         cursor = self.textCursor()
         if not cursor.hasSelection():
@@ -2126,6 +2154,8 @@ class MarkdownEditor(QTextEdit):
 
     def set_markdown(self, content: str) -> None:
         self._push_paint_block()
+        # Show busy cursor during page load/rendering
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             # CRITICAL: Clear any pending heading state from previous file/edits
             # This prevents sentinel characters from the previous file from corrupting this load
@@ -2146,9 +2176,34 @@ class MarkdownEditor(QTextEdit):
             normalized = self._normalize_markdown_images(content)
             t1 = time.perf_counter()
             self._mark_page_load("normalize images")
-            display = self._to_display(normalized)
-            if display and not display.endswith("\n"):
-                display += "\n"
+            
+            # Check page cache for converted display text (speeds up back/forth navigation)
+            cache_key = None
+            cache_hit = False
+            if self._current_path:
+                # Hash content for cache key (fast, invalidates on any edit)
+                content_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()[:16]
+                cache_key = (self._current_path, content_hash)
+                if cache_key in type(self)._display_cache:
+                    display = type(self)._display_cache[cache_key]
+                    # Update LRU order
+                    type(self)._display_cache_order.remove(cache_key)
+                    type(self)._display_cache_order.append(cache_key)
+                    cache_hit = True
+            
+            if not cache_hit:
+                display = self._to_display(normalized)
+                if display and not display.endswith("\n"):
+                    display += "\n"
+                
+                # Store in cache for fast re-loading
+                if cache_key:
+                    type(self)._display_cache[cache_key] = display
+                    type(self)._display_cache_order.append(cache_key)
+                    # Evict oldest if cache is full
+                    if len(type(self)._display_cache_order) > type(self)._display_cache_max_size:
+                        oldest = type(self)._display_cache_order.pop(0)
+                        type(self)._display_cache.pop(oldest, None)
             t2 = time.perf_counter()
             self._mark_page_load("convert to display text")
             self.highlighter.enable_timing(True)
@@ -2252,7 +2307,10 @@ class MarkdownEditor(QTextEdit):
             if _DETAILED_LOGGING:
                 print(f"[MD_TIMING] set_markdown breakdown:")
                 print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
-                print(f"  to_display: {(t2-t1)*1000:.1f}ms")
+                if cache_hit:
+                    print(f"  to_display: CACHE HIT (saved ~{(t2-t1)*1000:.1f}ms)")
+                else:
+                    print(f"  to_display: {(t2-t1)*1000:.1f}ms")
                 print(f"  setPlainText: {(t3-t2)*1000:.1f}ms")
                 print(f"  render_images: {(t4-t3)*1000:.1f}ms (lazy - deferred)")
                 print(f"  schedule_outline+margin: {(t5-t4)*1000:.1f}ms")
@@ -2276,6 +2334,8 @@ class MarkdownEditor(QTextEdit):
             self._mark_page_load("editor focus ready")
             self.setFocus()
         finally:
+            # Restore normal cursor after page load
+            QGuiApplication.restoreOverrideCursor()
             if self._suppress_paint_depth:
                 self._pop_paint_block()
 
@@ -2284,6 +2344,9 @@ class MarkdownEditor(QTextEdit):
         # CRITICAL: Clear any pending heading state - document is being replaced
         self._pending_heading_block_num = None
         self._pending_heading_level = None
+        
+        # Show busy cursor during document replacement
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         
         # Clear highlighter cache when replacing content
         if hasattr(self.highlighter, '_block_cache'):
@@ -2327,6 +2390,8 @@ class MarkdownEditor(QTextEdit):
             self._render_images(display)
         finally:
             self._display_guard = False
+            # Restore normal cursor after replacement
+            QGuiApplication.restoreOverrideCursor()
         self._schedule_heading_outline()
         self._refresh_hr_selections()
         self._apply_scroll_past_end_margin()
