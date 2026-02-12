@@ -282,6 +282,15 @@ class SearchTab(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         
+        # Navigation filter banner (shown when nav filter is active)
+        self.filter_banner = QLabel()
+        self.filter_banner.setTextFormat(Qt.RichText)
+        self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.filter_banner.setOpenExternalLinks(False)
+        self.filter_banner.linkActivated.connect(self._on_remove_filter)
+        self.filter_banner.hide()
+        layout.addWidget(self.filter_banner)
+        
         # Search input row
         search_row = QHBoxLayout()
         search_row.setSpacing(4)
@@ -306,15 +315,6 @@ class SearchTab(QWidget):
         search_row.addWidget(self.help_button)
         
         layout.addLayout(search_row)
-
-        # Navigation filter banner (shown when nav filter is active)
-        self.filter_banner = QLabel()
-        self.filter_banner.setTextFormat(Qt.RichText)
-        self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.filter_banner.setOpenExternalLinks(False)
-        self.filter_banner.linkActivated.connect(self._on_remove_filter)
-        self.filter_banner.hide()
-        layout.addWidget(self.filter_banner)
         
         # Subtree filter row
         filter_row = QHBoxLayout()
@@ -386,10 +386,10 @@ class SearchTab(QWidget):
             self.filter_banner.hide()
             return
         label = self._filter_label or path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
+        self.filter_banner.setToolTip(label)
         self.filter_banner.setText(
-            f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
-            f"Filtered by {label} "
-            f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+            f"<div style='background:#c62828; color:#ffffff; padding:8px; font-weight:bold;'>"
+            f"Filtered: <a href='remove' style='color:#ffffff; text-decoration:underline;'>click to clear</a>"
             f"</div>"
         )
         self.filter_banner.show()

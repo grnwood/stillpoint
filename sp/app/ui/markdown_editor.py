@@ -6,6 +6,7 @@ import time
 import os
 import re
 import itertools
+import shlex
 from pathlib import Path
 from typing import Optional, Callable
 import httpx
@@ -2005,13 +2006,81 @@ class MarkdownEditor(QTextEdit):
         self._pending_heading_level = None
         self._schedule_heading_outline()
 
+    def _open_terminal_here(self) -> None:
+        """Open OS-specific terminal at the directory of the current page."""
+        import subprocess
+        import platform
+        
+        if not self._vault_root or not self._current_path:
+            return
+        
+        try:
+            # Get the directory of the current page
+            page_file_path = self._vault_root / self._current_path.lstrip("/")
+            if page_file_path.is_file():
+                terminal_dir = page_file_path.parent
+            else:
+                terminal_dir = page_file_path
+            
+            # Make sure the directory exists
+            if not terminal_dir.exists():
+                terminal_dir = self._vault_root
+            
+            system = platform.system()
+            
+            if system == "Windows":
+                # Open Windows Terminal or cmd.exe
+                subprocess.Popen(["cmd.exe", "/K", "cd", "/D", str(terminal_dir)], 
+                               creationflags=subprocess.CREATE_NEW_CONSOLE)
+            elif system == "Darwin":  # macOS
+                # Use AppleScript to open Terminal.app
+                script = f'tell application "Terminal" to do script "cd {shlex.quote(str(terminal_dir))}"'
+                subprocess.Popen(["osascript", "-e", script])
+            else:  # Linux and others
+                # Try common Linux terminals in order of preference
+                terminals = [
+                    ["gnome-terminal", "--working-directory", str(terminal_dir)],
+                    ["konsole", "--workdir", str(terminal_dir)],
+                    ["xfce4-terminal", "--working-directory", str(terminal_dir)],
+                    ["xterm", "-e", f"cd {shlex.quote(str(terminal_dir))} && $SHELL"],
+                ]
+                
+                for term_cmd in terminals:
+                    try:
+                        subprocess.Popen(term_cmd)
+                        break
+                    except FileNotFoundError:
+                        continue
+        except Exception as e:
+            logger.warning(f"Failed to open terminal: {e}")
+
     def _move_text_via_jump_dialog(self) -> None:
         cursor = self.textCursor()
         if not cursor.hasSelection():
             return
         anchor = self._last_context_menu_global_pos
+        
+        # Get filter state from parent (main_window) to honor filtered navigation
+        filter_prefix = None
+        filter_label = None
+        clear_filter_cb = None
+        try:
+            parent_window = self.window()
+            if hasattr(parent_window, '_nav_filter_path'):
+                filter_prefix = parent_window._nav_filter_path
+                if filter_prefix and filter_prefix != "/":
+                    from .path_utils import path_to_colon
+                    filter_label = path_to_colon(filter_prefix) or filter_prefix
+                    if hasattr(parent_window, '_clear_nav_filter'):
+                        clear_filter_cb = parent_window._clear_nav_filter
+        except Exception:
+            pass
+        
         dialog = JumpToPageDialog(
             self,
+            filter_prefix=filter_prefix,
+            filter_label=filter_label,
+            clear_filter_cb=clear_filter_cb,
             compact=True,
             geometry_key=None,
             anchor_global_pos=anchor,
@@ -2434,6 +2503,14 @@ class MarkdownEditor(QTextEdit):
                 # Remove the trigger and update cursor
                 cursor.removeSelectedText()
                 self.setTextCursor(cursor)
+                # Capture cursor position AFTER removing trigger
+                saved_cursor_pos = cursor.position()
+                saved_anchor_pos = cursor.anchor()
+                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+                    print(
+                        "[DEBUG inline //] captured cursor after trigger removal: "
+                        f"pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.toPlainText())}"
+                    )
                 # Get cursor position for dialog placement (after removal)
                 cursor_rect = self.cursorRect()
                 anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
@@ -2442,42 +2519,95 @@ class MarkdownEditor(QTextEdit):
                 # Always clear guard flag
                 self._processing_inline_trigger = False
             # Show quick link dialog near cursor (with display guard released)
-            self._trigger_inline_link_insert(anchor_pos)
+            self._trigger_inline_link_insert(
+                anchor_pos,
+                saved_cursor_pos=saved_cursor_pos,
+                saved_anchor_pos=saved_anchor_pos,
+            )
             return
     
-    def _trigger_inline_link_insert(self, anchor_pos: QPoint) -> None:
-        """Show compact jump dialog near cursor and insert link in [:Page|label] format."""
-        # Create and show jump dialog near cursor
+    def _trigger_inline_link_insert(
+        self,
+        anchor_pos: QPoint,
+        *,
+        saved_cursor_pos: int | None = None,
+        saved_anchor_pos: int | None = None,
+    ) -> None:
+        """Show compact inline link picker and insert at the trigger position."""
         try:
-            from .jump_dialog import JumpToPageDialog
-            dialog = JumpToPageDialog(
-                self, 
-                compact=True, 
-                geometry_key=None,
-                anchor_global_pos=anchor_pos,
-                launch_mode="insert_link",
-                current_page_path=self._current_path
+            from .inline_link_picker import InlineLinkPickerOverlay
+
+            def _restore_cursor() -> QTextCursor | None:
+                if saved_cursor_pos is None or saved_anchor_pos is None:
+                    return None
+                doc_len = len(self.toPlainText())
+                anchor = max(0, min(saved_anchor_pos, doc_len))
+                pos = max(0, min(saved_cursor_pos, doc_len))
+                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+                    print(
+                        "[DEBUG inline //] restoring cursor: "
+                        f"saved_pos={saved_cursor_pos}, saved_anchor={saved_anchor_pos}, "
+                        f"clamped_pos={pos}, clamped_anchor={anchor}, doc_len={doc_len}"
+                    )
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(anchor)
+                cursor.setPosition(
+                    pos,
+                    QTextCursor.KeepAnchor if anchor != pos else QTextCursor.MoveAnchor,
+                )
+                self.setTextCursor(cursor)
+                return cursor
+
+            # Check if vi mode is enabled
+            vi_mode_enabled = getattr(self, '_vi_mode_enabled', False)
+            
+            # Get filter state from parent (main_window)
+            filter_prefix = None
+            filter_label = None
+            clear_filter_cb = None
+            try:
+                parent_window = self.window()
+                if hasattr(parent_window, '_nav_filter_path'):
+                    filter_prefix = parent_window._nav_filter_path
+                    if filter_prefix and filter_prefix != "/":
+                        from .path_utils import path_to_colon
+                        filter_label = path_to_colon(filter_prefix) or filter_prefix
+                        if hasattr(parent_window, '_clear_nav_filter'):
+                            clear_filter_cb = parent_window._clear_nav_filter
+            except Exception:
+                pass
+            
+            overlay = InlineLinkPickerOverlay(
+                parent=self,
+                anchor=anchor_pos,
+                vi_mode_enabled=vi_mode_enabled,
+                filter_prefix=filter_prefix,
+                filter_label=filter_label,
+                clear_filter_cb=clear_filter_cb,
+                current_page_path=self._current_path,
             )
-            if dialog.exec() == QDialog.Accepted:
-                selected = dialog.selected_path()
-                if selected:
-                    is_new_page = True
-                    try:
-                        if config.page_exists(selected):
-                            is_new_page = False
-                    except Exception:
-                        pass
-                    if is_new_page and self._vault_root:
-                        try:
-                            if (self._vault_root / selected.lstrip("/")).exists():
-                                is_new_page = False
-                        except Exception:
-                            pass
-                    # Convert to colon path
-                    colon_path = path_to_colon(selected)
-                    # Match Ctrl+L behavior: use target as label unless user provides one.
-                    self.insert_link(colon_path)
-                    if is_new_page:
+            
+            # Use focus suppression to prevent editor autosave
+            self.push_focus_lost_suppression()
+            try:
+                overlay.show()
+                overlay.raise_()
+                overlay.activateWindow()
+                result = overlay.exec()
+            finally:
+                self.pop_focus_lost_suppression()
+                _restore_cursor()
+                QTimer.singleShot(0, self.setFocus)
+
+            if result == QDialog.Accepted:
+                colon_path = overlay.selected_path()
+                if colon_path:
+                    restore_cursor = _restore_cursor()
+                    if restore_cursor:
+                        self.setTextCursor(restore_cursor)
+                    self.insert_link(colon_path, None, surround_with_spaces=True)
+                    # Only activate/open the page if it's a new page
+                    if overlay.is_new_page():
                         link_target = ensure_root_colon_link(colon_path)
                         try:
                             self._vi_restore_after_link_activation = bool(self._vi_insert_mode)
@@ -2485,7 +2615,7 @@ class MarkdownEditor(QTextEdit):
                             self._vi_restore_after_link_activation = False
                         QTimer.singleShot(0, lambda target=link_target: self.linkActivated.emit(target))
         except Exception as e:
-            logger.warning(f"Failed to show inline link dialog: {e}")
+            logger.warning(f"Failed to show inline link picker: {e}")
 
     def _refresh_camel_links(self) -> None:
         """Convert any +CamelCase links in the document and re-render display."""
@@ -4344,6 +4474,8 @@ class MarkdownEditor(QTextEdit):
                 backlinks_action.triggered.connect(
                     lambda: self.backlinksRequested.emit(self._current_path or "")
                 )
+                terminal_action = nav_sub.addAction("Open Terminal Here")
+                terminal_action.triggered.connect(self._open_terminal_here)
 
                 move_action = menu.addAction("Move Text…")
                 move_action.setEnabled(self.textCursor().hasSelection())
@@ -4420,6 +4552,8 @@ class MarkdownEditor(QTextEdit):
             )
             backlinks_action = nav_sub.addAction("Link Graph / Navigator")
             backlinks_action.triggered.connect(lambda: self.backlinksRequested.emit(self._current_path or ""))
+            terminal_action = nav_sub.addAction("Open Terminal Here")
+            terminal_action.triggered.connect(self._open_terminal_here)
 
             move_action = menu.addAction("Move Text…")
             move_action.setEnabled(self.textCursor().hasSelection())

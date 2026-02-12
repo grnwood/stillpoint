@@ -80,11 +80,17 @@ class InsertLinkDialog(QDialog):
         editing: bool = False,
         initial_link_target: str | None = None,
         initial_link_label: str | None = None,
+        as_popup: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Link" if editing else "Insert Link")
-        self.setModal(True)
-        self.setWindowModality(Qt.ApplicationModal)
+        self._as_popup = as_popup
+        if as_popup:
+            self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.setModal(False)
+        else:
+            self.setModal(True)
+            self.setWindowModality(Qt.ApplicationModal)
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
         self._clear_filter_cb = clear_filter_cb
@@ -96,6 +102,14 @@ class InsertLinkDialog(QDialog):
         self.geometry_save_timer.setInterval(500)  # 500ms debounce
         self.geometry_save_timer.setSingleShot(True)
         self.geometry_save_timer.timeout.connect(self._save_geometry)
+        
+        # Focus timer for popup mode
+        if as_popup:
+            self._focus_timer = QTimer(self)
+            self._focus_timer.setInterval(150)
+            self._focus_timer.timeout.connect(self._ensure_search_focus)
+        else:
+            self._focus_timer = None
         
         # Make dialog wider than tall (~80 chars wide)
         self.resize(640, 360)
@@ -196,11 +210,37 @@ class InsertLinkDialog(QDialog):
         # Restore saved geometry after layout is set up
         self._restore_geometry()
         
-        self.search.setFocus()
         if selected_text:
             self._refresh()
         else:
             self.list_widget.clear()
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        # Ensure the search field takes focus when the dialog appears
+        if self._as_popup:
+            self._ensure_search_focus()
+            if self._focus_timer:
+                self._focus_timer.start()
+        else:
+            QTimer.singleShot(0, self.search.setFocus)
+
+    def hideEvent(self, event):  # type: ignore[override]
+        if self._focus_timer:
+            self._focus_timer.stop()
+        super().hideEvent(event)
+
+    def _ensure_search_focus(self) -> None:
+        if not self.isVisible():
+            return
+        if self.search.hasFocus():
+            return
+        try:
+            self.raise_()
+            self.activateWindow()
+            self.search.setFocus()
+        except Exception:
+            pass
 
     def _prepare_selected_text(self, text: str | None) -> str:
         """Normalize selected text for seeding the link name."""
@@ -306,26 +346,58 @@ class InsertLinkDialog(QDialog):
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # If list has focus, allow type-ahead into the search field
+        previous_focus = self.focusWidget()
+        if previous_focus is self.list_widget:
+            key = event.key()
+            text = event.text()
+            if text and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+                self.search.setFocus()
+                self.search.insert(text)
+                event.accept()
+                return
+            if key in (Qt.Key_Backspace, Qt.Key_Delete):
+                self.search.setFocus()
+                QApplication.sendEvent(self.search, event)
+                event.accept()
+                return
         # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
         if event.key() in (Qt.Key_Up, Qt.Key_Down):
             # Only pass arrow keys to list if search field has focus
             # Don't interfere with arrow keys in link_name field
-            previous_focus = self.focusWidget()
             if previous_focus is self.search or previous_focus is self.list_widget:
                 QApplication.sendEvent(self.list_widget, event)
                 if previous_focus is not self.list_widget:
                     previous_focus.setFocus()
                 event.accept()
                 return
+        # Handle Ctrl+Shift+J/K for vi insert mode
+        mods = event.modifiers() & ~Qt.KeypadModifier
+        if event.key() == Qt.Key_J and (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+            current_row = self.list_widget.currentRow()
+            if current_row < self.list_widget.count() - 1:
+                self.list_widget.setCurrentRow(current_row + 1)
+            elif self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(0)  # Wrap to top
+            event.accept()
+            return
+        elif event.key() == Qt.Key_K and (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+            current_row = self.list_widget.currentRow()
+            if current_row > 0:
+                self.list_widget.setCurrentRow(current_row - 1)
+            elif self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(self.list_widget.count() - 1)  # Wrap to bottom
+            event.accept()
+            return
         # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
-        elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
+        elif event.key() == Qt.Key_J and (mods & Qt.ShiftModifier) and not (mods & Qt.ControlModifier):
             # Directly manipulate list selection instead of sending synthetic events
             current_row = self.list_widget.currentRow()
             if current_row < self.list_widget.count() - 1:
                 self.list_widget.setCurrentRow(current_row + 1)
             event.accept()
             return
-        elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
+        elif event.key() == Qt.Key_K and (mods & Qt.ShiftModifier) and not (mods & Qt.ControlModifier):
             # Directly manipulate list selection instead of sending synthetic events
             current_row = self.list_widget.currentRow()
             if current_row > 0:

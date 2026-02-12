@@ -684,10 +684,10 @@ class TagsTab(QWidget):
             self.filter_banner.hide()
             return
         label = self._filter_label or path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
+        self.filter_banner.setToolTip(label)
         self.filter_banner.setText(
-            f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
-            f"Filtered by {label} "
-            f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+            f"<div style='background:#c62828; color:#ffffff; padding:8px; font-weight:bold;'>"
+            f"Filtered: <a href='remove' style='color:#ffffff; text-decoration:underline;'>click to clear</a>"
             f"</div>"
         )
         self.filter_banner.show()

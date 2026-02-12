@@ -455,8 +455,18 @@ class MermaidEditorWindow(QMainWindow):
     def _get_monospace_font(self):
         from PySide6.QtGui import QFont
         font = QFont()
-        font.setFamily("Courier New" if os.name == "nt" else "Courier")
-        font.setPointSize(11)
+        
+        # Load font preferences
+        font_family = config.load_mermaid_editor_font()
+        font_size = config.load_mermaid_editor_font_size()
+        
+        if font_family:
+            font.setFamily(font_family)
+        else:
+            # Default to platform-specific monospace
+            font.setFamily("Courier New" if os.name == "nt" else "Courier")
+        
+        font.setPointSize(font_size)
         font.setFixedPitch(True)
         return font
 

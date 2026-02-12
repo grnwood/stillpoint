@@ -1822,6 +1822,56 @@ def save_puml_auto_render(enabled: bool) -> None:
     conn.commit()
 
 
+def load_puml_editor_font() -> Optional[str]:
+    """Load PlantUML editor font family (None for default monospace)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_editor_font",))
+    row = cur.fetchone()
+    if row and row[0]:
+        return row[0]
+    return None
+
+
+def save_puml_editor_font(font: Optional[str]) -> None:
+    """Save PlantUML editor font family."""
+    conn = _get_conn()
+    if not conn:
+        return
+    value = font.strip() if font else None
+    if value:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_editor_font", value))
+    else:
+        conn.execute("DELETE FROM kv WHERE key = ?", ("puml_editor_font",))
+    conn.commit()
+
+
+def load_puml_editor_font_size() -> int:
+    """Load PlantUML editor font size (default: 11)."""
+    conn = _get_conn()
+    if not conn:
+        return 11
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("puml_editor_font_size",))
+    row = cur.fetchone()
+    if row:
+        try:
+            return max(6, int(row[0]))
+        except (ValueError, TypeError):
+            return 11
+    return 11
+
+
+def save_puml_editor_font_size(size: int) -> None:
+    """Save PlantUML editor font size."""
+    conn = _get_conn()
+    if not conn:
+        return
+    value = max(6, int(size))
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("puml_editor_font_size", str(value)))
+    conn.commit()
+
+
 # --- Mermaid Editor window prefs -------------------------------------------
 
 
@@ -1949,6 +1999,56 @@ def save_mermaid_auto_render(enabled: bool) -> None:
     if not conn:
         return
     conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_auto_render", "1" if enabled else "0"))
+    conn.commit()
+
+
+def load_mermaid_editor_font() -> Optional[str]:
+    """Load Mermaid editor font family (None for default monospace)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_editor_font",))
+    row = cur.fetchone()
+    if row and row[0]:
+        return row[0]
+    return None
+
+
+def save_mermaid_editor_font(font: Optional[str]) -> None:
+    """Save Mermaid editor font family."""
+    conn = _get_conn()
+    if not conn:
+        return
+    value = font.strip() if font else None
+    if value:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_editor_font", value))
+    else:
+        conn.execute("DELETE FROM kv WHERE key = ?", ("mermaid_editor_font",))
+    conn.commit()
+
+
+def load_mermaid_editor_font_size() -> int:
+    """Load Mermaid editor font size (default: 11)."""
+    conn = _get_conn()
+    if not conn:
+        return 11
+    cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_editor_font_size",))
+    row = cur.fetchone()
+    if row:
+        try:
+            return max(6, int(row[0]))
+        except (ValueError, TypeError):
+            return 11
+    return 11
+
+
+def save_mermaid_editor_font_size(size: int) -> None:
+    """Save Mermaid editor font size."""
+    conn = _get_conn()
+    if not conn:
+        return
+    value = max(6, int(size))
+    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", ("mermaid_editor_font_size", str(value)))
     conn.commit()
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QEvent
 from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
@@ -154,6 +154,11 @@ class JumpToPageDialog(QDialog):
         self.list_widget = QListWidget()
         self.list_widget.setItemDelegate(HTMLDelegate(self.list_widget))
         self.list_widget.itemDoubleClicked.connect(self.accept)
+        self.list_widget.installEventFilter(self)
+        try:
+            self.list_widget.viewport().installEventFilter(self)
+        except Exception:
+            pass
         layout.addWidget(self.list_widget, 1)
 
         buttons = QDialogButtonBox()
@@ -173,6 +178,11 @@ class JumpToPageDialog(QDialog):
         
         self.search.setFocus()
         self._refresh()
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        # Ensure the search field takes focus when the dialog appears
+        QTimer.singleShot(0, self.search.setFocus)
 
     def selected_path(self) -> str | None:
         item = self.list_widget.currentItem()
@@ -198,9 +208,23 @@ class JumpToPageDialog(QDialog):
         return True
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        # If list has focus, allow type-ahead into the search field
+        previous_focus = self.focusWidget()
+        if previous_focus is self.list_widget:
+            key = event.key()
+            text = event.text()
+            if text and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+                self.search.setFocus()
+                self.search.insert(text)
+                event.accept()
+                return
+            if key in (Qt.Key_Backspace, Qt.Key_Delete):
+                self.search.setFocus()
+                QApplication.sendEvent(self.search, event)
+                event.accept()
+                return
         # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
         if event.key() in (Qt.Key_Up, Qt.Key_Down):
-            previous_focus = self.focusWidget()
             QApplication.sendEvent(self.list_widget, event)
             if previous_focus is not self.list_widget:
                 previous_focus.setFocus()
@@ -225,6 +249,20 @@ class JumpToPageDialog(QDialog):
             if self._activate_current():
                 return
         super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj in (self.list_widget, self.list_widget.viewport()) and event.type() == QEvent.KeyPress:
+            key = event.key()
+            text = event.text()
+            if text and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+                self.search.setFocus()
+                self.search.insert(text)
+                return True
+            if key in (Qt.Key_Backspace, Qt.Key_Delete):
+                self.search.setFocus()
+                QApplication.sendEvent(self.search, event)
+                return True
+        return super().eventFilter(obj, event)
 
     def _activate_current(self) -> bool:
         if self.list_widget.currentItem():

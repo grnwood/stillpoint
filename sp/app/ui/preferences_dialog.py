@@ -515,6 +515,28 @@ class PreferencesDialog(QDialog):
         debounce_row.addWidget(self.plantuml_debounce_spin, 1)
         puml_layout.addLayout(debounce_row)
 
+        puml_font_row = QHBoxLayout()
+        puml_font_row.addWidget(QLabel("Editor font:"))
+        self.plantuml_font_combo = self._build_font_combo("Default (Courier)")
+        try:
+            puml_font = config.load_puml_editor_font()
+        except Exception:
+            puml_font = None
+        self._select_font(self.plantuml_font_combo, puml_font)
+        puml_font_row.addWidget(self.plantuml_font_combo, 1)
+        puml_layout.addLayout(puml_font_row)
+
+        puml_font_size_row = QHBoxLayout()
+        puml_font_size_row.addWidget(QLabel("Editor font size:"))
+        self.plantuml_font_size_spin = QSpinBox()
+        self.plantuml_font_size_spin.setRange(6, 72)
+        try:
+            self.plantuml_font_size_spin.setValue(config.load_puml_editor_font_size())
+        except Exception:
+            self.plantuml_font_size_spin.setValue(11)
+        puml_font_size_row.addWidget(self.plantuml_font_size_spin, 1)
+        puml_layout.addLayout(puml_font_size_row)
+
         test_row = QHBoxLayout()
         self.plantuml_test_btn = QPushButton("Test PlantUML Setup")
         self.plantuml_test_btn.clicked.connect(self._run_plantuml_test)
@@ -550,6 +572,29 @@ class PreferencesDialog(QDialog):
         mermaid_test_row.addWidget(self.mermaid_test_btn)
         mermaid_test_row.addWidget(self.mermaid_test_status, 1)
         mermaid_layout.addLayout(mermaid_test_row)
+
+        mermaid_font_row = QHBoxLayout()
+        mermaid_font_row.addWidget(QLabel("Editor font:"))
+        self.mermaid_font_combo = self._build_font_combo("Default (Courier)")
+        try:
+            mermaid_font = config.load_mermaid_editor_font()
+        except Exception:
+            mermaid_font = None
+        self._select_font(self.mermaid_font_combo, mermaid_font)
+        mermaid_font_row.addWidget(self.mermaid_font_combo, 1)
+        mermaid_layout.addLayout(mermaid_font_row)
+
+        mermaid_font_size_row = QHBoxLayout()
+        mermaid_font_size_row.addWidget(QLabel("Editor font size:"))
+        self.mermaid_font_size_spin = QSpinBox()
+        self.mermaid_font_size_spin.setRange(6, 72)
+        try:
+            self.mermaid_font_size_spin.setValue(config.load_mermaid_editor_font_size())
+        except Exception:
+            self.mermaid_font_size_spin.setValue(11)
+        mermaid_font_size_row.addWidget(self.mermaid_font_size_spin, 1)
+        mermaid_layout.addLayout(mermaid_font_size_row)
+        
         mermaid_layout.addStretch(1)
     def _copy_mermaid_label(self):
         # Copy Mermaid label text to clipboard and show status bar message
@@ -961,10 +1006,18 @@ class PreferencesDialog(QDialog):
             config.save_plantuml_jar_path(self.plantuml_jar_edit.text())
             config.save_plantuml_java_path(self.plantuml_java_edit.text())
             config.save_plantuml_render_debounce_ms(self.plantuml_debounce_spin.value())
+            # Save PlantUML editor font preferences
+            puml_font = self.plantuml_font_combo.currentData()
+            config.save_puml_editor_font(puml_font if puml_font else None)
+            config.save_puml_editor_font_size(self.plantuml_font_size_spin.value())
         except Exception:
             pass
         try:
             config.save_mermaid_enabled(self.mermaid_enable_checkbox.isChecked())
+            # Save Mermaid editor font preferences
+            mermaid_font = self.mermaid_font_combo.currentData()
+            config.save_mermaid_editor_font(mermaid_font if mermaid_font else None)
+            config.save_mermaid_editor_font_size(self.mermaid_font_size_spin.value())
         except Exception:
             pass
         try:

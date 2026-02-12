@@ -28,7 +28,7 @@ class QuickCaptureInput(QTextEdit):
 
     def __init__(self, parent: Optional[QDialog] = None) -> None:
         super().__init__(parent)
-        self.setPlaceholderText("Type a thought or paste/drag images...")
+        self.setPlaceholderText("Type a thought or paste images...")
         self.setAcceptRichText(False)
         self.setTabChangesFocus(False)
         self.setAcceptDrops(True)

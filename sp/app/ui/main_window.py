@@ -111,9 +111,9 @@ from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 from sp.app import zim_import
+from sp import VERSION as APP_VERSION
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
-APP_VERSION = "1.0.0"
 
 
 def _load_one_shot_prompt() -> str:
@@ -1347,20 +1347,15 @@ class MainWindow(QMainWindow):
         
         # Search button to switch to search tab
         self.search_tree_button = QToolButton()
-        self.search_tree_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
-        self.search_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        self.search_tree_button.setAutoRaise(True)
-        self.search_tree_button.setToolTip(
-            f"<div style='color:{tooltip_fg}; background:{tooltip_bg}; padding:2px 4px;'>Search vault (Ctrl+Shift+F)</div>"
-        )
-        self.search_tree_button.clicked.connect(self._open_search_tab)
-        tree_header_layout.addWidget(self.search_tree_button)
-
         tree_header_layout.addStretch()
 
         # Manual refresh button to reload tree data from the API
         self.refresh_tree_button = QToolButton()
-        self.refresh_tree_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        refresh_icon_path = self._find_asset("reload.svg")
+        refresh_icon = self._load_icon(refresh_icon_path, icon_color, size=16)
+        if refresh_icon is None:
+            refresh_icon = self.style().standardIcon(QStyle.SP_BrowserReload)
+        self.refresh_tree_button.setIcon(refresh_icon)
         self.refresh_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.refresh_tree_button.setAutoRaise(True)
         self.refresh_tree_button.setToolTip(
@@ -8543,6 +8538,8 @@ class MainWindow(QMainWindow):
         if not config.load_enable_ai_chats():
             self._alert("Enable AI Chat in settings to use this window.")
             return
+        
+        # First check if there's a detached AI chat window
         if self._detached_ai_chat_window and self._detached_ai_chat_window.isVisible():
             try:
                 self._detached_ai_chat_window.raise_()
@@ -8552,6 +8549,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
+        
+        # Check if AI Chat tab exists in right panel
+        if self.right_panel.ai_chat_panel:
+            # Ensure right panel is visible
+            self._ensure_right_panel_visible()
+            
+            # Focus the AI Chat tab
+            self.right_panel.focus_ai_chat(self.current_path)
+            return
+        
+        # No tabbed or detached window - create a new detached window
         panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size(), api_client=self.http)
         panel.set_font_family(config.load_ai_chat_font_family())
         local_vault_root = self._local_vault_root()
@@ -9901,6 +9909,9 @@ class MainWindow(QMainWindow):
             if not self._feature_link_navigator_enabled:
                 self.editor.setFocus()
                 return
+            # Ensure right panel is visible
+            self._ensure_right_panel_visible()
+            
             self.right_panel.focus_link_tab(self.current_path)
             try:
                 if self.right_panel.link_panel:
@@ -10001,11 +10012,9 @@ class MainWindow(QMainWindow):
         """Switch to Calendar tab and focus calendar widget."""
         if not self._feature_calendar_enabled:
             return
-        sizes = self.editor_split.sizes()
-        if len(sizes) >= 2 and sizes[1] == 0:
-            width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes)
-            self.editor_split.setSizes([max(1, total - width), width])
+        # Ensure right panel is visible
+        self._ensure_right_panel_visible()
+        
         try:
             for i in range(self.right_panel.tabs.count()):
                 if self.right_panel.tabs.widget(i) == self.right_panel.calendar_panel:
@@ -10050,11 +10059,9 @@ class MainWindow(QMainWindow):
 
     def _focus_attachments_tab(self) -> None:
         """Switch to Attachments tab and focus."""
-        sizes = self.editor_split.sizes()
-        if len(sizes) >= 2 and sizes[1] == 0:
-            width = getattr(self, "_saved_right_width", 360)
-            total = sum(sizes)
-            self.editor_split.setSizes([max(1, total - width), width])
+        # Ensure right panel is visible
+        self._ensure_right_panel_visible()
+        
         try:
             for i in range(self.right_panel.tabs.count()):
                 if self.right_panel.tabs.widget(i) == self.right_panel.attachments_panel:
@@ -13391,14 +13398,14 @@ class MainWindow(QMainWindow):
         box_text = (
             "<div style=\"text-align: center;\">"
             "<div style=\"font-size: 18px; font-weight: 600;\">StillPoint</div>"
-            "<div style=\"margin-top: 6px;\">StillPoint is a local-first Markdown knowledge system for connected notes, tasks, and focused thinking — built to last.</div>"
+            "<div style=\"margin-top: 6px;\">StillPoint is a local-first Markdown knowledge system for connected notes, tasks, and focused thinking — with optional AI & Agentic infusion — built to last.</div>"
             "<div style=\"margin-top: 10px;\"><b>Author:</b> Joseph Greenwood "
             "(<a href=\"mailto:info@stillpoint.info\">info@stillpoint.info</a>)</div>"
             f"<div><b>Version:</b> {APP_VERSION}</div>"
             "<div style=\"margin-top: 8px;\">"
             "<a href=\"https://github.com/grnwood/stillpoint/issues\">Report Issues</a>"
             " · "
-            "<a href=\"https://grnwood.github.io/stillpoint\">Docs</a>"
+            "<a href=\"https://stillpoint.info\">Docs</a>"
             "</div>"
             "<div>Open-source software, permissively licensed under Apache 2.0.</div>"
             "</div>"
