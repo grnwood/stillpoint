@@ -4501,6 +4501,7 @@ class MarkdownEditor(QTextEdit):
                 menu.addSeparator()
             # Then copy/paste actions
             self._add_copy_actions_header(menu)
+            self._add_cut_action(menu)
             self._add_paste_action_header(menu)
             # Then image-specific actions
             self._add_ai_actions_entry(menu, as_submenu=True)
@@ -4537,6 +4538,7 @@ class MarkdownEditor(QTextEdit):
                 menu.addSeparator()
             # Then copy/paste actions
             self._add_copy_actions_header(menu)
+            self._add_cut_action(menu)
             self._add_paste_action_header(menu)
             # Then link-specific actions
             link_for_copy = md_link[3] if md_link else plain_link
@@ -4642,6 +4644,7 @@ class MarkdownEditor(QTextEdit):
                 menu.addSeparator()
             # Then copy/paste actions
             self._add_copy_actions_header(menu)
+            self._add_cut_action(menu)
             self._add_paste_action_header(menu)
             if heading_action:
                 menu.addAction(heading_action)
@@ -4721,6 +4724,18 @@ class MarkdownEditor(QTextEdit):
         copy_action, md_action = self._build_copy_actions(menu)
         menu.addAction(copy_action)
         menu.addAction(md_action)
+        menu.addSeparator()
+
+    def _add_cut_action(self, menu: QMenu) -> None:
+        if not menu:
+            return
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        cut_action = QAction("Cut", menu)
+        cut_action.setShortcut(QKeySequence.Cut)
+        cut_action.triggered.connect(self.cut)
+        menu.addAction(cut_action)
         menu.addSeparator()
 
     def _add_paste_action_header(self, menu: QMenu) -> None:
