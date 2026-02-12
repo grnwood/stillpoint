@@ -682,6 +682,8 @@ HEADING_SENTINEL_BASE = 0xE000
 HEADING_MARK_PATTERN = re.compile(r"^(\s*)(#{1,5})(\s+)(.+)$", re.MULTILINE)
 HEADING_SENTINEL_CHARS = "".join(chr(HEADING_SENTINEL_BASE + lvl) for lvl in range(1, HEADING_MAX_LEVEL + 1))
 HEADING_DISPLAY_PATTERN = re.compile(rf"^(\s*)([{HEADING_SENTINEL_CHARS}])(.*)$", re.MULTILINE)
+# Pattern to catch stray sentinel characters anywhere (not just at line start)
+STRAY_SENTINEL_PATTERN = re.compile(rf"[{HEADING_SENTINEL_CHARS}]")
 IMAGE_PATTERN = re.compile(
     r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)\s]+)\)(?:\{width=(?P<width>\d+)\})?", re.MULTILINE
 )
@@ -1509,6 +1511,9 @@ class MarkdownEditor(QTextEdit):
         self._hr_block_margin_px: int = 6
         self._enforce_display_guard: bool = False
         self._last_heading_block_num: Optional[int] = None
+        # CRITICAL STATE: These track headings being edited (sentinel temporarily removed)
+        # MUST be cleared on file load, document clear, or any operation that changes document identity
+        # If these are not cleared, stray sentinel characters can corrupt the editor display
         self._pending_heading_block_num: Optional[int] = None
         self._pending_heading_level: Optional[int] = None
         self._search_engine = SearchEngine(self)
@@ -2119,6 +2124,11 @@ class MarkdownEditor(QTextEdit):
     def set_markdown(self, content: str) -> None:
         self._push_paint_block()
         try:
+            # CRITICAL: Clear any pending heading state from previous file/edits
+            # This prevents sentinel characters from the previous file from corrupting this load
+            self._pending_heading_block_num = None
+            self._pending_heading_level = None
+            
             import time
             from os import getenv
             t0 = time.perf_counter()
@@ -2128,6 +2138,8 @@ class MarkdownEditor(QTextEdit):
                 trailing_count = len(content) - len(stripped)
                 if trailing_count > 10:
                     content = stripped + '\\n' * 10
+            # Strip any stray sentinel characters that may have been saved to disk
+            content = self._sanitize_input_markdown(content)
             normalized = self._normalize_markdown_images(content)
             t1 = time.perf_counter()
             self._mark_page_load("normalize images")
@@ -2266,6 +2278,10 @@ class MarkdownEditor(QTextEdit):
 
     def replace_markdown_in_place(self, content: str) -> None:
         """Replace the full document from markdown without clearing undo history."""
+        # CRITICAL: Clear any pending heading state - document is being replaced
+        self._pending_heading_block_num = None
+        self._pending_heading_level = None
+        
         # Clear highlighter cache when replacing content
         if hasattr(self.highlighter, '_block_cache'):
             self.highlighter._block_cache.clear()
@@ -2275,6 +2291,8 @@ class MarkdownEditor(QTextEdit):
             trailing_count = len(content) - len(stripped)
             if trailing_count > 10:
                 content = stripped + "\n" * 10
+        # Strip any stray sentinel characters from input
+        content = self._sanitize_input_markdown(content)
         normalized = self._normalize_markdown_images(content)
         display = self._to_display(normalized)
         if display and not display.endswith("\n"):
@@ -2825,6 +2843,9 @@ class MarkdownEditor(QTextEdit):
     def insert_link(self, colon_path: str, link_name: str | None = None, *, surround_with_spaces: bool = False) -> None:
         """Insert a link at the current cursor position in display format.
         
+        CRITICAL: If the cursor is already inside an existing link, this will REPLACE
+        that link instead of nesting links (which would corrupt the display).
+        
         Inserts directly as sentinel+target+sentinel+label+sentinel (display format).
         When surround_with_spaces is True, adds missing spaces around the link to avoid
         embedding sentinels in the middle of a word.
@@ -2856,6 +2877,21 @@ class MarkdownEditor(QTextEdit):
         display_link = f"{LINK_SENTINEL}{target}{LINK_SENTINEL}{label}{LINK_SENTINEL}"
         
         cursor = self.textCursor()
+        
+        # CRITICAL: Check if cursor is inside an existing link - if so, REPLACE the entire link
+        # to avoid nesting links which would corrupt the display format
+        md_link = self._markdown_link_at_cursor(cursor)
+        if md_link:
+            # Cursor is inside an existing link - replace it entirely
+            start, end, _, _ = md_link
+            block = cursor.block()
+            cursor = QTextCursor(block)
+            cursor.setPosition(block.position() + start)
+            cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+            # Remove the old link and continue with insertion
+            cursor.removeSelectedText()
+            self.setTextCursor(cursor)
+            cursor = self.textCursor()  # Get updated cursor position
         prefix = ""
         suffix = ""
         if surround_with_spaces and not cursor.hasSelection():
@@ -2965,6 +3001,8 @@ class MarkdownEditor(QTextEdit):
         if source.hasHtml() and source.hasText():
             plain = source.text()
             if plain:
+                # SAFETY: Strip sentinel characters before inserting
+                plain = self._sanitize_input_markdown(plain)
                 self.textCursor().insertText(plain)
                 return
 
@@ -2975,12 +3013,24 @@ class MarkdownEditor(QTextEdit):
             if not plain_from_html and source.hasText():
                 plain_from_html = source.text()
             if plain_from_html:
+                # SAFETY: Strip sentinel characters before inserting
+                plain_from_html = self._sanitize_input_markdown(plain_from_html)
                 self.textCursor().insertText(plain_from_html)
                 if "[" in plain_from_html and "|" in plain_from_html:
                     self._refresh_display()
                 return
 
-        # 4) Default paste without auto-link munging
+        # 4) Default paste - also sanitize to prevent sentinel character injection
+        # Extract and sanitize text before allowing default paste behavior
+        if source.hasText():
+            text = source.text()
+            if STRAY_SENTINEL_PATTERN.search(text):
+                # If sentinels detected, create clean MimeData and paste that
+                clean_text = self._sanitize_input_markdown(text)
+                clean_mime = QMimeData()
+                clean_mime.setText(clean_text)
+                super().insertFromMimeData(clean_mime)
+                return
         super().insertFromMimeData(source)
 
     def _prepare_image_paste_target(self) -> None:
@@ -6445,6 +6495,8 @@ class MarkdownEditor(QTextEdit):
     def _vi_insert_text(self, text: str) -> None:
         if not text:
             return
+        # SAFETY: Sanitize text to prevent sentinel character injection via vi-mode paste
+        text = self._sanitize_input_markdown(text)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         if cursor.hasSelection():
@@ -6750,8 +6802,20 @@ class MarkdownEditor(QTextEdit):
         )
         # Restore bullets: • → *
         restored = BULLET_DISPLAY_PATTERN.sub(r"\1* ", restored)
+        # SAFETY: Remove any remaining stray sentinel characters that weren't at line start
+        # This prevents corrupted sentinels from being saved to disk
+        restored = STRAY_SENTINEL_PATTERN.sub("", restored)
         return restored
 
+    def _sanitize_input_markdown(self, text: str) -> str:
+        """Remove any sentinel characters from input markdown (e.g., from corrupted files or copy/paste).
+        
+        Sentinel characters should never exist in stored markdown - they're only used
+        internally for display. This prevents them from breaking the editor if they
+        somehow end up in the input.
+        """
+        return STRAY_SENTINEL_PATTERN.sub("", text)
+    
     def _encode_heading(self, match: re.Match[str]) -> str:
         indent, hashes, _, body = match.groups()
         level = min(len(hashes), HEADING_MAX_LEVEL)
@@ -7208,61 +7272,79 @@ class MarkdownEditor(QTextEdit):
             self._hanging_indent_guard = False
 
     def _finalize_heading_block(self, block) -> None:
-        """Render a plain '# ' heading line into display form once editing is done."""
+        """Render a plain '# ' heading line into display form once editing is done.
+        
+        CRITICAL: This function converts markdown headings (# Text) back to internal
+        sentinel format (SENTINEL+Text) after editing. If this fails or is interrupted,
+        sentinel characters can leak into the visible text and corrupt the editor.
+        
+        We protect against this by:
+        1. Always clearing _pending_heading_* state before returning
+        2. Wrapping the conversion in try/except to ensure state cleanup
+        3. Clearing state on file load (set_markdown) and document replacement
+        """
         if self._display_guard or not block or not block.isValid():
             return
-        if self._is_code_block_line(block):
-            self._pending_heading_block_num = None
-            self._pending_heading_level = None
-            return
-        text = block.text()
-        if not text:
-            return
-        stripped = text.lstrip()
-        # Skip if already rendered (sentinel present)
-        if stripped and heading_level_from_char(stripped[0]):
-            self._pending_heading_block_num = None
-            self._pending_heading_level = None
-            return
-        converted = HEADING_MARK_PATTERN.sub(self._encode_heading, text)
-        if converted == text:
-            if (
-                self._pending_heading_block_num is None
-                or self._pending_heading_level is None
-                or block.blockNumber() != self._pending_heading_block_num
-            ):
-                return
-            if not stripped:
-                self._pending_heading_block_num = None
-                self._pending_heading_level = None
-                return
-            if stripped.startswith("```"):
-                self._pending_heading_block_num = None
-                self._pending_heading_level = None
-                return
-            indent = text[: len(text) - len(stripped)]
-            converted = f"{indent}{heading_sentinel(self._pending_heading_level)}{stripped}"
-
-        current = self.textCursor()
-        current_pos = current.position()
-        block_start = block.position()
-        delta = len(converted) - len(text)
-
-        self._display_guard = True
+        
         try:
-            line_cursor = QTextCursor(block)
-            line_cursor.select(QTextCursor.LineUnderCursor)
-            line_cursor.insertText(converted)
-        finally:
-            self._display_guard = False
+            if self._is_code_block_line(block):
+                self._pending_heading_block_num = None
+                self._pending_heading_level = None
+                return
+            text = block.text()
+            if not text:
+                return
+            stripped = text.lstrip()
+            # Skip if already rendered (sentinel present)
+            if stripped and heading_level_from_char(stripped[0]):
+                self._pending_heading_block_num = None
+                self._pending_heading_level = None
+                return
+            converted = HEADING_MARK_PATTERN.sub(self._encode_heading, text)
+            if converted == text:
+                if (
+                    self._pending_heading_block_num is None
+                    or self._pending_heading_level is None
+                    or block.blockNumber() != self._pending_heading_block_num
+                ):
+                    return
+                if not stripped:
+                    self._pending_heading_block_num = None
+                    self._pending_heading_level = None
+                    return
+                if stripped.startswith("```"):
+                    self._pending_heading_block_num = None
+                    self._pending_heading_level = None
+                    return
+                indent = text[: len(text) - len(stripped)]
+                converted = f"{indent}{heading_sentinel(self._pending_heading_level)}{stripped}"
+
+            current = self.textCursor()
+            current_pos = current.position()
+            block_start = block.position()
+            delta = len(converted) - len(text)
+
+            self._display_guard = True
+            try:
+                line_cursor = QTextCursor(block)
+                line_cursor.select(QTextCursor.LineUnderCursor)
+                line_cursor.insertText(converted)
+            finally:
+                self._display_guard = False
+                # CRITICAL: Always clear state even if insertion fails
+                self._pending_heading_block_num = None
+                self._pending_heading_level = None
+
+            if delta and current_pos > block_start + len(text):
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(max(block_start, current_pos + delta))
+                self.setTextCursor(new_cursor)
+            self._schedule_heading_outline()
+        except Exception as e:
+            # SAFETY: If anything goes wrong, clear the state to prevent corruption
+            logger.error(f"Error finalizing heading block: {e}", exc_info=True)
             self._pending_heading_block_num = None
             self._pending_heading_level = None
-
-        if delta and current_pos > block_start + len(text):
-            new_cursor = self.textCursor()
-            new_cursor.setPosition(max(block_start, current_pos + delta))
-            self.setTextCursor(new_cursor)
-        self._schedule_heading_outline()
     
     # --- Bullet list handling ---
     
