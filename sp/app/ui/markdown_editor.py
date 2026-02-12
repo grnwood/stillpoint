@@ -2288,6 +2288,9 @@ class MarkdownEditor(QTextEdit):
                 self.textChanged.connect(self._schedule_heading_outline)
                 if highlighter_disabled:
                     self.highlighter.setDocument(self.document())
+                    # Force synchronous highlighting so stats are available immediately
+                    # Qt's default is async (deferred), which means stats would be checked before highlighting runs
+                    self.highlighter.rehighlight()
                 self.setUpdatesEnabled(True)
                 self._render_images(display, time.perf_counter())
                 t4 = time.perf_counter()
@@ -2334,9 +2337,12 @@ class MarkdownEditor(QTextEdit):
                     )
                 # Always print syntax cache stats (even without timing) for diagnostics
                 total_cache_ops = type(self.highlighter)._cache_hits + type(self.highlighter)._cache_misses
+                print(f"[MD_DEBUG] Highlighter check: timing_blocks={self.highlighter._timing_blocks} cache_ops={total_cache_ops}")
                 if total_cache_ops > 0:
                     hit_rate = (type(self.highlighter)._cache_hits / total_cache_ops) * 100
                     print(f"[MD_CACHE] Syntax cache: hits={type(self.highlighter)._cache_hits} misses={type(self.highlighter)._cache_misses} hit_rate={hit_rate:.1f}% size={len(type(self.highlighter)._persistent_block_cache)}")
+                else:
+                    print(f"[MD_DEBUG] No highlighting occurred - highlighter may not have run")
                 if self.highlighter._timing_blocks:
                     avg = (self.highlighter._timing_total / self.highlighter._timing_blocks) * 1000.0
                     total = self.highlighter._timing_total * 1000.0
