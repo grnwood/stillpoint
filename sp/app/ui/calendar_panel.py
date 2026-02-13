@@ -3067,6 +3067,11 @@ class CalendarPanel(QWidget):
         menu.addAction("Date...").triggered.connect(
             lambda: self._open_task_date_picker(role, targets, anchor)
         )
+        if self._targets_have_date(role, targets):
+            menu.addSeparator()
+            menu.addAction("Clear Date").triggered.connect(
+                lambda: self._clear_task_date_choice(role, targets)
+            )
         menu.exec(anchor)
         self._suppress_task_activation = False
 
@@ -3093,6 +3098,29 @@ class CalendarPanel(QWidget):
                 apply_due=True,
                 clear_start=False,
                 clear_due=False,
+            )
+        QTimer.singleShot(200, self._update_insights_for_selection)
+
+    def _clear_task_date_choice(self, role: str, targets: list[dict]) -> None:
+        if role == "start":
+            self._update_tasks_with_dates(
+                targets,
+                None,
+                None,
+                apply_start=True,
+                apply_due=False,
+                clear_start=True,
+                clear_due=False,
+            )
+        else:
+            self._update_tasks_with_dates(
+                targets,
+                None,
+                None,
+                apply_start=False,
+                apply_due=True,
+                clear_start=False,
+                clear_due=True,
             )
         QTimer.singleShot(200, self._update_insights_for_selection)
 
@@ -3182,6 +3210,17 @@ class CalendarPanel(QWidget):
         else:
             return None
         return target.isoformat()
+
+    def _targets_have_date(self, role: str, targets: list[dict]) -> bool:
+        for target in targets:
+            task = target.get("task") or {}
+            if role == "start":
+                value = (task.get("starts") or task.get("start") or "").strip()
+            else:
+                value = (task.get("due") or "").strip()
+            if value:
+                return True
+        return False
 
     def _collect_task_date_targets(self) -> list[dict]:
         targets: list[dict] = []
