@@ -9693,6 +9693,16 @@ class MainWindow(QMainWindow):
         """Update calendar selection if opening a journal page."""
         date_tuple = self._extract_journal_date(path)
         if date_tuple:
+            # Preserve multi-day review context only when the calendar tab is
+            # actively visible in the expanded right panel.
+            try:
+                cal = getattr(self.right_panel, "calendar_panel", None)
+                cal_visible = bool(cal) and self._is_right_panel_expanded() and (self.right_panel.tabs.currentWidget() == cal)
+                multi_day_active = bool(cal and len(getattr(cal, "multi_selected_dates", set())) > 1)
+                if cal_visible and multi_day_active:
+                    return
+            except Exception:
+                pass
             year, month, day = date_tuple
             self.right_panel.set_calendar_date(year, month, day)
             # Also sync the journal tree navigation
