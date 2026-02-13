@@ -273,16 +273,32 @@ class CalendarPanel(QWidget):
             if is_light
             else theme_value("calendar_panel.calendar.grid_dark", "#555555")
         )
-        header_bg = alt_bg.name() if alt_bg.isValid() else (
+        default_header_bg = (
             theme_value("calendar_panel.calendar.header_dark", "#3A3A3A")
             if not is_light
             else theme_value("calendar_panel.calendar.header_light", "#F5F5F5")
+        )
+        if alt_bg.isValid():
+            # On some Windows palette/theme combinations, AlternateBase can be
+            # nearly white even in dark UI, which washes out the month header.
+            alt_lightness = alt_bg.lightness()
+            if (not is_light and alt_lightness > 140) or (is_light and alt_lightness > 245):
+                header_bg = default_header_bg
+            else:
+                header_bg = alt_bg.name()
+        else:
+            header_bg = default_header_bg
+        nav_text = text_fg.name() if text_fg.isValid() else (
+            theme_value("calendar_panel.calendar.nav_text_dark", "#E6E6E6")
+            if not is_light
+            else theme_value("calendar_panel.calendar.nav_text_light", "#1F1F1F")
         )
         
         self.calendar.setStyleSheet(
             f"""
             QCalendarWidget QWidget#qt_calendar_navigationbar {{
                 background-color: {header_bg};
+                color: {nav_text};
             }}
             QCalendarWidget QWidget {{
                 alternate-background-color: palette(base);
@@ -292,6 +308,7 @@ class CalendarPanel(QWidget):
                 font-weight: bold;
                 border-radius: 4px;
                 background-color: {header_bg};
+                color: {nav_text};
             }}
             QCalendarWidget QToolButton:hover {{
                 background-color: {selected_bg};
@@ -303,6 +320,8 @@ class CalendarPanel(QWidget):
             QCalendarWidget QSpinBox {{
                 border-radius: 4px;
                 padding: 4px;
+                color: {nav_text};
+                background-color: {header_bg};
             }}
             QCalendarWidget QTableView {{
                 selection-background-color: {selected_bg};
