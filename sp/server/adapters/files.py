@@ -255,6 +255,77 @@ def list_files_modified_between(root: Path, start: date, end: date) -> List[Dict
     return results
 
 
+def list_files_activity_between(root: Path, start: date, end: date, mode: str = "both") -> List[Dict]:
+    """Return page activity (created/updated) between dates (inclusive)."""
+    results: List[Dict] = []
+    if start > end:
+        start, end = end, start
+    mode_norm = (mode or "both").strip().lower()
+    if mode_norm in {"edited", "updated"}:
+        mode_norm = "edited"
+    elif mode_norm == "created":
+        mode_norm = "created"
+    else:
+        mode_norm = "both"
+
+    seen_dirs: set[Path] = set()
+    for suffix in PAGE_SUFFIXES:
+        for path in root.rglob(f"*{suffix}"):
+            page_dir = path.parent
+            if page_dir in seen_dirs and suffix == LEGACY_SUFFIX:
+                continue
+            if suffix == PAGE_SUFFIX:
+                seen_dirs.add(page_dir)
+            try:
+                stat = path.stat()
+                mtime = stat.st_mtime
+                ctime = getattr(stat, "st_birthtime", None)
+                if not ctime:
+                    ctime = stat.st_ctime
+            except OSError:
+                continue
+
+            mod_dt = dt.datetime.fromtimestamp(mtime)
+            created_dt = dt.datetime.fromtimestamp(ctime)
+            mod_in_range = start <= mod_dt.date() <= end
+            created_in_range = start <= created_dt.date() <= end
+
+            include = False
+            event = "updated"
+            event_time = mod_dt
+            if mode_norm == "edited":
+                include = mod_in_range
+                event = "updated"
+                event_time = mod_dt
+            elif mode_norm == "created":
+                include = created_in_range
+                event = "created"
+                event_time = created_dt
+            else:
+                include = mod_in_range or created_in_range
+                if created_in_range and (not mod_in_range or created_dt >= mod_dt):
+                    event = "created"
+                    event_time = created_dt
+                else:
+                    event = "updated"
+                    event_time = mod_dt
+
+            if not include:
+                continue
+
+            rel = f"/{path.relative_to(root).as_posix()}"
+            results.append(
+                {
+                    "path": rel,
+                    "modified": mod_dt.isoformat(),
+                    "created": created_dt.isoformat(),
+                    "event": event,
+                    "event_time": event_time.isoformat(),
+                }
+            )
+    return results
+
+
 def create_directory(root: Path, path: str) -> None:
     target = _resolve(root, path)
     if target.exists():

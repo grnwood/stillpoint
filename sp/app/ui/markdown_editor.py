@@ -3104,33 +3104,41 @@ class MarkdownEditor(QTextEdit):
             if "<a " in html.lower():
                 plain_from_html = self._html_to_plaintext_with_links(html)
                 if plain_from_html:
-                    # SAFETY: Strip sentinel characters before inserting
-                    plain_from_html = self._sanitize_input_markdown(plain_from_html)
-                    self.textCursor().insertText(plain_from_html)
-                    if "[" in plain_from_html and "|" in plain_from_html:
-                        self._refresh_display()
+                    self._insert_markdown_text(plain_from_html)
                     return
             # No links - prefer plain text to avoid style noise
             elif source.hasText():
-                plain = source.text()
-                if plain:
-                    # SAFETY: Strip sentinel characters before inserting
-                    plain = self._sanitize_input_markdown(plain)
-                    self.textCursor().insertText(plain)
-                    return
+                self._insert_markdown_text(source.text())
+                return
 
         # 3) Default paste - also sanitize to prevent sentinel character injection
-        # Extract and sanitize text before allowing default paste behavior
         if source.hasText():
-            text = source.text()
-            if STRAY_SENTINEL_PATTERN.search(text):
-                # If sentinels detected, create clean MimeData and paste that
-                clean_text = self._sanitize_input_markdown(text)
-                clean_mime = QMimeData()
-                clean_mime.setText(clean_text)
-                super().insertFromMimeData(clean_mime)
-                return
+            self._insert_markdown_text(source.text())
+            return
         super().insertFromMimeData(source)
+
+    def _insert_markdown_text(self, text: str) -> None:
+        """Insert pasted markdown/plain text and refresh display when link syntax exists."""
+        if not text:
+            return
+        clean_text = self._sanitize_input_markdown(text)
+        if not clean_text:
+            return
+        self.textCursor().insertText(clean_text)
+        try:
+            has_wiki = bool(WIKI_LINK_STORAGE_PATTERN.search(clean_text))
+            has_colon = any(COLON_LINK_PATTERN.match(line).hasMatch() for line in clean_text.splitlines())
+            has_camel = any(CAMEL_LINK_PATTERN.match(line).hasMatch() for line in clean_text.splitlines())
+            has_http = "http://" in clean_text or "https://" in clean_text
+        except Exception:
+            has_wiki = False
+            has_colon = False
+            has_camel = False
+            has_http = False
+        if has_wiki or has_colon or has_camel or has_http:
+            self._refresh_display()
+        if "![" in clean_text:
+            self._render_images(self.toPlainText())
 
     def _prepare_image_paste_target(self) -> None:
         """If pasting on a list/task line, move the cursor to a new plain line."""
@@ -6658,25 +6666,13 @@ class MarkdownEditor(QTextEdit):
     def _vi_insert_text(self, text: str) -> None:
         if not text:
             return
-        # SAFETY: Sanitize text to prevent sentinel character injection via vi-mode paste
-        text = self._sanitize_input_markdown(text)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         if cursor.hasSelection():
             cursor.removeSelectedText()
-        cursor.insertText(text)
+        self._insert_markdown_text(text)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
-        try:
-            has_wiki = bool(WIKI_LINK_STORAGE_PATTERN.search(text))
-            has_colon = any(COLON_LINK_PATTERN.match(line).hasMatch() for line in text.splitlines())
-        except Exception:
-            has_wiki = False
-            has_colon = False
-        if has_wiki or has_colon:
-            self._refresh_display()
-        if "![" in text:
-            self._render_images(self.toPlainText())
 
     def _vi_paste_buffer(self) -> Optional[str]:
         sys_clip = self._system_clipboard_text()

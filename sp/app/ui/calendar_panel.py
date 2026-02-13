@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QDialog,
+    QComboBox,
 )
 from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
@@ -47,7 +48,7 @@ from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.app import config
 from sp.app import indexer
 from .theme import theme_color, theme_value
-from .path_utils import path_to_colon
+from .path_utils import path_to_colon, ensure_root_colon_link
 from .task_style import (
     contrast_text_color,
     due_colors_from_due_str,
@@ -63,6 +64,7 @@ from .date_insert_dialog import DateInsertDialog
 PATH_ROLE = Qt.UserRole + 1
 LINE_ROLE = Qt.UserRole + 2
 RECENT_ACTION_ROLE = Qt.UserRole + 50
+RECENT_MODIFIED_ROLE = Qt.UserRole + 51
 DUE_TOKEN_PATTERN = re.compile(r"<([0-9]{4}-[0-9]{2}-[0-9]{2})")
 START_TOKEN_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
 PRINT_LINK_PATTERN = re.compile(
@@ -226,9 +228,13 @@ class CalendarPanel(QWidget):
         self._page_text_provider: Optional[Callable[[Optional[str]], str]] = None
         self._ai_last_markdown: str = ""
         self._recent_fetch_guard: int = 0
-        self._recent_pending_params: Optional[tuple[str, str, Optional[str]]] = None
+        self._recent_pending_params: Optional[tuple[list[QDate], Optional[str], bool]] = None
         self._recent_fetching: bool = False
         self._recent_data_loaded: bool = False
+        self._activity_last_markdown: str = ""
+        self._activity_selection_label: str = ""
+        self._activity_entries: list[dict] = []
+        self._activity_selection_key: tuple = ()
         self._task_date_filter_opener: Optional[Callable[[Optional[QWidget]], None]] = None
         self._task_date_filter_setter: Optional[Callable[[Optional[Date], Optional[Date], Optional[str]], None]] = None
         self._task_date_dialog: QDialog | None = None
@@ -605,17 +611,9 @@ class CalendarPanel(QWidget):
 
         self.day_insights_layout.addLayout(print_row)
         self.day_insights_layout.addWidget(pages_headings_container, 1)
-        recent_row = QHBoxLayout()
-        recent_row.setContentsMargins(0, 0, 0, 0)
-        recent_row.setSpacing(6)
-        recent_label = QLabel("Edited Pages:")
-        recent_label.setStyleSheet("font-weight: bold;")
         self.recent_journal_checkbox = QCheckBox("Journal?")
-        self.recent_journal_checkbox.setChecked(False)
-        self.recent_journal_checkbox.stateChanged.connect(lambda _: self._update_insights_for_selection())
-        recent_row.addWidget(recent_label)
-        recent_row.addStretch(1)
-        recent_row.addWidget(self.recent_journal_checkbox)
+        self.recent_journal_checkbox.setChecked(True)
+        self.recent_journal_checkbox.stateChanged.connect(self._on_activity_filter_changed)
         self.recent_list = QListWidget()
         self.recent_list.setAlternatingRowColors(True)
         self.recent_list.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -635,8 +633,6 @@ class CalendarPanel(QWidget):
             self.recent_list.setMaximumHeight(row_h * 1 + 12)
         except Exception:
             pass
-        self.day_insights_layout.addLayout(recent_row)
-        self.day_insights_layout.addWidget(self.recent_list)
         self.tasks_due_list = QTreeWidget()
         self._show_task_start_column = False
         self._show_task_page_column = False
@@ -776,9 +772,11 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         tasks_layout.addWidget(self.tasks_due_list, 1)
 
+        self.activity_panel = self._build_activity_panel()
         self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
         self.journal_tabs = QTabWidget()
         self.journal_tabs.addTab(tasks_panel, "Tasks")
+        self.journal_tabs.addTab(self.activity_panel, "Activity")
         if self.ai_insights_panel:
             self.journal_tabs.addTab(self.ai_insights_panel, "AI Insights")
         if self.journal_tabs.count() == 1:
@@ -1055,6 +1053,11 @@ class CalendarPanel(QWidget):
             self.zoom_in_btn,
             self.zoom_out_btn,
             getattr(self, "_print_btn", None),
+            getattr(self, "activity_info_label", None),
+            getattr(self, "activity_view", None),
+            getattr(self, "activity_load_btn", None),
+            getattr(self, "activity_copy_btn", None),
+            getattr(self, "activity_print_btn", None),
             getattr(self, "ai_title_label", None),
             getattr(self, "ai_delete_btn", None),
             getattr(self, "ai_generate_btn", None),
@@ -1459,6 +1462,60 @@ class CalendarPanel(QWidget):
         except Exception:
             return
         config.save_header_state(self._header_state_key, state)
+
+    def _build_activity_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        title = QLabel("Activity")
+        title.setStyleSheet("font-weight: bold;")
+        self.activity_load_btn = QPushButton("Load")
+        self.activity_load_btn.setToolTip("Load page activity for the selected date/range")
+        self.activity_load_btn.clicked.connect(self._load_recent_data)
+        self.activity_scope_combo = QComboBox()
+        self.activity_scope_combo.setToolTip("Choose which activity to include")
+        self.activity_scope_combo.addItem("Edited + Created", "both")
+        self.activity_scope_combo.addItem("Edited only", "edited")
+        self.activity_scope_combo.addItem("Created only", "created")
+        self.activity_scope_combo.currentIndexChanged.connect(lambda _: self._on_activity_filter_changed())
+        self.activity_print_btn = QToolButton()
+        self.activity_print_btn.setIcon(self._load_svg_icon("print.svg", QSize(20, 20)))
+        self.activity_print_btn.setToolTip("Print activity summary to browser")
+        self.activity_print_btn.setAutoRaise(True)
+        self.activity_print_btn.clicked.connect(self._print_activity_view)
+        self.activity_copy_btn = QToolButton()
+        self.activity_copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
+        self.activity_copy_btn.setToolTip("Copy activity links to buffer")
+        self.activity_copy_btn.setAutoRaise(True)
+        self.activity_copy_btn.clicked.connect(self._copy_activity_markdown)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.recent_journal_checkbox)
+        header.addWidget(self.activity_scope_combo)
+        header.addWidget(self.activity_load_btn)
+        header.addWidget(self.activity_copy_btn)
+        header.addWidget(self.activity_print_btn)
+
+        self.activity_info_label = QLabel("")
+        self.activity_info_label.setWordWrap(True)
+        self.activity_info_label.setStyleSheet("opacity: 0.9;")
+        self.activity_view = QTextBrowser()
+        self.activity_view.setOpenLinks(False)
+        self.activity_view.setOpenExternalLinks(False)
+        self.activity_view.anchorClicked.connect(self._on_activity_anchor_clicked)
+
+        layout.addLayout(header)
+        layout.addWidget(self.activity_info_label)
+        layout.addWidget(self.activity_view, 1)
+        self.activity_copy_btn.setEnabled(False)
+        self.activity_print_btn.setEnabled(False)
+        self._render_activity_prompt()
+        return panel
 
     def _build_ai_summary_panel(self) -> QWidget:
         panel = QWidget()
@@ -2538,9 +2595,6 @@ class CalendarPanel(QWidget):
 
     def _update_insights_for_selection(self, current_path: Optional[str] = None) -> None:
         """Update insights based on the current multi-selection."""
-        # Reset recent data loaded flag so user has to click to load each time
-        self._recent_data_loaded = False
-        
         dates_for_tasks: list[QDate] = []
         if self.multi_selected_dates:
             dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
@@ -2760,66 +2814,195 @@ class CalendarPanel(QWidget):
             suffix = "rd"
         return f"{qdate.toString('ddd')} {qdate.toString('MMM')} {day}{suffix} {qdate.year()}"
 
+    @staticmethod
+    def _activity_range_label(dates: list[QDate]) -> str:
+        valid = [d for d in dates if d and d.isValid()]
+        if not valid:
+            return "selected range"
+        start = min(valid, key=lambda d: d.toJulianDay())
+        end = max(valid, key=lambda d: d.toJulianDay())
+        if start == end:
+            return start.toString("yyyy-MM-dd")
+        return f"{start.toString('yyyy-MM-dd')} to {end.toString('yyyy-MM-dd')}"
+
+    def _render_activity_prompt(self, note: Optional[str] = None) -> None:
+        label = self._activity_selection_label or "selected date/range"
+        activity_label = self._activity_scope_label().lower()
+        if getattr(self, "activity_info_label", None):
+            self.activity_info_label.setText(
+                f"Click Load to see {activity_label} on {label}. "
+                "Links open pages in the editor."
+            )
+        message = note or "No activity loaded yet."
+        if getattr(self, "activity_view", None):
+            self.activity_view.setHtml(
+                f"<p>{html.escape(message)}</p>"
+                "<p><em>Click Load to fetch activity for the current date selection.</em></p>"
+            )
+        if getattr(self, "activity_copy_btn", None):
+            self.activity_copy_btn.setEnabled(False)
+        if getattr(self, "activity_print_btn", None):
+            self.activity_print_btn.setEnabled(False)
+
+    @staticmethod
+    def _selection_key(dates: list[QDate]) -> tuple[int, ...]:
+        return tuple(sorted(d.toJulianDay() for d in dates if d and d.isValid()))
+
+    def _activity_scope_mode(self) -> str:
+        combo = getattr(self, "activity_scope_combo", None)
+        if combo is None:
+            return "both"
+        mode = str(combo.currentData() or "both").strip().lower()
+        return mode if mode in {"both", "edited", "created"} else "both"
+
+    def _activity_scope_label(self) -> str:
+        mode = self._activity_scope_mode()
+        if mode == "edited":
+            return "edited pages"
+        if mode == "created":
+            return "created pages"
+        return "edited and created pages"
+
+    def _on_activity_filter_changed(self) -> None:
+        self._recent_data_loaded = False
+        self._activity_entries = []
+        self._activity_last_markdown = ""
+        self._update_insights_for_selection()
+
+    @staticmethod
+    def _format_activity_modified(value: str) -> tuple[str, str]:
+        """Return (date_heading, friendly_time) for an ISO timestamp string."""
+        if not value:
+            return ("Unknown Date", "time unknown")
+        try:
+            dt_obj = datetime.fromisoformat(value)
+        except Exception:
+            return ("Unknown Date", "time unknown")
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.astimezone()
+        local_dt = dt_obj.astimezone()
+        day_heading = local_dt.strftime("%Y-%m-%d (%A)")
+        tz = local_dt.strftime("%Z").strip()
+        tm = local_dt.strftime("%I:%M%p").lstrip("0").lower()
+        if tz:
+            return (day_heading, f"{tm} {tz}")
+        return (day_heading, tm)
+
+    def _render_activity_results(self) -> None:
+        if not getattr(self, "activity_view", None):
+            return
+        scope_label = self._activity_scope_label()
+        if not self._activity_entries:
+            self._activity_last_markdown = ""
+            self.activity_view.setHtml(f"<p>No {html.escape(scope_label)} found for this selection.</p>")
+            if getattr(self, "activity_copy_btn", None):
+                self.activity_copy_btn.setEnabled(False)
+            if getattr(self, "activity_print_btn", None):
+                self.activity_print_btn.setEnabled(False)
+            return
+
+        html_sections: list[str] = []
+        markdown_lines: list[str] = []
+        grouped: dict[str, list[dict]] = {}
+        for entry in self._activity_entries:
+            day_heading, friendly_time = self._format_activity_modified(str(entry.get("event_time") or ""))
+            grouped.setdefault(day_heading, []).append({**entry, "friendly_time": friendly_time})
+
+        for day_heading, rows in grouped.items():
+            html_items: list[str] = []
+            markdown_lines.append(f"### {day_heading}")
+            for row in rows:
+                path = str(row.get("path") or "")
+                label = str(row.get("label") or Path(path).stem or path)
+                friendly_time = str(row.get("friendly_time") or "time unknown")
+                event = str(row.get("event") or "updated").lower()
+                event_label = "Created" if event == "created" else "Updated"
+                safe_href = html.escape(path, quote=True)
+                html_items.append(
+                    f"<li><a href=\"{safe_href}\">{html.escape(label)}</a> "
+                    f"<span style='opacity:0.75'>({event_label} {html.escape(friendly_time)})</span></li>"
+                )
+                colon = ensure_root_colon_link(path_to_colon(path) or path)
+                markdown_lines.append(f"* [{colon}|{label}] ({event_label} {friendly_time})")
+            markdown_lines.append("")
+            html_sections.append(f"<p><strong>{html.escape(day_heading)}</strong></p><ul>{''.join(html_items)}</ul>")
+
+        self._activity_last_markdown = "\n".join(markdown_lines).rstrip()
+        heading = html.escape(self._activity_selection_label or "selected date/range")
+        self.activity_view.setHtml(
+            f"<p><strong>{html.escape(scope_label.title())} for {heading}</strong></p>"
+            + "".join(html_sections)
+        )
+        if getattr(self, "activity_copy_btn", None):
+            self.activity_copy_btn.setEnabled(True)
+        if getattr(self, "activity_print_btn", None):
+            self.activity_print_btn.setEnabled(True)
+
+    def _copy_activity_markdown(self) -> None:
+        if not self._activity_last_markdown:
+            return
+        clipboard = QApplication.clipboard()
+        if not clipboard:
+            return
+        clipboard.setText(self._activity_last_markdown)
+
+    def _print_activity_view(self) -> None:
+        if not self._activity_last_markdown:
+            return
+        css = self._load_print_css()
+        heading = html.escape(self._activity_selection_label or "selected date/range")
+        scope_label = html.escape(self._activity_scope_label().title())
+        items = []
+        for line in self._activity_last_markdown.splitlines():
+            items.append(f"<li>{self._linkify_task_text_html(line.lstrip('- ').strip())}</li>")
+        html_doc = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>StillPoint Activity</title>"
+            f"<style>{css}</style></head><body>"
+            f"<h1>{scope_label} for {heading}</h1>"
+            f"<ul>{''.join(items)}</ul>"
+            "</body></html>"
+        )
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
+            with tmp:
+                tmp.write(html_doc.encode("utf-8"))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+        except Exception:
+            return
+
+    def _on_activity_anchor_clicked(self, url: QUrl) -> None:
+        if not url:
+            return
+        raw = bytes(url.toEncoded()).decode("utf-8", errors="ignore").strip()
+        if not raw:
+            return
+        path = QUrl.fromPercentEncoding(raw.encode("utf-8")) if "%" in raw else raw
+        if not path.startswith("/"):
+            path = "/" + path.lstrip("/")
+        self.pageActivated.emit(path)
+
     def _populate_recent_modified(self, dates: list[QDate], *, current_path: Optional[str], expand_single: bool) -> None:
-        """Populate recent_list using the modified-files API."""
+        """Populate recent_list using the activity API."""
         self.recent_list.clear()
+        selection_key = (self._activity_scope_mode(),) + self._selection_key(dates)
         if not self.vault_root or not dates:
+            self._activity_selection_label = ""
+            self._activity_selection_key = ()
+            self._activity_entries = []
+            self._recent_data_loaded = False
+            self._render_activity_prompt("Open a vault and select a date to load activity.")
             return
-        
-        # Show "Click to load..." link instead of auto-loading
+        self._activity_selection_label = self._activity_range_label(dates)
+        if selection_key != self._activity_selection_key:
+            self._activity_selection_key = selection_key
+            self._activity_entries = []
+            self._recent_data_loaded = False
+        # Store parameters for explicit loading action.
+        self._recent_pending_params = (dates, current_path, expand_single)
         if not self._recent_data_loaded:
-            load_item = QListWidgetItem("Click to load...")
-            load_item.setData(RECENT_ACTION_ROLE, "load")
-            load_item.setForeground(theme_color("calendar_panel.recent.load_link", "#0066CC"))
-            try:
-                load_item.setToolTip("Click to load recently edited pages")
-            except Exception:
-                pass
-            self.recent_list.addItem(load_item)
-            # Store parameters for later loading
-            self._recent_pending_params = (dates, current_path, expand_single)
-            return
-        
-        # Show "Fetching data..." while loading
-        if self._recent_fetching:
-            fetch_item = QListWidgetItem("Fetching data...")
-            fetch_item.setForeground(theme_color("calendar_panel.recent.fetching", "#666666"))
-            self.recent_list.addItem(fetch_item)
-            return
-        
-        if expand_single and len(dates) == 1:
-            d = dates[0]
-            span = [d.addDays(-1), d, d.addDays(1)]
-            dates = span
-        # Derive min/max ISO date strings
-        try:
-            start = min(dates, key=lambda d: d.toJulianDay())
-            end = max(dates, key=lambda d: d.toJulianDay())
-            start_str = start.toString("yyyy-MM-dd")
-            end_str = end.toString("yyyy-MM-dd")
-        except Exception:
-            return
-        try:
-            resp = self.http.post(f"{self.api_base}/api/files/modified", json={"start_date": start_str, "end_date": end_str})
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("items", [])
-        except Exception:
-            return
-        for entry in items:
-            rel = entry.get("path", "")
-            if not rel or (current_path and rel == current_path):
-                continue
-            if not self.recent_journal_checkbox.isChecked() and rel.startswith("/Journal/"):
-                continue
-            label = Path(rel).stem
-            item = QListWidgetItem(label)
-            item.setData(PATH_ROLE, rel)
-            try:
-                item.setToolTip(rel)
-            except Exception:
-                pass
-            self.recent_list.addItem(item)
+            self._render_activity_prompt()
 
     def _priority_brush(self, level: int) -> Optional[dict]:
         """Return background/foreground for priority level."""
@@ -3693,29 +3876,16 @@ class CalendarPanel(QWidget):
             self.pageActivated.emit(str(path))
     
     def _load_recent_data(self) -> None:
-        """Load the recent edited pages data."""
+        """Load activity pages data."""
         if self._recent_fetching or not self._recent_pending_params:
             return
-        
-        # Expand to 4 rows when loading data
-        try:
-            row_h = self.recent_list.sizeHintForRow(0) or (self.recent_list.fontMetrics().height() + 6)
-            row_h = max(20, row_h)
-            self.recent_list.setMinimumHeight(row_h * 4)
-            self.recent_list.setMaximumHeight(row_h * 4 + 12)
-        except Exception:
-            pass
-        
+
         # Mark as loading and show "Fetching data..."
         self._recent_fetching = True
         self._recent_data_loaded = True
         dates, current_path, expand_single = self._recent_pending_params
-        
-        # Clear and show fetching message
         self.recent_list.clear()
-        fetch_item = QListWidgetItem("Fetching data...")
-        fetch_item.setForeground(theme_color("calendar_panel.recent.fetching", "#666666"))
-        self.recent_list.addItem(fetch_item)
+        self._render_activity_prompt("Fetching activity…")
         
         # Use QTimer to allow UI to update before blocking call
         QTimer.singleShot(0, lambda: self._do_fetch_recent(dates, current_path, expand_single))
@@ -3723,6 +3893,7 @@ class CalendarPanel(QWidget):
     def _do_fetch_recent(self, dates: list[QDate], current_path: Optional[str], expand_single: bool) -> None:
         """Actually fetch the recent data (called via timer to avoid blocking UI)."""
         self.recent_list.clear()
+        self._activity_entries = []
         
         if not self.vault_root or not dates:
             self._recent_fetching = False
@@ -3744,14 +3915,30 @@ class CalendarPanel(QWidget):
             return
         
         try:
-            resp = self.http.post(f"{self.api_base}/api/files/modified", json={"start_date": start_str, "end_date": end_str})
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("items", [])
+            mode = self._activity_scope_mode()
+            try:
+                resp = self.http.post(
+                    f"{self.api_base}/api/files/activity",
+                    json={"start_date": start_str, "end_date": end_str, "mode": mode},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("items", [])
+            except Exception:
+                # Backward compatibility with older servers.
+                resp = self.http.post(
+                    f"{self.api_base}/api/files/modified",
+                    json={"start_date": start_str, "end_date": end_str},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("items", [])
         except Exception:
             self._recent_fetching = False
+            self._render_activity_prompt("Failed to load activity.")
             return
         
+        filtered: list[dict] = []
         for entry in items:
             rel = entry.get("path", "")
             if not rel or (current_path and rel == current_path):
@@ -3759,8 +3946,35 @@ class CalendarPanel(QWidget):
             if not self.recent_journal_checkbox.isChecked() and rel.startswith("/Journal/"):
                 continue
             label = Path(rel).stem
-            item = QListWidgetItem(label)
+            filtered.append(
+                {
+                    "path": rel,
+                    "label": label,
+                    "modified": str(entry.get("modified", "")),
+                    "created": str(entry.get("created", "")),
+                    "event": str(entry.get("event", "updated")),
+                    "event_time": str(entry.get("event_time", entry.get("modified", ""))),
+                }
+            )
+
+        def _sort_key(entry: dict) -> tuple:
+            raw = str(entry.get("event_time") or "")
+            try:
+                dt_obj = datetime.fromisoformat(raw)
+                if dt_obj.tzinfo is None:
+                    dt_obj = dt_obj.astimezone()
+                ts = dt_obj.astimezone().timestamp()
+            except Exception:
+                ts = 0.0
+            return (ts, str(entry.get("path") or ""))
+
+        filtered.sort(key=_sort_key)
+        self._activity_entries = filtered
+        for entry in filtered:
+            item = QListWidgetItem(str(entry.get("label") or ""))
+            rel = str(entry.get("path") or "")
             item.setData(PATH_ROLE, rel)
+            item.setData(RECENT_MODIFIED_ROLE, str(entry.get("modified") or ""))
             try:
                 item.setToolTip(rel)
             except Exception:
@@ -3768,6 +3982,7 @@ class CalendarPanel(QWidget):
             self.recent_list.addItem(item)
         
         self._recent_fetching = False
+        self._render_activity_results()
     
     def _open_recent_link(self, item: QListWidgetItem) -> None:
         if not item:

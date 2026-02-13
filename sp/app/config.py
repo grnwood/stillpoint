@@ -2316,8 +2316,8 @@ def update_page_index(
         
         conn.execute(
             """
-            INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci, page_id, rev)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pages(path, title, updated, created_at, parent_path, display_order, path_ci, title_ci, page_id, rev)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 updated = excluded.updated,
@@ -2331,6 +2331,7 @@ def update_page_index(
             (
                 path,
                 title,
+                modified_ts,
                 modified_ts,
                 parent_path,
                 display_order,
@@ -2773,8 +2774,8 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
         with conn:
             conn.execute(
                 """
-                INSERT INTO pages(path, title, updated, parent_path, display_order, path_ci, title_ci, page_id, rev)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pages(path, title, updated, created_at, parent_path, display_order, path_ci, title_ci, page_id, rev)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     last_modified = excluded.updated,
@@ -2786,6 +2787,7 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
             (
                 page_path,
                 page_title,
+                now,
                 now,
                 parent_path,
                 order,
@@ -3720,6 +3722,9 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     if "last_modified" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN last_modified REAL")
         added = True
+    if "created_at" not in existing:
+        conn.execute("ALTER TABLE pages ADD COLUMN created_at REAL")
+        added = True
     if "path_ci" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN path_ci TEXT")
         normalized_added = True
@@ -3752,6 +3757,10 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
         try:
             now = time.time()
             conn.execute("UPDATE pages SET last_modified = COALESCE(last_modified, updated, ?) WHERE last_modified IS NULL", (now,))
+            conn.execute(
+                "UPDATE pages SET created_at = COALESCE(created_at, updated, last_modified, ?) WHERE created_at IS NULL",
+                (now,),
+            )
         except Exception:
             pass
     if normalized_added or ("path_ci" in existing and "title_ci" in existing):
@@ -3809,6 +3818,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             path TEXT PRIMARY KEY,
             title TEXT,
             updated REAL,
+            created_at REAL,
             last_modified REAL,
             parent_path TEXT,
             display_order INTEGER,

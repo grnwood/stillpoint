@@ -716,6 +716,12 @@ class ModifiedRangePayload(BaseModel):
     end_date: str
 
 
+class ActivityRangePayload(BaseModel):
+    start_date: str
+    end_date: str
+    mode: Literal["edited", "created", "both"] = "both"
+
+
 class TaskDateTargetPayload(BaseModel):
     path: str
     line: int
@@ -1573,6 +1579,87 @@ def files_modified(payload: ModifiedRangePayload) -> dict:
         _raise_file_http(500, f"List modified files error for {payload.start_date} -> {payload.end_date}", exc)
     except Exception as exc:
         _raise_file_http(500, f"List modified files error for {payload.start_date} -> {payload.end_date}", exc)
+    return {"items": items}
+
+
+@app.post("/api/files/activity")
+def files_activity(payload: ActivityRangePayload) -> dict:
+    try:
+        start = Date.fromisoformat(payload.start_date)
+        end = Date.fromisoformat(payload.end_date)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
+    print(
+        f"{_ANSI_BLUE}[API] POST /api/files/activity {payload.start_date} -> {payload.end_date} mode={payload.mode}{_ANSI_RESET}"
+    )
+    mode = (payload.mode or "both").strip().lower()
+    if mode not in {"edited", "created", "both"}:
+        mode = "both"
+    items: list[dict] = []
+    db_ok = False
+    db_path = config._vault_db_path()
+    if db_path:
+        try:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT path, COALESCE(updated, 0), COALESCE(created_at, updated, last_modified, 0)
+                    FROM pages
+                    WHERE deleted = 0
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            for path, updated_ts, created_ts in rows:
+                try:
+                    updated_dt = datetime.fromtimestamp(float(updated_ts or 0))
+                    created_dt = datetime.fromtimestamp(float(created_ts or 0))
+                except Exception:
+                    continue
+                updated_in = start <= updated_dt.date() <= end
+                created_in = start <= created_dt.date() <= end
+                if mode == "edited":
+                    include = updated_in
+                    event = "updated"
+                    event_dt = updated_dt
+                elif mode == "created":
+                    include = created_in
+                    event = "created"
+                    event_dt = created_dt
+                else:
+                    include = updated_in or created_in
+                    if created_in and (not updated_in or created_dt >= updated_dt):
+                        event = "created"
+                        event_dt = created_dt
+                    else:
+                        event = "updated"
+                        event_dt = updated_dt
+                if not include:
+                    continue
+                items.append(
+                    {
+                        "path": str(path),
+                        "modified": updated_dt.isoformat(),
+                        "created": created_dt.isoformat(),
+                        "event": event,
+                        "event_time": event_dt.isoformat(),
+                    }
+                )
+            db_ok = True
+        except Exception:
+            items = []
+            db_ok = False
+    if not db_ok:
+        root = vault_state.get_root()
+        try:
+            items = files.list_files_activity_between(root, start, end, mode=mode)
+        except FileAccessError as exc:
+            _raise_file_http(400, f"List activity files blocked for {payload.start_date} -> {payload.end_date}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"List activity files error for {payload.start_date} -> {payload.end_date}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"List activity files error for {payload.start_date} -> {payload.end_date}", exc)
     return {"items": items}
 
 

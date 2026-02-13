@@ -1,4 +1,5 @@
 import pytest
+from PySide6.QtCore import QMimeData
 
 from sp.app.ui.markdown_editor import LINK_SENTINEL, MarkdownEditor
 
@@ -69,3 +70,11 @@ def test_camelcase_uses_current_page_parent(editor):
     editor.set_context("/vault", "/Journal/2025/11/22/Call/Topic/Topic.md")
     converted = editor._convert_camelcase_links("Discuss +NextThing")
     assert "[:Journal:2025:11:22:Call:Topic:NextThing|NextThing]" in converted
+
+
+def test_plain_text_paste_renders_wiki_links_immediately(editor):
+    mime = QMimeData()
+    mime.setText("- [:Journal:2026:02:10:Decisions|Decisions] (Updated 11:28am CST)")
+    editor.insertFromMimeData(mime)
+    assert LINK_SENTINEL in editor.toPlainText()
+    assert "[:Journal:2026:02:10:Decisions|Decisions]" in editor.to_markdown()
