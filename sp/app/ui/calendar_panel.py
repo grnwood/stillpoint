@@ -562,7 +562,7 @@ class CalendarPanel(QWidget):
         subpages_col_layout = QVBoxLayout()
         subpages_col_layout.setContentsMargins(0, 0, 0, 0)
         subpages_col_layout.setSpacing(4)
-        subpages_label = QLabel("Sub Pages:")
+        subpages_label = QLabel("Journal Pages:")
         self._subpages_label = subpages_label
         subpages_label.setStyleSheet("font-weight: bold;")
         subpages_col_layout.addWidget(subpages_label)
