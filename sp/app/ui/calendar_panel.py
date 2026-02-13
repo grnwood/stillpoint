@@ -6,7 +6,6 @@ import tempfile
 import re
 import os
 import calendar
-import time
 from datetime import date as Date, datetime, timedelta
 from typing import Optional, Callable
 
@@ -243,8 +242,14 @@ class CalendarPanel(QWidget):
         self._suppress_task_activation = False
         # Avoid syncing the task panel's date filter for programmatic month changes.
         self._suppress_task_filter_sync = False
-        self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
-        self._api_task_cache_ttl = 0.5
+        self._api_task_cache: dict[tuple[bool, bool, bool], tuple[int, list[dict]]] = {}
+        self._task_cache_generation: int = 0
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh_now)
+        # The calendar tab no longer displays the journal navigator tree.
+        # Keep the widget for compatibility, but skip expensive model rebuilds.
+        self._journal_tree_enabled = False
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
@@ -907,17 +912,33 @@ class CalendarPanel(QWidget):
         super().resizeEvent(event)
         self._enforce_calendar_min_width()
 
-    def set_vault_root(self, vault_root: Optional[str]) -> None:
+    def set_vault_root(self, vault_root: Optional[str], *, defer_refresh: bool = False) -> None:
         """Set vault root for calendar and tree data."""
         self.vault_root = vault_root
-        self.refresh()
+        self._invalidate_task_cache()
+        if defer_refresh:
+            self.schedule_refresh(0)
+        else:
+            self.refresh()
+
+    def schedule_refresh(self, delay_ms: int = 0) -> None:
+        self._refresh_timer.start(max(0, int(delay_ms)))
 
     def refresh(self) -> None:
+        self._refresh_timer.stop()
+        self._refresh_now()
+
+    def _refresh_now(self) -> None:
         """Refresh the journal tree and calendar highlights."""
-        self._populate_tree()
+        if self._journal_tree_enabled:
+            self._populate_tree()
         self._update_calendar_dates()
         self._update_insights_from_calendar()
         self._update_today_visibility()
+
+    def _invalidate_task_cache(self) -> None:
+        self._task_cache_generation += 1
+        self._api_task_cache.clear()
 
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Move the calendar to a specific date and expand the tree."""
@@ -927,8 +948,9 @@ class CalendarPanel(QWidget):
             self.calendar.setSelectedDate(target)
             self._set_single_selection(target)
             self._update_calendar_dates(year, month)
-            self._expand_to_date(target)
-            self._update_day_listing(target)
+            if self._journal_tree_enabled:
+                self._expand_to_date(target)
+                self._update_day_listing(target)
             self._apply_multi_selection_formats()
             self._update_insights_for_selection()
             self._update_today_visibility()
@@ -1811,7 +1833,8 @@ class CalendarPanel(QWidget):
 
     def _on_month_changed(self, year: int, month: int) -> None:
         self._update_calendar_dates(year, month)
-        self._update_day_listing(self.calendar.selectedDate())
+        if self._journal_tree_enabled:
+            self._update_day_listing(self.calendar.selectedDate())
         self._apply_multi_selection_formats()
         self._sync_aux_calendars()
         self._update_insights_for_selection()
@@ -1868,8 +1891,9 @@ class CalendarPanel(QWidget):
             print(f"[CALENDAR] _on_date_clicked Click: Selected only {date.toString('yyyy-MM-dd')}")
         
         self._apply_multi_selection_formats()
-        self._expand_to_date(date)
-        self._update_day_listing(date)
+        if self._journal_tree_enabled:
+            self._expand_to_date(date)
+            self._update_day_listing(date)
         self._update_insights_for_selection()
         self._update_today_visibility()
         self._sync_aux_calendars()
@@ -2168,6 +2192,8 @@ class CalendarPanel(QWidget):
 
     def _expand_to_date(self, date: QDate) -> None:
         """Expand and select the tree path for the given date."""
+        if not self._journal_tree_enabled:
+            return
         target_year = f"{date.year()}"
         target_month = f"{date.month():02d}"
         target_day = f"{date.day():02d}"
@@ -2204,6 +2230,8 @@ class CalendarPanel(QWidget):
 
     def _select_subpage_item(self, year: int, month: int, day: int, sub_name: str, rel_path: Optional[str] = None) -> None:
         """Select a subpage row in the day listing if present."""
+        if not self._journal_tree_enabled:
+            return
         for i in range(self.journal_tree.topLevelItemCount()):
             top = self.journal_tree.topLevelItem(i)
             if not top:
@@ -2379,6 +2407,8 @@ class CalendarPanel(QWidget):
 
     def _update_day_listing(self, date: QDate) -> None:
         """Render the selected day's page and its subpages as children of the day item."""
+        if not self._journal_tree_enabled:
+            return
         if not self.vault_root:
             return
         day_item = self._find_item_by_path(f"Journal/{date.year():04d}/{date.month():02d}/{date.day():02d}")
@@ -2831,15 +2861,12 @@ class CalendarPanel(QWidget):
     ) -> list[dict]:
         if self.http:
             cache_key = (
-                "",
-                (),
                 bool(include_done),
                 bool(include_ancestors),
                 bool(actionable_only),
             )
             cached = self._api_task_cache.get(cache_key)
-            now = time.monotonic()
-            if cached and (now - cached[0]) <= self._api_task_cache_ttl:
+            if cached and cached[0] == self._task_cache_generation:
                 return cached[1]
             params = {
                 "query": "",
@@ -2852,7 +2879,7 @@ class CalendarPanel(QWidget):
                 resp.raise_for_status()
                 payload = resp.json()
                 items = payload.get("items", [])
-                self._api_task_cache[cache_key] = (now, items)
+                self._api_task_cache[cache_key] = (self._task_cache_generation, items)
                 return items
             except Exception as exc:
                 print(f"[CALENDAR] Failed to fetch tasks via API: {exc}")
@@ -3335,6 +3362,7 @@ class CalendarPanel(QWidget):
                 resp.raise_for_status()
             except Exception as exc:
                 print(f"[CALENDAR] Failed to update task dates via API: {exc}")
+            self._invalidate_task_cache()
             QTimer.singleShot(200, self._update_insights_for_selection)
             self.tasksUpdated.emit()
             return
@@ -3386,6 +3414,7 @@ class CalendarPanel(QWidget):
                     indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
                 except Exception:
                     pass
+        self._invalidate_task_cache()
         QTimer.singleShot(200, self._update_insights_for_selection)
         self.tasksUpdated.emit()
 
@@ -3488,6 +3517,7 @@ class CalendarPanel(QWidget):
                 indexer.index_page(rel_path, new_content)
             except Exception:
                 pass
+        self._invalidate_task_cache()
         QTimer.singleShot(200, self._update_insights_for_selection)
         self.tasksUpdated.emit()
 

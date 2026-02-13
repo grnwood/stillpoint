@@ -66,6 +66,10 @@ class TabbedRightPanel(QWidget):
         self._pending_calendar_date: Optional[tuple[int, int, int]] = None
         self._pending_calendar_vault_root: Optional[str] = None
         self._pending_calendar_refresh: bool = False
+        self._calendar_sync_timer = QTimer(self)
+        self._calendar_sync_timer.setSingleShot(True)
+        self._calendar_sync_timer.setInterval(75)
+        self._calendar_sync_timer.timeout.connect(self._sync_calendar_tab_state)
         
         # Create Tasks tab
         self.task_panel = None
@@ -186,7 +190,7 @@ class TabbedRightPanel(QWidget):
         else:
             self._pending_calendar_date = (year, month, day)
     
-    def set_current_page(self, page_path, relative_path=None) -> bool:
+    def set_current_page(self, page_path, relative_path=None, *, sync_calendar: bool = True) -> bool:
         """Update panels with the current page."""
         t0 = time.perf_counter()
         self.attachments_panel.set_page(page_path)
@@ -195,7 +199,7 @@ class TabbedRightPanel(QWidget):
             self.link_panel.set_page(relative_path)
         t2 = time.perf_counter()
         try:
-            if self.calendar_panel and relative_path:
+            if sync_calendar and self.calendar_panel and relative_path:
                 if self._is_calendar_tab_active():
                     self.calendar_panel.set_current_page(relative_path)
                 else:
@@ -317,7 +321,7 @@ class TabbedRightPanel(QWidget):
         widget = self.tabs.currentWidget()
         if widget:
             if self.calendar_panel and widget == self.calendar_panel:
-                self._sync_calendar_tab_state()
+                self._calendar_sync_timer.start()
             # For task panel, focus the search box specifically
             if self.task_panel and widget == self.task_panel:
                 if hasattr(widget, "focus_search"):
@@ -376,12 +380,16 @@ class TabbedRightPanel(QWidget):
         """Apply deferred calendar updates once the user explicitly opens the tab."""
         if not self._is_calendar_tab_active() or not self.calendar_panel:
             return
+        should_refresh = False
         if self._pending_calendar_vault_root:
-            self.calendar_panel.set_vault_root(self._pending_calendar_vault_root)
+            self.calendar_panel.set_vault_root(self._pending_calendar_vault_root, defer_refresh=True)
             self._pending_calendar_vault_root = None
+            should_refresh = True
         if self._pending_calendar_refresh:
-            self.calendar_panel.refresh()
             self._pending_calendar_refresh = False
+            should_refresh = True
+        if should_refresh:
+            self.calendar_panel.schedule_refresh(0)
         pending_path = self._pending_calendar_path
         pending_date = self._pending_calendar_date
         self._pending_calendar_path = None

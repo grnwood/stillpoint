@@ -1539,7 +1539,7 @@ class MainWindow(QMainWindow):
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
-        self.right_panel.calendarTaskActivated.connect(self._open_task_from_panel)
+        self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatResponseCopied.connect(
             lambda msg: self.statusBar().showMessage(msg or "Last chat response copied to buffer", 4000)
@@ -6079,14 +6079,26 @@ class MainWindow(QMainWindow):
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
 
-    def _open_file(self, path: str, retry: bool = False, add_to_history: bool = True, force: bool = False, cursor_at_end: bool = False, restore_history_cursor: bool = False) -> None:
+    def _open_file(
+        self,
+        path: str,
+        retry: bool = False,
+        add_to_history: bool = True,
+        force: bool = False,
+        cursor_at_end: bool = False,
+        restore_history_cursor: bool = False,
+        sync_calendar: bool = True,
+    ) -> None:
         if path:
             path = self._normalize_root_page_path(path)
         if not path or (path == self.current_path and not force):
             return
         if getattr(self, "_mode_window_pending", False) or getattr(self, "_mode_window", None):
             # Defer while a mode overlay is opening/closing to avoid scene clears during teardown.
-            QTimer.singleShot(100, lambda p=path, r=retry, a=add_to_history, f=force, c=cursor_at_end, rh=restore_history_cursor: self._open_file(p, r, a, f, c, rh))
+            QTimer.singleShot(
+                100,
+                lambda p=path, r=retry, a=add_to_history, f=force, c=cursor_at_end, rh=restore_history_cursor, sc=sync_calendar: self._open_file(p, r, a, f, c, rh, sc),
+            )
             return
         # Remember current cursor before switching pages
         self._remember_history_cursor()
@@ -6279,17 +6291,18 @@ class MainWindow(QMainWindow):
             # Refresh read-only badge if preference or lock state changed mid-session
             self._update_dirty_indicator()
         
-        # Update calendar if this is a journal page
-        self._update_calendar_for_journal_page(path)
+        # Update calendar if this is a journal page.
+        if sync_calendar:
+            self._update_calendar_for_journal_page(path)
         
         # Update attachments panel with current page
         from pathlib import Path
         if path:
             full_path = Path(self.vault_root) / path.lstrip("/")
-            has_chat = self.right_panel.set_current_page(full_path, path)
+            has_chat = self.right_panel.set_current_page(full_path, path, sync_calendar=sync_calendar)
             self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(path))
         else:
-            self.right_panel.set_current_page(None, None)
+            self.right_panel.set_current_page(None, None, sync_calendar=sync_calendar)
             self.editor.set_ai_chat_available(False)
         self._mark_initial_page_loaded()
         if tracer:
@@ -8403,7 +8416,7 @@ class MainWindow(QMainWindow):
         ai_font_size = config.load_ai_chat_font_size(base_ai_font)
         self.right_panel.set_font_size(ai_font_size)
 
-    def _open_task_from_panel(self, path: str, line: int) -> None:
+    def _open_task_from_panel(self, path: str, line: int, *, preserve_calendar_state: bool = False) -> None:
         if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
             print(f"[MAIN_WINDOW] _open_task_from_panel called: {path}:{line}, current_path={self.current_path}")
         # Remember which widget had focus (should be task tree)
@@ -8423,7 +8436,7 @@ class MainWindow(QMainWindow):
         
         # Open the file and jump to the task line
         if path != self.current_path:
-            self._open_file(path)
+            self._open_file(path, sync_calendar=not preserve_calendar_state)
         self._goto_line(line, select_line=True)
         
         # Keyboard activation: move focus to editor; mouse: restore task focus
@@ -8436,6 +8449,10 @@ class MainWindow(QMainWindow):
             focused_widget.setFocus()
             if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
                 print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
+
+    def _open_task_from_calendar_panel(self, path: str, line: int) -> None:
+        """Open task target page without altering calendar selection/filter state."""
+        self._open_task_from_panel(path, line, preserve_calendar_state=True)
 
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
@@ -8476,7 +8493,8 @@ class MainWindow(QMainWindow):
         # Handle possible anchor fragment in calendar links
         base, anchor = self._split_link_anchor(path)
         norm = self._normalize_editor_path(base)
-        self._open_file(norm)
+        # Preserve calendar selection/filter context while reviewing linked pages.
+        self._open_file(norm, sync_calendar=False)
         try:
             slug = self._anchor_slug(anchor)
             self._scroll_to_anchor_slug(slug)
@@ -8570,7 +8588,7 @@ class MainWindow(QMainWindow):
         panel.set_vault_root(self._local_vault_root() or "")
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
-        panel.taskActivated.connect(self._open_task_from_panel)
+        panel.taskActivated.connect(self._open_task_from_calendar_panel)
         panel.openInWindowRequested.connect(self._open_page_editor_window)
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
