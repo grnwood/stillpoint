@@ -49,7 +49,14 @@ jobs:
       - name: Build installer (Inno Setup)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\win32\stillpoint.iss"
+          Remove-Item -Recurse -Force packaging\win32\Output -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path packaging\win32\Output | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/Opackaging\win32\Output" "packaging\win32\stillpoint.iss"
+
+      - name: Verify installer exists
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if (!(Test-Path "packaging/win32/Output/StillPointSetup-win-x64.exe")) { throw "Installer exe not found at packaging/win32/Output/StillPointSetup-win-x64.exe" }
 
       - name: Zip bundle
         if: startsWith(github.ref, 'refs/tags/')
@@ -66,6 +73,7 @@ jobs:
         with:
           name: StillPointSetup
           path: packaging/win32/Output/StillPointSetup-win-x64.exe
+          if-no-files-found: error
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -74,3 +82,4 @@ jobs:
           files: |
             StillPoint-win-x64.zip
             packaging/win32/Output/StillPointSetup-win-x64.exe
+          fail_on_unmatched_files: true
