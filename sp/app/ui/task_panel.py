@@ -82,8 +82,9 @@ def _should_suspend_nav_for_tag(text: str, cursor: int, available_tags: set[str]
     tag = token.lstrip("@")
     if not tag:
         return False
-    # Treat any available tag that starts with the typed prefix as valid
-    return not any(candidate.startswith(tag) for candidate in available_tags)
+    normalized = {candidate.lower() for candidate in available_tags}
+    # Keep nav suspended while typing partial tags; only release on exact known tag.
+    return tag.lower() not in normalized
 
 
 class DebugTaskTree(QTreeWidget):

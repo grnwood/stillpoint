@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from chromadb import PersistentClient
+from chromadb import EphemeralClient, PersistentClient
 from chromadb.config import Settings
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from sp.rag import telemetry
@@ -20,6 +20,7 @@ class ChromaRAG:
         base = Path(self.vault_root) / ".stillpoint" / "chroma"
         base.mkdir(parents=True, exist_ok=True)
         self.persist_dir = str(base)
+        self._persistent = True
         telemetry_impl = f"{telemetry.NoopTelemetryClient.__module__}.{telemetry.NoopTelemetryClient.__name__}"
         settings = Settings(
             chroma_api_impl="chromadb.api.rust.RustBindingsAPI",
@@ -30,10 +31,23 @@ class ChromaRAG:
             chroma_telemetry_impl=telemetry_impl,
             anonymized_telemetry=False,
         )
-        self.client = PersistentClient(
-            path=self.persist_dir,
-            settings=settings,
-        )
+        try:
+            self.client = PersistentClient(
+                path=self.persist_dir,
+                settings=settings,
+            )
+        except Exception:
+            # Fallback for environments where persistent sqlite files are unavailable.
+            self._persistent = False
+            memory_settings = Settings(
+                chroma_api_impl="chromadb.api.rust.RustBindingsAPI",
+                is_persistent=False,
+                allow_reset=True,
+                chroma_product_telemetry_impl=telemetry_impl,
+                chroma_telemetry_impl=telemetry_impl,
+                anonymized_telemetry=False,
+            )
+            self.client = EphemeralClient(settings=memory_settings)
         self.collection = self._ensure_collection()
 
     def query(
@@ -176,4 +190,5 @@ class ChromaRAG:
         self._delete_scope(page_ref, kind, attachment)
 
     def close(self) -> None:
-        self.client.persist()
+        if self._persistent and hasattr(self.client, "persist"):
+            self.client.persist()

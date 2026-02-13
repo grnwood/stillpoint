@@ -22,7 +22,7 @@ TEST_CONTENT = """[Team Meetings:Retrospectives:Action Items
 ](Team Meetings:Retrospectives:Action Items)[breaker
 ](Software Architecture:Microservices:Service Discovery:Circuit Breaker)"""
 
-def test_regex_performance(pattern, name):
+def _measure_regex_performance(pattern, name):
     """Test regex performance and return execution time."""
     print(f"\nTesting {name}...")
     start_time = time.perf_counter() 
@@ -63,8 +63,8 @@ if __name__ == "__main__":
     print("Testing regex performance with malformed markdown links...")
     print(f"Test content:\n{repr(TEST_CONTENT)}")
     
-    old_time = test_regex_performance(OLD_PATTERN, "Original regex (with re.DOTALL)")
-    new_time = test_regex_performance(NEW_PATTERN, "Fixed regex (limited whitespace)")
+    old_time = _measure_regex_performance(OLD_PATTERN, "Original regex (with re.DOTALL)")
+    new_time = _measure_regex_performance(NEW_PATTERN, "Fixed regex (limited whitespace)")
     
     print(f"\n{'='*50}")
     if old_time == float('inf'):
@@ -74,3 +74,10 @@ if __name__ == "__main__":
         print(f"✅ Performance improved! {speedup:.1f}x faster")
     else:
         print(f"⚠️  New regex took {new_time:.1f}ms vs {old_time:.1f}ms")
+
+
+def test_regex_performance_regression() -> None:
+    old_time = _measure_regex_performance(OLD_PATTERN, "old")
+    new_time = _measure_regex_performance(NEW_PATTERN, "new")
+    assert new_time != float("inf")
+    assert new_time <= old_time

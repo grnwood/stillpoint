@@ -69,6 +69,8 @@ class HTMLDelegate(QStyledItemDelegate):
 
 class InsertLinkDialog(QDialog):
     """Dialog for searching and inserting page links in colon notation (PageA:PageB:PageC)."""
+    Accepted = QDialog.DialogCode.Accepted
+    Rejected = QDialog.DialogCode.Rejected
 
     def __init__(
         self,

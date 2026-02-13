@@ -58,3 +58,44 @@ def test_vi_clipboard_cycle_tracks_selection(app: QApplication) -> None:
     editor._vi_paste_buffer()
     assert editor.toPlainText().startswith("alpha beta")
     editor.close()
+
+
+def test_vi_command_prompt_runs_global_substitution(monkeypatch, app: QApplication) -> None:
+    editor = MarkdownEditor()
+    editor.setPlainText("apple apple")
+
+    monkeypatch.setattr(
+        "sp.app.ui.markdown_editor.QInputDialog.getText",
+        lambda *args, **kwargs: ("%s/apple/orange/g", True),
+    )
+
+    called: dict[str, str] = {}
+
+    def fake_replace_all(old: str, new: str) -> int:
+        called["old"] = old
+        called["new"] = new
+        return 2
+
+    monkeypatch.setattr(editor, "search_replace_all", fake_replace_all)
+
+    editor._open_vi_command_prompt()
+
+    assert called == {"old": "apple", "new": "orange"}
+    editor.close()
+
+
+def test_vi_command_prompt_rejects_invalid_substitution(monkeypatch, app: QApplication) -> None:
+    editor = MarkdownEditor()
+
+    monkeypatch.setattr(
+        "sp.app.ui.markdown_editor.QInputDialog.getText",
+        lambda *args, **kwargs: ("%s/noslash/g", True),
+    )
+
+    messages: list[str] = []
+    monkeypatch.setattr(editor, "_status_message", lambda msg, duration=2000: messages.append(msg))
+
+    editor._open_vi_command_prompt()
+
+    assert "Invalid substitution command." in messages
+    editor.close()

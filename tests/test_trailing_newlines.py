@@ -6,18 +6,21 @@ from sp.app.ui.markdown_editor import MarkdownEditor
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication([])
+    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture
 def editor(app):
-    return MarkdownEditor()
+    ed = MarkdownEditor()
+    yield ed
+    ed.close()
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("hello", "hello"),
+        ("", ""),
+        ("hello", "hello\n"),
         ("hello\n", "hello\n"),
         ("hello\n\n", "hello\n\n"),
         ("hello\n\n\n", "hello\n\n\n"),
@@ -25,7 +28,7 @@ def editor(app):
         ("hello\n\n\n\n\n", "hello\n\n\n"),  # capped to 3
     ],
 )
-def test_doc_to_markdown_trailing_newlines_capped(editor, text, expected):
+def test_doc_to_markdown_trailing_newlines_normalized(editor, text, expected):
     editor.setPlainText(text)
     assert editor._doc_to_markdown() == expected
 

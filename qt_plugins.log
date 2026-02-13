@@ -1,0 +1,823 @@
+[ZimxDiag 2026-01-17 08:24:11] Faulthandler logging to /tmp/stillpoint-faulthandler.log
+[ZimxDiag 2026-01-17 08:24:11] Application starting.
+[StillPoint] Minimal font scan: bundled monospace font /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf -> /home/grnwood/.cache/stillpoint/fonts-minimal/fonts/DejaVuSansMono.ttf (family DejaVu Sans Mono)
+[StillPoint] Minimal font scan enabled; using /home/grnwood/.cache/stillpoint/fonts-minimal/fonts/DejaVuSans.ttf via /home/grnwood/.cache/stillpoint/fonts-minimal/fonts.conf
+[ZimxDiag 2026-01-17 08:24:11] API server started on 127.0.0.1:8765.
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms" ...
+Qt Debug: looking at "libqwayland.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqwayland.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "wayland",
+            "wayland-egl",
+            "wayland-brcm"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("wayland", "wayland-egl", "wayland-brcm")
+Qt Debug: looking at "libqeglfs.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqeglfs.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "eglfs"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QEglFSIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("eglfs")
+Qt Debug: looking at "libqminimal.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqminimal.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "minimal"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QMinimalIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("minimal")
+Qt Debug: looking at "libqvnc.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqvnc.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "vnc"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QVncIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("vnc")
+Qt Debug: looking at "libqoffscreen.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqoffscreen.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "offscreen"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QOffscreenIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("offscreen")
+Qt Debug: looking at "libqminimalegl.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqminimalegl.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "minimalegl"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QMinimalEglIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("minimalegl")
+Qt Debug: looking at "libqxcb.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqxcb.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "xcb"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QXcbIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("xcb")
+Qt Debug: looking at "libqlinuxfb.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqlinuxfb.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "linuxfb"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QLinuxFbIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("linuxfb")
+Qt Debug: looking at "libqvkkhrdisplay.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqvkkhrdisplay.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "vkkhrdisplay"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QVkKhrDisplayIntegrationPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("vkkhrdisplay")
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/platforms" ...
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforms/libqxcb.so" loaded library
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platformthemes" ...
+Qt Debug: looking at "libqgtk3.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platformthemes/libqgtk3.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformThemeFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "gtk3"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QGtk3ThemePlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("gtk3")
+Qt Debug: looking at "libqxdgdesktopportal.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platformthemes/libqxdgdesktopportal.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformThemeFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "xdgdesktopportal",
+            "flatpak",
+            "snap"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QXdgDesktopPortalThemePlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("xdgdesktopportal", "flatpak", "snap")
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/platformthemes" ...
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platformthemes/libqgtk3.so" loaded library
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforminputcontexts" ...
+Qt Debug: looking at "libibusplatforminputcontextplugin.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPlatformInputContextFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "ibus"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QIbusPlatformInputContextPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("ibus")
+Qt Debug: looking at "libqtvirtualkeyboardplugin.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPlatformInputContextFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "qtvirtualkeyboard"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QVirtualKeyboardPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("qtvirtualkeyboard")
+Qt Debug: looking at "libcomposeplatforminputcontextplugin.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforminputcontexts/libcomposeplatforminputcontextplugin.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPlatformInputContextFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "compose",
+            "xim"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QComposePlatformInputContextPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("compose", "xim")
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/platforminputcontexts" ...
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/platforminputcontexts/libcomposeplatforminputcontextplugin.so" loaded library
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/styles" ...
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/styles" ...
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/iconengines" ...
+Qt Debug: looking at "libqsvgicon.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/iconengines/libqsvgicon.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QIconEngineFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz",
+            "svg.gz"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QSvgIconPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("svg", "svgz", "svg.gz")
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/iconengines" ...
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats" ...
+Qt Debug: looking at "libqwbmp.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqwbmp.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "wbmp"
+        ],
+        "MimeTypes": [
+            "image/vnd.wap.wbmp"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWbmpPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("wbmp")
+Qt Debug: looking at "libqtga.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtga.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "tga"
+        ],
+        "MimeTypes": [
+            "image/x-tga"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QTgaPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("tga")
+Qt Debug: looking at "libqwebp.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqwebp.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "webp"
+        ],
+        "MimeTypes": [
+            "image/webp"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWebpPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("webp")
+Qt Debug: looking at "libqgif.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqgif.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "gif"
+        ],
+        "MimeTypes": [
+            "image/gif"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QGifPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("gif")
+Qt Debug: looking at "libqico.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqico.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "ico",
+            "cur"
+        ],
+        "MimeTypes": [
+            "image/vnd.microsoft.icon",
+            "image/vnd.microsoft.icon"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QICOPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("ico", "cur")
+Qt Debug: looking at "libqicns.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqicns.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "icns"
+        ],
+        "MimeTypes": [
+            "image/x-icns"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QICNSPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("icns")
+Qt Debug: looking at "libqtiff.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtiff.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "tiff",
+            "tif"
+        ],
+        "MimeTypes": [
+            "image/tiff",
+            "image/tiff"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QTiffPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("tiff", "tif")
+Qt Debug: looking at "libqsvg.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqsvg.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz"
+        ],
+        "MimeTypes": [
+            "image/svg+xml",
+            "image/svg+xml-compressed"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QSvgPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("svg", "svgz")
+Qt Debug: looking at "libqpdf.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqpdf.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "pdf"
+        ],
+        "MimeTypes": [
+            "application/pdf"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QPdfPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("pdf")
+Qt Debug: looking at "libqjpeg.so"
+Qt Debug: Found metadata in lib /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqjpeg.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "jpg",
+            "jpeg",
+            "jfif"
+        ],
+        "MimeTypes": [
+            "image/jpeg",
+            "image/jpeg",
+            "image/jpeg"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QJpegPlugin",
+    "debug": false,
+    "version": 395776
+}
+
+
+Qt Debug: Got keys from plugin meta data QList("jpg", "jpeg", "jfif")
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/imageformats" ...
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/iconengines/libqsvgicon.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqsvg.so" loaded library
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/accessible" ...
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/accessible" ...
+[ZimxDiag 2026-01-17 08:24:14] Main window shown; entering Qt event loop.
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/accessiblebridge" ...
+Qt Debug: checking directory path "/home/grnwood/code/stillpoint/dist/StillPoint/accessiblebridge" ...
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqwbmp.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtga.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqwebp.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqgif.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqico.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqicns.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtiff.so" cannot load: Cannot load library /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtiff.so: libtiff.so.5: cannot open shared object file: No such file or directory
+Qt Debug: QLibraryPrivate::loadPlugin failed on "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtiff.so" : "Cannot load library /home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqtiff.so: libtiff.so.5: cannot open shared object file: No such file or directory"
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqpdf.so" loaded library
+Qt Debug: "/home/grnwood/code/stillpoint/dist/StillPoint/_internal/PySide6/Qt/plugins/imageformats/libqjpeg.so" loaded library
+
+** (xviewer:292127): WARNING **: 08:24:26.475: Failed to open file “/home/grnwood/.cache/thumbnails/normal/eaa7d1235bf2366a77ac2e98e33543b6.png”: No such file or directory
+[AIChat][condense] Using fallback condense prompt; file not found.
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[AIChat][condense] Using fallback condense prompt; file not found.
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[MainWindow] Connected PlantUML editor request signal
+[94m[API] POST /api/vault/select[0m
+[94m[API] 200 /api/vault/select[0m
+[94m[API] GET /api/vault/stats[0m
+[94m[API] GET /api/vault/stats folder_count=14[0m
+[94m[API] 200 /api/vault/stats[0m
+[94m[TREE] Folder count: 14[0m
+[94m[TREE] Vault has 14 folders, using FULL loading[0m
+[94m[TREE] Fetching tree with recursive=true[0m
+[94m[API] GET /api/vault/tree?path=%2F&recursive=true&include_journal=false[0m
+[94m[API] Root order_map sample: [('/Dobermins/Characteristics/Characteristics.md', 1), ('/Dobermins/Dobermins/Dobermins.md', 2), ('/Dobermins/Dobermins/pickles/pickles.md', 1), ('/Dobermins/Dobermins.md', 1), ('/Golden Retriever/Characteristic/Characteristic.md', 1)][0m
+[SORT] pickles: open_path=/Dobermins/Dobermins/pickles/pickles.md, order=1
+[SORT] characteristics: open_path=/Dobermins/Characteristics/Characteristics.md, order=1
+[SORT] dobermins: open_path=/Dobermins/Dobermins/Dobermins.md, order=2
+[SORT] characteristic: open_path=/Golden Retriever/Characteristic/Characteristic.md, order=1
+[SORT] characteristics: open_path=/Labradors/Characteristics/Characteristics.md, order=1
+[SORT] characteristics: open_path=/Rottwiler/Characteristics/Characteristics.md, order=1
+[SORT] dobermins: open_path=/Dobermins/Dobermins.md, order=1
+[SORT] golden retriever: open_path=/Golden Retriever/Golden Retriever.md, order=2
+[SORT] joebob: open_path=/JoeBob/JoeBob.md, order=3
+[SORT] labradors: open_path=/Labradors/Labradors.md, order=5
+[SORT] rottwiler: open_path=/Rottwiler/Rottwiler.md, order=6
+[SORT] joebob: open_path=/JoeBob.md, order=4
+[94m[API] Root tree order after sort: ['JoeBob'][0m
+[94m[API] GET /api/vault/tree path=/ recursive=True version=0 cached=False[0m
+[94m[API] 200 /api/vault/tree?path=%2F&recursive=true&include_journal=false[0m
+[TagsTab] refresh_tags() called
+[TagsTab] Query returned 1 tags from database
+[TagsTab] Loaded 1 tags
+[33m[Vector] Reloading context index (vault_root=set, api_client=ready)[0m
+[33m[Vector] Fetching context tree from API for context picker.[0m
+[94m[API] GET /api/vault/tree?path=%2F&recursive=true[0m
+[94m[API] GET /api/vault/tree path=/ recursive=True version=0 cached=True[0m
+[94m[API] 200 /api/vault/tree?path=%2F&recursive=true[0m
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[33m[Vector] Reloading context index (vault_root=set, api_client=ready)[0m
+[33m[Vector] Fetching context tree from API for context picker.[0m
+[94m[API] GET /api/vault/tree?path=%2F&recursive=true[0m
+[94m[API] GET /api/vault/tree path=/ recursive=True version=0 cached=True[0m
+[94m[API] 200 /api/vault/tree?path=%2F&recursive=true[0m
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[94m[API] POST /api/file/read[0m
+[94m[API] 200 /api/file/read[0m
+  Image 1/1 (./paste_image_001.png): 6.2ms
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] [EXPAND] Added to expanded paths: /Labradors (total: 1)
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] [UI] tree change: path=/Labradors, open=/Labradors/Labradors.md, is_dir=True
+[94m[API] POST /files/attach[0m
+[Attachments] receive file /Labradors/Labradors.txt to vault /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/Labradors.txt
+[Attachments] receive file /Labradors/paste_image_001.png to vault /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/paste_image_001.png
+[Attachments] receive file /Labradors/paste_image_002.png to vault /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/paste_image_002.png
+[Attachments] Attached 3 file(s) for /Labradors/Labradors.md
+[94m[API] 200 /files/attach[0m
+[Attachments] uploaded 3 attachment(s) for /Labradors/Labradors.md
+[StillPoint] Skipping autosave (reason=focus lost): document not modified
+[Attachments] Double-click non-puml -> open default: /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/paste_image_001.png
+[94m[API] POST /files/attach[0m
+[Attachments] receive file /Labradors/joeblow.puml to vault /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/joeblow.puml
+[Attachments] Attached 1 file(s) for /Labradors/Labradors.md
+[94m[API] 200 /files/attach[0m
+[Attachments] uploaded 1 attachment(s) for /Labradors/Labradors.md
+[MainWindow] Opening PlantUML editor for: /home/grnwood/Desktop/ZimXServerVaults/JoeBob/Labradors/joeblow.puml
+[PlantUML] Loaded shortcuts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/app/puml_shortcuts.json (18 items)
+[PlantUML] Shortcuts loaded: 18 categories from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/app/puml_shortcuts.json
+[PlantUML] Saved geometry: 1400x800 (base64 88 chars)
+[PlantUML] Saved HSplit sizes: [558, 838]
+[PlantUML] Saved VSplit sizes: [487, 209]
+[94m[API] POST /api/file/read[0m
+[94m[API] 200 /api/file/read[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] [EXPAND] Added to expanded paths: /Labradors/Characteristics (total: 2)
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] [UI] tree change: path=/Labradors/Characteristics, open=/Labradors/Characteristics/Characteristics.md, is_dir=False
+[94m[API] POST /api/file/read[0m
+[94m[API] 200 /api/file/read[0m
+  Image 1/1 (./paste_image_001.png): 10.0ms
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] [UI] tree change: path=/Labradors, open=/Labradors/Labradors.md, is_dir=True
+[34m[AIChat]: prompt: hello?[0m
+[33m[Vector] Indexing page context for /Labradors/Labradors.md[0m
+[94m[API] POST /vector/add[0m
+[Chroma] Delete request for /Labradors/Labradors.md (page)
+[Chroma] Indexed page context /Labradors/Labradors.md:page chunks=2
+[Vector] Added vector entry for /Labradors/Labradors.md (page)
+[94m[API] 200 /vector/add[0m
+[33m[Vector] querying for query='hello?' pages=['/Labradors/Labradors.md'] attachments=none[0m
+[94m[API] POST /vector/query[0m
+[Vector] Queried page context limit=8 pages=['/Labradors/Labradors.md'] attachments=any
+[94m[API] 200 /vector/query[0m
+[33m[Vector] Retrieved 1 context chunks for query.[0m
+[33m[Vector] chunk /Labradors/Labradors.md (page) score=1.978[0m
+[33m[Vector] rag retrieved:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[34m[system prompt] sending 1 system block(s); primary:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[AIChat][request] {'url': 'http://localhost:3000/v1/chat/completions', 'headers': {'Content-Type': 'application/json', 'x-api-secret': 'my-secret-token'}, 'payload': {'model': 'gpt-3.5-turbo', 'messages': [{'role': 'system', 'content': 'Vault context relevant to the query:\n/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t'}, {'role': 'user', 'content': 'hello?'}], 'stream': True}}
+[AIChat][models request] {'url': 'http://192.168.1.77:1234/v1/models', 'headers': {}}
+[AIChat][models response] 200 {
+  "data": [
+    {
+      "id": "ibm/granite-4-h-tiny",
+      "object": "model",
+      "owned_by": "organization_owner"
+    },
+    {
+      "id": "qwen3-4b",
+      "object": "model",
+      "owned_by": "organization_owner"
+    },
+    {
+      "id": "deepseek/deepseek-r1-0528-qwen3-8b",
+      "object": "model",
+      "owned_by": "organization_owner"
+    },
+    {
+      "id": "text-embedding-nomic-embed-text-v1.5",
+      "object": "model",
+      "owned_by": "organization_owner"
+    },
+    {
+      "id"
+[34m[AIChat]: prompt: hello?[0m
+[33m[Vector] querying for query='hello?' pages=['/Labradors/Labradors.md'] attachments=none[0m
+[94m[API] POST /vector/query[0m
+[Vector] Queried page context limit=8 pages=['/Labradors/Labradors.md'] attachments=any
+[94m[API] 200 /vector/query[0m
+[33m[Vector] Retrieved 1 context chunks for query.[0m
+[33m[Vector] chunk /Labradors/Labradors.md (page) score=1.978[0m
+[33m[Vector] rag retrieved:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[34m[system prompt] sending 1 system block(s); primary:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[AIChat][request] {'url': 'http://192.168.1.77:1234/v1/chat/completions', 'headers': {'Content-Type': 'application/json'}, 'payload': {'model': 'ibm/granite-4-h-tiny', 'messages': [{'role': 'system', 'content': 'Vault context relevant to the query:\n/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t'}, {'role': 'user', 'content': 'hello?'}, {'role': 'assistant', 'content': '[error] [Errno 111] Connection refused'}, {'role': 'user', 'content': 'hello?'}], 'stream': True}}
+[AIChat][stream complete] Hello! It seems there might be a temporary connection issue preventing me from fully processing your query. Let's try again.
+
+If you have any questions or need information, feel free to ask! For example, if you're interested in Labrador Retrievers, I can provide details about their characteristics, temperament, trainability, lifespan, and activity level based on the provided context. Just let me know what kind of information you're looking for.
+[32m[AIChat][stream complete] response_len=448[0m
+[StillPoint] Skipping autosave (reason=autosave timer): document not modified
+[34m[AIChat]: prompt: what is good about dogs?[0m
+[33m[Vector] querying for query='what is good about dogs?' pages=['/Labradors/Labradors.md'] attachments=none[0m
+[94m[API] POST /vector/query[0m
+[Vector] Queried page context limit=8 pages=['/Labradors/Labradors.md'] attachments=any
+[94m[API] 200 /vector/query[0m
+[33m[Vector] Retrieved 1 context chunks for query.[0m
+[33m[Vector] chunk /Labradors/Labradors.md (page) score=1.044[0m
+[33m[Vector] rag retrieved:
+Vault context relevant to the query:
+/Labradors/Labradors.md: . They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise to stay healthy and happy. They enjoy activities like walking, running, swimming, and playing fetch. Daily exercise is essential to prevent boredom and destructive behavior.[0m
+[34m[system prompt] sending 1 system block(s); primary:
+Vault context relevant to the query:
+/Labradors/Labradors.md: . They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise to stay healthy and happy. They enjoy activities like walking, running, swimming, and playing fetch. Daily exercise is essential to prevent boredom and destructive behavior.[0m
+[AIChat][request] {'url': 'http://192.168.1.77:1234/v1/chat/completions', 'headers': {'Content-Type': 'application/json'}, 'payload': {'model': 'ibm/granite-4-h-tiny', 'messages': [{'role': 'system', 'content': 'Vault context relevant to the query:\n/Labradors/Labradors.md: . They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise to stay healthy and happy. They enjoy activities like walking, running, swimming, and playing fetch. Daily exercise is essential to prevent boredom and destructive behavior.'}, {'role': 'user', 'content': 'hello?'}, {'role': 'assistant', 'content': '[error] [Errno 111] Connection refused'}, {'role': 'user', 'content': 'hello?'}, {'role': 'assistant', 'content': "Hello! It seems there might be a temporary connection issue preventing me from fully processing your query. Let's try again.\n\nIf you have any questions or need information, feel free to ask! For example, if you're interested in Labrador Retrievers, I can provide details about their characteristics, temperament, trainability, lifespan, and activity level based on the provided context. Just let me know what kind of information you're looking for."}, {'role': 'user', 'content': 'what is good about dogs?'}], 'stream': True}}
+[AIChat][stream complete] Dogs are wonderful companions known for several endearing qualities:
+
+1. **Loyalty**: Dogs form strong bonds with their owners and are incredibly loyal, often serving as steadfast protectors and faithful friends.
+
+2. **Companionship**: They offer unconditional love and companionship, helping to reduce feelings of loneliness and boosting emotional well-being.
+
+3. **Socialization**: Many dogs thrive in social settings, making them excellent for fostering interactions with people and other animals, which can improve social skills and confidence.
+
+4. **Health Benefits**: Owning a dog can lead to increased physical activity through daily walks and playtime, contributing to better health outcomes. Dogs also provide emotional support that can lower stress levels and blood pressure.
+
+5. **Intelligence and Trainability**: Most dogs are highly trainable and responsive to commands. This makes them adept at learning various tasks, which is beneficial for assistance roles like guide dogs or therapy dogs.
+
+6. **Sense of Routine**: Having a dog often brings structure and routine into daily life, encouraging responsibilities such as feeding, walking, and grooming, which can be particularly helpful for children and individuals who live alone.
+
+7. **Alertness**: Dogs have keen senses that make them good at detecting changes in their environment. They can alert owners to potential dangers or health issues, providing an added layer of security.
+
+8. **Adaptability**: Different breeds vary widely in size, temperament, and energy levels, allowing for a wide range of choices based on lifestyle preferences, whether it’s living in an apartment or having a large yard for playing fetch.
+
+Overall, dogs bring joy, companionship, and numerous health benefits to their owners' lives, making them cherished members of many families worldwide.
+[32m[AIChat][stream complete] response_len=1839[0m
+[34m[AIChat]: prompt: tell me more[0m
+[33m[Vector] querying for query='tell me more' pages=['/Labradors/Labradors.md'] attachments=none[0m
+[94m[API] POST /vector/query[0m
+[Vector] Queried page context limit=8 pages=['/Labradors/Labradors.md'] attachments=any
+[94m[API] 200 /vector/query[0m
+[33m[Vector] Retrieved 1 context chunks for query.[0m
+[33m[Vector] chunk /Labradors/Labradors.md (page) score=1.888[0m
+[33m[Vector] rag retrieved:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[34m[system prompt] sending 1 system block(s); primary:
+Vault context relevant to the query:
+/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t[0m
+[AIChat][request] {'url': 'http://192.168.1.77:1234/v1/chat/completions', 'headers': {'Content-Type': 'application/json'}, 'payload': {'model': 'ibm/granite-4-h-tiny', 'messages': [{'role': 'system', 'content': 'Vault context relevant to the query:\n/Labradors/Labradors.md: # Labradors Created Sunday 28 December 2025 --- ![paste_image_001](./paste_image_001.png){width=300} [:Labradors:Characteristics|Characteristics] - [ ] ### Labrador Retrievers **Appearance:** Labradors are medium to large dogs with a sturdy build, broad head, and expressive eyes. They have a short, water-resistant double coat that comes in colors like yellow, chocolate, and black. **Temperament:** Labradors are known for their friendly and outgoing personalities. They are intelligent, loyal, and good-natured dogs that love to be around people. They are also energetic and playful, making them great family pets. **Trainability:** Labradors are highly trainable and eager to please. They excel in obedience training, agility, and sports like retrieving. Their intelligence and willingness to learn make them easy to train for various tasks and activities. **Lifespan:** Labradors have an average lifespan of 10-12 years, but with proper care and regular exercise, they can live even longer. They are generally healthy dogs but may be prone to certain health issues like hip dysplasia and obesity. **Activity Level:** Labradors are active and energetic dogs that require regular exercise t'}, {'role': 'user', 'content': 'hello?'}, {'role': 'assistant', 'content': '[error] [Errno 111] Connection refused'}, {'role': 'user', 'content': 'hello?'}, {'role': 'assistant', 'content': "Hello! It seems there might be a temporary connection issue preventing me from fully processing your query. Let's try again.\n\nIf you have any questions or need information, feel free to ask! For example, if you're interested in Labrador Retrievers, I can provide details about their characteristics, temperament, trainability, lifespan, and activity level based on the provided context. Just let me know what kind of information you're looking for."}, {'role': 'user', 'content': 'what is good about dogs?'}, {'role': 'assistant', 'content': "Dogs are wonderful companions known for several endearing qualities:\n\n1. **Loyalty**: Dogs form strong bonds with their owners and are incredibly loyal, often serving as steadfast protectors and faithful friends.\n\n2. **Companionship**: They offer unconditional love and companionship, helping to reduce feelings of loneliness and boosting emotional well-being.\n\n3. **Socialization**: Many dogs thrive in social settings, making them excellent for fostering interactions with people and other animals, which can improve social skills and confidence.\n\n4. **Health Benefits**: Owning a dog can lead to increased physical activity through daily walks and playtime, contributing to better health outcomes. Dogs also provide emotional support that can lower stress levels and blood pressure.\n\n5. **Intelligence and Trainability**: Most dogs are highly trainable and responsive to commands. This makes them adept at learning various tasks, which is beneficial for assistance roles like guide dogs or therapy dogs.\n\n6. **Sense of Routine**: Having a dog often brings structure and routine into daily life, encouraging responsibilities such as feeding, walking, and grooming, which can be particularly helpful for children and individuals who live alone.\n\n7. **Alertness**: Dogs have keen senses that make them good at detecting changes in their environment. They can alert owners to potential dangers or health issues, providing an added layer of security.\n\n8. **Adaptability**: Different breeds vary widely in size, temperament, and energy levels, allowing for a wide range of choices based on lifestyle preferences, whether it’s living in an apartment or having a large yard for playing fetch.\n\nOverall, dogs bring joy, companionship, and numerous health benefits to their owners' lives, making them cherished members of many families worldwide."}, {'role': 'user', 'content': 'tell me more'}], 'stream': True}}
+[AIChat][stream complete] Certainly! Dogs are remarkable animals with unique characteristics that contribute to their roles as beloved pets and working animals. Here's a deeper look into the aspects that make dogs so special:
+
+### 1. **Variety in Breeds**
+
+Dogs come in an astonishing array of breeds, each developed for specific purposes such as hunting, herding, guarding, or companionship. For example:
+- **Hunting Dogs**: Breeds like Retrievers and Spaniels are bred for their exceptional sense of smell and ability to track game.
+- **Herding Dogs**: Border Collies and Australian Shepherds are known for their intelligence and agility in managing livestock.
+- **Guardian Dogs**: Great Pyrenees and Doberman Pinschers have a natural instinct to protect their territory and family.
+
+### 2. **Emotional Intelligence**
+
+Dogs exhibit a remarkable level of emotional intelligence, often able to sense human emotions and respond accordingly. They can provide comfort during stressful times, making them invaluable as therapy animals in hospitals, nursing homes, or for individuals dealing with anxiety or depression.
+
+### 3. **Training Potential**
+
+The ability to learn commands and perform tasks makes dogs highly trainable. Positive reinforcement techniques are particularly effective in training dogs due to their desire to please their owners. This trainability also extends to more complex skills like agility, obedience, and even search-and-rescue operations.
+
+### 4. **Health Monitoring**
+
+Some breeds or individual dogs show a keen ability to detect changes in human health that might be imperceptible to humans. For instance:
+- **Diabetes Alert Dogs**: These dogs can detect fluctuations in blood sugar levels through scent and alert their handlers, potentially preventing severe health issues.
+- **Cancer Detection**: There have been studies suggesting that certain dogs can identify cancer by smell, assisting in early diagnosis.
+
+### 5. **Social Behavior**
+
+Dogs are inherently social animals, designed to live in packs with a clear hierarchy but also forming strong bonds within the pack and with humans. This social nature makes them excellent pets for households and families, as they thrive on interaction and can reduce feelings of isolation.
+
+### 6. **Longevity and Commitment**
+
+While dogs do require a significant commitment in terms of time, effort, and resources (including veterinary care, food, grooming, and training), their loyalty and the joy they bring into our lives are often considered well worth it. The average lifespan varies by breed but generally ranges from 10 to 13 years for most domestic breeds.
+
+### 7. **Adaptability**
+
+Dogs are incredibly adaptable creatures, able to live in various environments from bustling city apartments to spacious rural homes. Their adaptability makes them suitable pets for a wide range of lifestyles and living situations.
+
+In summary, the unique combination of loyalty, intelligence, emotional sensitivity, trainability, health-monitoring capabilities, social behavior, commitment requirements, and adaptability make dogs truly exceptional animals that enrich human lives in countless ways. Whether as loyal companions, working partners, or therapeutic agents, their roles are invaluable across various aspects of life.
+[32m[AIChat][stream complete] response_len=3262[0m
+ * Serving Flask app 'sp.webserver.server'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:58101
+[33mPress CTRL+C to quit[0m
+Fontconfig error: Cannot load default config file: No such file: (null)
+Gtk-Message: 08:27:13.542: Failed to load module "xapp-gtk3-module"
+Opening in existing browser session.
+[2026-01-17 08:27:13,909] ERROR in app: Exception on / [GET]
+Traceback (most recent call last):
+  File "flask/app.py", line 1511, in wsgi_app
+  File "flask/app.py", line 919, in full_dispatch_request
+  File "flask/app.py", line 917, in full_dispatch_request
+  File "flask/app.py", line 902, in dispatch_request
+  File "sp/webserver/server.py", line 119, in index
+    return self._render_directory("")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "sp/webserver/server.py", line 275, in _render_directory
+    return render_template(
+           ^^^^^^^^^^^^^^^^
+  File "flask/templating.py", line 149, in render_template
+  File "jinja2/environment.py", line 1087, in get_or_select_template
+  File "jinja2/environment.py", line 1016, in get_template
+  File "jinja2/environment.py", line 975, in _load_template
+  File "jinja2/loaders.py", line 126, in load
+  File "flask/templating.py", line 65, in get_source
+  File "flask/templating.py", line 99, in _get_source_fast
+jinja2.exceptions.TemplateNotFound: index.html
+127.0.0.1 - - [17/Jan/2026 08:27:13] "[35m[1mGET / HTTP/1.1[0m" 500 -
+127.0.0.1 - - [17/Jan/2026 08:27:14] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+Fontconfig error: Cannot load default config file: No such file: (null)
+Gtk-Message: 08:27:50.752: Failed to load module "xapp-gtk3-module"
+Opening in existing browser session.
+[ZimxDiag 2026-01-17 08:28:21] QApplication aboutToQuit emitted.
+[ZimxDiag 2026-01-17 08:28:21] Qt event loop exited with code 0 after 249.64s.
+[ZimxDiag 2026-01-17 08:28:21] Unhandled exception after 249.64s: 0
+Traceback (most recent call last):
+  File "main.py", line 462, in main
+SystemExit: 0
+[AIChat][condense] Using fallback condense prompt; file not found.
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[33m[Vector] Reloading context index (vault_root=set, api_client=missing)[0m
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[AIChat][condense] Using fallback condense prompt; file not found.
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[33m[Vector] Reloading context index (vault_root=set, api_client=ready)[0m
+[33m[Vector] Fetching context tree from API for context picker.[0m
+[94m[API] GET /api/vault/tree?path=%2F&recursive=true[0m
+[94m[API] GET /api/vault/tree path=/ recursive=True version=0 cached=True[0m
+[94m[API] 200 /api/vault/tree?path=%2F&recursive=true[0m
+[AIChat][prompts] loaded system prompts from /home/grnwood/code/stillpoint/dist/StillPoint/_internal/sp/assets/ai-system-prompts.json
+[94m[API] GET /auth/status[0m
+[94m[API] 200 /auth/status[0m
+[94m[API] POST /auth/print-token[0m
+[94m[API] 200 /auth/print-token[0m
+[StillPoint] Write request reason=focus lost path=/Labradors/Labradors.md bytes=1372 mode=auto
+[94m[API] POST /api/file/write[0m
+[94m[API] 200 /api/file/write[0m
+[94m[API] POST /api/file/read[0m
+[94m[API] 200 /api/file/read[0m
+  Image 1/1 (./paste_image_001.png): 4.1ms
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] Write request reason=focus lost path=/Labradors/Labradors.md bytes=1372 mode=auto
+[94m[API] POST /api/file/write[0m
+[94m[API] 200 /api/file/write[0m
+[94m[API] POST /api/file/read[0m
+[94m[API] 200 /api/file/read[0m
+  Image 1/1 (./paste_image_001.png): 4.1ms
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[94m[TREE] _load_children_for_path: skipping (full tree already loaded)[0m
+[StillPoint] Skipping autosave (reason=window close): document not modified

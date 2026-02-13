@@ -128,7 +128,7 @@ def colon_to_path(colon_path: str, vault_root_name: str = "") -> str:
     cleaned = strip_root_prefix(cleaned)
     if not cleaned:
         if vault_root_name:
-            return f"/{vault_root_name}/{vault_root_name}{PAGE_SUFFIX}"
+            return f"/{vault_root_name}{PAGE_SUFFIX}"
         return "/"
     
     parts = cleaned.split(":")

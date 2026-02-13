@@ -220,6 +220,7 @@ CAMEL_LINK_PATTERN = QRegularExpression(r"(?<!\\S)\\+(?P<link>[A-Za-z][\\w]*)(?=
 WIKI_FILE_LINK_PATTERN = QRegularExpression(
     r"\[(?P<text>[^\]]+)\]\s*\((?P<file>(?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8})\)"
 )
+FILE_MARKDOWN_LINK_PATTERN = WIKI_FILE_LINK_PATTERN
 
 # Unified wiki-style link format: [link|label]
 # Works for both HTTP URLs and page links (colon notation)

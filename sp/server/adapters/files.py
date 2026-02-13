@@ -77,7 +77,7 @@ def _ensure_page_scaffold(directory: Path) -> Path:
     page_file = _page_file_for(directory)
     if not page_file.exists():
         directory.mkdir(parents=True, exist_ok=True)
-        #page_file.write_text(f"# {directory.name}\n\n", encoding="utf-8")
+        page_file.write_text(f"# {directory.name}\n\n", encoding="utf-8")
     return page_file
 
 

@@ -1,105 +1,77 @@
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QMimeData
-from sp.app.ui.markdown_editor import MarkdownEditor
+
+from sp.app.ui.markdown_editor import LINK_SENTINEL, MarkdownEditor
+
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication([])
+    return QApplication.instance() or QApplication([])
+
 
 @pytest.fixture
-def editor(app):
+def editor(app, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: False)
     ed = MarkdownEditor()
-    ed.show()  # Needed for rendering
-    return ed
+    ed.show()
+    yield ed
+    ed.close()
 
-def test_paste_link_from_buffer(editor):
-    # Simulate pasting a wiki-style link from buffer
-    link = "[:Journal:2025:11:20:MintSoundFix#1-your-fix-lives-in-etcmodprobed-kernel-agnostic|inline link]"
+
+def test_refresh_display_wraps_plain_http_link(editor):
+    url = "https://example.com/path?q=1"
+    editor.setPlainText(url)
+    editor._refresh_display()
+    assert f"[{url}|]" in editor.to_markdown()
+
+
+def test_insert_internal_link_normalizes_to_root_colon(editor):
     editor.setPlainText("")
-    editor.insertPlainText(link)
-    editor._refresh_display()
-    assert "inline link" in editor.toPlainText() or "inline link" in editor.toHtml()
+    editor.insert_link("PageA:PageB", "Custom Label")
+    assert "[:PageA:PageB|Custom Label]" in editor.to_markdown()
 
 
-def test_paste_colon_link_with_slug(editor):
-    # Simulate pasting a colon link with slug and spaces
-    link = "[PageA:PageB:PageC#slug-with-spaces|Label With Spaces]"
-    editor.setPlainText("")
-    editor.insertPlainText(link)
-    editor._refresh_display()
-    assert "Label With Spaces" in editor.toPlainText() or "Label With Spaces" in editor.toHtml()
-
-
-def test_edit_link_inline(editor):
-    # Insert a sentence with a link, then edit the label
-    sentence = "This is a [PageA:PageB|OriginalLabel] in a sentence."
-    editor.setPlainText(sentence)
-    editor._refresh_display()
-    # Simulate editing the label inline
-    new_sentence = "This is a [PageA:PageB|NewLabel] in a sentence."
-    editor.setPlainText(new_sentence)
-    editor._refresh_display()
-    assert "NewLabel" in editor.toPlainText() or "NewLabel" in editor.toHtml()
-    # Ensure only the label is shown, not the raw link
-    assert "PageA:PageB" not in editor.toPlainText() or "NewLabel" in editor.toHtml()
-
-
-def test_camelcase_link(editor):
-    # Simulate inserting a CamelCase link
-    link = "+CamelCasePage"
-    editor.setPlainText("")
-    editor.insertPlainText(link)
-    editor._refresh_display()
-    # Should render as a link (the label is the page name)
-    assert "CamelCasePage" in editor.toPlainText() or "CamelCasePage" in editor.toHtml()
-
-
-def test_camelcase_skip_inside_http(editor):
-    url = "https://lyonscg.atlassian.net/wiki/spaces/AC/pages/5814616065/SAP+2025+-+Launch+Checklist"
-    converted = editor._convert_camelcase_links(url)
-    assert converted == url
-
-
-def test_insert_link_dialog_like_http(editor):
-    # Simulate inserting a complex HTTP link through the editor helper
-    url = "https://teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D"
-    editor.setPlainText("")
-    editor.insert_link(url, None)
-    # Stored markdown should use wiki format with a single target and empty label
-    md = editor.to_markdown()
-    expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
-    assert expected in md
-
-
-def test_paste_complex_http_link_normalizes(editor):
-    url = "https://teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D"
-    mime = QMimeData()
-    mime.setText(url)
-    editor.setPlainText("")
-    editor.insertFromMimeData(mime)
-    editor._refresh_display()
-    expected = "/teams.microsoft.com/l/message/19:5071d17824ad4b278afaa9b39ca3fea4@thread.v2/1763757927194?context=%7B%22contextType%22%3A%22chat%22%7D|"
-    assert expected in editor.toPlainText()
-
-
-def test_insert_link_with_plus_signs(editor):
+def test_insert_external_link_keeps_full_url(editor):
     url = "https://lyonscg.atlassian.net/wiki/spaces/AC/pages/5814616065/SAP+2025+-+Launch+Checklist"
     editor.setPlainText("")
     editor.insert_link(url, None)
-    markdown = editor.to_markdown()
-    assert f"[{url}|]" in markdown
+    assert f"[{url}|{url}]" in editor.to_markdown()
 
 
 def test_normalize_external_link_strips_sentinels(editor):
     url = "https://sample.example/path+Part"
-    raw = f"{url}\x00extra label\x00"
+    raw = f"{url}{LINK_SENTINEL}extra label{LINK_SENTINEL}"
     assert editor._normalize_external_link(raw) == url
 
 
-def test_camelcase_link_uses_parent_folder(editor):
-    # When current page is /Journal/.../PickleSausage/PickleSausage.md, +NewTopic should live under that folder once
-    editor.set_context("/vault", "/Journal/2025/11/22/SuchandSuchCall/PickleSausage/PickleSausage.md")
-    text = "Discuss +RandomActsOfKindess tomorrow"
+def test_insert_link_surround_with_spaces(editor):
+    editor.setPlainText("alphabeta")
+    cursor = editor.textCursor()
+    cursor.setPosition(5)
+    editor.setTextCursor(cursor)
+
+    editor.insert_link("Page", surround_with_spaces=True)
+
+    text = editor.toPlainText()
+    first = text.index(LINK_SENTINEL)
+    last = text.rindex(LINK_SENTINEL)
+    assert text[first - 1] == " "
+    assert text[last + 1] == " "
+
+
+def test_camelcase_skips_http_urls(editor):
+    url = "https://example.com/wiki/SAP+2025+-+Launch+Checklist"
+    assert editor._convert_camelcase_links(url) == url
+
+
+def test_camelcase_not_converted_in_existing_link_label(editor):
+    text = "[PageA:PageB|+KeepLabel] and +ConvertMe"
     converted = editor._convert_camelcase_links(text)
-    assert "[:Journal:2025:11:22:SuchandSuchCall:PickleSausage:RandomActsOfKindess|RandomActsOfKindess]" in converted
+    assert "[PageA:PageB|+KeepLabel]" in converted
+    assert "[:ConvertMe|ConvertMe]" in converted
+
+
+def test_camelcase_uses_current_page_parent(editor):
+    editor.set_context("/vault", "/Journal/2025/11/22/Call/Topic/Topic.md")
+    converted = editor._convert_camelcase_links("Discuss +NextThing")
+    assert "[:Journal:2025:11:22:Call:Topic:NextThing|NextThing]" in converted

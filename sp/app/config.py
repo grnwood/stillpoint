@@ -42,7 +42,7 @@ def _prime_page_cache() -> None:
         return
     try:
         rows = conn.execute(
-            "SELECT path, title, path_ci, title_ci, COALESCE(updated, 0) FROM pages"
+            "SELECT path, title, path_ci, title_ci, COALESCE(updated, 0) FROM pages WHERE deleted = 0"
         ).fetchall()
     except sqlite3.OperationalError:
         _invalidate_page_cache()
@@ -2141,7 +2141,12 @@ def _update_global_config(updates: dict) -> None:
         except (json.JSONDecodeError, OSError):
             pass
     existing.update(updates)
-    GLOBAL_CONFIG.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    try:
+        GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        GLOBAL_CONFIG.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except OSError:
+        # Read-only environments (e.g., tests/sandboxes) should not crash callers.
+        return
 
 
 def load_font_size(default: int = 14) -> int:
@@ -3051,7 +3056,7 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
             for day_page_path, folder in day_folders_by_path.items():
                 prefix = (folder.rstrip("/") + "/") if folder != "/" else "/"
                 cur = conn.execute(
-                    "SELECT 1 FROM pages WHERE path LIKE ? AND path <> ? LIMIT 1",
+                    "SELECT 1 FROM pages WHERE deleted = 0 AND path LIKE ? AND path <> ? LIMIT 1",
                     (prefix + "%", day_page_path),
                 )
                 if cur.fetchone():
@@ -3081,7 +3086,7 @@ def search_pages(term: str, limit: int = 50) -> list[dict]:
         """
         SELECT path, title, path_ci, title_ci, COALESCE(updated, 0)
         FROM pages
-        WHERE path_ci LIKE ? OR title_ci LIKE ?
+        WHERE deleted = 0 AND (path_ci LIKE ? OR title_ci LIKE ?)
         ORDER BY
             CASE
                 WHEN path_ci = ? THEN 0

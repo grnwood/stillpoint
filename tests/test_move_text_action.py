@@ -1,16 +1,24 @@
 """Tests for the editor Move Text action (selection -> other page)."""
 
+import pytest
 from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.markdown_editor import MarkdownEditor
 
 
-def test_move_selected_text_replaces_with_link_and_sends_markdown(qapp):
+@pytest.fixture(scope="module")
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+def test_move_selected_text_replaces_with_link_and_sends_markdown(app, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: False)
+
     editor = MarkdownEditor()
     editor.set_context(None, "/Source/Source.md")
     editor.setPlainText("Hello world")
 
-    captured: dict = {}
+    captured: dict[str, str] = {}
 
     def callback(dest_path: str, markdown_text: str) -> bool:
         captured["dest_path"] = dest_path
@@ -31,6 +39,8 @@ def test_move_selected_text_replaces_with_link_and_sends_markdown(qapp):
     assert captured["dest_path"] == "/Target/Target.md"
     assert captured["markdown_text"] == "world"
 
-    text = editor.toPlainText()
-    assert "world" not in text
-    assert "\x00:Target\x00:Target\x00" in text
+    markdown = editor.to_markdown()
+    assert "world" not in markdown
+    assert "[:Target|" in markdown
+
+    editor.close()
