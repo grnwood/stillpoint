@@ -6,13 +6,6 @@ from PySide6.QtTest import QTest
 from sp.app.ui.markdown_editor import MarkdownEditor
 
 
-def _ensure_qapp() -> QApplication:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
-
-
 def _force_initial_paint(widget: MarkdownEditor, app: QApplication) -> None:
     widget.resize(400, 300)
     widget.show()
@@ -23,27 +16,22 @@ def _force_initial_paint(widget: MarkdownEditor, app: QApplication) -> None:
     app.processEvents()
 
 
-@pytest.fixture(scope="module")
-def app() -> QApplication:
-    return _ensure_qapp()
-
-
-def test_vi_mode_defers_until_widget_paints(app: QApplication) -> None:
+def test_vi_mode_defers_until_widget_paints(qapp: QApplication) -> None:
     editor = MarkdownEditor()
     editor.setPlainText("sample")
     editor.set_vi_mode_enabled(True)
     assert editor._vi_pending_activation is True
     assert editor._vi_mode_active is False
-    _force_initial_paint(editor, app)
+    _force_initial_paint(editor, qapp)
     assert editor._vi_has_painted is True
     assert editor._vi_pending_activation is False
     assert editor._vi_mode_active is True
     editor.close()
 
 
-def test_vi_clipboard_cycle_tracks_selection(app: QApplication) -> None:
+def test_vi_clipboard_cycle_tracks_selection(qapp: QApplication) -> None:
     editor = MarkdownEditor()
-    _force_initial_paint(editor, app)
+    _force_initial_paint(editor, qapp)
     editor.setPlainText("alpha beta")
     editor.set_vi_mode_enabled(True)
     cursor = editor.textCursor()
@@ -60,7 +48,7 @@ def test_vi_clipboard_cycle_tracks_selection(app: QApplication) -> None:
     editor.close()
 
 
-def test_vi_command_prompt_runs_global_substitution(monkeypatch, app: QApplication) -> None:
+def test_vi_command_prompt_runs_global_substitution(monkeypatch, qapp: QApplication) -> None:
     editor = MarkdownEditor()
     editor.setPlainText("apple apple")
 
@@ -84,7 +72,7 @@ def test_vi_command_prompt_runs_global_substitution(monkeypatch, app: QApplicati
     editor.close()
 
 
-def test_vi_command_prompt_rejects_invalid_substitution(monkeypatch, app: QApplication) -> None:
+def test_vi_command_prompt_rejects_invalid_substitution(monkeypatch, qapp: QApplication) -> None:
     editor = MarkdownEditor()
 
     monkeypatch.setattr(

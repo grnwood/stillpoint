@@ -1,16 +1,10 @@
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.markdown_editor import LINK_SENTINEL, MarkdownEditor
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
 @pytest.fixture
-def editor(app, monkeypatch):
+def editor(qapp, monkeypatch):
     monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: False)
     ed = MarkdownEditor()
     ed.show()

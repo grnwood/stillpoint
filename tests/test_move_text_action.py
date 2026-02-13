@@ -1,17 +1,11 @@
 """Tests for the editor Move Text action (selection -> other page)."""
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.markdown_editor import MarkdownEditor
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
-def test_move_selected_text_replaces_with_link_and_sends_markdown(app, monkeypatch):
+def test_move_selected_text_replaces_with_link_and_sends_markdown(qapp, monkeypatch):
     monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: False)
 
     editor = MarkdownEditor()
@@ -31,7 +25,7 @@ def test_move_selected_text_replaces_with_link_and_sends_markdown(app, monkeypat
     cursor.setPosition(6)
     cursor.setPosition(11, cursor.MoveMode.KeepAnchor)
     editor.setTextCursor(cursor)
-    QApplication.processEvents()
+    qapp.processEvents()
 
     ok = editor._move_selected_text_to_page("/Target/Target.md")
     assert ok is True

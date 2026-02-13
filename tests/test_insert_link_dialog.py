@@ -2,14 +2,8 @@
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.insert_link_dialog import InsertLinkDialog
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture(autouse=True)
@@ -19,15 +13,15 @@ def patch_dialog_config(monkeypatch):
     monkeypatch.setattr("sp.app.ui.insert_link_dialog.config.search_pages", lambda *_: [])
 
 
-def test_dialog_creation(app):
+def test_dialog_creation(qapp):
     dialog = InsertLinkDialog()
     assert dialog.windowTitle() == "Insert Link"
     dialog.close()
 
 
-def test_selected_text_seeds_link_name_and_cleans_line_breaks(app):
+def test_selected_text_seeds_link_name_and_cleans_line_breaks(qapp):
     dialog = InsertLinkDialog(selected_text="Line One\nLine Two")
-    QApplication.processEvents()
+    qapp.processEvents()
 
     assert dialog.search.text() == ""
     assert dialog.link_name.text() == "Line One Line Two"
@@ -35,7 +29,7 @@ def test_selected_text_seeds_link_name_and_cleans_line_breaks(app):
     dialog.close()
 
 
-def test_selected_colon_path_normalizes_non_http(app):
+def test_selected_colon_path_normalizes_non_http(qapp):
     dialog = InsertLinkDialog()
     dialog.search.setText("  :Page A:Child Node#My Anchor  ")
 
@@ -43,7 +37,7 @@ def test_selected_colon_path_normalizes_non_http(app):
     dialog.close()
 
 
-def test_selected_colon_path_preserves_http(app):
+def test_selected_colon_path_preserves_http(qapp):
     dialog = InsertLinkDialog()
     dialog.search.setText("https://example.com/some path")
 
@@ -51,27 +45,27 @@ def test_selected_colon_path_preserves_http(app):
     dialog.close()
 
 
-def test_link_name_manual_edit_stops_auto_populate(app):
+def test_link_name_manual_edit_stops_auto_populate(qapp):
     dialog = InsertLinkDialog()
 
     dialog.search.setText("PageA")
-    QApplication.processEvents()
+    qapp.processEvents()
     assert dialog.link_name.text() == "PageA"
 
     dialog.link_name.setText("Custom")
-    QApplication.processEvents()
+    qapp.processEvents()
 
     dialog.search.setText("PageB")
-    QApplication.processEvents()
+    qapp.processEvents()
 
     assert dialog.link_name.text() == "Custom"
     dialog.close()
 
 
-def test_http_search_auto_populates_link_name_when_not_manually_edited(app):
+def test_http_search_auto_populates_link_name_when_not_manually_edited(qapp):
     dialog = InsertLinkDialog()
     dialog.search.setText("https://example.com")
-    QApplication.processEvents()
+    qapp.processEvents()
 
     assert dialog.link_name.text() == "https://example.com"
     assert dialog.list_widget.count() == 0
@@ -79,7 +73,7 @@ def test_http_search_auto_populates_link_name_when_not_manually_edited(app):
     dialog.close()
 
 
-def test_filter_can_be_removed(app):
+def test_filter_can_be_removed(qapp):
     filter_cleared = {"called": False}
 
     def clear_filter() -> None:
@@ -103,7 +97,7 @@ def test_filter_can_be_removed(app):
     dialog.close()
 
 
-def test_return_key_accepts_dialog_when_text_exists(app):
+def test_return_key_accepts_dialog_when_text_exists(qapp):
     from PySide6.QtTest import QTest
 
     dialog = InsertLinkDialog()
@@ -111,7 +105,46 @@ def test_return_key_accepts_dialog_when_text_exists(app):
     dialog.search.setText(":PageA")
 
     QTest.keyClick(dialog.search, Qt.Key_Return)
-    QApplication.processEvents()
+    qapp.processEvents()
 
     assert dialog.result() == dialog.Accepted
+    dialog.close()
+
+
+def test_create_option_is_shown_for_nonexistent_target(qapp, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.insert_link_dialog.config.search_pages", lambda *_: [])
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText("Plan 2026")
+    qapp.processEvents()
+
+    first = dialog.list_widget.item(0)
+    assert first is not None
+    payload = first.data(Qt.UserRole)
+    assert isinstance(payload, dict)
+    assert payload.get("create") is True
+    assert payload.get("target") == ":Projects:Plan_2026"
+    assert "Create new page 'Plan 2026' at 'Projects'" in first.text()
+
+    dialog.list_widget.setCurrentRow(0)
+    assert dialog._activate_current() is True
+    assert dialog.should_create_new_page() is True
+    assert dialog.selected_colon_path() == ":Projects:Plan_2026"
+    dialog.close()
+
+
+def test_create_option_not_shown_when_leaf_name_exists(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Work/Plan_2026/Plan_2026.md", "title": "Plan 2026"}],
+    )
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText("Plan 2026")
+    qapp.processEvents()
+
+    assert dialog.list_widget.count() == 1
+    payload = dialog.list_widget.item(0).data(Qt.UserRole)
+    assert not isinstance(payload, dict)
+    assert dialog.should_create_new_page() is False
     dialog.close()

@@ -2,10 +2,31 @@ from __future__ import annotations
 
 import os
 
+# Configure Qt platform before importing any PySide modules.
+# VS Code test workers can crash (SIGSEGV) when Qt picks a GUI backend
+# incompatible with the runner environment.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+def _flush_qt(app: QApplication, rounds: int = 2) -> None:
+    """Drain queued Qt events, including DeferredDelete callbacks."""
+    for _ in range(rounds):
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+        try:
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        except Exception:
+            pass
+        try:
+            app.processEvents()
+        except Exception:
+            pass
 
 
 @pytest.fixture(scope="session")
@@ -14,12 +35,36 @@ def qapp() -> QApplication:
     if app is None:
         app = QApplication([])
     yield app
+    # Make teardown deterministic to avoid interpreter-shutdown crashes.
     try:
         app.closeAllWindows()
     except Exception:
         pass
-    app.processEvents()
-    app.quit()
+    _flush_qt(app, rounds=3)
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_toplevel_widgets(qapp: QApplication):
+    """Close and delete any leaked widgets between tests."""
+    yield
+    try:
+        widgets = list(qapp.topLevelWidgets())
+    except Exception:
+        widgets = []
+
+    for widget in reversed(widgets):
+        try:
+            if hasattr(widget, "close"):
+                widget.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(widget, "deleteLater"):
+                widget.deleteLater()
+        except Exception:
+            pass
+
+    _flush_qt(qapp, rounds=3)
 
 
 class _QtBot:
@@ -37,10 +82,23 @@ class _QtBot:
 def qtbot(qapp: QApplication):
     bot = _QtBot(qapp)
     yield bot
+    # Clean up widgets in reverse order
     for widget in reversed(bot._widgets):
         try:
-            widget.close()
-            widget.deleteLater()
+            if hasattr(widget, 'close'):
+                widget.close()
         except Exception:
             pass
-    qapp.processEvents()
+    # Process events to complete cleanup
+    try:
+        qapp.processEvents()
+    except Exception:
+        pass
+    # Delete widgets after processing events
+    for widget in reversed(bot._widgets):
+        try:
+            if hasattr(widget, 'deleteLater'):
+                widget.deleteLater()
+        except Exception:
+            pass
+    _flush_qt(qapp, rounds=2)

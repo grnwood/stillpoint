@@ -13,10 +13,11 @@ import platform
 import sqlite3
 import subprocess
 import sys
-import tempfile
+import tempfile 
 import time
 import faulthandler
 import re
+import warnings
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -7507,6 +7508,7 @@ class MainWindow(QMainWindow):
             filter_prefix=filter_prefix,
             filter_label=filter_label,
             clear_filter_cb=self._clear_nav_filter,
+            current_page_path=self.current_path,
         )
         self.editor.begin_dialog_block()
         try:
@@ -7524,6 +7526,15 @@ class MainWindow(QMainWindow):
             restore_cursor = _restore_cursor()
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
+            should_create_new = dlg.should_create_new_page()
+            created_via_insert = False
+            if should_create_new and colon_path:
+                resolved_target, created_via_insert = self._ensure_inline_link_target_page(
+                    colon_path,
+                    template_name="",
+                )
+                if resolved_target:
+                    colon_path = resolved_target
             if colon_path:
                 # If there was selected text, replace it with the link
                 if selection_range:
@@ -7536,13 +7547,82 @@ class MainWindow(QMainWindow):
                 
                 # Always set the cursor before inserting the link
                 self.editor.setTextCursor(restore_cursor)
-                label = link_name or selected_text or colon_path
+                label = None if should_create_new else (link_name or selected_text or colon_path)
                 self.editor.insert_link(
                     colon_path,
                     label,
                     surround_with_spaces=selection_range is None,
                 )
+                if created_via_insert:
+                    post_cursor = self.editor.textCursor()
+                    text = self.editor.toPlainText()
+                    pos = post_cursor.position()
+                    if pos >= len(text) or text[pos] != " ":
+                        post_cursor.insertText(" ")
+                        self.editor.setTextCursor(post_cursor)
                 inserted = True
+
+    def _find_existing_page_by_leaf_name(self, page_name: str) -> Optional[str]:
+        """Find an existing page path by page leaf name (case-insensitive)."""
+        cleaned = self._canonical_page_leaf_key(page_name)
+        if not cleaned:
+            return None
+        try:
+            matches = config.search_pages(page_name, limit=200)
+        except Exception:
+            matches = []
+        for page in matches:
+            path = page.get("path") or ""
+            if not path:
+                continue
+            if self._canonical_page_leaf_key(Path(path).stem) == cleaned:
+                return path
+        return None
+
+    def _canonical_page_leaf_key(self, page_name: str) -> str:
+        """Normalize leaf names for duplicate detection across input styles."""
+        raw = (page_name or "").strip().replace("_", " ")
+        return " ".join(raw.split()).lower()
+
+    def _ensure_inline_link_target_page(self, colon_path: str, *, template_name: str = "") -> tuple[str, bool]:
+        """Ensure link target exists for inline/Ctrl-L create flows.
+
+        Returns: (resolved_colon_path, created_new).
+        """
+        normalized_colon = ensure_root_colon_link(colon_path)
+        target_file = self._normalize_editor_path(colon_to_path(normalized_colon, self.vault_root_name))
+        target_file = self._resolve_case_insensitive_rel_path(target_file)
+        page_name = Path(target_file).stem
+        if not page_name:
+            return normalized_colon, False
+
+        existing_abs = Path(self.vault_root, target_file.lstrip("/")) if self.vault_root else None
+        if existing_abs and existing_abs.exists():
+            existing_colon = path_to_colon(target_file) or normalized_colon
+            return ensure_root_colon_link(existing_colon), False
+
+        existing_by_name = self._find_existing_page_by_leaf_name(page_name)
+        if existing_by_name:
+            existing_colon = path_to_colon(existing_by_name)
+            if existing_colon:
+                return ensure_root_colon_link(existing_colon), False
+
+        if self._read_only:
+            self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+            return normalized_colon, False
+        folder_path = self._file_path_to_folder(target_file)
+        if not self._ensure_page_folder(folder_path, allow_existing=True):
+            return normalized_colon, False
+
+        if template_name and template_name.strip():
+            template_path = self._resolve_template_path(template_name.strip(), fallback="Default")
+            self._apply_template_from_path(target_file, page_name, str(template_path))
+        else:
+            self._apply_new_page_template(target_file, page_name)
+        self._populate_vault_tree()
+
+        created_colon = path_to_colon(target_file) or normalized_colon
+        return ensure_root_colon_link(created_colon), True
 
 
     def _insert_date(self) -> None:
@@ -7634,6 +7714,16 @@ class MainWindow(QMainWindow):
             
             if "/" in page_name or ":" in page_name:
                 self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
+                return
+
+            # Keep page-creation behavior aligned with inline/Ctrl-L flows:
+            # if the leaf already exists (case/format-insensitive), open it instead.
+            existing_by_name = self._find_existing_page_by_leaf_name(page_name)
+            if existing_by_name:
+                self._pending_selection = existing_by_name
+                self._populate_vault_tree()
+                self._open_file(existing_by_name, cursor_at_end=True)
+                self.statusBar().showMessage("Page already exists; opened existing page", 4000)
                 return
             
             # Create the new page path (resolved_parent already determined above)
@@ -10835,6 +10925,17 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_inline_ai_worker", None):
             return
+        # Remove /ai trigger text only when action is actually performed.
+        try:
+            doc = self.editor.document()
+            raw_text = self.editor.toPlainText()
+            if 0 <= insert_pos <= len(raw_text) and raw_text[insert_pos:insert_pos + 4] == "/ai ":
+                tc = QTextCursor(doc)
+                tc.setPosition(insert_pos)
+                tc.setPosition(insert_pos + 4, QTextCursor.KeepAnchor)
+                tc.removeSelectedText()
+        except Exception:
+            pass
         try:
             from .ai_chat_panel import ServerManager, ApiWorker
         except Exception:
@@ -13673,7 +13774,9 @@ class MainWindow(QMainWindow):
         try:
             app = QApplication.instance()
             if app:
-                app.focusChanged.disconnect(self._on_focus_changed)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    app.focusChanged.disconnect(self._on_focus_changed)
         except:
             pass
         

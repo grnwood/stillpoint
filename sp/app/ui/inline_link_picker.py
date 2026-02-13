@@ -1,4 +1,4 @@
-"""Compact inline link picker overlay for // trigger."""
+"""Compact inline link picker overlays for quick-link and create-page triggers."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Callable
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
-from .path_utils import path_to_colon
+from .path_utils import path_to_colon, normalize_link_target
 import html
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ class HTMLDelegate(QStyledItemDelegate):
 
 
 class InlineLinkPickerOverlay(QDialog):
-    """Compact popup overlay for quickly inserting page links via // trigger."""
+    """Compact popup overlay for quick-link lookup or create-page insertion."""
     
     def __init__(
         self,
@@ -74,6 +74,7 @@ class InlineLinkPickerOverlay(QDialog):
         current_page_path: str | None = None,
     ) -> None:
         super().__init__(parent)
+        self._mode = "quick_link"
         self.setWindowTitle("Quick Link")
         self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setModal(False)
@@ -142,7 +143,7 @@ class InlineLinkPickerOverlay(QDialog):
         title = QLabel("Quick Link", card)
         title.setStyleSheet("font-weight: 600; font-size: 11px; color: #9fb7a9;")
         layout.addWidget(title)
-        
+
         self.search = QLineEdit(card)
         self.search.setPlaceholderText("Type to search pages...")
         self.search.setFocusPolicy(Qt.StrongFocus)
@@ -158,7 +159,7 @@ class InlineLinkPickerOverlay(QDialog):
         self.search.returnPressed.connect(self._on_search_return)
         self.search.installEventFilter(self)
         layout.addWidget(self.search)
-        
+
         self.list_widget = QListWidget(card)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
         self.list_widget.setStyleSheet(
@@ -182,11 +183,12 @@ class InlineLinkPickerOverlay(QDialog):
         self.list_widget.currentItemChanged.connect(self._on_selection_changed)
         self.list_widget.itemDoubleClicked.connect(self._accept_current)
         layout.addWidget(self.list_widget)
-        
-        hint = QLabel("↑↓ to navigate, Enter to select, Esc to cancel", card)
+        hint_text = "↑↓ to navigate, Enter to select, Esc to cancel"
+
+        hint = QLabel(hint_text, card)
         hint.setStyleSheet("color: #7b8f84; font-size: 10px;")
         layout.addWidget(hint)
-        
+
         self.resize(420, 300)
         self._refresh()
     
@@ -197,7 +199,6 @@ class InlineLinkPickerOverlay(QDialog):
         if self.list_widget.currentItem():
             self._accept_current()
         elif not self._has_matching_pages:
-            # No matches, create new page
             self._accept_current()
     
     def _on_selection_changed(self, current, previous) -> None:
@@ -207,9 +208,13 @@ class InlineLinkPickerOverlay(QDialog):
     def _accept_current(self) -> None:
         current = self.list_widget.currentItem()
         if current:
-            self._selected_path = current.data(Qt.UserRole)
-            # Check if this was the "create new page" item
-            self._is_new_page = not self._has_matching_pages
+            payload = current.data(Qt.UserRole)
+            if isinstance(payload, dict) and payload.get("create"):
+                self._selected_path = str(payload.get("target") or "")
+                self._is_new_page = True
+            else:
+                self._selected_path = str(payload or "")
+                self._is_new_page = False
         elif not self._has_matching_pages:
             # Create new page from search term
             search_term = self.search.text().strip()
@@ -220,26 +225,23 @@ class InlineLinkPickerOverlay(QDialog):
     
     def _generate_new_page_path(self, term: str) -> str:
         """Generate a colon-separated path for a new page based on search term."""
-        cleaned = term.strip().replace('/', ':')
-        
-        # If we have a current page, create the new page as a child
+        cleaned = normalize_link_target(term.strip().replace('/', ':')).lstrip(":")
+        if not cleaned:
+            return ""
+
+        # If we have a current page, create in that page location (child path).
         if self._current_page_path:
             try:
-                parent_colon = path_to_colon(self._current_page_path)
-                if parent_colon:
-                    # Remove leading colon from cleaned term if present
-                    if cleaned.startswith(':'):
-                        cleaned = cleaned[1:]
-                    # Create as child of current page
-                    return f"{parent_colon}:{cleaned}"
+                current_colon = path_to_colon(self._current_page_path)
+                if current_colon:
+                    return normalize_link_target(f":{current_colon}:{cleaned}")
+                return normalize_link_target(f":{cleaned}")
             except Exception:
                 pass
-        
+
         # Fallback: create at root level
-        if not cleaned.startswith(':'):
-            cleaned = ':' + cleaned
-        return cleaned
-    
+        return normalize_link_target(f":{cleaned}")
+
     def _refresh(self) -> None:
         """Refresh the list of matching pages."""
         term = self.search.text().strip()
@@ -255,6 +257,10 @@ class InlineLinkPickerOverlay(QDialog):
             pages = config.search_pages(term)
             term_lower = term.lower()
             matches = []
+            exact_exists = False
+            normalized_term = normalize_link_target(term).lstrip(":").lower()
+            term_leaf = normalized_term.split(":")[-1] if normalized_term else ""
+            typed_hierarchy = ":" in normalized_term
             
             for page in pages:
                 page_path = page.get("path", "")
@@ -263,6 +269,13 @@ class InlineLinkPickerOverlay(QDialog):
                     continue
                 colon_path = path_to_colon(page_path)
                 if colon_path:
+                    normalized_colon = normalize_link_target(":" + colon_path.lstrip(":")).lstrip(":").lower()
+                    if normalized_colon == normalized_term:
+                        exact_exists = True
+                    if not typed_hierarchy and term_leaf:
+                        page_leaf = normalized_colon.split(":")[-1]
+                        if page_leaf == term_leaf:
+                            exact_exists = True
                     matches.append((page_path, colon_path))
             
             # Sort by relevance (exact match, starts with, contains)
@@ -293,15 +306,18 @@ class InlineLinkPickerOverlay(QDialog):
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.UserRole, colon_path)
                 self.list_widget.addItem(item)
-            
-            if self._has_matching_pages:
-                self.list_widget.setCurrentRow(0)
-            else:
-                # Show "create new page" option
+
+            show_create = bool(term) and not exact_exists
+            if show_create:
                 create_text = f"<i>Create new page: <b>{html.escape(term)}</b></i>"
                 item = QListWidgetItem(create_text)
-                item.setData(Qt.UserRole, self._generate_new_page_path(term))
-                self.list_widget.addItem(item)
+                item.setData(
+                    Qt.UserRole,
+                    {"create": True, "target": self._generate_new_page_path(term)},
+                )
+                self.list_widget.insertItem(0, item)
+                self.list_widget.setCurrentRow(0)
+            elif self._has_matching_pages:
                 self.list_widget.setCurrentRow(0)
         
         except Exception as e:
@@ -312,7 +328,7 @@ class InlineLinkPickerOverlay(QDialog):
         if obj is self.search and event.type() == event.Type.KeyPress:
             key = event.key()
             mods = event.modifiers() & ~Qt.KeypadModifier  # Strip keypad modifier
-            
+
             # Handle up/down arrows
             if key == Qt.Key_Up:
                 self._move_selection(-1)
@@ -356,7 +372,18 @@ class InlineLinkPickerOverlay(QDialog):
         super().showEvent(event)
         if self._anchor is not None:
             try:
-                self.move(self._anchor)
+                from PySide6.QtGui import QGuiApplication
+                screen = QGuiApplication.screenAt(self._anchor) or QGuiApplication.primaryScreen()
+                if screen:
+                    geo = screen.availableGeometry()
+                    margin = 8
+                    x = self._anchor.x()
+                    y = self._anchor.y()
+                    x = max(geo.left() + margin, min(x, geo.right() - self.width() - margin))
+                    y = max(geo.top() + margin, min(y, geo.bottom() - self.height() - margin))
+                    self.move(x, y)
+                else:
+                    self.move(self._anchor)
             except Exception:
                 pass
         self._ensure_search_focus()

@@ -1,16 +1,10 @@
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.markdown_editor import MarkdownEditor
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
 @pytest.fixture
-def editor(app):
+def editor(qapp):
     ed = MarkdownEditor()
     yield ed
     ed.close()

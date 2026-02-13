@@ -2541,46 +2541,50 @@ class MarkdownEditor(QTextEdit):
         pass
     
     def _check_inline_link_trigger(self) -> None:
-        """Check if user typed // trigger and show quick link picker."""
+        """Check inline slash triggers and launch the corresponding popup."""
         if self._processing_inline_trigger or self._display_guard:
             return
         cursor = self.textCursor()
         pos = cursor.position()
 
-        # Look back 3 characters to check for '//'
         if pos < 3:
             return
 
-        trigger_cursor = QTextCursor(cursor)
-        trigger_cursor.setPosition(pos - 3)
-        trigger_cursor.setPosition(pos, QTextCursor.KeepAnchor)
-        trigger_text = trigger_cursor.selectedText()
-        if trigger_text == "[[ ":
+        four_char_trigger = ""
+        if pos >= 4:
+            trigger_cursor = QTextCursor(cursor)
+            trigger_cursor.setPosition(pos - 4)
+            trigger_cursor.setPosition(pos, QTextCursor.KeepAnchor)
+            four_char_trigger = trigger_cursor.selectedText()
+
+        if four_char_trigger == "/ai ":
             if not config.load_enable_ai_chats():
                 return
             self._processing_inline_trigger = True
             try:
-                prev_display_guard = self._display_guard
-                self._display_guard = True
-                trigger_cursor.removeSelectedText()
-                self.setTextCursor(trigger_cursor)
                 cursor_rect = self.cursorRect()
                 anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
             finally:
-                self._display_guard = prev_display_guard
                 self._processing_inline_trigger = False
-            self.aiInlinePromptRequested.emit(anchor_pos, trigger_cursor.position())
+            self.aiInlinePromptRequested.emit(anchor_pos, pos - 4)
             return
 
-        # Check if we're inside a [link|label] construct - skip trigger if so
+        cursor.setPosition(pos - 3)
+        cursor.setPosition(pos, QTextCursor.KeepAnchor)
+        trigger_text = cursor.selectedText()
+
+        if trigger_text != "// ":
+            return
+
+        # Retain bracket-context suppression so we don't trigger mid-link edit.
         line_start = cursor.block().position()
         line_text = cursor.block().text()
         pos_in_line = pos - line_start
-        
+
         # Don't trigger if we just completed a link (] followed by space)
         if pos_in_line >= 2 and line_text[pos_in_line - 2:pos_in_line] == "] ":
             return
-        
+
         # Look for unclosed [ before cursor position
         open_bracket = line_text.rfind('[', 0, pos_in_line)
         if open_bracket != -1:
@@ -2589,79 +2593,92 @@ class MarkdownEditor(QTextEdit):
             if close_bracket == -1:
                 # We're inside an unclosed [link|label] - don't trigger
                 return
-        
-        cursor.setPosition(pos - 3)
-        cursor.setPosition(pos, QTextCursor.KeepAnchor)
-        trigger_text = cursor.selectedText()
-        
-        # Check for // trigger (quick link)
-        if trigger_text == "// ":
-            # Set guard flag to prevent duplicate processing
-            self._processing_inline_trigger = True
+
+        trigger_start = pos - 3
+        trigger_end = pos
+
+        self._processing_inline_trigger = True
+        try:
+            cursor_rect = self.cursorRect()
+            anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
+        finally:
+            self._processing_inline_trigger = False
+
+        self._trigger_inline_link_insert(
+            anchor_pos,
+            trigger_start=trigger_start,
+            trigger_end=trigger_end,
+        )
+        return
+
+    def _replace_trigger_and_insert_link(
+        self,
+        trigger_start: int,
+        trigger_end: int,
+        colon_path: str,
+        *,
+        surround_with_spaces: bool = True,
+        ensure_trailing_space: bool = False,
+    ) -> None:
+        doc_len = len(self.toPlainText())
+        start = max(0, min(trigger_start, doc_len))
+        end = max(0, min(trigger_end, doc_len))
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        self.setTextCursor(cursor)
+        self.insert_link(colon_path, None, surround_with_spaces=surround_with_spaces)
+        if ensure_trailing_space:
+            post_cursor = self.textCursor()
+            text = self.toPlainText()
+            pos = post_cursor.position()
+            if pos >= len(text) or text[pos] != " ":
+                post_cursor.insertText(" ")
+                self.setTextCursor(post_cursor)
+
+    def _ensure_overlay_visible_on_screen(self, anchor: QPoint) -> QPoint:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+            if not screen:
+                return anchor
+            geo = screen.availableGeometry()
+            margin = 8
+            x = max(geo.left() + margin, min(anchor.x(), geo.right() - margin))
+            y = max(geo.top() + margin, min(anchor.y(), geo.bottom() - margin))
+            return QPoint(x, y)
+        except Exception:
+            return anchor
+
+    def _insert_inline_created_page_link(self, colon_path: str, template_name: str) -> tuple[str, bool]:
+        target = colon_path
+        created = False
+        window = self.window()
+        ensure_fn = getattr(window, "_ensure_inline_link_target_page", None)
+        if callable(ensure_fn):
             try:
-                prev_display_guard = self._display_guard
-                self._display_guard = True
-                # Remove the trigger and update cursor
-                cursor.removeSelectedText()
-                self.setTextCursor(cursor)
-                # Capture cursor position AFTER removing trigger
-                saved_cursor_pos = cursor.position()
-                saved_anchor_pos = cursor.anchor()
-                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
-                    print(
-                        "[DEBUG inline //] captured cursor after trigger removal: "
-                        f"pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.toPlainText())}"
-                    )
-                # Get cursor position for dialog placement (after removal)
-                cursor_rect = self.cursorRect()
-                anchor_pos = self.mapToGlobal(cursor_rect.bottomLeft())
-            finally:
-                self._display_guard = prev_display_guard
-                # Always clear guard flag
-                self._processing_inline_trigger = False
-            # Show quick link dialog near cursor (with display guard released)
-            self._trigger_inline_link_insert(
-                anchor_pos,
-                saved_cursor_pos=saved_cursor_pos,
-                saved_anchor_pos=saved_anchor_pos,
-            )
-            return
-    
+                resolved_target, created = ensure_fn(colon_path, template_name=template_name)
+                if resolved_target:
+                    target = resolved_target
+            except Exception:
+                pass
+        return target, created
+
     def _trigger_inline_link_insert(
         self,
         anchor_pos: QPoint,
         *,
-        saved_cursor_pos: int | None = None,
-        saved_anchor_pos: int | None = None,
+        trigger_start: int,
+        trigger_end: int,
     ) -> None:
-        """Show compact inline link picker and insert at the trigger position."""
+        """Show compact inline popup and insert at the trigger position."""
         try:
             from .inline_link_picker import InlineLinkPickerOverlay
 
-            def _restore_cursor() -> QTextCursor | None:
-                if saved_cursor_pos is None or saved_anchor_pos is None:
-                    return None
-                doc_len = len(self.toPlainText())
-                anchor = max(0, min(saved_anchor_pos, doc_len))
-                pos = max(0, min(saved_cursor_pos, doc_len))
-                if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
-                    print(
-                        "[DEBUG inline //] restoring cursor: "
-                        f"saved_pos={saved_cursor_pos}, saved_anchor={saved_anchor_pos}, "
-                        f"clamped_pos={pos}, clamped_anchor={anchor}, doc_len={doc_len}"
-                    )
-                cursor = QTextCursor(self.document())
-                cursor.setPosition(anchor)
-                cursor.setPosition(
-                    pos,
-                    QTextCursor.KeepAnchor if anchor != pos else QTextCursor.MoveAnchor,
-                )
-                self.setTextCursor(cursor)
-                return cursor
-
             # Check if vi mode is enabled
             vi_mode_enabled = getattr(self, '_vi_mode_enabled', False)
-            
+
             # Get filter state from parent (main_window)
             filter_prefix = None
             filter_label = None
@@ -2677,17 +2694,18 @@ class MarkdownEditor(QTextEdit):
                             clear_filter_cb = parent_window._clear_nav_filter
             except Exception:
                 pass
-            
+
+            anchor_for_overlay = self._ensure_overlay_visible_on_screen(anchor_pos)
             overlay = InlineLinkPickerOverlay(
                 parent=self,
-                anchor=anchor_pos,
+                anchor=anchor_for_overlay,
                 vi_mode_enabled=vi_mode_enabled,
                 filter_prefix=filter_prefix,
                 filter_label=filter_label,
                 clear_filter_cb=clear_filter_cb,
                 current_page_path=self._current_path,
             )
-            
+
             # Use focus suppression to prevent editor autosave
             self.push_focus_lost_suppression()
             try:
@@ -2697,26 +2715,26 @@ class MarkdownEditor(QTextEdit):
                 result = overlay.exec()
             finally:
                 self.pop_focus_lost_suppression()
-                _restore_cursor()
                 QTimer.singleShot(0, self.setFocus)
 
-            if result == QDialog.Accepted:
-                colon_path = overlay.selected_path()
-                if colon_path:
-                    restore_cursor = _restore_cursor()
-                    if restore_cursor:
-                        self.setTextCursor(restore_cursor)
-                    self.insert_link(colon_path, None, surround_with_spaces=True)
-                    # Only activate/open the page if it's a new page
-                    if overlay.is_new_page():
-                        link_target = ensure_root_colon_link(colon_path)
-                        try:
-                            self._vi_restore_after_link_activation = bool(self._vi_insert_mode)
-                        except Exception:
-                            self._vi_restore_after_link_activation = False
-                        QTimer.singleShot(0, lambda target=link_target: self.linkActivated.emit(target))
+            if result != QDialog.Accepted:
+                return
+            colon_path = overlay.selected_path()
+            if not colon_path:
+                return
+            final_target = colon_path
+            if overlay.is_new_page():
+                final_target, _ = self._insert_inline_created_page_link(colon_path, "")
+            self._replace_trigger_and_insert_link(
+                trigger_start,
+                trigger_end,
+                final_target,
+                surround_with_spaces=True,
+                ensure_trailing_space=overlay.is_new_page(),
+            )
         except Exception as e:
             logger.warning(f"Failed to show inline link picker: {e}")
+            return
 
     def _refresh_camel_links(self) -> None:
         """Convert any +CamelCase links in the document and re-render display."""
@@ -4247,8 +4265,7 @@ class MarkdownEditor(QTextEdit):
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
         super().keyReleaseEvent(event)
-        # Phase 3: +CamelCase auto-conversion removed - use [[ or // triggers instead
-        # Check for inline link triggers: [[ or //
+        # Phase 3: +CamelCase auto-conversion removed - use // and /ai triggers instead
         if event.key() == Qt.Key_Space and not (event.modifiers() & ~Qt.KeypadModifier):
             # Only trigger in insert mode (or when vi mode is disabled)
             if not self._vi_feature_enabled or self._vi_insert_mode:

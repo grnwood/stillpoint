@@ -79,6 +79,7 @@ class InsertLinkDialog(QDialog):
         filter_prefix: str | None = None,
         filter_label: str | None = None,
         clear_filter_cb=None,
+        current_page_path: str | None = None,
         editing: bool = False,
         initial_link_target: str | None = None,
         initial_link_label: str | None = None,
@@ -96,8 +97,12 @@ class InsertLinkDialog(QDialog):
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
         self._clear_filter_cb = clear_filter_cb
+        self._current_page_path = current_page_path
         self._launched_with_selection = False
         self._seeded_text = ""
+        self._create_new_selected = False
+        self._create_new_target: str | None = None
+        self._accepted_target: str | None = None
         
         # Set up geometry save timer (debounced)
         self.geometry_save_timer = QTimer(self)
@@ -274,6 +279,10 @@ class InsertLinkDialog(QDialog):
 
     def selected_colon_path(self) -> str | None:
         """Return the selected page in colon notation or HTTP URL."""
+        if self._create_new_selected and self._create_new_target:
+            return self._create_new_target
+        if self._accepted_target:
+            return self._accepted_target
         text = self.search.text().strip()
         # Don't normalize HTTP URLs
         if text.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
@@ -290,20 +299,34 @@ class InsertLinkDialog(QDialog):
         name = name.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
         return name or None
 
+    def should_create_new_page(self) -> bool:
+        """Return True when the selected action is explicit 'create new page'."""
+        return self._create_new_selected and bool(self._create_new_target)
+
     def _accept_from_list(self):
         """Accept dialog when item in list is double-clicked."""
         item = self.list_widget.currentItem()
         if item:
-            colon_path = item.data(Qt.UserRole)
+            payload = item.data(Qt.UserRole)
+            if isinstance(payload, dict) and payload.get("create"):
+                target = str(payload.get("target") or "").strip()
+                self._create_new_selected = bool(target)
+                self._create_new_target = target or None
+                self._accepted_target = None
+                self.accept()
+                return
+            colon_path = str(payload or "")
             if colon_path:
-                normalized = normalize_link_target(colon_path)
-                self.search.setText(normalized)
+                self._accepted_target = normalize_link_target(colon_path)
+            self._create_new_selected = False
+            self._create_new_target = None
             self.accept()
 
     def _on_search_changed(self):
         """Called when user types in the search field."""
         if self._ignore_search_change:
             return
+        self._accepted_target = None
         # If typing an HTTP URL, skip page search
         text = self.search.text().strip()
         if text.startswith(("http://", "https://")):
@@ -328,14 +351,18 @@ class InsertLinkDialog(QDialog):
     def _on_selection_changed(self, current, previous):
         """Called when user navigates through the list with arrow keys or Shift+J/K."""
         if current:
-            colon_path = current.data(Qt.UserRole)
+            payload = current.data(Qt.UserRole)
+            if isinstance(payload, dict) and payload.get("create"):
+                target = str(payload.get("target") or "").strip()
+                self._create_new_selected = bool(target)
+                self._create_new_target = target or None
+                self._accepted_target = None
+                return
+            self._create_new_selected = False
+            self._create_new_target = None
+            colon_path = str(payload or "")
             if colon_path:
-                # Update the search field with the selected item
-                self._ignore_search_change = True
-                self.search.blockSignals(True)
-                self.search.setText(colon_path)
-                self.search.blockSignals(False)
-                self._ignore_search_change = False
+                self._accepted_target = normalize_link_target(colon_path)
                 # Update link name if not manually edited
                 if not self._link_name_manually_edited:
                     self.link_name.blockSignals(True)
@@ -417,29 +444,35 @@ class InsertLinkDialog(QDialog):
         current_text = self.search.text().strip()
         if not current_text:
             return
-            
-        # Check if exact match exists in list
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item and item.data(Qt.UserRole) == current_text:
-                # Exact match found, just accept
-                self.list_widget.setCurrentItem(item)
-                self.accept()
-                return
-        
-        # No exact match - this will create a new page
+
+        # Prefer current list selection if present.
+        if self._activate_current():
+            return
         self.accept()
 
     def _activate_current(self) -> bool:
         """Accept dialog if an item is selected, or use what's typed in the search field."""
         item = self.list_widget.currentItem()
         if item:
-            colon_path = item.data(Qt.UserRole)
+            payload = item.data(Qt.UserRole)
+            if isinstance(payload, dict) and payload.get("create"):
+                target = str(payload.get("target") or "").strip()
+                self._create_new_selected = bool(target)
+                self._create_new_target = target or None
+                self._accepted_target = None
+                self.accept()
+                return True
+            colon_path = str(payload or "")
             if colon_path:
-                self.search.setText(colon_path)
+                self._accepted_target = normalize_link_target(colon_path)
+            self._create_new_selected = False
+            self._create_new_target = None
             self.accept()
             return True
         elif self.search.text().strip():
+            self._accepted_target = None
+            self._create_new_selected = False
+            self._create_new_target = None
             self.accept()
             return True
         return False
@@ -449,6 +482,9 @@ class InsertLinkDialog(QDialog):
         term = self.search.text().strip()
         if not term:
             self.list_widget.clear()
+            self._accepted_target = None
+            self._create_new_selected = False
+            self._create_new_target = None
             return
 
         search_term = term
@@ -460,6 +496,12 @@ class InsertLinkDialog(QDialog):
         query = normalized_term or search_term
         pages = config.search_pages(query)
         self.list_widget.clear()
+        existing_exact = False
+        term_normalized = normalize_link_target(term)
+        if term_normalized and not term_normalized.startswith(":"):
+            term_normalized = ":" + term_normalized
+        plain_leaf_term = term_normalized.lstrip(":").split(":")[-1].lower() if term_normalized else ""
+        typed_hierarchy = ":" in term_normalized.lstrip(":")
 
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
@@ -468,16 +510,67 @@ class InsertLinkDialog(QDialog):
             colon_path = path_to_colon(page["path"])
             if not colon_path:
                 continue
+            rooted_colon = normalize_link_target(":" + colon_path.lstrip(":"))
+            if rooted_colon.lower() == term_normalized.lower():
+                existing_exact = True
+            if not typed_hierarchy and plain_leaf_term:
+                page_leaf = rooted_colon.lstrip(":").split(":")[-1].lower()
+                if page_leaf == plain_leaf_term:
+                    existing_exact = True
             display_text = self._display_label(page, colon_path)
 
             item = QListWidgetItem(display_text)
-            item.setData(Qt.UserRole, normalize_link_target(colon_path))
+            item.setData(Qt.UserRole, rooted_colon)
             item.setToolTip(display_text)
             self.list_widget.addItem(item)
 
-        # Do not auto-select results; user controls selection via keyboard/mouse
+        if term and not term.startswith(("http://", "https://")) and not existing_exact:
+            create_target = self._generate_create_target(term)
+            current_location = self._current_page_display()
+            create_text = (
+                f"<i>Create new page '{html.escape(term)}' at '{html.escape(current_location)}'</i>"
+            )
+            create_item = QListWidgetItem(create_text)
+            create_item.setData(
+                Qt.UserRole,
+                {"create": True, "target": create_target},
+            )
+            create_item.setToolTip(create_text)
+            self.list_widget.insertItem(0, create_item)
+
+        # Keep a deterministic default selection for Enter.
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+        else:
+            self._accepted_target = None
+            self._create_new_selected = False
+            self._create_new_target = None
         if self.list_widget.count() == 0:
             self.list_widget.clearSelection()
+
+    def _current_page_display(self) -> str:
+        if not self._current_page_path:
+            return "/"
+        try:
+            return path_to_colon(self._current_page_path) or self._current_page_path
+        except Exception:
+            return self._current_page_path
+
+    def _generate_create_target(self, raw_name: str) -> str:
+        clean = normalize_link_target(raw_name).lstrip(":")
+        if not clean:
+            return ""
+        # If user typed a hierarchy explicitly, treat it as absolute colon path.
+        if ":" in clean:
+            return normalize_link_target(f":{clean}")
+        if self._current_page_path:
+            rel_current = self._current_page_path.strip("/")
+            parts = rel_current.split("/") if rel_current else []
+            parent_parts = parts[:-1] if parts else []
+            parent_path = ":".join(p for p in parent_parts if p)
+            if parent_path:
+                return normalize_link_target(f":{parent_path}:{clean}")
+        return normalize_link_target(f":{clean}")
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""

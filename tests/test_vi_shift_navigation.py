@@ -7,13 +7,6 @@ from PySide6.QtTest import QTest
 from sp.app.ui.markdown_editor import MarkdownEditor
 
 
-def _ensure_qapp() -> QApplication:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
-
-
 def _force_initial_paint(widget: MarkdownEditor, app: QApplication) -> None:
     widget.resize(400, 300)
     widget.show()
@@ -24,17 +17,12 @@ def _force_initial_paint(widget: MarkdownEditor, app: QApplication) -> None:
     app.processEvents()
 
 
-@pytest.fixture(scope="module")
-def app() -> QApplication:
-    return _ensure_qapp()
-
-
-def test_shift_n_at_end_selects_to_document_end(app: QApplication) -> None:
+def test_shift_n_at_end_selects_to_document_end(qapp: QApplication) -> None:
     editor = MarkdownEditor()
     # three lines, no trailing newline on final line
     editor.setPlainText("line1\nline2\nlastline")
     editor.set_vi_mode_enabled(True)
-    _force_initial_paint(editor, app)
+    _force_initial_paint(editor, qapp)
 
     # place cursor at start of last line
     cursor = editor.textCursor()
@@ -55,11 +43,11 @@ def test_shift_n_at_end_selects_to_document_end(app: QApplication) -> None:
     editor.close()
 
 
-def test_shift_u_at_start_selects_to_document_start(app: QApplication) -> None:
+def test_shift_u_at_start_selects_to_document_start(qapp: QApplication) -> None:
     editor = MarkdownEditor()
     editor.setPlainText("first line\nsecond line\nthird line")
     editor.set_vi_mode_enabled(True)
-    _force_initial_paint(editor, app)
+    _force_initial_paint(editor, qapp)
 
     # place cursor in first line, middle
     cursor = editor.textCursor()

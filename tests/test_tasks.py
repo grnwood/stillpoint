@@ -23,7 +23,7 @@ def test_extract_tasks_parses_metadata():
 
     done = tasks[1]
     assert done.done is True
-    assert "#done" in done.tags
+    assert "#done" in done.tags 
 
 
 def test_extract_tasks_handles_invalid_due():
