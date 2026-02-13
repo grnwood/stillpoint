@@ -1604,7 +1604,7 @@ def files_activity(payload: ActivityRangePayload) -> dict:
             try:
                 rows = conn.execute(
                     """
-                    SELECT path, COALESCE(updated, 0), COALESCE(created_at, updated, last_modified, 0)
+                    SELECT path, COALESCE(updated, 0), COALESCE(created_at, updated, 0)
                     FROM pages
                     WHERE deleted = 0
                     """
@@ -1629,12 +1629,12 @@ def files_activity(payload: ActivityRangePayload) -> dict:
                     event_dt = created_dt
                 else:
                     include = updated_in or created_in
-                    if created_in and (not updated_in or created_dt >= updated_dt):
-                        event = "created"
-                        event_dt = created_dt
-                    else:
+                    if updated_in:
                         event = "updated"
                         event_dt = updated_dt
+                    else:
+                        event = "created"
+                        event_dt = created_dt
                 if not include:
                     continue
                 items.append(

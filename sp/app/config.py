@@ -2278,14 +2278,14 @@ def update_page_index(
     links: Iterable[str],
     tasks: Sequence[dict],
     display_order: int | None = None,
-    last_modified: float | None = None,
+    updated: float | None = None,
 ) -> None:
     conn = _get_conn()
     if not conn:
         return
     _invalidate_task_cache()
     now = time.time()
-    modified_ts = last_modified if last_modified is not None else now
+    modified_ts = updated if updated is not None else now
     parent_path = _parent_folder_for_page(path)
     existing_order = None
     try:
@@ -2321,7 +2321,6 @@ def update_page_index(
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 updated = excluded.updated,
-                last_modified = excluded.updated,
                 parent_path = excluded.parent_path,
                 display_order = COALESCE(excluded.display_order, pages.display_order),
                 path_ci = excluded.path_ci,
@@ -2638,7 +2637,7 @@ def move_tree_index(old_folder_path: str, new_folder_path: str, root: Path, *, s
                 SET path = ?,
                     parent_path = ?,
                     display_order = ?,
-                    last_modified = ?,
+                    updated = ?,
                     path_ci = ?,
                     title_ci = lower(COALESCE(title, ''))
                 WHERE path = ?
@@ -2778,7 +2777,7 @@ def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     parent_path = excluded.parent_path,
-                    last_modified = excluded.updated,
+                    updated = excluded.updated,
                     display_order = COALESCE(pages.display_order, excluded.display_order),
                     path_ci = excluded.path_ci,
                     title_ci = lower(COALESCE(pages.title, excluded.title)),
@@ -3710,18 +3709,18 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     """Add newly introduced page columns and backfill defaults."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(pages)").fetchall()}
     added = False
+    hierarchy_added = False
     normalized_added = False
     
     # Original columns
     if "parent_path" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN parent_path TEXT")
         added = True
+        hierarchy_added = True
     if "display_order" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN display_order INTEGER")
         added = True
-    if "last_modified" not in existing:
-        conn.execute("ALTER TABLE pages ADD COLUMN last_modified REAL")
-        added = True
+        hierarchy_added = True
     if "created_at" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN created_at REAL")
         added = True
@@ -3752,17 +3751,21 @@ def _ensure_page_columns(conn: sqlite3.Connection) -> None:
     if "pinned" not in existing:
         conn.execute("ALTER TABLE pages ADD COLUMN pinned INTEGER DEFAULT 0")
         normalized_added = True
-    if added:
+    if added and hierarchy_added:
         _backfill_page_hierarchy(conn)
+    try:
+        # Canonicalize creation timestamps: never later than updated.
+        # This also corrects older backfills that used "now" for created_at.
+        conn.execute(
+            "UPDATE pages SET created_at = updated "
+            "WHERE updated IS NOT NULL AND (created_at IS NULL OR created_at > updated)"
+        )
         try:
-            now = time.time()
-            conn.execute("UPDATE pages SET last_modified = COALESCE(last_modified, updated, ?) WHERE last_modified IS NULL", (now,))
-            conn.execute(
-                "UPDATE pages SET created_at = COALESCE(created_at, updated, last_modified, ?) WHERE created_at IS NULL",
-                (now,),
-            )
+            conn.execute("UPDATE pages SET updated = created_at WHERE updated IS NULL AND created_at IS NOT NULL")
         except Exception:
             pass
+    except Exception:
+        pass
     if normalized_added or ("path_ci" in existing and "title_ci" in existing):
         _backfill_page_normalized_columns(conn)
     try:
@@ -3788,7 +3791,7 @@ def _backfill_page_hierarchy(conn: sqlite3.Connection) -> None:
             updates.append((parent, idx, now, path))
     if updates:
         conn.executemany(
-            "UPDATE pages SET parent_path = ?, display_order = ?, last_modified = COALESCE(last_modified, ?) WHERE path = ?",
+            "UPDATE pages SET parent_path = ?, display_order = ?, updated = COALESCE(updated, ?) WHERE path = ?",
             updates,
         )
         conn.commit()
@@ -3819,7 +3822,6 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             title TEXT,
             updated REAL,
             created_at REAL,
-            last_modified REAL,
             parent_path TEXT,
             display_order INTEGER,
             path_ci TEXT,
