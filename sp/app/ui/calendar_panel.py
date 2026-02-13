@@ -2575,13 +2575,33 @@ class CalendarPanel(QWidget):
         for date in dates:
             base_dir = Path(self.vault_root) / "Journal" / f"{date.year():04d}" / f"{date.month():02d}" / f"{date.day():02d}"
             date_label = date.toString("yyyy-MM-dd")
+            weekday_label = date.toString("dddd")
             if not base_dir.exists():
                 continue
+
             day_page = base_dir / f"{base_dir.name}{PAGE_SUFFIX}"
+            day_rel: Optional[str] = None
+            if day_page.exists():
+                try:
+                    day_rel = "/" + day_page.relative_to(self.vault_root).as_posix()
+                except Exception:
+                    day_rel = None
+
+            # Group multi-day subpages under a day header (clickable to day page when present).
+            header_item = QListWidgetItem(f"{date_label} ({weekday_label})")
+            header_item.setData(PATH_ROLE, day_rel)
+            header_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            try:
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+            except Exception:
+                pass
+            self.subpage_list.addItem(header_item)
+
             if day_page.exists():
                 total_files.append(day_page)
                 day_entries += 1
-                self._add_insight_item(f"{date_label} (day)", "/" + day_page.relative_to(self.vault_root).as_posix())
             subpages = self._list_day_subpages(base_dir)
             for label, rel in subpages:
                 target = Path(self.vault_root) / rel.lstrip("/")
@@ -2592,7 +2612,7 @@ class CalendarPanel(QWidget):
                     short = Path(rel).stem
                 except Exception:
                     short = label
-                self._add_insight_item(f"{date_label} • {short}", rel)
+                self._add_insight_item(f"   {short}", rel)
         for file in total_files:
             try:
                 text = file.read_text(encoding="utf-8")
