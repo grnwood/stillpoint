@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices, QPalette
 from PySide6.QtGui import QCursor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -929,11 +929,18 @@ class TaskPanel(QWidget):
             painter = QPainter(pixmap)
             renderer.render(painter)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.fillRect(pixmap.rect(), self._icon_tint_color())
             painter.end()
             return QIcon(pixmap)
         except Exception:
             return QIcon()
+
+    def _icon_tint_color(self) -> QColor:
+        palette = QApplication.palette()
+        bg = palette.color(QPalette.Window)
+        if bg.lightness() > 128:
+            return QColor(0, 0, 0)
+        return QColor(255, 255, 255)
 
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(24, 24))

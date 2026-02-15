@@ -4818,10 +4818,16 @@ class MarkdownEditor(QTextEdit):
         asset_finder = getattr(window, "_find_asset", None)
         if not callable(icon_loader) or not callable(asset_finder):
             return None
-        left_icon = icon_loader(asset_finder("left.svg"), Qt.white, size=18)
-        right_icon = icon_loader(asset_finder("right.svg"), Qt.white, size=18)
-        up_icon = icon_loader(asset_finder("up.svg"), Qt.white, size=18)
-        down_icon = icon_loader(asset_finder("down.svg"), Qt.white, size=18)
+        icon_color_getter = getattr(window, "_main_icon_color", None)
+        if callable(icon_color_getter):
+            icon_color = icon_color_getter()
+        else:
+            palette = QApplication.palette()
+            icon_color = QColor(0, 0, 0) if palette.color(QPalette.Window).lightness() > 128 else QColor(255, 255, 255)
+        left_icon = icon_loader(asset_finder("left.svg"), icon_color, size=18)
+        right_icon = icon_loader(asset_finder("right.svg"), icon_color, size=18)
+        up_icon = icon_loader(asset_finder("up.svg"), icon_color, size=18)
+        down_icon = icon_loader(asset_finder("down.svg"), icon_color, size=18)
         if not any((left_icon, right_icon, up_icon, down_icon)):
             return None
         container = QWidget()

@@ -1589,11 +1589,18 @@ class CalendarPanel(QWidget):
             painter = QPainter(pixmap)
             renderer.render(painter)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.fillRect(pixmap.rect(), self._icon_tint_color())
             painter.end()
             return QIcon(pixmap)
         except Exception:
             return QIcon()
+
+    def _icon_tint_color(self) -> QColor:
+        palette = QApplication.palette()
+        bg = palette.color(QPalette.Window)
+        if bg.lightness() > 128:
+            return QColor(0, 0, 0)
+        return QColor(255, 255, 255)
 
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(28, 28))

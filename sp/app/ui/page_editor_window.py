@@ -6,7 +6,18 @@ import traceback
 import httpx
 
 from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QColor, QIcon, QTextCursor, QTextFormat, QPalette
+from PySide6.QtGui import (
+    QAction,
+    QKeySequence,
+    QShortcut,
+    QColor,
+    QIcon,
+    QTextCursor,
+    QTextFormat,
+    QPalette,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -299,7 +310,9 @@ class PageEditorWindow(QMainWindow):
         save_action.setToolTip("Save (Ctrl+S)")
         save_icon_path = assets_root / "save.svg"
         if save_icon_path.exists():
-            save_action.setIcon(QIcon(str(save_icon_path)))
+            icon = self._load_tinted_icon(save_icon_path, size=16)
+            if icon:
+                save_action.setIcon(icon)
         save_action.triggered.connect(lambda: self._save_current_file(auto=False, reason="manual save"))
         toolbar.addAction(save_action)
         self.addAction(save_action)  # Register shortcut with window
@@ -310,7 +323,9 @@ class PageEditorWindow(QMainWindow):
         reload_action.setToolTip("Reload current page (Ctrl+R)")
         reload_icon_path = assets_root / "reload.svg"
         if reload_icon_path.exists():
-            reload_action.setIcon(QIcon(str(reload_icon_path)))
+            icon = self._load_tinted_icon(reload_icon_path, size=16)
+            if icon:
+                reload_action.setIcon(icon)
         reload_action.triggered.connect(self._reload_current_page)
         toolbar.addAction(reload_action)
         self.addAction(reload_action)
@@ -319,7 +334,9 @@ class PageEditorWindow(QMainWindow):
         insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
         link_icon_path = assets_root / "link.svg"
         if link_icon_path.exists():
-            insert_link_action.setIcon(QIcon(str(link_icon_path)))
+            icon = self._load_tinted_icon(link_icon_path, size=16)
+            if icon:
+                insert_link_action.setIcon(icon)
         insert_link_action.triggered.connect(self._insert_link)
         toolbar.addAction(insert_link_action)
         toolbar.addSeparator()
@@ -327,7 +344,9 @@ class PageEditorWindow(QMainWindow):
         ai_action.setToolTip("AI assist (one-shot)")
         icon_path = assets_root / "ai.svg"
         if icon_path.exists():
-            ai_action.setIcon(QIcon(str(icon_path)))
+            icon = self._load_tinted_icon(icon_path, size=16)
+            if icon:
+                ai_action.setIcon(icon)
         ai_action.triggered.connect(self._open_ai_assist)
         toolbar.addAction(ai_action)
         font_up = QAction("A+", self)
@@ -340,6 +359,29 @@ class PageEditorWindow(QMainWindow):
         toolbar.addAction(font_up)
 
         self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+    def _icon_tint_color(self) -> QColor:
+        pal = QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        if bg.lightness() > 128:
+            return QColor(0, 0, 0)
+        return QColor(255, 255, 255)
+
+    def _load_tinted_icon(self, path: Path, size: int = 16) -> Optional[QIcon]:
+        if not path.exists():
+            return None
+        icon = QIcon(str(path))
+        pm = icon.pixmap(size, size)
+        if pm.isNull():
+            return icon
+        colored = QPixmap(pm.size())
+        colored.fill(Qt.transparent)
+        painter = QPainter(colored)
+        painter.drawPixmap(0, 0, pm)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(colored.rect(), self._icon_tint_color())
+        painter.end()
+        return QIcon(colored)
 
     def _load_content(self) -> None:
         tracer = PageLoadLogger(self._source_path) if PAGE_LOGGING_ENABLED else None

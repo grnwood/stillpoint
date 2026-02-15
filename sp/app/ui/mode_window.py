@@ -428,7 +428,9 @@ class ModeWindow(QMainWindow):
             return None
         btn = QToolButton()
         btn.setAutoRaise(True)
-        btn.setIcon(QIcon(str(ai_path)))
+        icon = self._tinted_icon(ai_path, size=18)
+        if icon:
+            btn.setIcon(icon)
         btn.setIconSize(QSize(18, 18))
         btn.setToolTip("AI assist (one-shot)")
         btn.setCursor(Qt.PointingHandCursor)
@@ -716,8 +718,6 @@ class ModeWindow(QMainWindow):
         icon = self._tinted_icon(icon_path, size=16)
         if icon:
             self._window_button.setIcon(icon)
-        else:
-            self._window_button.setIcon(QIcon(str(icon_path)))
 
     def _sync_vi_insert_from_base(self) -> None:
         if not config.load_vi_mode_enabled():

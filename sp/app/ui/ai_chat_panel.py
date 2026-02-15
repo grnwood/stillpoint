@@ -20,6 +20,7 @@ import httpx
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QUrl, QSize, Qt
 from PySide6.QtGui import (
+    QColor,
     QCursor,
     QDesktopServices,
     QFocusEvent,
@@ -69,17 +70,18 @@ def _log_vector(message: str) -> None:
     print(_color_text(f"[Vector] {message}", CHROMA_COLOR))
 
 
-def _load_white_icon(path: Path, size: QSize | None = None) -> QIcon:
+def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
+    tint = _icon_tint_color()
     if not path.exists():
         return QIcon()
     pixmap = QPixmap(str(path))
     if size:
         pixmap = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     mask = pixmap.createMaskFromColor(Qt.transparent)
-    white = QPixmap(pixmap.size())
-    white.fill(Qt.white)
-    white.setMask(mask)
-    return QIcon(white)
+    colored = QPixmap(pixmap.size())
+    colored.fill(tint)
+    colored.setMask(mask)
+    return QIcon(colored)
 
 def _log_llm_response(message: str) -> None:
     print(_color_text(message, LLM_RESPONSE_COLOR))
@@ -217,6 +219,7 @@ def _asset_uri(name: str) -> str:
         return ""
 
 def _load_icon(name: str, size: QSize = QSize(24, 24)) -> QIcon:
+    tint = _icon_tint_color()
     path = _resolve_asset_path(name)
     if not path:
         return QIcon()
@@ -227,9 +230,9 @@ def _load_icon(name: str, size: QSize = QSize(24, 24)) -> QIcon:
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         renderer.render(painter)
-        # Make all non-transparent pixels white
+        # Tint non-transparent pixels for current palette contrast.
         painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), Qt.white)
+        painter.fillRect(pixmap.rect(), tint)
         painter.end()
         return QIcon(pixmap)
     else:
@@ -256,11 +259,13 @@ def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
     if not asset_path:
         # Fallback: return a blank or placeholder icon
         return f"<span title='{tooltip}' style='display:inline-block;width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'></span>"
+    tint = _icon_tint_color()
+    tint_hex = tint.name()
     if ext == ".svg":
         # Cache PNG in /tmp/stillpoint_icons/
         cache_dir = Path(tempfile.gettempdir()) / "stillpoint_icons"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        hashval = hashlib.md5((str(asset_path) + "_white" + str(ICON_SIZE)).encode()).hexdigest()
+        hashval = hashlib.md5((str(asset_path) + "_" + tint_hex + "_" + str(ICON_SIZE)).encode()).hexdigest()
         png_path = cache_dir / f"{asset_path.stem}_{hashval}.png"
         if not png_path.exists() or png_path.stat().st_mtime < asset_path.stat().st_mtime:
             renderer = QSvgRenderer(str(asset_path))
@@ -268,9 +273,9 @@ def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
             pixmap.fill(Qt.transparent)
             painter = QPainter(pixmap)
             renderer.render(painter)
-            # Make all non-transparent pixels white
+            # Tint non-transparent pixels for current palette contrast.
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), Qt.white)
+            painter.fillRect(pixmap.rect(), tint)
             painter.end()
             pixmap.save(str(png_path), "PNG")
         img_uri = png_path.as_uri()
@@ -280,6 +285,17 @@ def _icon_tag(name: str, tooltip: str, size: int = 10) -> str:
         f"<img src='{img_uri}' title='{tooltip}' "
         f"style='width:{ICON_SIZE}px;height:{ICON_SIZE}px;vertical-align:middle;margin:0 4px;'/>"
     )
+
+
+def _icon_tint_color() -> QColor:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return QColor(255, 255, 255)
+    palette = app.palette()
+    bg = palette.color(QPalette.Window)
+    if bg.lightness() > 128:
+        return QColor(0, 0, 0)
+    return QColor(255, 255, 255)
 
 
 @dataclass
@@ -1328,7 +1344,7 @@ class AIChatPanel(QtWidgets.QWidget):
         # Global chat button + context label
         global_icon_path = _get_asset_directory() / "global.svg"
         self.global_btn = QtWidgets.QToolButton()
-        self.global_btn.setIcon(_load_white_icon(global_icon_path, QSize(18, 18)))
+        self.global_btn.setIcon(_load_tinted_icon(global_icon_path, QSize(18, 18)))
         self.global_btn.setToolTip("Switch to Global Chat")
         self.global_btn.setAutoRaise(True)
         self.global_btn.clicked.connect(lambda: self.open_chat_for_page(None))
@@ -1345,14 +1361,14 @@ class AIChatPanel(QtWidgets.QWidget):
         # Move toggles to the right
         self.server_config_btn = QtWidgets.QToolButton()
         settings_path = _get_asset_directory() / "settings.svg"
-        self.server_config_btn.setIcon(_load_white_icon(settings_path, QSize(18, 18)))
+        self.server_config_btn.setIcon(_load_tinted_icon(settings_path, QSize(18, 18)))
         self.server_config_btn.setToolTip("Server Configurations")
         self.server_config_btn.setCheckable(True)
         self.server_config_btn.setChecked(False)
         self.server_config_btn.toggled.connect(self._toggle_server_config)
         self.show_chats_btn = QtWidgets.QToolButton()
         binoculars_path = _get_asset_directory() / "binoculars.svg"
-        self.show_chats_btn.setIcon(_load_white_icon(binoculars_path, QSize(20, 20)))
+        self.show_chats_btn.setIcon(_load_tinted_icon(binoculars_path, QSize(20, 20)))
         self.show_chats_btn.setCheckable(True)
         self.show_chats_btn.setChecked(False)
         self.show_chats_btn.setToolTip("Show chats")

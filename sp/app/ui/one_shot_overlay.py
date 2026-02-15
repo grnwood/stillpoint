@@ -6,7 +6,18 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QPalette, QTextCursor, QFont, QFontDatabase, QColor
+from PySide6.QtGui import (
+    QDesktopServices,
+    QIcon,
+    QKeyEvent,
+    QPalette,
+    QTextCursor,
+    QFont,
+    QFontDatabase,
+    QColor,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -72,6 +83,39 @@ def _find_asset(name: str) -> Optional[Path]:
     except Exception:
         pass
     return None
+
+
+def _icon_tint_color() -> QColor:
+    pal = QPalette()
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            pal = app.palette()
+    except Exception:
+        pass
+    bg = pal.color(QPalette.Window)
+    if bg.lightness() > 128:
+        return QColor(0, 0, 0)
+    return QColor(255, 255, 255)
+
+
+def _load_tinted_icon(path: Path, size: int = 16) -> QIcon:
+    if not path.exists():
+        return QIcon()
+    icon = QIcon(str(path))
+    pm = icon.pixmap(size, size)
+    if pm.isNull():
+        return icon
+    colored = QPixmap(pm.size())
+    colored.fill(Qt.transparent)
+    painter = QPainter(colored)
+    painter.drawPixmap(0, 0, pm)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(colored.rect(), _icon_tint_color())
+    painter.end()
+    return QIcon(colored)
 
 
 class OneShotPromptOverlay(QDialog):
@@ -250,7 +294,7 @@ class OneShotPromptOverlay(QDialog):
         self.send_btn.setToolTip("Send (Ctrl+Enter)")
         icon_path = _find_asset("send-message.svg")
         if icon_path:
-            self.send_btn.setIcon(QIcon(str(icon_path)))
+            self.send_btn.setIcon(_load_tinted_icon(icon_path, size=18))
         else:
             self.send_btn.setText("Send")
         self.send_btn.clicked.connect(self._send_input)

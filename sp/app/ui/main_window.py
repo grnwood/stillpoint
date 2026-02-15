@@ -1317,13 +1317,7 @@ class MainWindow(QMainWindow):
         self.tree_view.dragStatusChanged.connect(self._on_drag_status_changed)
         self.tree_view.expanded.connect(self._on_tree_expanded)
         self.tree_view.collapsed.connect(self._on_tree_collapsed)
-        pal = QApplication.instance().palette() if QApplication.instance() else None
-        base_color = pal.color(QPalette.Base) if pal else theme_color("main_window.icon.base_light", "#ffffff")
-        icon_color = (
-            theme_color("main_window.icon.on_dark", "#ffffff")
-            if base_color.lightness() < 128
-            else theme_color("main_window.icon.on_light", "#000000")
-        )
+        icon_color = self._main_icon_color()
         self._tree_parent_expanded_icon = QIcon()
         self._tree_parent_collapsed_icon = QIcon()
         self._tree_arrow_focus_pending = False
@@ -1368,7 +1362,7 @@ class MainWindow(QMainWindow):
 
         self.journal_tree_button = QToolButton()
         journal_icon_path = self._find_asset("calendar-days.svg")
-        journal_icon = self._load_icon(journal_icon_path, Qt.white, size=16)
+        journal_icon = self._load_icon(journal_icon_path, icon_color, size=16)
         if journal_icon is None:
             journal_icon = self.style().standardIcon(QStyle.SP_FileDialogDetailedView)
         self.journal_tree_button.setIcon(journal_icon)
@@ -1386,7 +1380,7 @@ class MainWindow(QMainWindow):
         # Collapse-all button (aligned to the right, more prominent with white foreground)
         self.collapse_tree_button = QToolButton()
         icon_path = self._find_asset("collapse.svg")
-        base_icon = self._load_icon(icon_path, Qt.white, size=16) or self.style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
+        base_icon = self._load_icon(icon_path, icon_color, size=16) or self.style().standardIcon(QStyle.SP_ToolBarVerticalExtensionButton)
         self.collapse_tree_button.setIcon(base_icon)
         self.collapse_tree_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.collapse_tree_button.setAutoRaise(True)
@@ -2008,7 +2002,7 @@ class MainWindow(QMainWindow):
 
         focus_icon = self._load_icon(
             self._find_asset("focus-mode.svg"),
-            theme_color("main_window.mode_button.icon", "#ffffff"),
+            self._main_icon_color(),
             size=16,
         )
         self._focus_mode_button = QToolButton()
@@ -2032,7 +2026,7 @@ class MainWindow(QMainWindow):
 
         audience_icon = self._load_icon(
             self._find_asset("present-mode.svg"),
-            theme_color("main_window.mode_button.icon", "#ffffff"),
+            self._main_icon_color(),
             size=16,
         )
         self._audience_mode_button = QToolButton()
@@ -2156,14 +2150,15 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
-        
-        home_icon = self._load_icon(self._find_asset("home.svg"), Qt.white, size=18)
-        search_icon = self._load_icon(self._find_asset("binoculars.svg"), Qt.white, size=18)
-        today_icon = self._load_icon(self._find_asset("calendar-days.svg"), Qt.white, size=18)
-        back_icon = self._load_icon(self._find_asset("left.svg"), Qt.white, size=18)
-        forward_icon = self._load_icon(self._find_asset("right.svg"), Qt.white, size=18)
-        up_icon = self._load_icon(self._find_asset("up.svg"), Qt.white, size=18)
-        down_icon = self._load_icon(self._find_asset("down.svg"), Qt.white, size=18)
+        icon_color = self._main_icon_color()
+
+        home_icon = self._load_icon(self._find_asset("home.svg"), icon_color, size=18)
+        search_icon = self._load_icon(self._find_asset("binoculars.svg"), icon_color, size=18)
+        today_icon = self._load_icon(self._find_asset("calendar-days.svg"), icon_color, size=18)
+        back_icon = self._load_icon(self._find_asset("left.svg"), icon_color, size=18)
+        forward_icon = self._load_icon(self._find_asset("right.svg"), icon_color, size=18)
+        up_icon = self._load_icon(self._find_asset("up.svg"), icon_color, size=18)
+        down_icon = self._load_icon(self._find_asset("down.svg"), icon_color, size=18)
 
         # Home button (navigate to vault root page)
         home_action = QAction("Home", self)
@@ -2193,7 +2188,7 @@ class MainWindow(QMainWindow):
         self.bookmark_button = QAction("Add Bookmark", self)
         self.bookmark_button.setToolTip("Toggle bookmark (Ctrl+Alt+B)")
         self.bookmark_button.triggered.connect(self._add_bookmark)
-        bookmark_icon = self._load_icon(self._find_asset("bookmark.svg"), Qt.white, size=18)
+        bookmark_icon = self._load_icon(self._find_asset("bookmark.svg"), icon_color, size=18)
         if bookmark_icon:
             self.bookmark_button.setIcon(bookmark_icon)
         else:
@@ -2209,7 +2204,7 @@ class MainWindow(QMainWindow):
 
         print_action = QAction("Print Page", self)
         print_action.setToolTip("Print or export current page to PDF (Ctrl+P)")
-        print_icon = self._load_icon(self._find_asset("print.svg"), Qt.white, size=18)
+        print_icon = self._load_icon(self._find_asset("print.svg"), icon_color, size=18)
         if print_icon:
             print_action.setIcon(print_icon)
         print_action.triggered.connect(self._print_current_page)
@@ -2268,7 +2263,7 @@ class MainWindow(QMainWindow):
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
         cog_icon_path = self._find_asset("cog.svg")
-        cog_icon = self._load_icon(cog_icon_path, Qt.white, size=18)
+        cog_icon = self._load_icon(cog_icon_path, icon_color, size=18)
         prefs_action.setIcon(cog_icon if cog_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         prefs_action.triggered.connect(self._open_preferences)
         self.toolbar.addAction(prefs_action)
@@ -7109,6 +7104,17 @@ class MainWindow(QMainWindow):
         painter.end()
         return QIcon(colored)
 
+    def _main_icon_color(self) -> QColor:
+        """Return an icon color with contrast against the current app palette."""
+        pal = QApplication.instance().palette() if QApplication.instance() else None
+        if pal is None:
+            return theme_color("main_window.icon.on_dark", "#ffffff")
+        # Use the window background for global toolbar/nav icon contrast.
+        bg = pal.color(QPalette.Window)
+        if bg.lightness() < 128:
+            return theme_color("main_window.icon.on_dark", "#ffffff")
+        return theme_color("main_window.icon.on_light", "#000000")
+
     def _badge_icon(self, base: QIcon) -> QIcon:
         """Return a copy of base icon with an AI badge overlay (bottom-right)."""
         if not self._ai_badge_icon or base.isNull():
@@ -9193,7 +9199,7 @@ class MainWindow(QMainWindow):
 
     def _sidebar_toggle_icon(self, collapsed: bool) -> Optional[QIcon]:
         icon_name = "show-sidebar.svg" if collapsed else "hide-sidebar.svg"
-        return self._load_icon(self._find_asset(icon_name), Qt.white, size=16)
+        return self._load_icon(self._find_asset(icon_name), self._main_icon_color(), size=16)
 
     def _update_sidebar_toggle_icons(self) -> None:
         if not hasattr(self, "_left_panel_stack") or not hasattr(self, "_right_panel_stack"):

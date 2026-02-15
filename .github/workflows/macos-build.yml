@@ -64,6 +64,7 @@ jobs:
           mkdir -p dist/bundle
           cp -R dist/StillPoint.app dist/bundle/
           cp -R dist/stillpoint-capture dist/bundle/
+          cp packaging/macos/README.txt dist/bundle/README.txt
           ditto -c -k --sequesterRsrc --keepParent dist/bundle StillPoint-macOS.zip
 
       - name: Upload artifact

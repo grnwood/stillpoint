@@ -1,55 +1,79 @@
 ========================================
-  StillPoint - macOS Installation
+  StillPoint - macOS Install Notes
 ========================================
 
-Thank you for downloading StillPoint!
+This build is unsigned and not notarized.
+Gatekeeper may block launch until you clear quarantine.
 
-INSTALLATION
-------------
+PACKAGE CONTENTS
+----------------
 
-To install StillPoint on your Mac:
+- StillPoint.app
+- stillpoint-capture (helper binary)
+- README.txt (this file)
 
-1. Unzip the download
-2. Drag "StillPoint.app" to your Applications folder
-3. Done!
+INSTALL
+-------
 
-FIRST LAUNCH
-------------
+1. Unzip the download.
+2. Move StillPoint.app to /Applications (recommended).
 
-When you first open StillPoint:
+FIRST RUN (GUI METHOD)
+----------------------
 
-1. Go to Applications folder
-2. Right-click "StillPoint.app"
-3. Select "Open"
-4. Click "Open" in the security dialog
+1. In Finder, open /Applications.
+2. Right-click StillPoint.app.
+3. Click Open.
+4. Confirm Open in the macOS prompt.
 
-(This is only needed the first time due to macOS Gatekeeper)
-
-ALTERNATIVE: Using Terminal
+FIRST RUN (TERMINAL METHOD)
 ---------------------------
 
-If you prefer, you can remove the quarantine flag:
+If Gatekeeper still blocks launch, clear quarantine:
 
   xattr -dr com.apple.quarantine /Applications/StillPoint.app
   open /Applications/StillPoint.app
 
-Helper script:
-  ./install-mac.sh
+SYSTEM-WIDE HOTKEY FOR stillpoint-capture
+-----------------------------------------
+
+The zip also includes a helper binary at:
+
+  stillpoint-capture/stillpoint-capture
+
+Recommended install location:
+
+1. Move it to /usr/local/bin:
+
+  sudo mkdir -p /usr/local/bin
+  sudo cp stillpoint-capture/stillpoint-capture /usr/local/bin/stillpoint-capture
+  sudo chmod +x /usr/local/bin/stillpoint-capture
+  xattr -dr com.apple.quarantine /usr/local/bin/stillpoint-capture
+
+2. Create a macOS Quick Action in Automator:
+   - Open Automator, choose "Quick Action".
+   - Set "Workflow receives" to "no input" in "any application".
+   - Add "Run Shell Script".
+   - Use this script:
+
+  /usr/local/bin/stillpoint-capture >/tmp/stillpoint-capture.log 2>&1 &
+
+   - Save as: StillPoint Capture
+
+3. Bind a global keyboard shortcut:
+   - Open System Settings -> Keyboard -> Keyboard Shortcuts.
+   - Go to Services (or Quick Actions).
+   - Find "StillPoint Capture" and assign your hotkey.
 
 UNINSTALL
 ---------
 
-To uninstall:
-  - Drag StillPoint.app from Applications to Trash
+- Remove /Applications/StillPoint.app
+- Remove /usr/local/bin/stillpoint-capture (if installed)
 
-TROUBLESHOOTING
----------------
+PROJECT
+-------
 
-If the icon doesn't appear in the Dock:
-  - Make sure you ran the "create-icns.sh" script before building
-  - Rebuild with: pyinstaller -y packaging/sp-macos.spec
-
-For more help, visit:
 https://github.com/grnwood/StillPoint
 
 ========================================
