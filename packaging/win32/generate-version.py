@@ -6,7 +6,7 @@ def main() -> None:
     source = Path(__file__).resolve().parents[2] / "sp" / "__init__.py"
     text = source.read_text(encoding="utf-8")
     match = re.search(
-        r"^VERSION\s*=\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]\s*$",
+        r"^VERSION\s*=\s*['\"]v?([0-9]+\.[0-9]+\.[0-9]+)['\"]\s*$",
         text,
         re.M,
     )
