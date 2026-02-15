@@ -251,7 +251,7 @@ def _maybe_use_minimal_fonts() -> None:
     cache_root.mkdir(parents=True, exist_ok=True)
     font_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pick a small, common font without walking the whole tree.
+    # Pick a small, common font set without walking the whole tree.
     if os.name == "nt":
         win_fonts = Path(os.getenv("WINDIR", "C:\\Windows")) / "Fonts"
         candidates = [
@@ -263,6 +263,23 @@ def _maybe_use_minimal_fonts() -> None:
             win_fonts / "consola.ttf",
             win_fonts / "cour.ttf",
             win_fonts / "lucon.ttf",
+        ]
+        emoji_candidates = [
+            win_fonts / "seguiemj.ttf",  # Segoe UI Emoji
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            Path("/System/Library/Fonts/SFNS.ttf"),
+        ]
+        mono_candidates = [
+            Path("/System/Library/Fonts/SFMono-Regular.otf"),
+            Path("/System/Library/Fonts/Supplemental/Courier New.ttf"),
+            Path("/Library/Fonts/Courier New.ttf"),
+        ]
+        emoji_candidates = [
+            Path("/System/Library/Fonts/Apple Color Emoji.ttc"),
         ]
     else:
         candidates = [
@@ -276,6 +293,11 @@ def _maybe_use_minimal_fonts() -> None:
             Path("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
             Path("/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
             Path("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"),
+        ]
+        emoji_candidates = [
+            Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+            Path("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
+            Path("/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf"),
         ]
     src = next((p for p in candidates if p.exists()), None)
     if not src:
@@ -315,17 +337,59 @@ def _maybe_use_minimal_fonts() -> None:
     else:
         print("[StillPoint] Minimal font scan: no monospace candidate found; tables/code may lack monospace.", file=sys.stderr)
 
+    # Ensure an emoji-capable fallback font is available.
+    emoji_src = next((p for p in emoji_candidates if p.exists()), None)
+    emoji_dest = None
+    emoji_family = None
+    if emoji_src:
+        emoji_dest = font_dir / emoji_src.name
+        try:
+            if not emoji_dest.exists():
+                shutil.copy2(emoji_src, emoji_dest)
+        except Exception as exc:
+            print(f"[StillPoint] Failed to copy minimal emoji font {emoji_src}: {exc}", file=sys.stderr)
+        else:
+            emoji_family_lookup = {
+                "seguiemj.ttf": "Segoe UI Emoji",
+                "Apple Color Emoji.ttc": "Apple Color Emoji",
+                "NotoColorEmoji.ttf": "Noto Color Emoji",
+                "NotoEmoji-Regular.ttf": "Noto Emoji",
+            }
+            emoji_family = emoji_family_lookup.get(emoji_src.name, emoji_src.stem)
+            print(
+                f"[StillPoint] Minimal font scan: bundled emoji font {emoji_src} -> {emoji_dest} (family {emoji_family})",
+                file=sys.stderr,
+            )
+    else:
+        print("[StillPoint] Minimal font scan: no emoji candidate found; emoji glyphs may render as tofu.", file=sys.stderr)
+
     fonts_conf = cache_root / "fonts.conf"
     try:
-        alias_block = ""
+        alias_blocks: list[str] = []
         if mono_family:
-            alias_block = f"""
+            alias_blocks.append(f"""
   <alias>
     <family>monospace</family>
     <prefer>
       <family>{mono_family}</family>
     </prefer>
-  </alias>"""
+  </alias>""")
+        if emoji_family:
+            alias_blocks.append(f"""
+  <alias>
+    <family>emoji</family>
+    <prefer>
+      <family>{emoji_family}</family>
+    </prefer>
+  </alias>""")
+            alias_blocks.append(f"""
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>{emoji_family}</family>
+    </prefer>
+  </alias>""")
+        alias_block = "".join(alias_blocks)
         fonts_conf.write_text(
             f"""<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
