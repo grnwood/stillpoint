@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from html import unescape
+from pathlib import Path
 from urllib.parse import quote_plus, urlparse, urlunparse, parse_qs, unquote
 import uuid
 from dataclasses import dataclass
@@ -121,6 +122,8 @@ Available tools:
   Full-text search across the vault. Returns matches with snippets.
 - vault.write: args={{"path":"string","content":"string","mode":"replace|append"}}
   Writes content to a vault page. If mode=append, it appends to the existing file.
+  Use StillPoint page paths where the file name matches its parent folder
+  (for example: /Playpage/Key Dates/Key Dates.md).
 - tasks.list: args={{"query":"string | null","tags":["tag"],"status":"todo|done|all"}}
   Lists tasks with optional filters.
 - daily.open: args={{}}
@@ -283,7 +286,12 @@ def _normalize_tool_name(name: str) -> str:
         return "web.fetch"
     if "search" in compact:
         return "vault.search"
-    if "read" in compact and "vault" in compact or compact in {"read", "vaultread", "readpage"}:
+    if (
+        ("read" in compact and "vault" in compact)
+        or compact in {"read", "vaultread", "readpage", "readpagecontent", "readcontent"}
+    ):
+        return "vault.read"
+    if "read" in compact and ("page" in compact or "content" in compact or "note" in compact):
         return "vault.read"
     if "write" in compact:
         return "vault.write"
@@ -332,14 +340,26 @@ def _infer_tool_name_from_args(args: dict) -> str:
         return "vault.search"
     if "query" in args and "path_prefix" in args:
         return "vault.search"
-    if "query" in args:
+    if "query" in args and ("tags" in args or "status" in args):
         return "tasks.list"
+    if "query" in args:
+        return "vault.search"
     if "content" in args and "path" in args:
         return "vault.write"
     if "url" in args:
         return "web.fetch"
     if "path" in args and len(args.keys()) <= 3:
         return "vault.read"
+    return ""
+
+
+def _extract_quoted_page_name(text: str) -> str:
+    if not text:
+        return ""
+    for pattern in (r"'([^']+)'", r'"([^"]+)"'):
+        match = re.search(pattern, text)
+        if match:
+            return (match.group(1) or "").strip()
     return ""
 
 
@@ -358,7 +378,28 @@ def _normalize_read_path(path: str, vault_root_name: str = "") -> str:
         cleaned = cleaned[1:]
     if cleaned and not cleaned.startswith("/"):
         cleaned = f"/{cleaned}"
-    return cleaned
+    return _canonicalize_page_path(cleaned)
+
+
+def _folder_to_page_path(path: str) -> str:
+    cleaned = (path or "").strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    lower = cleaned.lower()
+    if lower.endswith(".md") or lower.endswith(".txt"):
+        return cleaned
+    p = Path(cleaned.lstrip("/"))
+    if str(p) in {"", "."}:
+        return cleaned
+    return f"/{(p / f'{p.name}.md').as_posix()}"
+
+
+def _paths_refer_same_page(path_a: str, path_b: str, *, vault_root_name: str = "") -> bool:
+    norm_a = _normalize_read_path(_folder_to_page_path(path_a), vault_root_name=vault_root_name)
+    norm_b = _normalize_read_path(_folder_to_page_path(path_b), vault_root_name=vault_root_name)
+    return bool(norm_a and norm_b and norm_a == norm_b)
 
 
 def _extract_colon_link(text: str) -> str:
@@ -380,9 +421,30 @@ def _normalize_write_path(path: str, vault_root_name: str = "") -> str:
     if ":" in cleaned or cleaned.startswith(":"):
         return colon_to_path(cleaned, vault_root_name=vault_root_name)
     if cleaned.startswith("/"):
-        return cleaned
+        return _canonicalize_page_path(cleaned)
     # Treat bare titles as page names
-    return colon_to_path(cleaned, vault_root_name=vault_root_name)
+    return _canonicalize_page_path(colon_to_path(cleaned, vault_root_name=vault_root_name))
+
+
+def _canonicalize_page_path(path: str) -> str:
+    cleaned = (path or "").strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    rel = cleaned.lstrip("/")
+    p = Path(rel)
+    suffix = p.suffix.lower()
+    if suffix not in {".md", ".txt"}:
+        return cleaned
+    parent = p.parent
+    if str(parent) in {"", "."}:
+        return cleaned
+    page_stem = p.stem
+    if parent.name == page_stem:
+        return cleaned
+    canonical = parent / page_stem / f"{page_stem}{p.suffix}"
+    return f"/{canonical.as_posix()}"
 
 
 def _clean_page_query(text: str) -> str:
@@ -400,6 +462,23 @@ def _looks_explicit_path(text: str) -> bool:
     return cleaned.startswith("/") or cleaned.startswith(":") or ":" in cleaned
 
 
+def _is_implicit_page_reference(text: str) -> bool:
+    cleaned = (text or "").strip().lower()
+    if not cleaned:
+        return True
+    implicit_values = {
+        "current",
+        "current page",
+        "this",
+        "this page",
+        "here",
+        "chat page",
+        "active page",
+        "page",
+    }
+    return cleaned in implicit_values
+
+
 def _extract_tag_from_prompt(text: str) -> str:
     if not text:
         return ""
@@ -415,6 +494,55 @@ def _extract_search_query_from_prompt(text: str) -> str:
         if lowered.startswith(prefix):
             return text[len(prefix) :].strip(" .")
     return text.strip()
+
+
+def _fallback_search_query(text: str) -> str:
+    lowered = (text or "").lower()
+    for token in ("key dates", "key date", "important dates", "dates", "date"):
+        if token in lowered:
+            return token
+    return _extract_search_query_from_prompt(text)
+
+
+def _extract_key_date_lines(text: str, *, limit: int = 12) -> list[str]:
+    if not text:
+        return []
+    months = (
+        "January|February|March|April|May|June|July|August|September|October|November|December|"
+        "Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+    )
+    weekdays = "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun"
+    patterns = [
+        re.compile(rf"\b(?:{weekdays})\s+\d{{1,2}}\s+(?:{months})\s+\d{{4}}\b", re.IGNORECASE),
+        re.compile(rf"\b(?:{months})\s+\d{{1,2}},\s+\d{{4}}\b", re.IGNORECASE),
+        re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+        re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b"),
+    ]
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in (text or "").splitlines():
+        line = re.sub(r"\s+", " ", (raw or "").strip())
+        if not line:
+            continue
+        if not any(p.search(line) for p in patterns):
+            continue
+        cleaned = line.lstrip("-*# ").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        lines.append(cleaned[:220])
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _synthesize_key_dates_content(text: str, *, title: str = "Key Dates") -> str:
+    lines = _extract_key_date_lines(text, limit=12)
+    header = f"# {title}\n\n"
+    if not lines:
+        return header + "- No explicit dated items were found in the source page.\n"
+    bullets = "\n".join(f"- {line}" for line in lines)
+    return f"{header}{bullets}\n"
 
 
 def _detect_guard_state(prompt: str) -> dict:
@@ -446,6 +574,11 @@ def _apply_guard_to_tool_call(
 ) -> tuple[str, dict, Optional[dict]]:
     if name == "daily.open" and not guard.get("wants_daily"):
         return name, args, _tool_error("permission_denied", "daily.open blocked unless user asked about daily/journal.")
+    if name == "tasks.list" and not guard.get("wants_tasks"):
+        if guard.get("wants_search"):
+            query = (args or {}).get("query") or _extract_search_query_from_prompt(guard.get("prompt") or "")
+            return "vault.search", {"query": query or "tasks"}, None
+        return name, args, _tool_error("permission_denied", "tasks.list blocked unless user asked about tasks/todo.")
     if guard.get("wants_web") and name != "web.search":
         prompt = guard.get("prompt") or ""
         query = (args or {}).get("query") or _extract_search_query_from_prompt(prompt) or guard.get("tag") or ""
@@ -474,7 +607,7 @@ def _parse_trigger_settings(settings: dict) -> dict:
     for tool in tools:
         name = (tool or {}).get("name")
         tweaks = (tool or {}).get("settings") or ""
-        if not name:
+        if not isinstance(name, str) or not name:
             continue
         if "triggers=" in tweaks:
             raw = tweaks.split("triggers=", 1)[1]
@@ -513,7 +646,16 @@ def _tool_vault_read(client: httpx.Client, args: dict, context: dict) -> dict:
     chat_page_path = context.get("chat_page_path") or ""
     current_editor_path = context.get("current_editor_path") or ""
     chat_scope = context.get("chat_scope") or ""
-    if not arg_path and not requested_path and chat_page_path and current_editor_path and chat_page_path != current_editor_path:
+    vault_root_name = context.get("vault_root_name", "")
+    same_page = _paths_refer_same_page(chat_page_path, current_editor_path, vault_root_name=vault_root_name)
+    if (
+        not arg_path
+        and not requested_path
+        and chat_page_path
+        and current_editor_path
+        and chat_page_path != current_editor_path
+        and not same_page
+    ):
         return {
             "ok": False,
             "error": _tool_error(
@@ -523,15 +665,14 @@ def _tool_vault_read(client: httpx.Client, args: dict, context: dict) -> dict:
             ),
         }
     if not arg_path and not requested_path:
-        if chat_scope == "page" and chat_page_path:
-            path = chat_page_path
-        elif current_editor_path:
+        if current_editor_path:
             path = current_editor_path
+        elif chat_scope == "page" and chat_page_path:
+            path = chat_page_path
         else:
             path = context.get("current_path") or last_read_path or ""
     else:
         path = arg_path or requested_path
-    vault_root_name = context.get("vault_root_name", "")
     normalized_requested = _normalize_read_path(requested_path, vault_root_name=vault_root_name) if requested_path else ""
     normalized_arg = _normalize_read_path(arg_path, vault_root_name=vault_root_name) if arg_path else ""
     if normalized_requested and normalized_arg and normalized_requested != normalized_arg:
@@ -608,13 +749,25 @@ def _tool_vault_write(client: httpx.Client, args: dict, context: dict) -> dict:
     path = (args or {}).get("path") or ""
     content = (args or {}).get("content")
     mode = (args or {}).get("mode") or "replace"
-    if not path or content is None:
-        return {"ok": False, "error": _tool_error("invalid_args", "path and content are required")}
-    if mode == "append" and not _looks_explicit_path(path):
+    if content is None:
+        return {"ok": False, "error": _tool_error("invalid_args", "content is required")}
+    if not isinstance(content, str) or not content.strip():
+        source = str(context.get("last_read_content") or "")
+        if source:
+            content = _synthesize_key_dates_content(source, title="Key Dates")
+            _log_tool("vault.write received empty content; synthesized summary from last vault.read result")
+        else:
+            return {"ok": False, "error": _tool_error("invalid_args", "content must be non-empty")}
+    if mode == "append" and _is_implicit_page_reference(path):
         current_path = context.get("current_editor_path") or context.get("current_path") or ""
         chat_page_path = context.get("chat_page_path") or ""
         chat_scope = context.get("chat_scope") or ""
-        if current_path and chat_page_path and current_path != chat_page_path:
+        same_page = _paths_refer_same_page(
+            chat_page_path,
+            current_path,
+            vault_root_name=context.get("vault_root_name", ""),
+        )
+        if current_path and chat_page_path and current_path != chat_page_path and not same_page:
             return {
                 "ok": False,
                 "error": _tool_error(
@@ -1099,7 +1252,43 @@ class AgentToolLoopWorker(QtCore.QThread):
                         self.toolLog.emit(msg)
                         _log_tool(msg)
                 parsed = parse_agent_message(reply)
-                if not parsed or parsed.get("type") == "final":
+                if not parsed:
+                    try:
+                        raw_obj = json.loads(_extract_json_block(reply) or "")
+                    except Exception:
+                        raw_obj = None
+                    if isinstance(raw_obj, dict) and raw_obj.get("type") == "tool_result":
+                        messages.append({"role": "assistant", "content": json.dumps(raw_obj)})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Return only type='tool_request' or type='final'. Continue.",
+                            }
+                        )
+                        continue
+                    self.finished.emit(reply)
+                    return
+                if parsed.get("type") == "final":
+                    guard_state = self._context.get("guard_state") or {}
+                    if guard_state.get("wants_write") and not self._context.get("vault_write_done"):
+                        retries = int(self._context.get("write_guard_retries") or 0)
+                        if retries >= 1:
+                            self.failed.emit(
+                                "Agent did not issue required vault.write call. "
+                                "Try again and specify a concrete destination page path."
+                            )
+                            return
+                        self._context["write_guard_retries"] = retries + 1
+                        hint_path = _extract_quoted_page_name(self._user_prompt)
+                        path_hint = f' path="{hint_path}"' if hint_path else ""
+                        reminder = (
+                            "You must return type='tool_request' with a vault.write call before any final answer."
+                            f" Use mode='replace'.{path_hint}"
+                        )
+                        self.toolLog.emit(f"Guard: {reminder}")
+                        _log_tool(f"Guard: {reminder}")
+                        messages.append({"role": "user", "content": reminder})
+                        continue
                     final_text = parsed.get("content") if isinstance(parsed, dict) else reply
                     self.finished.emit(final_text or reply)
                     return
@@ -1123,9 +1312,35 @@ class AgentToolLoopWorker(QtCore.QThread):
                         inferred = _infer_tool_name_from_args(args)
                         if inferred:
                             name = inferred
+                        elif not args:
+                            msg = "Tool call: <skipped empty call> {}"
+                            self.toolLog.emit(msg)
+                            _log_tool(msg)
+                            result = _tool_result(
+                                call_id,
+                                "<invalid>",
+                                error=_tool_error("invalid_args", "Tool call missing both name and args; skipped."),
+                            )
+                            messages.append({"role": "assistant", "content": json.dumps(result)})
+                            out = (
+                                "Tool result: <invalid> status=error code=invalid_args "
+                                "message=Tool call missing both name and args; skipped."
+                            )
+                            self.toolLog.emit(out)
+                            _log_tool(out)
+                            continue
                         elif "path" in args:
                             name = "vault.read"
                     normalized_name = _normalize_tool_name(name)
+                    if not normalized_name:
+                        normalized_name = _infer_tool_name_from_args(args)
+                    if not isinstance(normalized_name, str):
+                        normalized_name = str(normalized_name or "")
+                    if normalized_name == "vault.search":
+                        query = (args or {}).get("query")
+                        if not isinstance(query, str) or not query.strip():
+                            args = dict(args or {})
+                            args["query"] = _fallback_search_query(self._user_prompt)
                     normalized_name, args, guard_error = _apply_guard_to_tool_call(
                         normalized_name, args, guard_state, tasks_done=tasks_done
                     )
@@ -1158,8 +1373,22 @@ class AgentToolLoopWorker(QtCore.QThread):
                             result = _tool_result(call_id, normalized_name, output=outcome.get("output"))
                         else:
                             result = _tool_result(call_id, normalized_name, error=outcome.get("error"))
+                    if normalized_name == "vault.read" and result.get("status") == "ok":
+                        output = result.get("output") or {}
+                        if isinstance(output, dict):
+                            content = output.get("content")
+                            if isinstance(content, str):
+                                self._context["last_read_content"] = content
+                            path = output.get("path")
+                            if isinstance(path, str) and path:
+                                self._context["last_read_path"] = path
                     if normalized_name == "tasks.list" and result.get("status") == "ok":
                         self._context["tasks_list_done"] = True
+                    if normalized_name == "vault.write" and result.get("status") == "ok":
+                        self._context["vault_write_done"] = True
+                        output = result.get("output") or {}
+                        if isinstance(output, dict) and output.get("path"):
+                            self._context["last_write_path"] = output.get("path")
                     messages.append({"role": "assistant", "content": json.dumps(result)})
                     msg = f"Tool result: {normalized_name or name} status={result.get('status')}"
                     if result.get("status") == "ok":
@@ -1182,7 +1411,12 @@ class AgentToolLoopWorker(QtCore.QThread):
                         "content": "Continue. Use the tool results above. If done, return a final answer.",
                     }
                 )
-            self.failed.emit("Agent tool loop exceeded max steps.")
+            if self._context.get("vault_write_done"):
+                path = self._context.get("last_write_path") or ""
+                msg = f"Wrote requested content to {path}." if path else "Wrote requested content."
+                self.finished.emit(msg)
+            else:
+                self.failed.emit("Agent tool loop exceeded max steps.")
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -1267,7 +1501,43 @@ class AgentToolChatWorker(QtCore.QThread):
                     if think_text:
                         self.toolMessage.emit(f"Thinking: {think_text}")
                 parsed = parse_agent_message(reply)
-                if not parsed or parsed.get("type") == "final":
+                if not parsed:
+                    try:
+                        raw_obj = json.loads(_extract_json_block(reply) or "")
+                    except Exception:
+                        raw_obj = None
+                    if isinstance(raw_obj, dict) and raw_obj.get("type") == "tool_result":
+                        messages.append({"role": "assistant", "content": json.dumps(raw_obj)})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Return only type='tool_request' or type='final'. Continue.",
+                            }
+                        )
+                        continue
+                    self.finalMessage.emit(reply)
+                    return
+                if parsed.get("type") == "final":
+                    guard_state = self._context.get("guard_state") or {}
+                    if guard_state.get("wants_write") and not self._context.get("vault_write_done"):
+                        retries = int(self._context.get("write_guard_retries") or 0)
+                        if retries >= 1:
+                            self.failed.emit(
+                                "Agent did not issue required vault.write call. "
+                                "Try again and specify a concrete destination page path."
+                            )
+                            return
+                        self._context["write_guard_retries"] = retries + 1
+                        hint_path = _extract_quoted_page_name(self._user_prompt)
+                        path_hint = f' path="{hint_path}"' if hint_path else ""
+                        reminder = (
+                            "You must return type='tool_request' with a vault.write call before any final answer."
+                            f" Use mode='replace'.{path_hint}"
+                        )
+                        self.toolMessage.emit(f"Guard: {reminder}")
+                        _log_tool(f"Guard: {reminder}")
+                        messages.append({"role": "user", "content": reminder})
+                        continue
                     final_text = parsed.get("content") if isinstance(parsed, dict) else reply
                     self.finalMessage.emit(final_text or reply)
                     return
@@ -1291,9 +1561,35 @@ class AgentToolChatWorker(QtCore.QThread):
                         inferred = _infer_tool_name_from_args(args)
                         if inferred:
                             name = inferred
+                        elif not args:
+                            msg = "Tool call: <skipped empty call> {}"
+                            self.toolMessage.emit(msg)
+                            _log_tool(msg)
+                            result = _tool_result(
+                                call_id,
+                                "<invalid>",
+                                error=_tool_error("invalid_args", "Tool call missing both name and args; skipped."),
+                            )
+                            messages.append({"role": "assistant", "content": json.dumps(result)})
+                            out = (
+                                "Tool result: <invalid> status=error code=invalid_args "
+                                "message=Tool call missing both name and args; skipped."
+                            )
+                            self.toolMessage.emit(out)
+                            _log_tool(out)
+                            continue
                         elif "path" in args:
                             name = "vault.read"
                     normalized_name = _normalize_tool_name(name)
+                    if not normalized_name:
+                        normalized_name = _infer_tool_name_from_args(args)
+                    if not isinstance(normalized_name, str):
+                        normalized_name = str(normalized_name or "")
+                    if normalized_name == "vault.search":
+                        query = (args or {}).get("query")
+                        if not isinstance(query, str) or not query.strip():
+                            args = dict(args or {})
+                            args["query"] = _fallback_search_query(self._user_prompt)
                     normalized_name, args, guard_error = _apply_guard_to_tool_call(
                         normalized_name, args, guard_state, tasks_done=tasks_done
                     )
@@ -1326,8 +1622,22 @@ class AgentToolChatWorker(QtCore.QThread):
                             result = _tool_result(call_id, normalized_name, output=outcome.get("output"))
                         else:
                             result = _tool_result(call_id, normalized_name, error=outcome.get("error"))
+                    if normalized_name == "vault.read" and result.get("status") == "ok":
+                        output = result.get("output") or {}
+                        if isinstance(output, dict):
+                            content = output.get("content")
+                            if isinstance(content, str):
+                                self._context["last_read_content"] = content
+                            path = output.get("path")
+                            if isinstance(path, str) and path:
+                                self._context["last_read_path"] = path
                     if normalized_name == "tasks.list" and result.get("status") == "ok":
                         self._context["tasks_list_done"] = True
+                    if normalized_name == "vault.write" and result.get("status") == "ok":
+                        self._context["vault_write_done"] = True
+                        output = result.get("output") or {}
+                        if isinstance(output, dict) and output.get("path"):
+                            self._context["last_write_path"] = output.get("path")
                     messages.append({"role": "assistant", "content": json.dumps(result)})
                     if result.get("status") == "error":
                         err = result.get("error") or {}
@@ -1370,7 +1680,12 @@ class AgentToolChatWorker(QtCore.QThread):
                         "content": "Continue. Use the tool results above. If done, return a final answer.",
                     }
                 )
-            self.failed.emit("Agent tool loop exceeded max steps.")
+            if self._context.get("vault_write_done"):
+                path = self._context.get("last_write_path") or ""
+                msg = f"Wrote requested content to {path}." if path else "Wrote requested content."
+                self.finalMessage.emit(msg)
+            else:
+                self.failed.emit("Agent tool loop exceeded max steps.")
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:

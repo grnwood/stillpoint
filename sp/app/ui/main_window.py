@@ -1535,6 +1535,7 @@ class MainWindow(QMainWindow):
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
+        self.right_panel.aiChatPageWritten.connect(self._on_ai_chat_page_written)
         self.right_panel.aiChatResponseCopied.connect(
             lambda msg: self.statusBar().showMessage(msg or "Last chat response copied to buffer", 4000)
         )
@@ -8683,6 +8684,7 @@ class MainWindow(QMainWindow):
         if self.current_path:
             panel.open_chat_for_page(self._normalize_editor_path(self.current_path))
         panel.chatNavigateRequested.connect(self._on_ai_chat_navigate)
+        panel.pageWritten.connect(self._on_ai_chat_page_written)
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
         window.setWindowTitle("AI Chat")
@@ -11264,6 +11266,18 @@ class MainWindow(QMainWindow):
             self._apply_focus_borders()
         except Exception:
             return
+
+    def _on_ai_chat_page_written(self, page_path: Optional[str]) -> None:
+        """Refresh nav tree/search-adjacent panels when AI tools write a page."""
+        if not page_path:
+            return
+        try:
+            normalized = self._normalize_editor_path(str(page_path))
+        except Exception:
+            normalized = str(page_path)
+        if normalized:
+            self._pending_selection = normalized
+        self._refresh_tree()
 
     def _on_ai_overlay_requested(self, text: str, anchor) -> None:
         """Open command bar focused on AI actions using chat panel context."""

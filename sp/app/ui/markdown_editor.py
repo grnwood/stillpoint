@@ -3078,6 +3078,16 @@ class MarkdownEditor(QTextEdit):
             self._restore_cursor_position(initial_position)
 
     def insertFromMimeData(self, source: QMimeData) -> None:  # type: ignore[override]
+        # 0) Internal markdown payload from StillPoint clipboard copy.
+        if source.hasFormat("application/x-stillpoint-markdown"):
+            try:
+                payload = bytes(source.data("application/x-stillpoint-markdown")).decode("utf-8")
+            except Exception:
+                payload = ""
+            if payload:
+                self._insert_markdown_text(payload)
+                return
+
         # 1) Images → save and embed
         if source.hasImage() and self._vault_root and self._current_path:
             image = source.imageData()
@@ -4935,6 +4945,38 @@ class MarkdownEditor(QTextEdit):
             pass
         return text.strip()
 
+    def _selection_as_markdown_for_clipboard(self) -> str:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return ""
+        # Preserve inline images and decode display links.
+        text = self._vi_selection_as_markdown(cursor)
+        if text is None:
+            text = cursor.selection().toPlainText()
+        text = (text or "").replace("\u2029", "\n")
+        try:
+            text = self._from_display(text)
+        except Exception:
+            pass
+        return text
+
+    def _copy_selection_to_clipboard(self) -> None:
+        markdown_text = self._selection_as_markdown_for_clipboard()
+        if not markdown_text:
+            return
+        plain_text = self._sanitize_for_clipboard(markdown_text)
+        mime_data = QMimeData()
+        mime_data.setText(plain_text)
+        try:
+            mime_data.setData("application/x-stillpoint-markdown", markdown_text.encode("utf-8"))
+        except Exception:
+            pass
+        QApplication.clipboard().setMimeData(mime_data)
+
+    def copy(self) -> None:  # type: ignore[override]
+        """Copy selection as plain external text + internal markdown payload."""
+        self._copy_selection_to_clipboard()
+
     def _copy_selection_as_html(self) -> None:
         """Convert selected markdown text to HTML and copy to clipboard."""
         cursor = self.textCursor()
@@ -4960,6 +5002,10 @@ class MarkdownEditor(QTextEdit):
             mime_data = QMimeData()
             mime_data.setHtml(html)
             mime_data.setText(markdown_text)  # Also provide plain text fallback
+            try:
+                mime_data.setData("application/x-stillpoint-markdown", markdown_text.encode("utf-8"))
+            except Exception:
+                pass
             clipboard.setMimeData(mime_data)
             
         except Exception as e:
@@ -4978,12 +5024,7 @@ class MarkdownEditor(QTextEdit):
 
     def _build_copy_actions(self, parent) -> tuple[QAction, QAction]:
         def do_copy():
-            cursor = self.textCursor()
-            if cursor.hasSelection():
-                txt = cursor.selection().toPlainText()
-            else:
-                txt = self.toPlainText()
-            QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+            self._copy_selection_to_clipboard()
 
         def do_copy_md():
             cursor = self.textCursor()
@@ -7203,8 +7244,17 @@ class MarkdownEditor(QTextEdit):
         """
         self._display_guard = True
         current_text = self.toPlainText()
-        # First convert FROM display back to storage (in case text is already partially in display format)
-        storage_text = self._from_display(current_text)
+        # Preserve inline image fragments when rebuilding display after paste/link edits.
+        # QTextEdit plain text contains object-replacement chars for images, so we need
+        # the document-aware markdown conversion path in that case.
+        if "\ufffc" in current_text:
+            storage_text = self._doc_to_markdown()
+            storage_text = self._normalize_markdown_images(storage_text)
+            storage_text = self._from_display(storage_text)
+        else:
+            # First convert FROM display back to storage (in case text is already
+            # partially in display format)
+            storage_text = self._from_display(current_text)
         # Convert +CamelCase links immediately so display is updated without waiting for save
         storage_text = self._convert_camelcase_links(storage_text)
         storage_text = self._wrap_plain_http_links(storage_text)

@@ -1200,6 +1200,7 @@ class AIChatPanel(QtWidgets.QWidget):
     chatNavigateRequested = QtCore.Signal(str)
     responseCopied = QtCore.Signal(str)
     aiOverlayRequested = QtCore.Signal(str, object)
+    pageWritten = QtCore.Signal(str)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if not hasattr(self, "input_edit"):
@@ -1253,6 +1254,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._last_agent_read_path: Optional[str] = None
         self._last_user_prompt: Optional[str] = None
         self._agent_fallback_in_progress = False
+        self._agent_progress_lines: list[str] = []
         self._current_editor_path: Optional[str] = None
         self._debug_entries: list[dict] = []
         self._active_think_debug: dict[int, int] = {}
@@ -1275,6 +1277,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._context_popup.refreshed.connect(self._context_popup_refresh_handler)
         self._context_popup_position: Optional[QtCore.QPoint] = None
         self._context_popup_width: Optional[int] = None
+        self._page_title_link_cache: dict[str, Optional[str]] = {}
         self._vector_api = VectorAPIClient(api_client)
         self._api_client = api_client
         self._chat_history: List[str] = []
@@ -1728,8 +1731,15 @@ class AIChatPanel(QtWidgets.QWidget):
         return bool(self._api_worker or self._condense_worker or self._agent_tool_worker)
 
     def _update_stop_button(self) -> None:
+        active = self._has_active_operation()
         if hasattr(self, "stop_btn"):
-            self.stop_btn.setVisible(self._has_active_operation())
+            self.stop_btn.setVisible(active)
+        if hasattr(self, "chat_tree"):
+            self.chat_tree.setEnabled(not active)
+        if hasattr(self, "global_btn"):
+            self.global_btn.setEnabled(not active)
+        if hasattr(self, "load_page_chat_label"):
+            self.load_page_chat_label.setEnabled(not active)
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.status_label.setText(text)
@@ -2036,8 +2046,69 @@ class AIChatPanel(QtWidgets.QWidget):
         for idx, seg in enumerate(segments):
             if seg.startswith("`"):
                 continue
-            segments[idx] = self._replace_path_tokens(seg)
+            transformed = self._replace_path_tokens(seg)
+            segments[idx] = self._replace_title_lines_with_links(transformed)
         return "".join(segments)
+
+    def _resolve_page_title_path(self, title: str) -> Optional[str]:
+        key = (title or "").strip().lower()
+        if not key:
+            return None
+        if key in self._page_title_link_cache:
+            return self._page_title_link_cache[key]
+        resolved: Optional[str] = None
+        try:
+            matches = config.search_pages(title, limit=20) or []
+        except Exception:
+            matches = []
+        exact: list[str] = []
+        for item in matches:
+            path = (item or {}).get("path")
+            item_title = ((item or {}).get("title") or "").strip().lower()
+            if not path:
+                continue
+            stem = Path(str(path).lstrip("/")).stem.lower()
+            if item_title == key or stem == key:
+                exact.append(str(path))
+        if len(exact) == 1:
+            resolved = exact[0]
+        self._page_title_link_cache[key] = resolved
+        return resolved
+
+    def _replace_title_lines_with_links(self, text: str) -> str:
+        if not text:
+            return text
+        line_pattern = re.compile(
+            r"^(\s*(?:[-*]\s+)?)"
+            r"([A-Za-z0-9][A-Za-z0-9 _:+\-/\.]{0,120}?)"
+            r"(\s+[—-]\s+)"
+            r"(.*)$"
+        )
+        out: list[str] = []
+        for line in text.splitlines(keepends=True):
+            newline = "\n" if line.endswith("\n") else ""
+            core = line[:-1] if newline else line
+            match = line_pattern.match(core)
+            if not match:
+                out.append(line)
+                continue
+            prefix, title, sep, rest = match.groups()
+            stripped = (title or "").strip()
+            if not stripped or stripped.startswith(":") or stripped.startswith("/") or "<a " in stripped:
+                out.append(line)
+                continue
+            path = self._resolve_page_title_path(stripped)
+            if not path:
+                out.append(line)
+                continue
+            colon = path_to_colon(path)
+            if not colon:
+                out.append(line)
+                continue
+            href = html.escape(f":{colon}", quote=True)
+            label = html.escape(stripped, quote=False)
+            out.append(f"{prefix}<a href=\"{href}\" title=\"{href}\">{label}</a>{sep}{rest}{newline}")
+        return "".join(out)
 
     def _replace_path_tokens(self, text: str) -> str:
         pattern = re.compile(
@@ -2957,6 +3028,11 @@ class AIChatPanel(QtWidgets.QWidget):
     def _on_chat_selected(self) -> None:
         if self._building_tree:
             return
+        if self._has_active_operation():
+            if self.current_session_id:
+                self._select_chat_by_id(self.current_session_id)
+            self._set_status("Wait for the active run to finish before switching chats.", "#f6c343")
+            return
         item = self.chat_tree.currentItem()
         if not item:
             return
@@ -3440,6 +3516,7 @@ class AIChatPanel(QtWidgets.QWidget):
 
         self.messages.append(("assistant", "Running agent tools..."))
         self._agent_placeholder_index = len(self.messages) - 1
+        self._agent_progress_lines = []
         self._render_messages()
 
         context_prompt = self._build_context_prompt(content)
@@ -3482,6 +3559,20 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_agent_tool_message(self, text: str) -> None:
         if not text:
             return
+        if text.startswith("Tool result: vault.write status=ok") and "path=" in text:
+            try:
+                path_part = text.split("path=", 1)[1]
+                path = path_part.split()[0].strip()
+                if path:
+                    self.pageWritten.emit(path)
+            except Exception:
+                pass
+        self._agent_progress_lines.append(text)
+        if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
+            role, _ = self.messages[self._agent_placeholder_index]
+            preview = "\n".join(self._agent_progress_lines[-20:])
+            self.messages[self._agent_placeholder_index] = (role, f"Running agent tools...\n\n{preview}")
+            self._render_messages()
         if "Tool result: vault.read status=ok" in text and "path=" in text:
             try:
                 path_part = text.split("path=", 1)[1]
@@ -3492,6 +3583,9 @@ class AIChatPanel(QtWidgets.QWidget):
                 pass
         if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
             anchor_index = (self._agent_placeholder_index - 1) if self._agent_placeholder_index is not None else None
+            if text.startswith("Guard:"):
+                self._append_debug_entry("Guard", text, open_state=False, anchor_index=anchor_index)
+                return
             if text.startswith("Tool call:"):
                 title = "Executing tool"
                 parts = text.split("Tool call:", 1)[-1].strip()
@@ -3523,7 +3617,8 @@ class AIChatPanel(QtWidgets.QWidget):
                     anchor_index=anchor_index,
                 )
                 return
-        self._append_assistant_message(text)
+        if not text.startswith("Guard:"):
+            self._append_assistant_message(text)
 
     def _handle_agent_final(self, text: str) -> None:
         final_text = text or ""
@@ -3534,6 +3629,7 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self._append_assistant_message(final_text)
         self._agent_placeholder_index = None
+        self._agent_progress_lines = []
         self._agent_tool_worker = None
         self.send_btn.setEnabled(True)
         self._set_status("Response received.", "#2ecc71")
@@ -3549,6 +3645,7 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self._append_assistant_message(msg)
         self._agent_placeholder_index = None
+        self._agent_progress_lines = []
         self._agent_tool_worker = None
         self.send_btn.setEnabled(True)
         self._set_status(f"API error: {err}")
@@ -3901,7 +3998,11 @@ class AIChatPanel(QtWidgets.QWidget):
         )
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
-        href = url.toString()
+        href = url.toString(QUrl.FullyDecoded).strip()
+        try:
+            href = html.unescape(href)
+        except Exception:
+            pass
         if href.startswith("action:"):
             parts = href.split(":")
             if len(parts) >= 3:
@@ -4202,6 +4303,9 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
         """Explicitly open (and create if needed) chat for the given page."""
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before switching chats.", "#f6c343")
+            return
         self.current_page_path = rel_path
         # Avoid triggering navigation back to the page on initial focus switch
         self._suppress_navigation = True
@@ -4215,6 +4319,9 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def open_named_chat(self, name: str, folder_path: str = "/") -> None:
         """Open (and create if needed) a stable named chat under the given folder."""
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before switching chats.", "#f6c343")
+            return
         self.current_page_path = None
         self._suppress_navigation = True
         chat = self.store.get_or_create_named_chat(folder_path, name)
@@ -4309,6 +4416,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Switch backing store to the current vault's .stillpoint folder."""
         self.vault_root = vault_root
+        self._page_title_link_cache.clear()
         if vault_root:
             try:
                 self.ai_manager = AIManager()

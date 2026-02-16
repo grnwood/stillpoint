@@ -58,15 +58,6 @@ jobs:
         run: |
           if (!(Test-Path "packaging/win32/Output/StillPointSetup-win-x64.exe")) { throw "Installer exe not found at packaging/win32/Output/StillPointSetup-win-x64.exe" }
 
-      - name: Zip bundle
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          Remove-Item -Recurse -Force bundle -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path bundle | Out-Null
-          Copy-Item -Recurse -Force dist\stillpoint bundle\
-          Copy-Item -Recurse -Force dist\stillpoint-capture bundle\
-          Compress-Archive -Path bundle\* -DestinationPath StillPoint-win-x64.zip
-
       - name: Upload installer artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
@@ -80,6 +71,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            StillPoint-win-x64.zip
             packaging/win32/Output/StillPointSetup-win-x64.exe
           fail_on_unmatched_files: true

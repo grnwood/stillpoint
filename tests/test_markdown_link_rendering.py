@@ -1,5 +1,7 @@
 import pytest
 from PySide6.QtCore import QMimeData
+from PySide6.QtGui import QGuiApplication, QTextCursor
+from PySide6.QtGui import QImage
 
 from sp.app.ui.markdown_editor import LINK_SENTINEL, MarkdownEditor
 
@@ -78,3 +80,71 @@ def test_plain_text_paste_renders_wiki_links_immediately(editor):
     editor.insertFromMimeData(mime)
     assert LINK_SENTINEL in editor.toPlainText()
     assert "[:Journal:2026:02:10:Decisions|Decisions]" in editor.to_markdown()
+
+
+def test_pasting_http_link_preserves_existing_inline_images(editor, tmp_path):
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "Playpage"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    image_path = page_dir / "sample.png"
+    image = QImage(4, 4, QImage.Format_ARGB32)
+    image.fill(0xFF00FF00)
+    assert image.save(str(image_path), "PNG")
+
+    editor.set_context(str(vault_root), "/Playpage/Playpage.md")
+    editor.set_markdown("![Sample](sample.png)\n")
+    cursor = editor.textCursor()
+    cursor.movePosition(cursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    mime = QMimeData()
+    url = "https://lyonscg.atlassian.net/browse/ASGC-36"
+    mime.setText(url)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "![Sample](sample.png)" in markdown
+    assert f"[{url}|]" in markdown
+
+
+def test_copy_strips_sentinels_for_plain_text_and_preserves_internal_markdown(editor):
+    url = "https://example.com/path?q=1"
+    editor.setPlainText(url)
+    editor._refresh_display()
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+
+    editor.copy()
+
+    mime = QGuiApplication.clipboard().mimeData()
+    plain = mime.text()
+    assert LINK_SENTINEL not in plain
+    assert mime.hasFormat("application/x-stillpoint-markdown")
+    md_payload = bytes(mime.data("application/x-stillpoint-markdown")).decode("utf-8")
+    assert f"[{url}|]" in md_payload
+
+
+def test_internal_markdown_clipboard_roundtrip_restores_link(editor):
+    url = "https://example.com/path?q=1"
+    src_mime = QMimeData()
+    src_mime.setText(url)
+    editor.insertFromMimeData(src_mime)
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+    editor.copy()
+
+    target = MarkdownEditor()
+    target.show()
+    try:
+        mime = QGuiApplication.clipboard().mimeData()
+        paste_mime = QMimeData()
+        paste_mime.setText(mime.text())
+        if mime.hasFormat("application/x-stillpoint-markdown"):
+            paste_mime.setData("application/x-stillpoint-markdown", mime.data("application/x-stillpoint-markdown"))
+        target.insertFromMimeData(paste_mime)
+        assert f"[{url}|]" in target.to_markdown()
+        assert LINK_SENTINEL in target.toPlainText()
+    finally:
+        target.close()

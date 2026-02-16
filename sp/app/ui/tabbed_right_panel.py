@@ -31,6 +31,7 @@ class TabbedRightPanel(QWidget):
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
     aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
+    aiChatPageWritten = Signal(str)  # page path written by AI chat tools
     openInWindowRequested = Signal(str)  # page path to open in single-page editor
     openTaskWindowRequested = Signal()
     openLinkWindowRequested = Signal()
@@ -418,6 +419,10 @@ class TabbedRightPanel(QWidget):
         """Forward AI overlay requests from the chat panel."""
         self.aiOverlayRequested.emit(text, anchor)
 
+    def _emit_ai_page_written(self, path: str) -> None:
+        """Forward AI chat page-write notifications."""
+        self.aiChatPageWritten.emit(path)
+
     def _add_ai_chat_tab(self) -> None:
         if self.ai_chat_panel:
             return
@@ -427,6 +432,7 @@ class TabbedRightPanel(QWidget):
         self.ai_chat_panel.chatNavigateRequested.connect(self._emit_chat_navigation)
         self.ai_chat_panel.responseCopied.connect(self.aiChatResponseCopied)
         self.ai_chat_panel.aiOverlayRequested.connect(self._emit_ai_overlay_request)
+        self.ai_chat_panel.pageWritten.connect(self._emit_ai_page_written)
 
     def _remove_ai_chat_tab(self) -> None:
         if not self.ai_chat_panel:
@@ -436,6 +442,10 @@ class TabbedRightPanel(QWidget):
             self.tabs.removeTab(idx)
         try:
             self.ai_chat_panel.chatNavigateRequested.disconnect(self._emit_chat_navigation)
+        except Exception:
+            pass
+        try:
+            self.ai_chat_panel.pageWritten.disconnect(self._emit_ai_page_written)
         except Exception:
             pass
         self.ai_chat_panel.deleteLater()

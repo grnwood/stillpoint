@@ -69,6 +69,7 @@ class AgentToolOverlay(QDialog):
         self._on_accept = on_accept
         self._worker: Optional[AgentToolLoopWorker] = None
         self._last_answer = ""
+        self._live_events: list[str] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -143,6 +144,9 @@ class AgentToolOverlay(QDialog):
         if not text:
             return
         self.tool_log.appendPlainText(text)
+        self._live_events.append(text)
+        preview = "\n".join(self._live_events[-30:])
+        self.chat_view.setPlainText(f"Running agent tools...\n\n{preview}")
 
     def _set_status(self, text: str) -> None:
         self._status.setText(text or "")
@@ -174,6 +178,8 @@ class AgentToolOverlay(QDialog):
         self._set_status("Running…")
         self._run_btn.setEnabled(False)
         self._accept_btn.setEnabled(False)
+        self._live_events = []
+        self.chat_view.setPlainText("Running agent tools...")
         config_obj = AgentLoopConfig(
             server_config=self._server_config,
             model=self._model,
@@ -192,7 +198,11 @@ class AgentToolOverlay(QDialog):
 
     def _handle_finished(self, text: str) -> None:
         self._last_answer = text or ""
-        self.chat_view.setPlainText(self._last_answer)
+        if self._live_events:
+            log = "\n".join(self._live_events[-30:])
+            self.chat_view.setPlainText(f"{log}\n\nFinal:\n{self._last_answer}")
+        else:
+            self.chat_view.setPlainText(self._last_answer)
         self._set_status("Done")
         self._run_btn.setEnabled(True)
         self._accept_btn.setEnabled(True)
@@ -200,7 +210,11 @@ class AgentToolOverlay(QDialog):
 
     def _handle_failed(self, err: str) -> None:
         self._set_status("Failed")
-        self.chat_view.setPlainText(f"Error: {err}")
+        if self._live_events:
+            log = "\n".join(self._live_events[-30:])
+            self.chat_view.setPlainText(f"{log}\n\nError: {err}")
+        else:
+            self.chat_view.setPlainText(f"Error: {err}")
         self._run_btn.setEnabled(True)
         self._accept_btn.setEnabled(True)
         self._worker = None
