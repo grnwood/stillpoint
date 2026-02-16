@@ -1132,18 +1132,31 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         stripped = text.lstrip()
         indent = len(text) - len(stripped)
+        utf16_positions = _utf16_positions(text)
+
+        def set_format_cp_span(start_cp: int, end_cp: int, fmt: QTextCharFormat) -> None:
+            """Apply format from codepoint offsets by converting to UTF-16 units."""
+            start_cp = max(0, min(start_cp, len(text)))
+            end_cp = max(start_cp, min(end_cp, len(text)))
+            if end_cp <= start_cp:
+                return
+            start_u16 = utf16_positions[start_cp]
+            end_u16 = utf16_positions[end_cp]
+            if end_u16 > start_u16:
+                self.setFormat(start_u16, end_u16 - start_u16, fmt)
+
         level = heading_level_from_char(stripped[0]) if stripped else 0
         heading_applied = False
         if level:
             fmt = self.heading_styles[min(level, len(self.heading_styles)) - 1]
-            self.setFormat(indent + 1, max(0, len(stripped) - 1), fmt)
-            self.setFormat(indent, 1, self.hidden_format)
+            set_format_cp_span(indent + 1, len(text), fmt)
+            set_format_cp_span(indent, indent + 1, self.hidden_format)
             heading_applied = True
         elif stripped.startswith("#"):
             hashes = len(stripped) - len(stripped.lstrip("#"))
             if 1 <= hashes <= HEADING_MAX_LEVEL and stripped[hashes:hashes + 1] == " ":
                 fmt = self.heading_styles[min(hashes, len(self.heading_styles)) - 1]
-                self.setFormat(indent + hashes + 1, len(stripped) - hashes - 1, fmt)
+                set_format_cp_span(indent + hashes + 1, len(text), fmt)
                 heading_applied = True
 
         # If we styled a heading, stop here so later rules (links, tags, etc.) don't override
@@ -3149,6 +3162,13 @@ class MarkdownEditor(QTextEdit):
             self._refresh_display()
         if "![" in clean_text:
             self._render_images(self.toPlainText())
+        # Paste can occasionally leave the trailing character with stale/default
+        # formatting until another edit. Rehighlight now so styles are consistent.
+        try:
+            if self._is_alive(self.highlighter):
+                self.highlighter.rehighlight()
+        except Exception:
+            pass
 
     def _prepare_image_paste_target(self) -> None:
         """If pasting on a list/task line, move the cursor to a new plain line."""

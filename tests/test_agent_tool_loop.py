@@ -69,10 +69,10 @@ def test_vault_write_append_bare_title_is_not_treated_as_implicit_page_reference
     )
     assert result.get("ok") is True
     assert client.last_write_payload is not None
-    assert client.last_write_payload.get("path") == "/MyDates"
+    assert client.last_write_payload.get("path") == "/MyDates/MyDates.md"
 
 
-def test_vault_write_append_current_page_still_conflicts_when_context_is_ambiguous() -> None:
+def test_vault_write_append_current_page_resolves_when_chat_and_editor_refer_same_page() -> None:
     client = _DummyClient()
     result = _tool_vault_write(
         client,
@@ -84,9 +84,9 @@ def test_vault_write_append_current_page_still_conflicts_when_context_is_ambiguo
             "vault_root_name": "",
         },
     )
-    assert result.get("ok") is False
-    error = result.get("error") or {}
-    assert error.get("code") == "conflict"
+    assert result.get("ok") is True
+    output = result.get("output") or {}
+    assert output.get("path") == "/Journal/2026/02/02/HibbetDevEnvMeeting"
 
 
 def test_normalize_write_path_canonicalizes_non_matching_md_filename() -> None:

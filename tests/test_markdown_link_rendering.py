@@ -103,7 +103,8 @@ def test_pasting_http_link_preserves_existing_inline_images(editor, tmp_path):
     editor.insertFromMimeData(mime)
 
     markdown = editor.to_markdown()
-    assert "![Sample](sample.png)" in markdown
+    # Image paths may be normalized to relative paths with ./
+    assert ("![Sample](sample.png)" in markdown or "![Sample](./sample.png)" in markdown)
     assert f"[{url}|]" in markdown
 
 
@@ -148,3 +149,28 @@ def test_internal_markdown_clipboard_roundtrip_restores_link(editor):
         assert LINK_SENTINEL in target.toPlainText()
     finally:
         target.close()
+
+
+def test_paste_heading_formats_trailing_character(editor, qapp):
+    mime = QMimeData()
+    mime.setText("# 🔁 What This Looks Like in StillPoint")
+    editor.insertFromMimeData(mime)
+    qapp.processEvents()
+
+    block = editor.document().firstBlock()
+    text = block.text()
+    assert text.endswith("StillPoint")
+
+    last_idx = len(text) - 1
+    prev_idx = len(text) - 2
+
+    last_cursor = QTextCursor(editor.document())
+    last_cursor.setPosition(block.position() + last_idx)
+    prev_cursor = QTextCursor(editor.document())
+    prev_cursor.setPosition(block.position() + prev_idx)
+
+    last_fmt = last_cursor.charFormat()
+    prev_fmt = prev_cursor.charFormat()
+
+    assert last_fmt.foreground().color() == prev_fmt.foreground().color()
+    assert last_fmt.fontPointSize() == prev_fmt.fontPointSize()
