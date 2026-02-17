@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .path_utils import path_to_colon
+from sp.logging_flags import log_enabled
 from sp.server.adapters.files import strip_page_suffix
 
 if TYPE_CHECKING:
@@ -398,7 +399,8 @@ class TagsTab(QWidget):
             if not conn:
                 db_path = config._vault_db_path()
                 if not db_path:
-                    print("[TagsTab] No vault database path available")
+                    if log_enabled("ui_state"):
+                        print("[TagsTab] No vault database path available")
                     return
                 import sqlite3
                 conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -407,7 +409,8 @@ class TagsTab(QWidget):
             if should_close:
                 conn.close()
             
-            print(f"[TagsTab] Query returned {len(rows)} tags from database")
+            if log_enabled("ui_state"):
+                print(f"[TagsTab] Query returned {len(rows)} tags from database")
             
             # Clear existing chicklets
             for chicklet in self.tag_chicklets.values():
@@ -435,11 +438,13 @@ class TagsTab(QWidget):
             self.tags_container.adjustSize()
             self.tags_container.updateGeometry()
 
-            print(f"[TagsTab] Loaded {len(rows)} tags")
+            if log_enabled("ui_state"):
+                print(f"[TagsTab] Loaded {len(rows)} tags")
 
         except Exception as e:
             import traceback
-            print(f"[TagsTab] Error loading tags: {str(e)}")
+            if log_enabled("ui_state"):
+                print(f"[TagsTab] Error loading tags: {str(e)}")
             traceback.print_exc()
     
     def _on_tag_clicked(self, tag: str, checked: bool):
@@ -500,7 +505,8 @@ class TagsTab(QWidget):
             
         except Exception as e:
             import traceback
-            print(f"[TagsTab] Error refreshing results: {str(e)}")
+            if log_enabled("ui_state"):
+                print(f"[TagsTab] Error refreshing results: {str(e)}")
             traceback.print_exc()
             self.status_label.setText(f"Error: {str(e)}")
     
@@ -552,7 +558,8 @@ class TagsTab(QWidget):
                 
         except Exception as e:
             import traceback
-            print(f"[TagsTab] Error displaying results: {str(e)}")
+            if log_enabled("ui_state"):
+                print(f"[TagsTab] Error displaying results: {str(e)}")
             traceback.print_exc()
             self.status_label.setText(f"Error displaying results: {str(e)}")
     
@@ -647,7 +654,8 @@ class TagsTab(QWidget):
         """Load tags when tab becomes visible for the first time and focus search bar."""
         super().showEvent(event)
         if not self._tags_loaded:
-            print("[TagsTab] Tab shown for first time, loading tags...")
+            if log_enabled("ui_state"):
+                print("[TagsTab] Tab shown for first time, loading tags...")
             self._load_tags()
             self._tags_loaded = True
         # Auto-focus the search bar
@@ -656,7 +664,8 @@ class TagsTab(QWidget):
     
     def refresh_tags(self):
         """Reload tags from database (call when vault changes)."""
-        print("[TagsTab] refresh_tags() called")
+        if log_enabled("ui_state"):
+            print("[TagsTab] refresh_tags() called")
         self.selected_tags.clear()
         self._load_tags()
         self.results_tree.clear()
