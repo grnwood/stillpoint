@@ -18,18 +18,40 @@
 </head>
 <body>
     {% if not print_mode %}
-    <nav class="container-fluid no-print">
-        <ul>
-            <li><strong><a href="/">StillPoint Vault</a></strong></li>
-        </ul>
-        <ul>
-            <li><a href="/browse/">Browse</a></li>
-        </ul>
-    </nav>
+    {% macro render_nav_nodes(nodes) -%}
+    <ul class="sp-tree-list">
+        {% for node in nodes %}
+        <li class="sp-tree-item">
+            {% if node.children %}
+            <details {% if node.expanded %}open{% endif %}>
+                <summary class="sp-tree-summary">
+                    <a href="{{ node.url }}" class="{% if node.active %}active{% endif %}">{{ node.name }}</a>
+                </summary>
+                {{ render_nav_nodes(node.children) }}
+            </details>
+            {% else %}
+            <a href="{{ node.url }}" class="{% if node.active %}active{% endif %}">{{ node.name }}</a>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {%- endmacro %}
     {% endif %}
     
-    <main class="container">
-        {% block content %}{% endblock %}
+    <main class="{% if not print_mode %}sp-shell{% else %}container{% endif %}">
+        {% if not print_mode %}
+        <aside class="sp-nav no-print">
+            <div class="sp-nav-header">
+                <strong><a href="/">StillPoint Vault</a></strong>
+            </div>
+            <div class="sp-nav-body">
+                {{ render_nav_nodes(nav_tree or []) }}
+            </div>
+        </aside>
+        {% endif %}
+        <section class="{% if not print_mode %}sp-content container{% endif %}">
+            {% block content %}{% endblock %}
+        </section>
     </main>
     
     {% if not print_mode %}

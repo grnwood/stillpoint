@@ -86,7 +86,7 @@ class EditLinkDialog(QDialog):
         item = self.list_widget.currentItem()
         if item:
             normalized = item.data(Qt.UserRole)
-            self.search_edit.setText(normalized)
+            self.search_edit.setText(self._apply_current_anchor(str(normalized or "")))
             self.accept()
     
     def _on_search_changed(self):
@@ -117,9 +117,7 @@ class EditLinkDialog(QDialog):
 
     def _refresh(self) -> None:
         orig_term = self.search_edit.text().strip()
-        search_term = orig_term
-        if "#" in search_term:
-            search_term = search_term.split("#", 1)[0].strip()
+        search_term, _anchor = self._split_anchor(orig_term)
         normalized_term = search_term.lstrip(":")
         pages = config.search_pages(normalized_term)
         self.list_widget.clear()
@@ -177,11 +175,12 @@ class EditLinkDialog(QDialog):
         if not colon_path:
             return
         if force or self.list_widget.hasFocus():
+            target = self._apply_current_anchor(str(colon_path))
             self.search_edit.blockSignals(True)
-            self.search_edit.setText(colon_path)
+            self.search_edit.setText(target)
             self.search_edit.blockSignals(False)
             self.text_edit.blockSignals(True)
-            self.text_edit.setText(colon_path)
+            self.text_edit.setText(target)
             self.text_edit.blockSignals(False)
             self._link_name_manually_edited = False
 
@@ -215,3 +214,23 @@ class EditLinkDialog(QDialog):
         escaped_search = re.escape(search_term)
         pattern = re.compile(f"({escaped_search})", re.IGNORECASE)
         return pattern.sub(r'<span style="font-weight: bold; font-size: 105%;">\\1</span>', escaped_text)
+
+    @staticmethod
+    def _split_anchor(target: str) -> tuple[str, str]:
+        text = (target or "").strip()
+        if "#" not in text:
+            return text, ""
+        base, anchor = text.split("#", 1)
+        anchor = anchor.strip()
+        return base.strip(), f"#{anchor}" if anchor else ""
+
+    def _current_anchor(self) -> str:
+        _base, anchor = self._split_anchor(self.search_edit.text())
+        return anchor
+
+    def _apply_current_anchor(self, target: str) -> str:
+        normalized = normalize_link_target(target)
+        if "#" in normalized:
+            return normalized
+        anchor = self._current_anchor()
+        return f"{normalized}{anchor}" if anchor else normalized

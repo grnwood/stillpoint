@@ -45,5 +45,8 @@ stillpoint --server --port 8080
 
 ## Tips
 - Back up your server data regularly.
+- SECURITY:  These vaults are *NOT* encrypted on the server, use caution there.
+  - If data encryption is a concern share your folders via a service like Dropbox/etc.
+  - or, *coming soon* encrypted blob server vaults (git-like distributed).
 - Test connections from different networks.
 - Use remote vaults for shared team notes.

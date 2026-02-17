@@ -1,4 +1,4 @@
-# Web Client
+[:Web_Server|Web_Server]Web Client
 
 ## What Is the Web Client?
 Access your notes from any web browser.

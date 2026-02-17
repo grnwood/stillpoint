@@ -4,14 +4,97 @@
     --spacing-page: 2rem;
 }
 
+.sp-shell {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    min-height: 100vh;
+    gap: 0;
+}
+
+.sp-nav {
+    border-right: 1px solid var(--muted-border-color);
+    background: var(--card-background-color);
+    overflow-y: auto;
+}
+
+.sp-nav-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--muted-border-color);
+    background: var(--card-background-color);
+}
+
+.sp-nav-body {
+    padding: 0.5rem 0.5rem 1rem 0.5rem;
+}
+
+.sp-content {
+    padding-top: 1rem;
+    overflow-x: auto;
+}
+
+.sp-tree-list {
+    list-style: none;
+    margin: 0;
+    padding-left: 0.6rem;
+}
+
+.sp-tree-item {
+    margin: 0.12rem 0;
+}
+
+.sp-tree-item a {
+    display: inline-block;
+    padding: 0.15rem 0.25rem;
+    border-radius: 0.35rem;
+    text-decoration: none;
+    color: inherit;
+}
+
+.sp-tree-item a.active {
+    background: rgba(59, 130, 246, 0.16);
+    font-weight: 600;
+}
+
+.sp-tree-summary {
+    list-style: none;
+}
+
+.sp-tree-summary::-webkit-details-marker {
+    display: none;
+}
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.45rem;
+    padding: 0.2rem 0;
+}
+
+.page-header h1 {
+    margin: 0;
+    line-height: 1.2;
+    font-size: 1.45rem;
+}
+
 .page-actions {
-    margin-bottom: var(--spacing-page);
+    margin-bottom: 0;
     display: flex;
     gap: 0.5rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
 }
 
 .page-actions a[role="button"] {
     margin: 0;
+    padding: 0.2rem 0.55rem;
+    min-height: 0;
+    line-height: 1.15;
+    font-size: 0.82rem;
 }
 
 .markdown-content {
@@ -67,4 +150,26 @@ nav[aria-label="breadcrumb"] li:not(:last-child)::after {
 
 .markdown-content a[href^="/wiki/"]:hover {
     border-bottom-style: solid;
+}
+
+@media (max-width: 900px) {
+    .sp-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .sp-nav {
+        border-right: none;
+        border-bottom: 1px solid var(--muted-border-color);
+        max-height: 45vh;
+    }
+
+    .page-header {
+        flex-direction: column;
+    }
+
+    .page-actions {
+        width: 100%;
+        justify-content: flex-start;
+        margin-bottom: 0.35rem;
+    }
 }

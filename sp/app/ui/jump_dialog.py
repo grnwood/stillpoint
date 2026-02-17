@@ -76,6 +76,7 @@ class JumpToPageDialog(QDialog):
         filter_prefix: str | None = None,
         filter_label: str | None = None,
         clear_filter_cb=None,
+        allow_filter_removal: bool = True,
         *,
         compact: bool = False,
         geometry_key: str | None = "jump_dialog",
@@ -85,6 +86,8 @@ class JumpToPageDialog(QDialog):
         remote_mode: bool = False,
         launch_mode: str = "jump",
         current_page_path: str | None = None,
+        implied_target_path: str | None = None,
+        implied_target_label: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._launch_mode = launch_mode  # 'jump', 'insert_link', or 'create_new'
@@ -95,10 +98,13 @@ class JumpToPageDialog(QDialog):
         self._filter_prefix = filter_prefix
         self._filter_label = filter_label
         self._clear_filter_cb = clear_filter_cb
+        self._allow_filter_removal = bool(allow_filter_removal)
         self._compact = bool(compact)
         self._geometry_key = geometry_key
         self._anchor_global_pos = anchor_global_pos
         self._show_rewrite_links_checkbox = show_rewrite_links_checkbox
+        self._implied_target_path = self._normalize_implied_target_path(implied_target_path)
+        self._implied_target_label = implied_target_label.strip() if isinstance(implied_target_label, str) else ""
         self.rewrite_links_checkbox = None
         self.http = http_client
         self._remote_mode = remote_mode
@@ -119,13 +125,20 @@ class JumpToPageDialog(QDialog):
             self.filter_banner.setTextInteractionFlags(Qt.TextBrowserInteraction)
             self.filter_banner.setOpenExternalLinks(False)
             label = self._filter_label or self._filter_prefix
-            self.filter_banner.setText(
-                f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
-                f"Filtered by {label} "
-                f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
-                f"</div>"
-            )
-            self.filter_banner.linkActivated.connect(self._on_remove_filter)
+            if self._allow_filter_removal:
+                self.filter_banner.setText(
+                    f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+                    f"Filtered by {label} "
+                    f"(<a href='remove' style='color:#ffffff; text-decoration:underline;'>Remove</a>)"
+                    f"</div>"
+                )
+                self.filter_banner.linkActivated.connect(self._on_remove_filter)
+            else:
+                self.filter_banner.setText(
+                    f"<div style='background:#c62828; color:#ffffff; padding:6px; font-weight:bold;'>"
+                    f"Filtered by {label}"
+                    f"</div>"
+                )
             layout.addWidget(self.filter_banner)
         else:
             self.filter_banner = None
@@ -288,6 +301,14 @@ class JumpToPageDialog(QDialog):
             pages = config.search_pages(term)
         
         self.list_widget.clear()
+        implied_inserted = False
+        if self._implied_target_path:
+            implied_text = self._implied_target_label or "<Vault Root>"
+            implied_item = QListWidgetItem(f"<b>{html.escape(implied_text)}</b>")
+            implied_item.setData(Qt.UserRole, self._implied_target_path)
+            implied_item.setToolTip(implied_text)
+            self.list_widget.addItem(implied_item)
+            implied_inserted = True
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
                 continue
@@ -306,7 +327,11 @@ class JumpToPageDialog(QDialog):
             self.list_widget.addItem(item)
         
         if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
+            default_row = 0
+            if implied_inserted and term and self.list_widget.count() > 1:
+                # While searching, prefer the first real result over the implied destination.
+                default_row = 1
+            self.list_widget.setCurrentRow(default_row)
         
         # Update title based on whether we have matches
         self.setWindowTitle(self._get_title())
@@ -385,6 +410,8 @@ class JumpToPageDialog(QDialog):
         self.geometry_save_timer.start()
 
     def _on_remove_filter(self, link: str) -> None:
+        if not self._allow_filter_removal:
+            return
         if self._clear_filter_cb:
             try:
                 self._clear_filter_cb()
@@ -456,6 +483,17 @@ class JumpToPageDialog(QDialog):
         highlighted = pattern.sub(r'<span style="font-weight: bold; font-size: 105%;">\1</span>', escaped_text)
         
         return highlighted
+
+    @staticmethod
+    def _normalize_implied_target_path(path: str | None) -> str | None:
+        if not path:
+            return None
+        cleaned = str(path).strip()
+        if not cleaned:
+            return None
+        if not cleaned.startswith("/"):
+            cleaned = f"/{cleaned}"
+        return cleaned.rstrip("/") or "/"
     
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """Save dialog geometry when closing."""

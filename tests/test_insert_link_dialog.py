@@ -133,10 +133,29 @@ def test_create_option_is_shown_for_nonexistent_target(qapp, monkeypatch):
     dialog.close()
 
 
-def test_create_option_not_shown_when_leaf_name_exists(qapp, monkeypatch):
+def test_create_option_is_still_shown_when_leaf_name_exists_elsewhere(qapp, monkeypatch):
     monkeypatch.setattr(
         "sp.app.ui.insert_link_dialog.config.search_pages",
         lambda *_: [{"path": "/Work/Plan_2026/Plan_2026.md", "title": "Plan 2026"}],
+    )
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText("Plan 2026")
+    qapp.processEvents()
+
+    assert dialog.list_widget.count() >= 1
+    payload = dialog.list_widget.item(0).data(Qt.UserRole)
+    assert isinstance(payload, dict)
+    assert payload.get("create") is True
+    assert payload.get("target") == ":Projects:Plan_2026"
+    assert dialog.should_create_new_page() is True
+    dialog.close()
+
+
+def test_create_option_not_shown_when_target_exists_under_current_parent(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Projects/Plan_2026/Plan_2026.md", "title": "Plan 2026"}],
     )
     dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
     dialog.show()
@@ -147,4 +166,37 @@ def test_create_option_not_shown_when_leaf_name_exists(qapp, monkeypatch):
     payload = dialog.list_widget.item(0).data(Qt.UserRole)
     assert not isinstance(payload, dict)
     assert dialog.should_create_new_page() is False
+    dialog.close()
+
+
+def test_anchor_does_not_trigger_create_when_base_page_exists(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Journal/2026/02/17/17/17.md", "title": "Tuesday, February 17 2026"}],
+    )
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText(":Journal:2026:02:17:17#cush-sap")
+    qapp.processEvents()
+
+    assert dialog.list_widget.count() >= 1
+    first_payload = dialog.list_widget.item(0).data(Qt.UserRole)
+    assert not isinstance(first_payload, dict)
+    dialog.close()
+
+
+def test_anchor_is_preserved_when_accepting_existing_page(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Journal/2026/02/17/17/17.md", "title": "Tuesday, February 17 2026"}],
+    )
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText(":Journal:2026:02:17:17#cush-sap")
+    qapp.processEvents()
+
+    dialog.list_widget.setCurrentRow(0)
+    assert dialog._activate_current() is True
+    assert dialog.should_create_new_page() is False
+    assert dialog.selected_colon_path() == ":Journal:2026:02:17:17#cush-sap"
     dialog.close()

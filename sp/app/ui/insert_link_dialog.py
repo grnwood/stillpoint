@@ -317,7 +317,7 @@ class InsertLinkDialog(QDialog):
                 return
             colon_path = str(payload or "")
             if colon_path:
-                self._accepted_target = normalize_link_target(colon_path)
+                self._accepted_target = self._apply_current_anchor(colon_path)
             self._create_new_selected = False
             self._create_new_target = None
             self.accept()
@@ -362,7 +362,7 @@ class InsertLinkDialog(QDialog):
             self._create_new_target = None
             colon_path = str(payload or "")
             if colon_path:
-                self._accepted_target = normalize_link_target(colon_path)
+                self._accepted_target = self._apply_current_anchor(colon_path)
                 # Update link name if not manually edited
                 if not self._link_name_manually_edited:
                     self.link_name.blockSignals(True)
@@ -464,7 +464,7 @@ class InsertLinkDialog(QDialog):
                 return True
             colon_path = str(payload or "")
             if colon_path:
-                self._accepted_target = normalize_link_target(colon_path)
+                self._accepted_target = self._apply_current_anchor(colon_path)
             self._create_new_selected = False
             self._create_new_target = None
             self.accept()
@@ -487,9 +487,7 @@ class InsertLinkDialog(QDialog):
             self._create_new_target = None
             return
 
-        search_term = term
-        if "#" in search_term:
-            search_term = search_term.split("#", 1)[0].strip()
+        search_term, _anchor = self._split_anchor(term)
         normalized_term = search_term.lstrip(":")
         if ":" in normalized_term:
             normalized_term = normalized_term.replace(":", "/")
@@ -497,11 +495,12 @@ class InsertLinkDialog(QDialog):
         pages = config.search_pages(query)
         self.list_widget.clear()
         existing_exact = False
-        term_normalized = normalize_link_target(term)
-        if term_normalized and not term_normalized.startswith(":"):
-            term_normalized = ":" + term_normalized
-        plain_leaf_term = term_normalized.lstrip(":").split(":")[-1].lower() if term_normalized else ""
-        typed_hierarchy = ":" in term_normalized.lstrip(":")
+        create_target = ""
+        create_target_base = ""
+        if term and not term.startswith(("http://", "https://")):
+            create_target = self._generate_create_target(search_term)
+            create_target_base, _anchor = self._split_anchor(create_target)
+            create_target_base = normalize_link_target(create_target_base)
 
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
@@ -511,12 +510,8 @@ class InsertLinkDialog(QDialog):
             if not colon_path:
                 continue
             rooted_colon = normalize_link_target(":" + colon_path.lstrip(":"))
-            if rooted_colon.lower() == term_normalized.lower():
+            if create_target_base and rooted_colon.lower() == create_target_base.lower():
                 existing_exact = True
-            if not typed_hierarchy and plain_leaf_term:
-                page_leaf = rooted_colon.lstrip(":").split(":")[-1].lower()
-                if page_leaf == plain_leaf_term:
-                    existing_exact = True
             display_text = self._display_label(page, colon_path)
 
             item = QListWidgetItem(display_text)
@@ -525,7 +520,6 @@ class InsertLinkDialog(QDialog):
             self.list_widget.addItem(item)
 
         if term and not term.startswith(("http://", "https://")) and not existing_exact:
-            create_target = self._generate_create_target(term)
             current_location = self._current_page_display()
             create_text = (
                 f"<i>Create new page '{html.escape(term)}' at '{html.escape(current_location)}'</i>"
@@ -571,6 +565,26 @@ class InsertLinkDialog(QDialog):
             if parent_path:
                 return normalize_link_target(f":{parent_path}:{clean}")
         return normalize_link_target(f":{clean}")
+
+    @staticmethod
+    def _split_anchor(target: str) -> tuple[str, str]:
+        text = (target or "").strip()
+        if "#" not in text:
+            return text, ""
+        base, anchor = text.split("#", 1)
+        anchor = anchor.strip()
+        return base.strip(), f"#{anchor}" if anchor else ""
+
+    def _current_anchor(self) -> str:
+        _base, anchor = self._split_anchor(self.search.text())
+        return anchor
+
+    def _apply_current_anchor(self, target: str) -> str:
+        normalized = normalize_link_target(target)
+        if "#" in normalized:
+            return normalized
+        anchor = self._current_anchor()
+        return f"{normalized}{anchor}" if anchor else normalized
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""

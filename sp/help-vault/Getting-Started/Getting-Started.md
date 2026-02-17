@@ -1,10 +1,15 @@
 # Getting Started
 
 ## First Time Setup
-When you first run StillPoint, you'll see a welcome screen.
-- Click 'Create New Vault' to start fresh.
-- Or 'Open Existing Vault' to use an existing folder.
-- Vaults are just folders on your computer with Markdown files.
+![paste_image_001](./paste_image_001.png)
+
+When you first run StillPoint, you will see a welcome screen.
+- Click `Create New Vault` to start fresh.
+- Click `Open Existing Vault` to use a vault you already have.
+- A vault is just a folder on your computer with Markdown pages inside it.
+
+Tip: many users create a `vaults/` folder (for example on Desktop or Documents) and keep each vault in its own subfolder.
+update: talk about setting default vault or not.
 
 ## Create or Open a Vault
 - Use Vault -> New Vault to create a new vault.
@@ -24,32 +29,35 @@ MyNotes/
 ```
 
 ## Core Layout
+
+![paste_image_002](./paste_image_002.png){width=900}
+
 - Left sidebar: Vault tree, Tags, Search.
 - Center: Editor.
-- Right sidebar: Tasks, Calendar, Attachments, Link Navigator.
+- Right sidebar: Tasks, Calendar, Attachments, Link Navigator, and AI (if enabled).
 
 ## First Page
-- Use File -> New Page to create a note.
-- Pages live as Markdown files on disk.
-Example page content:
-```markdown
-# My First Page
+- Create your first page using one of these options:
+  - Press `Ctrl+N`
+  - Right-click in the page tree and choose `New Page`
+- Pages are saved as Markdown files on disk.
 
-This is a simple note.
 
-- [ ] Task 1
-- [x] Task 2 (done)
+## Templates
+Templates help you create consistent pages quickly.
+- You can make templates for common pages like meeting notes, daily logs, or project plans.
+- Templates can include swap variables (placeholders) that are filled in when the page is created.
+- Start simple: create one template you use often, then expand over time.
 
-Link to another page: :AnotherPage
-```
 
 ## Saving
 - StillPoint saves automatically as you type.
-- Use Ctrl+S to force a save at any time.
+- Use `Ctrl+S` to force a save at any time.
 
 ## Switching Vaults
 - Use Vault -> Open Vault in New Window to work in multiple vaults at once.
 
 ## Next Steps
-- Learn about [:Editor|editing] and [:Navigation|navigation].
-- Try adding [:Tasks|tasks] and [:Calendar|journal entries].
+- Learn about [:Editor|Editor] and [:Navigation|Navigation].
+- Try adding [:Tasks|Tasks] and [:Calendar|Calendar].
+- Visit [:Welcome|Welcome] for the bigger-picture view of how people use StillPoint day to day.

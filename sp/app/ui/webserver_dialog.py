@@ -9,11 +9,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QGroupBox,
     QFormLayout,
     QSpinBox,
+    QComboBox,
 )
 
 from sp.webserver import WebServer
@@ -51,10 +51,12 @@ class WebServerDialog(QDialog):
         config_group = QGroupBox("Server Configuration")
         config_layout = QFormLayout()
 
-        # Host input
-        self.host_input = QLineEdit("127.0.0.1")
-        self.host_input.setPlaceholderText("127.0.0.1")
-        config_layout.addRow("Host:", self.host_input)
+        # Host mode dropdown (explicit safe choices only)
+        self.host_input = QComboBox()
+        self.host_input.addItem("Localhost only (127.0.0.1)", "127.0.0.1")
+        self.host_input.addItem("Local Network (0.0.0.0)", "0.0.0.0")
+        self.host_input.setCurrentIndex(0)
+        config_layout.addRow("Network:", self.host_input)
 
         # Port input
         self.port_input = QSpinBox()
@@ -99,7 +101,7 @@ class WebServerDialog(QDialog):
     def _start_server(self):
         """Start the web server."""
         try:
-            host = self.host_input.text().strip() or "127.0.0.1"
+            host = (self.host_input.currentData() or "127.0.0.1").strip()
             port = self.port_input.value()
 
             # Create web server if needed
@@ -111,9 +113,18 @@ class WebServerDialog(QDialog):
 
             # Update UI
             protocol = "https" if self.web_server.use_ssl else "http"
-            url = f"{protocol}://{actual_host}:{actual_port}/"
+            display_host = actual_host
+            link_host = actual_host
+            if actual_host == "0.0.0.0":
+                # 0.0.0.0 is a bind address, not a browsable host.
+                link_host = "127.0.0.1"
+                display_host = "0.0.0.0 (all interfaces)"
+            url = f"{protocol}://{link_host}:{actual_port}/"
 
-            self.status_label.setText(f'Server is running on <a href="{url}">{url}</a>')
+            self.status_label.setText(
+                f'Server is running on {display_host}:{actual_port}<br>'
+                f'Open locally: <a href="{url}">{url}</a>'
+            )
             self.status_label.setOpenExternalLinks(True)
             self.status_label.setTextFormat(Qt.RichText)
 

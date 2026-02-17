@@ -1,51 +1,69 @@
 # Modes
 
-## What Are Modes?
-Modes change how the interface behaves for different tasks.
-- **Normal Mode**: Full interface with all panels
-- **Focus Mode**: Distraction-free writing
-- **VI Mode**: Vim-style keyboard navigation
-- **Audience Mode**: Presentation view
+Modes help you use the same page in different ways: writing, presenting, or keyboard-driven editing.
 
-## Normal Mode
-The default interface:
-- All panels visible (Tasks, Calendar, Links, etc.)
-- Full toolbar and menus
-- Best for general note-taking and organization
+## Mode Types
+- **Normal editing**: Your regular app window with panels and tools.
+- **Focus Mode**: Cleaner writing view with fewer distractions.
+- **Audience Mode**: Bigger, presentation-friendly reading view.
+- **Vi Mode**: Vim-style editor behavior inside the markdown editor.
+
+## How To Open Modes
+- Menu: `View -> View... -> Focus Mode` or `Audience Mode`
+- Keyboard Focus Mode: `Ctrl+Alt+F`
+- Keyboard Audience Mode: `Ctrl+Alt+A`
+- You can also open Focus/Audience from the mode buttons in the status bar.
+
+Note: `Ctrl+Shift+F` is **Search Across Vault**, not Focus Mode.
 
 ## Focus Mode
-For distraction-free writing:
-- Hide all panels except the editor
-- Clean, minimal interface
-- Toggle with View → Focus Mode or Ctrl+Shift+F
-- Perfect for deep writing sessions
+Focus Mode is best when you want to write without visual noise.
+- Opens the current page in a dedicated overlay window.
+- Keeps your cursor position and returns you to the same place when you close it.
+- Uses your Focus Mode settings from Preferences.
 
-## VI Mode
-Vim-style editing:
-- Use keyboard shortcuts for navigation
-- `Esc` to enter command mode
-- `i` to enter insert mode
-- `h/j/k/l` for movement
-- Enable in Preferences → Editor → VI Mode
+Useful Focus settings in `Preferences -> Modes`:
+- Centered column
+- Max column width (characters)
+- Font size
+- Font scale
+- Typewriter scrolling
+- Current paragraph highlight
 
 ## Audience Mode
-For presentations:
-- Large, readable text
-- Hide editing controls
-- Navigate with keyboard or mouse
-- Toggle with View → Audience Mode
+Audience Mode is tuned for reading or presenting content to others.
+- Opens the current page in a clean, larger-format overlay window.
+- Keeps your place and returns you to normal editing when closed.
+- Uses your Audience Mode settings from Preferences.
 
-## Switching Modes
-- Use View menu to switch modes
-- Keyboard shortcuts where available
-- Modes remember their state per vault
+Useful Audience settings in `Preferences -> Modes`:
+- Centered column
+- Max column width (characters)
+- Font size
+- Font scale
+- Line height scale
+- Cursor spotlight
+- Paragraph highlight
+- Soft auto-scroll
+- Floating tool strip
 
-## Customizing Modes
-- Some settings can be customized per mode
-- Font sizes may change in Audience mode
-- Panel visibility depends on the mode
+**NOTE:**  Both Focus and Audience mode have a 'Full screen' toggle button so they can be resized and/or dragged to a second monitor.
 
-## Tips
-- Use Focus mode for creative writing.
-- VI mode is great for power users.
-- Audience mode works well for sharing notes.
+## Vi Mode
+Vi Mode changes editing behavior in the main markdown editor for keyboard-first workflows.
+- Enable it in `Preferences -> Modes -> Enable Vi Mode`.
+- Optional: `Use Vi Mode Block Cursor`.
+- When active, StillPoint shows an `INS` status badge in the status bar for insert mode.
+
+## Main Editor Soft Auto-Scroll
+Separate from Focus/Audience overlays, you can tune soft auto-scroll for normal editing:
+- Enable main editor soft auto-scroll
+- Set how many lines to scroll per step
+
+These are in `Preferences -> Modes`.
+
+## Tips For New Users
+- Start with Focus Mode first; it is the easiest mode to feel immediately.
+- Use Audience Mode when sharing notes on screen.
+- Try Vi Mode only if you already like Vim-style editing.
+- If a mode looks too tight or too wide, adjust max column width and font scale in Preferences.

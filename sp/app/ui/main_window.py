@@ -1204,6 +1204,8 @@ class MainWindow(QMainWindow):
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
         self._remote_username: Optional[str] = None
+        # Stable selected remote vault path; may differ from API-reported root.
+        self._remote_vault_ref_path: Optional[str] = None
         def _log_request(request):
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -3216,8 +3218,8 @@ class MainWindow(QMainWindow):
 
     def _select_vault(self, checked: bool | None = None, startup: bool = False, spawn_new_process: bool = False) -> bool:  # noqa: ARG002
         seed_vault = self.vault_root or config.load_last_vault()
-        if self._remote_mode and self._server_url and self.vault_root:
-            seed_vault = self._encode_remote_ref(self._server_url, self.vault_root)
+        if self._remote_mode and self._server_url and (self._remote_vault_ref_path or self.vault_root):
+            seed_vault = self._encode_remote_ref(self._server_url, self._remote_vault_ref_path or self.vault_root)
         kind, server_url, path = self._decode_vault_ref(seed_vault)
         seed_path = path if kind == "local" else None
         select_id = seed_path
@@ -3275,7 +3277,7 @@ class MainWindow(QMainWindow):
         if self._remote_mode:
             server_url = self.api_base
             if server_url:
-                self._launch_remote_vault_process(server_url, self.vault_root)
+                self._launch_remote_vault_process(server_url, self._remote_vault_ref_path or self.vault_root)
         else:
             self._launch_vault_process(self.vault_root)
         self._close_vault_window()
@@ -4021,7 +4023,8 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             return None
         if self._remote_mode:
-            return str(self._remote_vault_cache_root(self.vault_root))
+            ref_path = self._remote_vault_ref_path or self.vault_root
+            return str(self._remote_vault_cache_root(ref_path))
         return self.vault_root
 
     def _remote_server_key(self) -> str:
@@ -4497,6 +4500,7 @@ class MainWindow(QMainWindow):
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
         try:
+            remote_ref_path = directory if self._remote_mode else None
             # Persist current history before switching away
             self._persist_recent_history()
             # Release any existing lock before switching vaults
@@ -4508,7 +4512,8 @@ class MainWindow(QMainWindow):
             prefer_read_only = False
             if self._remote_mode:
                 try:
-                    cache_root = self._ensure_remote_cache_root()
+                    cache_root = self._remote_vault_cache_root(remote_ref_path or directory)
+                    cache_root.mkdir(parents=True, exist_ok=True)
                     config.set_active_vault(str(cache_root))
                     prefer_read_only = config.load_vault_force_read_only()
                 except Exception:
@@ -4557,6 +4562,7 @@ class MainWindow(QMainWindow):
                 self._release_vault_lock()
                 return False
             self.vault_root = resp.json().get("root")
+            self._remote_vault_ref_path = remote_ref_path if self._remote_mode else None
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
             if self._remote_mode:
                 if not self._ensure_remote_auth_for_vault():
@@ -4586,9 +4592,8 @@ class MainWindow(QMainWindow):
                 # Set active vault for both local and remote modes
                 # For remote vaults, we cache the index locally so we still need the DB connection
                 if self._remote_mode:
-                    # For remote vaults, use a cache directory based on the server URL and vault path
-                    cache_key = hashlib.sha256(f"{self.api_base}:{self.vault_root}".encode()).hexdigest()[:16]
-                    cache_root = Path.home() / ".cache" / "stillpoint" / "remote-vaults" / cache_key
+                    # For remote vaults, scope local metadata by selected remote vault path.
+                    cache_root = self._remote_vault_cache_root(self._remote_vault_ref_path or directory)
                     cache_root.mkdir(parents=True, exist_ok=True)
                     config.set_active_vault(str(cache_root))
                 else:
@@ -4596,7 +4601,9 @@ class MainWindow(QMainWindow):
                     config.set_active_vault(self.vault_root)
                 
                 if self._remote_mode:
-                    config.save_last_vault(self._encode_remote_ref(self.api_base, self.vault_root))
+                    config.save_last_vault(
+                        self._encode_remote_ref(self.api_base, self._remote_vault_ref_path or directory)
+                    )
                 else:
                     config.save_last_vault(self.vault_root)
                     display_name = vault_name or Path(self.vault_root).name
@@ -5099,7 +5106,11 @@ class MainWindow(QMainWindow):
         recent_history = self.page_history[-18:] if len(self.page_history) > 18 else self.page_history[:]
 
         # Remove calendar pages (e.g., /Journal/) from recent history
-        filtered_history = [p for p in recent_history if "/Journal/" not in p and "/journal/" not in p]
+        filtered_history = [
+            p
+            for p in recent_history
+            if self._is_history_path_allowed(p) and "/Journal/" not in p and "/journal/" not in p
+        ]
 
         # Remove duplicates while preserving order (keep most recent occurrence)
         seen = set()
@@ -6112,7 +6123,7 @@ class MainWindow(QMainWindow):
             tracer.mark("api read start")
         
         # Add to page history (unless we're navigating through history)
-        if add_to_history and path != self.current_path:
+        if add_to_history and self._is_history_path_allowed(path) and path != self.current_path:
             # Remove any forward history when opening a new page
             if self.history_index < len(self.page_history) - 1:
                 self.page_history = self.page_history[:self.history_index + 1]
@@ -7579,30 +7590,10 @@ class MainWindow(QMainWindow):
                     pos = post_cursor.position()
                     if pos >= len(text) or text[pos] != " ":
                         post_cursor.insertText(" ")
-                        self.editor.setTextCursor(post_cursor)
+                    else:
+                        post_cursor.setPosition(pos + 1)
+                    self.editor.setTextCursor(post_cursor)
                 inserted = True
-
-    def _find_existing_page_by_leaf_name(self, page_name: str) -> Optional[str]:
-        """Find an existing page path by page leaf name (case-insensitive)."""
-        cleaned = self._canonical_page_leaf_key(page_name)
-        if not cleaned:
-            return None
-        try:
-            matches = config.search_pages(page_name, limit=200)
-        except Exception:
-            matches = []
-        for page in matches:
-            path = page.get("path") or ""
-            if not path:
-                continue
-            if self._canonical_page_leaf_key(Path(path).stem) == cleaned:
-                return path
-        return None
-
-    def _canonical_page_leaf_key(self, page_name: str) -> str:
-        """Normalize leaf names for duplicate detection across input styles."""
-        raw = (page_name or "").strip().replace("_", " ")
-        return " ".join(raw.split()).lower()
 
     def _ensure_inline_link_target_page(self, colon_path: str, *, template_name: str = "") -> tuple[str, bool]:
         """Ensure link target exists for inline/Ctrl-L create flows.
@@ -7621,12 +7612,6 @@ class MainWindow(QMainWindow):
             existing_colon = path_to_colon(target_file) or normalized_colon
             return ensure_root_colon_link(existing_colon), False
 
-        existing_by_name = self._find_existing_page_by_leaf_name(page_name)
-        if existing_by_name:
-            existing_colon = path_to_colon(existing_by_name)
-            if existing_colon:
-                return ensure_root_colon_link(existing_colon), False
-
         if self._read_only:
             self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
             return normalized_colon, False
@@ -7639,7 +7624,16 @@ class MainWindow(QMainWindow):
             self._apply_template_from_path(target_file, page_name, str(template_path))
         else:
             self._apply_new_page_template(target_file, page_name)
-        self._populate_vault_tree()
+        # Keep inline link creation from triggering navigation side effects in the tree.
+        saved_pending_selection = self._pending_selection
+        self._pending_selection = None
+        saved_suspend = self._suspend_selection_open
+        self._suspend_selection_open = True
+        try:
+            self._populate_vault_tree()
+        finally:
+            self._suspend_selection_open = saved_suspend
+            self._pending_selection = saved_pending_selection
 
         created_colon = path_to_colon(target_file) or normalized_colon
         return ensure_root_colon_link(created_colon), True
@@ -7736,16 +7730,6 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
                 return
 
-            # Keep page-creation behavior aligned with inline/Ctrl-L flows:
-            # if the leaf already exists (case/format-insensitive), open it instead.
-            existing_by_name = self._find_existing_page_by_leaf_name(page_name)
-            if existing_by_name:
-                self._pending_selection = existing_by_name
-                self._populate_vault_tree()
-                self._open_file(existing_by_name, cursor_at_end=True)
-                self.statusBar().showMessage("Page already exists; opened existing page", 4000)
-                return
-            
             # Create the new page path (resolved_parent already determined above)
             target_path = self._join_paths(resolved_parent, page_name)
             
@@ -7755,7 +7739,21 @@ class MainWindow(QMainWindow):
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
-                    self.statusBar().showMessage("Page already exists", 4000)
+                    existing_file = self._folder_to_file_path(target_path)
+                    colon_existing = path_to_colon(existing_file) if existing_file else None
+                    if colon_existing and self.current_path:
+                        self.editor.insert_link(colon_existing, surround_with_spaces=True)
+                        cursor = self.editor.textCursor()
+                        text = self.editor.toPlainText()
+                        pos = cursor.position()
+                        if pos >= len(text) or text[pos] != " ":
+                            cursor.insertText(" ")
+                        else:
+                            cursor.setPosition(pos + 1)
+                        self.editor.setTextCursor(cursor)
+                        self.statusBar().showMessage("Page already exists here; inserted link", 4000)
+                        return
+                    self.statusBar().showMessage("Page already exists here", 4000)
                 else:
                     self._alert_api_error(exc, "Failed to create page")
                 return
@@ -7773,16 +7771,39 @@ class MainWindow(QMainWindow):
             if template_path:
                 self._apply_template_from_path(file_path, page_name, template_path)
             
-            # Insert a short link to the new page before opening it.
+            # Refresh tree without auto-opening/selecting the new page.
+            saved_pending_selection = self._pending_selection
+            self._pending_selection = None
+            saved_suspend = self._suspend_selection_open
+            self._suspend_selection_open = True
+            try:
+                self._populate_vault_tree()
+            finally:
+                self._suspend_selection_open = saved_suspend
+                self._pending_selection = saved_pending_selection
+
+            # Insert link where the cursor is and keep editing the current page.
             if self.current_path:
                 colon_path = path_to_colon(file_path)
                 if colon_path:
-                    self.editor.insert_link(colon_path)
+                    self.editor.insert_link(colon_path, surround_with_spaces=True)
+                    cursor = self.editor.textCursor()
+                    text = self.editor.toPlainText()
+                    pos = cursor.position()
+                    if pos >= len(text) or text[pos] != " ":
+                        cursor.insertText(" ")
+                        self.editor.setTextCursor(cursor)
+                    else:
+                        cursor.setPosition(pos + 1)
+                        self.editor.setTextCursor(cursor)
+                    self.statusBar().showMessage("Created page and inserted link", 4000)
+                    return
+                self.statusBar().showMessage("Created page", 3000)
+                return
 
-            # Open the new page
-            self._pending_selection = file_path
+            # No active page to insert into; keep behavior non-navigating.
+            self.statusBar().showMessage("Created page", 3000)
             self._populate_vault_tree()
-            self._open_file(file_path, cursor_at_end=True)
 
     def _show_folder_template_dialog(self, parent_path: str = "/") -> None:
         """Show dialog to create pages from a folder template."""
@@ -11460,7 +11481,24 @@ class MainWindow(QMainWindow):
     def _move_path_dialog(self, folder_path: str, current_parent: str) -> None:
         if not self._ensure_writable("move pages or folders"):
             return
-        dlg = JumpToPageDialog(self, show_rewrite_links_checkbox=True, http_client=self.http, remote_mode=self._remote_mode)
+        implied_target_path = "/"
+        implied_target_label = "<Vault Root>"
+        filter_path = (self._nav_filter_path or "").strip()
+        if filter_path and filter_path != "/":
+            implied_target_path = filter_path
+            filter_name = Path(filter_path.rstrip("/")).name or (path_to_colon(filter_path) or "Filtered")
+            implied_target_label = f"<{filter_name}>"
+        dlg = JumpToPageDialog(
+            self,
+            filter_prefix=filter_path if (filter_path and filter_path != "/") else None,
+            filter_label=path_to_colon(filter_path) if (filter_path and filter_path != "/") else None,
+            allow_filter_removal=False,
+            show_rewrite_links_checkbox=True,
+            http_client=self.http,
+            remote_mode=self._remote_mode,
+            implied_target_path=implied_target_path,
+            implied_target_label=implied_target_label,
+        )
         dlg.setWindowTitle("Move To…")
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -12493,7 +12531,7 @@ class MainWindow(QMainWindow):
         seen: set[str] = set()
         ordered: list[str] = []
         for path in self.page_history:
-            if path and path not in seen:
+            if self._is_history_path_allowed(path) and path not in seen:
                 seen.add(path)
                 ordered.append(path)
         config.save_recent_history(ordered[-50:])
@@ -12509,22 +12547,35 @@ class MainWindow(QMainWindow):
         """Restore recent history from the vault DB."""
         if not config.has_active_vault():
             return
-        history = config.load_recent_history()
+        history = [p for p in config.load_recent_history() if self._is_history_path_allowed(p)]
         self.page_history = history[:50]
         self.history_index = len(self.page_history) - 1 if self.page_history else -1
         positions = config.load_recent_history_positions()
-        # Only keep positions for known history paths
-        self._history_cursor_positions.update({k: v for k, v in positions.items() if k in self.page_history})
+        # Replace per-vault maps so entries from another vault cannot leak across switches.
+        self._history_cursor_positions = {k: v for k, v in positions.items() if k in self.page_history}
+        self._history_scroll_positions = {
+            k: v for k, v in self._history_scroll_positions.items() if k in self.page_history
+        }
 
     def _recent_history_candidates(self) -> list[str]:
         """Return MRU list (unique) for popup cycling."""
         seen: set[str] = set()
         result: list[str] = []
         for path in reversed(self.page_history):
-            if path and path != self.current_path and path not in seen:
+            if (
+                self._is_history_path_allowed(path)
+                and path != self.current_path
+                and path not in seen
+            ):
                 seen.add(path)
                 result.append(path)
         return result
+
+    @staticmethod
+    def _is_history_path_allowed(path: Optional[str]) -> bool:
+        if not path or not isinstance(path, str):
+            return False
+        return path != FILTER_BANNER
 
     def _heading_popup_candidates(self) -> list[dict]:
         """Return headings for current page (excluding horizontal rules)."""

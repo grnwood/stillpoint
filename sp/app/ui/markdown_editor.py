@@ -7262,6 +7262,16 @@ class MarkdownEditor(QTextEdit):
         This converts storage format (markdown syntax) to display format (with hidden syntax).
         Used after inserting/editing links or pasting content that may contain links.
         """
+        scroll_bar = self.verticalScrollBar()
+        h_scroll_bar = self.horizontalScrollBar()
+        old_v_scroll = scroll_bar.value() if self._is_alive(scroll_bar) else 0
+        old_h_scroll = h_scroll_bar.value() if self._is_alive(h_scroll_bar) else 0
+        old_cursor = QTextCursor(self.textCursor())
+        try:
+            old_cursor_y = self.cursorRect(old_cursor).top()
+        except Exception:
+            old_cursor_y = 0
+
         self._display_guard = True
         current_text = self.toPlainText()
         # Preserve inline image fragments when rebuilding display after paste/link edits.
@@ -7291,6 +7301,27 @@ class MarkdownEditor(QTextEdit):
         new_cursor = self.textCursor()
         new_cursor.setPosition(min(old_cursor_pos, len(display_text)))
         self.setTextCursor(new_cursor)
+        # Keep viewport stable after whole-document replacement (prevents jumpy paste UX).
+        if self._is_alive(scroll_bar):
+            try:
+                new_cursor_y = self.cursorRect(new_cursor).top()
+                target_scroll = old_v_scroll + (new_cursor_y - old_cursor_y)
+                target_scroll = max(scroll_bar.minimum(), min(scroll_bar.maximum(), target_scroll))
+                scroll_bar.setValue(target_scroll)
+            except Exception:
+                scroll_bar.setValue(old_v_scroll)
+        if self._is_alive(h_scroll_bar):
+            try:
+                h_scroll_bar.setValue(old_h_scroll)
+            except Exception:
+                pass
+        # If caret somehow ended up outside view, bring it back so user sees pasted link location.
+        try:
+            cursor_rect = self.cursorRect(new_cursor)
+            if not self.viewport().rect().intersects(cursor_rect):
+                self.ensureCursorVisible()
+        except Exception:
+            pass
         self._render_images(display_text)
         self._display_guard = False
         self._schedule_heading_outline()

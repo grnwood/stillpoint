@@ -7,6 +7,7 @@ attachment serving, and print/PDF support.
 
 import logging
 import os
+import posixpath
 import re
 import socket
 import ssl
@@ -75,17 +76,24 @@ class WebServer:
         @self.app.template_filter("safe_markdown")
         def safe_markdown(text: str) -> Markup:
             """Render markdown to HTML safely."""
+            current_page_path = ""
+            try:
+                current_page_path = (request.view_args or {}).get("page_path", "") if request else ""
+            except Exception:
+                current_page_path = ""
             if self.config:
                 # Use StillPoint's markdown renderer
-                html = self._render_markdown(text)
+                html = self._render_markdown(text, current_page_path)
             else:
                 # Fallback to simple rendering
                 import markdown
                 normalized = self._normalize_markdown_lists(text)
+                normalized = self._rewrite_wiki_style_links(normalized)
+                normalized = self._rewrite_markdown_image_links(normalized, current_page_path)
                 html = markdown.markdown(normalized, extensions=["fenced_code", "tables"])
             return Markup(html)
 
-    def _render_markdown(self, text: str) -> str:
+    def _render_markdown(self, text: str, page_path: str = "") -> str:
         """
         Render markdown using StillPoint's renderer.
 
@@ -99,8 +107,99 @@ class WebServer:
         # For now, use basic markdown
         text = self._normalize_markdown_lists(text)
         text = self._rewrite_strikethrough(text)
+        text = self._rewrite_wiki_style_links(text)
+        text = self._rewrite_markdown_image_links(text, page_path)
         import markdown
         return markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+
+    @staticmethod
+    def _rewrite_wiki_style_links(text: str) -> str:
+        """Convert [link|label] external links into markdown links."""
+        if not text:
+            return text
+        pattern = re.compile(r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\]")
+
+        def convert_line(line: str) -> str:
+            # Skip replacements inside inline code spans.
+            parts = line.split("`")
+            for idx in range(0, len(parts), 2):
+                def repl(match: re.Match[str]) -> str:
+                    link = (match.group("link") or "").strip()
+                    label = (match.group("label") or "").strip()
+                    if not link:
+                        return match.group(0)
+                    lower = link.lower()
+                    if lower.startswith("http://") or lower.startswith("https://"):
+                        display = label if label else link
+                        return f"[{display}]({link})"
+                    return match.group(0)
+
+                parts[idx] = pattern.sub(repl, parts[idx])
+            return "`".join(parts)
+
+        lines = text.splitlines()
+        out: list[str] = []
+        in_fence = False
+        fence_marker = ""
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                out.append(line)
+                continue
+            if in_fence:
+                out.append(line)
+                continue
+            out.append(convert_line(line))
+        return "\n".join(out)
+
+    @staticmethod
+    def _is_external_or_anchor(link: str) -> bool:
+        lower = (link or "").strip().lower()
+        return (
+            lower.startswith("http://")
+            or lower.startswith("https://")
+            or lower.startswith("data:")
+            or lower.startswith("/attachments/")
+            or lower.startswith("#")
+        )
+
+    def _rewrite_markdown_image_links(self, text: str, page_path: str) -> str:
+        """Rewrite markdown image links to /attachments/... URLs relative to current page."""
+        if not text:
+            return text
+
+        page_rel = (page_path or "").strip().lstrip("/")
+        base_dir = posixpath.dirname(page_rel) if page_rel else ""
+        pattern = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)(?P<width>\{width=\d+\})?")
+
+        def repl(match: re.Match[str]) -> str:
+            alt = match.group("alt") or ""
+            raw_path = (match.group("path") or "").strip().replace("\\", "/")
+            width = match.group("width") or ""
+            if not raw_path or self._is_external_or_anchor(raw_path):
+                return match.group(0)
+            if raw_path.startswith("/"):
+                rel = raw_path.lstrip("/")
+            else:
+                rel = posixpath.normpath(posixpath.join(base_dir, raw_path))
+            rel = rel.lstrip("/")
+            if not rel or rel.startswith("../"):
+                return match.group(0)
+            attachment_url = f"/attachments/{rel}"
+            if width:
+                m = re.match(r"\{width=(\d+)\}", width)
+                if m:
+                    return f'<img alt="{alt}" src="{attachment_url}" width="{m.group(1)}">'
+            return f"![{alt}]({attachment_url})"
+
+        return pattern.sub(repl, text)
 
     @staticmethod
     def _normalize_markdown_lists(text: str) -> str:
@@ -334,6 +433,7 @@ class WebServer:
         
         # Get metadata
         title = full_path.stem
+        nav_tree = self._build_navigation_tree(page_path)
         
         # Check for print mode
         print_mode = request.args.get("mode") == "print"
@@ -356,6 +456,8 @@ class WebServer:
             title=title,
             content=content,
             page_path=page_path,
+            nav_tree=nav_tree,
+            current_page_path=page_path,
             attachments=attachments,
             print_mode=print_mode,
             auto_print=auto_print,
@@ -404,13 +506,103 @@ class WebServer:
             abort(500)
         
         title = dir_path if dir_path else "Vault Root"
-        
+        nav_tree = self._build_navigation_tree()
+
         return render_template(
             "index.html",
             title=title,
             dir_path=dir_path,
             items=items,
+            nav_tree=nav_tree,
+            current_page_path=None,
         )
+
+    def _page_file_for_directory(self, directory: Path) -> Optional[Path]:
+        """Return canonical page file for a page-directory, preferring .md over .txt."""
+        if not directory or not directory.exists() or not directory.is_dir():
+            return None
+        name = directory.name
+        for suffix in (".md", ".txt"):
+            candidate = directory / f"{name}{suffix}"
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
+
+    def _build_navigation_tree(self, current_page_path: str = "") -> list[dict]:
+        """Build a folder/page tree similar to app file navigation."""
+        current_rel = (current_page_path or "").strip().lstrip("/")
+        order_map = {}
+        if self.config and hasattr(self.config, "fetch_display_order_map"):
+            try:
+                order_map = self.config.fetch_display_order_map() or {}
+            except Exception:
+                order_map = {}
+
+        def build_for_dir(abs_dir: Path, rel_dir: str) -> list[dict]:
+            nodes: list[dict] = []
+            try:
+                entries = list(abs_dir.iterdir())
+            except Exception:
+                return nodes
+
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    child_rel = posixpath.join(rel_dir, entry.name) if rel_dir else entry.name
+                    page_file = self._page_file_for_directory(entry)
+                    children = build_for_dir(entry, child_rel)
+                    if not page_file and not children:
+                        continue
+                    page_rel = ""
+                    url = f"/browse/{child_rel}" if child_rel else "/browse/"
+                    if page_file:
+                        page_rel = page_file.relative_to(self.vault_root).as_posix()
+                        url = f"/wiki/{Path(page_rel).with_suffix('').as_posix()}"
+                    active = bool(page_rel and page_rel == current_rel)
+                    expanded = bool(current_rel and (current_rel.startswith(child_rel + "/") or active))
+                    open_path = f"/{page_rel}" if page_rel else ""
+                    nodes.append(
+                        {
+                            "name": entry.name,
+                            "url": url,
+                            "page_rel": page_rel,
+                            "open_path": open_path,
+                            "children": children,
+                            "active": active,
+                            "expanded": expanded,
+                        }
+                    )
+                    continue
+                if not entry.is_file():
+                    continue
+                if entry.suffix.lower() not in (".md", ".txt"):
+                    continue
+                # Skip folder-page files; represented by directory nodes above.
+                if entry.stem == abs_dir.name and abs_dir != self.vault_root:
+                    continue
+                file_rel = entry.relative_to(self.vault_root).as_posix()
+                nodes.append(
+                    {
+                        "name": entry.stem,
+                        "url": f"/wiki/{Path(file_rel).with_suffix('').as_posix()}",
+                        "page_rel": file_rel,
+                        "open_path": f"/{file_rel}",
+                        "children": [],
+                        "active": file_rel == current_rel,
+                        "expanded": False,
+                    }
+                )
+            nodes.sort(
+                key=lambda node: (
+                    order_map.get(node.get("open_path")) if node.get("open_path") in order_map else float("inf"),
+                    (node.get("name") or "").lower(),
+                )
+            )
+
+            return nodes
+
+        return build_for_dir(self.vault_root, "")
 
     def _find_free_port(self) -> int:
         """Find a free port on the system."""
