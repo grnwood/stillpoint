@@ -3403,7 +3403,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _ensure_user_help_vault(self) -> Path:
-        """Ensure a writable copy of the bundled help vault exists under ~/.stillpoint/help-vault."""
+        """Ensure user help vault exists under ~/.stillpoint/help-vault."""
         src = self._find_help_vault_template()
         if src is None:
             raise RuntimeError("Bundled help vault is missing.")
@@ -3411,187 +3411,13 @@ class MainWindow(QMainWindow):
         user_root = Path.home() / ".stillpoint" / "help-vault"
         user_root.parent.mkdir(parents=True, exist_ok=True)
 
-        def _has_help_vault_content(root: Path) -> bool:
-            return (
-                (root / "Welcome" / "Welcome.md").exists()
-                or (root / "Getting-Started" / "Getting-Started.md").exists()
-                or (root / "help-vault" / "help-vault.md").exists()
-                or (root / "help-vault.md").exists()
-                or (root / "help-vault.txt").exists()
-            )
-
-        def _copy_missing_files(src_root: Path, dst_root: Path) -> None:
-            for dirpath, dirnames, filenames in os.walk(src_root):
-                rel = os.path.relpath(dirpath, src_root)
-                if rel == ".":
-                    rel = ""
-                if rel and rel.startswith(".stillpoint"):
-                    continue
-                if rel and (".db" in rel or ".lock" in rel):
-                    continue
-                dst_dir = dst_root / rel if rel else dst_root
-                dst_dir.mkdir(parents=True, exist_ok=True)
-                for name in filenames:
-                    if name.endswith((".db", ".lock")):
-                        continue
-                    src_file = Path(dirpath) / name
-                    dst_file = dst_dir / name
-                    if not dst_file.exists():
-                        shutil.copy2(src_file, dst_file)
-
-        # Seed when missing or incomplete; avoid overwriting existing user edits.
-        if user_root.exists() and _has_help_vault_content(user_root):
-            # If the vault only contains the inner help-vault page, backfill the rest.
-            if not (user_root / "Welcome" / "Welcome.md").exists():
-                _copy_missing_files(src, user_root)
-            self._apply_help_vault_defaults(user_root)
+        # Use existing user copy exactly as-is.
+        if user_root.exists():
             return user_root
 
-        # Seed via a temp dir to avoid leaving a half-copied vault behind.
-        tmp_parent = user_root.parent
-        with tempfile.TemporaryDirectory(prefix="stillpoint-help-vault-", dir=str(tmp_parent)) as tmpdir:
-            staged = Path(tmpdir) / "help-vault"
-            shutil.copytree(
-                src,
-                staged,
-                dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(".stillpoint", "*.db", "*.lock"),
-            )
-            shutil.copytree(staged, user_root, dirs_exist_ok=True)
-        self._apply_help_vault_defaults(user_root)
+        # First-time seed: raw copy the bundled help vault, including its settings.
+        shutil.copytree(src, user_root)
         return user_root
-
-    def _apply_help_vault_defaults(self, vault_root: Path) -> None:
-        """Normalize help-vault ordering and defaults without overwriting user edits."""
-        # Remove deprecated help-vault page if present.
-        deprecated_page = vault_root / "help-vault" / "help-vault.md"
-        if deprecated_page.exists():
-            try:
-                deprecated_page.unlink()
-            except Exception:
-                pass
-            try:
-                deprecated_page.parent.rmdir()
-            except Exception:
-                pass
-        db_path = vault_root / ".stillpoint" / "settings.db"
-        if not db_path.exists():
-            return
-        desired_order = [
-            "/Welcome/Welcome.md",
-            "/Getting-Started/Getting-Started.md",
-            "/Navigation/Navigation.md",
-            "/Editor/Editor.md",
-            "/Shortcuts/Shortcuts.md",
-            "/Tasks/Tasks.md",
-            "/Calendar/Calendar.md",
-            "/Attachments/Attachments.md",
-            "/Rendering/Rendering.md",
-            "/Modes/Modes.md",
-            "/Preferences/Preferences.md",
-            "/Remote Vaults/Remote Vaults.md",
-            "/Web Client/Web Client.md",
-            "/AI/AI.md",
-            "/Troubleshooting/Troubleshooting.md",
-        ]
-        try:
-            with sqlite3.connect(db_path) as conn:
-                cur = conn.cursor()
-                cur.execute("BEGIN")
-                cur.execute("DELETE FROM pages WHERE path = ?", ("/help-vault/help-vault.md",))
-                cur.execute("DELETE FROM pages WHERE path = ?", ("/Remote-Vaults/Remote-Vaults.md",))
-                for idx, page in enumerate(desired_order, start=1):
-                    cur.execute(
-                        "UPDATE pages SET display_order = ? WHERE path = ?",
-                        (idx, page),
-                    )
-                # Bump tree_version in the help-vault DB to force a refresh.
-                row = cur.execute(
-                    "SELECT value FROM kv WHERE key = ?",
-                    ("tree_version",),
-                ).fetchone()
-                try:
-                    current_version = int(row[0]) if row and row[0] is not None else 0
-                except Exception:
-                    current_version = 0
-                cur.execute(
-                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
-                    ("tree_version", str(current_version + 1)),
-                )
-                cur.execute(
-                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
-                    ("last_file", "/Welcome/Welcome.md"),
-                )
-                # Clean up recent history entries for removed page.
-                row = cur.execute(
-                    "SELECT value FROM kv WHERE key = ?",
-                    ("recent_history",),
-                ).fetchone()
-                if row and row[0]:
-                    try:
-                        history = json.loads(row[0])
-                        if isinstance(history, list):
-                            history = [h for h in history if h != "/help-vault/help-vault.md"]
-                            history = [h for h in history if h != "/Remote-Vaults/Remote-Vaults.md"]
-                            if "/Welcome/Welcome.md" in history:
-                                history.remove("/Welcome/Welcome.md")
-                            history.insert(0, "/Welcome/Welcome.md")
-                            cur.execute(
-                                "REPLACE INTO kv(key, value) VALUES(?, ?)",
-                                ("recent_history", json.dumps(history)),
-                            )
-                    except Exception:
-                        pass
-                row = cur.execute(
-                    "SELECT value FROM kv WHERE key = ?",
-                    ("recent_history_positions",),
-                ).fetchone()
-                if row and row[0]:
-                    try:
-                        positions = json.loads(row[0])
-                        if isinstance(positions, dict):
-                            positions.pop("/help-vault/help-vault.md", None)
-                            positions.pop("/Remote-Vaults/Remote-Vaults.md", None)
-                            positions.setdefault("/Welcome/Welcome.md", 0)
-                            cur.execute(
-                                "REPLACE INTO kv(key, value) VALUES(?, ?)",
-                                ("recent_history_positions", json.dumps(positions)),
-                            )
-                    except Exception:
-                        pass
-                conn.commit()
-        except Exception:
-            return
-
-    def _apply_help_vault_defaults_once(self) -> None:
-        if not self.vault_root or not self.vault_root_name:
-            return
-        if self.vault_root_name.lower() != "help-vault":
-            return
-        db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
-        if not db_path.exists():
-            return
-        try:
-            with sqlite3.connect(db_path) as conn:
-                row = conn.execute(
-                    "SELECT value FROM kv WHERE key = ?",
-                    ("help_vault_order_fixed",),
-                ).fetchone()
-                if row and str(row[0]).strip().lower() in {"1", "true", "yes"}:
-                    return
-        except Exception:
-            # If we can't read the flag, still attempt to apply once.
-            pass
-        self._apply_help_vault_defaults(Path(self.vault_root))
-        try:
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    "REPLACE INTO kv(key, value) VALUES(?, ?)",
-                    ("help_vault_order_fixed", "true"),
-                )
-                conn.commit()
-        except Exception:
-            pass
 
     def _open_help_documentation(self) -> None:
         """Open the built-in help vault in a new StillPoint window."""
@@ -4687,10 +4513,6 @@ class MainWindow(QMainWindow):
                 needs_index = index_dir_missing or config.is_vault_index_empty()
                 if needs_index:
                     self._reindex_vault(show_progress=True)
-                self._apply_help_vault_defaults_once()
-                # Refresh tree if we just normalized help-vault ordering.
-                if self.vault_root_name and self.vault_root_name.lower() == "help-vault":
-                    self._refresh_tree()
 
                 self._load_bookmarks()
                 if self.vault_root:
