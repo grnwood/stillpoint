@@ -3267,8 +3267,12 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             self._alert("Open a vault first.")
             return
+        self._ensure_config_active_vault_context()
         dialog = VaultPreferencesDialog(self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._ensure_config_active_vault_context()
+            self._apply_feature_overrides()
+            self._apply_vault_read_only_pref()
 
     def _reload_vault(self) -> None:
         if not self.vault_root:
@@ -4415,6 +4419,7 @@ class MainWindow(QMainWindow):
         """Toggle read-only mode immediately based on the per-vault preference."""
         if not self.vault_root:
             return
+        self._ensure_config_active_vault_context()
         try:
             desired_read_only = config.load_vault_force_read_only()
         except Exception:
@@ -4436,6 +4441,7 @@ class MainWindow(QMainWindow):
                 self._apply_read_only_state()
 
     def _apply_feature_overrides(self) -> None:
+        self._ensure_config_active_vault_context()
         new_tasks = config.load_feature_tasks_enabled()
         new_calendar = config.load_feature_calendar_enabled()
         new_link_navigator = config.load_feature_link_navigator_enabled()
@@ -4484,6 +4490,20 @@ class MainWindow(QMainWindow):
             self._refresh_right_minibar_tabs()
             self._refresh_left_minibar_tabs()
         self._apply_calendar_action_visibility()
+
+    def _ensure_config_active_vault_context(self) -> None:
+        """Make config reads resolve against this window's active vault."""
+        if not self.vault_root:
+            return
+        try:
+            if self._remote_mode:
+                cache_root = self._remote_vault_cache_root(self._remote_vault_ref_path or self.vault_root)
+                cache_root.mkdir(parents=True, exist_ok=True)
+                config.set_active_vault(str(cache_root))
+            else:
+                config.set_active_vault(self.vault_root)
+        except Exception:
+            return
 
     def _apply_calendar_action_visibility(self) -> None:
         visible = bool(self._feature_calendar_enabled)
@@ -7927,9 +7947,8 @@ class MainWindow(QMainWindow):
         dlg.rebuildIndexRequested.connect(lambda: self._reindex_vault(show_progress=True))
         if dlg.exec() == QDialog.Accepted:
             self._apply_vi_preferences()
-            self.right_panel.set_ai_enabled(config.load_enable_ai_chats())
+            self._apply_feature_overrides()
             self._refresh_right_minibar_tabs()
-            self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
             ai_family = config.load_ai_chat_font_family()
             if self.right_panel.ai_chat_panel:
                 self.right_panel.ai_chat_panel.set_font_family(ai_family)

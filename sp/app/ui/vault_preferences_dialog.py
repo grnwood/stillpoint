@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QLabel,
     QVBoxLayout,
-    QMessageBox,
 )
 
 from sp.app import config
@@ -27,7 +26,8 @@ class VaultPreferencesDialog(QDialog):
         layout = QVBoxLayout(self)
         note = QLabel(
             "These settings override the global application preferences for this vault.\n"
-            "Checked = Enabled, Unchecked = Disabled, Dash = Use Global."
+            "Feature/AI overrides: Checked = Enabled, Unchecked = Disabled, Dash = Use Global.\n"
+            "Read-only is a direct per-vault setting."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
@@ -66,6 +66,16 @@ class VaultPreferencesDialog(QDialog):
             config.load_vault_enable_ai_chats_override(),
         )
         layout.addWidget(self.ai_chats_checkbox)
+        layout.addWidget(QLabel("<b>Access</b>"))
+        self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
+        self.force_read_only_checkbox.setToolTip(
+            "Open this vault without taking a lock or allowing writes in this window."
+        )
+        try:
+            self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
+        except Exception:
+            self.force_read_only_checkbox.setChecked(False)
+        layout.addWidget(self.force_read_only_checkbox)
 
         layout.addStretch(1)
 
@@ -125,10 +135,5 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_tags_override(values["tags"])
         config.save_vault_feature_remote_vaults_override(values["remote_vaults"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
-        if changed:
-            QMessageBox.information(
-                self,
-                "Reopen Vault Required",
-                "Reopen this vault for changes to take effect.",
-            )
+        config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         super().accept()

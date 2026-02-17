@@ -52,7 +52,6 @@ class PreferencesDialog(QDialog):
         app_instance = QApplication.instance()
         self._initial_app_font = QFont(app_instance.font()) if app_instance else QFont()
         self._font_families = sorted(QFontDatabase().families())
-        self.force_read_only_checkbox = None
 
         root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(10, 10, 10, 10)
@@ -147,15 +146,6 @@ class PreferencesDialog(QDialog):
         self.feature_remote_vaults_checkbox = QCheckBox("Enable Remote Vaults")
         self.feature_remote_vaults_checkbox.setChecked(config.load_global_feature_remote_vaults_enabled())
         general_layout.addWidget(self.feature_remote_vaults_checkbox)
-        self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
-        self.force_read_only_checkbox.setToolTip(
-            "Open this vault without taking a lock or allowing writes from this window."
-        )
-        try:
-            self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
-        except Exception:
-            self.force_read_only_checkbox.setChecked(False)
-        general_layout.addWidget(self.force_read_only_checkbox)
         self.feature_tasks_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_calendar_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
@@ -1106,8 +1096,6 @@ class PreferencesDialog(QDialog):
             config.save_agent_tool_settings({"tools": tools})
         except Exception:
             pass
-        if self.force_read_only_checkbox is not None:
-            config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         config.save_show_task_start_date(self.show_task_start_checkbox.isChecked())
         config.save_show_task_page(self.show_task_page_checkbox.isChecked())
