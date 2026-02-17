@@ -9,6 +9,7 @@ from chromadb.config import Settings
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from sp.rag import telemetry
 from sp.rag.index import RetrievedChunk
+from sp.logging_flags import log_enabled
 
 
 @dataclass
@@ -74,7 +75,8 @@ class ChromaRAG:
                 where=where,
             )
         except Exception as exc:
-            print(f"[Chroma] Query failed: {exc}")
+            if log_enabled("rag_vector"):
+                print(f"[Chroma] Query failed: {exc}")
             return []
         documents = results.get("documents", [[]])[0]
         metadatas = results.get("metadatas", [[]])[0]
@@ -112,7 +114,8 @@ class ChromaRAG:
                 where=where,
             )
         except Exception as exc:
-            print(f"[Chroma] Attachment query failed: {exc}")
+            if log_enabled("rag_vector"):
+                print(f"[Chroma] Attachment query failed: {exc}")
             return []
         documents = results.get("documents", [[]])[0]
         metadatas = results.get("metadatas", [[]])[0]
@@ -165,13 +168,16 @@ class ChromaRAG:
             where["$and"].append({"attachment_name": attachment})
         try:
             self.collection.delete(where=where)
-            print(f"[Chroma] Delete request for {page_ref} ({kind})")
+            if log_enabled("rag_vector"):
+                print(f"[Chroma] Delete request for {page_ref} ({kind})")
         except Exception as exc:
-            print(f"[Chroma] Failed to delete {page_ref} ({kind}): {exc}")
+            if log_enabled("rag_vector"):
+                print(f"[Chroma] Failed to delete {page_ref} ({kind}): {exc}")
 
     def index_text(self, page_ref: str, text: str, kind: str, attachment: Optional[str] = None) -> None:
         if not text.strip():
-            print(f"[Chroma] Skipping empty text for {page_ref}")
+            if log_enabled("rag_vector"):
+                print(f"[Chroma] Skipping empty text for {page_ref}")
             return
         self._delete_scope(page_ref, kind, attachment)
         base_id = self._doc_id(page_ref, kind, attachment)
@@ -184,7 +190,8 @@ class ChromaRAG:
         ids = [f"{base_id}:{idx}" for idx in range(len(chunks))]
         metadatas = [dict(metadata, chunk_index=idx) for idx in range(len(chunks))]
         self.collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
-        print(f"[Chroma] Indexed {kind} context {base_id} chunks={len(chunks)}")
+        if log_enabled("rag_vector"):
+            print(f"[Chroma] Indexed {kind} context {base_id} chunks={len(chunks)}")
 
     def delete_text(self, page_ref: str, kind: str, attachment: Optional[str] = None) -> None:
         self._delete_scope(page_ref, kind, attachment)

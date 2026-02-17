@@ -18,28 +18,38 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
 from sp.app import config
+from sp.logging_flags import log_enabled
+
 from sp.app.ui.main_window import MainWindow
 
 
 # ============================================================================
-# DEBUG CONFIGURATION - Environment Variables
+# LOGGING CONFIGURATION - Environment Variables
 # ============================================================================
-# Set these environment variables to "1" or "true" to enable detailed logging
-# By default, all are OFF for cleaner stdout (only startup and API calls shown)
+# Set SP_LOG_<AREA>=1 (or true) to enable detailed logging per functional area.
+# By default these are OFF for quieter stdout. Important startup/error messages
+# remain visible.
 #
-# SP_DEBUG_EDITOR      - Editor operations (markdown save/load, cursor positioning)
-# SP_DEBUG_NAV         - Navigation operations (tree selection, history)  
-# SP_DEBUG_HISTORY     - Page history tracking
-# SP_DEBUG_PANELS      - Right panel signal forwarding
-# SP_DEBUG_TASKS       - Task panel mouse events and signal emission
-# SP_DEBUG_PLANTUML    - PlantUML rendering operations
-# SP_DETAILED_PAGE_LOG - Detailed page load timing and operations
-# SP_DETAILED_LOGGING  - Additional low-level internal logging (various modules)
+# SP_LOG_API_CLIENT      - Desktop HTTP request/response tracing
+# SP_LOG_API_SERVER      - FastAPI endpoint tracing
+# SP_LOG_NAVIGATION      - Left nav and page history behavior
+# SP_LOG_SORTING_REORDER - Tree sorting/reorder internals
+# SP_LOG_EDITOR_MARKDOWN - Markdown editor read/write and cursor behavior
+# SP_LOG_EDITOR_RENDER   - Render pipeline details (images/preview/etc)
+# SP_LOG_ATTACHMENTS_MEDIA - Attachments and media operations
+# SP_LOG_TASKS_CALENDAR  - Task and calendar data flow
+# SP_LOG_REMOTE_VAULTS   - Remote vault auth/config diagnostics
+# SP_LOG_AI_CHAT         - AI chat request/response diagnostics
+# SP_LOG_RAG_VECTOR      - Vector/RAG indexing and query traces
+# SP_LOG_DIAGRAMS        - Mermaid/PlantUML details
+# SP_LOG_UI_STATE        - UI geometry/panel state details
+# SP_LOG_PERFORMANCE     - Timing/performance traces
+# SP_LOG_ALL             - Enable all detailed areas
 #
 # Examples:
-#   export SP_DEBUG_NAV=1        # Enable navigation debugging
-#   export SP_DEBUG_TASKS=1      # Enable task panel debugging
-#   SP_DEBUG_EDITOR=1 ./sv.sh   # Enable for single run
+#   export SP_LOG_NAVIGATION=1
+#   export SP_LOG_API_SERVER=1
+#   SP_LOG_EDITOR_MARKDOWN=1 ./sv.sh
 # ============================================================================
 
 def _debug_enabled(var_name: str) -> bool:
@@ -180,6 +190,8 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         return
     if "Accessible invalid" in message or "Could not find accessible on path" in message:
         return
+    if "GetApplicationBusAddress" in message:
+        return
     # Let other messages through to the default handler
     if mode == QtMsgType.QtDebugMsg:
         print(f"Qt Debug: {message}", file=sys.stderr)
@@ -301,14 +313,14 @@ def _maybe_use_minimal_fonts() -> None:
         ]
     src = next((p for p in candidates if p.exists()), None)
     if not src:
-        print("[StillPoint] SP_MINIMAL_FONT_SCAN set but no candidate font found; falling back to system fonts.", file=sys.stderr)
+        _startup("[StillPoint] SP_MINIMAL_FONT_SCAN set but no candidate font found; falling back to system fonts.")
         return
     dest = font_dir / src.name
     try:
         if not dest.exists():
             shutil.copy2(src, dest)
     except Exception as exc:
-        print(f"[StillPoint] Failed to copy minimal font {src}: {exc}", file=sys.stderr)
+        _startup(f"[StillPoint] Failed to copy minimal font {src}: {exc}")
         return
 
     # Ensure a monospace font is available for code/tables
@@ -321,7 +333,7 @@ def _maybe_use_minimal_fonts() -> None:
             if not mono_dest.exists():
                 shutil.copy2(mono_src, mono_dest)
         except Exception as exc:
-            print(f"[StillPoint] Failed to copy minimal monospace font {mono_src}: {exc}", file=sys.stderr)
+            _startup(f"[StillPoint] Failed to copy minimal monospace font {mono_src}: {exc}")
         else:
             family_lookup = {
                 "consola.ttf": "Consolas",
@@ -333,9 +345,9 @@ def _maybe_use_minimal_fonts() -> None:
                 "UbuntuMono-R.ttf": "Ubuntu Mono",
             }
             mono_family = family_lookup.get(mono_src.name, mono_src.stem)
-            print(f"[StillPoint] Minimal font scan: bundled monospace font {mono_src} -> {mono_dest} (family {mono_family})", file=sys.stderr)
+            _startup(f"[StillPoint] Minimal font scan: bundled monospace font {mono_src} -> {mono_dest} (family {mono_family})")
     else:
-        print("[StillPoint] Minimal font scan: no monospace candidate found; tables/code may lack monospace.", file=sys.stderr)
+        _startup("[StillPoint] Minimal font scan: no monospace candidate found; tables/code may lack monospace.")
 
     # Ensure an emoji-capable fallback font is available.
     emoji_src = next((p for p in emoji_candidates if p.exists()), None)
@@ -347,7 +359,7 @@ def _maybe_use_minimal_fonts() -> None:
             if not emoji_dest.exists():
                 shutil.copy2(emoji_src, emoji_dest)
         except Exception as exc:
-            print(f"[StillPoint] Failed to copy minimal emoji font {emoji_src}: {exc}", file=sys.stderr)
+            _startup(f"[StillPoint] Failed to copy minimal emoji font {emoji_src}: {exc}")
         else:
             emoji_family_lookup = {
                 "seguiemj.ttf": "Segoe UI Emoji",
@@ -356,12 +368,11 @@ def _maybe_use_minimal_fonts() -> None:
                 "NotoEmoji-Regular.ttf": "Noto Emoji",
             }
             emoji_family = emoji_family_lookup.get(emoji_src.name, emoji_src.stem)
-            print(
-                f"[StillPoint] Minimal font scan: bundled emoji font {emoji_src} -> {emoji_dest} (family {emoji_family})",
-                file=sys.stderr,
+            _startup(
+                f"[StillPoint] Minimal font scan: bundled emoji font {emoji_src} -> {emoji_dest} (family {emoji_family})"
             )
     else:
-        print("[StillPoint] Minimal font scan: no emoji candidate found; emoji glyphs may render as tofu.", file=sys.stderr)
+        _startup("[StillPoint] Minimal font scan: no emoji candidate found; emoji glyphs may render as tofu.")
 
     fonts_conf = cache_root / "fonts.conf"
     try:
@@ -402,13 +413,13 @@ def _maybe_use_minimal_fonts() -> None:
             encoding="utf-8",
         )
     except Exception as exc:
-        print(f"[StillPoint] Failed to write minimal fonts.conf: {exc}", file=sys.stderr)
+        _startup(f"[StillPoint] Failed to write minimal fonts.conf: {exc}")
         return
 
     os.environ["FONTCONFIG_FILE"] = str(fonts_conf)
     os.environ["FONTCONFIG_PATH"] = str(cache_root)
     os.environ["QT_QPA_FONTDIR"] = str(font_dir)
-    print(f"[StillPoint] Minimal font scan enabled; using {dest} via {fonts_conf}", file=sys.stderr)
+    _startup(f"[StillPoint] Minimal font scan enabled; using {dest} via {fonts_conf}")
 
 
 def _apply_application_font(app: QApplication) -> None:
@@ -468,7 +479,7 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
         api_module.get_app(),
         host=host,
         port=port,
-        log_level=os.getenv("UVICORN_LOG_LEVEL", "debug"),
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "warning"),
         log_config=log_config,
     )
     server = uvicorn.Server(config)
@@ -607,10 +618,16 @@ def _parse_vault_arg(argv: list[str]) -> str | None:
     return None
 
 
-def _diag(msg: str) -> None:
-    """Lightweight diagnostic logger for startup/teardown events."""
+def _sp(msg: str) -> None:
+    """Always-on lifecycle logger."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[SPDiag {timestamp}] {msg}", file=sys.stderr)
+    print(f"[SP {timestamp}] {msg}", file=sys.stderr)
+
+
+def _startup(msg: str) -> None:
+    """Startup diagnostics behind SP_LOG_STARTUP."""
+    if log_enabled("startup"):
+        _sp(msg)
 
 _FAULTHANDLER_FILE = None
 
@@ -630,10 +647,10 @@ def _enable_faulthandler_log() -> None:
         _FAULTHANDLER_FILE = open(log_path, "a", buffering=1)
         faulthandler.enable(_FAULTHANDLER_FILE)
         os.environ["STILLPOINT_FAULTHANDLER_LOG"] = str(log_path)
-        _diag(f"Faulthandler logging to {log_path}")
+        _startup(f"Faulthandler logging to {log_path}")
     except Exception as exc:
         try:
-            _diag(f"Failed to enable faulthandler log: {exc}")
+            _startup(f"Failed to enable faulthandler log: {exc}")
         except Exception:
             pass
 
@@ -662,7 +679,7 @@ def main() -> None:
     
     start_ts = time.time()
     _enable_faulthandler_log()
-    _diag("Application starting.")
+    _sp("Application starting.")
     config.init_settings()
     _maybe_use_minimal_fonts()
     # Set Windows App User Model ID before creating QApplication
@@ -677,9 +694,9 @@ def main() -> None:
     # Import api_module after server starts to set UI token
     from sp.server import api as api_module
     api_module.set_local_ui_token(local_ui_token)
-    _diag(f"API server started on {args.host}:{port}.")
+    _sp(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
-    qt_app.aboutToQuit.connect(lambda: _diag("QApplication aboutToQuit emitted."))
+    qt_app.aboutToQuit.connect(lambda: _startup("QApplication aboutToQuit emitted."))
     _apply_application_font(qt_app)
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
@@ -698,17 +715,21 @@ def main() -> None:
     try:
         if window.startup(vault_hint=vault_hint, force_select=args.select_vault):
             window.show()
-            _diag("Main window shown; entering Qt event loop.")
+            _sp("Main window open.")
             rc = qt_app.exec()
             uptime = time.time() - start_ts
-            _diag(f"Qt event loop exited with code {rc} after {uptime:.2f}s.")
+            if rc == 0:
+                _sp("Application exited.")
+            else:
+                _sp(f"Application exited with code {rc}.")
+            _startup(f"Qt event loop exited with code {rc} after {uptime:.2f}s.")
             sys.exit(rc)
         else:
-            _diag("Startup cancelled by user; quitting.")
+            _startup("Startup cancelled by user; quitting.")
             qt_app.quit()
-    except BaseException as exc:
+    except Exception as exc:
         uptime = time.time() - start_ts
-        _diag(f"Unhandled exception after {uptime:.2f}s: {exc}")
+        _sp(f"Unhandled exception after {uptime:.2f}s: {exc}")
         traceback.print_exc()
         try:
             qt_app.quit()

@@ -64,9 +64,20 @@ from sp.server.vector import vector_manager
 from sp.rag.index import RetrievedChunk
 from sp.app import config
 from sp.app import indexer as app_indexer
+from sp.logging_flags import log_enabled
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
+
+
+def _log_api(message: str) -> None:
+    if log_enabled("api_server"):
+        print(message)
+
+
+def _log_sort(message: str) -> None:
+    if log_enabled("sorting_reorder"):
+        print(message)
 
 _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
     "0",
@@ -434,7 +445,7 @@ async def verify_server_admin(request: Request) -> None:
     
     # Check for server admin password header
     password_hash = request.headers.get("x-server-admin-password")
-    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    debug = log_enabled("remote_vaults")
     if debug:
         print(f"[verify_server_admin] Received hash: {password_hash[:16] + '...' if password_hash else 'None'}")
         if SERVER_ADMIN_PASSWORD:
@@ -1115,7 +1126,8 @@ def select_vault(payload: VaultSelectPayload) -> dict:
 
 def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
     """Background worker to reindex vault."""
-    print(f"[Reindex] Job {job_id} started: rebuild_search={rebuild_search}")
+    if log_enabled("search_index"):
+        print(f"[Reindex] Job {job_id} started: rebuild_search={rebuild_search}")
     
     try:
         with _REINDEX_LOCK:
@@ -1133,7 +1145,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                 txt_files.append(page_file)
         
         total = len(txt_files)
-        print(f"[Reindex] Job {job_id}: found {total} files")
+        if log_enabled("search_index"):
+            print(f"[Reindex] Job {job_id}: found {total} files")
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["total"] = total
             _REINDEX_JOBS[job_id]["current"] = 0
@@ -1155,14 +1168,16 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         
         # Rebuild search index if requested
         if rebuild_search:
-            print(f"[Reindex] Job {job_id}: starting search index rebuild")
+            if log_enabled("search_index"):
+                print(f"[Reindex] Job {job_id}: starting search index rebuild")
             with _REINDEX_LOCK:
                 _REINDEX_JOBS[job_id]["message"] = "Rebuilding search index..."
             
             try:
                 db_path = config._vault_db_path()
                 if db_path:
-                    print(f"[Reindex] Job {job_id}: db_path={db_path}")
+                    if log_enabled("search_index"):
+                        print(f"[Reindex] Job {job_id}: db_path={db_path}")
                     conn = sqlite3.connect(db_path, check_same_thread=False)
                     try:
                         conn.execute(
@@ -1209,14 +1224,17 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                         conn.commit()
                     finally:
                         conn.close()
-                    print(f"[Reindex] Job {job_id}: search index complete")
+                    if log_enabled("search_index"):
+                        print(f"[Reindex] Job {job_id}: search index complete")
             except Exception as search_exc:
-                print(f"[Reindex] Job {job_id}: search index error: {search_exc}")
+                if log_enabled("search_index"):
+                    print(f"[Reindex] Job {job_id}: search index error: {search_exc}")
                 # Don't fail the entire job if search indexing fails
                 with _REINDEX_LOCK:
                     _REINDEX_JOBS[job_id]["message"] = f"Main index complete, search index error: {search_exc}"
         
-        print(f"[Reindex] Job {job_id}: marking as completed")
+        if log_enabled("search_index"):
+            print(f"[Reindex] Job {job_id}: marking as completed")
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["status"] = "completed"
             _REINDEX_JOBS[job_id]["progress"] = 100
@@ -1225,7 +1243,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                 pass
             else:
                 _REINDEX_JOBS[job_id]["message"] = f"Complete: indexed {total} pages"
-        print(f"[Reindex] Job {job_id}: finished successfully")
+        if log_enabled("search_index"):
+            print(f"[Reindex] Job {job_id}: finished successfully")
     
     except Exception as exc:
         print(f"[Reindex] Job {job_id}: fatal error: {exc}")
@@ -1287,12 +1306,12 @@ def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = 
             tree = _filter_out_journal(tree)
         order_map = config.fetch_display_order_map()
         if normalized_path == "/":
-            print(f"{_ANSI_BLUE}[API] Root order_map sample: {list(order_map.items())[:5]}{_ANSI_RESET}")
+            _log_api(f"{_ANSI_BLUE}[API] Root order_map sample: {list(order_map.items())[:5]}{_ANSI_RESET}")
         _sort_tree_nodes(tree, order_map)
         if normalized_path == "/" and tree:
-            print(f"{_ANSI_BLUE}[API] Root tree order after sort: {[n.get('name') for n in tree[:5]]}{_ANSI_RESET}")
+            _log_api(f"{_ANSI_BLUE}[API] Root tree order after sort: {[n.get('name') for n in tree[:5]]}{_ANSI_RESET}")
         _set_cached_tree(root, normalized_path, recursive, include_journal, version, tree)
-    print(
+    _log_api(
         f"{_ANSI_BLUE}[API] GET /api/vault/tree path={normalized_path} recursive={recursive} "
         f"version={version} cached={cache_hit}{_ANSI_RESET}"
     )
@@ -1304,7 +1323,7 @@ def vault_stats() -> dict:
     """Get vault statistics including folder count for lazy loading decisions."""
     root = vault_state.get_root()
     folder_count = config.count_folders()
-    print(f"{_ANSI_BLUE}[API] GET /api/vault/stats folder_count={folder_count}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] GET /api/vault/stats folder_count={folder_count}{_ANSI_RESET}")
     return {"folder_count": folder_count}
 
 
@@ -1569,7 +1588,7 @@ def files_modified(payload: ModifiedRangePayload) -> dict:
         end = Date.fromisoformat(payload.end_date)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
-    print(f"{_ANSI_BLUE}[API] POST /api/files/modified {payload.start_date} -> {payload.end_date}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] POST /api/files/modified {payload.start_date} -> {payload.end_date}{_ANSI_RESET}")
     root = vault_state.get_root()
     try:
         items = files.list_files_modified_between(root, start, end)
@@ -1589,7 +1608,7 @@ def files_activity(payload: ActivityRangePayload) -> dict:
         end = Date.fromisoformat(payload.end_date)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
-    print(
+    _log_api(
         f"{_ANSI_BLUE}[API] POST /api/files/activity {payload.start_date} -> {payload.end_date} mode={payload.mode}{_ANSI_RESET}"
     )
     mode = (payload.mode or "both").strip().lower()
@@ -1787,7 +1806,7 @@ def api_tasks(
         actionable_only=bool(actionable_only),
         status=normalized_status,
     )
-    if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+    if log_enabled("tasks_calendar"):
         print(
             f"[API] /api/tasks count={len(task_rows)} "
             f"query={normalized_query!r} tags={list(normalized_tags)} "
@@ -1892,7 +1911,7 @@ def api_search(
 ) -> dict:
     """Full-text search across all pages using FTS5."""
     subtree_str = f" subtree={subtree}" if subtree else ""
-    print(f"{_ANSI_BLUE}[API] GET /api/search q={q}{subtree_str} limit={limit}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] GET /api/search q={q}{subtree_str} limit={limit}{_ANSI_RESET}")
     
     if not q or not q.strip():
         return {"results": []}
@@ -1905,7 +1924,7 @@ def api_search(
         conn = sqlite3.connect(db_path, check_same_thread=False)
         results = search_index.search_pages(conn, q, subtree, limit)
         preview = [item.get("path") for item in results[:5]]
-        print(
+        _log_api(
             f"{_ANSI_BLUE}[API] /api/search q={q} results={len(results)} sample={preview}{_ANSI_RESET}"
         )
         conn.close()
@@ -1925,7 +1944,7 @@ def api_pages_search(
     This is a lighter-weight search than /api/search, intended for autocomplete
     in dialogs. It does substring matching on page paths and titles.
     """
-    print(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
     
     db_path = config._vault_db_path()
     if not db_path:
@@ -1962,7 +1981,7 @@ def api_pages_search(
         conn.close()
         
         pages = [{"path": row[0], "title": row[1]} for row in rows]
-        print(f"{_ANSI_BLUE}[API] /api/pages/search q={q} found {len(pages)} pages{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] /api/pages/search q={q} found {len(pages)} pages{_ANSI_RESET}")
         return {"pages": pages}
     except Exception as e:
         print(f"[API] Pages search error: {e}")
@@ -2281,11 +2300,11 @@ def file_rename(payload: RenameMovePayload) -> dict:
 
 @app.post("/api/file/move")
 def file_move(payload: RenameMovePayload) -> dict:
-    print(f"{_ANSI_BLUE}[API] POST /api/file/move from={payload.from_path} to={payload.to_path}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] POST /api/file/move from={payload.from_path} to={payload.to_path}{_ANSI_RESET}")
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
     if not ok:
-        print(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
         exc = RuntimeError(reason or "Preflight failed")
         raise HTTPException(
             status_code=400,
@@ -2294,10 +2313,10 @@ def file_move(payload: RenameMovePayload) -> dict:
     try:
         result = file_ops.move_folder(root, payload.from_path, payload.to_path, rewrite_links=payload.rewrite_links)
     except FileNotFoundError as exc:
-        print(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
         _raise_file_http(404, f"Move failed for {payload.from_path}", exc)
     except FileAccessError as exc:
-        print(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
         _raise_file_http(400, f"Move blocked for {payload.from_path}", exc)
     except OSError as exc:
         _raise_file_http(500, f"Move error for {payload.from_path}", exc)
@@ -2340,14 +2359,14 @@ def file_delete(payload: FileDeletePayload) -> dict:
 def tree_reorder(payload: ReorderPayload) -> dict:
     """Reorder pages within a parent folder without moving files."""
     _get_vault_root()
-    print(f"{_ANSI_BLUE}[API] POST /api/tree/reorder parent={payload.parent_path} count={len(payload.page_order)}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] POST /api/tree/reorder parent={payload.parent_path} count={len(payload.page_order)}{_ANSI_RESET}")
     try:
         config.reorder_pages(payload.parent_path, payload.page_order)
         version = config.bump_tree_version()
         _clear_tree_cache()
-        print(f"{_ANSI_BLUE}[API] Reordered {len(payload.page_order)} items, new version={version}{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] Reordered {len(payload.page_order)} items, new version={version}{_ANSI_RESET}")
     except Exception as exc:
-        print(f"{_ANSI_BLUE}[API] Reorder failed: {exc}{_ANSI_RESET}")
+        _log_api(f"{_ANSI_BLUE}[API] Reorder failed: {exc}{_ANSI_RESET}")
         raise HTTPException(status_code=500, detail=f"Failed to reorder: {exc}") from exc
     return {"ok": True, "version": version}
 
@@ -2585,20 +2604,22 @@ def _sort_tree_nodes(nodes: list[dict], order_map: dict[str, int]) -> None:
         order_val = order_map.get(open_path) if open_path else None
         node_name = (node.get("name") or "").lower()
         if order_val is not None:
-            print(f"[SORT] {node_name}: open_path={open_path}, order={order_val}")
+            _log_sort(f"[SORT] {node_name}: open_path={open_path}, order={order_val}")
         else:
-            print(f"[SORT] {node_name}: open_path={open_path}, order=None (will sort by name)")
+            _log_sort(f"[SORT] {node_name}: open_path={open_path}, order=None (will sort by name)")
         return (order_val if order_val is not None else float("inf"), node_name)
 
     nodes.sort(key=_key)
 
 
 def _log_attachment(message: str) -> None:
-    print(f"[Attachments] {message}")
+    if log_enabled("attachments_media"):
+        print(f"[Attachments] {message}")
 
 
 def _log_vector(message: str) -> None:
-    print(f"[Vector] {message}")
+    if log_enabled("rag_vector"):
+        print(f"[Vector] {message}")
 
 
 def _handle_vector_exception(context: str, exc: Exception) -> None:

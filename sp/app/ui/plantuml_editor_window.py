@@ -35,9 +35,10 @@ from PySide6.QtGui import QPainter, QColor, QTextFormat
 from sp.app.plantuml_renderer import PlantUMLRenderer, RenderResult
 from .ai_chat_panel import ApiWorker, ServerManager
 from sp.app import config
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 
-_LOGGING = os.getenv("ZIMX_PLANTUML_DEBUG", "0") not in ("0", "false", "False", "", None)
+_LOGGING = log_enabled("diagrams")
 
 
 class LineNumberArea(QWidget):

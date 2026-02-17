@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from sp.logging_flags import log_enabled
 from sp.server.adapters.files import PAGE_SUFFIX
 
 
@@ -384,7 +385,7 @@ class OpenVaultDialog(QDialog):
     def _load_remote_vaults(self, select_id: Optional[str] = None) -> None:
         if not self._remote_vaults_enabled or not self.remote_list_widget:
             return
-        debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+        debug = log_enabled("remote_vaults")
         start = time.perf_counter()
         if self._remote_loaded:
             if select_id:

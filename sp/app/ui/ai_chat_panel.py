@@ -54,6 +54,7 @@ from .ai_api import build_api_request, build_auth_headers, compose_url
 from sp.rag.index import RetrievedChunk
 from .path_utils import path_to_colon, ensure_root_colon_link
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
+from sp.logging_flags import log_enabled
 
 AI_CHAT_COLOR = "\033[34m"
 CHROMA_COLOR = "\033[33m"
@@ -64,10 +65,12 @@ def _color_text(text: str, color: str) -> str:
     return f"{color}{text}{LOG_RESET}"
 
 def _log_ai_chat(message: str) -> None:
-    print(_color_text(message, AI_CHAT_COLOR))
+    if log_enabled("ai_chat"):
+        print(_color_text(message, AI_CHAT_COLOR))
 
 def _log_vector(message: str) -> None:
-    print(_color_text(f"[Vector] {message}", CHROMA_COLOR))
+    if log_enabled("rag_vector"):
+        print(_color_text(f"[Vector] {message}", CHROMA_COLOR))
 
 
 def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
@@ -84,7 +87,8 @@ def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
     return QIcon(colored)
 
 def _log_llm_response(message: str) -> None:
-    print(_color_text(message, LLM_RESPONSE_COLOR))
+    if log_enabled("ai_chat"):
+        print(_color_text(message, LLM_RESPONSE_COLOR))
 
 
 class VectorAPIClient:
@@ -328,11 +332,11 @@ def fetch_and_cache_models(server_config: dict) -> List[str]:
     headers = build_auth_headers(server)
     verify = bool(server.get("verify_ssl", True))
     try:
-        print("[AIChat][models request]", {"url": url, "headers": headers})
+        _log_ai_chat(f"[AIChat][models request] url={url} headers={headers}")
         with httpx.Client(timeout=10.0, verify=verify) as client:
             resp = client.get(url, headers=headers)
             resp.raise_for_status()
-            print(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
+            _log_ai_chat(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
             payload = resp.json()
     except Exception as exc:
         print(f"Error fetching models from {url}: {exc}")
@@ -883,7 +887,7 @@ class ApiWorker(QtCore.QThread):
             url, headers, verify, timeout, payload = build_api_request(
                 self.server_config, self.messages, self.model, stream=self.stream
             )
-            print("[AIChat][request]", {"url": url, "headers": headers, "payload": payload})
+            _log_ai_chat(f"[AIChat][request] url={url} headers={headers} payload={payload}")
             if self.stream:
                 with httpx.stream(
                     "POST", url, json=payload, headers=headers, timeout=timeout, verify=verify
@@ -913,15 +917,15 @@ class ApiWorker(QtCore.QThread):
                             except Exception:
                                 continue
                     if full:
-                        print("[AIChat][stream complete]", full)
+                        _log_ai_chat(f"[AIChat][stream complete] {full}")
                         self.finished.emit(full)
                         return
                 # Fallback to non-stream if no chunks were handled
             with httpx.Client(timeout=timeout, verify=verify) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
-                print(f"[AIChat][response status] {resp.status_code}")
-                print("[AIChat][response body]", resp.text)
+                _log_ai_chat(f"[AIChat][response status] {resp.status_code}")
+                _log_ai_chat(f"[AIChat][response body] {resp.text}")
                 data = resp.json()
                 choice = (data.get("choices") or [{}])[0]
                 content = ""
@@ -1584,9 +1588,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self._apply_font_size()
 
     def _reset_chat_history(self) -> None:
-        print("[AIChat][reset] Starting chat reset.")
+        _log_ai_chat("[AIChat][reset] Starting chat reset.")
         if not self.current_session_id or not self.store:
-            print("[AIChat][reset] No current_session_id or store; aborting.")
+            _log_ai_chat("[AIChat][reset] No current_session_id or store; aborting.")
             return
 
         session_id = self.current_session_id
@@ -1611,7 +1615,7 @@ class AIChatPanel(QtWidgets.QWidget):
             try:
                 self.store.clear_chat(session_id)
             except Exception as exc:
-                print(f"[AIChat][reset] Failed to clear chat {session_id}: {exc}")
+                _log_ai_chat(f"[AIChat][reset] Failed to clear chat {session_id}: {exc}")
             self._condense_buffer = ""
             self._summary_content = None
             self._message_think.clear()
@@ -1622,7 +1626,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._context_popup_position = None
             self._context_popup_width = None
             self._set_status("Chat history cleared.")
-            print("[AIChat][reset] Finished _reset_chat_history")
+            _log_ai_chat("[AIChat][reset] Finished _reset_chat_history")
             return
 
         if self._context_items:
@@ -1644,7 +1648,7 @@ class AIChatPanel(QtWidgets.QWidget):
         try:
             self.store.delete_session(session_id)
         except Exception as exc:
-            print(f"[AIChat][reset] Failed to delete session {session_id}: {exc}")
+            _log_ai_chat(f"[AIChat][reset] Failed to delete session {session_id}: {exc}")
         self.current_session_id = None
         self._condense_buffer = ""
         self._summary_content = None
@@ -1659,7 +1663,7 @@ class AIChatPanel(QtWidgets.QWidget):
         if self._ensure_active_chat() and self.current_session_id:
             self._load_chat_messages(self.current_session_id)
         self._set_status("Chat history cleared.")
-        print("[AIChat][reset] Finished _reset_chat_history")
+        _log_ai_chat("[AIChat][reset] Finished _reset_chat_history")
 
     def set_preserve_session_on_reset(self, preserve: bool, *, keep_context: bool = False) -> None:
         """Control whether reset clears messages but keeps the current chat session."""
@@ -1680,7 +1684,7 @@ class AIChatPanel(QtWidgets.QWidget):
                     return path.read_text(encoding="utf-8").strip()
             except Exception:
                 continue
-        print("[AIChat][condense] Using fallback condense prompt; file not found.")
+        _log_ai_chat("[AIChat][condense] Using fallback condense prompt; file not found.")
         return "You are a helpful assistant. Summarize the following chat history."
 
     def focusInEvent(self, event):  # type: ignore[override]
@@ -4202,11 +4206,11 @@ class AIChatPanel(QtWidgets.QWidget):
                     if tree:
                         self.system_prompts_tree = tree
                         self._prompts_source_path = path
-                        print(f"[AIChat][prompts] loaded system prompts from {path}")
+                        _log_ai_chat(f"[AIChat][prompts] loaded system prompts from {path}")
                         break
-                    print(f"[AIChat][prompts] {path} had no prompts after normalization, skipping.")
+                    _log_ai_chat(f"[AIChat][prompts] {path} had no prompts after normalization, skipping.")
                 except Exception:
-                    print(f"[AIChat][prompts] failed to load {path}")
+                    _log_ai_chat(f"[AIChat][prompts] failed to load {path}")
                     continue
 
         if not self.system_prompts_tree:

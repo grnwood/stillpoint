@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 from dataclasses import dataclass
+from sp.logging_flags import log_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ Alice -> Bob: test
                 cmd = [java_cmd, "-jar", jar_cmd, "-tsvg", "-pipe"]
 
             # Debug output: show command
-            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+            if log_enabled("diagrams"):
                 print(f"[PlantUML] Command: {' '.join(cmd)}", file=sys.stdout, flush=True)
                 print(f"[PlantUML] Input length: {len(puml_text)} bytes", file=sys.stdout, flush=True)
 
@@ -236,7 +237,7 @@ Alice -> Bob: test
             )
 
             # Debug output: show result
-            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+            if log_enabled("diagrams"):
                 print(f"[PlantUML] Return code: {result.returncode}", file=sys.stdout, flush=True)
                 print(f"[PlantUML] Stdout length: {len(result.stdout)} bytes", file=sys.stdout, flush=True)
                 print(f"[PlantUML] Stderr length: {len(result.stderr)} bytes", file=sys.stdout, flush=True)
@@ -247,7 +248,7 @@ Alice -> Bob: test
             
             # Check if we got valid SVG
             if '<svg' in svg_content:
-                if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                if log_enabled("diagrams"):
                     print(f"[PlantUML] ✓ Render successful (SVG produced)", file=sys.stdout, flush=True)
                     if result.returncode != 0 and stderr_text:
                         print(f"[PlantUML] Warning - non-zero exit but SVG produced:\n{stderr_text}", file=sys.stdout, flush=True)
@@ -255,7 +256,7 @@ Alice -> Bob: test
             
             # No valid SVG - report error
             if result.returncode != 0:
-                if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+                if log_enabled("diagrams"):
                     print(f"[PlantUML] Stderr output:\n{stderr_text}", file=sys.stdout, flush=True)
                 return RenderResult(
                     success=False,
@@ -264,7 +265,7 @@ Alice -> Bob: test
                 )
             
             # Zero exit code but no SVG - also an error
-            if os.getenv("ZIMX_DEBUG_PLANTUML", "0") not in ("0", "false", "False", ""):
+            if log_enabled("diagrams"):
                 print(f"[PlantUML] Invalid SVG - stderr:\n{stderr_text}", file=sys.stdout, flush=True)
             return RenderResult(
                 success=False,

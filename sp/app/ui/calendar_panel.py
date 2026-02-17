@@ -47,6 +47,7 @@ from shiboken6 import Shiboken
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.app import config
 from sp.app import indexer
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 from .path_utils import path_to_colon, ensure_root_colon_link
 from .task_style import (
@@ -3155,7 +3156,7 @@ class CalendarPanel(QWidget):
             tasks = self._fetch_tasks_api(include_done=False, include_ancestors=False, actionable_only=False)
         except Exception:
             tasks = []
-        if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             print(f"[CALENDAR] fetched tasks count={len(tasks)}")
         overdue_tasks: list[dict] = []
         due_tasks: list[dict] = []
@@ -3222,7 +3223,7 @@ class CalendarPanel(QWidget):
         self._due_task_count = total_count
         if total_count:
             self._ensure_task_column_widths()
-        if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             print(
                 f"[CALENDAR] sections overdue={len(overdue_tasks)} due={len(due_tasks)} "
                 f"start={len(start_tasks)} unscheduled={len(unscheduled_tasks)} total={total_count}"

@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import os
 import time
 from typing import Optional
+from sp.logging_flags import log_enabled
 
 
-PAGE_LOGGING_ENABLED = os.getenv("ZIMX_DETAILED_PAGE_LOGGING", "0") not in (
-    "0",
-    "false",
-    "False",
-    "",
-    None,
-)
+PAGE_LOGGING_ENABLED = log_enabled("performance")
 
 
 class PageLoadLogger:

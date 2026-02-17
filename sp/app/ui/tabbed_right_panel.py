@@ -10,6 +10,7 @@ from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import QTabWidget, QWidget, QMenu
 from PySide6.QtCore import Qt
 from sp.app import config
+from sp.logging_flags import log_enabled
 
 from .ai_chat_panel import AIChatPanel
 from .task_panel import TaskPanel
@@ -491,7 +492,7 @@ class TabbedRightPanel(QWidget):
             return
         self.task_panel = TaskPanel(font_size_key="task_font_size_tabbed", splitter_key="task_splitter_tabbed")
         self.tabs.insertTab(0, self.task_panel, "Tasks")
-        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("ui_state"):
             self.task_panel.taskActivated.connect(lambda path, line: print(f"[TABBED_PANEL] taskActivated received: {path}:{line}") or self.taskActivated.emit(path, line))
         else:
             self.task_panel.taskActivated.connect(self.taskActivated)

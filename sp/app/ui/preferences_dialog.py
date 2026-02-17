@@ -38,6 +38,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QUrl
 
 from sp.app import config
+from sp.logging_flags import log_enabled
 from . import theme as theme_module
 
 
@@ -1074,7 +1075,7 @@ class PreferencesDialog(QDialog):
             config.save_main_soft_scroll_lines(self.main_soft_scroll_lines_spin.value())
         except Exception:
             pass
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+        if log_enabled("editor_markdown"):
             print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_enable_ai_agents(self.enable_ai_agents_checkbox.isChecked())

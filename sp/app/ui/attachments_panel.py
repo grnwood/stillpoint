@@ -32,8 +32,9 @@ from PySide6.QtWidgets import (
 )
 
 from .page_load_logger import PAGE_LOGGING_ENABLED
+from sp.logging_flags import log_enabled
 
-_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_DETAILED_LOGGING = log_enabled("attachments_media")
 
 
 class AttachmentsListWidget(QListWidget):
@@ -547,7 +548,8 @@ class AttachmentsPanel(QWidget):
                     if self._auth_prompt():
                         resp = self._http_client.post("/files/attach", data={"page_path": page_key}, files=multipart)
                 resp.raise_for_status()
-                print(f"[Attachments] uploaded {len(multipart)} attachment(s) for {page_key}")
+                if log_enabled("attachments_media"):
+                    print(f"[Attachments] uploaded {len(multipart)} attachment(s) for {page_key}")
                 return True
             except httpx.HTTPError as exc:
                 print(f"[Attachments] failed to upload attachments for {page_key}: {exc}")
@@ -557,7 +559,8 @@ class AttachmentsPanel(QWidget):
         if not removed:
             return True
         if not self._http_client:
-            print(f"[Attachments] skipped server delete for {len(removed)} file(s) (no API client)")
+            if log_enabled("attachments_media"):
+                print(f"[Attachments] skipped server delete for {len(removed)} file(s) (no API client)")
             return True
         try:
             resp = self._http_client.post("/files/delete", json={"paths": sorted(removed)})
@@ -565,7 +568,8 @@ class AttachmentsPanel(QWidget):
                 if self._auth_prompt():
                     resp = self._http_client.post("/files/delete", json={"paths": sorted(removed)})
             resp.raise_for_status()
-            print(f"[Attachments] deleted {len(removed)} attachment(s) for panel")
+            if log_enabled("attachments_media"):
+                print(f"[Attachments] deleted {len(removed)} attachment(s) for panel")
             return True
         except httpx.HTTPError as exc:
             print(f"[Attachments] failed to delete attachments on server: {exc}")
@@ -911,4 +915,3 @@ class AttachmentsPanel(QWidget):
                         continue
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open terminal: {e}")
-

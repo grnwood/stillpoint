@@ -107,6 +107,7 @@ from PySide6.QtWidgets import (
 
 from sp.app import config, indexer
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -535,9 +536,34 @@ TYPE_ROLE = PATH_ROLE + 1
 OPEN_ROLE = TYPE_ROLE + 1
 FILTER_BANNER = "__NAV_FILTER_BANNER__"
 TREE_LAZY_LOAD_THRESHOLD = 500  # Load full tree if vault has fewer than 500 folders
-_DETAILED_LOGGING = os.getenv("ZIMX_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_DETAILED_LOGGING = log_enabled("ui_state")
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
+
+
+def _log_api_client(message: str) -> None:
+    if log_enabled("api_client"):
+        print(message)
+
+
+def _log_navigation(message: str) -> None:
+    if log_enabled("navigation"):
+        print(message)
+
+
+def _log_sorting(message: str) -> None:
+    if log_enabled("sorting_reorder"):
+        print(message)
+
+
+def _log_search(message: str) -> None:
+    if log_enabled("search_index"):
+        print(message)
+
+
+def _log_ui_state(message: str) -> None:
+    if log_enabled("ui_state"):
+        print(message)
 
 
 class VaultTreeModel(QStandardItemModel):
@@ -558,7 +584,7 @@ class VaultTreeModel(QStandardItemModel):
                 self._drag_source_parent_path = parent_item.data(PATH_ROLE) if parent_item else None
             else:
                 self._drag_source_parent_path = "/"  # Root level
-        print(f"[MODEL] mimeData: source parent path = {self._drag_source_parent_path}")
+        _log_sorting(f"[MODEL] mimeData: source parent path = {self._drag_source_parent_path}")
         
         # Get the standard mime data from parent class
         mime = super().mimeData(indexes)
@@ -570,7 +596,7 @@ class VaultTreeModel(QStandardItemModel):
             if path:
                 mime.setText(path)
                 mime.setData("application/x-stillpoint-path", path.encode("utf-8"))
-                print(f"[MODEL] Added custom mime data: text={path}, has stillpoint-path={mime.hasFormat('application/x-stillpoint-path')}")
+                _log_sorting(f"[MODEL] Added custom mime data: text={path}, has stillpoint-path={mime.hasFormat('application/x-stillpoint-path')}")
         
         return mime
     
@@ -582,11 +608,11 @@ class VaultTreeModel(QStandardItemModel):
         else:
             target_parent_path = "/"
         
-        print(f"[MODEL] canDropMimeData: source={self._drag_source_parent_path}, target={target_parent_path}")
+        _log_sorting(f"[MODEL] canDropMimeData: source={self._drag_source_parent_path}, target={target_parent_path}")
         
         # Check if this is a same-parent drop
         if self._drag_source_parent_path != target_parent_path:
-            print(f"[MODEL] Blocking drop - different parent")
+            _log_sorting("[MODEL] Blocking drop - different parent")
             return False
         
         return super().canDropMimeData(data, action, row, column, parent)
@@ -599,20 +625,20 @@ class VaultTreeModel(QStandardItemModel):
         else:
             target_parent_path = "/"
         
-        print(f"[MODEL] dropMimeData called: source={self._drag_source_parent_path}, target={target_parent_path}, row={row}")
+        _log_sorting(f"[MODEL] dropMimeData called: source={self._drag_source_parent_path}, target={target_parent_path}, row={row}")
         
         # Verify same parent (belt and suspenders)
         if self._drag_source_parent_path != target_parent_path:
-            print(f"[MODEL] dropMimeData blocked - different parent")
+            _log_sorting("[MODEL] dropMimeData blocked - different parent")
             return False
         
-        print(f"[MODEL] Calling super().dropMimeData()")
+        _log_sorting("[MODEL] Calling super().dropMimeData()")
         # Let the model handle the internal reordering
         result = super().dropMimeData(data, action, row, column, parent)
-        print(f"[MODEL] super().dropMimeData() returned {result}")
+        _log_sorting(f"[MODEL] super().dropMimeData() returned {result}")
         
         if result:
-            print(f"[MODEL] Reorder successful, emitting reorderRequested signal")
+            _log_sorting("[MODEL] Reorder successful, emitting reorderRequested signal")
             # Use the parent path we already have
             parent_path = target_parent_path or "/"
             
@@ -629,9 +655,9 @@ class VaultTreeModel(QStandardItemModel):
                         if child_path and child_path not in seen:
                             ordered_paths.append(child_path)
                             seen.add(child_path)
-                            print(f"[MODEL]   {row_idx}: {child_path}")
+                            _log_sorting(f"[MODEL]   {row_idx}: {child_path}")
             
-            print(f"[MODEL] Emitting reorderRequested: parent={parent_path}, count={len(ordered_paths)}")
+            _log_sorting(f"[MODEL] Emitting reorderRequested: parent={parent_path}, count={len(ordered_paths)}")
             # Emit signal to trigger API call
             self.reorderRequested.emit(parent_path, ordered_paths)
         
@@ -785,7 +811,7 @@ class VaultTreeView(QTreeView):
         ):
             if not self._dragging:
                 self._dragging = True
-                print(f"[TREE] Drag detected, calling startDrag()")
+                _log_sorting("[TREE] Drag detected, calling startDrag()")
                 self.dragStarted.emit()
                 self.dragStatusChanged.emit("Reorder item in the tree...")
                 # Manually trigger drag with our custom mime data
@@ -839,7 +865,7 @@ class NavTreeDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
     def dragEnterEvent(self, event):  # type: ignore[override]
-        print(f"[TREE DRAG] dragEnterEvent")
+        _log_sorting("[TREE DRAG] dragEnterEvent")
         event.acceptProposedAction()
         super().dragEnterEvent(event)
 
@@ -850,7 +876,7 @@ class NavTreeDelegate(QStyledItemDelegate):
         
         # Block ALL OnItem drops - we only allow reordering between items
         if drop_pos == QAbstractItemView.OnItem:
-            print(f"[TREE DRAG] Blocking OnItem drop")
+            _log_sorting("[TREE DRAG] Blocking OnItem drop")
             event.setDropAction(Qt.IgnoreAction)
             event.ignore()
             return
@@ -860,10 +886,10 @@ class NavTreeDelegate(QStyledItemDelegate):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event):  # type: ignore[override]
-        print(f"[TREE DROP] dropEvent called")
+        _log_sorting("[TREE DROP] dropEvent called")
         src_indexes = self.selectedIndexes()
         if not src_indexes:
-            print(f"[TREE DROP] No src_indexes, ignoring")
+            _log_sorting("[TREE DROP] No src_indexes, ignoring")
             event.ignore()
             self.dragStatusChanged.emit("")  # Clear status on failed drop
             return
@@ -877,19 +903,19 @@ class NavTreeDelegate(QStyledItemDelegate):
         target_index = self.indexAt(pos)
         drop_pos = self.dropIndicatorPosition()
         
-        print(f"[TREE DROP] src_path={src_path}, drop_pos={drop_pos}")
+        _log_sorting(f"[TREE DROP] src_path={src_path}, drop_pos={drop_pos}")
         
         # Determine the parent of the source and target
         src_parent_index = src_index.parent()
         target_parent_index = target_index.parent() if target_index.isValid() else QModelIndex()
         
-        print(f"[TREE DROP] src_parent==target_parent? {src_parent_index == target_parent_index}")
+        _log_sorting(f"[TREE DROP] src_parent==target_parent? {src_parent_index == target_parent_index}")
         
         # ONLY allow reordering within the same parent
         # Block any attempt to move to a different parent
         if drop_pos == QAbstractItemView.OnItem:
             # Dropping onto another folder - BLOCKED for moves between parents
-            print(f"[TREE DROP] OnItem drop blocked - use Move... menu option instead")
+            _log_sorting("[TREE DROP] OnItem drop blocked - use Move... menu option instead")
             event.ignore()
             self.dragStatusChanged.emit("")
             return
@@ -897,13 +923,13 @@ class NavTreeDelegate(QStyledItemDelegate):
         # Check if we're reordering within the same parent
         if drop_pos in (QAbstractItemView.AboveItem, QAbstractItemView.BelowItem) and src_parent_index == target_parent_index:
             # This is a reorder operation within the same folder - ALLOWED
-            print(f"[TREE DROP] Handling as REORDER")
+            _log_sorting("[TREE DROP] Handling as REORDER")
             event.acceptProposedAction()
             self._handle_reorder_drop(src_index, target_index, drop_pos)
             return
         
         # Any other case is a move to different parent - BLOCKED
-        print(f"[TREE DROP] Cross-parent move blocked - use Move... menu option instead")
+        _log_sorting("[TREE DROP] Cross-parent move blocked - use Move... menu option instead")
         event.ignore()
         self.dragStatusChanged.emit("")
     
@@ -980,10 +1006,10 @@ class NavTreeDelegate(QStyledItemDelegate):
         """Start drag with path text so editor drops can create links."""
         # Use the stored drag source index from mousePressEvent
         if not self._drag_src_index or not self._drag_src_index.isValid():
-            print(f"[TREE DRAG] No valid drag source index, using selected indexes")
+            _log_sorting("[TREE DRAG] No valid drag source index, using selected indexes")
             indexes = self.selectedIndexes()
             if not indexes:
-                print(f"[TREE DRAG] No selection, calling super()")
+                _log_sorting("[TREE DRAG] No selection, calling super()")
                 super().startDrag(supportedActions)
                 return
             idx = indexes[0]
@@ -991,7 +1017,7 @@ class NavTreeDelegate(QStyledItemDelegate):
             idx = self._drag_src_index
         
         path = idx.data(OPEN_ROLE) or idx.data(PATH_ROLE)
-        print(f"[TREE DRAG] Starting drag: path={path}")
+        _log_sorting(f"[TREE DRAG] Starting drag: path={path}")
         if not path:
             super().startDrag(supportedActions)
             return
@@ -1001,16 +1027,16 @@ class NavTreeDelegate(QStyledItemDelegate):
         mime.setText(path)
         mime.setData("application/x-stillpoint-path", path.encode("utf-8"))
         
-        print(f"[TREE DRAG] Created mime with formats: {mime.formats()}")
-        print(f"[TREE DRAG] Has text: {mime.hasText()}, text: {mime.text()}")
-        print(f"[TREE DRAG] Has stillpoint-path: {mime.hasFormat('application/x-stillpoint-path')}")
+        _log_sorting(f"[TREE DRAG] Created mime with formats: {mime.formats()}")
+        _log_sorting(f"[TREE DRAG] Has text: {mime.hasText()}, text: {mime.text()}")
+        _log_sorting(f"[TREE DRAG] Has stillpoint-path: {mime.hasFormat('application/x-stillpoint-path')}")
         
         drag = QDrag(self)
         drag.setMimeData(mime)
         # Execute the drag with Copy action to allow external drops
-        print(f"[TREE DRAG] About to exec drag")
+        _log_sorting("[TREE DRAG] About to exec drag")
         result = drag.exec(Qt.CopyAction)
-        print(f"[TREE DRAG] Drag completed with result={result}")
+        _log_sorting(f"[TREE DRAG] Drag completed with result={result}")
 
 
 class MenuCommandBar(QWidget):
@@ -1169,9 +1195,8 @@ class MenuCommandBar(QWidget):
 
 
 def logNav(message: str) -> None:
-    """Log navigation operations if ZIMX_DEBUG_NAV is enabled."""
-    if os.getenv("ZIMX_DEBUG_NAV", "0") not in ("0", "false", "False", ""):
-        print(f"[Nav] {message}")
+    """Log navigation operations when navigation logging is enabled."""
+    _log_navigation(f"[Nav] {message}")
 
 
 class MainWindow(QMainWindow):
@@ -1211,14 +1236,14 @@ class MainWindow(QMainWindow):
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
             except Exception:
                 path = str(request.url)
-            print(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
+            _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
             try:
                 path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
             except Exception:
                 path = str(response.request.url)
-            print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
+            _log_api_client(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
 
         self.http = self._build_http_client(
             base_url=self.api_base,
@@ -1555,12 +1580,14 @@ class MainWindow(QMainWindow):
         self.right_panel.linkHomeRequested.connect(self._go_home)
         try:
             self.right_panel.attachments_panel.plantumlEditorRequested.connect(self._open_plantuml_editor)
-            print("[MainWindow] Connected PlantUML editor request signal")
+            if log_enabled("startup"):
+                print("[MainWindow] Connected PlantUML editor request signal")
         except Exception as exc:
             print(f"[MainWindow] Failed to connect PlantUML editor signal: {exc}")
         try:
             self.right_panel.attachments_panel.mermaidEditorRequested.connect(self._open_mermaid_editor)
-            print("[MainWindow] Connected Mermaid editor request signal")
+            if log_enabled("startup"):
+                print("[MainWindow] Connected Mermaid editor request signal")
         except Exception as exc:
             print(f"[MainWindow] Failed to connect Mermaid editor signal: {exc}")
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
@@ -2793,7 +2820,7 @@ class MainWindow(QMainWindow):
         """Load configured remote vaults with individual connectivity status."""
         results: list[dict[str, str]] = []
         status: list[dict[str, str]] = []
-        debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+        debug = log_enabled("remote_vaults")
         start_total = time.perf_counter()
         servers = config.load_remote_servers()
         if not servers:
@@ -3174,7 +3201,7 @@ class MainWindow(QMainWindow):
         
         # Save server with password hash if remember was checked
         saved_password_hash = server_password_hash if remember_server_password else None
-        debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+        debug = log_enabled("remote_vaults")
         if debug:
             print(f"[AddRemote] Saving server: host={host} port={port} scheme={scheme}")
             print(f"[AddRemote]   remember_password={remember_server_password}")
@@ -3714,14 +3741,14 @@ class MainWindow(QMainWindow):
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
             except Exception:
                 path = str(request.url)
-            print(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
+            _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
             try:
                 path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
             except Exception:
                 path = str(response.request.url)
-            print(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
+            _log_api_client(f"{_ANSI_BLUE}[API] {response.status_code} {path}{_ANSI_RESET}")
 
         self.http = self._build_http_client(
             base_url=self.api_base,
@@ -5527,10 +5554,10 @@ class MainWindow(QMainWindow):
             resp.raise_for_status()
             data = resp.json()
             count = data.get("folder_count", 0)
-            print(f"{_ANSI_BLUE}[TREE] Folder count: {count}{_ANSI_RESET}")
+            _log_navigation(f"{_ANSI_BLUE}[TREE] Folder count: {count}{_ANSI_RESET}")
             return count
         except Exception as exc:
-            print(f"{_ANSI_BLUE}[TREE] Failed to get folder count: {exc}{_ANSI_RESET}")
+            _log_navigation(f"{_ANSI_BLUE}[TREE] Failed to get folder count: {exc}{_ANSI_RESET}")
             return 0
 
     def _populate_vault_tree(self) -> None:
@@ -5546,7 +5573,9 @@ class MainWindow(QMainWindow):
         # Decide lazy vs full loading based on vault size
         folder_count = self._count_folders_in_vault()
         self._use_lazy_loading = folder_count >= TREE_LAZY_LOAD_THRESHOLD
-        print(f"{_ANSI_BLUE}[TREE] Vault has {folder_count} folders, using {'LAZY' if self._use_lazy_loading else 'FULL'} loading{_ANSI_RESET}")
+        _log_navigation(
+            f"{_ANSI_BLUE}[TREE] Vault has {folder_count} folders, using {'LAZY' if self._use_lazy_loading else 'FULL'} loading{_ANSI_RESET}"
+        )
         
         nav_root = self._nav_filter_path or "/"
         fetch_path = "/" if (self._is_journal_path(nav_root) and not self._show_journal_in_nav) else nav_root
@@ -5557,7 +5586,7 @@ class MainWindow(QMainWindow):
             try:
                 # Use recursive loading for small vaults, lazy for large
                 recursive_param = "false" if self._use_lazy_loading else "true"
-                print(f"{_ANSI_BLUE}[TREE] Fetching tree with recursive={recursive_param}{_ANSI_RESET}")
+                _log_navigation(f"{_ANSI_BLUE}[TREE] Fetching tree with recursive={recursive_param}{_ANSI_RESET}")
                 resp = self.http.get(
                     "/api/vault/tree",
                     params={
@@ -5754,7 +5783,7 @@ class MainWindow(QMainWindow):
         """Fetch children for a path (cached, then API) and populate the node."""
         # Skip lazy loading if full tree was loaded
         if not self._use_lazy_loading:
-            print(f"{_ANSI_BLUE}[TREE] _load_children_for_path: skipping (full tree already loaded){_ANSI_RESET}")
+            _log_navigation(f"{_ANSI_BLUE}[TREE] _load_children_for_path: skipping (full tree already loaded){_ANSI_RESET}")
             return
             
         if not self._show_journal_in_nav and self._is_journal_path(path):
@@ -5973,7 +6002,7 @@ class MainWindow(QMainWindow):
             if not self.page_history or self.page_history[-1] != path:
                 self.page_history.append(path)
                 self.history_index = len(self.page_history) - 1
-                if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+                if log_enabled("navigation"):
                     print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
                 # Refresh history buttons
                 self._refresh_history_buttons()
@@ -6000,7 +6029,7 @@ class MainWindow(QMainWindow):
         mtime_ns = payload.get("mtime_ns")
         if path:
             self._page_revisions[path] = {"rev": rev, "mtime_ns": mtime_ns}
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+        if log_enabled("editor_markdown"):
             print(f"[DEBUG load] Loaded from API: {len(content)} chars, ends_with_newline={content.endswith('\\n')}, last_20_chars={repr(content[-20:])}")
         if tracer:
             try:
@@ -6423,7 +6452,7 @@ class MainWindow(QMainWindow):
                 self.editor.verticalScrollBar().setValue(saved_scroll_pos)
 
         payload_content = self.editor.to_markdown()
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+        if log_enabled("editor_markdown"):
             print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
         
         payload = {"path": self.current_path, "content": payload_content}
@@ -7132,7 +7161,7 @@ class MainWindow(QMainWindow):
 
     def _on_search_result_selected(self, path: str, line: int, position: int = -1) -> None:
         """Handle navigation from search results to a specific page."""
-        print(f"[SearchNav] Navigating to {path}, line {line}")
+        _log_search(f"[SearchNav] Navigating to {path}, line {line}")
         prev_suppress = getattr(self.editor, "_suppress_focus_on_load", False)
         self.editor._suppress_focus_on_load = True
         try:
@@ -7142,10 +7171,10 @@ class MainWindow(QMainWindow):
         
         # Scroll to the line with flash animation if line number is provided
         if position is not None and position >= 0:
-            print(f"[SearchNav] Scheduling scroll to position {position}")
+            _log_search(f"[SearchNav] Scheduling scroll to position {position}")
             QTimer.singleShot(50, lambda: self._scroll_to_position_with_flash(position))
         elif line > 0:
-            print(f"[SearchNav] Scheduling scroll to line {line}")
+            _log_search(f"[SearchNav] Scheduling scroll to line {line}")
             QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
         
         # Return focus to search results tree only if the user hasn't moved to the search box
@@ -7177,15 +7206,15 @@ class MainWindow(QMainWindow):
     
     def _scroll_to_line_with_flash(self, line: int) -> None:
         """Scroll to a specific line number and flash it."""
-        print(f"[SearchNav] _scroll_to_line_with_flash called with line {line}")
+        _log_search(f"[SearchNav] _scroll_to_line_with_flash called with line {line}")
         if line <= 0:
-            print(f"[SearchNav] Line {line} is invalid, skipping")
+            _log_search(f"[SearchNav] Line {line} is invalid, skipping")
             return
         
         # Create cursor at the specified line (1-indexed from search, but QTextDocument uses 0-indexed)
         doc = self.editor.document()
         total_lines = doc.blockCount()
-        print(f"[SearchNav] Document has {total_lines} lines, looking for line {line}")
+        _log_search(f"[SearchNav] Document has {total_lines} lines, looking for line {line}")
         
         # Note: Our search returns 1-indexed line numbers from enumerate(lines, 1)
         # QTextDocument.findBlockByLineNumber expects 0-indexed
@@ -7195,20 +7224,20 @@ class MainWindow(QMainWindow):
             # Fallback to line if that doesn't work
             block = doc.findBlockByLineNumber(line)
             if not block.isValid():
-                print(f"[SearchNav] Block at line {line} is not valid")
+                _log_search(f"[SearchNav] Block at line {line} is not valid")
                 return
         
         cursor = QTextCursor(block)
         cursor.movePosition(QTextCursor.StartOfBlock)
         
-        print(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
+        _log_search(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
         # Set the cursor position and scroll with animation and flash
         self.editor.setTextCursor(cursor)
         self._animate_or_flash_to_cursor(cursor)
 
     def _scroll_to_position_with_flash(self, position: int) -> None:
         """Scroll to a character offset and flash it."""
-        print(f"[SearchNav] _scroll_to_position_with_flash called with position {position}")
+        _log_search(f"[SearchNav] _scroll_to_position_with_flash called with position {position}")
         doc = self.editor.document()
         if not doc:
             return
@@ -7336,7 +7365,7 @@ class MainWindow(QMainWindow):
         editor_cursor = self.editor.textCursor()
         saved_cursor_pos = editor_cursor.position()
         saved_anchor_pos = editor_cursor.anchor()
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+        if log_enabled("editor_markdown"):
             print(f"[DEBUG _insert_link] BEFORE save: pos={saved_cursor_pos}, anchor={saved_anchor_pos}, doc_len={len(self.editor.toPlainText())}")
         
         # Save current page before inserting link to ensure it's indexed
@@ -7344,7 +7373,7 @@ class MainWindow(QMainWindow):
         if self.current_path:
             self._save_current_file(auto=True, reason="insert link")
         
-        if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+        if log_enabled("editor_markdown"):
             print(f"[DEBUG _insert_link] AFTER save: cursor.pos={self.editor.textCursor().position()}, doc_len={len(self.editor.toPlainText())}")
         
         # Get selected text if any
@@ -7362,7 +7391,7 @@ class MainWindow(QMainWindow):
             doc_len = len(self.editor.toPlainText())
             anchor = max(0, min(saved_anchor_pos, doc_len))
             pos = max(0, min(saved_cursor_pos, doc_len))
-            if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            if log_enabled("editor_markdown"):
                 print(f"[DEBUG _restore_cursor] doc_len={doc_len}, saved_anchor={saved_anchor_pos}, saved_pos={saved_cursor_pos}, clamped_anchor={anchor}, clamped_pos={pos}")
             cursor = QTextCursor(self.editor.document())
             cursor.setPosition(anchor)
@@ -7545,7 +7574,12 @@ class MainWindow(QMainWindow):
         if link_text:
             self.statusBar().showMessage(f"Copied link: {link_text}", 3000)
 
-    def _show_new_page_dialog(self, parent_path: Optional[str] = None) -> None:
+    def _show_new_page_dialog(
+        self,
+        parent_path: Optional[str] = None,
+        *,
+        insert_link_in_editor: bool = True,
+    ) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""
         if not self.vault_root:
             self._alert("Select a vault before creating pages.")
@@ -7583,7 +7617,7 @@ class MainWindow(QMainWindow):
                 if exc.response is not None and exc.response.status_code == 409:
                     existing_file = self._folder_to_file_path(target_path)
                     colon_existing = path_to_colon(existing_file) if existing_file else None
-                    if colon_existing and self.current_path:
+                    if insert_link_in_editor and colon_existing and self.current_path:
                         self.editor.insert_link(colon_existing, surround_with_spaces=True)
                         cursor = self.editor.textCursor()
                         text = self.editor.toPlainText()
@@ -7625,7 +7659,7 @@ class MainWindow(QMainWindow):
                 self._pending_selection = saved_pending_selection
 
             # Insert link where the cursor is and keep editing the current page.
-            if self.current_path:
+            if insert_link_in_editor and self.current_path:
                 colon_path = path_to_colon(file_path)
                 if colon_path:
                     self.editor.insert_link(colon_path, surround_with_spaces=True)
@@ -7643,7 +7677,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Created page", 3000)
                 return
 
-            # No active page to insert into; keep behavior non-navigating.
+            # No active page to insert into, or insertion disabled.
             self.statusBar().showMessage("Created page", 3000)
             self._populate_vault_tree()
 
@@ -8286,11 +8320,11 @@ class MainWindow(QMainWindow):
         self.right_panel.set_font_size(ai_font_size)
 
     def _open_task_from_panel(self, path: str, line: int, *, preserve_calendar_state: bool = False) -> None:
-        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("ui_state"):
             print(f"[MAIN_WINDOW] _open_task_from_panel called: {path}:{line}, current_path={self.current_path}")
         # Remember which widget had focus (should be task tree)
         focused_widget = self.focusWidget()
-        if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("ui_state"):
             print(f"[MAIN_WINDOW] Focus before: {focused_widget}")
         # Detect activation source (keyboard vs mouse) from sender
         activation_source = None
@@ -8316,7 +8350,7 @@ class MainWindow(QMainWindow):
                 pass
         elif focused_widget and "Task" in focused_widget.__class__.__name__:
             focused_widget.setFocus()
-            if os.getenv("ZIMX_DEBUG_PANELS", "0") not in ("0", "false", "False", ""):
+            if log_enabled("ui_state"):
                 print(f"[MAIN_WINDOW] Focus restored to: {focused_widget}")
 
     def _open_task_from_calendar_panel(self, path: str, line: int) -> None:
@@ -10362,7 +10396,10 @@ class MainWindow(QMainWindow):
             add_menu_section("Create")
             page_template_action = menu.addAction("New Page...")
             page_template_action.triggered.connect(
-                lambda checked=False, p=path: self._show_new_page_dialog(parent_path=p)
+                lambda checked=False, p=path: self._show_new_page_dialog(
+                    parent_path=p,
+                    insert_link_in_editor=False,
+                )
             )
             folder_template_action = menu.addAction("New from Folder Template…")
             folder_template_action.triggered.connect(
@@ -10434,7 +10471,13 @@ class MainWindow(QMainWindow):
         else:
             # When clicking empty space, use filtered path if active, otherwise root
             default_parent = self._nav_filter_path if self._nav_filter_path and self._nav_filter_path != "/" else "/"
-            menu.addAction("New Page", lambda checked=False, p=default_parent: self._show_new_page_dialog(parent_path=p))
+            menu.addAction(
+                "New Page",
+                lambda checked=False, p=default_parent: self._show_new_page_dialog(
+                    parent_path=p,
+                    insert_link_in_editor=False,
+                ),
+            )
         if menu.actions():
             menu.exec(global_pos)
 
@@ -11742,7 +11785,7 @@ class MainWindow(QMainWindow):
         try:
             return "Have a super awesome day!\n\t-- Rodney Norman"
         except Exception as e:
-            if os.getenv("ZIMX_DEBUG_EDITOR", "0") not in ("0", "false", "False", ""):
+            if log_enabled("editor_markdown"):
                 print(f"[DEBUG] Failed to fetch QOTD: {e}")
             return ""
 
@@ -12218,7 +12261,7 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index -= 1
         target_path = self.page_history[self.history_index]
-        if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+        if log_enabled("navigation"):
             print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
@@ -12235,7 +12278,7 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self.history_index += 1
         target_path = self.page_history[self.history_index]
-        if os.getenv("ZIMX_DEBUG_HISTORY", "0") not in ("0", "false", "False", ""):
+        if log_enabled("navigation"):
             print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
@@ -13872,7 +13915,13 @@ class MainWindow(QMainWindow):
         )
 
     def _debug(self, message: str) -> None:
-        print(f"[StillPoint] {message}")
+        if (
+            log_enabled("navigation")
+            or log_enabled("ui_state")
+            or log_enabled("vault_io")
+            or log_enabled("editor_markdown")
+        ):
+            print(f"[StillPoint] {message}")
 
     def _log_write(self, reason: str, path: str, content: str | None, auto: bool | None = None) -> None:
         label = reason or "save"

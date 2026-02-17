@@ -32,11 +32,12 @@ from PySide6.QtGui import QDesktopServices
 
 from sp.app.mermaid_renderer import MermaidRenderer
 from sp.app import config
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 
-_LOGGING = os.getenv("ZIMX_MERMAID_DEBUG", "0") not in ("0", "false", "False", "", None)
+_LOGGING = log_enabled("diagrams")
 
 
 def _generate_error_svg(error_message: str, line_number: int = 0) -> str:

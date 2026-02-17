@@ -7,6 +7,7 @@ from docx import Document
 from PIL import Image
 import pytesseract
 from pdfminer.high_level import extract_text as extract_pdf_text
+from sp.logging_flags import log_enabled
 
 
 def _extract_text_from_image(image_path: Path) -> str:
@@ -14,7 +15,8 @@ def _extract_text_from_image(image_path: Path) -> str:
         with Image.open(image_path) as img:
             return pytesseract.image_to_string(img)
     except Exception as exc:  # pragma: no cover - external tooling
-        print(f"[Chroma] Failed to OCR {image_path}: {exc}")
+        if log_enabled("rag_vector"):
+            print(f"[Chroma] Failed to OCR {image_path}: {exc}")
         return ""
 
 
@@ -23,7 +25,8 @@ def _extract_docx_text(doc_path: Path) -> str:
         doc = Document(str(doc_path))
         return "\n".join(p.text for p in doc.paragraphs if p.text)
     except Exception as exc:  # pragma: no cover - external tooling
-        print(f"[Chroma] Failed to parse {doc_path}: {exc}")
+        if log_enabled("rag_vector"):
+            print(f"[Chroma] Failed to parse {doc_path}: {exc}")
         return ""
 
 
@@ -39,5 +42,6 @@ def extract_attachment_text(path: Path) -> str:
             return _extract_text_from_image(path)
         return path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
-        print(f"[Chroma] Failed to extract {path}: {exc}")
+        if log_enabled("rag_vector"):
+            print(f"[Chroma] Failed to extract {path}: {exc}")
         return ""

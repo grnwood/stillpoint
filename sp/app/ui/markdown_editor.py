@@ -78,6 +78,7 @@ from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
 from sp.app import config
 from sp.app import indexer
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 
 
@@ -698,7 +699,7 @@ IMAGE_PROP_WIDTH = IMAGE_PROP_ALT + 2
 IMAGE_PROP_NATURAL_WIDTH = IMAGE_PROP_ALT + 3
 IMAGE_PROP_NATURAL_HEIGHT = IMAGE_PROP_ALT + 4
 
-_DETAILED_LOGGING = os.getenv("SP_DETAILED_LOGGING", "0") not in ("0", "false", "False", "", None)
+_DETAILED_LOGGING = log_enabled("editor_markdown")
 
 def _utf16_positions(text: str) -> list[int]:
     positions = [0]
@@ -2209,7 +2210,8 @@ class MarkdownEditor(QTextEdit):
                     type(self)._display_cache_order.remove(cache_key)
                     type(self)._display_cache_order.append(cache_key)
                     cache_hit = True
-                    print(f"[MD_CACHE] ✓ HIT: {self._current_path} (cached display text)")
+                    if log_enabled("editor_render"):
+                        print(f"[MD_CACHE] ✓ HIT: {self._current_path} (cached display text)")
             
             if not cache_hit:
                 display = self._to_display(normalized)
@@ -2224,7 +2226,10 @@ class MarkdownEditor(QTextEdit):
                     if len(type(self)._display_cache_order) > type(self)._display_cache_max_size:
                         oldest = type(self)._display_cache_order.pop(0)
                         type(self)._display_cache.pop(oldest, None)
-                    print(f"[MD_CACHE] ✗ MISS: {self._current_path} (converted and cached, cache size: {len(type(self)._display_cache)})")
+                    if log_enabled("editor_render"):
+                        print(
+                            f"[MD_CACHE] ✗ MISS: {self._current_path} (converted and cached, cache size: {len(type(self)._display_cache)})"
+                        )
             t2 = time.perf_counter()
             self._mark_page_load("convert to display text")
             self.highlighter.enable_timing(True)
@@ -2495,7 +2500,7 @@ class MarkdownEditor(QTextEdit):
                 result = baseline
             elif result_images == baseline_images and len(result) < len(baseline):
                 result = baseline
-        if sys.platform == "win32" and os.getenv("SP_WIN_TRUNC_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and log_enabled("editor_render"):
             display_text = self.toPlainText()
             def _tail(text: str) -> str:
                 tail = text.replace("\u2029", "\n")
@@ -2514,7 +2519,7 @@ class MarkdownEditor(QTextEdit):
             )
             print(f"[StillPoint][WIN_TRUNC_DEBUG] baseline_tail={_tail(baseline)!r}")
             print(f"[StillPoint][WIN_TRUNC_DEBUG] result_tail={_tail(result)!r}")
-        if sys.platform == "win32" and os.getenv("SP_WIN_IMAGE_SAVE_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and log_enabled("editor_render"):
             doc = self.document()
             cursor = QTextCursor(doc)
             cursor.setPosition(0)
@@ -8342,7 +8347,7 @@ class MarkdownEditor(QTextEdit):
                     )
                 )
             cursor.setPosition(cursor.selectionEnd())
-        if sys.platform == "win32" and os.getenv("SP_WIN_IMAGE_DEBUG", "0") not in ("0", "false", "False", ""):
+        if sys.platform == "win32" and log_enabled("editor_render"):
             sample = matches[:5]
             print(f"[StillPoint][WIN_IMAGE_DEBUG] matches={len(matches)} sample_count={len(sample)}")
             for idx, (start_pos, end_pos, path, alt, width, selected, match_text) in enumerate(sample, start=1):
@@ -8372,7 +8377,7 @@ class MarkdownEditor(QTextEdit):
                 t_img_start = time.perf_counter()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-                if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                if log_enabled("editor_render"):
                     picked = cursor.selectedText().replace("\u2029", "\n")
                     print(
                         f"[StillPoint][IMAGE_RENDER_DEBUG] idx={idx+1}/{len(matches)} "
@@ -8383,7 +8388,7 @@ class MarkdownEditor(QTextEdit):
                     picked_norm = picked.strip()
                     match_norm = match_text.strip()
                     if picked_norm != match_norm:
-                        if os.getenv("SP_IMAGE_RENDER_DEBUG", "0") not in ("0", "false", "False", ""):
+                        if log_enabled("editor_render"):
                             print(
                                 f"[StillPoint][IMAGE_RENDER_DEBUG] skip idx={idx+1} "
                                 f"range=({start_pos},{end_pos}) picked_mismatch"
@@ -8399,12 +8404,14 @@ class MarkdownEditor(QTextEdit):
 
                 if fmt is None:
                     # If the image can't be resolved, leave the markdown text as-is
-                    print(f"  Image {idx+1}/{len(matches)} ({path}): FAILED")
+                    if log_enabled("editor_render"):
+                        print(f"  Image {idx+1}/{len(matches)} ({path}): FAILED")
                     continue
 
                 cursor.removeSelectedText()
                 cursor.insertImage(fmt)
-                print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
+                if log_enabled("editor_render"):
+                    print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
         self._mark_page_load(f"render images done count={len(matches)}")

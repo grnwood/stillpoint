@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from markdown import markdown as render_markdown
 from sp.app import config
 from sp.app import indexer
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
@@ -98,7 +99,7 @@ class DebugTaskTree(QTreeWidget):
         self._pending_task_data = None
     
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
-        debug = os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", "")
+        debug = log_enabled("tasks_calendar")
         if debug:
             print(f"[DEBUG_TREE] mouseDoubleClickEvent: button={event.button()}, pos={event.pos()}")
         item = self.itemAt(event.pos())
@@ -128,7 +129,7 @@ class DebugTaskTree(QTreeWidget):
     
     def _emit_deferred_double_click(self):
         if self._pending_task_data:
-            if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            if log_enabled("tasks_calendar"):
                 print(f"[DEBUG_TREE] Emitting task activation for {self._pending_task_data.get('path')}")
             # Find the parent TaskPanel and emit through it
             parent = self.parent()
@@ -143,10 +144,10 @@ class DebugTaskTree(QTreeWidget):
             self._pending_task_data = None
     
     def mousePressEvent(self, event):  # type: ignore[override]
-        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             print(f"[DEBUG_TREE] mousePressEvent: button={event.button()}, pos={event.pos()}")
         super().mousePressEvent(event)
-        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             print(f"[DEBUG_TREE] After super().mousePressEvent(), event.isAccepted()={event.isAccepted()}")
 
 
@@ -309,7 +310,7 @@ class TaskPanel(QWidget):
         self.task_tree.customContextMenuRequested.connect(self._open_task_date_context_menu)
         
         # Debug: Log when tree signals fire (if enabled)
-        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             self.task_tree.itemActivated.connect(lambda item: print(f"[TASK_TREE] itemActivated signal fired"))
             self.task_tree.itemDoubleClicked.connect(lambda item, col: print(f"[TASK_TREE] itemDoubleClicked signal fired, col={col}"))
         
@@ -2541,11 +2542,11 @@ class TaskPanel(QWidget):
     def _emit_task_activation(self, item: QTreeWidgetItem) -> None:
         task = item.data(0, Qt.UserRole)
         if not task:
-            if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+            if log_enabled("tasks_calendar"):
                 print(f"[TASK_PANEL] _emit_task_activation: no task data on item")
             return
         self._remember_task_selection(task)
-        if os.getenv("ZIMX_DEBUG_TASKS", "0") not in ("0", "false", "False", ""):
+        if log_enabled("tasks_calendar"):
             print(f"[TASK_PANEL] _emit_task_activation: emitting signal for {task['path']}:{task.get('line') or 1}")
         if not self._last_activation_source:
             self._last_activation_source = "unknown"
@@ -3056,7 +3057,7 @@ class TaskPanel(QWidget):
                 resp.raise_for_status()
                 payload = resp.json()
                 items = payload.get("items", [])
-                if os.getenv("ZIMX_DEBUG_TASKS_API", "0") not in ("0", "false", "False", ""):
+                if log_enabled("tasks_calendar"):
                     print(
                         f"[TASK_PANEL] /api/tasks count={len(items)} "
                         f"query={query!r} tags={tags} include_done={include_done} "

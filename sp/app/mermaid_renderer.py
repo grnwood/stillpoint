@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from sp.logging_flags import log_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ class MermaidRenderer:
 
                 cmd = [mmdc_cmd, "-i", str(input_path), "-o", str(output_path), "-t", "neutral"]
 
-                if os.getenv("ZIMX_DEBUG_MERMAID", "0") not in ("0", "false", "False", ""):
+                if log_enabled("diagrams"):
                     print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
 
                 result = subprocess.run(
@@ -198,7 +199,7 @@ class MermaidRenderer:
 
                 cmd = [mmdc_cmd, "-i", str(input_path), "-o", str(output_path)]
 
-                if os.getenv("ZIMX_DEBUG_MERMAID", "0") not in ("0", "false", "False", ""):
+                if log_enabled("diagrams"):
                     print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
 
                 result = subprocess.run(

@@ -12,6 +12,7 @@ from threading import RLock
 from typing import Iterable, Optional, Sequence
 
 from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
+from sp.logging_flags import log_enabled
 
 GLOBAL_CONFIG = Path.home() / ".stillpoint_config.json"
 
@@ -330,7 +331,7 @@ def add_remote_server(
 ) -> None:
     """Add or update a remote server entry."""
     import os
-    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    debug = log_enabled("remote_vaults")
     
     host = host.strip()
     scheme = scheme.strip() or "http"
@@ -413,7 +414,7 @@ def delete_remote_server(host: str, port: int, scheme: str = "http") -> None:
 def get_server_password_hash(host: str, port: int, scheme: str = "http") -> Optional[str]:
     """Get stored server admin password hash for a remote server."""
     import os
-    debug = os.getenv("ZIMX_DEBUG_REMOTE_VAULTS", "0") not in ("0", "false", "False", "")
+    debug = log_enabled("remote_vaults")
     if debug:
         print(f"[Config] Looking up password: host={host} port={port} (type={type(port).__name__}) scheme={scheme}")
     for entry in load_remote_servers():
