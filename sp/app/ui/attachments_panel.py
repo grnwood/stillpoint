@@ -164,8 +164,8 @@ class AttachmentsPanel(QWidget):
         t0 = time.perf_counter()
         self.current_page_path = page_path
         self._refresh_attachments()
-        if PAGE_LOGGING_ENABLED:
-            print(f"[PageLoadAndRender] attachments set_page elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
+        #if PAGE_LOGGING_ENABLED:
+            #print(f"[PageLoadAndRender] attachments set_page elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
     
     def focusInEvent(self, event) -> None:
         """Refresh attachments whenever the panel gains focus."""
@@ -215,8 +215,8 @@ class AttachmentsPanel(QWidget):
         if not self.current_page_path:
             self.open_folder_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
-            if PAGE_LOGGING_ENABLED:
-                print(f"[PageLoadAndRender] attachments refresh skipped (no page) elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
+            #if PAGE_LOGGING_ENABLED:
+                #print(f"[PageLoadAndRender] attachments refresh skipped (no page) elapsed={(time.perf_counter()-t0)*1000:.1f}ms")
             return
         
         # Get the folder for this page
@@ -265,15 +265,15 @@ class AttachmentsPanel(QWidget):
                         item.setIcon(icon)
 
                     self.attachments_list.addItem(item)
-            if PAGE_LOGGING_ENABLED:
-                print(
-                    f"[PageLoadAndRender] attachments refresh listed={len(files)} elapsed={(time.perf_counter()-t_list)*1000:.1f}ms total={(time.perf_counter()-t0)*1000:.1f}ms"
-                )
+            #if PAGE_LOGGING_ENABLED:
+            #    print(
+            #        f"[PageLoadAndRender] attachments refresh listed={len(files)} elapsed={(time.perf_counter()-t_list)*1000:.1f}ms total={(time.perf_counter()-t0)*1000:.1f}ms"
+            #    )
         except (OSError, PermissionError):
             pass
         else:
-            if PAGE_LOGGING_ENABLED:
-                print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
+            #if PAGE_LOGGING_ENABLED:
+                #print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
             self._sync_with_server(attachments)
         self._update_remove_button_state()
 
@@ -330,8 +330,8 @@ class AttachmentsPanel(QWidget):
             if icon:
                 item.setIcon(icon)
             self.attachments_list.addItem(item)
-        if PAGE_LOGGING_ENABLED:
-            print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
+        #if PAGE_LOGGING_ENABLED:
+            #print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()
 
     def _get_remote_cache_root(self) -> Optional[Path]:
@@ -595,8 +595,8 @@ class AttachmentsPanel(QWidget):
                     size = 144
                 
                 scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                if PAGE_LOGGING_ENABLED:
-                    print(f"[PageLoadAndRender] attachments thumbnail {file_path.name} load+scale={(time.perf_counter()-load_t0)*1000:.1f}ms")
+                #if PAGE_LOGGING_ENABLED:
+                    #print(f"[PageLoadAndRender] attachments thumbnail {file_path.name} load+scale={(time.perf_counter()-load_t0)*1000:.1f}ms")
                 return QIcon(scaled)
         
         # Use OS file icon for non-images or if thumbnail failed

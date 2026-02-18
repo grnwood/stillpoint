@@ -2195,7 +2195,7 @@ class MainWindow(QMainWindow):
         if not PAGE_LOGGING_ENABLED or not hasattr(self, "_loop_timer"):
             return
         elapsed = self._loop_timer.elapsed()
-        print(f"[PageLoadAndRender] eventloop {phase} dt={elapsed:.1f}ms")
+        #print(f"[PageLoadAndRender] eventloop {phase} dt={elapsed:.1f}ms")
         self._loop_timer.restart()
 
     def _check_eventloop_drift(self) -> None:
@@ -2203,7 +2203,7 @@ class MainWindow(QMainWindow):
             return
         elapsed = self._loop_timer.elapsed()
         if elapsed > 500:  # 0.5s threshold suggests the loop was blocked
-            print(f"[PageLoadAndRender] eventloop drift warning dt={elapsed:.1f}ms (loop stall?)")
+            #print(f"[PageLoadAndRender] eventloop drift warning dt={elapsed:.1f}ms (loop stall?)")
             self._loop_timer.restart()
 
     # --- UI wiring -----------------------------------------------------

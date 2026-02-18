@@ -7,8 +7,8 @@ from typing import Dict, Iterable
 # All default to False to keep stdout quiet unless explicitly enabled.
 AREA_DEFAULTS: Dict[str, bool] = {
     "startup": False,
-    "api_client": False,
-    "api_server": False,
+    "api_client": True,
+    "api_server": True,
     "auth_security": False,
     "vault_io": False,
     "autosave": False,

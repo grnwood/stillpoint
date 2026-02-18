@@ -208,17 +208,9 @@ class TabbedRightPanel(QWidget):
                     self._pending_calendar_path = relative_path
         except Exception:
             pass
-        if PAGE_LOGGING_ENABLED:
-            print(
-                f"[PageLoadAndRender] right panel update attachments={(t1-t0)*1000:.1f}ms links={(t2-t1)*1000:.1f}ms"
-            )
         if self.ai_chat_panel:
             self.ai_chat_panel.set_current_page(relative_path)
         t3 = time.perf_counter()
-        if PAGE_LOGGING_ENABLED:
-            print(
-                f"[PageLoadAndRender] right panel ai chat {(t3-t2)*1000:.1f}ms"
-            )
         self._update_attachments_tab_label()
         if self.ai_chat_panel and hasattr(self.ai_chat_panel, "has_chat_for_path"):
             return self.ai_chat_panel.has_chat_for_path(relative_path)
