@@ -81,8 +81,8 @@ class HomebaseSyncConfig:
     device_id: str
     remote_url: str
     auth_token: str
-    local_ui_token: str = ""
     passphrase: str
+    local_ui_token: str = ""
     auto_sync: bool = True
     interval_seconds: int = 60
     push_debounce_seconds: int = 3
