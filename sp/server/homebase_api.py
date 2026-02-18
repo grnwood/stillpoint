@@ -137,7 +137,7 @@ def register_homebase_routes(
     def homebase_put_manifest(
         vault_id: str,
         manifest_id: str,
-        body: bytes = Body(..., media_type="application/json"),
+        body: bytes = Body(..., media_type="application/octet-stream"),
         _user=Depends(user_dependency),
     ) -> dict[str, Any]:
         base = _vault_base(vault_id)
