@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
+
+import httpx
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -11,6 +14,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
@@ -94,8 +99,24 @@ class VaultPreferencesDialog(QDialog):
         self.homebase_form = QFormLayout()
         self.homebase_url_edit = QLineEdit(config.load_homebase_remote_url())
         self.homebase_url_edit.setPlaceholderText("https://server.example.com")
+        self.homebase_vault_id_edit = QLineEdit(config.load_homebase_vault_id() or "")
+        self.homebase_vault_id_edit.setPlaceholderText("Remote Homebase vault ID")
+        self.homebase_bootstrap_mode_combo = QComboBox()
+        self.homebase_bootstrap_mode_combo.addItem("Connect Existing", "connect")
+        self.homebase_bootstrap_mode_combo.addItem("Create New", "create")
+        self.homebase_vault_name_edit = QLineEdit()
+        self.homebase_vault_name_edit.setPlaceholderText("Optional vault display name (create mode)")
+        self.homebase_username_edit = QLineEdit(config.load_homebase_username())
+        self.homebase_username_edit.setPlaceholderText("Username")
+        self.homebase_password_edit = QLineEdit()
+        self.homebase_password_edit.setEchoMode(QLineEdit.Password)
+        self.homebase_password_edit.setPlaceholderText("Password")
+        self.homebase_server_admin_edit = QLineEdit()
+        self.homebase_server_admin_edit.setEchoMode(QLineEdit.Password)
+        self.homebase_server_admin_edit.setPlaceholderText("Server admin password (required for create)")
         self.homebase_token_edit = QLineEdit(config.load_homebase_auth_token())
         self.homebase_token_edit.setPlaceholderText("Bearer token")
+        self._homebase_refresh_token = config.load_homebase_refresh_token()
         self.homebase_passphrase_edit = QLineEdit(config.load_homebase_passphrase())
         self.homebase_passphrase_edit.setEchoMode(QLineEdit.Password)
         self.homebase_passphrase_edit.setPlaceholderText("Shared passphrase")
@@ -110,7 +131,17 @@ class VaultPreferencesDialog(QDialog):
         self.homebase_parallel_spin = QSpinBox()
         self.homebase_parallel_spin.setRange(1, 32)
         self.homebase_parallel_spin.setValue(config.load_homebase_max_parallel_transfers())
+        self.homebase_bootstrap_button = QPushButton("Connect / Create & Get Token")
+        self.homebase_bootstrap_button.clicked.connect(self._bootstrap_homebase_auth)
+        self.homebase_bootstrap_mode_combo.currentIndexChanged.connect(self._update_homebase_bootstrap_mode)
         self.homebase_form.addRow("Homebase URL", self.homebase_url_edit)
+        self.homebase_form.addRow("Mode", self.homebase_bootstrap_mode_combo)
+        self.homebase_form.addRow("Vault ID", self.homebase_vault_id_edit)
+        self.homebase_form.addRow("Vault Name", self.homebase_vault_name_edit)
+        self.homebase_form.addRow("Username", self.homebase_username_edit)
+        self.homebase_form.addRow("Password", self.homebase_password_edit)
+        self.homebase_form.addRow("Server Admin Password", self.homebase_server_admin_edit)
+        self.homebase_form.addRow("", self.homebase_bootstrap_button)
         self.homebase_form.addRow("Auth Token", self.homebase_token_edit)
         self.homebase_form.addRow("Passphrase", self.homebase_passphrase_edit)
         self.homebase_form.addRow("", self.homebase_auto_sync_checkbox)
@@ -120,6 +151,7 @@ class VaultPreferencesDialog(QDialog):
         layout.addLayout(self.homebase_form)
         self.remote_mode_combo.currentIndexChanged.connect(self._update_homebase_form_visibility)
         self._update_homebase_form_visibility()
+        self._update_homebase_bootstrap_mode()
 
         layout.addStretch(1)
 
@@ -173,12 +205,86 @@ class VaultPreferencesDialog(QDialog):
     def _update_homebase_form_visibility(self) -> None:
         is_homebase = self.remote_mode_combo.currentData() == "homebase_remote"
         self.homebase_url_edit.setEnabled(is_homebase)
+        self.homebase_vault_id_edit.setEnabled(is_homebase)
+        self.homebase_bootstrap_mode_combo.setEnabled(is_homebase)
+        self.homebase_vault_name_edit.setEnabled(is_homebase)
+        self.homebase_username_edit.setEnabled(is_homebase)
+        self.homebase_password_edit.setEnabled(is_homebase)
+        self.homebase_server_admin_edit.setEnabled(is_homebase)
+        self.homebase_bootstrap_button.setEnabled(is_homebase)
         self.homebase_token_edit.setEnabled(is_homebase)
         self.homebase_passphrase_edit.setEnabled(is_homebase)
         self.homebase_auto_sync_checkbox.setEnabled(is_homebase)
         self.homebase_interval_spin.setEnabled(is_homebase)
         self.homebase_debounce_spin.setEnabled(is_homebase)
         self.homebase_parallel_spin.setEnabled(is_homebase)
+
+    def _update_homebase_bootstrap_mode(self) -> None:
+        create_mode = self.homebase_bootstrap_mode_combo.currentData() == "create"
+        self.homebase_vault_name_edit.setEnabled(create_mode)
+        self.homebase_server_admin_edit.setEnabled(create_mode)
+
+    def _bootstrap_homebase_auth(self) -> None:
+        base_url = self.homebase_url_edit.text().strip().rstrip("/")
+        if not base_url:
+            QMessageBox.warning(self, "Missing URL", "Enter a Homebase server URL first.")
+            return
+        username = self.homebase_username_edit.text().strip()
+        password = self.homebase_password_edit.text()
+        if not username or not password:
+            QMessageBox.warning(self, "Missing Credentials", "Enter Homebase username and password.")
+            return
+        mode = self.homebase_bootstrap_mode_combo.currentData()
+        headers: dict[str, str] = {}
+        payload: dict[str, str] = {"username": username, "password": password}
+        if mode == "create":
+            admin_password = self.homebase_server_admin_edit.text().strip()
+            if not admin_password:
+                QMessageBox.warning(
+                    self,
+                    "Missing Admin Password",
+                    "Creating a remote Homebase vault requires the server admin password.",
+                )
+                return
+            headers["x-server-admin-password"] = hashlib.sha256(admin_password.encode("utf-8")).hexdigest()
+            vault_name = self.homebase_vault_name_edit.text().strip()
+            if vault_name:
+                payload["vault_name"] = vault_name
+            url = f"{base_url}/v1/homebase/bootstrap/create"
+        else:
+            vault_id = self.homebase_vault_id_edit.text().strip()
+            if not vault_id:
+                QMessageBox.warning(self, "Missing Vault ID", "Enter the remote Homebase vault ID to connect.")
+                return
+            payload["vault_id"] = vault_id
+            url = f"{base_url}/v1/homebase/bootstrap/connect"
+        try:
+            resp = httpx.post(url, json=payload, headers=headers, timeout=20.0)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            msg = str(exc)
+            try:
+                if "resp" in locals():
+                    msg = resp.text[:400] or msg
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Homebase Setup Failed", msg)
+            return
+        vault_id = str(data.get("vault_id") or "").strip()
+        access_token = str(data.get("access_token") or "").strip()
+        refresh_token = str(data.get("refresh_token") or "").strip()
+        if not vault_id or not access_token:
+            QMessageBox.critical(self, "Homebase Setup Failed", "Server returned an invalid token response.")
+            return
+        self.homebase_vault_id_edit.setText(vault_id)
+        self.homebase_token_edit.setText(access_token)
+        self._homebase_refresh_token = refresh_token
+        QMessageBox.information(
+            self,
+            "Homebase Setup Complete",
+            "Token acquired and applied to this vault's Homebase settings.",
+        )
 
     def accept(self) -> None:  # type: ignore[override]
         values = self._collect_values()
@@ -193,7 +299,10 @@ class VaultPreferencesDialog(QDialog):
         remote_mode = str(self.remote_mode_combo.currentData() or "none")
         config.save_vault_remote_mode(remote_mode)
         config.save_homebase_remote_url(self.homebase_url_edit.text().strip())
+        config.save_homebase_vault_id(self.homebase_vault_id_edit.text().strip())
+        config.save_homebase_username(self.homebase_username_edit.text().strip())
         config.save_homebase_auth_token(self.homebase_token_edit.text().strip())
+        config.save_homebase_refresh_token(self._homebase_refresh_token)
         config.save_homebase_passphrase(self.homebase_passphrase_edit.text())
         config.save_homebase_auto_sync(self.homebase_auto_sync_checkbox.isChecked())
         config.save_homebase_interval_seconds(self.homebase_interval_spin.value())

@@ -1278,6 +1278,24 @@ def load_homebase_vault_id() -> Optional[str]:
     return value or None
 
 
+def save_homebase_vault_id(vault_id: str) -> None:
+    """Persist Homebase vault id for the active vault."""
+    cleaned = str(vault_id or "").strip()
+    if not cleaned:
+        return
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_vault_id", cleaned),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
 def ensure_homebase_vault_id() -> str:
     """Return or create a stable Homebase vault id for the active vault."""
     existing = load_homebase_vault_id()
@@ -1347,6 +1365,62 @@ def save_homebase_auth_token(token: str) -> None:
         conn.execute(
             "REPLACE INTO kv(key, value) VALUES(?, ?)",
             ("homebase_auth_token", str(token or "").strip()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_refresh_token(default: str = "") -> str:
+    """Return Homebase refresh token for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_refresh_token'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]) if row and row[0] is not None else default
+    return value
+
+
+def save_homebase_refresh_token(token: str) -> None:
+    """Persist Homebase refresh token for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_refresh_token", str(token or "").strip()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_username(default: str = "") -> str:
+    """Return Homebase username for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_username'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]).strip() if row and row[0] is not None else default
+    return value
+
+
+def save_homebase_username(username: str) -> None:
+    """Persist Homebase username for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_username", str(username or "").strip()),
         )
         conn.commit()
     except sqlite3.OperationalError:

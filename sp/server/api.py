@@ -848,8 +848,8 @@ app.add_middleware(
 
 homebase_api.register_homebase_routes(
     app,
-    user_dependency=get_current_user,
     ensure_vaults_root=_ensure_vaults_root,
+    admin_dependency=verify_server_admin,
 )
 
 

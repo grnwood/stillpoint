@@ -83,10 +83,12 @@ class HomebaseSyncConfig:
     auth_token: str
     passphrase: str
     local_ui_token: str = ""
+    refresh_token: str = ""
     auto_sync: bool = True
     interval_seconds: int = 60
     push_debounce_seconds: int = 3
     max_parallel_transfers: int = 6
+    token_update_callback: Optional[Callable[[str, str], None]] = None
 
 
 class HomebaseSyncEngine:
@@ -219,7 +221,7 @@ class HomebaseSyncEngine:
             },
         }
 
-    def _sync_once(self) -> None:
+    def _sync_once(self, allow_refresh_retry: bool = True) -> None:
         ignore_backoff = False
         with self._cv:
             if self._ignore_backoff_once:
@@ -360,6 +362,30 @@ class HomebaseSyncEngine:
                 pending_downloads=0,
             )
             _log(f"sync complete, uploaded={upload_count}, conflicts={conflicts}")
+        except httpx.HTTPStatusError as exc:
+            if (
+                allow_refresh_retry
+                and exc.response is not None
+                and exc.response.status_code == 401
+                and self._refresh_tokens()
+            ):
+                _log("auth refresh succeeded; retrying sync")
+                return self._sync_once(allow_refresh_retry=False)
+            count = int(hb.get("error_count", 0)) + 1
+            delay = min(300, 2 ** min(8, count))
+            hb["error_count"] = count
+            hb["last_error"] = str(exc)
+            hb["backoff_until"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + delay))
+            _write_json(self._state_path, state)
+            self._set_status_locked(
+                state="offline",
+                summary="Offline (changes pending)",
+                last_error=str(exc),
+            )
+            _log(
+                f"sync failed: {exc} "
+                f"error_count={count} next_retry_in={delay}s backoff_until={hb['backoff_until']}"
+            )
         except (httpx.HTTPError, OSError, ValueError) as exc:
             count = int(hb.get("error_count", 0)) + 1
             delay = min(300, 2 ** min(8, count))
@@ -378,6 +404,43 @@ class HomebaseSyncEngine:
             )
         finally:
             client.close()
+
+    def _refresh_tokens(self) -> bool:
+        refresh_token = str(self.cfg.refresh_token or "").strip()
+        if not refresh_token:
+            _log("auth refresh skipped (no refresh token)")
+            return False
+        url = f"{self.cfg.remote_url.rstrip('/')}/v1/homebase/bootstrap/refresh"
+        headers: dict[str, str] = {}
+        if self.cfg.local_ui_token:
+            headers["x-local-ui-token"] = self.cfg.local_ui_token
+        _log("auth 401 detected; attempting token refresh")
+        try:
+            resp = httpx.post(
+                url,
+                json={"vault_id": self.cfg.vault_id, "refresh_token": refresh_token},
+                headers=headers,
+                timeout=20.0,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            access = str(payload.get("access_token") or "").strip()
+            refreshed = str(payload.get("refresh_token") or "").strip()
+            if not access or not refreshed:
+                _log("auth refresh failed (missing access/refresh token in response)")
+                return False
+            self.cfg.auth_token = access
+            self.cfg.refresh_token = refreshed
+            if self.cfg.token_update_callback:
+                try:
+                    self.cfg.token_update_callback(access, refreshed)
+                except Exception:
+                    pass
+            _log("auth refresh completed")
+            return True
+        except Exception as exc:
+            _log(f"auth refresh failed: {exc}")
+            return False
 
     def _build_local_manifest(self) -> dict[str, Any]:
         entries: dict[str, Any] = {}

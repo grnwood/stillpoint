@@ -3760,16 +3760,18 @@ class MainWindow(QMainWindow):
                 return
             cfg = HomebaseSyncConfig(
                 vault_root=Path(self.vault_root),
-                vault_id=config.ensure_homebase_vault_id(),
+                vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
                 device_id=config.load_homebase_device_id(),
                 remote_url=remote_url,
                 auth_token=config.load_homebase_auth_token().strip(),
                 local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
                 passphrase=passphrase,
+                refresh_token=config.load_homebase_refresh_token().strip(),
                 auto_sync=config.load_homebase_auto_sync(),
                 interval_seconds=config.load_homebase_interval_seconds(),
                 push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
                 max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
+                token_update_callback=self._store_homebase_tokens,
             )
             self._homebase_sync_engine = HomebaseSyncEngine(cfg)
             self._homebase_sync_engine.start()
@@ -3909,6 +3911,13 @@ class MainWindow(QMainWindow):
             return token
         except Exception:
             return ""
+
+    def _store_homebase_tokens(self, access_token: str, refresh_token: str) -> None:
+        try:
+            config.save_homebase_auth_token(access_token)
+            config.save_homebase_refresh_token(refresh_token)
+        except Exception:
+            pass
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
         if is_remote:
