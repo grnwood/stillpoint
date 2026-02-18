@@ -6,6 +6,7 @@ import platform
 import sqlite3
 import re
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from threading import RLock
@@ -1226,6 +1227,257 @@ def load_feature_remote_vaults_enabled(default: bool = True) -> bool:
 def save_feature_remote_vaults_enabled(enabled: bool) -> None:
     """Persist preference for enabling remote vaults."""
     _update_global_config({"feature_remote_vaults_enabled": bool(enabled)})
+
+
+_VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote"}
+
+
+def load_vault_remote_mode(default: str = "none") -> str:
+    """Return selected remote mode for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'vault_remote_mode'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]).strip().lower() if row and row[0] is not None else default
+    return value if value in _VALID_REMOTE_MODES else default
+
+
+def save_vault_remote_mode(mode: str) -> None:
+    """Persist selected remote mode for the active vault."""
+    cleaned = str(mode or "").strip().lower()
+    if cleaned not in _VALID_REMOTE_MODES:
+        cleaned = "none"
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("vault_remote_mode", cleaned),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_vault_id() -> Optional[str]:
+    """Return Homebase vault id for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_vault_id'").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or row[0] is None:
+        return None
+    value = str(row[0]).strip()
+    return value or None
+
+
+def ensure_homebase_vault_id() -> str:
+    """Return or create a stable Homebase vault id for the active vault."""
+    existing = load_homebase_vault_id()
+    if existing:
+        return existing
+    created = str(uuid.uuid4())
+    conn = _get_conn()
+    if conn:
+        try:
+            conn.execute(
+                "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                ("homebase_vault_id", created),
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+    return created
+
+
+def load_homebase_remote_url(default: str = "") -> str:
+    """Return Homebase remote URL for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_remote_url'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]).strip() if row and row[0] is not None else default
+    return value
+
+
+def save_homebase_remote_url(url: str) -> None:
+    """Persist Homebase remote URL for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_remote_url", str(url or "").strip()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_auth_token(default: str = "") -> str:
+    """Return Homebase bearer token for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_auth_token'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]) if row and row[0] is not None else default
+    return value
+
+
+def save_homebase_auth_token(token: str) -> None:
+    """Persist Homebase bearer token for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_auth_token", str(token or "").strip()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_passphrase(default: str = "") -> str:
+    """Return Homebase encryption passphrase for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_passphrase'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    value = str(row[0]) if row and row[0] is not None else default
+    return value
+
+
+def save_homebase_passphrase(passphrase: str) -> None:
+    """Persist Homebase encryption passphrase for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_passphrase", str(passphrase or "")),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def _load_vault_int_setting(key: str, default: int, minimum: int = 1) -> int:
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    try:
+        value = int(row[0]) if row and row[0] is not None else default
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def _save_vault_int_setting(key: str, value: int) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            (key, str(int(value))),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_auto_sync(default: bool = True) -> bool:
+    """Return Homebase auto-sync setting for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_auto_sync'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if not row or row[0] is None:
+        return default
+    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_homebase_auto_sync(enabled: bool) -> None:
+    """Persist Homebase auto-sync setting for the active vault."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_auto_sync", "true" if enabled else "false"),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_interval_seconds(default: int = 60) -> int:
+    """Return Homebase interval sync cadence in seconds."""
+    return _load_vault_int_setting("homebase_interval_seconds", default=default, minimum=5)
+
+
+def save_homebase_interval_seconds(seconds: int) -> None:
+    """Persist Homebase interval sync cadence in seconds."""
+    _save_vault_int_setting("homebase_interval_seconds", max(5, int(seconds)))
+
+
+def load_homebase_push_debounce_seconds(default: int = 3) -> int:
+    """Return Homebase push debounce window in seconds."""
+    return _load_vault_int_setting("homebase_push_debounce_seconds", default=default, minimum=1)
+
+
+def save_homebase_push_debounce_seconds(seconds: int) -> None:
+    """Persist Homebase push debounce window in seconds."""
+    _save_vault_int_setting("homebase_push_debounce_seconds", max(1, int(seconds)))
+
+
+def load_homebase_max_parallel_transfers(default: int = 6) -> int:
+    """Return Homebase transfer concurrency limit."""
+    return _load_vault_int_setting("homebase_max_parallel_transfers", default=default, minimum=1)
+
+
+def save_homebase_max_parallel_transfers(value: int) -> None:
+    """Persist Homebase transfer concurrency limit."""
+    _save_vault_int_setting("homebase_max_parallel_transfers", max(1, int(value)))
+
+
+def load_homebase_device_id() -> str:
+    """Return stable client device id used by Homebase sync."""
+    payload = _read_global_config()
+    existing = payload.get("homebase_device_id")
+    if isinstance(existing, str) and existing.strip():
+        return existing.strip()
+    created = f"dev-{uuid.uuid4().hex[:12]}"
+    _update_global_config({"homebase_device_id": created})
+    return created
 
 
 def load_default_ai_server() -> Optional[str]:

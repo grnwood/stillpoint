@@ -108,6 +108,8 @@ from PySide6.QtWidgets import (
 from sp.app import config, indexer
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
+from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
+from sp.sync.engine import HomebaseSyncConfig
 from .theme import theme_color, theme_value
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -1229,6 +1231,8 @@ class MainWindow(QMainWindow):
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
         self._remote_username: Optional[str] = None
+        self._homebase_sync_engine: Optional[HomebaseSyncEngine] = None
+        self._homebase_status_poll_timer: Optional[QTimer] = None
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
         def _log_request(request):
@@ -1590,6 +1594,10 @@ class MainWindow(QMainWindow):
                 print("[MainWindow] Connected Mermaid editor request signal")
         except Exception as exc:
             print(f"[MainWindow] Failed to connect Mermaid editor signal: {exc}")
+        try:
+            self.right_panel.attachments_panel.attachmentsModified.connect(self._on_local_attachment_changed)
+        except Exception:
+            pass
         self.right_panel.set_page_text_provider(self._get_editor_text_for_path)
         self.right_panel.set_calendar_font_size(self.font_size)
         try:
@@ -1779,6 +1787,12 @@ class MainWindow(QMainWindow):
         vault_prefs_action.setToolTip("Override global preferences for this vault")
         vault_prefs_action.triggered.connect(self._open_vault_preferences)
         vault_menu.addAction(vault_prefs_action)
+        self._action_homebase_sync_now = QAction("Sync Now", self)
+        self._action_homebase_sync_now.setToolTip("Run Homebase sync immediately")
+        self._action_homebase_sync_now.triggered.connect(
+            lambda checked=False: self._trigger_homebase_sync_now("menu")
+        )
+        vault_menu.addAction(self._action_homebase_sync_now)
         reload_vault_action = QAction("Reload Vault", self)
         reload_vault_action.setToolTip("Close and reopen the current vault")
         reload_vault_action.triggered.connect(self._reload_vault)
@@ -1897,6 +1911,7 @@ class MainWindow(QMainWindow):
             self._action_webserver: self._action_webserver.toolTip(),
             self._action_server_login: self._action_server_login.toolTip(),
             self._action_server_logout: self._action_server_logout.toolTip(),
+            self._action_homebase_sync_now: self._action_homebase_sync_now.toolTip(),
         }
         self._apply_remote_mode_ui()
         self._setup_tray_icon()
@@ -2123,6 +2138,21 @@ class MainWindow(QMainWindow):
         self._remote_status_label.setToolTip("")
         self._remote_status_label.hide()
         self.statusBar().addPermanentWidget(self._remote_status_label, 0)
+
+        self._homebase_status_label = QLabel("HOMEBASE")
+        self._homebase_status_label.setObjectName("homebaseStatusLabel")
+        self._homebase_status_label.setStyleSheet(
+            self._badge_base_style
+            + " background-color: "
+            f"{theme_value('main_window.homebase_badge.bg', '#2e7d32')}; "
+            "margin-right: 6px; color: "
+            f"{theme_value('main_window.homebase_badge.text', '#ffffff')};"
+        )
+        self._homebase_status_label.setToolTip("")
+        self._homebase_status_label.setCursor(QCursor(Qt.PointingHandCursor))
+        self._homebase_status_label.mousePressEvent = lambda event: self._show_homebase_sync_summary()
+        self._homebase_status_label.hide()
+        self.statusBar().addPermanentWidget(self._homebase_status_label, 0)
 
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
@@ -3300,6 +3330,7 @@ class MainWindow(QMainWindow):
             self._ensure_config_active_vault_context()
             self._apply_feature_overrides()
             self._apply_vault_read_only_pref()
+            self._configure_homebase_sync_for_vault()
 
     def _reload_vault(self) -> None:
         if not self.vault_root:
@@ -3618,6 +3649,8 @@ class MainWindow(QMainWindow):
             self._action_server_logout.setEnabled(False)
             self._action_server_logout.setToolTip("Available when connected to a remote server.")
         self._update_remote_status_badge()
+        self._poll_homebase_status()
+        self._update_homebase_sync_action_state()
 
     @staticmethod
     def _format_remote_host(server_url: str, include_scheme: bool = False) -> str:
@@ -3687,6 +3720,176 @@ class MainWindow(QMainWindow):
         else:
             self._remote_status_label.setToolTip("")
             self._remote_status_label.hide()
+
+    def _is_homebase_mode_enabled(self) -> bool:
+        if self._remote_mode:
+            return False
+        try:
+            return config.load_vault_remote_mode() == "homebase_remote"
+        except Exception:
+            return False
+
+    def _shutdown_homebase_sync(self) -> None:
+        if self._homebase_status_poll_timer:
+            try:
+                self._homebase_status_poll_timer.stop()
+            except Exception:
+                pass
+        self._homebase_status_poll_timer = None
+        if self._homebase_sync_engine:
+            try:
+                self._homebase_sync_engine.stop()
+            except Exception:
+                pass
+        self._homebase_sync_engine = None
+        self._update_homebase_status_badge(None)
+        self._update_homebase_sync_action_state()
+
+    def _configure_homebase_sync_for_vault(self) -> None:
+        self._shutdown_homebase_sync()
+        if not self.vault_root or not self._is_homebase_mode_enabled():
+            self._update_homebase_sync_action_state()
+            return
+        try:
+            remote_url = config.load_homebase_remote_url().strip()
+            passphrase = config.load_homebase_passphrase()
+            if not remote_url or not passphrase:
+                self._update_homebase_status_badge(
+                    HomebaseSyncStatus(state="error", summary="Homebase not configured")
+                )
+                return
+            cfg = HomebaseSyncConfig(
+                vault_root=Path(self.vault_root),
+                vault_id=config.ensure_homebase_vault_id(),
+                device_id=config.load_homebase_device_id(),
+                remote_url=remote_url,
+                auth_token=config.load_homebase_auth_token().strip(),
+                passphrase=passphrase,
+                auto_sync=config.load_homebase_auto_sync(),
+                interval_seconds=config.load_homebase_interval_seconds(),
+                push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
+                max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
+            )
+            self._homebase_sync_engine = HomebaseSyncEngine(cfg)
+            self._homebase_sync_engine.start()
+            self._homebase_status_poll_timer = QTimer(self)
+            self._homebase_status_poll_timer.setInterval(1000)
+            self._homebase_status_poll_timer.timeout.connect(self._poll_homebase_status)
+            self._homebase_status_poll_timer.start()
+            self._homebase_sync_engine.schedule_sync("vault open")
+            self._poll_homebase_status()
+            self._update_homebase_sync_action_state()
+        except Exception as exc:
+            self._update_homebase_status_badge(
+                HomebaseSyncStatus(state="error", summary=f"Homebase error: {exc}")
+            )
+            self._update_homebase_sync_action_state()
+
+    def _poll_homebase_status(self) -> None:
+        status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        self._update_homebase_status_badge(status)
+        self._update_homebase_sync_action_state()
+
+    def _update_homebase_status_badge(self, status: Optional[HomebaseSyncStatus]) -> None:
+        if not hasattr(self, "_homebase_status_label"):
+            return
+        if not status or not self._is_homebase_mode_enabled():
+            self._homebase_status_label.hide()
+            self._homebase_status_label.setToolTip("")
+            return
+        state = status.state
+        if state == "syncing":
+            text = "HOMEBASE: Syncing..."
+            bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
+        elif state == "offline":
+            text = "HOMEBASE: Offline"
+            bg = theme_value("main_window.homebase_badge.offline_bg", "#ef6c00")
+        elif state == "error":
+            text = "HOMEBASE: Error"
+            bg = theme_value("main_window.homebase_badge.error_bg", "#b71c1c")
+        else:
+            if status.conflicts > 0:
+                text = f"HOMEBASE: Conflicts {status.conflicts}"
+                bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
+            else:
+                text = "HOMEBASE: Up to date"
+                bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
+        tooltip = status.summary
+        if status.last_sync_at:
+            tooltip += f"\nLast sync: {status.last_sync_at}"
+        if status.last_error:
+            tooltip += f"\nLast error: {status.last_error}"
+        self._homebase_status_label.setText(text)
+        self._homebase_status_label.setToolTip(tooltip)
+        self._homebase_status_label.setStyleSheet(
+            self._badge_base_style
+            + f" background-color: {bg}; margin-right: 6px; color: "
+            f"{theme_value('main_window.homebase_badge.text', '#ffffff')};"
+        )
+        self._homebase_status_label.show()
+
+    def _schedule_homebase_sync(self, reason: str) -> None:
+        if self._homebase_sync_engine:
+            try:
+                self._homebase_sync_engine.schedule_sync(reason)
+            except Exception:
+                pass
+
+    def _trigger_homebase_sync_now(self, reason: str = "manual") -> None:
+        if not self._homebase_sync_engine:
+            self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
+            return
+        try:
+            self._homebase_sync_engine.sync_now(reason)
+            self.statusBar().showMessage("Homebase sync requested.", 2500)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Homebase sync request failed: {exc}", 5000)
+
+    def _update_homebase_sync_action_state(self) -> None:
+        action = getattr(self, "_action_homebase_sync_now", None)
+        if action is None:
+            return
+        enabled = bool(self._homebase_sync_engine) and self._is_homebase_mode_enabled()
+        action.setEnabled(enabled)
+        if enabled:
+            action.setToolTip(self._action_tooltips.get(action, "Run Homebase sync immediately"))
+        else:
+            action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
+
+    def _show_homebase_sync_summary(self) -> None:
+        if not self._is_homebase_mode_enabled():
+            return
+        status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        if not status:
+            QMessageBox.information(
+                self,
+                "Homebase Sync",
+                "Homebase sync is not configured for this vault.",
+            )
+            return
+        details = [
+            f"State: {status.state}",
+            f"Summary: {status.summary}",
+            f"Conflicts: {status.conflicts}",
+            f"Pending: {'Yes' if status.pending else 'No'}",
+        ]
+        if status.last_sync_at:
+            details.append(f"Last Sync: {status.last_sync_at}")
+        if status.last_error:
+            details.append(f"Last Error: {status.last_error}")
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Homebase Sync")
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText("Homebase sync status")
+        dialog.setInformativeText("\n".join(details))
+        sync_now_btn = dialog.addButton("Sync Now", QMessageBox.AcceptRole)
+        dialog.addButton(QMessageBox.Close)
+        dialog.exec()
+        if dialog.clickedButton() == sync_now_btn:
+            self._trigger_homebase_sync_now("badge")
+
+    def _on_local_attachment_changed(self, reason: str) -> None:
+        self._schedule_homebase_sync(reason or "attachment write")
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
         if is_remote:
@@ -4373,6 +4576,7 @@ class MainWindow(QMainWindow):
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
         try:
+            self._shutdown_homebase_sync()
             remote_ref_path = directory if self._remote_mode else None
             # Persist current history before switching away
             self._persist_recent_history()
@@ -4481,6 +4685,7 @@ class MainWindow(QMainWindow):
                     config.save_last_vault(self.vault_root)
                     display_name = vault_name or Path(self.vault_root).name
                     config.remember_vault(self.vault_root, display_name)
+                self._configure_homebase_sync_for_vault()
                 try:
                     self.refresh_tree_button.setEnabled(True)
                 except Exception:
@@ -6279,6 +6484,7 @@ class MainWindow(QMainWindow):
         self.autosave_timer.stop()
         display_path = path_to_colon(path) if path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
+        self._schedule_homebase_sync("page save")
 
     def _accept_noop_conflict(self, path: str, content: str, conflict: dict, auto: bool) -> bool:
         remote_content = conflict.get("current_content", "")
@@ -6908,6 +7114,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
         # Refresh attachments panel to show the new image
         self.right_panel.refresh_attachments()
+        self._schedule_homebase_sync("image saved")
 
     def _on_editor_focus_lost(self) -> None:
         """Handle editor focus loss - save if not moving to right panel."""
@@ -7332,6 +7539,7 @@ class MainWindow(QMainWindow):
         """Force-save the current page after a dropped attachment inserts content."""
         self._save_current_file(auto=True, reason="attachment dropped")
         self.statusBar().showMessage(f"Saved after dropping {filename}", 3000)
+        self._schedule_homebase_sync("attachment dropped")
 
     def _jump_to_page(self) -> None:
         if not config.has_active_vault():
@@ -13749,6 +13957,7 @@ class MainWindow(QMainWindow):
         # Stop any pending timers
         self.autosave_timer.stop()
         self.geometry_save_timer.stop()
+        self._shutdown_homebase_sync()
         
         # Disconnect signals to prevent callbacks after window deletion
         try:

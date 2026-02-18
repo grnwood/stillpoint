@@ -5,9 +5,13 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QLabel,
+    QLineEdit,
+    QSpinBox,
     QVBoxLayout,
 )
 
@@ -77,6 +81,46 @@ class VaultPreferencesDialog(QDialog):
             self.force_read_only_checkbox.setChecked(False)
         layout.addWidget(self.force_read_only_checkbox)
 
+        layout.addWidget(QLabel("<b>Remote Mode</b>"))
+        self.remote_mode_combo = QComboBox()
+        self.remote_mode_combo.addItem("None", "none")
+        self.remote_mode_combo.addItem("Plain Remote (legacy)", "plain_remote")
+        self.remote_mode_combo.addItem("Homebase Remote", "homebase_remote")
+        mode = config.load_vault_remote_mode()
+        idx = self.remote_mode_combo.findData(mode)
+        self.remote_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        layout.addWidget(self.remote_mode_combo)
+
+        self.homebase_form = QFormLayout()
+        self.homebase_url_edit = QLineEdit(config.load_homebase_remote_url())
+        self.homebase_url_edit.setPlaceholderText("https://server.example.com")
+        self.homebase_token_edit = QLineEdit(config.load_homebase_auth_token())
+        self.homebase_token_edit.setPlaceholderText("Bearer token")
+        self.homebase_passphrase_edit = QLineEdit(config.load_homebase_passphrase())
+        self.homebase_passphrase_edit.setEchoMode(QLineEdit.Password)
+        self.homebase_passphrase_edit.setPlaceholderText("Shared passphrase")
+        self.homebase_auto_sync_checkbox = QCheckBox("Enable auto-sync")
+        self.homebase_auto_sync_checkbox.setChecked(config.load_homebase_auto_sync())
+        self.homebase_interval_spin = QSpinBox()
+        self.homebase_interval_spin.setRange(5, 3600)
+        self.homebase_interval_spin.setValue(config.load_homebase_interval_seconds())
+        self.homebase_debounce_spin = QSpinBox()
+        self.homebase_debounce_spin.setRange(1, 120)
+        self.homebase_debounce_spin.setValue(config.load_homebase_push_debounce_seconds())
+        self.homebase_parallel_spin = QSpinBox()
+        self.homebase_parallel_spin.setRange(1, 32)
+        self.homebase_parallel_spin.setValue(config.load_homebase_max_parallel_transfers())
+        self.homebase_form.addRow("Homebase URL", self.homebase_url_edit)
+        self.homebase_form.addRow("Auth Token", self.homebase_token_edit)
+        self.homebase_form.addRow("Passphrase", self.homebase_passphrase_edit)
+        self.homebase_form.addRow("", self.homebase_auto_sync_checkbox)
+        self.homebase_form.addRow("Interval Seconds", self.homebase_interval_spin)
+        self.homebase_form.addRow("Push Debounce Seconds", self.homebase_debounce_spin)
+        self.homebase_form.addRow("Max Parallel Transfers", self.homebase_parallel_spin)
+        layout.addLayout(self.homebase_form)
+        self.remote_mode_combo.currentIndexChanged.connect(self._update_homebase_form_visibility)
+        self._update_homebase_form_visibility()
+
         layout.addStretch(1)
 
         self._initial_values = self._collect_values()
@@ -126,6 +170,16 @@ class VaultPreferencesDialog(QDialog):
         ):
             checkbox.setCheckState(Qt.PartiallyChecked)
 
+    def _update_homebase_form_visibility(self) -> None:
+        is_homebase = self.remote_mode_combo.currentData() == "homebase_remote"
+        self.homebase_url_edit.setEnabled(is_homebase)
+        self.homebase_token_edit.setEnabled(is_homebase)
+        self.homebase_passphrase_edit.setEnabled(is_homebase)
+        self.homebase_auto_sync_checkbox.setEnabled(is_homebase)
+        self.homebase_interval_spin.setEnabled(is_homebase)
+        self.homebase_debounce_spin.setEnabled(is_homebase)
+        self.homebase_parallel_spin.setEnabled(is_homebase)
+
     def accept(self) -> None:  # type: ignore[override]
         values = self._collect_values()
         changed = values != self._initial_values
@@ -136,4 +190,16 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_remote_vaults_override(values["remote_vaults"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
+        remote_mode = str(self.remote_mode_combo.currentData() or "none")
+        config.save_vault_remote_mode(remote_mode)
+        config.save_homebase_remote_url(self.homebase_url_edit.text().strip())
+        config.save_homebase_auth_token(self.homebase_token_edit.text().strip())
+        config.save_homebase_passphrase(self.homebase_passphrase_edit.text())
+        config.save_homebase_auto_sync(self.homebase_auto_sync_checkbox.isChecked())
+        config.save_homebase_interval_seconds(self.homebase_interval_spin.value())
+        config.save_homebase_push_debounce_seconds(self.homebase_debounce_spin.value())
+        config.save_homebase_max_parallel_transfers(self.homebase_parallel_spin.value())
+        if remote_mode == "homebase_remote":
+            config.ensure_homebase_vault_id()
+            config.load_homebase_device_id()
         super().accept()

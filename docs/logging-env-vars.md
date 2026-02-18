@@ -25,6 +25,7 @@ Set any area to `1` / `true` to enable, `0` / `false` to disable.
 - `SP_LOG_SEARCH_INDEX`
 - `SP_LOG_TASKS_CALENDAR`
 - `SP_LOG_REMOTE_VAULTS`
+- `SP_LOG_HOMEBASE_SYNC`
 - `SP_LOG_AI_CHAT`
 - `SP_LOG_RAG_VECTOR`
 - `SP_LOG_DIAGRAMS`

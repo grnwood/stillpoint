@@ -64,6 +64,8 @@ class AttachmentsPanel(QWidget):
     plantumlEditorRequested = Signal(object)  # file_path or payload
     # Signal emitted when user wants to open a Mermaid diagram file in the Mermaid editor
     mermaidEditorRequested = Signal(object)  # file_path or payload
+    # Signal emitted when local attachment files changed on disk.
+    attachmentsModified = Signal(str)
 
     def __init__(
         self,
@@ -403,6 +405,7 @@ class AttachmentsPanel(QWidget):
             except OSError as exc:
                 print(f"[Attachments] Failed to copy {src}: {exc}")
         self._refresh_attachments()
+        self.attachmentsModified.emit("attachments added")
 
     def _add_remote_attachments(self) -> None:
         if not self._http_client:
@@ -483,6 +486,7 @@ class AttachmentsPanel(QWidget):
         if to_delete:
             self._delete_removed_attachments(to_delete)
         self._refresh_attachments()
+        self.attachmentsModified.emit("attachments removed")
 
     def _current_page_key(self) -> Optional[str]:
         if not self.current_page_path:
@@ -805,6 +809,7 @@ class AttachmentsPanel(QWidget):
             self._refresh_attachments()
             # Emit signal to open the file in the PlantUML editor
             self.plantumlEditorRequested.emit(str(file_path))
+            self.attachmentsModified.emit("plantuml created")
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
@@ -880,6 +885,7 @@ class AttachmentsPanel(QWidget):
             file_path.write_text(template, encoding="utf-8")
             self._refresh_attachments()
             self.mermaidEditorRequested.emit(str(file_path))
+            self.attachmentsModified.emit("mermaid created")
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")

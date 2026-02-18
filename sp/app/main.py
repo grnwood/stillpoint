@@ -39,6 +39,7 @@ from sp.app.ui.main_window import MainWindow
 # SP_LOG_ATTACHMENTS_MEDIA - Attachments and media operations
 # SP_LOG_TASKS_CALENDAR  - Task and calendar data flow
 # SP_LOG_REMOTE_VAULTS   - Remote vault auth/config diagnostics
+# SP_LOG_HOMEBASE_SYNC   - Homebase sync scheduler, pull/push, conflict traces
 # SP_LOG_AI_CHAT         - AI chat request/response diagnostics
 # SP_LOG_RAG_VECTOR      - Vector/RAG indexing and query traces
 # SP_LOG_DIAGRAMS        - Mermaid/PlantUML details

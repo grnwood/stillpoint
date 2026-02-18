@@ -57,6 +57,7 @@ except ImportError:
 from sp.server import indexer
 from sp.server import file_ops
 from sp.server import search_index
+from sp.server import homebase_api
 from sp.server.adapters import files
 from sp.server.adapters.files import FileAccessError, LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.server.state import vault_state
@@ -843,6 +844,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
+)
+
+homebase_api.register_homebase_routes(
+    app,
+    user_dependency=get_current_user,
+    ensure_vaults_root=_ensure_vaults_root,
 )
 
 
