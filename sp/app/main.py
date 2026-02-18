@@ -194,6 +194,8 @@ def _qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         return
     if "Could not parse stylesheet" in message and not log_enabled("ui_state"):
         return
+    if "QFont::setPointSize" in message and "Point size <= 0" in message and not log_enabled("ui_state"):
+        return
     # Let other messages through to the default handler
     if mode == QtMsgType.QtDebugMsg:
         print(f"Qt Debug: {message}", file=sys.stderr)

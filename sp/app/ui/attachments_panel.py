@@ -683,14 +683,17 @@ class AttachmentsPanel(QWidget):
             if file_path.exists():
                 # Check if it's a PlantUML file
                 if file_path.suffix.lower() == ".puml":
-                    print(f"[Attachments] Double-click .puml -> open editor: {data}")
+                    if log_enabled("attachments_media"):
+                        print(f"[Attachments] Double-click .puml -> open editor: {data}")
                     self.plantumlEditorRequested.emit(data)
                 elif file_path.suffix.lower() in mermaid_suffixes:
-                    print(f"[Attachments] Double-click Mermaid -> open editor: {data}")
+                    if log_enabled("attachments_media"):
+                        print(f"[Attachments] Double-click Mermaid -> open editor: {data}")
                     self.mermaidEditorRequested.emit(data)
                 else:
                     # Open with default system handler
-                    print(f"[Attachments] Double-click non-puml -> open default: {data}")
+                    if log_enabled("attachments_media"):
+                        print(f"[Attachments] Double-click non-puml -> open default: {data}")
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
     
     def refresh(self) -> None:
