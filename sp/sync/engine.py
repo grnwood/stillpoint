@@ -81,6 +81,7 @@ class HomebaseSyncConfig:
     device_id: str
     remote_url: str
     auth_token: str
+    local_ui_token: str = ""
     passphrase: str
     auto_sync: bool = True
     interval_seconds: int = 60
@@ -257,6 +258,7 @@ class HomebaseSyncEngine:
             base_url=self.cfg.remote_url,
             token=self.cfg.auth_token,
             vault_id=self.cfg.vault_id,
+            local_ui_token=self.cfg.local_ui_token,
         )
         try:
             latest = client.get_latest()

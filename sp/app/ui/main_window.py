@@ -3764,6 +3764,7 @@ class MainWindow(QMainWindow):
                 device_id=config.load_homebase_device_id(),
                 remote_url=remote_url,
                 auth_token=config.load_homebase_auth_token().strip(),
+                local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
                 passphrase=passphrase,
                 auto_sync=config.load_homebase_auto_sync(),
                 interval_seconds=config.load_homebase_interval_seconds(),
@@ -3890,6 +3891,24 @@ class MainWindow(QMainWindow):
 
     def _on_local_attachment_changed(self, reason: str) -> None:
         self._schedule_homebase_sync(reason or "attachment write")
+
+    def _homebase_local_ui_token_for_url(self, remote_url: str) -> str:
+        token = (self._local_auth_token or "").strip()
+        if not token:
+            return ""
+        try:
+            target = urlparse(remote_url)
+            local = urlparse(self._local_api_base)
+            target_host = (target.hostname or "").strip().lower()
+            if target_host not in {"127.0.0.1", "localhost", "::1"}:
+                return ""
+            target_port = target.port or (443 if (target.scheme or "http") == "https" else 80)
+            local_port = local.port or (443 if (local.scheme or "http") == "https" else 80)
+            if target_port != local_port:
+                return ""
+            return token
+        except Exception:
+            return ""
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
         if is_remote:
