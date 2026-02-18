@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import calendar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -101,6 +102,7 @@ class HomebaseSyncEngine:
         self._next_run_at: Optional[float] = None
         self._last_interval_run_at: float = 0.0
         self._force_run = False
+        self._ignore_backoff_once = False
         self._status_lock = threading.Lock()
         self._status = HomebaseSyncStatus()
         self._sync_dir = self.cfg.vault_root / ".stillpoint" / "sync"
@@ -145,6 +147,7 @@ class HomebaseSyncEngine:
     def sync_now(self, reason: str = "manual") -> None:
         with self._cv:
             self._force_run = True
+            self._ignore_backoff_once = True
             self._set_status_locked(pending=True, summary=f"Sync requested ({reason})")
             self._cv.notify_all()
         _log(f"sync now requested ({reason})")
@@ -216,21 +219,35 @@ class HomebaseSyncEngine:
         }
 
     def _sync_once(self) -> None:
+        ignore_backoff = False
+        with self._cv:
+            if self._ignore_backoff_once:
+                ignore_backoff = True
+                self._ignore_backoff_once = False
         self._set_status_locked(state="syncing", summary="Syncing...", pending=False, last_error=None)
-        _log("sync started")
+        _log(f"sync started ignore_backoff={ignore_backoff}")
         state = _read_json(self._state_path, self._default_state())
         hb = state.setdefault("homebase", {})
         backoff_until = hb.get("backoff_until")
-        if backoff_until and isinstance(backoff_until, str):
+        if not ignore_backoff and backoff_until and isinstance(backoff_until, str):
             try:
                 backoff_ts = time.strptime(backoff_until, "%Y-%m-%dT%H:%M:%SZ")
-                if time.time() < time.mktime(backoff_ts):
+                # backoff_until is persisted as UTC "Z", so convert with timegm (UTC),
+                # not mktime (local time), otherwise retries can be delayed for hours.
+                backoff_epoch = float(calendar.timegm(backoff_ts))
+                now_epoch = float(time.time())
+                if now_epoch < backoff_epoch:
+                    remaining = int(max(0.0, backoff_epoch - now_epoch))
+                    last_error = str(hb.get("last_error") or "").strip()
                     self._set_status_locked(
                         state="offline",
                         summary="Offline (retry backoff)",
                         pending=False,
                     )
-                    _log(f"sync deferred by backoff_until={backoff_until}")
+                    _log(
+                        f"sync deferred by backoff_until={backoff_until} "
+                        f"remaining={remaining}s last_error={last_error or 'unknown'}"
+                    )
                     return
             except Exception:
                 pass
@@ -353,7 +370,10 @@ class HomebaseSyncEngine:
                 summary="Offline (changes pending)",
                 last_error=str(exc),
             )
-            _log(f"sync failed: {exc}")
+            _log(
+                f"sync failed: {exc} "
+                f"error_count={count} next_retry_in={delay}s backoff_until={hb['backoff_until']}"
+            )
         finally:
             client.close()
 
