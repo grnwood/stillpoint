@@ -81,8 +81,11 @@ class HomebaseClient:
         resp = self.client.put(
             url,
             content=data,
+            headers={"Content-Type": "application/json"},
         )
         _log_client(f"PUT {url} -> {resp.status_code}")
+        if resp.status_code >= 400:
+            _log_client(f"PUT {url} error_body={resp.text[:300]}")
         resp.raise_for_status()
 
     def has_object(self, object_id: str) -> bool:
@@ -106,6 +109,9 @@ class HomebaseClient:
         resp = self.client.put(
             url,
             content=data,
+            headers={"Content-Type": "application/octet-stream"},
         )
         _log_client(f"PUT {url} -> {resp.status_code}")
+        if resp.status_code >= 400:
+            _log_client(f"PUT {url} error_body={resp.text[:300]}")
         resp.raise_for_status()

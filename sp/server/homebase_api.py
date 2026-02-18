@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Response
 
 from sp.logging_flags import log_enabled
 
@@ -134,7 +134,12 @@ def register_homebase_routes(
         return Response(content=path.read_bytes(), media_type="application/json")
 
     @app.put("/v1/homebase/{vault_id}/manifests/{manifest_id}")
-    def homebase_put_manifest(vault_id: str, manifest_id: str, body: bytes, _user=Depends(user_dependency)) -> dict[str, Any]:
+    def homebase_put_manifest(
+        vault_id: str,
+        manifest_id: str,
+        body: bytes = Body(..., media_type="application/json"),
+        _user=Depends(user_dependency),
+    ) -> dict[str, Any]:
         base = _vault_base(vault_id)
         mid = _validate_hash("manifest_id", manifest_id)
         _log_server(f"PUT /manifests vault_id={vault_id} manifest_id={mid} bytes={len(body)}")
@@ -187,7 +192,12 @@ def register_homebase_routes(
         return Response(content=path.read_bytes(), media_type="application/octet-stream")
 
     @app.put("/v1/homebase/{vault_id}/objects/{object_id}")
-    def homebase_put_object(vault_id: str, object_id: str, body: bytes, _user=Depends(user_dependency)) -> dict[str, Any]:
+    def homebase_put_object(
+        vault_id: str,
+        object_id: str,
+        body: bytes = Body(..., media_type="application/octet-stream"),
+        _user=Depends(user_dependency),
+    ) -> dict[str, Any]:
         base = _vault_base(vault_id)
         oid = _validate_hash("object_id", object_id)
         _log_server(f"PUT /objects vault_id={vault_id} object_id={oid} bytes={len(body)}")
