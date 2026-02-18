@@ -21,11 +21,13 @@ from sp.sync.local_fs import bytes_equal, conflict_copy_path, iter_files, read_b
 
 
 _HOMEBASE_LOG = log_enabled("homebase_sync")
+_ANSI_BLUE = "\033[94m"
+_ANSI_RESET = "\033[0m"
 
 
 def _log(message: str) -> None:
     if _HOMEBASE_LOG:
-        print(f"[Homebase] {message}")
+        print(f"{_ANSI_BLUE}[HomebaseClient] {message}{_ANSI_RESET}")
 
 
 def _utc_now_iso() -> str:
@@ -112,6 +114,12 @@ class HomebaseSyncEngine:
         self._stop = False
         self._thread = threading.Thread(target=self._run_loop, name="homebase-sync", daemon=True)
         self._thread.start()
+        _log(
+            "engine start "
+            f"vault_id={self.cfg.vault_id} device_id={self.cfg.device_id} "
+            f"auto_sync={self.cfg.auto_sync} interval={self.cfg.interval_seconds}s "
+            f"debounce={self.cfg.push_debounce_seconds}s"
+        )
         if self.cfg.auto_sync:
             self.schedule_sync("startup")
 
@@ -121,6 +129,7 @@ class HomebaseSyncEngine:
             self._cv.notify_all()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        _log("engine stop")
 
     def schedule_sync(self, reason: str = "event") -> None:
         delay = max(1, int(self.cfg.push_debounce_seconds))
@@ -221,6 +230,7 @@ class HomebaseSyncEngine:
                         summary="Offline (retry backoff)",
                         pending=False,
                     )
+                    _log(f"sync deferred by backoff_until={backoff_until}")
                     return
             except Exception:
                 pass
@@ -241,6 +251,8 @@ class HomebaseSyncEngine:
                 self._apply_remote_checkpoint(client, key, remote_head)
                 hb["last_seen_latest_checkpoint_id"] = remote_head
                 hb["last_pulled_checkpoint_id"] = remote_head
+            else:
+                _log(f"pull: no remote change latest={remote_head}")
 
             manifest = self._build_local_manifest()
             current_scan = {
@@ -254,6 +266,10 @@ class HomebaseSyncEngine:
             scan_state = _read_json(self._scan_path, {"entries": {}})
             previous_scan = scan_state.get("entries") if isinstance(scan_state.get("entries"), dict) else {}
             unchanged_scan = previous_scan == current_scan
+            _log(
+                f"scan complete files={len(current_scan)} unchanged_scan={unchanged_scan} "
+                f"had_last_push={bool(hb.get('last_pushed_checkpoint_id'))}"
+            )
             if unchanged_scan and hb.get("last_pushed_checkpoint_id") and not pulled_remote:
                 hb["last_sync_at"] = _utc_now_iso()
                 hb["last_error"] = None
@@ -270,8 +286,12 @@ class HomebaseSyncEngine:
                 return
             manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
             checkpoint_id = _manifest_id_bytes(manifest_bytes)
+            _log(
+                f"manifest staged checkpoint_candidate={checkpoint_id} files={len(manifest.get('entries', {}))}"
+            )
 
             upload_count = 0
+            existing_count = 0
             for rel_path, meta in manifest.get("entries", {}).items():
                 if not isinstance(meta, dict):
                     continue
@@ -283,9 +303,15 @@ class HomebaseSyncEngine:
                 if not client.has_object(object_id):
                     client.put_object(object_id, envelope)
                     upload_count += 1
+                else:
+                    existing_count += 1
 
             manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
             checkpoint_id = _manifest_id_bytes(manifest_bytes)
+            _log(
+                f"push publish checkpoint={checkpoint_id} uploaded_objects={upload_count} "
+                f"reused_objects={existing_count}"
+            )
             client.put_manifest(checkpoint_id, manifest_bytes)
             client.put_latest(checkpoint_id)
             hb["last_pushed_checkpoint_id"] = checkpoint_id
@@ -350,10 +376,16 @@ class HomebaseSyncEngine:
         }
 
     def _apply_remote_checkpoint(self, client: HomebaseClient, key: bytes, checkpoint_id: str) -> None:
+        _log(f"pull begin checkpoint={checkpoint_id}")
         manifest_bytes = client.get_manifest(checkpoint_id)
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         entries = manifest.get("entries", {})
         remote_device_id = str(manifest.get("device_id") or "remote")
+        _log(f"pull manifest entries={len(entries)} remote_device={remote_device_id}")
+        downloaded = 0
+        written_new = 0
+        unchanged = 0
+        conflicts = 0
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
                 continue
@@ -364,12 +396,15 @@ class HomebaseSyncEngine:
                 continue
             ciphertext = client.get_object(str(object_id))
             plaintext = decrypt_bytes(key, ciphertext)
+            downloaded += 1
             local_path = self.cfg.vault_root / rel
             if not local_path.exists():
                 write_bytes_atomic(local_path, plaintext)
+                written_new += 1
                 continue
             local_bytes = read_bytes(local_path)
             if bytes_equal(local_bytes, plaintext):
+                unchanged += 1
                 continue
             conflict_rel = conflict_copy_path(str(rel), remote_device_id)
             conflict_path = self.cfg.vault_root / conflict_rel
@@ -381,6 +416,11 @@ class HomebaseSyncEngine:
                 remote_device_id=remote_device_id,
             )
             _log(f"conflict copy created: {conflict_rel}")
+            conflicts += 1
+        _log(
+            f"pull complete downloaded={downloaded} written_new={written_new} "
+            f"unchanged={unchanged} conflicts={conflicts}"
+        )
 
     def _record_conflict(
         self,

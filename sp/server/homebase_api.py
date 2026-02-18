@@ -9,9 +9,19 @@ from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 
+from sp.logging_flags import log_enabled
+
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+_LOG_HOMEBASE = log_enabled("homebase_sync")
+_ANSI_GREEN = "\033[92m"
+_ANSI_RESET = "\033[0m"
+
+
+def _log_server(message: str) -> None:
+    if _LOG_HOMEBASE:
+        print(f"{_ANSI_GREEN}[HomebaseServer] {message}{_ANSI_RESET}")
 
 
 def _validate_id(name: str, value: str) -> str:
@@ -56,6 +66,8 @@ def register_homebase_routes(
     user_dependency,
     ensure_vaults_root: Callable[[], Path],
 ) -> None:
+    _log_server("routes registered")
+
     def _vault_base(vault_id: str) -> Path:
         validated = _validate_id("vault_id", vault_id)
         return ensure_vaults_root() / "homebase" / validated
@@ -67,6 +79,7 @@ def register_homebase_routes(
         _user=Depends(user_dependency),
     ) -> dict[str, Any]:
         base = _vault_base(vault_id)
+        _log_server(f"GET /changes vault_id={vault_id} since={since}")
         latest_path = base / "refs" / "latest.json"
         latest_checkpoint_id = None
         cursor = since or ""
@@ -84,15 +97,19 @@ def register_homebase_routes(
     @app.get("/v1/homebase/{vault_id}/latest")
     def homebase_get_latest(vault_id: str, _user=Depends(user_dependency)) -> dict[str, Any]:
         base = _vault_base(vault_id)
+        _log_server(f"GET /latest vault_id={vault_id}")
         path = base / "refs" / "latest.json"
         if not path.exists():
+            _log_server(f"GET /latest vault_id={vault_id} -> 404 (no latest)")
             raise HTTPException(status_code=404, detail="No latest checkpoint")
+        _log_server(f"GET /latest vault_id={vault_id} -> 200")
         return _read_json(path)
 
     @app.put("/v1/homebase/{vault_id}/latest")
     def homebase_put_latest(vault_id: str, payload: dict[str, Any], _user=Depends(user_dependency)) -> dict[str, Any]:
         base = _vault_base(vault_id)
         checkpoint_id = _validate_hash("checkpoint_id", str(payload.get("checkpoint_id") or ""))
+        _log_server(f"PUT /latest vault_id={vault_id} checkpoint_id={checkpoint_id}")
         out = {
             "schema_version": 1,
             "vault_id": _validate_id("vault_id", vault_id),
@@ -101,23 +118,31 @@ def register_homebase_routes(
         }
         path = base / "refs" / "latest.json"
         _write_bytes(path, json.dumps(out, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        _log_server(f"PUT /latest vault_id={vault_id} -> 200")
         return {"ok": True, "checkpoint_id": checkpoint_id}
 
     @app.get("/v1/homebase/{vault_id}/manifests/{manifest_id}")
     def homebase_get_manifest(vault_id: str, manifest_id: str, _user=Depends(user_dependency)) -> Response:
         base = _vault_base(vault_id)
         mid = _validate_hash("manifest_id", manifest_id)
+        _log_server(f"GET /manifests vault_id={vault_id} manifest_id={mid}")
         path = base / "manifests" / mid[:2] / mid
         if not path.exists():
+            _log_server(f"GET /manifests vault_id={vault_id} manifest_id={mid} -> 404")
             raise HTTPException(status_code=404, detail="Manifest not found")
+        _log_server(f"GET /manifests vault_id={vault_id} manifest_id={mid} -> 200 bytes={path.stat().st_size}")
         return Response(content=path.read_bytes(), media_type="application/json")
 
     @app.put("/v1/homebase/{vault_id}/manifests/{manifest_id}")
     def homebase_put_manifest(vault_id: str, manifest_id: str, body: bytes, _user=Depends(user_dependency)) -> dict[str, Any]:
         base = _vault_base(vault_id)
         mid = _validate_hash("manifest_id", manifest_id)
+        _log_server(f"PUT /manifests vault_id={vault_id} manifest_id={mid} bytes={len(body)}")
         expected = hashlib.sha256(body).hexdigest()
         if expected != mid:
+            _log_server(
+                f"PUT /manifests vault_id={vault_id} manifest_id={mid} -> 400 hash_mismatch expected={expected}"
+            )
             raise HTTPException(status_code=400, detail="Manifest hash does not match manifest_id")
         path = base / "manifests" / mid[:2] / mid
         _write_bytes(path, body)
@@ -134,35 +159,49 @@ def register_homebase_routes(
             base / "checkpoints" / f"{mid}.json",
             json.dumps(checkpoint_meta, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         )
+        _log_server(f"PUT /manifests vault_id={vault_id} manifest_id={mid} -> 200")
         return {"ok": True, "manifest_id": mid}
 
     @app.head("/v1/homebase/{vault_id}/objects/{object_id}")
     def homebase_head_object(vault_id: str, object_id: str, _user=Depends(user_dependency)) -> Response:
         base = _vault_base(vault_id)
         oid = _validate_hash("object_id", object_id)
+        _log_server(f"HEAD /objects vault_id={vault_id} object_id={oid}")
         path = base / "objects" / oid[:2] / oid
         if not path.exists():
+            _log_server(f"HEAD /objects vault_id={vault_id} object_id={oid} -> 404")
             raise HTTPException(status_code=404, detail="Object not found")
+        _log_server(f"HEAD /objects vault_id={vault_id} object_id={oid} -> 200")
         return Response(status_code=200)
 
     @app.get("/v1/homebase/{vault_id}/objects/{object_id}")
     def homebase_get_object(vault_id: str, object_id: str, _user=Depends(user_dependency)) -> Response:
         base = _vault_base(vault_id)
         oid = _validate_hash("object_id", object_id)
+        _log_server(f"GET /objects vault_id={vault_id} object_id={oid}")
         path = base / "objects" / oid[:2] / oid
         if not path.exists():
+            _log_server(f"GET /objects vault_id={vault_id} object_id={oid} -> 404")
             raise HTTPException(status_code=404, detail="Object not found")
+        _log_server(f"GET /objects vault_id={vault_id} object_id={oid} -> 200 bytes={path.stat().st_size}")
         return Response(content=path.read_bytes(), media_type="application/octet-stream")
 
     @app.put("/v1/homebase/{vault_id}/objects/{object_id}")
     def homebase_put_object(vault_id: str, object_id: str, body: bytes, _user=Depends(user_dependency)) -> dict[str, Any]:
         base = _vault_base(vault_id)
         oid = _validate_hash("object_id", object_id)
+        _log_server(f"PUT /objects vault_id={vault_id} object_id={oid} bytes={len(body)}")
         expected = hashlib.sha256(body).hexdigest()
         if expected != oid:
+            _log_server(
+                f"PUT /objects vault_id={vault_id} object_id={oid} -> 400 hash_mismatch expected={expected}"
+            )
             raise HTTPException(status_code=400, detail="Object hash does not match object_id")
         path = base / "objects" / oid[:2] / oid
         if not path.exists():
             _write_bytes(path, body)
+            _log_server(f"PUT /objects vault_id={vault_id} object_id={oid} stored=new")
+        else:
+            _log_server(f"PUT /objects vault_id={vault_id} object_id={oid} stored=existing")
+        _log_server(f"PUT /objects vault_id={vault_id} object_id={oid} -> 200")
         return {"ok": True, "object_id": oid}
-
