@@ -1146,23 +1146,29 @@ class PlantUMLEditorWindow(QMainWindow):
             g = self.saveGeometry().toBase64().data().decode("utf-8")
             config.save_puml_window_geometry(g)
             size = self.geometry().size()
-            print(f"[PlantUML] Saved geometry: {size.width()}x{size.height()} (base64 {len(g)} chars)")
+            if _LOGGING:
+                print(f"[PlantUML] Saved geometry: {size.width()}x{size.height()} (base64 {len(g)} chars)")
         except Exception as exc:
-            print(f"[PlantUML] Save geometry failed: {exc}")
+            if _LOGGING:
+                print(f"[PlantUML] Save geometry failed: {exc}")
         try:
             h = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
             config.save_puml_hsplit_state(h)
             sizes = self.editor_preview_splitter.sizes()
-            print(f"[PlantUML] Saved HSplit sizes: {sizes}")
+            if _LOGGING:
+                print(f"[PlantUML] Saved HSplit sizes: {sizes}")
         except Exception as exc:
-            print(f"[PlantUML] Save HSplit failed: {exc}")
+            if _LOGGING:
+                print(f"[PlantUML] Save HSplit failed: {exc}")
         try:
             v = self._vertical_splitter.saveState().toBase64().data().decode("utf-8")
             config.save_puml_vsplit_state(v)
             sizes = self._vertical_splitter.sizes()
-            print(f"[PlantUML] Saved VSplit sizes: {sizes}")
+            if _LOGGING:
+                print(f"[PlantUML] Saved VSplit sizes: {sizes}")
         except Exception as exc:
-            print(f"[PlantUML] Save VSplit failed: {exc}")
+            if _LOGGING:
+                print(f"[PlantUML] Save VSplit failed: {exc}")
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -1234,10 +1240,12 @@ class PlantUMLEditorWindow(QMainWindow):
                         with open(p, 'r', encoding='utf-8') as f:
                             shortcuts = json.load(f)
                         loaded_from = str(p)
-                        print(f"[PlantUML] Loaded shortcuts from {p} ({len(shortcuts) if isinstance(shortcuts, list) else 'invalid'} items)")
+                        if _LOGGING:
+                            print(f"[PlantUML] Loaded shortcuts from {p} ({len(shortcuts) if isinstance(shortcuts, list) else 'invalid'} items)")
                         break
                 except Exception as exc:
-                    print(f"[PlantUML] Failed reading {p}: {exc}")
+                    if _LOGGING:
+                        print(f"[PlantUML] Failed reading {p}: {exc}")
             # Try importlib.resources as a last resort
             if shortcuts is None:
                 try:
@@ -1245,9 +1253,11 @@ class PlantUMLEditorWindow(QMainWindow):
                     data = ilr.files("sp.app").joinpath("puml_shortcuts.json").read_text(encoding="utf-8")
                     shortcuts = json.loads(data)
                     loaded_from = "package:sp.app/puml_shortcuts.json"
-                    print("[PlantUML] Loaded shortcuts via importlib.resources")
+                    if _LOGGING:
+                        print("[PlantUML] Loaded shortcuts via importlib.resources")
                 except Exception as exc:
-                    print(f"[PlantUML] resources load failed: {exc}")
+                    if _LOGGING:
+                        print(f"[PlantUML] resources load failed: {exc}")
 
             if isinstance(shortcuts, list):
                 self._shortcuts_data = shortcuts
@@ -1255,11 +1265,14 @@ class PlantUMLEditorWindow(QMainWindow):
                     name = item.get("name", "")
                     if name:
                         self.shortcuts_category_combo.addItem(name, name)
-                print(f"[PlantUML] Shortcuts loaded: {len(shortcuts)} categories from {loaded_from}")
+                if _LOGGING:
+                    print(f"[PlantUML] Shortcuts loaded: {len(shortcuts)} categories from {loaded_from}")
             else:
-                print("[PlantUML] No shortcuts loaded (not a list)")
+                if _LOGGING:
+                    print("[PlantUML] No shortcuts loaded (not a list)")
         except Exception as exc:
-            print(f"[PlantUML] Failed to load shortcuts: {exc}")
+            if _LOGGING:
+                print(f"[PlantUML] Failed to load shortcuts: {exc}")
 
     def _on_shortcuts_category_changed(self, index: int) -> None:
         """When the category changes, offer Simple/Advanced variants and enable help."""

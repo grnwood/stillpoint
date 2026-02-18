@@ -8690,7 +8690,8 @@ class MainWindow(QMainWindow):
             if isinstance(file_path, dict) and file_path.get("kind") == "remote":
                 self._open_remote_plantuml_editor(file_path.get("path", ""), file_path.get("page_path"))
                 return
-            print(f"[MainWindow] Opening PlantUML editor for: {file_path}")
+            if log_enabled("diagrams"):
+                print(f"[MainWindow] Opening PlantUML editor for: {file_path}")
             
             window = PlantUMLEditorWindow(str(file_path), parent=None)
             try:
