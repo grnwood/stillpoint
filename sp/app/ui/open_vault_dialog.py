@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import os
 import time
 from typing import Optional
 from urllib.parse import urlparse
+
+import httpx
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -90,6 +94,240 @@ class AddVaultDialog(QDialog):
         return self._result
 
 
+class AddHomebaseVaultDialog(QDialog):
+    """Dialog for creating/connecting a Homebase vault profile."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._result: Optional[dict[str, str]] = None
+        self.setWindowTitle("Add Homebase Vault")
+        self.setModal(True)
+        self.resize(560, 420)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("My Homebase Vault")
+        form.addRow("Display Name:", self.name_edit)
+
+        local_row = QHBoxLayout()
+        self.local_path_edit = QLineEdit()
+        local_btn = QPushButton("Browse…")
+        local_btn.clicked.connect(self._browse_local)
+        local_row.addWidget(self.local_path_edit, 1)
+        local_row.addWidget(local_btn)
+        local_wrap = QWidget()
+        local_wrap.setLayout(local_row)
+        form.addRow("Local Vault Folder:", local_wrap)
+
+        self.server_url_edit = QLineEdit()
+        self.server_url_edit.setPlaceholderText("http://127.0.0.1:8080")
+        form.addRow("Homebase Server URL:", self.server_url_edit)
+
+        self.admin_password_edit = QLineEdit()
+        self.admin_password_edit.setEchoMode(QLineEdit.Password)
+        self.admin_password_edit.setPlaceholderText("Required for create/query")
+        form.addRow("Server Admin Password:", self.admin_password_edit)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Connect Existing", "connect")
+        self.mode_combo.addItem("Create New", "create")
+        self.mode_combo.currentIndexChanged.connect(self._update_mode)
+        form.addRow("Mode:", self.mode_combo)
+
+        self.vault_id_edit = QLineEdit()
+        self.vault_id_edit.setPlaceholderText("Existing Homebase vault id")
+        vault_id_row = QHBoxLayout()
+        vault_id_row.setContentsMargins(0, 0, 0, 0)
+        vault_id_row.setSpacing(6)
+        self.query_vaults_btn = QPushButton("Query…")
+        self.query_vaults_btn.clicked.connect(self._query_homebase_vaults)
+        vault_id_row.addWidget(self.vault_id_edit, 1)
+        vault_id_row.addWidget(self.query_vaults_btn)
+        vault_id_wrap = QWidget()
+        vault_id_wrap.setLayout(vault_id_row)
+        form.addRow("Homebase Vault ID:", vault_id_wrap)
+
+        self.vault_name_edit = QLineEdit()
+        self.vault_name_edit.setPlaceholderText("Optional remote vault name")
+        form.addRow("Remote Vault Name:", self.vault_name_edit)
+
+        self.username_edit = QLineEdit()
+        self.username_edit.setPlaceholderText("username")
+        form.addRow("Username:", self.username_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setPlaceholderText("password")
+        form.addRow("Password:", self.password_edit)
+
+        self.passphrase_edit = QLineEdit()
+        self.passphrase_edit.setEchoMode(QLineEdit.Password)
+        self.passphrase_edit.setPlaceholderText("Shared encryption passphrase")
+        form.addRow("Homebase Passphrase:", self.passphrase_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update_mode()
+
+    def _browse_local(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Select Local Vault Folder", str(Path.home()))
+        if directory:
+            self.local_path_edit.setText(directory)
+            if not self.name_edit.text().strip():
+                self.name_edit.setText(Path(directory).name)
+
+    def _update_mode(self) -> None:
+        create_mode = self.mode_combo.currentData() == "create"
+        self.vault_id_edit.setEnabled(not create_mode)
+        self.vault_name_edit.setEnabled(create_mode)
+        self.query_vaults_btn.setEnabled(not create_mode)
+        self.admin_password_edit.setEnabled(True)
+
+    def _query_homebase_vaults(self) -> None:
+        server_url = self.server_url_edit.text().strip().rstrip("/")
+        admin_password = self.admin_password_edit.text().strip()
+        if not server_url:
+            QMessageBox.warning(self, "Missing Server URL", "Enter the Homebase server URL first.")
+            return
+        if not admin_password:
+            QMessageBox.warning(self, "Missing Admin Password", "Vault discovery requires server admin password.")
+            return
+        headers = {"x-server-admin-password": hashlib.sha256(admin_password.encode("utf-8")).hexdigest()}
+        url = f"{server_url}/v1/homebase/bootstrap/vaults"
+        try:
+            resp = httpx.get(url, headers=headers, timeout=20.0)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            details = str(exc)
+            try:
+                details = resp.text[:500] or details  # type: ignore[name-defined]
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Homebase Query Failed", details)
+            return
+        raw_vaults = data.get("vaults")
+        if not isinstance(raw_vaults, list):
+            QMessageBox.warning(self, "No Vaults", "Server returned no vault entries.")
+            return
+        label_to_id: dict[str, str] = {}
+        label_to_name: dict[str, str] = {}
+        labels: list[str] = []
+        for item in raw_vaults:
+            if not isinstance(item, dict):
+                continue
+            vault_id = str(item.get("vault_id") or "").strip()
+            if not vault_id:
+                continue
+            vault_name = str(item.get("vault_name") or "").strip()
+            created_at = str(item.get("created_at") or "").strip()
+            name_part = vault_name or "(unnamed)"
+            created_part = f"  |  {created_at}" if created_at else ""
+            label = f"{name_part}  |  {vault_id}{created_part}"
+            labels.append(label)
+            label_to_id[label] = vault_id
+            label_to_name[label] = vault_name
+        if not labels:
+            QMessageBox.information(self, "No Vaults", "No Homebase vaults found on this server.")
+            return
+        selected, ok = QInputDialog.getItem(
+            self,
+            "Select Homebase Vault",
+            "Choose a Homebase vault ID:",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not selected:
+            return
+        vault_id = label_to_id.get(selected, "")
+        if vault_id:
+            self.vault_id_edit.setText(vault_id)
+        vault_name = label_to_name.get(selected, "")
+        if vault_name and not self.name_edit.text().strip():
+            self.name_edit.setText(vault_name)
+
+    def accept(self) -> None:  # type: ignore[override]
+        local_path = self.local_path_edit.text().strip()
+        server_url = self.server_url_edit.text().strip().rstrip("/")
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+        passphrase = self.passphrase_edit.text()
+        mode = str(self.mode_combo.currentData() or "connect")
+        if not local_path or not server_url or not username or not password or not passphrase:
+            QMessageBox.warning(self, "Missing Info", "Local path, server URL, username, password, and passphrase are required.")
+            return
+        local_root = Path(local_path)
+        if not local_root.exists() or not local_root.is_dir():
+            QMessageBox.warning(self, "Folder Not Found", "Choose an existing local vault folder.")
+            return
+        headers: dict[str, str] = {}
+        payload: dict[str, str] = {"username": username, "password": password}
+        if mode == "create":
+            admin_password = self.admin_password_edit.text().strip()
+            if not admin_password:
+                QMessageBox.warning(self, "Missing Admin Password", "Create mode requires server admin password.")
+                return
+            headers["x-server-admin-password"] = hashlib.sha256(admin_password.encode("utf-8")).hexdigest()
+            remote_name = self.vault_name_edit.text().strip()
+            if remote_name:
+                payload["vault_name"] = remote_name
+            url = f"{server_url}/v1/homebase/bootstrap/create"
+        else:
+            vault_id = self.vault_id_edit.text().strip()
+            if not vault_id:
+                QMessageBox.warning(self, "Missing Vault ID", "Connect mode requires Homebase vault id.")
+                return
+            payload["vault_id"] = vault_id
+            url = f"{server_url}/v1/homebase/bootstrap/connect"
+        try:
+            resp = httpx.post(url, json=payload, headers=headers, timeout=20.0)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            details = str(exc)
+            try:
+                details = resp.text[:500] or details  # type: ignore[name-defined]
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Homebase Setup Failed", details)
+            return
+
+        vault_id = str(data.get("vault_id") or "").strip()
+        access_token = str(data.get("access_token") or "").strip()
+        refresh_token = str(data.get("refresh_token") or "").strip()
+        if not vault_id or not access_token:
+            QMessageBox.critical(self, "Homebase Setup Failed", "Server did not return a valid token payload.")
+            return
+        display_name = self.name_edit.text().strip() or local_root.name
+        self._result = {
+            "id": f"homebase::{server_url}::{vault_id}::{local_path}",
+            "kind": "homebase",
+            "name": display_name,
+            "path": str(local_root),
+            "server_url": server_url,
+            "vault_id": vault_id,
+            "username": username,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "passphrase": passphrase,
+            "auto_sync": True,
+            "interval_seconds": 60,
+            "push_debounce_seconds": 3,
+            "max_parallel_transfers": 6,
+        }
+        super().accept()
+
+    def selected_profile(self) -> Optional[dict[str, str]]:
+        return self._result
+
+
 class OpenVaultDialog(QDialog):
     """Dialog for selecting, adding, and managing vaults."""
     @staticmethod
@@ -118,7 +356,18 @@ class OpenVaultDialog(QDialog):
         self._on_add_remote = on_add_remote
         self._on_load_remote = on_load_remote
         self.local_vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
-        self.local_vaults = [v for v in self.local_vaults if not self._is_help_vault_path(v.get("path"))]
+        self.homebase_vaults: list[dict[str, str]] = config.load_homebase_vault_profiles()
+        homebase_paths = {
+            str(v.get("path") or "").strip()
+            for v in self.homebase_vaults
+            if str(v.get("path") or "").strip()
+        }
+        self.local_vaults = [
+            v
+            for v in self.local_vaults
+            if not self._is_help_vault_path(v.get("path"))
+            and str(v.get("path") or "").strip() not in homebase_paths
+        ]
         if not self.local_vaults and current_vault and not self._is_help_vault_path(current_vault):
             self.local_vaults.append({"name": Path(current_vault).name, "path": current_vault})
         self.remote_vaults: list[dict[str, str]] = []
@@ -128,6 +377,7 @@ class OpenVaultDialog(QDialog):
         self._select_id = select_id
         self._remote_loaded = False
         self._remote_vaults_enabled = config.load_feature_remote_vaults_enabled()
+        self._homebase_vaults_enabled = config.load_feature_homebase_vaults_enabled()
 
         layout = QVBoxLayout(self)
         intro_row = QHBoxLayout()
@@ -145,7 +395,6 @@ class OpenVaultDialog(QDialog):
         layout.addLayout(intro_row)
 
         self.tabs = QTabWidget()
-        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
 
         local_tab = QWidget()
@@ -201,6 +450,36 @@ class OpenVaultDialog(QDialog):
             remote_layout.addLayout(remote_controls)
             self.tabs.addTab(remote_tab, "Remote Vaults")
 
+        self.homebase_list_widget = None
+        self.add_homebase_btn = None
+        self.remove_homebase_btn = None
+        self.edit_configs_homebase_btn = None
+        if self._homebase_vaults_enabled:
+            homebase_tab = QWidget()
+            homebase_layout = QVBoxLayout(homebase_tab)
+            homebase_layout.setContentsMargins(0, 0, 0, 0)
+            homebase_layout.setSpacing(6)
+            self.homebase_list_widget = QListWidget()
+            self.homebase_list_widget.itemDoubleClicked.connect(self._accept_current)
+            self.homebase_list_widget.currentItemChanged.connect(self._on_selection_changed)
+            homebase_layout.addWidget(self.homebase_list_widget, 1)
+
+            homebase_controls = QHBoxLayout()
+            self.add_homebase_btn = QPushButton("Add Homebase")
+            self.add_homebase_btn.clicked.connect(self._add_homebase)
+            self.remove_homebase_btn = QPushButton("Remove Selected")
+            self.remove_homebase_btn.clicked.connect(self._remove_homebase_selected)
+            self.edit_configs_homebase_btn = QPushButton("Edit Vault Configs")
+            self.edit_configs_homebase_btn.clicked.connect(self._open_config_file)
+            homebase_controls.addWidget(self.add_homebase_btn)
+            homebase_controls.addWidget(self.remove_homebase_btn)
+            homebase_controls.addWidget(self.edit_configs_homebase_btn)
+            homebase_controls.addStretch(1)
+            homebase_layout.addLayout(homebase_controls)
+            self.tabs.addTab(homebase_tab, "Homebase Vaults")
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         default_row = QHBoxLayout()
         default_row.addWidget(QLabel("Default vault:"))
         self.default_combo = QComboBox()
@@ -216,6 +495,7 @@ class OpenVaultDialog(QDialog):
         layout.addWidget(self.button_box)
 
         self._refresh_local_list(select_path=current_vault or self.default_vault)
+        self._refresh_homebase_list(select_id=self._select_id)
         if self._select_id and str(self._select_id).startswith("remote::"):
             self._select_id = None
 
@@ -273,6 +553,16 @@ class OpenVaultDialog(QDialog):
         if not self.remote_list_widget:
             return
         self._populate_remote_list(select_id=select_id)
+        self._update_buttons()
+
+    def _refresh_homebase_list(self, select_id: Optional[str] = None) -> None:
+        if not self.homebase_list_widget:
+            return
+        self._populate_list(
+            self.homebase_list_widget,
+            self.homebase_vaults,
+            select_id=select_id,
+        )
         self._update_buttons()
 
     def _refresh_default_combo(self) -> None:
@@ -360,6 +650,11 @@ class OpenVaultDialog(QDialog):
             if path and not path.startswith("/"):
                 path = f"/{path}"
             return f"{display}{path}"
+        if vault.get("kind") == "homebase":
+            server = vault.get("server_url") or ""
+            vault_id = vault.get("vault_id") or ""
+            local_path = vault.get("path") or ""
+            return f"{OpenVaultDialog._format_remote_server(server, include_scheme=False)}  |  id:{vault_id}  |  {local_path}"
         return vault.get("path") or ""
 
     @staticmethod
@@ -378,8 +673,13 @@ class OpenVaultDialog(QDialog):
         self._update_buttons()
 
     def _on_tab_changed(self, index: int) -> None:
-        if self._remote_vaults_enabled and index == 1:
+        current_widget = self.tabs.widget(index)
+        remote_list = getattr(self, "remote_list_widget", None)
+        homebase_list = getattr(self, "homebase_list_widget", None)
+        if self._remote_vaults_enabled and remote_list and current_widget and remote_list.parentWidget() == current_widget:
             self._load_remote_vaults(select_id=self._select_id)
+        if self._homebase_vaults_enabled and homebase_list and current_widget and homebase_list.parentWidget() == current_widget:
+            self._refresh_homebase_list(select_id=self._select_id)
         self._update_buttons()
 
     def _load_remote_vaults(self, select_id: Optional[str] = None) -> None:
@@ -427,8 +727,11 @@ class OpenVaultDialog(QDialog):
         self.remote_vaults = [v for v in vaults if v.get("kind") == "remote"]
 
     def _active_list_widget(self) -> QListWidget:
-        if self._remote_vaults_enabled and self.remote_list_widget and self.tabs.currentIndex() == 1:
+        current = self.tabs.currentWidget()
+        if self._remote_vaults_enabled and self.remote_list_widget and current and self.remote_list_widget.parentWidget() == current:
             return self.remote_list_widget
+        if self._homebase_vaults_enabled and self.homebase_list_widget and current and self.homebase_list_widget.parentWidget() == current:
+            return self.homebase_list_widget
         return self.local_list_widget
 
     def _update_buttons(self) -> None:
@@ -447,6 +750,10 @@ class OpenVaultDialog(QDialog):
         if self.remove_remote_btn and self.remote_list_widget:
             self.remove_remote_btn.setEnabled(
                 current_list is self.remote_list_widget and is_remote_vault
+            )
+        if self.remove_homebase_btn and self.homebase_list_widget:
+            self.remove_homebase_btn.setEnabled(
+                current_list is self.homebase_list_widget and isinstance(current_data, dict) and current_data.get("kind") == "homebase"
             )
         ok_button = self.button_box.button(QDialogButtonBox.Ok)
         if ok_button:
@@ -500,6 +807,38 @@ class OpenVaultDialog(QDialog):
         self._refresh_local_list()
         if self._remote_loaded:
             self._refresh_remote_list()
+
+    def _add_homebase(self) -> None:
+        if not self._homebase_vaults_enabled:
+            return
+        dlg = AddHomebaseVaultDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        profile = dlg.selected_profile()
+        if not profile:
+            return
+        config.upsert_homebase_vault_profile(profile)
+        profile_path = str(profile.get("path") or "").strip()
+        if profile_path:
+            config.delete_known_vault(profile_path)
+        self.homebase_vaults = config.load_homebase_vault_profiles()
+        self._refresh_homebase_list(select_id=profile.get("id"))
+
+    def _remove_homebase_selected(self) -> None:
+        if not self.homebase_list_widget:
+            return
+        item = self.homebase_list_widget.currentItem()
+        if not item:
+            return
+        data = item.data(Qt.UserRole)
+        if not isinstance(data, dict) or data.get("kind") != "homebase":
+            return
+        profile_id = str(data.get("id") or "").strip()
+        if not profile_id:
+            return
+        config.delete_homebase_vault_profile(profile_id)
+        self.homebase_vaults = config.load_homebase_vault_profiles()
+        self._refresh_homebase_list()
 
     def _remove_selected(self) -> None:
         item = self.local_list_widget.currentItem()

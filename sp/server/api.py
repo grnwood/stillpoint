@@ -3166,6 +3166,29 @@ def _get_vault_root() -> Path:
 
 
 def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_ops: bool) -> str:
+    def _sha256_stream(stream) -> tuple[str, int]:
+        hasher = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            hasher.update(chunk)
+        return hasher.hexdigest(), total
+
+    def _sha256_file(path: Path) -> tuple[str, int]:
+        hasher = hashlib.sha256()
+        total = 0
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                hasher.update(chunk)
+        return hasher.hexdigest(), total
+
     filename = Path(upload.filename).name
     if not filename:
         raise HTTPException(status_code=400, detail="Attachment filename is required")
@@ -3181,9 +3204,26 @@ def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_
             status_code=500,
             detail=_format_file_op_detail(f"Create attachment folder failed for {attachment_normalized}", exc),
         ) from exc
+    unchanged = False
+    incoming_hash = ""
+    incoming_size = -1
+    if dest_path.exists():
+        try:
+            upload.file.seek(0)
+            incoming_hash, incoming_size = _sha256_stream(upload.file)
+            upload.file.seek(0)
+            existing_hash, existing_size = _sha256_file(dest_path)
+            if existing_size == incoming_size and existing_hash == incoming_hash:
+                unchanged = True
+        except OSError as exc:
+            _log_attachment(f"Failed to compare existing attachment {attachment_normalized}: {exc}")
+        except Exception:
+            pass
     log_msg = f"receive file {attachment_normalized} to vault {dest_path}"
-    if use_local_ops and dest_path.exists():
-        log_msg += " (server==client)"
+    if unchanged:
+        log_msg += " (unchanged)"
+        if use_local_ops:
+            log_msg += " (server==client)"
     else:
         try:
             upload.file.seek(0)
@@ -3195,6 +3235,8 @@ def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_
                 status_code=500,
                 detail=_format_file_op_detail(f"Persist attachment failed for {attachment_normalized}", exc),
             ) from exc
+        if use_local_ops:
+            log_msg += " (server==client)"
     _log_attachment(log_msg)
     config.upsert_attachment_entry(page_path, attachment_normalized, str(dest_path))
     return attachment_normalized

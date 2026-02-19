@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 import errno
 import ctypes
 import hashlib
@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile 
 import time
+from datetime import datetime, timezone
 import faulthandler
 import re
 import warnings
@@ -1269,6 +1270,9 @@ class MainWindow(QMainWindow):
         self._popup_mode: Optional[str] = None  # "history" or "heading"
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
+        self._homebase_pending_reload_path: Optional[str] = None
+        self._homebase_conflict_seen_keys: set[str] = set()
+        self._homebase_conflict_popup_open: bool = False
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
         self._tree_cache: dict[str, list[dict]] = {}
@@ -1298,6 +1302,15 @@ class MainWindow(QMainWindow):
         # Remember cursor positions for history navigation
         # Track last-saved content to detect dirty buffers
         self._last_saved_content: Optional[str] = None
+        self._undo_cache_path: Optional[Path] = None
+        self._undo_cache_pages_limit: int = 20
+        self._undo_cache_states_limit: int = 10
+        self._undo_cache_replaying: bool = False
+        self._undo_cache: dict[str, Any] = {
+            "schema_version": 1,
+            "pages": {},
+            "order": [],
+        }
         self._scroll_anim: Optional[QPropertyAnimation] = None
         self._vi_enabled: bool = False
         self._vi_insert_active: bool = False
@@ -1475,6 +1488,8 @@ class MainWindow(QMainWindow):
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
         self.editor.set_move_text_callback(self._append_text_to_page_from_editor)
+        self.editor.set_persisted_undo_callback(self._persisted_undo_fallback)
+        self.editor.set_persisted_redo_callback(self._persisted_redo_fallback)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
         self.editor.pageTagInserted.connect(self._on_page_tag_inserted)
         self.find_bar = FindReplaceBar(self)
@@ -1579,6 +1594,8 @@ class MainWindow(QMainWindow):
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
+        self.right_panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
+        self.right_panel.taskDatesApplied.connect(self._on_task_dates_applied)
         self.right_panel.linkBackRequested.connect(self._navigate_history_back)
         self.right_panel.linkForwardRequested.connect(self._navigate_history_forward)
         self.right_panel.linkHomeRequested.connect(self._go_home)
@@ -1779,6 +1796,10 @@ class MainWindow(QMainWindow):
         # Vault menu (now left of File)
         vault_menu = self.menuBar().addMenu("&Vault")
         file_menu = self.menuBar().addMenu("F&ile")
+        switch_vault_action = QAction("Switch Vaults", self)
+        switch_vault_action.setToolTip("Switch this window to a different vault")
+        switch_vault_action.triggered.connect(lambda checked=False: self._select_vault())
+        vault_menu.addAction(switch_vault_action)
         open_vault_new_win_action = QAction("Open Vault in New Window", self)
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
@@ -1793,6 +1814,12 @@ class MainWindow(QMainWindow):
             lambda checked=False: self._trigger_homebase_sync_now("menu")
         )
         vault_menu.addAction(self._action_homebase_sync_now)
+        self._action_homebase_reset_sync = QAction("Reset Sync State (Server Authoritative)", self)
+        self._action_homebase_reset_sync.setToolTip(
+            "Discard local sync state/conflicts and re-seed local files from the current server snapshot"
+        )
+        self._action_homebase_reset_sync.triggered.connect(self._reset_homebase_sync_state_server_authoritative)
+        vault_menu.addAction(self._action_homebase_reset_sync)
         reload_vault_action = QAction("Reload Vault", self)
         reload_vault_action.setToolTip("Close and reopen the current vault")
         reload_vault_action.triggered.connect(self._reload_vault)
@@ -1912,6 +1939,7 @@ class MainWindow(QMainWindow):
             self._action_server_login: self._action_server_login.toolTip(),
             self._action_server_logout: self._action_server_logout.toolTip(),
             self._action_homebase_sync_now: self._action_homebase_sync_now.toolTip(),
+            self._action_homebase_reset_sync: self._action_homebase_reset_sync.toolTip(),
         }
         self._apply_remote_mode_ui()
         self._setup_tray_icon()
@@ -2399,6 +2427,8 @@ class MainWindow(QMainWindow):
         rename_shortcut = QShortcut(QKeySequence(Qt.Key_F2), self)
         rename_shortcut.setContext(Qt.ApplicationShortcut)
         rename_shortcut.activated.connect(self._trigger_tree_rename)
+        switch_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
+        switch_vault_shortcut.activated.connect(lambda: self._select_vault())
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
         open_vault_new_win_shortcut.activated.connect(lambda: self._select_vault(spawn_new_process=True))
         focus_mode_shortcut = QShortcut(QKeySequence("Ctrl+Alt+F"), self)
@@ -3315,10 +3345,55 @@ class MainWindow(QMainWindow):
         else:
             self._switch_api_base(self._local_api_base, is_remote=False, verify_tls=True)
         if self._set_vault(selection["path"], vault_name=selection.get("name")):
+            if selection.get("kind") == "homebase":
+                try:
+                    config.delete_known_vault(selection["path"])
+                except Exception:
+                    pass
+                self._apply_homebase_profile(selection)
             self._restore_recent_history()
             QTimer.singleShot(100, self._auto_load_initial_file)
             return True
         return False
+
+    @staticmethod
+    def _normalize_vault_path(path_value: Optional[str]) -> str:
+        if not path_value:
+            return ""
+        try:
+            return str(Path(path_value).expanduser().resolve())
+        except Exception:
+            return os.path.abspath(os.path.expanduser(str(path_value)))
+
+    def _homebase_profile_for_path(self, local_path: Optional[str]) -> Optional[dict]:
+        target = self._normalize_vault_path(local_path)
+        if not target:
+            return None
+        try:
+            for profile in config.load_homebase_vault_profiles():
+                if self._normalize_vault_path(str(profile.get("path") or "")) == target:
+                    return profile
+        except Exception:
+            return None
+        return None
+
+    def _apply_homebase_profile(self, profile: dict) -> None:
+        try:
+            self._ensure_config_active_vault_context()
+            config.save_vault_remote_mode("homebase_remote")
+            config.save_homebase_remote_url(str(profile.get("server_url") or "").strip())
+            config.save_homebase_vault_id(str(profile.get("vault_id") or "").strip())
+            config.save_homebase_username(str(profile.get("username") or "").strip())
+            config.save_homebase_auth_token(str(profile.get("access_token") or "").strip())
+            config.save_homebase_refresh_token(str(profile.get("refresh_token") or "").strip())
+            config.save_homebase_passphrase(str(profile.get("passphrase") or ""))
+            config.save_homebase_auto_sync(bool(profile.get("auto_sync", True)))
+            config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
+            config.save_homebase_push_debounce_seconds(int(profile.get("push_debounce_seconds", 3)))
+            config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 6)))
+            self._configure_homebase_sync_for_vault()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Homebase profile apply failed: {exc}", 5000)
 
     def _open_vault_preferences(self) -> None:
         if not config.has_active_vault():
@@ -3742,6 +3817,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._homebase_sync_engine = None
+        self._homebase_conflict_seen_keys.clear()
+        self._homebase_conflict_popup_open = False
         self._update_homebase_status_badge(None)
         self._update_homebase_sync_action_state()
 
@@ -3791,7 +3868,299 @@ class MainWindow(QMainWindow):
     def _poll_homebase_status(self) -> None:
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
         self._update_homebase_status_badge(status)
+        self._maybe_show_homebase_conflict_popup(status)
+        if self._homebase_sync_engine:
+            try:
+                updates = self._homebase_sync_engine.consume_remote_updates()
+            except Exception:
+                updates = []
+            if updates:
+                self._on_homebase_remote_updates(updates)
+        if self._homebase_pending_reload_path and self._is_editor_idle_for_remote_reload():
+            pending = self._homebase_pending_reload_path
+            self._homebase_pending_reload_path = None
+            if pending and self.current_path == pending:
+                self._open_file(
+                    pending,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
         self._update_homebase_sync_action_state()
+
+    def _is_editor_idle_for_remote_reload(self) -> bool:
+        if not self.current_path:
+            return False
+        if self._merge_dialog_open:
+            return False
+        if self._dirty_flag:
+            return False
+        try:
+            if self.editor.document().isModified():
+                return False
+        except Exception:
+            pass
+        try:
+            if self.autosave_timer.isActive():
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _on_homebase_remote_updates(self, updated_paths: list[str]) -> None:
+        if not updated_paths or not self.vault_root or self._remote_mode:
+            return
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for rel in updated_paths:
+            rel_path = str(rel or "").strip().replace("\\", "/").lstrip("/")
+            if not rel_path or rel_path.startswith(".stillpoint/"):
+                continue
+            abs_path = Path(self.vault_root) / rel_path
+            page_path = "/" + abs_path.relative_to(self.vault_root).as_posix()
+            if page_path not in seen:
+                seen.add(page_path)
+                normalized.append(page_path)
+        if not normalized:
+            return
+        try:
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+        except Exception:
+            pass
+        self._refresh_tree()
+        if self.current_path and self.current_path in seen:
+            if self._is_editor_idle_for_remote_reload():
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
+            else:
+                self._homebase_pending_reload_path = self.current_path
+                self.statusBar().showMessage(
+                    "Remote sync updated this page; reload deferred until editor is idle.",
+                    4000,
+                )
+
+    def _homebase_conflict_key(self, entry: dict[str, Any]) -> str:
+        return "|".join(
+            [
+                str(entry.get("path") or "").strip(),
+                str(entry.get("conflict_copy_path") or "").strip(),
+                str(entry.get("ts") or "").strip(),
+            ]
+        )
+
+    def _format_homebase_conflict_ts(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "Unknown"
+        try:
+            if text.endswith("Z"):
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(text)
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            return text
+
+    def _format_homebase_conflict_mtime(self, value: Any) -> str:
+        try:
+            sec = int(value)
+            if sec <= 0:
+                return "n/a"
+            return datetime.fromtimestamp(sec, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            return "n/a"
+
+    def _maybe_show_homebase_conflict_popup(self, status: Optional[HomebaseSyncStatus]) -> None:
+        if not status or status.conflicts <= 0:
+            return
+        if not self._homebase_sync_engine or not self._is_homebase_mode_enabled():
+            return
+        if self._homebase_conflict_popup_open:
+            return
+        try:
+            conflicts = self._homebase_sync_engine.list_conflicts(limit=200)
+        except Exception:
+            return
+        if not conflicts:
+            return
+        unseen = [c for c in conflicts if self._homebase_conflict_key(c) not in self._homebase_conflict_seen_keys]
+        if not unseen:
+            return
+        self._show_homebase_conflicts_popup(conflicts)
+
+    def _show_homebase_conflicts_popup(self, conflicts: list[dict[str, Any]]) -> None:
+        if not conflicts:
+            return
+        for entry in conflicts:
+            self._homebase_conflict_seen_keys.add(self._homebase_conflict_key(entry))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Homebase Sync Conflicts")
+        dialog.resize(860, 460)
+        layout = QVBoxLayout(dialog)
+        info = QLabel("Homebase detected file conflicts. Select a file and open the diff viewer to merge changes.")
+        layout.addWidget(info)
+        list_widget = QListWidget(dialog)
+        detail_label = QLabel("")
+        detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail_label.setWordWrap(True)
+        detail_label.setStyleSheet(
+            f"padding: 8px; border: 1px solid {theme_value('main_window.splitter.handle', '#444')};"
+        )
+        for entry in conflicts:
+            path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            item_text = (
+                f"/{path}  |  "
+                f"remote device: {entry.get('remote_device_id', 'unknown')}  |  "
+                f"detected: {self._format_homebase_conflict_ts(entry.get('ts'))}"
+            )
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, entry)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget, 1)
+        layout.addWidget(detail_label)
+        buttons = QHBoxLayout()
+        open_diff_btn = QPushButton("Open Diff Viewer", dialog)
+        close_btn = QPushButton("Close", dialog)
+        buttons.addStretch(1)
+        buttons.addWidget(open_diff_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        def _update_detail() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                detail_label.setText("")
+                open_diff_btn.setEnabled(False)
+                return
+            entry = item.data(Qt.UserRole) or {}
+            path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            conflict_copy = str(entry.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+            detail_label.setText(
+                "\n".join(
+                    [
+                        f"Path: /{path}",
+                        f"Conflict copy: /{conflict_copy}",
+                        f"Reason: {entry.get('reason', 'unknown')}",
+                        f"Remote device: {entry.get('remote_device_id', 'unknown')}",
+                        f"Detected: {self._format_homebase_conflict_ts(entry.get('ts'))}",
+                        f"Local mtime: {self._format_homebase_conflict_mtime(entry.get('local_mtime'))}",
+                        f"Remote mtime: {self._format_homebase_conflict_mtime(entry.get('remote_mtime'))}",
+                    ]
+                )
+            )
+            open_diff_btn.setEnabled(True)
+
+        def _open_diff() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                return
+            entry = item.data(Qt.UserRole) or {}
+            if self._resolve_homebase_conflict_with_diff(entry):
+                row = list_widget.row(item)
+                list_widget.takeItem(row)
+                if list_widget.count() == 0:
+                    dialog.accept()
+                else:
+                    list_widget.setCurrentRow(max(0, row - 1))
+
+        list_widget.currentItemChanged.connect(lambda current, previous: _update_detail())
+        open_diff_btn.clicked.connect(_open_diff)
+        close_btn.clicked.connect(dialog.accept)
+        if list_widget.count():
+            list_widget.setCurrentRow(0)
+        self._homebase_conflict_popup_open = True
+        try:
+            dialog.exec()
+        finally:
+            self._homebase_conflict_popup_open = False
+
+    def _resolve_homebase_conflict_with_diff(self, entry: dict[str, Any]) -> bool:
+        if not self.vault_root:
+            return False
+        path_rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        conflict_rel = str(entry.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+        if not path_rel or not conflict_rel:
+            QMessageBox.warning(self, "Homebase Conflict", "Missing conflict path data.")
+            return False
+        local_path = (Path(self.vault_root) / path_rel).resolve()
+        conflict_path = (Path(self.vault_root) / conflict_rel).resolve()
+        try:
+            root = Path(self.vault_root).resolve()
+            local_path.relative_to(root)
+            conflict_path.relative_to(root)
+        except Exception:
+            QMessageBox.warning(self, "Homebase Conflict", "Conflict path is outside vault root.")
+            return False
+        if not conflict_path.exists():
+            if self._homebase_sync_engine:
+                try:
+                    self._homebase_sync_engine.resolve_conflict_entry(conflict_rel, resolution="missing-conflict-copy")
+                except Exception:
+                    pass
+            QMessageBox.information(self, "Homebase Conflict", "Conflict copy no longer exists. Marked as resolved.")
+            return True
+        if not local_path.exists():
+            local_text = ""
+        else:
+            try:
+                local_text = local_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                QMessageBox.warning(self, "Homebase Conflict", f"Local file is not UTF-8 text: /{path_rel}")
+                return False
+            except Exception as exc:
+                QMessageBox.warning(self, "Homebase Conflict", f"Failed to read local file: {exc}")
+                return False
+        try:
+            conflict_text = conflict_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            QMessageBox.warning(self, "Homebase Conflict", f"Conflict copy is not UTF-8 text: /{conflict_rel}")
+            return False
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase Conflict", f"Failed to read conflict copy: {exc}")
+            return False
+        page_path = "/" + path_rel
+        merge_dialog = MergeConflictDialog(local_text, conflict_text, page_path, parent=self)
+        if merge_dialog.exec() != QDialog.Accepted:
+            return False
+        merged_text = merge_dialog.merged_text()
+        if merged_text is None:
+            return False
+        try:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(merged_text, encoding="utf-8")
+            if conflict_path.exists():
+                conflict_path.unlink()
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.resolve_conflict_entry(conflict_rel, resolution="merged")
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+            indexer.index_page(page_path, merged_text)
+            self.right_panel.refresh_tasks()
+            if self.current_path == page_path and self._is_editor_idle_for_remote_reload():
+                self._open_file(
+                    page_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
+            else:
+                self._refresh_tree()
+            self._schedule_homebase_sync("conflict resolved")
+            self.statusBar().showMessage(f"Resolved Homebase conflict for {page_path}", 5000)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Homebase Conflict", f"Failed to apply merged file: {exc}")
+            return False
 
     def _update_homebase_status_badge(self, status: Optional[HomebaseSyncStatus]) -> None:
         if not hasattr(self, "_homebase_status_label"):
@@ -3804,6 +4173,9 @@ class MainWindow(QMainWindow):
         if state == "syncing":
             text = "HOMEBASE: Syncing..."
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
+        elif state == "hibernated":
+            text = "HOMEBASE: Hibernated"
+            bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
         elif state == "offline":
             text = "HOMEBASE: Offline"
             bg = theme_value("main_window.homebase_badge.offline_bg", "#ef6c00")
@@ -3848,16 +4220,76 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"Homebase sync request failed: {exc}", 5000)
 
+    def _reset_homebase_sync_state_server_authoritative(self) -> None:
+        if not self.vault_root or not self._is_homebase_mode_enabled():
+            self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Reset Homebase Sync State",
+            "This will clear local sync state/conflicts and overwrite local files "
+            "with the current server snapshot where paths match.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._shutdown_homebase_sync()
+            self._ensure_config_active_vault_context()
+            remote_url = config.load_homebase_remote_url().strip()
+            passphrase = config.load_homebase_passphrase()
+            if not remote_url or not passphrase:
+                QMessageBox.warning(self, "Homebase", "Homebase is not configured for this vault.")
+                return
+            cfg = HomebaseSyncConfig(
+                vault_root=Path(self.vault_root),
+                vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
+                device_id=config.load_homebase_device_id(),
+                remote_url=remote_url,
+                auth_token=config.load_homebase_auth_token().strip(),
+                local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
+                passphrase=passphrase,
+                refresh_token=config.load_homebase_refresh_token().strip(),
+                auto_sync=config.load_homebase_auto_sync(),
+                interval_seconds=config.load_homebase_interval_seconds(),
+                push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
+                max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
+                token_update_callback=self._store_homebase_tokens,
+            )
+            reset_engine = HomebaseSyncEngine(cfg)
+            reset_engine.reset_to_server_authoritative()
+            self._configure_homebase_sync_for_vault()
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.sync_now("post-reset")
+            self.statusBar().showMessage("Homebase sync state reset complete (server authoritative).", 5000)
+        except Exception as exc:
+            self._configure_homebase_sync_for_vault()
+            QMessageBox.critical(self, "Homebase Reset Failed", str(exc))
+
     def _update_homebase_sync_action_state(self) -> None:
         action = getattr(self, "_action_homebase_sync_now", None)
-        if action is None:
+        reset_action = getattr(self, "_action_homebase_reset_sync", None)
+        if action is None and reset_action is None:
             return
         enabled = bool(self._homebase_sync_engine) and self._is_homebase_mode_enabled()
-        action.setEnabled(enabled)
-        if enabled:
-            action.setToolTip(self._action_tooltips.get(action, "Run Homebase sync immediately"))
-        else:
-            action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
+        if action is not None:
+            action.setEnabled(enabled)
+            if enabled:
+                action.setToolTip(self._action_tooltips.get(action, "Run Homebase sync immediately"))
+            else:
+                action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
+        if reset_action is not None:
+            reset_action.setEnabled(enabled)
+            if enabled:
+                reset_action.setToolTip(
+                    self._action_tooltips.get(
+                        reset_action,
+                        "Discard local sync state/conflicts and re-seed local files from server",
+                    )
+                )
+            else:
+                reset_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
 
     def _show_homebase_sync_summary(self) -> None:
         if not self._is_homebase_mode_enabled():
@@ -3886,10 +4318,77 @@ class MainWindow(QMainWindow):
         dialog.setText("Homebase sync status")
         dialog.setInformativeText("\n".join(details))
         sync_now_btn = dialog.addButton("Sync Now", QMessageBox.AcceptRole)
+        reset_auth_btn = dialog.addButton("Reset Auth", QMessageBox.ActionRole)
+        conflicts_btn = None
+        if status.conflicts > 0 and self._homebase_sync_engine:
+            conflicts_btn = dialog.addButton("View Conflicts", QMessageBox.ActionRole)
         dialog.addButton(QMessageBox.Close)
         dialog.exec()
         if dialog.clickedButton() == sync_now_btn:
             self._trigger_homebase_sync_now("badge")
+        elif dialog.clickedButton() == reset_auth_btn:
+            self._reset_homebase_auth()
+        elif conflicts_btn is not None and dialog.clickedButton() == conflicts_btn:
+            try:
+                conflicts = self._homebase_sync_engine.list_conflicts(limit=200) if self._homebase_sync_engine else []
+            except Exception:
+                conflicts = []
+            self._show_homebase_conflicts_popup(conflicts)
+
+    def _reset_homebase_auth(self) -> None:
+        if not self.vault_root or not self._is_homebase_mode_enabled():
+            self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
+            return
+        try:
+            self._ensure_config_active_vault_context()
+            remote_url = config.load_homebase_remote_url().strip().rstrip("/")
+            vault_id = (config.load_homebase_vault_id() or "").strip()
+            if not remote_url or not vault_id:
+                QMessageBox.warning(self, "Homebase Auth", "Missing Homebase server URL or vault ID.")
+                return
+            default_username = config.load_homebase_username().strip()
+            username, ok = QInputDialog.getText(
+                self,
+                "Reset Homebase Auth",
+                "Username:",
+                QLineEdit.Normal,
+                default_username,
+            )
+            if not ok or not str(username).strip():
+                return
+            password, ok = QInputDialog.getText(
+                self,
+                "Reset Homebase Auth",
+                "Password:",
+                QLineEdit.Password,
+            )
+            if not ok or not password:
+                return
+            headers: dict[str, str] = {}
+            local_ui_token = self._homebase_local_ui_token_for_url(remote_url)
+            if local_ui_token:
+                headers["x-local-ui-token"] = local_ui_token
+            url = f"{remote_url}/v1/homebase/bootstrap/connect"
+            resp = httpx.post(
+                url,
+                json={"vault_id": vault_id, "username": str(username).strip(), "password": password},
+                headers=headers,
+                timeout=20.0,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            access_token = str(payload.get("access_token") or "").strip()
+            refresh_token = str(payload.get("refresh_token") or "").strip()
+            if not access_token or not refresh_token:
+                raise ValueError("Server did not return access/refresh tokens")
+            config.save_homebase_username(str(username).strip())
+            self._store_homebase_tokens(access_token, refresh_token)
+            self._configure_homebase_sync_for_vault()
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.sync_now("auth reset")
+            self.statusBar().showMessage("Homebase auth reset complete.", 5000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Homebase Auth Reset Failed", str(exc))
 
     def _on_local_attachment_changed(self, reason: str) -> None:
         self._schedule_homebase_sync(reason or "attachment write")
@@ -3914,8 +4413,33 @@ class MainWindow(QMainWindow):
 
     def _store_homebase_tokens(self, access_token: str, refresh_token: str) -> None:
         try:
+            self._ensure_config_active_vault_context()
             config.save_homebase_auth_token(access_token)
             config.save_homebase_refresh_token(refresh_token)
+            # Keep global Homebase profile tokens in sync so reopening from
+            # Homebase Vaults does not reapply stale/expired tokens.
+            if self.vault_root:
+                current_path = self._normalize_vault_path(self.vault_root)
+                current_server = config.load_homebase_remote_url().strip()
+                current_vault_id = (config.load_homebase_vault_id() or "").strip()
+                profiles = config.load_homebase_vault_profiles()
+                updated = False
+                for profile in profiles:
+                    if not isinstance(profile, dict):
+                        continue
+                    profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
+                    if profile_path != current_path:
+                        continue
+                    if current_server and str(profile.get("server_url") or "").strip() != current_server:
+                        continue
+                    if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
+                        continue
+                    profile["access_token"] = access_token
+                    profile["refresh_token"] = refresh_token
+                    updated = True
+                    break
+                if updated:
+                    config.save_homebase_vault_profiles(profiles)
         except Exception:
             pass
 
@@ -4670,6 +5194,11 @@ class MainWindow(QMainWindow):
             self._remote_vault_ref_path = remote_ref_path if self._remote_mode else None
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
             if self._remote_mode:
+                self._undo_cache_path = None
+                self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+            else:
+                self._init_persisted_undo_cache_for_vault()
+            if self._remote_mode:
                 if not self._ensure_remote_auth_for_vault():
                     self.statusBar().showMessage("Login required to access this vault.", 4000)
                     return False
@@ -4694,6 +5223,11 @@ class MainWindow(QMainWindow):
                         return False
                     index_dir_missing = True
             if self.vault_root:
+                homebase_profile = None
+                if not self._remote_mode:
+                    homebase_profile = self._homebase_profile_for_path(self.vault_root)
+                    if not homebase_profile:
+                        homebase_profile = self._homebase_profile_for_path(directory)
                 # Set active vault for both local and remote modes
                 # For remote vaults, we cache the index locally so we still need the DB connection
                 if self._remote_mode:
@@ -4711,9 +5245,15 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     config.save_last_vault(self.vault_root)
-                    display_name = vault_name or Path(self.vault_root).name
-                    config.remember_vault(self.vault_root, display_name)
-                self._configure_homebase_sync_for_vault()
+                    if homebase_profile:
+                        config.delete_known_vault(self.vault_root)
+                    else:
+                        display_name = vault_name or Path(self.vault_root).name
+                        config.remember_vault(self.vault_root, display_name)
+                if homebase_profile:
+                    self._apply_homebase_profile(homebase_profile)
+                else:
+                    self._configure_homebase_sync_for_vault()
                 try:
                     self.refresh_tree_button.setEnabled(True)
                 except Exception:
@@ -6297,6 +6837,8 @@ class MainWindow(QMainWindow):
         self._dirty_flag = False
         self._last_saved_content = content
         self._update_dirty_indicator()
+        self._capture_undo_snapshot(path, content, source="load")
+        self._schedule_homebase_sync("page load")
         updated = indexer.index_page(path, content)
         if updated:
             self.right_panel.refresh_tasks()
@@ -6501,6 +7043,7 @@ class MainWindow(QMainWindow):
             pass
         self._dirty_flag = False
         self._update_dirty_indicator()
+        self._capture_undo_snapshot(path, content, source="save")
 
         was_virtual = path in self.virtual_pages
         if was_virtual:
@@ -6513,6 +7056,173 @@ class MainWindow(QMainWindow):
         display_path = path_to_colon(path) if path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
         self._schedule_homebase_sync("page save")
+
+    def _init_persisted_undo_cache_for_vault(self) -> None:
+        if not self.vault_root:
+            self._undo_cache_path = None
+            self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+            return
+        cache_path = Path(self.vault_root) / ".stillpoint" / "undo_cache.json"
+        self._undo_cache_path = cache_path
+        try:
+            if cache_path.exists():
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                pages = payload.get("pages") if isinstance(payload, dict) else {}
+                order = payload.get("order") if isinstance(payload, dict) else []
+                self._undo_cache = {
+                    "schema_version": 1,
+                    "pages": pages if isinstance(pages, dict) else {},
+                    "order": order if isinstance(order, list) else [],
+                }
+            else:
+                self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+        except Exception:
+            self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+
+    def _save_persisted_undo_cache(self) -> None:
+        if not self._undo_cache_path:
+            return
+        try:
+            self._undo_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._undo_cache_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._undo_cache, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+            tmp.replace(self._undo_cache_path)
+        except Exception:
+            return
+
+    def _capture_undo_snapshot(self, path: Optional[str], content: str, source: str = "edit") -> None:
+        if self._undo_cache_replaying:
+            return
+        page_path = str(path or "").strip()
+        if not page_path or not self._undo_cache_path:
+            return
+        pages = self._undo_cache.setdefault("pages", {})
+        order = self._undo_cache.setdefault("order", [])
+        if not isinstance(pages, dict) or not isinstance(order, list):
+            self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+            pages = self._undo_cache["pages"]
+            order = self._undo_cache["order"]
+        entry = pages.get(page_path)
+        if not isinstance(entry, dict):
+            entry = {"states": [], "cursor": -1}
+            pages[page_path] = entry
+        states = entry.setdefault("states", [])
+        if not isinstance(states, list):
+            states = []
+            entry["states"] = states
+        current_cursor = int(entry.get("cursor", len(states) - 1))
+        if states and 0 <= current_cursor < len(states) - 1:
+            del states[current_cursor + 1 :]
+        if states and isinstance(states[-1], dict) and str(states[-1].get("content", "")) == content:
+            entry["cursor"] = len(states) - 1
+        else:
+            cursor_pos = 0
+            try:
+                cursor_pos = int(self.editor.textCursor().position())
+            except Exception:
+                cursor_pos = 0
+            states.append(
+                {
+                    "content": content,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "source": source,
+                    "cursor_pos": cursor_pos,
+                }
+            )
+            if len(states) > self._undo_cache_states_limit:
+                trim = len(states) - self._undo_cache_states_limit
+                del states[:trim]
+            entry["cursor"] = len(states) - 1
+        if page_path in order:
+            order.remove(page_path)
+        order.append(page_path)
+        while len(order) > self._undo_cache_pages_limit:
+            evict = order.pop(0)
+            pages.pop(evict, None)
+        self._save_persisted_undo_cache()
+
+    def _apply_persisted_snapshot(self, page_path: str, target_index: int) -> bool:
+        pages = self._undo_cache.get("pages")
+        if not isinstance(pages, dict):
+            return False
+        entry = pages.get(page_path)
+        if not isinstance(entry, dict):
+            return False
+        states = entry.get("states")
+        if not isinstance(states, list) or target_index < 0 or target_index >= len(states):
+            return False
+        state = states[target_index]
+        if not isinstance(state, dict):
+            return False
+        content = str(state.get("content", ""))
+        cursor_pos = int(state.get("cursor_pos", 0) or 0)
+        self._undo_cache_replaying = True
+        try:
+            self._suspend_autosave = True
+            self._suspend_dirty_tracking = True
+            try:
+                self.editor.replace_markdown_in_place(content)
+            finally:
+                self._suspend_dirty_tracking = False
+                self._suspend_autosave = False
+            try:
+                cursor = self.editor.textCursor()
+                doc_len = len(self.editor.toPlainText())
+                cursor.setPosition(max(0, min(cursor_pos, doc_len)))
+                self.editor.setTextCursor(cursor)
+            except Exception:
+                pass
+            entry["cursor"] = target_index
+            self._dirty_flag = self._last_saved_content is None or content != self._last_saved_content
+            self._update_dirty_indicator()
+            self._save_persisted_undo_cache()
+            return True
+        finally:
+            self._undo_cache_replaying = False
+
+    def _persisted_undo_fallback(self) -> bool:
+        page_path = str(self.current_path or "").strip()
+        if not page_path:
+            return False
+        pages = self._undo_cache.get("pages")
+        if not isinstance(pages, dict):
+            return False
+        entry = pages.get(page_path)
+        if not isinstance(entry, dict):
+            return False
+        states = entry.get("states")
+        if not isinstance(states, list) or not states:
+            return False
+        current = int(entry.get("cursor", len(states) - 1))
+        target = current - 1
+        if target < 0:
+            return False
+        if not self._apply_persisted_snapshot(page_path, target):
+            return False
+        self.statusBar().showMessage(f"Undo (snapshot {target + 1}/{len(states)})", 2500)
+        return True
+
+    def _persisted_redo_fallback(self) -> bool:
+        page_path = str(self.current_path or "").strip()
+        if not page_path:
+            return False
+        pages = self._undo_cache.get("pages")
+        if not isinstance(pages, dict):
+            return False
+        entry = pages.get(page_path)
+        if not isinstance(entry, dict):
+            return False
+        states = entry.get("states")
+        if not isinstance(states, list) or not states:
+            return False
+        current = int(entry.get("cursor", len(states) - 1))
+        target = current + 1
+        if target >= len(states):
+            return False
+        if not self._apply_persisted_snapshot(page_path, target):
+            return False
+        self.statusBar().showMessage(f"Redo (snapshot {target + 1}/{len(states)})", 2500)
+        return True
 
     def _accept_noop_conflict(self, path: str, content: str, conflict: dict, auto: bool) -> bool:
         remote_content = conflict.get("current_content", "")
@@ -8593,6 +9303,83 @@ class MainWindow(QMainWindow):
         """Open task target page without altering calendar selection/filter state."""
         self._open_task_from_panel(path, line, preserve_calendar_state=True)
 
+    def _normalize_task_date_paths(self, paths: list[str]) -> set[str]:
+        normalized: set[str] = set()
+        for raw in paths or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            try:
+                norm = self._normalize_editor_path(text)
+            except Exception:
+                norm = text if text.startswith("/") else f"/{text.lstrip('/')}"
+            if norm:
+                normalized.add(norm)
+        return normalized
+
+    def _on_task_dates_will_apply(self, paths: list[str]) -> None:
+        targets = self._normalize_task_date_paths(paths)
+        if not targets:
+            return
+        if self.current_path in targets:
+            try:
+                if self._dirty_flag or self.editor.document().isModified():
+                    self._save_current_file(auto=True, reason="task date pre-apply")
+            except Exception:
+                pass
+        for win in list(getattr(self, "_page_windows", [])):
+            try:
+                src = self._normalize_editor_path(str(getattr(win, "_source_path", "") or ""))
+            except Exception:
+                continue
+            if src not in targets:
+                continue
+            try:
+                if bool(win._is_dirty()):
+                    win._save_current_file(auto=True, reason="task date pre-apply")
+            except Exception:
+                pass
+
+    def _on_task_dates_applied(self, paths: list[str]) -> None:
+        targets = self._normalize_task_date_paths(paths)
+        if not targets:
+            return
+        if self.current_path in targets:
+            can_reload = True
+            try:
+                can_reload = not (self._dirty_flag or self.editor.document().isModified())
+            except Exception:
+                can_reload = not self._dirty_flag
+            if can_reload:
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
+            else:
+                self.statusBar().showMessage(
+                    "Task date updated on current page; reload skipped (unsaved edits).",
+                    4000,
+                )
+        for win in list(getattr(self, "_page_windows", [])):
+            try:
+                src = self._normalize_editor_path(str(getattr(win, "_source_path", "") or ""))
+            except Exception:
+                continue
+            if src not in targets:
+                continue
+            try:
+                if bool(win._is_dirty()):
+                    continue
+            except Exception:
+                pass
+            try:
+                win._load_content()
+            except Exception:
+                pass
+
     def _open_link_from_panel(self, path: str) -> None:
         if not path:
             return
@@ -8700,6 +9487,8 @@ class MainWindow(QMainWindow):
             pass
         panel.refresh()
         panel.taskActivated.connect(self._open_task_from_panel)
+        panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
+        panel.taskDatesApplied.connect(self._on_task_dates_applied)
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
         window.setWindowTitle("Tasks")
@@ -8728,6 +9517,8 @@ class MainWindow(QMainWindow):
         panel.dateActivated.connect(self.right_panel.calendar_panel.dateActivated.emit)
         panel.pageActivated.connect(self._open_calendar_page)
         panel.taskActivated.connect(self._open_task_from_calendar_panel)
+        panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
+        panel.taskDatesApplied.connect(self._on_task_dates_applied)
         panel.openInWindowRequested.connect(self._open_page_editor_window)
         window = QMainWindow(None)
         self._prepare_top_level_window(window)

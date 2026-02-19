@@ -193,6 +193,8 @@ class CalendarPanel(QWidget):
     pageActivated = Signal(str)  # relative path to a page
     taskActivated = Signal(str, int)  # path, line number
     tasksUpdated = Signal()
+    taskDatesWillApply = Signal(list)  # affected page paths
+    taskDatesApplied = Signal(list)  # affected page paths
     openInWindowRequested = Signal(str)
     pageAboutToBeDeleted = Signal(str)  # emitted BEFORE page deletion (for editor unload)
     pageDeleted = Signal(str)  # emitted AFTER page is deleted
@@ -3570,6 +3572,15 @@ class CalendarPanel(QWidget):
         clear_start: bool,
         clear_due: bool,
     ) -> None:
+        affected_paths = sorted(
+            {
+                "/" + str(t.get("path") or "").strip().lstrip("/")
+                for t in targets
+                if str(t.get("path") or "").strip()
+            }
+        )
+        if affected_paths:
+            self.taskDatesWillApply.emit(affected_paths)
         if self.http:
             payload = {
                 "targets": [
@@ -3592,6 +3603,9 @@ class CalendarPanel(QWidget):
                 resp.raise_for_status()
             except Exception as exc:
                 print(f"[CALENDAR] Failed to update task dates via API: {exc}")
+                return
+            if affected_paths:
+                self.taskDatesApplied.emit(affected_paths)
             self._invalidate_task_cache()
             QTimer.singleShot(200, self._update_insights_for_selection)
             self.tasksUpdated.emit()
@@ -3646,6 +3660,8 @@ class CalendarPanel(QWidget):
                     pass
         self._invalidate_task_cache()
         QTimer.singleShot(200, self._update_insights_for_selection)
+        if affected_paths:
+            self.taskDatesApplied.emit(affected_paths)
         self.tasksUpdated.emit()
 
     def _update_task_line_dates(

@@ -21,6 +21,7 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _LOG_HOMEBASE = log_enabled("homebase_sync")
 _ANSI_GREEN = "\033[92m"
+_ANSI_RED = "\033[91m"
 _ANSI_RESET = "\033[0m"
 _ACCESS_TTL_SECONDS = 3600
 _REFRESH_TTL_SECONDS = 30 * 24 * 3600
@@ -45,7 +46,8 @@ class HomebaseBootstrapRefreshPayload(BaseModel):
 
 def _log_server(message: str) -> None:
     if _LOG_HOMEBASE:
-        print(f"{_ANSI_GREEN}[HomebaseServer] {message}{_ANSI_RESET}")
+        color = _ANSI_RED if "conflict" in str(message).lower() else _ANSI_GREEN
+        print(f"{color}[HomebaseServer] {message}{_ANSI_RESET}")
 
 
 def _validate_id(name: str, value: str) -> str:
@@ -353,15 +355,33 @@ def register_homebase_routes(
     def homebase_put_latest(vault_id: str, payload: dict[str, Any], _user=Depends(_require_homebase_auth)) -> dict[str, Any]:
         base = _vault_base(vault_id)
         checkpoint_id = _validate_hash("checkpoint_id", str(payload.get("checkpoint_id") or ""))
-        _log_server(f"PUT /latest vault_id={vault_id} checkpoint_id={checkpoint_id}")
+        username = str((_user or {}).get("username") or "")
+        _log_server(f"PUT /latest vault_id={vault_id} checkpoint_id={checkpoint_id} user={username or 'unknown'}")
+        path = base / "refs" / "latest.json"
+        previous_checkpoint_id = ""
+        if path.exists():
+            try:
+                existing = _read_json(path)
+                previous_checkpoint_id = str(existing.get("checkpoint_id") or "")
+            except Exception:
+                previous_checkpoint_id = ""
         out = {
             "schema_version": 1,
             "vault_id": _validate_id("vault_id", vault_id),
             "checkpoint_id": checkpoint_id,
             "updated_at": _utc_now_iso(),
         }
-        path = base / "refs" / "latest.json"
         _write_bytes(path, json.dumps(out, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        if previous_checkpoint_id and previous_checkpoint_id != checkpoint_id:
+            _log_server(
+                f"CONFLICT_HINT latest_pointer_changed vault_id={vault_id} "
+                f"previous={previous_checkpoint_id} new={checkpoint_id} user={username or 'unknown'}"
+            )
+        elif previous_checkpoint_id == checkpoint_id:
+            _log_server(
+                f"PUT /latest vault_id={vault_id} checkpoint_id={checkpoint_id} "
+                f"note=idempotent"
+            )
         _log_server(f"PUT /latest vault_id={vault_id} -> 200")
         return {"ok": True, "checkpoint_id": checkpoint_id}
 
@@ -395,20 +415,34 @@ def register_homebase_routes(
             raise HTTPException(status_code=400, detail="Manifest hash does not match manifest_id")
         path = base / "manifests" / mid[:2] / mid
         _write_bytes(path, body)
+        device_id = ""
+        entries_count = 0
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                device_id = str(parsed.get("device_id") or "")
+                entries = parsed.get("entries")
+                if isinstance(entries, dict):
+                    entries_count = len(entries)
+        except Exception:
+            pass
         checkpoint_meta = {
             "schema_version": 1,
             "vault_id": _validate_id("vault_id", vault_id),
             "checkpoint_id": mid,
             "manifest_id": mid,
             "created_at": _utc_now_iso(),
-            "device_id": "",
+            "device_id": device_id,
             "parent_checkpoint_id": None,
         }
         _write_bytes(
             base / "checkpoints" / f"{mid}.json",
             json.dumps(checkpoint_meta, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         )
-        _log_server(f"PUT /manifests vault_id={vault_id} manifest_id={mid} -> 200")
+        _log_server(
+            f"PUT /manifests vault_id={vault_id} manifest_id={mid} "
+            f"device_id={device_id or 'unknown'} entries={entries_count} -> 200"
+        )
         return {"ok": True, "manifest_id": mid}
 
     @app.head("/v1/homebase/{vault_id}/objects/{object_id}")

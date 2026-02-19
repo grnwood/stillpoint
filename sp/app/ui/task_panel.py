@@ -155,6 +155,8 @@ class TaskPanel(QWidget):
     taskActivated = Signal(str, int)
     focusGained = Signal()
     filterClearRequested = Signal()
+    taskDatesWillApply = Signal(list)  # affected page paths
+    taskDatesApplied = Signal(list)  # affected page paths
 
     def __init__(
         self,
@@ -2770,6 +2772,15 @@ class TaskPanel(QWidget):
         apply_start: bool,
         apply_due: bool,
     ) -> None:
+        affected_paths = sorted(
+            {
+                "/" + str(t.get("path") or "").strip().lstrip("/")
+                for t in targets
+                if str(t.get("path") or "").strip()
+            }
+        )
+        if affected_paths:
+            self.taskDatesWillApply.emit(affected_paths)
         if self._http_client:
             payload = {
                 "targets": [
@@ -2792,6 +2803,10 @@ class TaskPanel(QWidget):
                 resp.raise_for_status()
             except Exception as exc:
                 print(f"[TASK_PANEL] Failed to update task dates via API: {exc}")
+                QTimer.singleShot(150, self._refresh_tasks)
+                return
+            if affected_paths:
+                self.taskDatesApplied.emit(affected_paths)
             QTimer.singleShot(150, self._refresh_tasks)
             return
         if not config.has_active_vault():
@@ -2844,6 +2859,8 @@ class TaskPanel(QWidget):
                     indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
                 except Exception:
                     pass
+        if affected_paths:
+            self.taskDatesApplied.emit(affected_paths)
         QTimer.singleShot(150, self._refresh_tasks)
 
     def _update_task_line_dates(

@@ -10,7 +10,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 from threading import RLock
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
 from sp.logging_flags import log_enabled
@@ -19,6 +19,8 @@ GLOBAL_CONFIG = Path.home() / ".stillpoint_config.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
+_ACTIVE_CONN_LOCK = RLock()
+_STALE_ACTIVE_CONNS: list[sqlite3.Connection] = []
 _TASK_FETCH_CACHE: OrderedDict[tuple, list[dict]] = OrderedDict()
 
 _TASK_FETCH_CACHE_SIZE = 32
@@ -1229,6 +1231,124 @@ def save_feature_remote_vaults_enabled(enabled: bool) -> None:
     _update_global_config({"feature_remote_vaults_enabled": bool(enabled)})
 
 
+def load_global_feature_homebase_vaults_enabled(default: bool = True) -> bool:
+    """Return whether Homebase vaults are enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_homebase_vaults_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_homebase_vaults_enabled(default: bool = True) -> bool:
+    """Return whether Homebase vaults are enabled (vault overrides global)."""
+    override = _load_vault_override_bool("override_feature_homebase_vaults_enabled")
+    if override is not None:
+        return override
+    return load_global_feature_homebase_vaults_enabled(default=default)
+
+
+def save_feature_homebase_vaults_enabled(enabled: bool) -> None:
+    """Persist preference for enabling Homebase vaults."""
+    _update_global_config({"feature_homebase_vaults_enabled": bool(enabled)})
+
+
+def load_homebase_vault_profiles() -> list[dict[str, Any]]:
+    """Load saved Homebase vault connection profiles."""
+    payload = _read_global_config()
+    rows = payload.get("homebase_vaults", [])
+    result: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return result
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        profile = dict(entry)
+        profile_id = str(profile.get("id") or "").strip()
+        local_path = str(profile.get("path") or "").strip()
+        remote_url = str(profile.get("server_url") or "").strip()
+        vault_id = str(profile.get("vault_id") or "").strip()
+        if not profile_id:
+            profile_id = f"homebase::{remote_url}::{vault_id}::{local_path}"
+            profile["id"] = profile_id
+        if not local_path or not remote_url or not vault_id:
+            continue
+        profile["kind"] = "homebase"
+        profile["path"] = local_path
+        profile["server_url"] = remote_url
+        profile["vault_id"] = vault_id
+        profile["name"] = str(profile.get("name") or Path(local_path).name)
+        profile["username"] = str(profile.get("username") or "")
+        profile["access_token"] = str(profile.get("access_token") or "")
+        profile["refresh_token"] = str(profile.get("refresh_token") or "")
+        profile["passphrase"] = str(profile.get("passphrase") or "")
+        profile["auto_sync"] = bool(profile.get("auto_sync", True))
+        profile["interval_seconds"] = int(profile.get("interval_seconds", 60))
+        profile["push_debounce_seconds"] = int(profile.get("push_debounce_seconds", 3))
+        profile["max_parallel_transfers"] = int(profile.get("max_parallel_transfers", 6))
+        result.append(profile)
+    return result
+
+
+def save_homebase_vault_profiles(entries: list[dict[str, Any]]) -> None:
+    """Persist all Homebase vault connection profiles."""
+    sanitized: list[dict[str, Any]] = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        local_path = str(raw.get("path") or "").strip()
+        remote_url = str(raw.get("server_url") or "").strip()
+        vault_id = str(raw.get("vault_id") or "").strip()
+        if not local_path or not remote_url or not vault_id:
+            continue
+        profile_id = str(raw.get("id") or f"homebase::{remote_url}::{vault_id}::{local_path}").strip()
+        sanitized.append(
+            {
+                "id": profile_id,
+                "kind": "homebase",
+                "name": str(raw.get("name") or Path(local_path).name),
+                "path": local_path,
+                "server_url": remote_url,
+                "vault_id": vault_id,
+                "username": str(raw.get("username") or ""),
+                "access_token": str(raw.get("access_token") or ""),
+                "refresh_token": str(raw.get("refresh_token") or ""),
+                "passphrase": str(raw.get("passphrase") or ""),
+                "auto_sync": bool(raw.get("auto_sync", True)),
+                "interval_seconds": int(raw.get("interval_seconds", 60)),
+                "push_debounce_seconds": int(raw.get("push_debounce_seconds", 3)),
+                "max_parallel_transfers": int(raw.get("max_parallel_transfers", 6)),
+            }
+        )
+    _update_global_config({"homebase_vaults": sanitized})
+
+
+def upsert_homebase_vault_profile(entry: dict[str, Any]) -> None:
+    """Insert or update a Homebase vault profile by id."""
+    profile_id = str(entry.get("id") or "").strip()
+    if not profile_id:
+        local_path = str(entry.get("path") or "").strip()
+        remote_url = str(entry.get("server_url") or "").strip()
+        vault_id = str(entry.get("vault_id") or "").strip()
+        profile_id = f"homebase::{remote_url}::{vault_id}::{local_path}"
+        entry = dict(entry)
+        entry["id"] = profile_id
+    current = load_homebase_vault_profiles()
+    filtered = [row for row in current if str(row.get("id")) != profile_id]
+    filtered.insert(0, dict(entry))
+    save_homebase_vault_profiles(filtered)
+
+
+def delete_homebase_vault_profile(profile_id: str) -> None:
+    """Delete a Homebase vault profile by id."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        return
+    current = load_homebase_vault_profiles()
+    filtered = [row for row in current if str(row.get("id")) != pid]
+    save_homebase_vault_profiles(filtered)
+
+
 _VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote"}
 
 
@@ -1648,9 +1768,12 @@ def get_page_hash(path: str) -> Optional[str]:
     conn = _get_conn()
     if not conn:
         return None
-    cur = conn.execute("SELECT value FROM kv WHERE key = ?", (f"hash:{path}",))
-    row = cur.fetchone()
-    return str(row[0]) if row else None
+    try:
+        cur = conn.execute("SELECT value FROM kv WHERE key = ?", (f"hash:{path}",))
+        row = cur.fetchone()
+        return str(row[0]) if row else None
+    except sqlite3.Error:
+        return None
 
 
 def set_page_hash(path: str, digest: str) -> None:
@@ -1658,8 +1781,11 @@ def set_page_hash(path: str, digest: str) -> None:
     conn = _get_conn()
     if not conn:
         return
-    conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", (f"hash:{path}", digest))
-    conn.commit()
+    try:
+        conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", (f"hash:{path}", digest))
+        conn.commit()
+    except sqlite3.Error:
+        return
 
 
 def load_bookmarks() -> list[str]:
@@ -3838,22 +3964,29 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
 
 def set_active_vault(root: Optional[str]) -> None:
     global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED
-    if _ACTIVE_CONN:
-        _ACTIVE_CONN.close()
+    with _ACTIVE_CONN_LOCK:
+        old_conn = _ACTIVE_CONN
         _ACTIVE_CONN = None
-    _TASKS_FTS_ENABLED = False
-    _invalidate_task_cache()
-    _invalidate_page_cache()
-    if not root:
-        _ACTIVE_ROOT = None
-        return
-    _ACTIVE_ROOT = Path(root)
-    db_dir = _ACTIVE_ROOT / ".stillpoint"
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / "settings.db"
-    _ACTIVE_CONN = sqlite3.connect(db_path, check_same_thread=False)
-    _ensure_schema(_ACTIVE_CONN)
-    _prime_page_cache()
+        _TASKS_FTS_ENABLED = False
+        _invalidate_task_cache()
+        _invalidate_page_cache()
+        if not root:
+            _ACTIVE_ROOT = None
+            if old_conn:
+                _STALE_ACTIVE_CONNS.append(old_conn)
+            return
+        _ACTIVE_ROOT = Path(root)
+        db_dir = _ACTIVE_ROOT / ".stillpoint"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = db_dir / "settings.db"
+        _ACTIVE_CONN = sqlite3.connect(db_path, check_same_thread=False)
+        _ensure_schema(_ACTIVE_CONN)
+        _prime_page_cache()
+        # Avoid closing the previous shared connection here. Background worker
+        # threads may still be reading from it and closing in-flight can crash
+        # the process in native sqlite code.
+        if old_conn:
+            _STALE_ACTIVE_CONNS.append(old_conn)
 
 
 
@@ -3879,7 +4012,8 @@ def is_vault_index_empty() -> bool:
 
 
 def _get_conn() -> Optional[sqlite3.Connection]:
-    return _ACTIVE_CONN
+    with _ACTIVE_CONN_LOCK:
+        return _ACTIVE_CONN
 
 
 def _vault_db_path() -> Optional[Path]:

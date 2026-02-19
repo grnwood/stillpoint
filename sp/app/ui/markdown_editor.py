@@ -1534,6 +1534,8 @@ class MarkdownEditor(QTextEdit):
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
         self._move_text_callback: Optional[Callable[[str, str], bool]] = None
+        self._persisted_undo_callback: Optional[Callable[[], bool]] = None
+        self._persisted_redo_callback: Optional[Callable[[], bool]] = None
         self._suppress_link_scan: bool = False
         self._suppress_vi_cursor: bool = False
         self._overlay_transition: bool = False  # True while a mode overlay is spinning up/down
@@ -1979,6 +1981,14 @@ class MarkdownEditor(QTextEdit):
     def set_move_text_callback(self, callback: Optional[Callable[[str, str], bool]]) -> None:
         """Provide a handler that appends markdown text to a target page path."""
         self._move_text_callback = callback
+
+    def set_persisted_undo_callback(self, callback: Optional[Callable[[], bool]]) -> None:
+        """Provide a fallback undo handler when the in-memory Qt undo stack is empty."""
+        self._persisted_undo_callback = callback
+
+    def set_persisted_redo_callback(self, callback: Optional[Callable[[], bool]]) -> None:
+        """Provide a fallback redo handler when the in-memory Qt redo stack is empty."""
+        self._persisted_redo_callback = callback
 
     @classmethod
     def clear_display_cache(cls, path: Optional[str] = None) -> None:
@@ -6511,6 +6521,8 @@ class MarkdownEditor(QTextEdit):
         try:
             doc = self.document()
             if not doc or not doc.isUndoAvailable():
+                if self._persisted_undo_callback and self._persisted_undo_callback():
+                    return
                 self._status_message("Nothing to undo.")
                 return
             cursor_before = QTextCursor(self.textCursor())
@@ -6575,6 +6587,8 @@ class MarkdownEditor(QTextEdit):
         try:
             doc = self.document()
             if not doc or not doc.isRedoAvailable():
+                if self._persisted_redo_callback and self._persisted_redo_callback():
+                    return
                 self._status_message("Nothing to redo.")
                 return
             cursor_before = QTextCursor(self.textCursor())

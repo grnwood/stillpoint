@@ -39,6 +39,8 @@ class TabbedRightPanel(QWidget):
     openAiWindowRequested = Signal()
     openCalendarWindowRequested = Signal()
     filterClearRequested = Signal()
+    taskDatesWillApply = Signal(list)  # affected page paths
+    taskDatesApplied = Signal(list)  # affected page paths
     pageAboutToBeDeleted = Signal(str)  # page about to be deleted (for editor unload)
     pageDeleted = Signal(str)  # page path deleted from calendar panel
     linkBackRequested = Signal()
@@ -489,6 +491,8 @@ class TabbedRightPanel(QWidget):
         else:
             self.task_panel.taskActivated.connect(self.taskActivated)
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
+        self.task_panel.taskDatesWillApply.connect(self.taskDatesWillApply)
+        self.task_panel.taskDatesApplied.connect(self.taskDatesApplied)
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)
         self._sync_calendar_task_filters()
@@ -518,6 +522,8 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.pageActivated.connect(self.calendarPageActivated)
         self.calendar_panel.taskActivated.connect(self.calendarTaskActivated)
         self.calendar_panel.tasksUpdated.connect(self.refresh_tasks)
+        self.calendar_panel.taskDatesWillApply.connect(self.taskDatesWillApply)
+        self.calendar_panel.taskDatesApplied.connect(self.taskDatesApplied)
         self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
         self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
         self.calendar_panel.pageDeleted.connect(self.pageDeleted)
