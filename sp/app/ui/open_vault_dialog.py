@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -124,6 +125,9 @@ class AddHomebaseVaultDialog(QDialog):
         self.server_url_edit = QLineEdit()
         self.server_url_edit.setPlaceholderText("http://127.0.0.1:8080")
         form.addRow("Homebase Server URL:", self.server_url_edit)
+        self.ignore_invalid_ssl_checkbox = QCheckBox("Ignore invalid SSL certificates")
+        self.ignore_invalid_ssl_checkbox.setChecked(False)
+        form.addRow("", self.ignore_invalid_ssl_checkbox)
 
         self.admin_password_edit = QLineEdit()
         self.admin_password_edit.setEchoMode(QLineEdit.Password)
@@ -192,6 +196,7 @@ class AddHomebaseVaultDialog(QDialog):
     def _query_homebase_vaults(self) -> None:
         server_url = self.server_url_edit.text().strip().rstrip("/")
         admin_password = self.admin_password_edit.text().strip()
+        verify_ssl = not bool(self.ignore_invalid_ssl_checkbox.isChecked())
         if not server_url:
             QMessageBox.warning(self, "Missing Server URL", "Enter the Homebase server URL first.")
             return
@@ -201,7 +206,7 @@ class AddHomebaseVaultDialog(QDialog):
         headers = {"x-server-admin-password": hashlib.sha256(admin_password.encode("utf-8")).hexdigest()}
         url = f"{server_url}/v1/homebase/bootstrap/vaults"
         try:
-            resp = httpx.get(url, headers=headers, timeout=20.0)
+            resp = httpx.get(url, headers=headers, timeout=20.0, verify=verify_ssl)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -256,6 +261,7 @@ class AddHomebaseVaultDialog(QDialog):
     def accept(self) -> None:  # type: ignore[override]
         local_path = self.local_path_edit.text().strip()
         server_url = self.server_url_edit.text().strip().rstrip("/")
+        verify_ssl = not bool(self.ignore_invalid_ssl_checkbox.isChecked())
         username = self.username_edit.text().strip()
         password = self.password_edit.text()
         passphrase = self.passphrase_edit.text()
@@ -287,7 +293,7 @@ class AddHomebaseVaultDialog(QDialog):
             payload["vault_id"] = vault_id
             url = f"{server_url}/v1/homebase/bootstrap/connect"
         try:
-            resp = httpx.post(url, json=payload, headers=headers, timeout=20.0)
+            resp = httpx.post(url, json=payload, headers=headers, timeout=20.0, verify=verify_ssl)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -312,6 +318,7 @@ class AddHomebaseVaultDialog(QDialog):
             "name": display_name,
             "path": str(local_root),
             "server_url": server_url,
+            "verify_ssl": bool(verify_ssl),
             "vault_id": vault_id,
             "username": username,
             "access_token": access_token,

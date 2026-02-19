@@ -85,6 +85,7 @@ class HomebaseSyncConfig:
     vault_id: str
     device_id: str
     remote_url: str
+    verify_ssl: bool
     auth_token: str
     passphrase: str
     local_ui_token: str = ""
@@ -179,6 +180,7 @@ class HomebaseSyncEngine:
             token=self.cfg.auth_token,
             vault_id=self.cfg.vault_id,
             local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
         )
         try:
             latest = client.get_latest()
@@ -458,6 +460,7 @@ class HomebaseSyncEngine:
             token=self.cfg.auth_token,
             vault_id=self.cfg.vault_id,
             local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
         )
         try:
             latest = client.get_latest()
@@ -715,6 +718,7 @@ class HomebaseSyncEngine:
                 json={"vault_id": self.cfg.vault_id, "refresh_token": refresh_token},
                 headers=headers,
                 timeout=20.0,
+                verify=self.cfg.verify_ssl,
             )
             resp.raise_for_status()
             payload = resp.json()

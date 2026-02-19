@@ -25,18 +25,21 @@ class HomebaseClient:
         vault_id: str,
         timeout: float = 30.0,
         local_ui_token: str = "",
+        verify_ssl: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.vault_id = vault_id
+        self.verify_ssl = bool(verify_ssl)
         headers: dict[str, str] = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if local_ui_token:
             headers["x-local-ui-token"] = local_ui_token
-        self.client = httpx.Client(headers=headers, timeout=timeout)
+        self.client = httpx.Client(headers=headers, timeout=timeout, verify=self.verify_ssl)
         _log_client(
             f"init base_url={self.base_url} vault_id={self.vault_id} "
-            f"auth={'yes' if bool(token) else 'no'} local_ui_token={'yes' if bool(local_ui_token) else 'no'}"
+            f"auth={'yes' if bool(token) else 'no'} local_ui_token={'yes' if bool(local_ui_token) else 'no'} "
+            f"verify_ssl={'yes' if self.verify_ssl else 'no'}"
         )
 
     def close(self) -> None:

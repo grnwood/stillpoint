@@ -3382,6 +3382,7 @@ class MainWindow(QMainWindow):
             self._ensure_config_active_vault_context()
             config.save_vault_remote_mode("homebase_remote")
             config.save_homebase_remote_url(str(profile.get("server_url") or "").strip())
+            config.save_homebase_verify_ssl(bool(profile.get("verify_ssl", True)))
             config.save_homebase_vault_id(str(profile.get("vault_id") or "").strip())
             config.save_homebase_username(str(profile.get("username") or "").strip())
             config.save_homebase_auth_token(str(profile.get("access_token") or "").strip())
@@ -3840,6 +3841,7 @@ class MainWindow(QMainWindow):
                 vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
                 device_id=config.load_homebase_device_id(),
                 remote_url=remote_url,
+                verify_ssl=config.load_homebase_verify_ssl(),
                 auth_token=config.load_homebase_auth_token().strip(),
                 local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
                 passphrase=passphrase,
@@ -4247,6 +4249,7 @@ class MainWindow(QMainWindow):
                 vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
                 device_id=config.load_homebase_device_id(),
                 remote_url=remote_url,
+                verify_ssl=config.load_homebase_verify_ssl(),
                 auth_token=config.load_homebase_auth_token().strip(),
                 local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
                 passphrase=passphrase,
@@ -4374,6 +4377,7 @@ class MainWindow(QMainWindow):
                 json={"vault_id": vault_id, "username": str(username).strip(), "password": password},
                 headers=headers,
                 timeout=20.0,
+                verify=config.load_homebase_verify_ssl(),
             )
             resp.raise_for_status()
             payload = resp.json()

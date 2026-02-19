@@ -1276,6 +1276,7 @@ def load_homebase_vault_profiles() -> list[dict[str, Any]]:
         profile["kind"] = "homebase"
         profile["path"] = local_path
         profile["server_url"] = remote_url
+        profile["verify_ssl"] = bool(profile.get("verify_ssl", True))
         profile["vault_id"] = vault_id
         profile["name"] = str(profile.get("name") or Path(local_path).name)
         profile["username"] = str(profile.get("username") or "")
@@ -1309,6 +1310,7 @@ def save_homebase_vault_profiles(entries: list[dict[str, Any]]) -> None:
                 "name": str(raw.get("name") or Path(local_path).name),
                 "path": local_path,
                 "server_url": remote_url,
+                "verify_ssl": bool(raw.get("verify_ssl", True)),
                 "vault_id": vault_id,
                 "username": str(raw.get("username") or ""),
                 "access_token": str(raw.get("access_token") or ""),
@@ -1457,6 +1459,35 @@ def save_homebase_remote_url(url: str) -> None:
         conn.execute(
             "REPLACE INTO kv(key, value) VALUES(?, ?)",
             ("homebase_remote_url", str(url or "").strip()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_verify_ssl(default: bool = True) -> bool:
+    """Return whether Homebase remote TLS certificates should be verified."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_verify_ssl'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if not row or row[0] is None:
+        return default
+    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_homebase_verify_ssl(verify_ssl: bool) -> None:
+    """Persist whether Homebase remote TLS certificates should be verified."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_verify_ssl", "true" if bool(verify_ssl) else "false"),
         )
         conn.commit()
     except sqlite3.OperationalError:
