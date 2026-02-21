@@ -503,7 +503,10 @@ class HomebaseSyncEngine:
             )
             if unchanged_scan and hb.get("last_pushed_checkpoint_id") and not pulled_remote:
                 last_sync_at = _utc_now_iso()
-                self._no_change_streak += 1
+                self._no_change_streak = min(
+                    self._no_change_streak + 1,
+                    self._hibernate_after_checks,
+                )
                 conflicts = self._conflict_count()
                 state_name = "idle"
                 summary = "Up to date"

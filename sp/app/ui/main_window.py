@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import faulthandler
 import re
 import warnings
@@ -1268,8 +1268,11 @@ class MainWindow(QMainWindow):
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
+        self._tree_nav_open_timer: Optional[QTimer] = None
+        self._tree_nav_open_target: Optional[str] = None
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
+        self._hierarchy_last_child_by_parent: dict[str, str] = {}
         self._homebase_pending_reload_path: Optional[str] = None
         self._homebase_conflict_seen_keys: set[str] = set()
         self._homebase_conflict_popup_open: bool = False
@@ -1318,6 +1321,8 @@ class MainWindow(QMainWindow):
         self._vi_enable_pending: bool = False
         self._dirty_flag: bool = False
         self._suspend_dirty_tracking: bool = False
+        self._homebase_has_unsynced_local_changes: bool = False
+        self._homebase_unsynced_marked_at: Optional[datetime] = None
         self._suppress_focus_borders: bool = False
         
         # Track virtual (unsaved) pages
@@ -2498,8 +2503,8 @@ class MainWindow(QMainWindow):
         command_bar_universal.activated.connect(self._show_command_bar)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
-        nav_up.activated.connect(self._navigate_hierarchy_up)
-        nav_down.activated.connect(self._navigate_hierarchy_down)
+        nav_up.activated.connect(self._on_nav_up_shortcut)
+        nav_down.activated.connect(self._on_nav_down_shortcut)
         nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=False))
         nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=False))
         reload_page.activated.connect(self._reload_current_page)
@@ -3858,7 +3863,8 @@ class MainWindow(QMainWindow):
             self._homebase_status_poll_timer.setInterval(1000)
             self._homebase_status_poll_timer.timeout.connect(self._poll_homebase_status)
             self._homebase_status_poll_timer.start()
-            self._homebase_sync_engine.schedule_sync("vault open")
+            if cfg.auto_sync:
+                self._homebase_sync_engine.schedule_sync("vault open")
             self._poll_homebase_status()
             self._update_homebase_sync_action_state()
         except Exception as exc:
@@ -3869,6 +3875,9 @@ class MainWindow(QMainWindow):
 
     def _poll_homebase_status(self) -> None:
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        if self._homebase_status_clears_unsynced_marker(status):
+            self._homebase_has_unsynced_local_changes = False
+            self._homebase_unsynced_marked_at = None
         self._update_homebase_status_badge(status)
         self._maybe_show_homebase_conflict_popup(status)
         if self._homebase_sync_engine:
@@ -3890,6 +3899,45 @@ class MainWindow(QMainWindow):
                     sync_calendar=False,
                 )
         self._update_homebase_sync_action_state()
+
+    def _mark_homebase_unsynced_local_change(self) -> None:
+        if not self._is_homebase_mode_enabled():
+            return
+        self._homebase_has_unsynced_local_changes = True
+        self._homebase_unsynced_marked_at = datetime.now(timezone.utc)
+        status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        self._update_homebase_status_badge(status)
+
+    @staticmethod
+    def _parse_homebase_sync_ts(value: Optional[str]) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            # Engine format is usually "...Z"; normalize for fromisoformat.
+            normalized = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _homebase_status_clears_unsynced_marker(self, status: Optional[HomebaseSyncStatus]) -> bool:
+        if not status or not self._homebase_has_unsynced_local_changes:
+            return False
+        if status.conflicts != 0 or status.pending:
+            return False
+        if status.state not in {"idle", "hibernated"}:
+            return False
+        mark = self._homebase_unsynced_marked_at
+        if mark is None:
+            return True
+        synced_at = self._parse_homebase_sync_ts(status.last_sync_at)
+        if synced_at is None:
+            return False
+        # last_sync_at is second-granular; allow a small skew window.
+        return (synced_at + timedelta(seconds=1)) >= mark
 
     def _is_editor_idle_for_remote_reload(self) -> bool:
         if not self.current_path:
@@ -4171,26 +4219,29 @@ class MainWindow(QMainWindow):
             self._homebase_status_label.hide()
             self._homebase_status_label.setToolTip("")
             return
+        auto_sync_enabled = bool(
+            self._homebase_sync_engine and getattr(self._homebase_sync_engine.cfg, "auto_sync", False)
+        )
         state = status.state
-        if state == "syncing":
-            text = "HOMEBASE: Syncing..."
+        has_pending_work = bool(
+            status.pending
+            or state == "syncing"
+            or int(getattr(status, "pending_uploads", 0) or 0) > 0
+            or int(getattr(status, "pending_downloads", 0) or 0) > 0
+            or bool(getattr(self, "_dirty_flag", False))
+            or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+        )
+        star = "*" if has_pending_work else ""
+        text = f"HOMEBASE{star}"
+        if status.conflicts > 0:
+            text = f"HOMEBASE ({status.conflicts}){star}"
+            bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
+        elif state == "syncing" or status.pending:
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
-        elif state == "hibernated":
-            text = "HOMEBASE: Hibernated"
-            bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
-        elif state == "offline":
-            text = "HOMEBASE: Offline"
-            bg = theme_value("main_window.homebase_badge.offline_bg", "#ef6c00")
-        elif state == "error":
-            text = "HOMEBASE: Error"
-            bg = theme_value("main_window.homebase_badge.error_bg", "#b71c1c")
+        elif state == "hibernated" or not auto_sync_enabled:
+            bg = theme_value("main_window.homebase_badge.idle_bg", "#757575")
         else:
-            if status.conflicts > 0:
-                text = f"HOMEBASE: Conflicts {status.conflicts}"
-                bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
-            else:
-                text = "HOMEBASE: Up to date"
-                bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
+            bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
         tooltip = status.summary
         if status.last_sync_at:
             tooltip += f"\nLast sync: {status.last_sync_at}"
@@ -4205,8 +4256,45 @@ class MainWindow(QMainWindow):
         )
         self._homebase_status_label.show()
 
+    def _persist_homebase_sync_settings_to_profile(
+        self,
+        auto_sync: bool,
+        interval_seconds: int,
+        push_debounce_seconds: int,
+        max_parallel_transfers: int,
+    ) -> None:
+        if not self.vault_root:
+            return
+        current_path = self._normalize_vault_path(self.vault_root)
+        if not current_path:
+            return
+        current_server = config.load_homebase_remote_url().strip()
+        current_vault_id = (config.load_homebase_vault_id() or "").strip()
+        profiles = config.load_homebase_vault_profiles()
+        updated = False
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
+            if profile_path != current_path:
+                continue
+            if current_server and str(profile.get("server_url") or "").strip() != current_server:
+                continue
+            if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
+                continue
+            profile["auto_sync"] = bool(auto_sync)
+            profile["interval_seconds"] = int(interval_seconds)
+            profile["push_debounce_seconds"] = int(push_debounce_seconds)
+            profile["max_parallel_transfers"] = int(max_parallel_transfers)
+            updated = True
+            break
+        if updated:
+            config.save_homebase_vault_profiles(profiles)
+
     def _schedule_homebase_sync(self, reason: str) -> None:
         if self._homebase_sync_engine:
+            if not getattr(self._homebase_sync_engine.cfg, "auto_sync", False):
+                return
             try:
                 self._homebase_sync_engine.schedule_sync(reason)
             except Exception:
@@ -4305,6 +4393,18 @@ class MainWindow(QMainWindow):
                 "Homebase sync is not configured for this vault.",
             )
             return
+        try:
+            self._ensure_config_active_vault_context()
+            auto_sync = bool(config.load_homebase_auto_sync())
+            interval_seconds = int(config.load_homebase_interval_seconds())
+            push_debounce_seconds = int(config.load_homebase_push_debounce_seconds())
+            max_parallel_transfers = int(config.load_homebase_max_parallel_transfers())
+        except Exception:
+            auto_sync = True
+            interval_seconds = 60
+            push_debounce_seconds = 3
+            max_parallel_transfers = 6
+
         details = [
             f"State: {status.state}",
             f"Summary: {status.summary}",
@@ -4315,28 +4415,108 @@ class MainWindow(QMainWindow):
             details.append(f"Last Sync: {status.last_sync_at}")
         if status.last_error:
             details.append(f"Last Error: {status.last_error}")
-        dialog = QMessageBox(self)
+
+        dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync")
-        dialog.setIcon(QMessageBox.Information)
-        dialog.setText("Homebase sync status")
-        dialog.setInformativeText("\n".join(details))
-        sync_now_btn = dialog.addButton("Sync Now", QMessageBox.AcceptRole)
-        reset_auth_btn = dialog.addButton("Reset Auth", QMessageBox.ActionRole)
+        dialog.setModal(True)
+        dialog.resize(560, 360)
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel("Homebase sync status")
+        layout.addWidget(title)
+
+        status_text = QLabel("\n".join(details))
+        status_text.setWordWrap(True)
+        status_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(status_text)
+
+        settings_box = QFrame()
+        settings_box.setFrameShape(QFrame.StyledPanel)
+        settings_layout = QFormLayout(settings_box)
+
+        auto_sync_cb = QCheckBox("Enable auto sync")
+        auto_sync_cb.setChecked(auto_sync)
+        settings_layout.addRow("Auto Sync:", auto_sync_cb)
+
+        interval_spin = QSpinBox()
+        interval_spin.setRange(5, 86400)
+        interval_spin.setValue(max(5, interval_seconds))
+        interval_spin.setSuffix(" s")
+        settings_layout.addRow("Interval:", interval_spin)
+
+        debounce_spin = QSpinBox()
+        debounce_spin.setRange(1, 300)
+        debounce_spin.setValue(max(1, push_debounce_seconds))
+        debounce_spin.setSuffix(" s")
+        settings_layout.addRow("Push Debounce:", debounce_spin)
+
+        max_parallel_spin = QSpinBox()
+        max_parallel_spin.setRange(1, 64)
+        max_parallel_spin.setValue(max(1, max_parallel_transfers))
+        settings_layout.addRow("Max Parallel Transfers:", max_parallel_spin)
+
+        layout.addWidget(settings_box)
+
+        def _toggle_interval_enabled() -> None:
+            interval_spin.setEnabled(bool(auto_sync_cb.isChecked()))
+
+        auto_sync_cb.toggled.connect(_toggle_interval_enabled)
+        _toggle_interval_enabled()
+
+        button_row = QHBoxLayout()
+        save_settings_btn = QPushButton("Save Settings")
+        sync_now_btn = QPushButton("Sync Now")
+        reset_auth_btn = QPushButton("Reset Auth")
         conflicts_btn = None
         if status.conflicts > 0 and self._homebase_sync_engine:
-            conflicts_btn = dialog.addButton("View Conflicts", QMessageBox.ActionRole)
-        dialog.addButton(QMessageBox.Close)
-        dialog.exec()
-        if dialog.clickedButton() == sync_now_btn:
-            self._trigger_homebase_sync_now("badge")
-        elif dialog.clickedButton() == reset_auth_btn:
-            self._reset_homebase_auth()
-        elif conflicts_btn is not None and dialog.clickedButton() == conflicts_btn:
+            conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
+            button_row.addWidget(conflicts_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+
+        button_row.addWidget(save_settings_btn)
+        button_row.addWidget(sync_now_btn)
+        button_row.addWidget(reset_auth_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        def _save_settings() -> None:
+            try:
+                self._ensure_config_active_vault_context()
+                new_auto_sync = bool(auto_sync_cb.isChecked())
+                new_interval = int(interval_spin.value())
+                new_debounce = int(debounce_spin.value())
+                new_parallel = int(max_parallel_spin.value())
+                config.save_homebase_auto_sync(new_auto_sync)
+                config.save_homebase_interval_seconds(new_interval)
+                config.save_homebase_push_debounce_seconds(new_debounce)
+                config.save_homebase_max_parallel_transfers(new_parallel)
+                self._persist_homebase_sync_settings_to_profile(
+                    auto_sync=new_auto_sync,
+                    interval_seconds=new_interval,
+                    push_debounce_seconds=new_debounce,
+                    max_parallel_transfers=new_parallel,
+                )
+                self._configure_homebase_sync_for_vault()
+                self.statusBar().showMessage("Homebase sync settings updated.", 4000)
+            except Exception as exc:
+                QMessageBox.critical(dialog, "Homebase Sync", f"Failed to save settings: {exc}")
+
+        def _view_conflicts() -> None:
             try:
                 conflicts = self._homebase_sync_engine.list_conflicts(limit=200) if self._homebase_sync_engine else []
             except Exception:
                 conflicts = []
             self._show_homebase_conflicts_popup(conflicts)
+
+        save_settings_btn.clicked.connect(_save_settings)
+        sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
+        reset_auth_btn.clicked.connect(self._reset_homebase_auth)
+        if conflicts_btn is not None:
+            conflicts_btn.clicked.connect(_view_conflicts)
+
+        dialog.exec()
 
     def _reset_homebase_auth(self) -> None:
         if not self.vault_root or not self._is_homebase_mode_enabled():
@@ -4395,6 +4575,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Homebase Auth Reset Failed", str(exc))
 
     def _on_local_attachment_changed(self, reason: str) -> None:
+        self._mark_homebase_unsynced_local_change()
         self._schedule_homebase_sync(reason or "attachment write")
 
     def _homebase_local_ui_token_for_url(self, remote_url: str) -> str:
@@ -5132,6 +5313,8 @@ class MainWindow(QMainWindow):
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
         try:
+            self._homebase_has_unsynced_local_changes = False
+            self._homebase_unsynced_marked_at = None
             self._shutdown_homebase_sync()
             remote_ref_path = directory if self._remote_mode else None
             # Persist current history before switching away
@@ -7030,6 +7213,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _finalize_save(self, path: str, content: str, resp_payload: dict, message: str) -> None:
+        previous_saved_content = self._last_saved_content
+        was_virtual = path in self.virtual_pages
+        content_changed = previous_saved_content is None or content != previous_saved_content
+        if content_changed or was_virtual:
+            self._mark_homebase_unsynced_local_change()
         if config.has_active_vault():
             indexer.index_page(path, content)
             self.right_panel.refresh_tasks()
@@ -7049,7 +7237,6 @@ class MainWindow(QMainWindow):
         self._update_dirty_indicator()
         self._capture_undo_snapshot(path, content, source="save")
 
-        was_virtual = path in self.virtual_pages
         if was_virtual:
             self.virtual_pages.discard(path)
             self.virtual_page_original_content.pop(path, None)
@@ -7626,7 +7813,19 @@ class MainWindow(QMainWindow):
         """Return True if the buffer differs from last saved content."""
         if not self.current_path:
             return False
-        return bool(getattr(self, "_dirty_flag", False))
+        dirty = bool(getattr(self, "_dirty_flag", False))
+        if not dirty:
+            return False
+        if not self._homebase_sync_engine:
+            return True
+        try:
+            current_content = self.editor.to_markdown()
+            if self._last_saved_content is not None and current_content == self._last_saved_content:
+                self._dirty_flag = False
+                return False
+        except Exception:
+            pass
+        return True
 
     def _save_dirty_page(self, reason: str = "dirty page") -> None:
         """Save the current page if there are unsaved edits."""
@@ -8445,6 +8644,8 @@ class MainWindow(QMainWindow):
             self._apply_template_from_path(target_file, page_name, str(template_path))
         else:
             self._apply_new_page_template(target_file, page_name)
+        self._mark_homebase_unsynced_local_change()
+        self._schedule_homebase_sync("page create")
         # Keep inline link creation from triggering navigation side effects in the tree.
         saved_pending_selection = self._pending_selection
         self._pending_selection = None
@@ -8596,6 +8797,8 @@ class MainWindow(QMainWindow):
             template_path = dlg.get_template_path()
             if template_path:
                 self._apply_template_from_path(file_path, page_name, template_path)
+            self._mark_homebase_unsynced_local_change()
+            self._schedule_homebase_sync("page create")
             
             # Refresh tree without auto-opening/selecting the new page.
             saved_pending_selection = self._pending_selection
@@ -8726,6 +8929,8 @@ class MainWindow(QMainWindow):
         
         # Show success message
         if created_pages:
+            self._mark_homebase_unsynced_local_change()
+            self._schedule_homebase_sync("page create")
             self.statusBar().showMessage(
                 f"Created {len(created_pages)} pages in '{folder_name}'",
                 5000
@@ -10479,6 +10684,7 @@ class MainWindow(QMainWindow):
         # Mark as virtual page and store original template content
         self.virtual_pages.add(rel_path)
         self.virtual_page_original_content[rel_path] = content
+        self._mark_homebase_unsynced_local_change()
         
         # Move cursor to template position or end
         cursor = self.editor.textCursor()
@@ -12312,6 +12518,8 @@ class MainWindow(QMainWindow):
             # Apply NewPage.txt template to the newly created page
             self._apply_new_page_template(file_path, name)
             self._pending_selection = file_path
+            self._mark_homebase_unsynced_local_change()
+            self._schedule_homebase_sync("page create")
         self._populate_vault_tree()
 
     def _trigger_tree_rename(self) -> None:
@@ -13879,60 +14087,111 @@ class MainWindow(QMainWindow):
         self._exit_vi_insert_on_activate()
         if not self.current_path:
             return
-        colon_path = path_to_colon(self.current_path)
-        if not colon_path:
+        current = Path(self.current_path.lstrip("/"))
+        if current.suffix.lower() not in PAGE_SUFFIXES:
             return
-        parts = colon_path.split(":")
-        if len(parts) == 1:
-            # Already at root vault
-            self.statusBar().showMessage(f"At root: {colon_path}")
+        current_page_folder = current.parent
+        parent_page_folder = current_page_folder.parent
+        if str(parent_page_folder) in {"", "."}:
+            parent_path = self._vault_root_page_path()
+        else:
+            parent_name = parent_page_folder.name
+            parent_path = f"/{(parent_page_folder / f'{parent_name}{PAGE_SUFFIX}').as_posix()}"
+        if not parent_path or parent_path == self.current_path:
+            colon_path = path_to_colon(self.current_path)
+            if colon_path:
+                self.statusBar().showMessage(f"At root: {colon_path}")
             return
-        # Remove only the last segment
-        parent_colon = ":".join(parts[:-1])
-        parent_path = colon_to_path(parent_colon, self.vault_root_name)
-        if parent_path:
-            self._remember_history_cursor()
-            self._suspend_selection_open = True
-            try:
-                self._select_tree_path(parent_path)
-                self._open_file(parent_path, add_to_history=False, restore_history_cursor=True)
-            finally:
-                self._suspend_selection_open = False
-            if len(parts) == 2:
-                # Just moved to root vault
-                self.statusBar().showMessage(f"At root: {parent_colon}")
-            else:
-                self.statusBar().showMessage(f"Up: {parent_colon}")
+        self._hierarchy_last_child_by_parent[parent_path] = self.current_path
+        self._remember_history_cursor()
+        self._suspend_selection_open = True
+        try:
+            self._select_tree_path(parent_path)
+            self._open_file(parent_path, add_to_history=False, restore_history_cursor=True)
+        finally:
+            self._suspend_selection_open = False
+        parent_colon = path_to_colon(parent_path) or parent_path
+        self.statusBar().showMessage(f"Up: {parent_colon}")
+
+    def _on_nav_up_shortcut(self) -> None:
+        if log_enabled("navigation"):
+            print(f"[HIER] Alt+Up activated current={self.current_path!r}")
+        self._navigate_hierarchy_up()
+
+    def _on_nav_down_shortcut(self) -> None:
+        if log_enabled("navigation"):
+            print(f"[HIER] Alt+Down activated current={self.current_path!r}")
+        self._navigate_hierarchy_down()
 
     def _navigate_hierarchy_down(self) -> None:
-        """Navigate down in page hierarchy (Alt+Down): Open first child page."""
+        """Navigate down in page hierarchy (Alt+Down): Open previous child, else first child page."""
         self._exit_vi_insert_on_activate()
         if not self.current_path:
+            if log_enabled("navigation"):
+                print("[HIER] down abort: no current_path")
             return
-        # Get current folder path
-        folder_path = self._file_path_to_folder(self.current_path)
-        if not folder_path or not self.vault_root:
+        if not self.vault_root:
+            if log_enabled("navigation"):
+                print("[HIER] down abort: no vault_root")
             return
-        # Find first child page
-        folder = Path(self.vault_root) / folder_path.lstrip("/")
-        if not folder.exists() or not folder.is_dir():
+
+        child_path: Optional[str] = None
+        remembered_child = str(self._hierarchy_last_child_by_parent.get(self.current_path) or "").strip()
+        if log_enabled("navigation"):
+            print(f"[HIER] down parent={self.current_path!r} remembered_child={remembered_child!r}")
+        if remembered_child:
+            child_path = remembered_child
+            if log_enabled("navigation"):
+                print(f"[HIER] down using remembered child={child_path!r}")
+
+        if not child_path:
+            folder_path = self._file_path_to_folder(self.current_path)
+            if not folder_path:
+                if log_enabled("navigation"):
+                    print("[HIER] down abort: empty folder_path")
+                return
+            root_page = self._vault_root_page_path()
+            if root_page and self.current_path == root_page:
+                folder = Path(self.vault_root)
+            else:
+                root_prefix = f"{self.vault_root_name}/" if self.vault_root_name else ""
+                folder_rel = folder_path.lstrip("/")
+                if root_prefix and folder_rel.startswith(root_prefix):
+                    folder_rel = folder_rel[len(root_prefix) :]
+                folder = Path(self.vault_root) / folder_rel
+            if not folder.exists() or not folder.is_dir():
+                if log_enabled("navigation"):
+                    print(f"[HIER] down abort: parent folder missing/invalid {folder.as_posix()!r}")
+                return
+            subdirs = sorted([d for d in folder.iterdir() if d.is_dir()])
+            if log_enabled("navigation"):
+                print(f"[HIER] down fallback subdirs={[d.name for d in subdirs]!r}")
+            for subdir in subdirs:
+                candidate_file = subdir / f"{subdir.name}{PAGE_SUFFIX}"
+                if candidate_file.exists():
+                    candidate_rel = candidate_file.relative_to(Path(self.vault_root)).as_posix()
+                    if self.vault_root_name and str(self.current_path).lstrip("/").startswith(f"{self.vault_root_name}/"):
+                        child_path = f"/{self.vault_root_name}/{candidate_rel}"
+                    else:
+                        child_path = f"/{candidate_rel}"
+                    if log_enabled("navigation"):
+                        print(f"[HIER] down fallback selected child={child_path!r}")
+                    break
+
+        if not child_path:
+            if log_enabled("navigation"):
+                print("[HIER] down abort: no child_path resolved")
             return
-        # Get all subdirectories
-        subdirs = sorted([d for d in folder.iterdir() if d.is_dir()])
-        if not subdirs:
-            return
-        # Open first child page
-        first_child = subdirs[0]
-        child_file = first_child / f"{first_child.name}{PAGE_SUFFIX}"
-        if child_file.exists():
-            child_path = f"/{child_file.relative_to(Path(self.vault_root)).as_posix()}"
-            self._remember_history_cursor()
-            self._suspend_selection_open = True
-            try:
-                self._select_tree_path(child_path)
-                self._open_file(child_path, add_to_history=False, restore_history_cursor=True)
-            finally:
-                self._suspend_selection_open = False
+
+        if log_enabled("navigation"):
+            print(f"[HIER] down opening child={child_path!r}")
+        self._remember_history_cursor()
+        self._suspend_selection_open = True
+        try:
+            self._select_tree_path(child_path)
+            self._open_file(child_path, add_to_history=False, restore_history_cursor=True)
+        finally:
+            self._suspend_selection_open = False
 
     def _navigate_tree(self, delta: int, leaves_only: bool) -> None:
         indexes = self._gather_indexes(leaves_only)
@@ -13957,7 +14216,25 @@ class MainWindow(QMainWindow):
         # Open the page for this node (whether folder or file)
         open_target = target.data(OPEN_ROLE) or target.data(PATH_ROLE)
         if open_target and open_target != self.current_path:
-            QTimer.singleShot(0, lambda p=open_target: self._open_file(p))
+            self._schedule_tree_nav_open(str(open_target))
+
+    def _schedule_tree_nav_open(self, open_target: str, debounce_ms: int = 280) -> None:
+        target = str(open_target or "").strip()
+        if not target:
+            return
+        self._tree_nav_open_target = target
+        if self._tree_nav_open_timer is None:
+            self._tree_nav_open_timer = QTimer(self)
+            self._tree_nav_open_timer.setSingleShot(True)
+            self._tree_nav_open_timer.timeout.connect(self._flush_tree_nav_open)
+        self._tree_nav_open_timer.start(max(1, int(debounce_ms)))
+
+    def _flush_tree_nav_open(self) -> None:
+        target = str(self._tree_nav_open_target or "").strip()
+        self._tree_nav_open_target = None
+        if not target or target == self.current_path:
+            return
+        self._open_file(target)
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
@@ -14689,9 +14966,19 @@ class MainWindow(QMainWindow):
         if getattr(self, "_suspend_dirty_tracking", False):
             return
         new_state = bool(modified)
+        if new_state and self._homebase_sync_engine:
+            try:
+                current_content = self.editor.to_markdown()
+                if self._last_saved_content is not None and current_content == self._last_saved_content:
+                    new_state = False
+            except Exception:
+                pass
         if new_state != getattr(self, "_dirty_flag", False):
             self._dirty_flag = new_state
             self._update_dirty_indicator()
+            if not new_state and self._is_homebase_mode_enabled():
+                status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+                self._update_homebase_status_badge(status)
 
     def _apply_vi_preferences(self) -> None:
         self._vi_enabled = config.load_vi_mode_enabled()
