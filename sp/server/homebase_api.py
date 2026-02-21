@@ -44,6 +44,25 @@ class HomebaseBootstrapRefreshPayload(BaseModel):
     refresh_token: str
 
 
+class HomebaseUserCreatePayload(BaseModel):
+    username: str
+    password: str
+    role: Optional[str] = None
+    perm: Optional[str] = None
+
+
+class HomebaseUserUpdatePayload(BaseModel):
+    username: Optional[str] = None
+    role: Optional[str] = None
+    perm: Optional[str] = None
+    password: Optional[str] = None
+
+
+class HomebaseChangePasswordPayload(BaseModel):
+    old_password: str
+    new_password: str
+
+
 def _log_server(message: str) -> None:
     if _LOG_HOMEBASE:
         color = _ANSI_RED if "conflict" in str(message).lower() else _ANSI_GREEN
@@ -121,6 +140,100 @@ def register_homebase_routes(
 ) -> None:
     _log_server("routes registered")
     ph = PasswordHasher()
+
+    def _normalize_role(value: Optional[str]) -> str:
+        role = str(value or "").strip().lower()
+        if role == "admin":
+            return "admin"
+        return "normal"
+
+    def _normalize_perm(value: Optional[str], role: str) -> str:
+        if role == "admin":
+            return "read_write"
+        perm = str(value or "").strip().lower()
+        if perm in {"read+write", "read_write", "write", "readwrite"}:
+            return "read_write"
+        return "read"
+
+    def _normalize_auth_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        if not isinstance(payload, dict):
+            return {}, False
+        changed = False
+        if "users" not in payload:
+            username = str(payload.get("username") or "").strip()
+            password_hash = str(payload.get("password_hash") or "")
+            if username and password_hash:
+                created_at = str(payload.get("created_at") or _utc_now_iso())
+                payload = {
+                    "schema_version": 2,
+                    "created_at": created_at,
+                    "users": {
+                        username: {
+                            "username": username,
+                            "password_hash": password_hash,
+                            "role": "admin",
+                            "perm": "read_write",
+                            "created_at": created_at,
+                            "last_login_at": None,
+                            "last_password_change_at": created_at,
+                        }
+                    },
+                }
+                changed = True
+            else:
+                return {}, False
+
+        if payload.get("schema_version") != 2:
+            payload["schema_version"] = 2
+            changed = True
+
+        users = payload.get("users")
+        if not isinstance(users, dict):
+            payload["users"] = {}
+            users = payload["users"]
+            changed = True
+
+        created_at = str(payload.get("created_at") or _utc_now_iso())
+        payload["created_at"] = created_at
+        for username, record in list(users.items()):
+            if not isinstance(record, dict):
+                users.pop(username, None)
+                changed = True
+                continue
+            record.setdefault("username", username)
+            role = _normalize_role(record.get("role"))
+            perm = _normalize_perm(record.get("perm"), role)
+            if record.get("role") != role:
+                record["role"] = role
+                changed = True
+            if record.get("perm") != perm:
+                record["perm"] = perm
+                changed = True
+            if not record.get("created_at"):
+                record["created_at"] = created_at
+                changed = True
+            if "last_login_at" not in record:
+                record["last_login_at"] = None
+                changed = True
+            if not record.get("last_password_change_at"):
+                record["last_password_change_at"] = record.get("created_at") or created_at
+                changed = True
+        return payload, changed
+
+    def _load_auth(base: Path) -> dict[str, Any]:
+        payload = _read_json_default(_auth_path(base), {})
+        normalized, changed = _normalize_auth_payload(payload)
+        if normalized and changed:
+            _write_json(_auth_path(base), normalized)
+        return normalized
+
+    def _get_user_record(base: Path, username: str) -> Optional[dict[str, Any]]:
+        payload = _load_auth(base)
+        users = payload.get("users")
+        if not isinstance(users, dict):
+            return None
+        record = users.get(username)
+        return record if isinstance(record, dict) else None
 
     def _vault_base(vault_id: str) -> Path:
         validated = _validate_id("vault_id", vault_id)
@@ -205,12 +318,30 @@ def register_homebase_routes(
         base = _vault_base(vault_id)
         auth_file = _auth_path(base)
         if not auth_file.exists():
-            return {"username": "anonymous"}
+            return {"username": "anonymous", "role": "admin", "perm": "read_write", "can_write": True}
         token = _parse_bearer_token(authorization)
         username = _verify_access_token(base, token)
         if not username:
             raise HTTPException(status_code=401, detail="Not authenticated")
-        return {"username": username}
+        record = _get_user_record(base, username)
+        if not record:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        role = _normalize_role(record.get("role"))
+        perm = _normalize_perm(record.get("perm"), role)
+        can_write = role == "admin" or perm == "read_write"
+        return {"username": username, "role": role, "perm": perm, "can_write": can_write}
+
+    def _require_homebase_admin(vault_id: str, authorization: Optional[str] = Header(default=None)) -> dict[str, str]:
+        user = _require_homebase_auth(vault_id, authorization)
+        if user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return user
+
+    def _require_homebase_write(vault_id: str, authorization: Optional[str] = Header(default=None)) -> dict[str, str]:
+        user = _require_homebase_auth(vault_id, authorization)
+        if not user.get("can_write"):
+            raise HTTPException(status_code=403, detail="User does not have write permission")
+        return user
 
     @app.get("/v1/homebase/bootstrap/vaults")
     def homebase_bootstrap_list(_admin=Depends(admin_dependency)) -> dict[str, Any]:
@@ -245,11 +376,21 @@ def register_homebase_routes(
         vault_id = str(uuid.uuid4())
         base = _vault_base(vault_id)
         base.mkdir(parents=True, exist_ok=True)
+        now = _utc_now_iso()
         auth_payload = {
-            "schema_version": 1,
-            "username": username,
-            "password_hash": ph.hash(password),
-            "created_at": _utc_now_iso(),
+            "schema_version": 2,
+            "created_at": now,
+            "users": {
+                username: {
+                    "username": username,
+                    "password_hash": ph.hash(password),
+                    "role": "admin",
+                    "perm": "read_write",
+                    "created_at": now,
+                    "last_login_at": None,
+                    "last_password_change_at": now,
+                }
+            },
         }
         _write_json(_auth_path(base), auth_payload)
         _write_json(
@@ -276,17 +417,22 @@ def register_homebase_routes(
         if not username or not password:
             raise HTTPException(status_code=400, detail="Username and password are required")
         base = _vault_base(vault_id)
-        auth_payload = _read_json_default(_auth_path(base), {})
-        expected_user = str(auth_payload.get("username") or "").strip()
-        password_hash = str(auth_payload.get("password_hash") or "")
-        if not expected_user or not password_hash:
+        auth_payload = _load_auth(base)
+        if not auth_payload:
             raise HTTPException(status_code=404, detail="Homebase vault auth is not configured")
-        if username != expected_user:
+        users = auth_payload.get("users", {})
+        record = users.get(username) if isinstance(users, dict) else None
+        if not isinstance(record, dict):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        password_hash = str(record.get("password_hash") or "")
+        if not password_hash:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         try:
             ph.verify(password_hash, password)
         except VerifyMismatchError:
             raise HTTPException(status_code=401, detail="Invalid credentials")
+        record["last_login_at"] = _utc_now_iso()
+        _write_json(_auth_path(base), auth_payload)
         tokens = _issue_tokens(base, username)
         _log_server(f"POST /bootstrap/connect vault_id={vault_id} username={username}")
         return {
@@ -309,6 +455,10 @@ def register_homebase_routes(
         if not username:
             _save_tokens(base, tokens)
             raise HTTPException(status_code=401, detail="Invalid refresh token")
+        if not _get_user_record(base, username):
+            refresh_bucket.pop(refresh_token, None)
+            _save_tokens(base, tokens)
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
         refresh_bucket.pop(refresh_token, None)
         _save_tokens(base, tokens)
         fresh = _issue_tokens(base, username)
@@ -317,6 +467,159 @@ def register_homebase_routes(
             "vault_id": vault_id,
             **fresh,
         }
+
+    @app.get("/v1/homebase/{vault_id}/users")
+    def homebase_list_users(vault_id: str, _user=Depends(_require_homebase_admin)) -> dict[str, Any]:
+        base = _vault_base(vault_id)
+        auth_payload = _load_auth(base)
+        users = auth_payload.get("users", {})
+        if not isinstance(users, dict):
+            users = {}
+        results: list[dict[str, Any]] = []
+        for username, record in users.items():
+            if not isinstance(record, dict):
+                continue
+            role = _normalize_role(record.get("role"))
+            perm = _normalize_perm(record.get("perm"), role)
+            last_login = record.get("last_login_at")
+            results.append(
+                {
+                    "username": username,
+                    "role": role,
+                    "perm": perm,
+                    "logged_in": bool(last_login),
+                    "last_login_at": last_login,
+                    "last_password_change_at": record.get("last_password_change_at"),
+                    "created_at": record.get("created_at"),
+                }
+            )
+        results.sort(key=lambda item: str(item.get("username") or "").lower())
+        return {"users": results}
+
+    @app.post("/v1/homebase/{vault_id}/users")
+    def homebase_create_user(
+        vault_id: str,
+        payload: HomebaseUserCreatePayload,
+        _user=Depends(_require_homebase_admin),
+    ) -> dict[str, Any]:
+        username = payload.username.strip()
+        password = payload.password
+        if not username or not password:
+            raise HTTPException(status_code=400, detail="Username and password are required")
+        base = _vault_base(vault_id)
+        auth_payload = _load_auth(base)
+        users = auth_payload.get("users")
+        if not isinstance(users, dict):
+            users = {}
+            auth_payload["users"] = users
+        if username in users:
+            raise HTTPException(status_code=409, detail="User already exists")
+        now = _utc_now_iso()
+        role = _normalize_role(payload.role)
+        perm = _normalize_perm(payload.perm, role)
+        users[username] = {
+            "username": username,
+            "password_hash": ph.hash(password),
+            "role": role,
+            "perm": perm,
+            "created_at": now,
+            "last_login_at": None,
+            "last_password_change_at": now,
+        }
+        _write_json(_auth_path(base), auth_payload)
+        _log_server(f"POST /users vault_id={vault_id} username={username}")
+        return {"ok": True}
+
+    @app.patch("/v1/homebase/{vault_id}/users/{username}")
+    def homebase_update_user(
+        vault_id: str,
+        username: str,
+        payload: HomebaseUserUpdatePayload,
+        _user=Depends(_require_homebase_admin),
+    ) -> dict[str, Any]:
+        base = _vault_base(vault_id)
+        auth_payload = _load_auth(base)
+        users = auth_payload.get("users")
+        if not isinstance(users, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+        record = users.get(username)
+        if not isinstance(record, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+        new_username = str(payload.username or "").strip()
+        if new_username and new_username != username:
+            if new_username in users:
+                raise HTTPException(status_code=409, detail="Username already exists")
+            users[new_username] = record
+            users.pop(username, None)
+            record["username"] = new_username
+            username = new_username
+        role = _normalize_role(payload.role if payload.role is not None else record.get("role"))
+        perm = _normalize_perm(payload.perm if payload.perm is not None else record.get("perm"), role)
+        record["role"] = role
+        record["perm"] = perm
+        if payload.password:
+            record["password_hash"] = ph.hash(payload.password)
+            record["last_password_change_at"] = _utc_now_iso()
+        _write_json(_auth_path(base), auth_payload)
+        return {"ok": True}
+
+    @app.delete("/v1/homebase/{vault_id}/users/{username}")
+    def homebase_delete_user(vault_id: str, username: str, _user=Depends(_require_homebase_admin)) -> dict[str, Any]:
+        base = _vault_base(vault_id)
+        auth_payload = _load_auth(base)
+        users = auth_payload.get("users")
+        if not isinstance(users, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+        if username not in users:
+            raise HTTPException(status_code=404, detail="User not found")
+        current_user = str((_user or {}).get("username") or "")
+        if username == current_user:
+            raise HTTPException(status_code=400, detail="Cannot delete the currently logged-in user")
+        remaining_admins = [
+            name
+            for name, record in users.items()
+            if name != username and _normalize_role((record or {}).get("role")) == "admin"
+        ]
+        if not remaining_admins:
+            raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+        users.pop(username, None)
+        _write_json(_auth_path(base), auth_payload)
+        _log_server(f"DELETE /users vault_id={vault_id} username={username}")
+        return {"ok": True}
+
+    @app.get("/v1/homebase/{vault_id}/auth/me")
+    def homebase_auth_me(vault_id: str, _user=Depends(_require_homebase_auth)) -> dict[str, Any]:
+        return dict(_user or {})
+
+    @app.post("/v1/homebase/{vault_id}/auth/change")
+    def homebase_auth_change(
+        vault_id: str,
+        payload: HomebaseChangePasswordPayload,
+        _user=Depends(_require_homebase_auth),
+    ) -> dict[str, Any]:
+        base = _vault_base(vault_id)
+        auth_payload = _load_auth(base)
+        users = auth_payload.get("users")
+        if not isinstance(users, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+        username = str((_user or {}).get("username") or "").strip()
+        if not username:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        record = users.get(username)
+        if not isinstance(record, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+        password_hash = str(record.get("password_hash") or "")
+        if not password_hash:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        try:
+            ph.verify(password_hash, payload.old_password)
+        except VerifyMismatchError:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        record["password_hash"] = ph.hash(payload.new_password)
+        record["last_password_change_at"] = _utc_now_iso()
+        _write_json(_auth_path(base), auth_payload)
+        _log_server(f"POST /auth/change vault_id={vault_id} username={username}")
+        return {"ok": True}
 
     @app.get("/v1/homebase/{vault_id}/changes")
     def homebase_changes(
@@ -352,7 +655,7 @@ def register_homebase_routes(
         return _read_json(path)
 
     @app.put("/v1/homebase/{vault_id}/latest")
-    def homebase_put_latest(vault_id: str, payload: dict[str, Any], _user=Depends(_require_homebase_auth)) -> dict[str, Any]:
+    def homebase_put_latest(vault_id: str, payload: dict[str, Any], _user=Depends(_require_homebase_write)) -> dict[str, Any]:
         base = _vault_base(vault_id)
         checkpoint_id = _validate_hash("checkpoint_id", str(payload.get("checkpoint_id") or ""))
         username = str((_user or {}).get("username") or "")
@@ -402,7 +705,7 @@ def register_homebase_routes(
         vault_id: str,
         manifest_id: str,
         body: bytes = Body(..., media_type="application/octet-stream"),
-        _user=Depends(_require_homebase_auth),
+        _user=Depends(_require_homebase_write),
     ) -> dict[str, Any]:
         base = _vault_base(vault_id)
         mid = _validate_hash("manifest_id", manifest_id)
@@ -474,7 +777,7 @@ def register_homebase_routes(
         vault_id: str,
         object_id: str,
         body: bytes = Body(..., media_type="application/octet-stream"),
-        _user=Depends(_require_homebase_auth),
+        _user=Depends(_require_homebase_write),
     ) -> dict[str, Any]:
         base = _vault_base(vault_id)
         oid = _validate_hash("object_id", object_id)

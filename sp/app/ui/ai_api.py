@@ -45,11 +45,8 @@ def build_api_request(server_config: dict, messages: List[dict], model: str, str
     headers.update(build_auth_headers(server))
     verify = bool(server.get("verify_ssl", True))
 
-    timeout_raw = server.get("timeout", "")
-    try:
-        timeout = float(timeout_raw) if str(timeout_raw).strip() else 120
-    except (ValueError, TypeError):
-        timeout = 120
+    # Force AI operations to timeout quickly.
+    timeout = 5.0
 
     payload = {"model": model, "messages": messages, "stream": bool(stream)}
     return url, headers, verify, timeout, payload

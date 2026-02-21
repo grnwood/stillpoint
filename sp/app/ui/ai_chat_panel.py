@@ -60,6 +60,7 @@ AI_CHAT_COLOR = "\033[34m"
 CHROMA_COLOR = "\033[33m"
 LLM_RESPONSE_COLOR = "\033[32m"
 LOG_RESET = "\033[0m"
+AI_TIMEOUT_SECONDS = 5.0
 
 def _color_text(text: str, color: str) -> str:
     return f"{color}{text}{LOG_RESET}"
@@ -122,7 +123,7 @@ class VectorAPIClient:
             "attachment_name": attachment,
         }
         try:
-            resp = self._client.post("/vector/add", json=payload, timeout=timeout)
+            resp = self._client.post("/vector/add", json=payload, timeout=timeout or AI_TIMEOUT_SECONDS)
             resp.raise_for_status()
             return True
         except (httpx.HTTPError, RuntimeError) as exc:
@@ -138,7 +139,7 @@ class VectorAPIClient:
             "attachment_name": attachment,
         }
         try:
-            resp = self._client.post("/vector/remove", json=payload, timeout=timeout)
+            resp = self._client.post("/vector/remove", json=payload, timeout=timeout or AI_TIMEOUT_SECONDS)
             resp.raise_for_status()
             return True
         except (httpx.HTTPError, RuntimeError) as exc:
@@ -167,7 +168,7 @@ class VectorAPIClient:
         if attachment_names:
             payload["attachment_names"] = attachment_names
         try:
-            resp = self._client.post("/vector/query", json=payload)
+            resp = self._client.post("/vector/query", json=payload, timeout=AI_TIMEOUT_SECONDS)
             resp.raise_for_status()
             data = resp.json()
             return [RetrievedChunk(**item) for item in data.get("chunks", [])]
@@ -333,7 +334,7 @@ def fetch_and_cache_models(server_config: dict) -> List[str]:
     verify = bool(server.get("verify_ssl", True))
     try:
         _log_ai_chat(f"[AIChat][models request] url={url} headers={headers}")
-        with httpx.Client(timeout=10.0, verify=verify) as client:
+        with httpx.Client(timeout=AI_TIMEOUT_SECONDS, verify=verify) as client:
             resp = client.get(url, headers=headers)
             resp.raise_for_status()
             _log_ai_chat(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
@@ -1030,7 +1031,7 @@ class ServerConfigDialog(QtWidgets.QDialog):
                 "custom_header_value": self.custom_header_value_edit.text().strip(),
             }
         )
-        timeout = self._parse_timeout(default=10.0)
+        timeout = self._parse_timeout(default=AI_TIMEOUT_SECONDS)
         verify_ssl = self.verify_ssl_check.isChecked()
         try:
             with httpx.Client(timeout=timeout, verify=verify_ssl) as client:
@@ -1089,11 +1090,11 @@ class ServerConfigDialog(QtWidgets.QDialog):
     def _parse_timeout(self, default: float) -> float:
         timeout_raw = self.timeout_edit.text().strip()
         if not timeout_raw:
-            return default
+            return AI_TIMEOUT_SECONDS
         try:
-            return float(timeout_raw)
+            return AI_TIMEOUT_SECONDS
         except ValueError:
-            return default
+            return AI_TIMEOUT_SECONDS
 
     def _handle_accept(self):
         name = self.name_edit.text().strip()
@@ -3653,6 +3654,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._agent_tool_worker = None
         self.send_btn.setEnabled(True)
         self._set_status(f"API error: {err}")
+        self._notify_status_bar_connection_error(err)
         self._render_messages()
         self._update_stop_button()
 
@@ -3807,7 +3809,39 @@ class AIChatPanel(QtWidgets.QWidget):
             )
         else:
             self._set_status(f"Condense failed: {err}")
+            self._notify_status_bar_connection_error(err)
         self._update_stop_button()
+
+    @staticmethod
+    def _is_connection_error(err: str) -> bool:
+        text = (err or "").lower()
+        triggers = [
+            "connect",
+            "connection",
+            "timed out",
+            "timeout",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure",
+            "network is unreachable",
+            "failed to establish a new connection",
+            "connection refused",
+            "max retries",
+            "errno 111",
+            "errno 110",
+            "errno 113",
+        ]
+        return any(token in text for token in triggers)
+
+    def _notify_status_bar_connection_error(self, err: str) -> None:
+        if not self._is_connection_error(err):
+            return
+        try:
+            window = self.window()
+            if window and hasattr(window, "statusBar"):
+                window.statusBar().showMessage("AI connection failed.", 5000)
+        except Exception:
+            pass
 
     def _flush_pending_stream_chunks(self) -> None:
         if self._cancel_pending_send:
@@ -3871,6 +3905,7 @@ class AIChatPanel(QtWidgets.QWidget):
             )
         else:
             self._set_status(f"API error: {err}")
+            self._notify_status_bar_connection_error(err)
         self.send_btn.setEnabled(True)
         self._api_worker = None
         self._cancel_pending_send = False

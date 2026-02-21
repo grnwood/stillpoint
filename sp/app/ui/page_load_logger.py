@@ -18,7 +18,8 @@ class PageLoadLogger:
         self._last = now
         self.enabled = PAGE_LOGGING_ENABLED
         if self.enabled:
-            print(f"[PageLoadAndRender] start path={path}")
+            #print(f"[PageLoadAndRender] start path={path}")
+            pass
 
     def mark(self, label: str) -> None:
         if not self.enabled:
@@ -26,9 +27,9 @@ class PageLoadLogger:
         now = time.perf_counter()
         step_ms = (now - self._last) * 1000.0
         total_ms = (now - self._start) * 1000.0
-        print(
-            f"[PageLoadAndRender] {label} +{step_ms:.1f}ms total={total_ms:.1f}ms path={self.path}"
-        )
+        #print(
+        #    f"[PageLoadAndRender] {label} +{step_ms:.1f}ms total={total_ms:.1f}ms path={self.path}"
+        #)
         self._last = now
 
     def end(self, label: str = "ready") -> None:

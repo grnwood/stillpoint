@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script src="ga.js"></script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote Vaults & Homebase · StillPoint</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+</head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+              <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="remote-vaults.html">Remote Vaults</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+        </nav>
+
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">Vaults</span>
+          <h1>Remote Vaults and Homebase Vaults.</h1>
+          <p>
+            StillPoint works offline by default, but grows with you when you want sync,
+            shared access, or a zero-trust storage model. Remote Vaults and Homebase Vaults
+            are two paths to that future.
+          </p>
+        </div>
+        <div class="image-stack">
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox="img/remote-vault-approaches.png"
+            data-lightbox-caption="Remote Vaults vs Homebase Vaults architecture overview."
+            style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
+          >
+            <img
+              src="img/remote-vault-approaches.png"
+              alt="Remote Vaults versus Homebase Vaults architecture diagram"
+            />
+          </button>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.15s">
+        <div class="eyebrow">Two paths</div>
+        <h2>Pick the vault model that matches your workflow.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Remote Vaults</h3>
+            <p>
+              A live server-backed vault with user management. Great for teams, shared spaces,
+              and centralized administration. Think of it like a collaborative vault hosted on
+              infrastructure you control.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Homebase Vaults</h3>
+            <p>
+              A personal-first sync model with encrypted blobs on the server and keys kept local.
+              Built for multi-device continuity without giving up privacy.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Both feel local</h3>
+            <p>
+              StillPoint keeps the same interface, the same flow, and the same speed. The mode
+              changes the sync and security model, not the way you think.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.25s">
+        <div>
+          <h2>When to use Remote Vaults</h2>
+          <p>
+            Remote Vaults are best when multiple people need to work in the same vault, or when
+            your organization wants central control over access and storage.
+          </p>
+          <div class="grid">
+            <div class="card">
+              <h3>Team collaboration</h3>
+              <p>Shared notes, shared structure, and a single source of truth.</p>
+            </div>
+            <div class="card">
+              <h3>Admin control</h3>
+              <p>Admins manage users, roles, and write permissions.</p>
+            </div>
+            <div class="card">
+              <h3>Infrastructure-owned</h3>
+              <p>Host it on your own servers or keep it local to your network.</p>
+            </div>
+          </div>
+        </div>
+        <div>
+          <h2>When to use Homebase Vaults</h2>
+          <p>
+            Homebase is built for personal continuity across devices. It gives you sync and
+            backups without handing your plaintext to a server.
+          </p>
+          <p>
+            Think of Homebase like a Git model for notes: each device keeps a full local copy,
+            works independently, then pushes and pulls changes through the Homebase server with
+            eventual consistency.
+          </p>
+          <div class="grid">
+            <div class="card">
+              <h3>Private by design</h3>
+              <p>Encrypted blobs live on the server; your passphrase stays local.</p>
+            </div>
+            <div class="card">
+              <h3>Multi-device flow</h3>
+              <p>Use StillPoint on your laptop, desktop, or travel machine.</p>
+            </div>
+            <div class="card">
+              <h3>Offline first</h3>
+              <p>Work anywhere, sync later, keep full local performance.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.35s">
+        <div class="eyebrow">Security</div>
+        <h2>Different threat models, both intentional.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Remote Vaults</h3>
+            <p>
+              Access is controlled with user roles and permissions. The server stores the vault
+              content directly and enforces authentication on every request. Best for
+              shared environments where the server is trusted and access is managed.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Homebase Vaults</h3>
+            <p>
+              The server stores encrypted blobs and metadata. The encryption passphrase stays
+              on your device, so the server cannot read plaintext. Tokens authenticate access,
+              but do not reveal your content.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Practical takeaway</h3>
+            <p>
+              Remote Vaults optimize for collaboration and administration. Homebase optimizes
+              for privacy and personal control. Choose the model that matches the trust boundary
+              you need.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.45s">
+        <div class="eyebrow">Comparison</div>
+        <h2>Remote Vaults vs Homebase Vaults</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Remote Vaults</th>
+                <th>Homebase Vaults</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Best for</td>
+                <td>Teams, shared workspaces, central admin</td>
+                <td>Personal or small-team sync across devices</td>
+              </tr>
+              <tr>
+                <td>Permissions</td>
+                <td>Admins, read, read+write per user</td>
+                <td>Admin roles, local-first control</td>
+              </tr>
+              <tr>
+                <td>Security model</td>
+                <td>Server-enforced auth and access control</td>
+                <td>Client-side encryption, server stores encrypted blobs</td>
+              </tr>
+              <tr>
+                <td>Offline use</td>
+                <td>Designed for connected use</td>
+                <td>Fully offline, syncs when available</td>
+              </tr>
+              <tr>
+                <td>Sync model</td>
+                <td>Live server-first pull/push</td>
+                <td>Git-like local-first push/pull with eventual consistency</td>
+              </tr>
+              <tr>
+                <td>Setup</td>
+                <td>Connect to a remote server and vault</td>
+                <td>Pair devices with Homebase and a passphrase</td>
+              </tr>
+              <tr>
+                <td>Why choose it</td>
+                <td>Collaboration, governance, shared structure</td>
+                <td>Privacy-first sync with zero-trust storage</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.55s">
+        <div class="eyebrow">Decision</div>
+        <h2>If you're unsure, start local.</h2>
+        <p>
+          You can begin with a local vault and move to Remote or Homebase later. StillPoint keeps
+          your notes in plain files, so the path forward is always open.
+        </p>
+      </section>
+
+      <footer class="site-footer">
+        <span>Flexible by default, powerful when needed.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+              <span><a href="philo.html#funding-support">Support the project</a></span>
+      </footer>
+    </main>
+  </body>
+</html>

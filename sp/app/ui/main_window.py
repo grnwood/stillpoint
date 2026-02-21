@@ -87,6 +87,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QHBoxLayout,
+    QGridLayout,
     QToolButton,
     QTableWidget,
     QTableWidgetItem,
@@ -104,6 +105,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSystemTrayIcon,
     QScrollArea,
+    QComboBox,
 )
 
 from sp.app import config, indexer
@@ -339,6 +341,290 @@ class RemoteChangePasswordDialog(QDialog):
 
     def values(self) -> tuple[str, str, str, bool]:
         return self._username, self._old_password, self._new_password, self._remember
+
+
+class UserCreateDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Create User")
+        self.setModal(True)
+        self.resize(360, 220)
+
+        self._username = ""
+        self._password = ""
+        self._role = "normal"
+        self._perm = "read"
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_edit = QLineEdit()
+        form.addRow("Username:", self.username_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("Password:", self.password_edit)
+
+        self.role_combo = QComboBox()
+        self.role_combo.addItem("Admin", "admin")
+        self.role_combo.addItem("Normal", "normal")
+        self.role_combo.setCurrentIndex(1)
+        self.role_combo.currentIndexChanged.connect(self._sync_perm_enabled)
+        form.addRow("Role:", self.role_combo)
+
+        self.perm_combo = QComboBox()
+        self.perm_combo.addItem("Read", "read")
+        self.perm_combo.addItem("Read + Write", "read_write")
+        self.perm_combo.setCurrentIndex(0)
+        form.addRow("Permission:", self.perm_combo)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._sync_perm_enabled()
+
+    def _sync_perm_enabled(self) -> None:
+        role = self.role_combo.currentData()
+        is_admin = role == "admin"
+        self.perm_combo.setEnabled(not is_admin)
+        if is_admin:
+            self.perm_combo.setCurrentIndex(1)
+
+    def accept(self) -> None:  # type: ignore[override]
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+        if not username or not password:
+            QMessageBox.warning(self, "Missing Info", "Please enter a username and password.")
+            return
+        self._username = username
+        self._password = password
+        self._role = str(self.role_combo.currentData() or "normal")
+        self._perm = str(self.perm_combo.currentData() or "read")
+        super().accept()
+
+    def values(self) -> tuple[str, str, str, str]:
+        return self._username, self._password, self._role, self._perm
+
+
+class UserEditDialog(QDialog):
+    def __init__(self, parent=None, *, username: str, role: str, perm: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit User")
+        self.setModal(True)
+        self.resize(360, 250)
+
+        self._username = username
+        self._password = ""
+        self._role = role
+        self._perm = perm
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_edit = QLineEdit()
+        self.username_edit.setText(username)
+        form.addRow("Username:", self.username_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setPlaceholderText("Leave blank to keep existing")
+        form.addRow("Reset Password:", self.password_edit)
+
+        self.role_combo = QComboBox()
+        self.role_combo.addItem("Admin", "admin")
+        self.role_combo.addItem("Normal", "normal")
+        self.role_combo.setCurrentIndex(0 if role == "admin" else 1)
+        self.role_combo.currentIndexChanged.connect(self._sync_perm_enabled)
+        form.addRow("Role:", self.role_combo)
+
+        self.perm_combo = QComboBox()
+        self.perm_combo.addItem("Read", "read")
+        self.perm_combo.addItem("Read + Write", "read_write")
+        self.perm_combo.setCurrentIndex(1 if perm in ("read_write", "read+write") else 0)
+        form.addRow("Permission:", self.perm_combo)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._sync_perm_enabled()
+
+    def _sync_perm_enabled(self) -> None:
+        role = self.role_combo.currentData()
+        is_admin = role == "admin"
+        self.perm_combo.setEnabled(not is_admin)
+        if is_admin:
+            self.perm_combo.setCurrentIndex(1)
+
+    def accept(self) -> None:  # type: ignore[override]
+        username = self.username_edit.text().strip()
+        if not username:
+            QMessageBox.warning(self, "Missing Info", "Please enter a username.")
+            return
+        self._username = username
+        self._password = self.password_edit.text()
+        self._role = str(self.role_combo.currentData() or "normal")
+        self._perm = str(self.perm_combo.currentData() or "read")
+        super().accept()
+
+    def values(self) -> tuple[str, str, str, str]:
+        return self._username, self._password, self._role, self._perm
+
+
+class ManageUsersDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        fetch_users: Callable[[], list[dict]],
+        create_user: Callable[[str, str, str, str], None],
+        edit_user: Callable[[str, str, str, str, str], None],
+        delete_user: Callable[[str], None],
+        title: str = "Manage Users",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(720, 360)
+
+        self._fetch_users = fetch_users
+        self._create_user = create_user
+        self._edit_user = edit_user
+        self._delete_user = delete_user
+
+        layout = QVBoxLayout(self)
+
+        self.table = QTableWidget(0, 6, self)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Username",
+                "Role",
+                "Permission",
+                "Logged In",
+                "Last Login",
+                "Last Password Change",
+            ]
+        )
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.table, 1)
+
+        button_row = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self._refresh)
+        button_row.addWidget(self.refresh_btn)
+
+        self.create_btn = QPushButton("Create User")
+        self.create_btn.clicked.connect(self._create)
+        button_row.addWidget(self.create_btn)
+
+        self.edit_btn = QPushButton("Edit User")
+        self.edit_btn.clicked.connect(self._edit)
+        button_row.addWidget(self.edit_btn)
+
+        self.delete_btn = QPushButton("Delete User")
+        self.delete_btn.clicked.connect(self._delete)
+        button_row.addWidget(self.delete_btn)
+
+        button_row.addStretch(1)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        button_row.addWidget(close_btn)
+
+        layout.addLayout(button_row)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        try:
+            users = self._fetch_users() or []
+        except Exception as exc:
+            QMessageBox.critical(self, "User List Failed", str(exc))
+            return
+        self.table.setRowCount(0)
+        for entry in users:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            username = str(entry.get("username") or "")
+            role = str(entry.get("role") or "")
+            perm = str(entry.get("perm") or "")
+            logged_in = "Yes" if entry.get("logged_in") else "No"
+            last_login = str(entry.get("last_login_at") or "—")
+            last_password = str(entry.get("last_password_change_at") or "—")
+            values = [username, role, perm, logged_in, last_login, last_password]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                self.table.setItem(row, col, item)
+
+    def _create(self) -> None:
+        dlg = UserCreateDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        username, password, role, perm = dlg.values()
+        try:
+            self._create_user(username, password, role, perm)
+        except Exception as exc:
+            QMessageBox.critical(self, "Create User Failed", str(exc))
+            return
+        self._refresh()
+
+    def _edit(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Edit User", "Select a user to edit.")
+            return
+        username_item = self.table.item(row, 0)
+        role_item = self.table.item(row, 1)
+        perm_item = self.table.item(row, 2)
+        username = username_item.text() if username_item else ""
+        role = role_item.text() if role_item else "normal"
+        perm = perm_item.text() if perm_item else "read"
+        if not username:
+            return
+        dlg = UserEditDialog(self, username=username, role=role, perm=perm)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        new_username, password, role, perm = dlg.values()
+        try:
+            self._edit_user(username, new_username, password, role, perm)
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit User Failed", str(exc))
+            return
+        self._refresh()
+
+    def _delete(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Delete User", "Select a user to delete.")
+            return
+        username_item = self.table.item(row, 0)
+        username = username_item.text() if username_item else ""
+        if not username:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete User",
+            f"Delete user '{username}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._delete_user(username)
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete User Failed", str(exc))
+            return
+        self._refresh()
 
 
 class AddRemoteDialog(QDialog):
@@ -1232,6 +1518,13 @@ class MainWindow(QMainWindow):
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
         self._remote_username: Optional[str] = None
+        self._remote_user_is_admin: bool = False
+        self._remote_user_can_write: bool = True
+        self._user_read_only: bool = False
+        self._homebase_user_is_admin: bool = False
+        self._homebase_user_can_write: bool = True
+        self._homebase_user_info_loaded: bool = False
+        self._homebase_user_info_refreshing: bool = False
         self._homebase_sync_engine: Optional[HomebaseSyncEngine] = None
         self._homebase_status_poll_timer: Optional[QTimer] = None
         # Stable selected remote vault path; may differ from API-reported root.
@@ -1801,10 +2094,6 @@ class MainWindow(QMainWindow):
         # Vault menu (now left of File)
         vault_menu = self.menuBar().addMenu("&Vault")
         file_menu = self.menuBar().addMenu("F&ile")
-        switch_vault_action = QAction("Switch Vaults", self)
-        switch_vault_action.setToolTip("Switch this window to a different vault")
-        switch_vault_action.triggered.connect(lambda checked=False: self._select_vault())
-        vault_menu.addAction(switch_vault_action)
         open_vault_new_win_action = QAction("Open Vault in New Window", self)
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
@@ -1818,13 +2107,11 @@ class MainWindow(QMainWindow):
         self._action_homebase_sync_now.triggered.connect(
             lambda checked=False: self._trigger_homebase_sync_now("menu")
         )
-        vault_menu.addAction(self._action_homebase_sync_now)
         self._action_homebase_reset_sync = QAction("Reset Sync State (Server Authoritative)", self)
         self._action_homebase_reset_sync.setToolTip(
             "Discard local sync state/conflicts and re-seed local files from the current server snapshot"
         )
         self._action_homebase_reset_sync.triggered.connect(self._reset_homebase_sync_state_server_authoritative)
-        vault_menu.addAction(self._action_homebase_reset_sync)
         reload_vault_action = QAction("Reload Vault", self)
         reload_vault_action.setToolTip("Close and reopen the current vault")
         reload_vault_action.triggered.connect(self._reload_vault)
@@ -1833,14 +2120,30 @@ class MainWindow(QMainWindow):
         close_vault_action.setToolTip("Close this window")
         close_vault_action.triggered.connect(self._close_vault_window)
         vault_menu.addAction(close_vault_action)
+        self._remote_vault_menu = vault_menu.addMenu("Remote Vault")
+        try:
+            self._remote_vault_menu.menuAction().setVisible(False)
+        except Exception:
+            self._remote_vault_menu.setVisible(False)
         self._action_server_login = QAction("Login - Authenticate to Remote Vault", self)
         self._action_server_login.setToolTip("Authenticate to the remote vault")
-        self._action_server_login.triggered.connect(self._prompt_remote_login)
-        vault_menu.addAction(self._action_server_login)
+        self._action_server_login.triggered.connect(self._handle_remote_vault_login)
+        self._remote_vault_menu.addAction(self._action_server_login)
         self._action_server_logout = QAction("Logout - Clear Remote Vault Credentials", self)
         self._action_server_logout.setToolTip("Clear stored remote vault credentials")
-        self._action_server_logout.triggered.connect(self._logout_remote)
-        vault_menu.addAction(self._action_server_logout)
+        self._action_server_logout.triggered.connect(self._handle_remote_vault_logout)
+        self._remote_vault_menu.addAction(self._action_server_logout)
+        self._action_manage_users = QAction("Manage Users...", self)
+        self._action_manage_users.setToolTip("Manage users for this vault")
+        self._action_manage_users.triggered.connect(self._open_user_management)
+        self._remote_vault_menu.addAction(self._action_manage_users)
+        self._action_reset_password = QAction("Reset Password...", self)
+        self._action_reset_password.setToolTip("Reset your vault password")
+        self._action_reset_password.triggered.connect(self._handle_remote_vault_reset_password)
+        self._remote_vault_menu.addAction(self._action_reset_password)
+        self._remote_vault_menu.addSeparator()
+        self._remote_vault_menu.addAction(self._action_homebase_sync_now)
+        self._remote_vault_menu.addAction(self._action_homebase_reset_sync)
         self._action_new_vault = QAction("New Vault", self)
         self._action_new_vault.setToolTip("Create a new vault")
         self._action_new_vault.triggered.connect(self._create_vault)
@@ -1868,7 +2171,9 @@ class MainWindow(QMainWindow):
         import_menu.addAction(zim_import_action)
         new_page_action = QAction("New Page...", self)
         new_page_action.setToolTip("Create a new page in the current folder")
-        new_page_action.triggered.connect(lambda checked=False: self._show_new_page_dialog())
+        new_page_action.triggered.connect(
+            lambda checked=False: self._show_new_page_dialog(insert_link_in_editor=False)
+        )
         file_menu.addAction(new_page_action)
         delete_page_action = QAction("Delete Page", self)
         delete_page_action.setToolTip("Delete the current page")
@@ -1943,6 +2248,8 @@ class MainWindow(QMainWindow):
             self._action_webserver: self._action_webserver.toolTip(),
             self._action_server_login: self._action_server_login.toolTip(),
             self._action_server_logout: self._action_server_logout.toolTip(),
+            self._action_manage_users: self._action_manage_users.toolTip(),
+            self._action_reset_password: self._action_reset_password.toolTip(),
             self._action_homebase_sync_now: self._action_homebase_sync_now.toolTip(),
             self._action_homebase_reset_sync: self._action_homebase_reset_sync.toolTip(),
         }
@@ -2451,7 +2758,7 @@ class MainWindow(QMainWindow):
         heading_popup.setContext(Qt.WindowShortcut)
         heading_popup.activated.connect(lambda: self._cycle_popup("heading", reverse=False))
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
-        new_page_shortcut.activated.connect(self._show_new_page_dialog)
+        new_page_shortcut.activated.connect(lambda: self._show_new_page_dialog(insert_link_in_editor=False))
         journal_shortcut = QShortcut(QKeySequence("Alt+D"), self)
         journal_shortcut.activated.connect(self._open_journal_today)
         # Home shortcut: Alt+Home (works regardless of vi-mode state)
@@ -3356,6 +3663,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self._apply_homebase_profile(selection)
+            self._update_user_management_ui()
             self._restore_recent_history()
             QTimer.singleShot(100, self._auto_load_initial_file)
             return True
@@ -3397,7 +3705,9 @@ class MainWindow(QMainWindow):
             config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
             config.save_homebase_push_debounce_seconds(int(profile.get("push_debounce_seconds", 3)))
             config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 6)))
+            self._homebase_user_info_loaded = False
             self._configure_homebase_sync_for_vault()
+            self._apply_remote_mode_ui()
         except Exception as exc:
             self.statusBar().showMessage(f"Homebase profile apply failed: {exc}", 5000)
 
@@ -3680,9 +3990,39 @@ class MainWindow(QMainWindow):
         """Guard write operations when the vault is opened read-only."""
         if self._read_only:
             if not interactive:
-                self._alert(f"Vault is read-only because another StillPoint window holds the lock.\nCannot {action}.")
+                if self._user_read_only and self._remote_mode:
+                    self._alert("You do not have permisison to write to this vault.")
+                elif self._user_read_only and self._is_homebase_mode_enabled():
+                    self._alert("You do not have permission to write to this vault.")
+                else:
+                    self._alert(f"Vault is read-only because another StillPoint window holds the lock.\nCannot {action}.")
             return False
         return True
+
+    def _read_only_status_message(self, fallback: str) -> str:
+        if self._user_read_only and self._remote_mode:
+            return "You do not have permisison to write to this vault."
+        if self._user_read_only and self._is_homebase_mode_enabled():
+            return "You do not have permission to write to this vault."
+        return fallback
+
+    def _apply_remote_user_permissions(self, *, can_write: bool, is_admin: bool) -> None:
+        self._remote_user_can_write = bool(can_write)
+        self._remote_user_is_admin = bool(is_admin)
+        if self._remote_mode:
+            self._user_read_only = not self._remote_user_can_write
+            self._read_only = self._user_read_only
+            self._apply_read_only_state()
+        self._update_user_management_ui()
+
+    def _apply_homebase_user_permissions(self, *, can_write: bool, is_admin: bool) -> None:
+        self._homebase_user_can_write = bool(can_write)
+        self._homebase_user_is_admin = bool(is_admin)
+        if self._is_homebase_mode_enabled():
+            self._user_read_only = not self._homebase_user_can_write
+            self._read_only = self._user_read_only
+            self._apply_read_only_state()
+        self._update_user_management_ui()
 
     def _require_local_mode(self, action: str) -> bool:
         """Block local-only features when connected to a remote server."""
@@ -3719,19 +4059,56 @@ class MainWindow(QMainWindow):
         self._action_rebuild_index.setToolTip(self._action_tooltips.get(self._action_rebuild_index, "Rebuild vault index"))
         self._action_rebuild_search_index.setEnabled(True)
         self._action_rebuild_search_index.setToolTip(self._action_tooltips.get(self._action_rebuild_search_index, "Rebuild vault search index"))
-        if self._remote_mode:
+        if self._remote_mode or self._is_homebase_mode_enabled():
+            self._action_server_login.setVisible(True)
+            self._action_server_logout.setVisible(True)
             self._action_server_login.setEnabled(True)
-            self._action_server_login.setToolTip(self._action_tooltips.get(self._action_server_login, ""))
             self._action_server_logout.setEnabled(True)
-            self._action_server_logout.setToolTip(self._action_tooltips.get(self._action_server_logout, ""))
+            if self._remote_mode:
+                self._action_server_login.setToolTip(self._action_tooltips.get(self._action_server_login, ""))
+                self._action_server_logout.setToolTip(self._action_tooltips.get(self._action_server_logout, ""))
+            else:
+                self._action_server_login.setToolTip("Authenticate to the Homebase vault")
+                self._action_server_logout.setToolTip("Clear stored Homebase credentials")
         else:
+            self._action_server_login.setVisible(False)
+            self._action_server_logout.setVisible(False)
             self._action_server_login.setEnabled(False)
-            self._action_server_login.setToolTip("Available when connected to a remote server.")
             self._action_server_logout.setEnabled(False)
-            self._action_server_logout.setToolTip("Available when connected to a remote server.")
-        self._update_remote_status_badge()
-        self._poll_homebase_status()
-        self._update_homebase_sync_action_state()
+        self._update_user_management_ui()
+        if hasattr(self, "_action_homebase_sync_now"):
+            self._action_homebase_sync_now.setVisible(self._is_homebase_mode_enabled())
+        if hasattr(self, "_action_homebase_reset_sync"):
+            self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
+
+    def _update_user_management_ui(self) -> None:
+        if not hasattr(self, "_action_manage_users"):
+            return
+        is_remote = bool(self._remote_mode)
+        is_homebase = bool(self._is_homebase_mode_enabled())
+        if is_homebase and not self._homebase_user_info_loaded:
+            auth_token = str(config.load_homebase_auth_token() or "").strip()
+            if auth_token and not self._homebase_user_info_refreshing:
+                try:
+                    self._refresh_homebase_user_info()
+                except Exception:
+                    pass
+        if hasattr(self, "_remote_vault_menu"):
+            try:
+                self._remote_vault_menu.menuAction().setVisible(is_remote or is_homebase)
+            except Exception:
+                self._remote_vault_menu.setVisible(is_remote or is_homebase)
+        if not is_remote and not is_homebase:
+            self._action_manage_users.setVisible(False)
+            self._action_reset_password.setVisible(False)
+            return
+        self._action_reset_password.setVisible(is_remote or is_homebase)
+        if is_remote:
+            self._action_manage_users.setVisible(bool(self._remote_user_is_admin))
+            self._action_manage_users.setEnabled(bool(self._remote_user_is_admin))
+        elif is_homebase:
+            self._action_manage_users.setVisible(bool(self._homebase_user_is_admin))
+            self._action_manage_users.setEnabled(bool(self._homebase_user_is_admin))
 
     @staticmethod
     def _format_remote_host(server_url: str, include_scheme: bool = False) -> str:
@@ -3867,6 +4244,8 @@ class MainWindow(QMainWindow):
                 self._homebase_sync_engine.schedule_sync("vault open")
             self._poll_homebase_status()
             self._update_homebase_sync_action_state()
+            self._refresh_homebase_user_info()
+            self._update_user_management_ui()
         except Exception as exc:
             self._update_homebase_status_badge(
                 HomebaseSyncStatus(state="error", summary=f"Homebase error: {exc}")
@@ -4233,9 +4612,20 @@ class MainWindow(QMainWindow):
         )
         star = "*" if has_pending_work else ""
         text = f"HOMEBASE{star}"
+        summary_lower = str(status.summary or "").lower()
+        last_error_lower = str(status.last_error or "").lower()
+        auth_error = (
+            "unauthor" in summary_lower
+            or "not authenticated" in summary_lower
+            or "auth error" in summary_lower
+            or "401" in last_error_lower
+        )
         if status.conflicts > 0:
             text = f"HOMEBASE ({status.conflicts}){star}"
             bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
+        elif auth_error:
+            text = f"HOMEBASE AUTH{star}"
+            bg = theme_value("main_window.homebase_badge.auth_bg", "#d32f2f")
         elif state == "syncing" or status.pending:
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
         elif state == "hibernated" or not auto_sync_enabled:
@@ -4405,34 +4795,75 @@ class MainWindow(QMainWindow):
             push_debounce_seconds = 3
             max_parallel_transfers = 6
 
-        details = [
-            f"State: {status.state}",
-            f"Summary: {status.summary}",
-            f"Conflicts: {status.conflicts}",
-            f"Pending: {'Yes' if status.pending else 'No'}",
-        ]
-        if status.last_sync_at:
-            details.append(f"Last Sync: {status.last_sync_at}")
-        if status.last_error:
-            details.append(f"Last Error: {status.last_error}")
+        vault_id = ""
+        try:
+            vault_id = str(config.load_homebase_vault_id() or "").strip()
+        except Exception:
+            vault_id = ""
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync")
         dialog.setModal(True)
-        dialog.resize(560, 360)
+        dialog.resize(560, 420)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
+        header = QHBoxLayout()
         title = QLabel("Homebase sync status")
-        layout.addWidget(title)
+        title.setStyleSheet("font-weight: 600; font-size: 15px;")
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
 
-        status_text = QLabel("\n".join(details))
-        status_text.setWordWrap(True)
-        status_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(status_text)
+        info_box = QFrame()
+        info_box.setFrameShape(QFrame.StyledPanel)
+        info_layout = QGridLayout(info_box)
+        info_layout.setContentsMargins(12, 12, 12, 12)
+        info_layout.setHorizontalSpacing(10)
+        info_layout.setVerticalSpacing(6)
+
+        row = 0
+        if vault_id:
+            info_layout.addWidget(QLabel("Vault ID:"), row, 0, Qt.AlignTop)
+            vault_label = QLabel(vault_id)
+            vault_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            info_layout.addWidget(vault_label, row, 1)
+            row += 1
+
+        info_layout.addWidget(QLabel("State:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel(status.state), row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Summary:"), row, 0, Qt.AlignTop)
+        summary_label = QLabel(status.summary)
+        summary_label.setWordWrap(True)
+        summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(summary_label, row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Conflicts:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel(str(status.conflicts)), row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Pending:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel("Yes" if status.pending else "No"), row, 1)
+        row += 1
+        if status.last_sync_at:
+            info_layout.addWidget(QLabel("Last Sync:"), row, 0, Qt.AlignTop)
+            info_layout.addWidget(QLabel(status.last_sync_at), row, 1)
+            row += 1
+        if status.last_error:
+            info_layout.addWidget(QLabel("Last Error:"), row, 0, Qt.AlignTop)
+            error_label = QLabel(status.last_error)
+            error_label.setWordWrap(True)
+            error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            info_layout.addWidget(error_label, row, 1)
+
+        layout.addWidget(info_box)
 
         settings_box = QFrame()
         settings_box.setFrameShape(QFrame.StyledPanel)
         settings_layout = QFormLayout(settings_box)
+        settings_layout.setContentsMargins(12, 12, 12, 12)
+        settings_layout.setSpacing(8)
 
         auto_sync_cb = QCheckBox("Enable auto sync")
         auto_sync_cb.setChecked(auto_sync)
@@ -4567,9 +4998,12 @@ class MainWindow(QMainWindow):
                 raise ValueError("Server did not return access/refresh tokens")
             config.save_homebase_username(str(username).strip())
             self._store_homebase_tokens(access_token, refresh_token)
+            self._homebase_user_info_loaded = False
             self._configure_homebase_sync_for_vault()
+            self._refresh_homebase_user_info()
             if self._homebase_sync_engine:
                 self._homebase_sync_engine.sync_now("auth reset")
+                self._poll_homebase_status()
             self.statusBar().showMessage("Homebase auth reset complete.", 5000)
         except Exception as exc:
             QMessageBox.critical(self, "Homebase Auth Reset Failed", str(exc))
@@ -4746,6 +5180,12 @@ class MainWindow(QMainWindow):
             self._refresh_editor_context(self.current_path)
         except Exception:
             pass
+        if hasattr(self, "_remote_vault_menu"):
+            show_menu = self._remote_mode or self._is_homebase_mode_enabled()
+            try:
+                self._remote_vault_menu.menuAction().setVisible(show_menu)
+            except Exception:
+                self._remote_vault_menu.setVisible(show_menu)
         
         # Check if remote vault needs indexing
         if is_remote:
@@ -4892,6 +5332,95 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _refresh_remote_user_info(self) -> None:
+        if not self._remote_mode:
+            return
+        try:
+            resp = self.http.get("/auth/me")
+        except Exception:
+            return
+        if resp.status_code != 200:
+            return
+        try:
+            info = resp.json()
+        except Exception:
+            return
+        username = str(info.get("username") or "").strip()
+        if username:
+            self._remote_username = username
+        role = str(info.get("role") or "").strip().lower()
+        perm = str(info.get("perm") or "").strip().lower()
+        is_admin = bool(info.get("is_admin") or role == "admin")
+        can_write = info.get("can_write")
+        if can_write is None:
+            can_write = role == "admin" or perm in ("read_write", "read+write", "write", "readwrite")
+        self._apply_remote_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
+
+    def _homebase_request(self, method: str, path: str, payload: Optional[dict] = None) -> httpx.Response:
+        base_url = config.load_homebase_remote_url().strip().rstrip("/")
+        vault_id = (config.load_homebase_vault_id() or "").strip()
+        if not base_url or not vault_id:
+            raise RuntimeError("Homebase server is not configured.")
+        auth_token = str(config.load_homebase_auth_token() or "").strip()
+        refresh_token = str(config.load_homebase_refresh_token() or "").strip()
+        verify_ssl = config.load_homebase_verify_ssl()
+        local_ui_token = self._homebase_local_ui_token_for_url(base_url)
+        headers: dict[str, str] = {}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        if local_ui_token:
+            headers["x-local-ui-token"] = local_ui_token
+        url = f"{base_url}/v1/homebase/{vault_id}{path}"
+        resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
+        if resp.status_code != 401 or not refresh_token:
+            return resp
+        try:
+            refresh_resp = httpx.post(
+                f"{base_url}/v1/homebase/bootstrap/refresh",
+                json={"vault_id": vault_id, "refresh_token": refresh_token},
+                timeout=15.0,
+                verify=verify_ssl,
+            )
+            if refresh_resp.status_code != 200:
+                return resp
+            data = refresh_resp.json()
+            access = str(data.get("access_token") or "").strip()
+            refreshed = str(data.get("refresh_token") or "").strip()
+            if not access or not refreshed:
+                return resp
+            self._store_homebase_tokens(access, refreshed)
+            headers["Authorization"] = f"Bearer {access}"
+            resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
+        except Exception:
+            return resp
+        return resp
+
+    def _refresh_homebase_user_info(self) -> None:
+        if not self._is_homebase_mode_enabled():
+            return
+        if self._homebase_user_info_refreshing:
+            return
+        self._homebase_user_info_refreshing = True
+        try:
+            resp = self._homebase_request("GET", "/auth/me")
+            if resp.status_code != 200:
+                return
+            try:
+                info = resp.json()
+            except Exception:
+                return
+            role = str(info.get("role") or "").strip().lower()
+            perm = str(info.get("perm") or "").strip().lower()
+            is_admin = bool(info.get("role") == "admin" or info.get("is_admin"))
+            can_write = info.get("can_write")
+            if can_write is None:
+                can_write = role == "admin" or perm in ("read_write", "read+write", "write", "readwrite")
+            self._apply_homebase_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
+            self._homebase_user_info_loaded = True
+            self._update_user_management_ui()
+        finally:
+            self._homebase_user_info_refreshing = False
+
     def _setup_remote_auth(self, username: str, password: str, remember: bool) -> bool:
         """Setup authentication for a vault that doesn't have it configured yet."""
         try:
@@ -4919,6 +5448,7 @@ class MainWindow(QMainWindow):
             self._set_auth_tokens(access, refresh, remember, username)
             # Rebuild the HTTP client so it uses the new auth tokens
             self._rebuild_http_client()
+            self._refresh_remote_user_info()
             self.statusBar().showMessage("Vault authentication configured.", 3000)
             return True
         except Exception as exc:
@@ -4954,6 +5484,7 @@ class MainWindow(QMainWindow):
             self._set_auth_tokens(access, refresh, remember, username)
             # Rebuild the HTTP client so it uses the new auth tokens
             self._rebuild_http_client()
+            self._refresh_remote_user_info()
             self._update_remote_status_badge()
             self.statusBar().showMessage("Remote vault authentication successful.", 3000)
             return True
@@ -4991,6 +5522,7 @@ class MainWindow(QMainWindow):
             self._remote_username = username
             self._set_auth_tokens(access, refresh, remember, username)
             self._rebuild_http_client()
+            self._refresh_remote_user_info()
             self._update_remote_status_badge()
             self.statusBar().showMessage("Vault password updated.", 3000)
             return True
@@ -5009,6 +5541,264 @@ class MainWindow(QMainWindow):
             return False
         new_username, old_pw, new_pw, remember = dlg.values()
         return self._change_remote_password(new_username, old_pw, new_pw, remember)
+
+    def _prompt_reset_password(self) -> None:
+        if not self._remote_mode:
+            self._alert("Password reset is only available for remote vaults.")
+            return
+        remember_default = self._remember_refresh or bool(self._refresh_token)
+        dlg = RemoteChangePasswordDialog(
+            self,
+            username=self._remote_username or "",
+            old_password="",
+            remember_default=remember_default,
+        )
+        dlg.setWindowTitle("Reset Vault Password")
+        try:
+            dlg.username_edit.setReadOnly(True)
+        except Exception:
+            pass
+        if dlg.exec() != QDialog.Accepted:
+            return
+        username, old_pw, new_pw, remember = dlg.values()
+        self._change_remote_password(username, old_pw, new_pw, remember)
+
+    def _prompt_homebase_reset_password(self) -> None:
+        if not self._is_homebase_mode_enabled():
+            self._alert("Password reset is only available for Homebase vaults.")
+            return
+        dlg = RemoteChangePasswordDialog(
+            self,
+            username=config.load_homebase_username().strip(),
+            old_password="",
+            remember_default=True,
+        )
+        dlg.setWindowTitle("Reset Homebase Password")
+        try:
+            dlg.username_edit.setReadOnly(True)
+        except Exception:
+            pass
+        if dlg.exec() != QDialog.Accepted:
+            return
+        username, old_pw, new_pw, _remember = dlg.values()
+        self._change_homebase_password(old_pw, new_pw)
+
+    def _change_homebase_password(self, old_password: str, new_password: str) -> None:
+        try:
+            resp = self._homebase_request(
+                "POST",
+                "/auth/change",
+                payload={"old_password": old_password, "new_password": new_password},
+            )
+            if resp.status_code != 200:
+                detail = None
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        detail = data.get("detail") or data.get("message")
+                except Exception:
+                    pass
+                raise RuntimeError(detail or f"HTTP {resp.status_code}")
+            self.statusBar().showMessage("Homebase password updated.", 3000)
+        except Exception as exc:
+            self._alert(f"Password update failed: {exc}")
+
+    def _homebase_login(self) -> None:
+        if not self._is_homebase_mode_enabled():
+            self._alert("Homebase sync is not configured for this vault.")
+            return
+        self._reset_homebase_auth()
+
+    def _homebase_logout(self) -> None:
+        try:
+            config.save_homebase_auth_token("")
+            config.save_homebase_refresh_token("")
+            self._homebase_user_is_admin = False
+            self._homebase_user_can_write = True
+            self._homebase_user_info_loaded = False
+            self._configure_homebase_sync_for_vault()
+            self.statusBar().showMessage("Homebase credentials cleared.", 3000)
+        except Exception as exc:
+            self._alert(f"Failed to clear Homebase credentials: {exc}")
+
+    def _handle_remote_vault_login(self) -> None:
+        if self._remote_mode:
+            self._prompt_remote_login()
+            return
+        if self._is_homebase_mode_enabled():
+            self._homebase_login()
+            return
+        self._alert("Remote vault login is only available when a remote or Homebase vault is active.")
+
+    def _handle_remote_vault_logout(self) -> None:
+        if self._remote_mode:
+            self._logout_remote()
+            return
+        if self._is_homebase_mode_enabled():
+            self._homebase_logout()
+            return
+        self._alert("Remote vault logout is only available when a remote or Homebase vault is active.")
+
+    def _handle_remote_vault_reset_password(self) -> None:
+        if self._remote_mode:
+            self._prompt_reset_password()
+            return
+        if self._is_homebase_mode_enabled():
+            self._prompt_homebase_reset_password()
+            return
+        self._alert("Password reset is only available for remote or Homebase vaults.")
+
+    def _fetch_remote_users(self) -> list[dict]:
+        resp = self.http.get("/auth/users")
+        if resp.status_code == 404:
+            raise RuntimeError("User management is not supported by this server. Update the remote server and try again.")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+        payload = resp.json()
+        users = payload.get("users") if isinstance(payload, dict) else None
+        return users if isinstance(users, list) else []
+
+    def _create_remote_user(self, username: str, password: str, role: str, perm: str) -> None:
+        resp = self.http.post(
+            "/auth/users",
+            json={"username": username, "password": password, "role": role, "perm": perm},
+        )
+        if resp.status_code == 404:
+            raise RuntimeError("User management is not supported by this server. Update the remote server and try again.")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _edit_remote_user(self, username: str, new_username: str, password: str, role: str, perm: str) -> None:
+        payload: dict[str, str] = {"role": role, "perm": perm}
+        if new_username and new_username != username:
+            payload["username"] = new_username
+        if password:
+            payload["password"] = password
+        resp = self.http.patch(f"/auth/users/{quote(username)}", json=payload)
+        if resp.status_code == 404:
+            raise RuntimeError("User management is not supported by this server. Update the remote server and try again.")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _delete_remote_user(self, username: str) -> None:
+        resp = self.http.delete(f"/auth/users/{quote(username)}")
+        if resp.status_code == 404:
+            raise RuntimeError("User management is not supported by this server. Update the remote server and try again.")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _fetch_homebase_users(self) -> list[dict]:
+        resp = self._homebase_request("GET", "/users")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+        payload = resp.json()
+        users = payload.get("users") if isinstance(payload, dict) else None
+        return users if isinstance(users, list) else []
+
+    def _create_homebase_user(self, username: str, password: str, role: str, perm: str) -> None:
+        resp = self._homebase_request(
+            "POST",
+            "/users",
+            payload={"username": username, "password": password, "role": role, "perm": perm},
+        )
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _edit_homebase_user(self, username: str, new_username: str, password: str, role: str, perm: str) -> None:
+        payload: dict[str, str] = {"role": role, "perm": perm}
+        if new_username and new_username != username:
+            payload["username"] = new_username
+        if password:
+            payload["password"] = password
+        resp = self._homebase_request("PATCH", f"/users/{quote(username)}", payload=payload)
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _delete_homebase_user(self, username: str) -> None:
+        resp = self._homebase_request("DELETE", f"/users/{quote(username)}")
+        if resp.status_code != 200:
+            detail = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    detail = data.get("detail") or data.get("message")
+            except Exception:
+                pass
+            raise RuntimeError(detail or f"HTTP {resp.status_code}")
+
+    def _open_user_management(self) -> None:
+        if self._remote_mode:
+            dialog = ManageUsersDialog(
+                self,
+                fetch_users=self._fetch_remote_users,
+                create_user=self._create_remote_user,
+                edit_user=self._edit_remote_user,
+                delete_user=self._delete_remote_user,
+                title="Manage Users (Remote Vault)",
+            )
+            dialog.exec()
+            return
+        if self._is_homebase_mode_enabled():
+            dialog = ManageUsersDialog(
+                self,
+                fetch_users=self._fetch_homebase_users,
+                create_user=self._create_homebase_user,
+                edit_user=self._edit_homebase_user,
+                delete_user=self._delete_homebase_user,
+                title="Manage Users (Homebase)",
+            )
+            dialog.exec()
+            return
+        self._alert("User management is only available for remote vaults.")
 
     def _prompt_remote_login(self) -> bool:
         """Prompt for vault credentials, calling setup or login based on auth status."""
@@ -5093,15 +5883,26 @@ class MainWindow(QMainWindow):
         if not payload.get("enabled") or not payload.get("configured"):
             return True
         if self._access_token:
+            self._refresh_remote_user_info()
             return True
         if self._refresh_token and self._attempt_refresh():
+            self._refresh_remote_user_info()
             return True
-        return self._prompt_remote_login()
+        ok = self._prompt_remote_login()
+        if ok:
+            self._refresh_remote_user_info()
+        return ok
 
     def _logout_remote(self) -> None:
         if not self._remote_mode:
             return
         self._clear_auth_tokens()
+        self._remote_user_is_admin = False
+        self._remote_user_can_write = True
+        self._user_read_only = False
+        self._read_only = False
+        self._apply_read_only_state()
+        self._update_user_management_ui()
         self._update_remote_status_badge()
         self.statusBar().showMessage("Remote vault credentials cleared.", 3000)
 
@@ -8633,7 +9434,10 @@ class MainWindow(QMainWindow):
             return ensure_root_colon_link(existing_colon), False
 
         if self._read_only:
-            self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+            self.statusBar().showMessage(
+                self._read_only_status_message("Cannot create new pages while vault is read-only."),
+                5000,
+            )
             return normalized_colon, False
         folder_path = self._file_path_to_folder(target_file)
         if not self._ensure_page_folder(folder_path, allow_existing=True):
@@ -8729,7 +9533,7 @@ class MainWindow(QMainWindow):
         self,
         parent_path: Optional[str] = None,
         *,
-        insert_link_in_editor: bool = True,
+        insert_link_in_editor: bool = False,
     ) -> None:
         """Show dialog to create a new page with template selection (Ctrl+N)."""
         if not self.vault_root:
@@ -8779,6 +9583,11 @@ class MainWindow(QMainWindow):
                             cursor.setPosition(pos + 1)
                         self.editor.setTextCursor(cursor)
                         self.statusBar().showMessage("Page already exists here; inserted link", 4000)
+                        return
+                    if not insert_link_in_editor and existing_file:
+                        self._open_file(existing_file, cursor_at_end=False, force=True)
+                        self.editor.setFocus()
+                        self.statusBar().showMessage("Opened existing page", 3000)
                         return
                     self.statusBar().showMessage("Page already exists here", 4000)
                 else:
@@ -8832,7 +9641,8 @@ class MainWindow(QMainWindow):
 
             # No active page to insert into, or insertion disabled.
             self.statusBar().showMessage("Created page", 3000)
-            self._populate_vault_tree()
+            self._open_file(file_path, cursor_at_end=True, force=True)
+            self.editor.setFocus()
 
     def _show_folder_template_dialog(self, parent_path: str = "/") -> None:
         """Show dialog to create pages from a folder template."""
@@ -10487,6 +11297,14 @@ class MainWindow(QMainWindow):
         """Handle link activations from the editor (main or popup)."""
         if not link:
             return
+        if link.strip() == "//":
+            target = self._home_page_path() or self._vault_root_page_path()
+            if target:
+                if refresh_only and self.current_path == target:
+                    self._reload_page_preserve_cursor(target)
+                else:
+                    self._open_file(target, force=force)
+                return
         restore_vi_insert = False
         try:
             sender = self.sender()
@@ -11050,10 +11868,23 @@ class MainWindow(QMainWindow):
                 main_page = self._home_page_path() or self._vault_root_page_path()
                 if not main_page:
                     return
+                created_root = False
+                if not self._page_exists(main_page):
+                    if self._read_only:
+                        self.statusBar().showMessage(
+                            self._read_only_status_message("Cannot create new pages while vault is read-only."),
+                            5000,
+                        )
+                        return
+                    folder_path = self._file_path_to_folder(main_page)
+                    if not self._ensure_page_folder(folder_path, allow_existing=True):
+                        return
+                    self._apply_new_page_template(main_page, self.vault_root_name or "Home")
+                    created_root = True
                 if refresh_only and self.current_path == main_page:
                     self._reload_page_preserve_cursor(main_page)
                 else:
-                    self._open_file(main_page, force=force)
+                    self._open_file(main_page, cursor_at_end=created_root, force=force)
                     self._scroll_to_anchor_slug(anchor_slug)
                     self._apply_navigation_focus(focus_target)
                 return
@@ -11063,10 +11894,23 @@ class MainWindow(QMainWindow):
                 main_page = self._vault_root_page_path()
                 if not main_page:
                     return
+                created_root = False
+                if not self._page_exists(main_page):
+                    if self._read_only:
+                        self.statusBar().showMessage(
+                            self._read_only_status_message("Cannot create new pages while vault is read-only."),
+                            5000,
+                        )
+                        return
+                    folder_path = self._file_path_to_folder(main_page)
+                    if not self._ensure_page_folder(folder_path, allow_existing=True):
+                        return
+                    self._apply_new_page_template(main_page, self.vault_root_name or "Home")
+                    created_root = True
                 if refresh_only and self.current_path == main_page:
                     self._reload_page_preserve_cursor(main_page)
                 else:
-                    self._open_file(main_page, force=force)
+                    self._open_file(main_page, cursor_at_end=created_root, force=force)
                     self._scroll_to_anchor_slug(anchor_slug)
                     self._apply_navigation_focus(focus_target)
                 return
@@ -11091,7 +11935,10 @@ class MainWindow(QMainWindow):
                 is_new_page = False
             else:
                 if self._read_only:
-                    self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+                    self.statusBar().showMessage(
+                        self._read_only_status_message("Cannot create new pages while vault is read-only."),
+                        5000,
+                    )
                     return
                 if not self._ensure_page_folder(folder_path, allow_existing=True):
                     return
@@ -11131,7 +11978,10 @@ class MainWindow(QMainWindow):
                 is_new_page = False
             else:
                 if self._read_only:
-                    self.statusBar().showMessage("Cannot create new pages while vault is read-only.", 5000)
+                    self.statusBar().showMessage(
+                        self._read_only_status_message("Cannot create new pages while vault is read-only."),
+                        5000,
+                    )
                     return
                 if not self._ensure_page_folder(folder_path, allow_existing=True):
                     return

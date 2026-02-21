@@ -287,6 +287,18 @@ class AuthModels:
         old_password: str = Field(..., min_length=8)
         new_password: str = Field(..., min_length=8)
 
+    class UserCreateRequest(BaseModel):
+        username: str = Field(..., min_length=3, max_length=50)
+        password: str = Field(..., min_length=8)
+        role: Literal["admin", "normal"] = "normal"
+        perm: Optional[Literal["read", "read_write"]] = None
+
+    class UserUpdateRequest(BaseModel):
+        username: Optional[str] = None
+        role: Optional[Literal["admin", "normal"]] = None
+        perm: Optional[Literal["read", "read_write"]] = None
+        password: Optional[str] = None
+
     class TokenResponse(BaseModel):
         access_token: str
         refresh_token: str
@@ -295,6 +307,9 @@ class AuthModels:
     class UserInfo(BaseModel):
         username: str
         is_admin: bool = True
+        can_write: bool = True
+        role: str = "admin"
+        perm: str = "read_write"
 
     class PrintTokenRequest(BaseModel):
         ttl_seconds: int = Field(default=900, ge=60, le=3600)
@@ -318,6 +333,26 @@ def _verify_password(plain_password: str, hashed_password: str) -> bool:
 def _hash_password(password: str) -> str:
     return password_hasher.hash(password)
 
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _normalize_role(value: Optional[str]) -> str:
+    role = str(value or "").strip().lower()
+    if role == "admin":
+        return "admin"
+    return "normal"
+
+
+def _normalize_perm(value: Optional[str], role: str) -> str:
+    if role == "admin":
+        return "read_write"
+    perm = str(value or "").strip().lower()
+    if perm in {"read+write", "read_write", "write", "readwrite"}:
+        return "read_write"
+    return "read"
+
 def _server_password_hash() -> Optional[str]:
     if not SERVER_ADMIN_PASSWORD:
         return None
@@ -331,15 +366,89 @@ def _combined_vault_password(password: str) -> str:
 
 
 def _build_auth_config(username: str, password: str) -> dict:
-    combined_password = _combined_vault_password(password)
-    config = {
+    now = _utc_now_iso()
+    user_record = {
         "username": username,
-        "password_hash": _hash_password(combined_password),
+        "password_hash": _hash_password(_combined_vault_password(password)),
         "vault_password_hash": _hash_password(password),
         "server_password_hash": _server_password_hash(),
-        "configured_at": datetime.utcnow().isoformat()
+        "role": "admin",
+        "perm": "read_write",
+        "created_at": now,
+        "last_login_at": None,
+        "last_password_change_at": now,
     }
-    return config
+    return {
+        "schema_version": 2,
+        "configured_at": now,
+        "users": {username: user_record},
+    }
+
+
+def _normalize_auth_config(payload: dict) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        return {}, False
+    changed = False
+    if "users" not in payload:
+        username = str(payload.get("username") or "").strip()
+        password_hash = payload.get("password_hash")
+        if not username or not password_hash:
+            return {}, False
+        configured_at = str(payload.get("configured_at") or _utc_now_iso())
+        user_record = {
+            "username": username,
+            "password_hash": password_hash,
+            "vault_password_hash": payload.get("vault_password_hash"),
+            "server_password_hash": payload.get("server_password_hash"),
+            "role": "admin",
+            "perm": "read_write",
+            "created_at": configured_at,
+            "last_login_at": None,
+            "last_password_change_at": configured_at,
+        }
+        payload = {
+            "schema_version": 2,
+            "configured_at": configured_at,
+            "users": {username: user_record},
+        }
+        changed = True
+
+    if payload.get("schema_version") != 2:
+        payload["schema_version"] = 2
+        changed = True
+
+    users = payload.get("users")
+    if not isinstance(users, dict):
+        payload["users"] = {}
+        users = payload["users"]
+        changed = True
+
+    configured_at = str(payload.get("configured_at") or _utc_now_iso())
+    payload["configured_at"] = configured_at
+    for username, record in list(users.items()):
+        if not isinstance(record, dict):
+            users.pop(username, None)
+            changed = True
+            continue
+        record.setdefault("username", username)
+        role = _normalize_role(record.get("role"))
+        perm = _normalize_perm(record.get("perm"), role)
+        if record.get("role") != role:
+            record["role"] = role
+            changed = True
+        if record.get("perm") != perm:
+            record["perm"] = perm
+            changed = True
+        if not record.get("created_at"):
+            record["created_at"] = configured_at
+            changed = True
+        if "last_login_at" not in record:
+            record["last_login_at"] = None
+            changed = True
+        if not record.get("last_password_change_at"):
+            record["last_password_change_at"] = record.get("created_at") or configured_at
+            changed = True
+    return payload, changed
 
 
 def _store_auth_config_at_path(db_path: Path, config: dict) -> None:
@@ -371,7 +480,18 @@ def _get_auth_config():
         cursor = conn.execute("SELECT value FROM kv WHERE key = 'auth_config'")
         row = cursor.fetchone()
         if row:
-            return json.loads(row[0])
+            payload = json.loads(row[0])
+            normalized, changed = _normalize_auth_config(payload)
+            if normalized and changed:
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                        ("auth_config", json.dumps(normalized)),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+            return normalized or None
     except Exception:
         pass
     finally:
@@ -389,8 +509,8 @@ def _set_auth_config(username: str, password: str):
         raise HTTPException(status_code=500, detail="No vault selected")
     db_path = vault_root / ".stillpoint" / "settings.db"
 
-    config = _build_auth_config(username, password)
-    _store_auth_config_at_path(db_path, config)
+    config_payload = _build_auth_config(username, password)
+    _store_auth_config_at_path(db_path, config_payload)
 
 
 def _init_vault_db(root: Path) -> None:
@@ -411,6 +531,32 @@ def _set_auth_config_for_path(root: Path, username: str, password: str) -> None:
 
     config_payload = _build_auth_config(username, password)
     _store_auth_config_at_path(db_path, config_payload)
+
+
+def _get_user_record(auth_config: dict, username: str) -> Optional[dict]:
+    users = auth_config.get("users")
+    if not isinstance(users, dict):
+        return None
+    return users.get(username)
+
+
+def _verify_user_password(user: dict, password: str) -> tuple[bool, Optional[str]]:
+    vault_hash = user.get("vault_password_hash")
+    server_hash = user.get("server_password_hash")
+    combined_ok = _verify_password(_combined_vault_password(password), user.get("password_hash", ""))
+    if vault_hash:
+        vault_ok = _verify_password(password, vault_hash)
+        current_server_hash = _server_password_hash()
+        if combined_ok:
+            return True, None
+        if vault_ok and current_server_hash and server_hash and server_hash != current_server_hash:
+            return False, "Server password changed; update vault password"
+        if vault_ok and current_server_hash and not server_hash:
+            return False, "Server password required; update vault password"
+        return False, "Invalid credentials"
+    if combined_ok:
+        return True, None
+    return False, "Invalid credentials"
 
 
 def set_local_ui_token(token: Optional[str]) -> None:
@@ -467,13 +613,13 @@ async def get_current_user(
 ) -> Optional[AuthModels.UserInfo]:
     """Dependency to get current authenticated user."""
     if not AUTH_ENABLED:
-        return AuthModels.UserInfo(username="admin", is_admin=True)
+        return AuthModels.UserInfo(username="admin", is_admin=True, can_write=True, role="admin", perm="read_write")
 
     local_token = _LOCAL_UI_TOKEN or os.getenv("ZIMX_LOCAL_UI_TOKEN")
     token_header = request.headers.get("x-local-ui-token")
     local_bypass = bool(local_token) and token_header == local_token
     if request.client and request.client.host in _LOCAL_HOSTS and local_bypass:
-        return AuthModels.UserInfo(username="admin", is_admin=True)
+        return AuthModels.UserInfo(username="admin", is_admin=True, can_write=True, role="admin", perm="read_write")
 
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -483,9 +629,34 @@ async def get_current_user(
         username: str = payload.get("sub")
         if username is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return AuthModels.UserInfo(username=username, is_admin=True)
+        auth_config = _get_auth_config()
+        user_record = _get_user_record(auth_config, username) if auth_config else None
+        if user_record:
+            role = _normalize_role(user_record.get("role"))
+            perm = _normalize_perm(user_record.get("perm"), role)
+            can_write = role == "admin" or perm == "read_write"
+            return AuthModels.UserInfo(
+                username=username,
+                is_admin=role == "admin",
+                can_write=can_write,
+                role=role,
+                perm=perm,
+            )
+        return AuthModels.UserInfo(username=username, is_admin=True, can_write=True, role="admin", perm="read_write")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_admin_user(user: AuthModels.UserInfo = Depends(get_current_user)) -> AuthModels.UserInfo:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+def require_write_user(user: AuthModels.UserInfo = Depends(get_current_user)) -> AuthModels.UserInfo:
+    if not user.can_write:
+        raise HTTPException(status_code=403, detail="User does not have write permission")
+    return user
 
 
 def _filter_out_journal(tree: list[dict]) -> list[dict]:
@@ -875,12 +1046,6 @@ def auth_setup(payload: AuthModels.SetupRequest) -> dict:
         raise HTTPException(status_code=400, detail="Authentication already configured")
     
     _set_auth_config(payload.username, payload.password)
-    
-    if not vault_hash and combined_ok:
-        try:
-            _set_auth_config(payload.username, payload.password)
-        except Exception:
-            pass
 
     # Generate tokens
     access_token = _create_token(
@@ -913,27 +1078,18 @@ def auth_login(payload: AuthModels.LoginRequest) -> dict:
     if not auth_config:
         raise HTTPException(status_code=400, detail="Authentication not configured. Use /auth/setup first.")
     
-    # Verify credentials
-    if payload.username != auth_config["username"]:
+    user_record = _get_user_record(auth_config, payload.username)
+    if not user_record:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    vault_hash = auth_config.get("vault_password_hash")
-    server_hash = auth_config.get("server_password_hash")
-    combined_ok = _verify_password(_combined_vault_password(payload.password), auth_config["password_hash"])
-    if vault_hash:
-        vault_ok = _verify_password(payload.password, vault_hash)
-        current_server_hash = _server_password_hash()
-        if combined_ok:
-            pass
-        elif vault_ok and current_server_hash and server_hash and server_hash != current_server_hash:
-            raise HTTPException(status_code=401, detail="Server password changed; update vault password")
-        elif vault_ok and current_server_hash and not server_hash:
-            raise HTTPException(status_code=401, detail="Server password required; update vault password")
-        else:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-    else:
-        if not combined_ok:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+    ok, error_detail = _verify_user_password(user_record, payload.password)
+    if not ok:
+        raise HTTPException(status_code=401, detail=error_detail or "Invalid credentials")
+
+    user_record["last_login_at"] = _utc_now_iso()
+    try:
+        _store_auth_config_at_path(vault_root / ".stillpoint" / "settings.db", auth_config)
+    except Exception:
+        pass
     
     # Generate tokens
     access_token = _create_token(
@@ -966,18 +1122,22 @@ def auth_change(payload: AuthModels.ChangeRequest) -> dict:
     if not auth_config:
         raise HTTPException(status_code=400, detail="Authentication not configured. Use /auth/setup first.")
 
-    if payload.username != auth_config.get("username"):
+    user_record = _get_user_record(auth_config, payload.username)
+    if not user_record:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    vault_hash = auth_config.get("vault_password_hash")
-    if vault_hash:
-        if not _verify_password(payload.old_password, vault_hash):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-    else:
-        if not _verify_password(_combined_vault_password(payload.old_password), auth_config["password_hash"]):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+    ok, error_detail = _verify_user_password(user_record, payload.old_password)
+    if not ok:
+        raise HTTPException(status_code=401, detail=error_detail or "Invalid credentials")
 
-    _set_auth_config(payload.username, payload.new_password)
+    user_record["password_hash"] = _hash_password(_combined_vault_password(payload.new_password))
+    user_record["vault_password_hash"] = _hash_password(payload.new_password)
+    user_record["server_password_hash"] = _server_password_hash()
+    user_record["last_password_change_at"] = _utc_now_iso()
+    try:
+        _store_auth_config_at_path(vault_root / ".stillpoint" / "settings.db", auth_config)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to update password")
 
     access_token = _create_token(
         {"sub": payload.username},
@@ -1008,6 +1168,10 @@ def auth_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) 
         
         username = payload.get("sub")
         if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        auth_config = _get_auth_config()
+        if auth_config and not _get_user_record(auth_config, username):
             raise HTTPException(status_code=401, detail="Invalid token")
         
         # Generate new tokens
@@ -1057,6 +1221,150 @@ def auth_status() -> dict:
         "enabled": AUTH_ENABLED,
         "vault_selected": True
     }
+
+
+@app.get("/auth/users")
+def auth_list_users(user: AuthModels.UserInfo = Depends(require_admin_user)) -> dict:
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured")
+    users = auth_config.get("users", {})
+    if not isinstance(users, dict):
+        users = {}
+    results: list[dict] = []
+    for username, record in users.items():
+        if not isinstance(record, dict):
+            continue
+        role = _normalize_role(record.get("role"))
+        perm = _normalize_perm(record.get("perm"), role)
+        last_login = record.get("last_login_at")
+        results.append(
+            {
+                "username": username,
+                "role": role,
+                "perm": perm,
+                "logged_in": bool(last_login),
+                "last_login_at": last_login,
+                "last_password_change_at": record.get("last_password_change_at"),
+                "created_at": record.get("created_at"),
+            }
+        )
+    results.sort(key=lambda item: str(item.get("username") or "").lower())
+    return {"users": results}
+
+
+@app.post("/auth/users")
+def auth_create_user(payload: AuthModels.UserCreateRequest, user: AuthModels.UserInfo = Depends(require_admin_user)) -> dict:
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured")
+    username = payload.username.strip()
+    users = auth_config.get("users")
+    if not isinstance(users, dict):
+        users = {}
+        auth_config["users"] = users
+    if username in users:
+        raise HTTPException(status_code=409, detail="User already exists")
+    role = _normalize_role(payload.role)
+    perm = _normalize_perm(payload.perm, role)
+    now = _utc_now_iso()
+    users[username] = {
+        "username": username,
+        "password_hash": _hash_password(_combined_vault_password(payload.password)),
+        "vault_password_hash": _hash_password(payload.password),
+        "server_password_hash": _server_password_hash(),
+        "role": role,
+        "perm": perm,
+        "created_at": now,
+        "last_login_at": None,
+        "last_password_change_at": now,
+    }
+    try:
+        vault_root = vault_state.get_root()
+        if not vault_root:
+            raise HTTPException(status_code=400, detail="No vault selected")
+        _store_auth_config_at_path(vault_root / ".stillpoint" / "settings.db", auth_config)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create user: {exc}") from exc
+    return {"ok": True}
+
+
+@app.patch("/auth/users/{username}")
+def auth_update_user(
+    username: str,
+    payload: AuthModels.UserUpdateRequest,
+    user: AuthModels.UserInfo = Depends(require_admin_user),
+) -> dict:
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured")
+    users = auth_config.get("users")
+    if not isinstance(users, dict):
+        raise HTTPException(status_code=404, detail="User not found")
+    record = users.get(username)
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=404, detail="User not found")
+    new_username = str(payload.username or "").strip()
+    if new_username and new_username != username:
+        if new_username in users:
+            raise HTTPException(status_code=409, detail="Username already exists")
+        users[new_username] = record
+        users.pop(username, None)
+        record["username"] = new_username
+        username = new_username
+    role = _normalize_role(payload.role if payload.role is not None else record.get("role"))
+    perm = _normalize_perm(payload.perm if payload.perm is not None else record.get("perm"), role)
+    record["role"] = role
+    record["perm"] = perm
+    if payload.password:
+        record["password_hash"] = _hash_password(_combined_vault_password(payload.password))
+        record["vault_password_hash"] = _hash_password(payload.password)
+        record["server_password_hash"] = _server_password_hash()
+        record["last_password_change_at"] = _utc_now_iso()
+    try:
+        vault_root = vault_state.get_root()
+        if not vault_root:
+            raise HTTPException(status_code=400, detail="No vault selected")
+        _store_auth_config_at_path(vault_root / ".stillpoint" / "settings.db", auth_config)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update user: {exc}") from exc
+    return {"ok": True}
+
+
+@app.delete("/auth/users/{username}")
+def auth_delete_user(username: str, user: AuthModels.UserInfo = Depends(require_admin_user)) -> dict:
+    auth_config = _get_auth_config()
+    if not auth_config:
+        raise HTTPException(status_code=400, detail="Authentication not configured")
+    users = auth_config.get("users")
+    if not isinstance(users, dict):
+        raise HTTPException(status_code=404, detail="User not found")
+    if username not in users:
+        raise HTTPException(status_code=404, detail="User not found")
+    if username == user.username:
+        raise HTTPException(status_code=400, detail="Cannot delete the currently logged-in user")
+    remaining_admins = [
+        name
+        for name, record in users.items()
+        if name != username and _normalize_role((record or {}).get("role")) == "admin"
+    ]
+    if not remaining_admins:
+        raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+    users.pop(username, None)
+    try:
+        vault_root = vault_state.get_root()
+        if not vault_root:
+            raise HTTPException(status_code=400, detail="No vault selected")
+        _store_auth_config_at_path(vault_root / ".stillpoint" / "settings.db", auth_config)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete user: {exc}") from exc
+    return {"ok": True}
 
 
 @app.post("/auth/print-token")
@@ -1476,7 +1784,7 @@ async def asset_file(
 def file_write(
     payload: FileWritePayload,
     if_match: Optional[str] = Header(None),
-    user: AuthModels.UserInfo = Depends(get_current_user)
+    user: AuthModels.UserInfo = Depends(require_write_user)
 ) -> dict:
     root = vault_state.get_root()
     file_path = root / payload.path.lstrip("/")
@@ -1690,7 +1998,7 @@ def files_activity(payload: ActivityRangePayload) -> dict:
 
 
 @app.post("/api/journal/today")
-def journal_today(payload: JournalPayload) -> dict:
+def journal_today(payload: JournalPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     # Pass template through so the initial content becomes the user's day template
     try:
@@ -1723,7 +2031,7 @@ def ui_quick_capture(user: AuthModels.UserInfo = Depends(get_current_user)) -> d
 @app.post("/api/quick-capture")
 def quick_capture(
     payload: QuickCapturePayload,
-    user: AuthModels.UserInfo = Depends(get_current_user),
+    user: AuthModels.UserInfo = Depends(require_write_user),
 ) -> dict:
     text = (payload.text or "").strip()
     if not text:
@@ -1826,7 +2134,7 @@ def api_tasks(
 @app.post("/api/tasks/update-dates")
 def api_update_task_dates(
     payload: TaskDateUpdatePayload,
-    user: AuthModels.UserInfo = Depends(get_current_user),
+    user: AuthModels.UserInfo = Depends(require_write_user),
 ) -> dict:
     root = vault_state.get_root()
     if not payload.targets:
@@ -2214,7 +2522,7 @@ async def api_chat(payload: ChatPayload) -> dict:
 
 
 @app.post("/api/path/create")
-def create_path(payload: CreatePathPayload) -> dict:
+def create_path(payload: CreatePathPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     page_path: Optional[str] = None
     version = config.get_tree_version()
@@ -2247,7 +2555,7 @@ def create_path(payload: CreatePathPayload) -> dict:
 
 
 @app.post("/api/path/delete")
-def delete_path(payload: DeletePathPayload) -> dict:
+def delete_path(payload: DeletePathPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     try:
         result = file_ops.delete_folder(root, payload.path)
@@ -2283,7 +2591,7 @@ def file_operation_options(path: str, op: Literal["rename", "move", "delete"], d
 
 
 @app.post("/api/file/rename")
-def file_rename(payload: RenameMovePayload) -> dict:
+def file_rename(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "rename", payload.from_path, payload.to_path)
     if not ok:
@@ -2306,7 +2614,7 @@ def file_rename(payload: RenameMovePayload) -> dict:
 
 
 @app.post("/api/file/move")
-def file_move(payload: RenameMovePayload) -> dict:
+def file_move(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     _log_api(f"{_ANSI_BLUE}[API] POST /api/file/move from={payload.from_path} to={payload.to_path}{_ANSI_RESET}")
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
@@ -2333,7 +2641,7 @@ def file_move(payload: RenameMovePayload) -> dict:
 
 
 @app.delete("/api/file")
-def file_delete(payload: FileDeletePayload) -> dict:
+def file_delete(payload: FileDeletePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     ok, reason = file_ops.preflight(root, "delete", payload.path)
     if not ok:
@@ -2363,7 +2671,7 @@ def file_delete(payload: FileDeletePayload) -> dict:
 
 
 @app.post("/api/tree/reorder")
-def tree_reorder(payload: ReorderPayload) -> dict:
+def tree_reorder(payload: ReorderPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     """Reorder pages within a parent folder without moving files."""
     _get_vault_root()
     _log_api(f"{_ANSI_BLUE}[API] POST /api/tree/reorder parent={payload.parent_path} count={len(payload.page_order)}{_ANSI_RESET}")
@@ -2379,7 +2687,7 @@ def tree_reorder(payload: ReorderPayload) -> dict:
 
 
 @app.post("/api/vault/update-links")
-def vault_update_links(payload: UpdateLinksPayload) -> dict:
+def vault_update_links(payload: UpdateLinksPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
     try:
         touched = file_ops.update_links_on_disk(root, payload.path_map)
@@ -2399,6 +2707,7 @@ def attach_files(
     request: Request,
     page_path: str = Form(...),
     files: List[UploadFile] = FastAPISingleFile(...),
+    user: AuthModels.UserInfo = Depends(require_write_user),
 ) -> dict:
     root = _get_vault_root()
     normalized_page = _vault_relative_path(page_path)
