@@ -6342,11 +6342,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Bookmarked: {page_name}", 3000)
 
     def _refresh_tree(self) -> None:
-        """Manual refresh of the vault tree from the API."""
+        """Manual refresh of the vault tree from the API.
+
+        For local/homebase vaults, this also bumps tree version to invalidate
+        server-side tree cache after out-of-band filesystem edits.
+        """
+        if not self._remote_mode:
+            try:
+                config.bump_tree_version()
+            except Exception:
+                pass
         # Clear all tree caches to force fresh reload
         self._tree_cache.clear()
         self._tree_path_version.clear()
         self._populate_vault_tree()
+        if self._is_homebase_mode_enabled():
+            self._trigger_homebase_sync_now("tree refresh")
 
     def _toggle_show_journal_in_nav(self, checked: bool) -> None:
         self._set_show_journal_in_nav(checked)
