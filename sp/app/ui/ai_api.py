@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from typing import List
+import httpx
+
+from sp.app import config
 
 def normalize_base_url(url: str) -> str:
     if not url:
@@ -34,6 +37,14 @@ def build_auth_headers(server_config: dict) -> dict:
     return headers
 
 
+def build_httpx_timeout(server_config: dict | None = None) -> httpx.Timeout:
+    """Build a timeout with distinct connect/read limits."""
+    _ = server_config  # Reserved for possible per-server overrides.
+    connect_timeout = config.load_ai_chat_connect_timeout(5.0)
+    read_timeout = config.load_ai_chat_read_timeout(15.0)
+    return httpx.Timeout(connect=connect_timeout, read=read_timeout, write=read_timeout, pool=connect_timeout)
+
+
 def build_api_request(server_config: dict, messages: List[dict], model: str, stream: bool = True):
     server = server_config or {}
     base_url = server.get("base_url", "")
@@ -45,8 +56,7 @@ def build_api_request(server_config: dict, messages: List[dict], model: str, str
     headers.update(build_auth_headers(server))
     verify = bool(server.get("verify_ssl", True))
 
-    # Force AI operations to timeout quickly.
-    timeout = 5.0
+    timeout = build_httpx_timeout(server)
 
     payload = {"model": model, "messages": messages, "stream": bool(stream)}
     return url, headers, verify, timeout, payload

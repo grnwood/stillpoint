@@ -1761,6 +1761,53 @@ def save_default_ai_model(model: Optional[str]) -> None:
     """Persist preferred default AI model for new chats."""
     _update_global_config({"default_ai_model": model})
 
+def load_ai_chat_connect_timeout(default: float = 5.0) -> float:
+    """Load AI chat connect timeout in seconds."""
+    payload = _read_global_config()
+    raw = payload.get("ai_chat_connect_timeout", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
+def save_ai_chat_connect_timeout(value: float) -> None:
+    """Persist AI chat connect timeout in seconds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 5.0
+    if parsed <= 0:
+        parsed = 5.0
+    _update_global_config({"ai_chat_connect_timeout": parsed})
+
+
+def load_ai_chat_read_timeout(default: float = 15.0) -> float:
+    """Load AI chat read timeout in seconds."""
+    payload = _read_global_config()
+    raw = payload.get("ai_chat_read_timeout", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
+def save_ai_chat_read_timeout(value: float) -> None:
+    """Persist AI chat read timeout in seconds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 15.0
+    if parsed <= 0:
+        parsed = 15.0
+    _update_global_config({"ai_chat_read_timeout": parsed})
+
 
 def load_toc_collapsed() -> bool:
     """Return whether the table-of-contents panel should start collapsed."""

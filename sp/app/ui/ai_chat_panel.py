@@ -50,7 +50,7 @@ from .agent_tool_loop import (
     build_vault_key,
     parse_agent_message,
 )
-from .ai_api import build_api_request, build_auth_headers, compose_url
+from .ai_api import build_api_request, build_auth_headers, build_httpx_timeout, compose_url
 from sp.rag.index import RetrievedChunk
 from .path_utils import path_to_colon, ensure_root_colon_link
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
@@ -334,7 +334,7 @@ def fetch_and_cache_models(server_config: dict) -> List[str]:
     verify = bool(server.get("verify_ssl", True))
     try:
         _log_ai_chat(f"[AIChat][models request] url={url} headers={headers}")
-        with httpx.Client(timeout=AI_TIMEOUT_SECONDS, verify=verify) as client:
+        with httpx.Client(timeout=build_httpx_timeout(server), verify=verify) as client:
             resp = client.get(url, headers=headers)
             resp.raise_for_status()
             _log_ai_chat(f"[AIChat][models response] {resp.status_code} {resp.text[:500]}")
@@ -400,7 +400,6 @@ def build_default_server_configs():
             "verify_ssl": True,
             "default_model": "gpt-3.5-turbo",
             "auto_summarize": True,
-            "timeout": "",
         },
         {
             "name": "OpenAI Compatible (8000)",
@@ -415,7 +414,6 @@ def build_default_server_configs():
             "verify_ssl": True,
             "default_model": "gpt-3.5-turbo",
             "auto_summarize": True,
-            "timeout": "",
         },
         {
             "name": "OpenAI Compatible (8080)",
@@ -430,7 +428,6 @@ def build_default_server_configs():
             "verify_ssl": True,
             "default_model": "gpt-3.5-turbo",
             "auto_summarize": True,
-            "timeout": "",
         },
     ]
     return servers
@@ -466,7 +463,6 @@ class ServerManager:
             "verify_ssl": bool(entry.get("verify_ssl", True)),
             "default_model": default_model,
             "auto_summarize": to_bool(entry.get("auto_summarize"), default=True),
-            "timeout": entry.get("timeout", ""),
         }
 
     def load_servers(self) -> List[dict]:
@@ -969,7 +965,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
         self.custom_header_value_edit = QtWidgets.QLineEdit(self.server.get("custom_header_value", ""))
         self.models_path_edit = QtWidgets.QLineEdit(self.server.get("models_path", ""))
         self.chat_path_edit = QtWidgets.QLineEdit(self.server.get("chat_path", ""))
-        self.timeout_edit = QtWidgets.QLineEdit(str(self.server.get("timeout") or ""))
         self.default_model_combo = QtWidgets.QComboBox()
         self.default_model_combo.setEnabled(False)
         self.default_model_combo.addItem(self.server.get("default_model", "gpt-3.5-turbo"))
@@ -996,7 +991,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
         layout.addRow("Custom Header Value", self.custom_header_value_edit)
         layout.addRow("Models Path", self.models_path_edit)
         layout.addRow("Chat Path", self.chat_path_edit)
-        layout.addRow("Timeout (seconds)", self.timeout_edit)
         layout.addRow("Default Model", self.default_model_combo)
         layout.addRow("Verify Server", self.verify_button)
         layout.addRow(self.verify_ssl_check)
@@ -1031,10 +1025,9 @@ class ServerConfigDialog(QtWidgets.QDialog):
                 "custom_header_value": self.custom_header_value_edit.text().strip(),
             }
         )
-        timeout = self._parse_timeout(default=AI_TIMEOUT_SECONDS)
         verify_ssl = self.verify_ssl_check.isChecked()
         try:
-            with httpx.Client(timeout=timeout, verify=verify_ssl) as client:
+            with httpx.Client(timeout=build_httpx_timeout(), verify=verify_ssl) as client:
                 resp = client.get(url, headers=headers)
                 resp.raise_for_status()
                 payload = resp.json()
@@ -1087,15 +1080,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
         cleaned = sorted({m for m in model_ids if m})
         return cleaned or [fallback_model]
 
-    def _parse_timeout(self, default: float) -> float:
-        timeout_raw = self.timeout_edit.text().strip()
-        if not timeout_raw:
-            return AI_TIMEOUT_SECONDS
-        try:
-            return AI_TIMEOUT_SECONDS
-        except ValueError:
-            return AI_TIMEOUT_SECONDS
-
     def _handle_accept(self):
         name = self.name_edit.text().strip()
         base = self.base_edit.text().strip()
@@ -1112,14 +1096,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
         models_path = self.models_path_edit.text().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
         chat_path = self.chat_path_edit.text().strip() or "/v1/chat/completions"
 
-        timeout_raw = self.timeout_edit.text().strip()
-        timeout_value = ""
-        if timeout_raw:
-            try:
-                timeout_value = float(timeout_raw)
-            except ValueError:
-                timeout_value = timeout_raw
-
         self.result = {
             "name": name,
             "base_url": base,
@@ -1132,7 +1108,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
             "chat_path": chat_path,
             "default_model": self.default_model_combo.currentText().strip() or "gpt-3.5-turbo",
             "verify_ssl": self.verify_ssl_check.isChecked(),
-            "timeout": timeout_value,
             "original_name": self.original_name,
         }
         super().accept()
@@ -1153,14 +1128,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
         models_path = self.models_path_edit.text().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
         chat_path = self.chat_path_edit.text().strip() or "/v1/chat/completions"
 
-        timeout_raw = self.timeout_edit.text().strip()
-        timeout_value = ""
-        if timeout_raw:
-            try:
-                timeout_value = float(timeout_raw)
-            except ValueError:
-                timeout_value = timeout_raw
-
         self.result = {
             "name": name,
             "base_url": base,
@@ -1173,7 +1140,6 @@ class ServerConfigDialog(QtWidgets.QDialog):
             "chat_path": chat_path,
             "default_model": self.default_model_combo.currentText().strip() or "gpt-3.5-turbo",
             "verify_ssl": self.verify_ssl_check.isChecked(),
-            "timeout": timeout_value,
             "original_name": self.original_name,
         }
         super().accept()
