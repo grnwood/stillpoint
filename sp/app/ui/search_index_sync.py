@@ -82,6 +82,7 @@ class PeriodicSearchIndexSync(QObject):
             return
         if self._in_progress:
             self._log("[SearchIndex] periodic sync skipped: previous run still in progress")
+            print("[SearchIndex] periodic sync skipped (already running)")
             return
 
         local_vault_root = self._get_vault_root()
@@ -91,11 +92,16 @@ class PeriodicSearchIndexSync(QObject):
 
         self._in_progress = True
         self._log("[SearchIndex] periodic sync started")
+        print(
+            "[SearchIndex] periodic sync starting "
+            f"vault={local_vault_root} db={db_path}"
+        )
 
         def worker() -> None:
             run_started = time.perf_counter()
             files_scanned = 0
             stale_candidates = 0
+            stale_processed = 0
             stale_deleted = 0
             pages_upserted = 0
             upsert_candidates = 0
@@ -105,6 +111,7 @@ class PeriodicSearchIndexSync(QObject):
             status = "ok"
             scan_log_every = 250
             upsert_log_every = 100
+            stale_log_every = 100
             try:
                 root = Path(local_vault_root)
                 conn = sqlite3.connect(db_path, check_same_thread=False, timeout=0.75)
@@ -144,8 +151,16 @@ class PeriodicSearchIndexSync(QObject):
                         for path, (mtime, _content) in file_map.items()
                         if existing_map.get(path) != mtime
                     )
+                    unchanged_rows = len(file_map) - upsert_candidates
+                    print(
+                        "[SearchIndex] periodic sync plan "
+                        f"files_on_disk={len(file_map)} indexed_rows={len(existing_paths)} "
+                        f"upsert_candidates={upsert_candidates} unchanged={unchanged_rows} "
+                        f"stale_candidates={stale_candidates}"
+                    )
 
                     for stale_path in sorted(existing_paths - current_paths):
+                        stale_processed += 1
                         try:
                             ok = search_index.delete_page(conn, stale_path)
                             if ok:
@@ -155,6 +170,12 @@ class PeriodicSearchIndexSync(QObject):
                         except Exception:
                             delete_errors += 1
                             continue
+                        if stale_processed % stale_log_every == 0:
+                            print(
+                                "[SearchIndex] progress "
+                                f"stale_processed={stale_processed}/{stale_candidates} "
+                                f"stale_deleted={stale_deleted} delete_errors={delete_errors}"
+                            )
 
                     upsert_processed = 0
                     for path, (mtime, content) in file_map.items():
@@ -191,6 +212,13 @@ class PeriodicSearchIndexSync(QObject):
                     status_line += f", errors {total_errors}"
                 if status != "ok":
                     status_line = f"Search index sync failed: {status}"
+                print(
+                    "[SearchIndex] periodic sync finished "
+                    f"status={status} scanned={files_scanned} upsert_candidates={upsert_candidates} "
+                    f"upserted={pages_upserted} stale_candidates={stale_candidates} deleted={stale_deleted} "
+                    f"read_errors={read_errors} delete_errors={delete_errors} upsert_errors={upsert_errors} "
+                    f"duration_ms={elapsed_ms}"
+                )
                 self._log(
                     "[SearchIndex] periodic sync summary "
                     f"status={status} scanned={files_scanned} upsert_candidates={upsert_candidates} upserted={pages_upserted} "
