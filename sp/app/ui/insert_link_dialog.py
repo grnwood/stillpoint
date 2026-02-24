@@ -487,7 +487,7 @@ class InsertLinkDialog(QDialog):
             self._create_new_target = None
             return
 
-        search_term, _anchor = self._split_anchor(term)
+        search_term, anchor = self._split_anchor(term)
         normalized_term = search_term.lstrip(":")
         if ":" in normalized_term:
             normalized_term = normalized_term.replace(":", "/")
@@ -499,6 +499,8 @@ class InsertLinkDialog(QDialog):
         create_target_base = ""
         if term and not term.startswith(("http://", "https://")):
             create_target = self._generate_create_target(search_term)
+            if anchor and create_target and "#" not in create_target:
+                create_target = f"{create_target}{anchor}"
             create_target_base, _anchor = self._split_anchor(create_target)
             create_target_base = normalize_link_target(create_target_base)
 
