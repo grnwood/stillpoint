@@ -8,6 +8,7 @@ import re
 import itertools
 import shlex
 import hashlib
+import unicodedata
 from pathlib import Path
 from typing import Optional, Callable
 import httpx
@@ -3296,7 +3297,7 @@ class MarkdownEditor(QTextEdit):
 
     def _normalize_external_link(self, link: str) -> str:
         """Preserve full external links while stripping whitespace and hidden sentinels."""
-        text = (link or "").strip()
+        text = self._strip_problematic_control_chars(link or "").strip()
         if LINK_SENTINEL in text:
             text = text.split(LINK_SENTINEL, 1)[0]
         # Guard against leaked wiki delimiter when copying/pasting displayed [url|] links.
@@ -3304,9 +3305,39 @@ class MarkdownEditor(QTextEdit):
             text = text.rstrip("|")
         return text
 
+    def _strip_problematic_control_chars(self, text: str) -> str:
+        """Remove clipboard control/format characters while preserving normal whitespace."""
+        if not text:
+            return ""
+        cleaned_chars: list[str] = []
+        for ch in text:
+            if ch == "\u2029":
+                cleaned_chars.append("\n")
+                continue
+            if ch in ("\n", "\r", "\t"):
+                cleaned_chars.append(ch)
+                continue
+            if ch == "\uFFFC":
+                continue
+            cat = unicodedata.category(ch)
+            if cat in {"Cc", "Cf", "Cs"}:
+                continue
+            cleaned_chars.append(ch)
+        return "".join(cleaned_chars)
+
     def _normalize_pasted_link_artifacts(self, text: str) -> str:
         """Repair common malformed Teams/Jira link artifacts into stable wiki links."""
-        if not text or "[" not in text or "|" not in text:
+        text = self._strip_problematic_control_chars(text)
+        if not text:
+            return text
+
+        text = re.sub(
+            r"\[(?P<label>[^\]\n]+)\]\((?P<url>https?://[^)\s]+)\)",
+            lambda m: f"[{self._normalize_external_link(m.group('url'))}|{self._clean_pasted_link_label(m.group('label'))}]",
+            text,
+        )
+
+        if "[" not in text or "|" not in text:
             return text
 
         # Merge split Jira-style artifacts:
@@ -3338,13 +3369,10 @@ class MarkdownEditor(QTextEdit):
         link_re = re.compile(r"^https?://[^\s\[\]<>]+$")
 
         def _clean_url(value: str) -> str:
-            return (value or "").strip().strip("[]()")
+            return self._normalize_external_link((value or "").strip().strip("[]()"))
 
         def _clean_label(value: str) -> str:
-            out = (value or "").replace(LINK_SENTINEL, "").strip()
-            out = out.strip("[]")
-            out = re.sub(r"\s+", " ", out)
-            return out
+            return self._clean_pasted_link_label(value)
 
         def _rewrite(match: re.Match[str]) -> str:
             raw = match.group(0)
@@ -3369,6 +3397,13 @@ class MarkdownEditor(QTextEdit):
             _rewrite,
             text,
         )
+
+    def _clean_pasted_link_label(self, value: str) -> str:
+        out = self._strip_problematic_control_chars(value or "")
+        out = out.replace(LINK_SENTINEL, "").strip()
+        out = out.strip("[]")
+        out = re.sub(r"\s+", " ", out)
+        return out
 
     def _wrap_plain_http_links(self, text: str) -> str:
         """Convert bare HTTP(S) URLs into wiki format [url|] to enable sentinel rendering."""
@@ -4242,6 +4277,14 @@ class MarkdownEditor(QTextEdit):
         # Check for meaningful modifiers (ignore KeypadModifier which Qt may add on some platforms)
         # This is used throughout the keyPressEvent for cross-platform compatibility
         meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and meaningful_modifiers == Qt.ControlModifier:
+            vi_insert = self._vi_feature_enabled and self._vi_insert_mode
+            if vi_insert:
+                link = self._link_under_cursor(self.textCursor())
+                if link:
+                    self.linkActivated.emit(link)
+                    event.accept()
+                    return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
             cursor = self.textCursor()
             vi_insert = self._vi_feature_enabled and self._vi_insert_mode
@@ -7228,11 +7271,10 @@ class MarkdownEditor(QTextEdit):
         This allows copying blocks with headings to work correctly while still protecting
         against sentinel corruption from other sources.
         """
-        # Normalize common clipboard line separator and strip low control chars.
-        cleaned = text.replace("\u2029", "\n")
-        cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+", "", cleaned)
+        # Normalize clipboard control/format characters early.
+        cleaned = self._strip_problematic_control_chars(text)
         # Remove invisible characters that can destabilize parsing.
-        cleaned = re.sub(r"[\u200B-\u200F\u2028\u202A-\u202E\uFEFF\uFFFC]", "", cleaned)
+        cleaned = re.sub(r"[\u2028]", "", cleaned)
         # Strip link sentinels from pasted input; those should only exist in display text.
         cleaned = cleaned.replace(LINK_SENTINEL, "")
         # Preserve heading sentinels only at line start; drop rogue embedded ones.

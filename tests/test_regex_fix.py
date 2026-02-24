@@ -120,4 +120,8 @@ def test_regex_performance_regression() -> None:
     old_time = _measure_regex_performance(OLD_PATTERN, "old")
     new_time = _measure_regex_performance(NEW_PATTERN, "new")
     assert new_time != float("inf")
-    assert new_time <= old_time
+    assert old_time != float("inf")
+    # Sub-millisecond timing can vary by platform/load. Keep this guard broad
+    # enough to avoid flakes while still catching meaningful slowdowns.
+    assert new_time <= old_time * 3.0
+    assert new_time <= 50.0

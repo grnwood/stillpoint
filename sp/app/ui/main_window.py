@@ -10354,6 +10354,10 @@ class MainWindow(QMainWindow):
         # Keyboard activation: move focus to editor; mouse: restore task focus
         if activation_source == "keyboard":
             try:
+                self._exit_vi_insert_on_activate()
+            except Exception:
+                pass
+            try:
                 self.editor.setFocus(Qt.OtherFocusReason)
             except Exception:
                 pass

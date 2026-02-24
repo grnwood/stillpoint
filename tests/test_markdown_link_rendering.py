@@ -235,6 +235,28 @@ def test_html_paste_prefers_anchor_conversion(editor):
     assert "[https://example.com/task/456|https://example.com/task/456]" in markdown
 
 
+def test_paste_markdown_link_with_control_chars_normalizes_to_wiki(editor):
+    mime = QMimeData()
+    mime.setText("[Task\u2060 123](https://example.com/task/123\u200b)")
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "[https://example.com/task/123|Task 123]" in markdown
+    assert "\u2060" not in markdown
+    assert "\u200b" not in markdown
+
+
+def test_paste_wiki_link_with_invisible_controls_strips_controls(editor):
+    mime = QMimeData()
+    mime.setText("[https://example.com/task/999\u200e| Smart\u2060 Label ]")
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "[https://example.com/task/999|Smart Label]" in markdown
+    assert "\u200e" not in markdown
+    assert "\u2060" not in markdown
+
+
 def test_paste_trailing_pipe_url_does_not_create_double_delimiter(editor):
     mime = QMimeData()
     url = "http://www.foxnews.com"

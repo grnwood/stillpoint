@@ -1,4 +1,5 @@
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
@@ -86,4 +87,38 @@ def test_vi_command_prompt_rejects_invalid_substitution(monkeypatch, qapp: QAppl
     editor._open_vi_command_prompt()
 
     assert "Invalid substitution command." in messages
+    editor.close()
+
+
+def test_vi_insert_enter_does_not_activate_link(monkeypatch, qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.set_markdown("Example")
+    editor.set_vi_mode_enabled(True)
+    editor._enter_vi_insert_mode()
+    monkeypatch.setattr(editor, "_link_under_cursor", lambda *_args, **_kwargs: "https://example.com")
+
+    activated: list[str] = []
+    editor.linkActivated.connect(lambda link: activated.append(link))
+
+    QTest.keyClick(editor, Qt.Key_Return)
+
+    assert activated == []
+    editor.close()
+
+
+def test_vi_insert_ctrl_enter_activates_link(monkeypatch, qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.set_markdown("Example")
+    editor.set_vi_mode_enabled(True)
+    editor._enter_vi_insert_mode()
+    monkeypatch.setattr(editor, "_link_under_cursor", lambda *_args, **_kwargs: "https://example.com")
+
+    activated: list[str] = []
+    editor.linkActivated.connect(lambda link: activated.append(link))
+
+    QTest.keyClick(editor, Qt.Key_Return, Qt.ControlModifier)
+
+    assert activated == ["https://example.com"]
     editor.close()
