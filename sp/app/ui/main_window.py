@@ -6957,6 +6957,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         open_win = menu.addAction("Open in Editor Window")
         open_win.triggered.connect(lambda: self._open_page_editor_window(bookmark_path))
+        search_action = menu.addAction("Search From Here...")
+        search_action.triggered.connect(lambda: self._search_from_folder(bookmark_path))
         filter_action = menu.addAction("Filter nav from here")
         filter_action.triggered.connect(lambda: self._set_nav_filter(bookmark_path))
         menu.addSeparator()
@@ -8985,6 +8987,19 @@ class MainWindow(QMainWindow):
         self._ensure_left_panel_visible()
         self.left_tab_widget.setCurrentIndex(self.left_tab_widget.indexOf(self.search_tab))
         self.search_tab.focus_search()
+
+    def _search_from_folder(self, path: str) -> None:
+        """Open Search tab scoped to the selected folder path and focus query input."""
+        if not path:
+            return
+        normalized = self._file_path_to_folder(path if path.startswith("/") else f"/{path}") or "/"
+        try:
+            self.search_tab.current_subtree = normalized
+            self.search_tab.subtree_entry.setText(path_to_colon(normalized))
+            self.search_tab.clear_subtree_button.setEnabled(True)
+        except Exception:
+            pass
+        self._open_search_tab()
     
     def _is_search_index_populated(self) -> bool:
         """Check if the full-text search index has any content."""
@@ -12511,6 +12526,10 @@ class MainWindow(QMainWindow):
                 copy_link_action = menu.addAction("Copy Link to this Location")
                 copy_link_action.triggered.connect(
                     lambda checked=False, p=path, op=open_path: self._copy_tree_location_link(p, op)
+                )
+                search_from_here_action = menu.addAction("Search From Here...")
+                search_from_here_action.triggered.connect(
+                    lambda checked=False, p=path: self._search_from_folder(p)
                 )
                 toggle_bookmark_action = menu.addAction("Toggle Bookmark for this Page")
                 toggle_bookmark_action.triggered.connect(
