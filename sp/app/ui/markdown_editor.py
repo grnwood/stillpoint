@@ -6923,13 +6923,8 @@ class MarkdownEditor(QTextEdit):
     def _vi_insert_text(self, text: str) -> None:
         if not text:
             return
-        cursor = self.textCursor()
-        cursor.beginEditBlock()
-        if cursor.hasSelection():
-            cursor.removeSelectedText()
+        # Keep vi-mode paste aligned with Ctrl+V behavior.
         self._insert_markdown_text(text)
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
 
     def _vi_paste_buffer(self) -> Optional[str]:
         sys_clip = self._system_clipboard_text()
