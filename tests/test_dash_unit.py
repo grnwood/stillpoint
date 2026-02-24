@@ -1,4 +1,7 @@
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor
+from PySide6.QtTest import QTest
 
 from sp.app.ui.markdown_editor import MarkdownEditor
 
@@ -26,3 +29,20 @@ def editor(qapp):
 )
 def test_is_bullet_line(editor, input_text, expected):
     assert editor._is_bullet_line(input_text) == expected
+
+
+def test_backspace_clears_empty_checkbox_line(editor, qapp):
+    editor.show()
+    editor.setPlainText("() ")
+    editor._enforce_display_symbols()
+
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    editor.setTextCursor(cursor)
+
+    assert editor.toPlainText().startswith("☐")
+
+    QTest.keyClick(editor, Qt.Key_Backspace)
+    qapp.processEvents()
+
+    assert editor.toPlainText() == ""

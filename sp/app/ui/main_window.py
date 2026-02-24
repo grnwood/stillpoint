@@ -10710,9 +10710,6 @@ class MainWindow(QMainWindow):
         """Open a lightweight editor window for a single page (shared server)."""
         if not path or not self.vault_root:
             return
-        if self._remote_mode:
-            self._alert("Popup editor windows are not available in remote mode yet.")
-            return
         rel_path = self._normalize_editor_path(path)
         try:
             window = PageEditorWindow(
@@ -10722,6 +10719,11 @@ class MainWindow(QMainWindow):
                 read_only=self._read_only,
                 open_in_main_callback=lambda target, **kw: self._open_link_in_context(target, **kw),
                 local_auth_token=self._local_auth_token,
+                remote_mode=self._remote_mode,
+                auth_prompt=self._prompt_remote_login if self._remote_mode else None,
+                http_headers=dict(self.http.headers),
+                http_auth=self.http.auth,
+                verify_tls=self._verify_tls,
                 parent=None,
             )
             try:
@@ -12547,12 +12549,13 @@ class MainWindow(QMainWindow):
                 )
             if file_path:
                 add_menu_section("File & Location")
-                view_src = menu.addAction("Edit Page Source")
-                view_src.triggered.connect(lambda checked=False, fp=file_path: self._view_page_source(fp))
-                
-                # Open File Location
-                open_loc = menu.addAction("Open File Location")
-                open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
+                if not self._remote_mode:
+                    view_src = menu.addAction("Edit Page Source")
+                    view_src.triggered.connect(lambda checked=False, fp=file_path: self._view_page_source(fp))
+
+                    # Open File Location
+                    open_loc = menu.addAction("Open File Location")
+                    open_loc.triggered.connect(lambda checked=False, fp=file_path: self._open_tree_file_location(fp))
                 
                 add_menu_section("Insights & Output")
                 print_page_action = menu.addAction("Print Page…")

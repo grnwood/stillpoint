@@ -2993,9 +2993,13 @@ class MarkdownEditor(QTextEdit):
             if match_left != target_left:
                 label = candidate
         
-        # If no custom label, use target or a short label based on preference.
+        # If no custom label:
+        # - external URLs: keep empty label so storage is [url|] (avoids noisy [url|url])
+        # - internal links: use short/full label based on preference.
         if not label:
-            if (not is_http_url) and config.load_prefer_short_links():
+            if is_http_url:
+                label = ""
+            elif config.load_prefer_short_links():
                 trimmed = target.lstrip(":")
                 label = (trimmed.split(":")[-1] if trimmed else target)
             else:
@@ -3135,17 +3139,14 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
 
-        # 2) Rich HTML → convert links to markdown format
+        # 2) Rich HTML → convert to plain markdown-friendly text.
         if source.hasHtml():
             html = source.html()
-            # Check if HTML contains links - if so, parse it
-            if "<a " in html.lower():
-                plain_from_html = self._html_to_plaintext_with_links(html)
-                if plain_from_html:
-                    self._insert_markdown_text(plain_from_html)
-                    return
-            # No links - prefer plain text to avoid style noise
-            elif source.hasText():
+            plain_from_html = self._html_to_plaintext_with_links(html)
+            if plain_from_html:
+                self._insert_markdown_text(plain_from_html)
+                return
+            if source.hasText():
                 self._insert_markdown_text(source.text())
                 return
 
@@ -3160,9 +3161,12 @@ class MarkdownEditor(QTextEdit):
         if not text:
             return
         clean_text = self._sanitize_input_markdown(text)
+        clean_text = self._normalize_pasted_link_artifacts(clean_text)
         if not clean_text:
             return
-        self.textCursor().insertText(clean_text)
+        cursor = self.textCursor()
+        cursor.insertText(clean_text)
+        self.setTextCursor(cursor)
         try:
             has_wiki = bool(WIKI_LINK_STORAGE_PATTERN.search(clean_text))
             has_colon = any(COLON_LINK_PATTERN.match(line).hasMatch() for line in clean_text.splitlines())
@@ -3175,6 +3179,11 @@ class MarkdownEditor(QTextEdit):
             has_http = False
         if has_wiki or has_colon or has_camel or has_http:
             self._refresh_display()
+            # Keep caret out of hidden sentinel boundaries after link rendering.
+            try:
+                self._move_cursor_to_link_end_on_enter(self.textCursor())
+            except Exception:
+                pass
         if "![" in clean_text:
             self._render_images(self.toPlainText())
         # Paste can occasionally leave the trailing character with stale/default
@@ -3219,6 +3228,7 @@ class MarkdownEditor(QTextEdit):
                 self.parts: list[str] = []
                 self._link_href: Optional[str] = None
                 self._link_text: list[str] = []
+                self._ignored_depth = 0
 
             def _last_char(self) -> str:
                 return self.parts[-1][-1] if self.parts else ""
@@ -3229,6 +3239,9 @@ class MarkdownEditor(QTextEdit):
 
             def handle_starttag(self, tag: str, attrs) -> None:
                 tag = tag.lower()
+                if tag in {"style", "script"}:
+                    self._ignored_depth += 1
+                    return
                 if tag == "a":
                     self._link_href = dict(attrs).get("href", "")
                     self._link_text = []
@@ -3243,6 +3256,10 @@ class MarkdownEditor(QTextEdit):
 
             def handle_endtag(self, tag: str) -> None:
                 tag = tag.lower()
+                if tag in {"style", "script"}:
+                    if self._ignored_depth > 0:
+                        self._ignored_depth -= 1
+                    return
                 if tag == "a":
                     label = "".join(self._link_text).strip()
                     href = self._link_href or ""
@@ -3259,6 +3276,8 @@ class MarkdownEditor(QTextEdit):
                     self._ensure_newline()
 
             def handle_data(self, data: str) -> None:
+                if self._ignored_depth > 0:
+                    return
                 if self._link_href is not None:
                     self._link_text.append(data)
                 else:
@@ -3280,14 +3299,83 @@ class MarkdownEditor(QTextEdit):
         text = (link or "").strip()
         if LINK_SENTINEL in text:
             text = text.split(LINK_SENTINEL, 1)[0]
+        # Guard against leaked wiki delimiter when copying/pasting displayed [url|] links.
+        if text.startswith(("http://", "https://")) and text.endswith("|"):
+            text = text.rstrip("|")
         return text
+
+    def _normalize_pasted_link_artifacts(self, text: str) -> str:
+        """Repair common malformed Teams/Jira link artifacts into stable wiki links."""
+        if not text or "[" not in text or "|" not in text:
+            return text
+
+        # Merge split Jira-style artifacts:
+        # [url|][label|url] -> [url|label]
+        text = re.sub(
+            r"\[(?P<url>https?://[^\]|]+)\|\]\[\s*(?P<label>[^\]|][^\]]*?)\s*\|\s*(?P=url)\]",
+            lambda m: f"[{m.group('url')}|{(m.group('label') or '').strip()}]",
+            text,
+        )
+        # [url|]url -> [url|url]
+        text = re.sub(
+            r"\[(?P<url>https?://[^\]|]+)\|\](?P=url)",
+            lambda m: f"[{m.group('url')}|{m.group('url')}]",
+            text,
+        )
+        # [url|[url|]] -> [url|]
+        text = re.sub(
+            r"\[(?P<url>https?://[^\]|]+)\|\[(?P=url)\|\]\]",
+            lambda m: f"[{m.group('url')}|]",
+            text,
+        )
+        # [url|label][url|] -> [url|label]
+        text = re.sub(
+            r"\[(?P<url>https?://[^\]|]+)\|(?P<label>[^\]]*)\]\[(?P=url)\|\]",
+            lambda m: f"[{m.group('url')}|{m.group('label')}]",
+            text,
+        )
+
+        link_re = re.compile(r"^https?://[^\s\[\]<>]+$")
+
+        def _clean_url(value: str) -> str:
+            return (value or "").strip().strip("[]()")
+
+        def _clean_label(value: str) -> str:
+            out = (value or "").replace(LINK_SENTINEL, "").strip()
+            out = out.strip("[]")
+            out = re.sub(r"\s+", " ", out)
+            return out
+
+        def _rewrite(match: re.Match[str]) -> str:
+            raw = match.group(0)
+            left = _clean_label(match.group("left"))
+            right = _clean_label(match.group("right"))
+            left_url = _clean_url(left)
+            right_url = _clean_url(right)
+            is_left_url = bool(link_re.match(left_url))
+            is_right_url = bool(link_re.match(right_url))
+            if not (is_left_url or is_right_url):
+                return raw
+            if is_left_url and not is_right_url:
+                return f"[{left_url}|{right}]"
+            if is_right_url and not is_left_url:
+                return f"[{right_url}|{left}]"
+            # Both sides look like URLs; preserve left as target and right as label.
+            label = right_url
+            return f"[{left_url}|{label}]"
+
+        return re.sub(
+            r"\[(?P<left>[^\[\]\n|]{0,600})\|(?P<right>[^\[\]\n|]{0,600})\]",
+            _rewrite,
+            text,
+        )
 
     def _wrap_plain_http_links(self, text: str) -> str:
         """Convert bare HTTP(S) URLs into wiki format [url|] to enable sentinel rendering."""
         if not text or "http" not in text:
             return text
 
-        pattern = re.compile(rf"(?<!\[)(?<!\()(https?://[^\s<>\[\]\(\){LINK_SENTINEL}]+)")
+        pattern = re.compile(rf"(?<!\[)(?<!\()(?<!\|)(https?://[^\s<>\[\]\(\){LINK_SENTINEL}]+)")
 
         def repl(match: re.Match[str]) -> str:
             url = match.group(1)
@@ -4248,6 +4336,11 @@ class MarkdownEditor(QTextEdit):
             if self._handle_task_enter(task_indent, task_content):
                 event.accept()
                 return
+        # Backspace on an empty task line should remove the checkbox marker.
+        if is_task and event.key() == Qt.Key_Backspace and not meaningful_modifiers:
+            if self._handle_task_backspace(task_indent, task_content):
+                event.accept()
+                return
         # Esc: vi-mode exit or terminate bullet mode when vi is disabled
         if event.key() == Qt.Key_Escape:
             if self._handle_vi_escape():
@@ -4655,14 +4748,15 @@ class MarkdownEditor(QTextEdit):
                 print_page_action.triggered.connect(
                     lambda: self.printPageRequested.emit(self._current_path or "")
                 )
-                edit_src_action = page_sub.addAction("Edit Page Source")
-                edit_src_action.triggered.connect(
-                    lambda: self.editPageSourceRequested.emit(self._current_path or "")
-                )
-                open_loc_action = page_sub.addAction("Open Page Location")
-                open_loc_action.triggered.connect(
-                    lambda: self.openFileLocationRequested.emit(self._current_path or "")
-                )
+                if not self._remote_mode:
+                    edit_src_action = page_sub.addAction("Edit Page Source")
+                    edit_src_action.triggered.connect(
+                        lambda: self.editPageSourceRequested.emit(self._current_path or "")
+                    )
+                    open_loc_action = page_sub.addAction("Open Page Location")
+                    open_loc_action.triggered.connect(
+                        lambda: self.openFileLocationRequested.emit(self._current_path or "")
+                    )
                 open_popup_action = page_sub.addAction("Open Page in New Editor")
                 open_popup_action.setEnabled(bool(self._open_in_window_callback))
                 if self._open_in_window_callback:
@@ -4742,14 +4836,15 @@ class MarkdownEditor(QTextEdit):
             print_page_action.triggered.connect(
                 lambda: self.printPageRequested.emit(self._current_path or "")
             )
-            edit_src_action = page_sub.addAction("Edit Page Source")
-            edit_src_action.triggered.connect(
-                lambda: self.editPageSourceRequested.emit(self._current_path or "")
-            )
-            open_loc_action = page_sub.addAction("Open Page Location")
-            open_loc_action.triggered.connect(
-                lambda: self.openFileLocationRequested.emit(self._current_path or "")
-            )
+            if not self._remote_mode:
+                edit_src_action = page_sub.addAction("Edit Page Source")
+                edit_src_action.triggered.connect(
+                    lambda: self.editPageSourceRequested.emit(self._current_path or "")
+                )
+                open_loc_action = page_sub.addAction("Open Page Location")
+                open_loc_action.triggered.connect(
+                    lambda: self.openFileLocationRequested.emit(self._current_path or "")
+                )
             open_popup_action = page_sub.addAction("Open Page in New Editor")
             open_popup_action.setEnabled(bool(self._open_in_window_callback))
             if self._open_in_window_callback:
@@ -4984,6 +5079,9 @@ class MarkdownEditor(QTextEdit):
         cursor = self.textCursor()
         if not cursor.hasSelection():
             return ""
+        selected_link_markdown = self._selected_display_link_markdown(cursor)
+        if selected_link_markdown:
+            return selected_link_markdown
         # Preserve inline images and decode display links.
         text = self._vi_selection_as_markdown(cursor)
         if text is None:
@@ -4993,12 +5091,60 @@ class MarkdownEditor(QTextEdit):
             text = self._from_display(text)
         except Exception:
             pass
+        # Safety: copied markdown payload should never contain display sentinels.
+        text = text.replace(LINK_SENTINEL, "")
         return text
+
+    def _selected_display_link_markdown(self, cursor: QTextCursor) -> Optional[str]:
+        """Return storage markdown for a selected rendered link label, if selection matches one."""
+        if not cursor.hasSelection():
+            return None
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        if end <= start:
+            return None
+        text = self.toPlainText()
+        for m in WIKI_LINK_DISPLAY_PATTERN.finditer(text):
+            raw_link = m.group("link")
+            label = m.group("label")
+            link_start = m.start()
+            link_end = m.end()
+            link_part_start = m.start("link")
+            link_part_end = m.end("link")
+            label_part_start = m.start("label")
+            label_part_end = m.end("label")
+            if label:
+                visible_start = label_part_start
+                visible_end = label_part_end
+            else:
+                visible_start = link_part_start
+                visible_end = link_part_end
+                if raw_link.endswith("|") and visible_end > visible_start:
+                    visible_end -= 1
+
+            # Match either full rendered link selection or exact visible label selection.
+            is_full_link = start <= link_start and end >= link_end
+            is_visible_only = start == visible_start and end == visible_end
+            # Also treat mixed target+label selections inside one rendered link as a full link copy.
+            # This is the common case that otherwise flattens to ":targetlabel".
+            spans_link_and_label = False
+            if label:
+                overlap_link = start < link_part_end and end > link_part_start
+                overlap_label = start < label_part_end and end > label_part_start
+                spans_link_and_label = overlap_link and overlap_label
+
+            if not (is_full_link or is_visible_only or spans_link_and_label):
+                continue
+
+            link = raw_link[:-1] if (not label and raw_link.endswith("|")) else raw_link
+            return f"[{link}|{label}]"
+        return None
 
     def _copy_selection_to_clipboard(self) -> None:
         markdown_text = self._selection_as_markdown_for_clipboard()
         if not markdown_text:
             return
+        markdown_text = markdown_text.replace(LINK_SENTINEL, "")
         plain_text = self._sanitize_for_clipboard(markdown_text)
         mime_data = QMimeData()
         mime_data.setText(plain_text)
@@ -5377,6 +5523,13 @@ class MarkdownEditor(QTextEdit):
                             visible_end = label_end
                         
                         if key == Qt.Key_Right:
+                            # If caret is immediately before the link structure,
+                            # jump straight to visible text.
+                            if idx > 0 and rel_pos == idx - 1:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + visible_start)
+                                self.setTextCursor(new_cursor)
+                                return True
                             # Moving right: if cursor is in the hidden part, jump to visible start
                             if idx <= rel_pos < visible_start:
                                 new_cursor = QTextCursor(cursor)
@@ -5391,16 +5544,30 @@ class MarkdownEditor(QTextEdit):
                                 return True
                         
                         elif key == Qt.Key_Left:
-                            # Moving left: if cursor is in the visible part, jump to before the link
-                            if visible_start < rel_pos <= visible_end:
+                            # If caret is immediately after the full link structure,
+                            # jump straight to the end of visible text.
+                            if rel_pos == label_end + 1:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + visible_end)
+                                self.setTextCursor(new_cursor)
+                                return True
+                            # If at start of visible part, jump before the link.
+                            if rel_pos == visible_start:
                                 new_cursor = QTextCursor(cursor)
                                 new_cursor.setPosition(block.position() + idx)
                                 self.setTextCursor(new_cursor)
                                 return True
-                            # If at start of visible part, jump before the link
-                            elif rel_pos == visible_start:
+                            # If cursor is in hidden sentinel area to the left, jump before link.
+                            if idx < rel_pos < visible_start:
                                 new_cursor = QTextCursor(cursor)
                                 new_cursor.setPosition(block.position() + idx)
+                                self.setTextCursor(new_cursor)
+                                return True
+                            # If cursor is in hidden sentinel area on the right edge,
+                            # jump to end of visible text.
+                            if visible_end < rel_pos <= label_end:
+                                new_cursor = QTextCursor(cursor)
+                                new_cursor.setPosition(block.position() + visible_end)
                                 self.setTextCursor(new_cursor)
                                 return True
                         
@@ -6610,13 +6777,13 @@ class MarkdownEditor(QTextEdit):
     def _vi_selected_text_or_line(self) -> Optional[str]:
         cursor = QTextCursor(self.textCursor())
         if cursor.hasSelection():
-            text = self._vi_selection_as_markdown(cursor)
+            text = self._vi_selection_text(cursor)
         else:
             block = cursor.block()
             if not block.isValid():
                 return None
             cursor.select(QTextCursor.LineUnderCursor)
-            text = self._vi_selection_as_markdown(cursor)
+            text = self._vi_selection_text(cursor)
         if text is None:
             return None
         normalized = text.replace("\u2029", "\n")
@@ -6653,7 +6820,11 @@ class MarkdownEditor(QTextEdit):
         return "".join(parts)
 
     def _vi_selection_text(self, cursor: QTextCursor) -> Optional[str]:
-        text = self._vi_selection_as_markdown(cursor)
+        selected_link_markdown = self._selected_display_link_markdown(cursor)
+        if selected_link_markdown:
+            text = selected_link_markdown
+        else:
+            text = self._vi_selection_as_markdown(cursor)
         if text is None:
             if not cursor.hasSelection():
                 return None
@@ -7062,9 +7233,22 @@ class MarkdownEditor(QTextEdit):
         This allows copying blocks with headings to work correctly while still protecting
         against sentinel corruption from other sources.
         """
-        # Remove rogue sentinels: those that appear after any non-whitespace character
-        # This preserves sentinels at line start (valid headings) but strips embedded ones
-        cleaned = ROGUE_SENTINEL_PATTERN.sub("", text)
+        # Normalize common clipboard line separator and strip low control chars.
+        cleaned = text.replace("\u2029", "\n")
+        cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+", "", cleaned)
+        # Remove invisible characters that can destabilize parsing.
+        cleaned = re.sub(r"[\u200B-\u200F\u2028\u202A-\u202E\uFEFF\uFFFC]", "", cleaned)
+        # Strip link sentinels from pasted input; those should only exist in display text.
+        cleaned = cleaned.replace(LINK_SENTINEL, "")
+        # Preserve heading sentinels only at line start; drop rogue embedded ones.
+        cleaned = ROGUE_SENTINEL_PATTERN.sub("", cleaned)
+        # Remove any other private-use glyphs while preserving valid heading sentinels.
+        heading_set = set(HEADING_SENTINEL_CHARS)
+        cleaned = "".join(
+            ch
+            for ch in cleaned
+            if not (0xE000 <= ord(ch) <= 0xF8FF and ch not in heading_set)
+        )
         return cleaned
     
     def _encode_heading(self, match: re.Match[str]) -> str:
@@ -7843,6 +8027,40 @@ class MarkdownEditor(QTextEdit):
         cursor.insertText(indent + marker)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+        return True
+
+    def _handle_task_backspace(self, indent: str, content: str) -> bool:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False
+        if content.strip():
+            return False
+
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        text = block.text()
+        pos_in_block = cursor.position() - block.position()
+
+        marker_match = re.match(r"^(\s*)(?:[☐☑]\s*|[-*]\s*\[[ xX]\]\s*)(.*)$", text)
+        if not marker_match:
+            return False
+        if (marker_match.group(2) or "").strip():
+            return False
+
+        marker_end = len(text) - len(marker_match.group(2) or "")
+        if pos_in_block < marker_end:
+            return False
+
+        line_cursor = QTextCursor(block)
+        line_cursor.beginEditBlock()
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(indent)
+        line_cursor.endEditBlock()
+
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(block.position() + len(indent))
+        self.setTextCursor(new_cursor)
         return True
 
     def _maybe_expand_checkbox(self) -> bool:

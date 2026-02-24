@@ -76,6 +76,11 @@ class PageEditorWindow(QMainWindow):
         read_only: bool,
         open_in_main_callback: Callable[[str], None],
         local_auth_token: Optional[str] = None,
+        remote_mode: bool = False,
+        auth_prompt: Optional[Callable[[], bool]] = None,
+        http_headers: Optional[dict[str, str]] = None,
+        http_auth: Optional[httpx.Auth] = None,
+        verify_tls: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -89,9 +94,19 @@ class PageEditorWindow(QMainWindow):
         self._source_path = page_path  # lock the target path for all saves
         self.page_path = page_path
         self._read_only = read_only
+        self._remote_mode = bool(remote_mode)
+        self._auth_prompt = auth_prompt
         self._open_in_main = open_in_main_callback
-        headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
-        self.http = httpx.Client(base_url=self.api_base, timeout=10.0, headers=headers)
+        headers = dict(http_headers) if http_headers else None
+        if headers is None and local_auth_token:
+            headers = {"X-Local-UI-Token": local_auth_token}
+        self.http = httpx.Client(
+            base_url=self.api_base,
+            timeout=10.0,
+            headers=headers,
+            auth=http_auth,
+            verify=verify_tls,
+        )
         self._badge_base_style = (
             "border: 1px solid "
             f"{theme_value('page_editor_window.badge.border', '#666666')}; "
@@ -203,6 +218,14 @@ class PageEditorWindow(QMainWindow):
         
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
+
+    def _api_post(self, path: str, payload: dict) -> httpx.Response:
+        """POST with one remote re-auth retry on 401."""
+        resp = self.http.post(path, json=payload)
+        if resp.status_code == 401 and self._remote_mode and self._auth_prompt:
+            if self._auth_prompt():
+                resp = self.http.post(path, json=payload)
+        return resp
 
     def _apply_theme_palette(self) -> None:
         bg = theme_value("page_editor_window.base.bg", None)
@@ -389,7 +412,7 @@ class PageEditorWindow(QMainWindow):
             tracer.mark("api read start")
         print(f"[StillPoint Popup] Read request path={self._source_path}")
         try:
-            resp = self.http.post("/api/file/read", json={"path": self._source_path})
+            resp = self._api_post("/api/file/read", {"path": self._source_path})
             resp.raise_for_status()
             content = resp.json().get("content", "")
             if tracer:
@@ -467,7 +490,7 @@ class PageEditorWindow(QMainWindow):
             f"bytes={payload_bytes}"
         )
         try:
-            resp = self.http.post("/api/file/write", json=payload)
+            resp = self._api_post("/api/file/write", payload)
             resp.raise_for_status()
             print(f"[StillPoint Popup] Write OK {self._source_path} status={resp.status_code}")
         except httpx.HTTPError as exc:
