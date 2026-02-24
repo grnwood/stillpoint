@@ -150,12 +150,18 @@ class PreferencesDialog(QDialog):
         self.feature_homebase_vaults_checkbox = QCheckBox("Enable Homebase Vaults")
         self.feature_homebase_vaults_checkbox.setChecked(config.load_global_feature_homebase_vaults_enabled())
         general_layout.addWidget(self.feature_homebase_vaults_checkbox)
+        self.feature_keep_search_index_sync_checkbox = QCheckBox("Keep search index in sync periodically")
+        self.feature_keep_search_index_sync_checkbox.setChecked(
+            config.load_global_feature_keep_search_index_sync_enabled(default=False)
+        )
+        general_layout.addWidget(self.feature_keep_search_index_sync_checkbox)
         self.feature_tasks_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_calendar_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_tags_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_remote_vaults_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_homebase_vaults_checkbox.toggled.connect(self._warn_restart_required)
+        self.feature_keep_search_index_sync_checkbox.toggled.connect(self._warn_restart_required)
         add_divider(general_layout)
 
         general_layout.addWidget(QLabel("<b>Capture</b>"))
@@ -1043,6 +1049,7 @@ class PreferencesDialog(QDialog):
         config.save_feature_tags_enabled(self.feature_tags_checkbox.isChecked())
         config.save_feature_remote_vaults_enabled(self.feature_remote_vaults_checkbox.isChecked())
         config.save_feature_homebase_vaults_enabled(self.feature_homebase_vaults_checkbox.isChecked())
+        config.save_feature_keep_search_index_sync_enabled(self.feature_keep_search_index_sync_checkbox.isChecked())
         selected_theme = self.theme_combo.currentData() or "default"
         if not self._validate_theme_selection(selected_theme):
             return

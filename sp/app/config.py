@@ -1253,6 +1253,20 @@ def save_feature_homebase_vaults_enabled(enabled: bool) -> None:
     _update_global_config({"feature_homebase_vaults_enabled": bool(enabled)})
 
 
+def load_global_feature_keep_search_index_sync_enabled(default: bool = False) -> bool:
+    """Return whether periodic search-index sync is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_keep_search_index_sync_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def save_feature_keep_search_index_sync_enabled(enabled: bool) -> None:
+    """Persist preference for periodic search-index sync."""
+    _update_global_config({"feature_keep_search_index_sync_enabled": bool(enabled)})
+
+
 def load_homebase_vault_profiles() -> list[dict[str, Any]]:
     """Load saved Homebase vault connection profiles."""
     payload = _read_global_config()

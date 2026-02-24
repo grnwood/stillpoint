@@ -2,6 +2,7 @@
 
 import re
 import sqlite3
+import time
 from pathlib import PurePosixPath
 from typing import Optional
 
@@ -14,52 +15,82 @@ def init_search_db(conn: sqlite3.Connection) -> None:
     pass
 
 
-def upsert_page(conn: sqlite3.Connection, path: str, mtime: int, content: str) -> None:
+def upsert_page(conn: sqlite3.Connection, path: str, mtime: int, content: str) -> bool:
     """Insert or update a page in the search index."""
-    try:
-        # Insert or update pages_search_index
-        conn.execute(
-            """
-            INSERT INTO pages_search_index (path, mtime)
-            VALUES (?, ?)
-            ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime
-            """,
-            (path, mtime),
-        )
-        
-        # Get the row id
-        row_id = conn.execute(
-            "SELECT id FROM pages_search_index WHERE path = ?", (path,)
-        ).fetchone()[0]
-        
-        # Insert or replace in FTS table
-        conn.execute(
-            "INSERT OR REPLACE INTO pages_search_fts(rowid, content) VALUES (?, ?)",
-            (row_id, content),
-        )
-        
-        conn.commit()
-    except sqlite3.OperationalError as e:
-        print(f"[SearchIndex] Failed to upsert page {path}: {e}")
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Insert or update pages_search_index
+            conn.execute(
+                """
+                INSERT INTO pages_search_index (path, mtime)
+                VALUES (?, ?)
+                ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime
+                """,
+                (path, mtime),
+            )
 
+            # Get the row id
+            row_id = conn.execute(
+                "SELECT id FROM pages_search_index WHERE path = ?", (path,)
+            ).fetchone()[0]
 
-def delete_page(conn: sqlite3.Connection, path: str) -> None:
-    """Remove a page from the search index."""
-    try:
-        # Get the row id
-        row = conn.execute(
-            "SELECT id FROM pages_search_index WHERE path = ?", (path,)
-        ).fetchone()
-        
-        if row:
-            row_id = row[0]
-            # Delete from FTS table
-            conn.execute("DELETE FROM pages_search_fts WHERE rowid = ?", (row_id,))
-            # Delete from index table
-            conn.execute("DELETE FROM pages_search_index WHERE id = ?", (row_id,))
+            # Insert or replace in FTS table
+            conn.execute(
+                "INSERT OR REPLACE INTO pages_search_fts(rowid, content) VALUES (?, ?)",
+                (row_id, content),
+            )
+
             conn.commit()
-    except sqlite3.OperationalError as e:
-        print(f"[SearchIndex] Failed to delete page {path}: {e}")
+            return True
+        except sqlite3.OperationalError as e:
+            err = str(e).lower()
+            if "locked" in err and attempt < max_attempts:
+                backoff = 0.10 * attempt
+                print(
+                    "[SearchIndex] database locked during upsert "
+                    f"path={path}; backing off {int(backoff * 1000)}ms "
+                    f"(attempt {attempt}/{max_attempts})"
+                )
+                time.sleep(backoff)
+                continue
+            print(f"[SearchIndex] Failed to upsert page {path}: {e}")
+            return False
+    return False
+
+
+def delete_page(conn: sqlite3.Connection, path: str) -> bool:
+    """Remove a page from the search index."""
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Get the row id
+            row = conn.execute(
+                "SELECT id FROM pages_search_index WHERE path = ?", (path,)
+            ).fetchone()
+
+            if row:
+                row_id = row[0]
+                # Delete from FTS table
+                conn.execute("DELETE FROM pages_search_fts WHERE rowid = ?", (row_id,))
+                # Delete from index table
+                conn.execute("DELETE FROM pages_search_index WHERE id = ?", (row_id,))
+                conn.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            err = str(e).lower()
+            if "locked" in err and attempt < max_attempts:
+                backoff = 0.10 * attempt
+                print(
+                    "[SearchIndex] database locked during delete "
+                    f"path={path}; backing off {int(backoff * 1000)}ms "
+                    f"(attempt {attempt}/{max_attempts})"
+                )
+                time.sleep(backoff)
+                continue
+            print(f"[SearchIndex] Failed to delete page {path}: {e}")
+            return False
+    return False
 
 
 def delete_tree(conn: sqlite3.Connection, folder_path: str) -> None:

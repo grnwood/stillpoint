@@ -817,6 +817,7 @@ from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from .mode_window import ModeWindow
 from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
+from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
 
 
@@ -1489,7 +1490,6 @@ def logNav(message: str) -> None:
 
 
 class MainWindow(QMainWindow):
-
     def __init__(
         self,
         api_base: str,
@@ -1758,6 +1758,17 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
+        self._search_sync = PeriodicSearchIndexSync(
+            self,
+            is_enabled=lambda: config.load_global_feature_keep_search_index_sync_enabled(default=False),
+            is_remote_mode=lambda: self._remote_mode,
+            get_vault_root=lambda: self.vault_root,
+            get_db_path=config._vault_db_path,
+            log_fn=_log_search,
+        )
+        self._search_sync.statusReady.connect(
+            lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
+        )
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(self._on_editor_focus_lost)
@@ -4080,6 +4091,11 @@ class MainWindow(QMainWindow):
             self._action_homebase_sync_now.setVisible(self._is_homebase_mode_enabled())
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
+        self._update_periodic_search_sync_timer()
+
+    def _update_periodic_search_sync_timer(self) -> None:
+        """Enable/disable periodic local search index sync based on mode and preferences."""
+        self._search_sync.update_timer()
 
     def _update_user_management_ui(self) -> None:
         if not hasattr(self, "_action_manage_users"):
@@ -6316,6 +6332,7 @@ class MainWindow(QMainWindow):
                 
                 # Register this process's window for tray menu (cross-process)
                 self._register_process_window()
+                self._update_periodic_search_sync_timer()
                 
                 return True
         finally:
@@ -9812,6 +9829,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.update_links_on_index = True
             self._setup_quick_capture_shortcut(show_error=True)
+            self._update_periodic_search_sync_timer()
         try:
             self.editor.set_pygments_style(config.load_pygments_style("monokai"))
         except Exception:
@@ -15135,35 +15153,39 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        
-        if self._remote_mode:
-            # Remote reindex via API
-            self._reindex_remote_vault(rebuild_search=False)
-        else:
-            # Local reindex
-            if not config.has_active_vault():
-                self._alert("Select a vault before rebuilding the index.")
-                return
-            print("[UI] Rebuild index from disk start")
-            self.statusBar().showMessage("Reindexing vault from files...", 0)
-            try:
-                # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
-                config.set_active_vault(None)
-                db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
+
+        self._search_sync.suspend("manual rebuild index")
+        try:
+            if self._remote_mode:
+                # Remote reindex via API
+                self._reindex_remote_vault(rebuild_search=False)
+            else:
+                # Local reindex
+                if not config.has_active_vault():
+                    self._alert("Select a vault before rebuilding the index.")
+                    return
+                print("[UI] Rebuild index from disk start")
+                self.statusBar().showMessage("Reindexing vault from files...", 0)
                 try:
-                    db_path.unlink()
-                except FileNotFoundError:
-                    pass
-                config.set_active_vault(self.vault_root)
-            except Exception as exc:
-                self.statusBar().showMessage("Reindex failed", 4000)
-                self._alert(f"Failed to reindex: {exc}")
-                print(f"[UI] Reindex failed: {exc}")
-                return
-            print("[UI] Rebuild index from disk: indexing files")
-            self._reindex_vault(show_progress=True)
-            self.statusBar().showMessage("Reindex complete", 4000)
-            print("[UI] Reindex from files complete")
+                    # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
+                    config.set_active_vault(None)
+                    db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
+                    try:
+                        db_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    config.set_active_vault(self.vault_root)
+                except Exception as exc:
+                    self.statusBar().showMessage("Reindex failed", 4000)
+                    self._alert(f"Failed to reindex: {exc}")
+                    print(f"[UI] Reindex failed: {exc}")
+                    return
+                print("[UI] Rebuild index from disk: indexing files")
+                self._reindex_vault(show_progress=True)
+                self.statusBar().showMessage("Reindex complete", 4000)
+                print("[UI] Reindex from files complete")
+        finally:
+            self._search_sync.resume("manual rebuild index")
 
     def _rebuild_vault_search_index(self) -> None:
         """Rebuild the full-text search index from source files."""
@@ -15181,79 +15203,83 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        
-        if self._remote_mode:
-            # Remote reindex via API
-            self._reindex_remote_vault(rebuild_search=True)
-        else:
-            # Local reindex
-            if not config.has_active_vault():
-                self._alert("Select a vault before rebuilding the search index.")
-                return
-            db_path = config._vault_db_path()
-            if not db_path:
-                self._alert("No vault database found for search index.")
-                return
-            self.statusBar().showMessage("Rebuilding search index...", 0)
 
-            root = Path(self.vault_root)
-            txt_files = []
-            for suffix in PAGE_SUFFIXES:
-                for page_file in sorted(root.rglob(f"*{suffix}")):
-                    if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
-                        continue
-                    txt_files.append(page_file)
+        self._search_sync.suspend("manual rebuild search index")
+        try:
+            if self._remote_mode:
+                # Remote reindex via API
+                self._reindex_remote_vault(rebuild_search=True)
+            else:
+                # Local reindex
+                if not config.has_active_vault():
+                    self._alert("Select a vault before rebuilding the search index.")
+                    return
+                db_path = config._vault_db_path()
+                if not db_path:
+                    self._alert("No vault database found for search index.")
+                    return
+                self.statusBar().showMessage("Rebuilding search index...", 0)
 
-            progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
-            progress.setWindowTitle("Search Index")
-            progress.setCancelButton(None)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.show()
+                root = Path(self.vault_root)
+                txt_files = []
+                for suffix in PAGE_SUFFIXES:
+                    for page_file in sorted(root.rglob(f"*{suffix}")):
+                        if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                            continue
+                        txt_files.append(page_file)
 
-            import sqlite3
+                progress = QProgressDialog("Indexing search...", None, 0, len(txt_files), self)
+                progress.setWindowTitle("Search Index")
+                progress.setCancelButton(None)
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setMinimumDuration(0)
+                progress.show()
 
-            conn = sqlite3.connect(db_path, check_same_thread=False)
-            try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS pages_search_index (
-                        id INTEGER PRIMARY KEY,
-                        path TEXT NOT NULL UNIQUE,
-                        mtime INTEGER NOT NULL
-                    )
-                    """
-                )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
+                import sqlite3
+
+                conn = sqlite3.connect(db_path, check_same_thread=False)
                 try:
                     conn.execute(
-                        "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                        """
+                        CREATE TABLE IF NOT EXISTS pages_search_index (
+                            id INTEGER PRIMARY KEY,
+                            path TEXT NOT NULL UNIQUE,
+                            mtime INTEGER NOT NULL
+                        )
+                        """
                     )
-                except sqlite3.OperationalError as exc:
-                    self.statusBar().showMessage("Search index unavailable", 4000)
-                    self._alert(f"Search index unavailable: {exc}")
-                    return
-                conn.execute("DELETE FROM pages_search_fts")
-                conn.execute("DELETE FROM pages_search_index")
-                conn.commit()
-
-                for idx, txt_file in enumerate(txt_files, start=1):
-                    rel_path = txt_file.relative_to(root)
-                    path_str = f"/{rel_path.as_posix()}"
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_search_path ON pages_search_index(path)")
                     try:
-                        content = txt_file.read_text(encoding="utf-8")
-                        mtime = int(txt_file.stat().st_mtime)
-                        search_index.upsert_page(conn, path_str, mtime, content)
-                    except Exception:
-                        continue
-                    progress.setValue(idx)
-                    QApplication.processEvents()
-            finally:
-                conn.close()
-                progress.close()
+                        conn.execute(
+                            "CREATE VIRTUAL TABLE IF NOT EXISTS pages_search_fts USING fts5(content, content_rowid='id')"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        self.statusBar().showMessage("Search index unavailable", 4000)
+                        self._alert(f"Search index unavailable: {exc}")
+                        return
+                    conn.execute("DELETE FROM pages_search_fts")
+                    conn.execute("DELETE FROM pages_search_index")
+                    conn.commit()
 
-            page_count = len(txt_files)
-            self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
+                    for idx, txt_file in enumerate(txt_files, start=1):
+                        rel_path = txt_file.relative_to(root)
+                        path_str = f"/{rel_path.as_posix()}"
+                        try:
+                            content = txt_file.read_text(encoding="utf-8")
+                            mtime = int(txt_file.stat().st_mtime)
+                            search_index.upsert_page(conn, path_str, mtime, content)
+                        except Exception:
+                            continue
+                        progress.setValue(idx)
+                        QApplication.processEvents()
+                finally:
+                    conn.close()
+                    progress.close()
+
+                page_count = len(txt_files)
+                self.statusBar().showMessage(f"Search index rebuilt: {page_count} pages", 3000)
+        finally:
+            self._search_sync.resume("manual rebuild search index")
 
     def _reindex_remote_vault(self, rebuild_search: bool = False, on_complete=None) -> None:
         """Start remote reindex job and poll for progress."""
@@ -15949,6 +15975,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         # Stop any pending timers
         self.autosave_timer.stop()
+        self._search_sync.stop()
         self.geometry_save_timer.stop()
         self._shutdown_homebase_sync()
         
