@@ -14987,7 +14987,9 @@ class MainWindow(QMainWindow):
         if mode == "history" and target:
             self._exit_vi_insert_on_activate()
             self._remember_history_cursor()
-            self._open_file(target, add_to_history=False, force=True, restore_history_cursor=True)
+            # Ctrl+Tab should behave like true MRU switching: the selected page
+            # becomes most-recent so alternating pages stays at the top.
+            self._open_file(target, add_to_history=True, force=True, restore_history_cursor=True)
         elif mode == "heading" and target:
             try:
                 pos = int(target.get("position", 0))
