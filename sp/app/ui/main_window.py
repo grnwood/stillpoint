@@ -1484,6 +1484,64 @@ class MenuCommandBar(QWidget):
         self.closed.emit()
 
 
+class BookmarkChickletButton(QPushButton):
+    dragStartRequested = Signal(str)
+    dragMoveRequested = Signal(str, QPoint)
+    dragEndRequested = Signal(str, QPoint)
+
+    def __init__(self, bookmark_path: str, label: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(label, parent)
+        self.bookmark_path = bookmark_path
+        self._press_pos: Optional[QPoint] = None
+        self._drag_active = False
+        self._drag_hold_timer = QTimer(self)
+        self._drag_hold_timer.setSingleShot(True)
+        self._drag_hold_timer.setInterval(220)
+        self._drag_hold_timer.timeout.connect(self._activate_drag)
+
+    def _activate_drag(self) -> None:
+        if self.isDown():
+            self._drag_active = True
+            self.dragStartRequested.emit(self.bookmark_path)
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            try:
+                self._press_pos = event.position().toPoint()
+            except Exception:
+                self._press_pos = event.pos()
+            self._drag_active = False
+            self._drag_hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if self._drag_active and (event.buttons() & Qt.LeftButton):
+            self.dragMoveRequested.emit(self.bookmark_path, event.globalPosition().toPoint())
+            event.accept()
+            return
+        if self._press_pos is not None and (event.buttons() & Qt.LeftButton) and not self._drag_active:
+            try:
+                distance = (event.position().toPoint() - self._press_pos).manhattanLength()
+            except Exception:
+                distance = (event.pos() - self._press_pos).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._drag_hold_timer.stop()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        self._drag_hold_timer.stop()
+        if event.button() == Qt.LeftButton and self._drag_active:
+            self.setDown(False)
+            self.dragEndRequested.emit(self.bookmark_path, event.globalPosition().toPoint())
+            self._drag_active = False
+            self._press_pos = None
+            event.accept()
+            return
+        self._drag_active = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+
 def logNav(message: str) -> None:
     """Log navigation operations when navigation logging is enabled."""
     _log_navigation(f"[Nav] {message}")
@@ -1629,6 +1687,9 @@ class MainWindow(QMainWindow):
         # Bookmarks
         self.bookmarks: list[str] = []
         self.bookmark_buttons: dict[str, QPushButton] = {}
+        self._bookmark_drag_source_path: Optional[str] = None
+        self._bookmark_drag_insert_index: Optional[int] = None
+        self._bookmark_drag_divider: Optional[QFrame] = None
         
         # History buttons
         self.history_buttons: list[QPushButton] = []
@@ -6597,6 +6658,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_bookmark_buttons(self) -> None:
         """Refresh the bookmark buttons in the toolbar."""
+        self._clear_bookmark_drag_state()
         try:
             self.bookmark_scroll_area.horizontalScrollBar().setValue(0)
         except Exception:
@@ -6612,14 +6674,17 @@ class MainWindow(QMainWindow):
             # Extract leaf node name (page name)
             page_name = Path(bookmark_path).stem
             
-            # Create button as a QPushButton with context menu
-            btn = QPushButton(page_name)
+            # Create button with drag-and-hold reorder support
+            btn = BookmarkChickletButton(bookmark_path, page_name)
             btn.setToolTip(path_to_colon(bookmark_path) or bookmark_path)
             btn.clicked.connect(lambda checked=False, p=bookmark_path: self._open_bookmark(p))
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
             btn.customContextMenuRequested.connect(
                 lambda pos, p=bookmark_path, b=btn: self._show_bookmark_context_menu(pos, p, b)
             )
+            btn.dragStartRequested.connect(self._on_bookmark_drag_start)
+            btn.dragMoveRequested.connect(self._on_bookmark_drag_move)
+            btn.dragEndRequested.connect(self._on_bookmark_drag_end)
             
             # Store button in dict for later removal
             self.bookmark_buttons[bookmark_path] = btn
@@ -6673,15 +6738,54 @@ class MainWindow(QMainWindow):
     def _update_bookmark_filter_highlights(self) -> None:
         if not getattr(self, "bookmark_buttons", None):
             return
-        highlight_border = theme_value("main_window.bookmark.filtered_border", "#D9534F")
-        normal_border = theme_value("main_window.bookmark.normal_border", "#555555")
         for path, btn in self.bookmark_buttons.items():
-            is_highlighted = self._bookmark_matches_nav_filter(path)
-            border_color = highlight_border if is_highlighted else normal_border
-            btn.setStyleSheet(
-                f"QPushButton {{ border: 1px solid {border_color}; "
-                "padding: 2px 6px; border-radius: 3px; }}"
-            )
+            self._apply_bookmark_button_style(btn, path)
+
+    def _apply_bookmark_button_style(self, btn: QPushButton, bookmark_path: str) -> None:
+        is_active = bool(self.current_path and bookmark_path == self.current_path)
+        is_filtered = self._bookmark_matches_nav_filter(bookmark_path)
+        active_border = theme_value("main_window.bookmark.active_border", theme_value("main_window.focus_border.default", "#4A90E2"))
+        active_bg = theme_value("main_window.bookmark.active_bg", "palette(highlight)")
+        active_text = theme_value("main_window.bookmark.active_text", "palette(highlighted-text)")
+        filtered_border = theme_value("main_window.bookmark.filtered_border", "#D9534F")
+        filtered_bg = theme_value("main_window.bookmark.filtered_bg", filtered_border)
+        filtered_text = theme_value("main_window.bookmark.filtered_text", "#ffffff")
+        normal_border = theme_value("main_window.bookmark.normal_border", "#555555")
+        border_color = filtered_border if is_filtered else (active_border if is_active else normal_border)
+        style = (
+            f"QPushButton {{ border: 1px solid {border_color}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
+        if is_filtered:
+            style += f" background: {filtered_bg}; color: {filtered_text};"
+        elif is_active:
+            style += f" background: {active_bg}; color: {active_text};"
+        style += " }"
+        btn.setStyleSheet(style)
+
+    def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
+        is_active = bool(self.current_path and history_path == self.current_path)
+        normal_border = theme_value("main_window.history.button_border", "#555555")
+        active_border = theme_value("main_window.history.active_border", theme_value("main_window.focus_border.default", "#4A90E2"))
+        active_bg = theme_value("main_window.history.active_bg", "palette(highlight)")
+        active_text = theme_value("main_window.history.active_text", "palette(highlighted-text)")
+        border_color = active_border if is_active else normal_border
+        style = (
+            f"QPushButton {{ border: 1px solid {border_color}; "
+            "padding: 2px 6px; border-radius: 3px;"
+        )
+        if is_active:
+            style += f" background: {active_bg}; color: {active_text};"
+        style += " }"
+        btn.setStyleSheet(style)
+
+    def _update_active_page_chicklets(self) -> None:
+        for path, btn in self.bookmark_buttons.items():
+            self._apply_bookmark_button_style(btn, path)
+        for btn in self.history_buttons:
+            history_path = str(btn.property("history_path") or "")
+            if history_path:
+                self._apply_history_button_style(btn, history_path)
 
     def _update_bookmark_scroll_buttons(self) -> None:
         if not getattr(self, "bookmark_scroll_area", None):
@@ -6752,6 +6856,122 @@ class MainWindow(QMainWindow):
         if bar.value() > max_range:
             bar.setValue(max_range)
 
+    def _ensure_bookmark_drag_divider(self) -> QFrame:
+        if self._bookmark_drag_divider is None:
+            divider = QFrame(self.bookmark_strip)
+            divider.setFrameShape(QFrame.VLine)
+            divider.setLineWidth(2)
+            divider.setMidLineWidth(0)
+            divider.setFixedWidth(3)
+            divider.setStyleSheet(
+                "QFrame { background: "
+                f"{theme_value('main_window.bookmark.drag_divider', theme_value('main_window.focus_border.default', '#4A90E2'))}; "
+                "border: none; margin: 2px 0px; }"
+            )
+            self._bookmark_drag_divider = divider
+        return self._bookmark_drag_divider
+
+    def _clear_bookmark_drag_state(self) -> None:
+        self._bookmark_drag_source_path = None
+        self._bookmark_drag_insert_index = None
+        divider = self._bookmark_drag_divider
+        if divider is not None:
+            try:
+                self.bookmark_layout.removeWidget(divider)
+            except Exception:
+                pass
+            divider.hide()
+        try:
+            self.bookmark_strip.unsetCursor()
+        except Exception:
+            pass
+
+    def _bookmark_drag_insert_pos(self, global_pos: QPoint) -> int:
+        try:
+            local = self.bookmark_strip.mapFromGlobal(global_pos)
+            x = local.x()
+        except Exception:
+            return len(self.bookmarks)
+        for idx, path in enumerate(self.bookmarks):
+            btn = self.bookmark_buttons.get(path)
+            if not btn or not btn.isVisible():
+                continue
+            mid_x = btn.geometry().x() + (btn.geometry().width() // 2)
+            if x < mid_x:
+                return idx
+        return len(self.bookmarks)
+
+    def _auto_scroll_bookmark_strip_during_drag(self, global_pos: QPoint) -> None:
+        try:
+            viewport_pos = self.bookmark_scroll_area.viewport().mapFromGlobal(global_pos)
+        except Exception:
+            return
+        width = self.bookmark_scroll_area.viewport().width()
+        if width <= 0:
+            return
+        bar = self.bookmark_scroll_area.horizontalScrollBar()
+        if bar.maximum() <= 0:
+            return
+        edge_threshold = 28
+        if viewport_pos.x() < edge_threshold:
+            bar.setValue(max(0, bar.value() - 20))
+        elif viewport_pos.x() > width - edge_threshold:
+            bar.setValue(min(bar.maximum(), bar.value() + 20))
+        self._update_bookmark_scroll_buttons()
+
+    def _update_bookmark_drag_divider(self, global_pos: QPoint) -> None:
+        if not self._bookmark_drag_source_path:
+            return
+        self._auto_scroll_bookmark_strip_during_drag(global_pos)
+        insert_index = self._bookmark_drag_insert_pos(global_pos)
+        self._bookmark_drag_insert_index = insert_index
+        divider = self._ensure_bookmark_drag_divider()
+        try:
+            self.bookmark_layout.removeWidget(divider)
+        except Exception:
+            pass
+        self.bookmark_layout.insertWidget(insert_index, divider)
+        divider.show()
+
+    def _on_bookmark_drag_start(self, bookmark_path: str) -> None:
+        if bookmark_path not in self.bookmarks:
+            return
+        self._bookmark_drag_source_path = bookmark_path
+        self._bookmark_drag_insert_index = self.bookmarks.index(bookmark_path)
+        try:
+            self.bookmark_strip.setCursor(Qt.ClosedHandCursor)
+        except Exception:
+            pass
+        self._update_bookmark_drag_divider(QCursor.pos())
+
+    def _on_bookmark_drag_move(self, bookmark_path: str, global_pos: QPoint) -> None:
+        if bookmark_path != self._bookmark_drag_source_path:
+            return
+        self._update_bookmark_drag_divider(global_pos)
+
+    def _on_bookmark_drag_end(self, bookmark_path: str, global_pos: QPoint) -> None:
+        if bookmark_path != self._bookmark_drag_source_path:
+            self._clear_bookmark_drag_state()
+            return
+        self._update_bookmark_drag_divider(global_pos)
+        source_path = self._bookmark_drag_source_path
+        insert_index = self._bookmark_drag_insert_index
+        self._clear_bookmark_drag_state()
+        if not source_path or insert_index is None or source_path not in self.bookmarks:
+            return
+        src_index = self.bookmarks.index(source_path)
+        final_index = max(0, min(insert_index, len(self.bookmarks)))
+        if final_index > src_index:
+            final_index -= 1
+        if final_index == src_index:
+            return
+        self.bookmarks.pop(src_index)
+        self.bookmarks.insert(final_index, source_path)
+        config.save_bookmarks(self.bookmarks)
+        self._refresh_bookmark_buttons()
+        page_name = Path(source_path).stem
+        self.statusBar().showMessage(f"Reordered bookmark: {page_name}", 2000)
+
     def _refresh_history_buttons(self) -> None:
         """Refresh the history buttons in the toolbar (last 10 pages visited)."""
         # Clear existing buttons
@@ -6786,11 +7006,8 @@ class MainWindow(QMainWindow):
 
             # Create button with border styling
             btn = QPushButton(page_name)
-            btn.setStyleSheet(
-                "QPushButton { border: 1px solid "
-                f"{theme_value('main_window.history.button_border', '#555555')}; "
-                "padding: 2px 6px; border-radius: 3px; }"
-            )
+            btn.setProperty("history_path", page_path)
+            self._apply_history_button_style(btn, page_path)
             btn.setToolTip(path_to_colon(page_path) or page_path)
             btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -6801,6 +7018,7 @@ class MainWindow(QMainWindow):
 
             # Add to layout
             self.history_layout.addWidget(btn)
+        self._update_active_page_chicklets()
 
     def _open_history_page(self, page_path: str) -> None:
         """Open a page from history without updating tree selection."""
@@ -7837,6 +8055,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.current_path = path
+        self._update_active_page_chicklets()
         self._suspend_autosave = True
         self._suspend_cursor_history = True
         self._suspend_dirty_tracking = True
