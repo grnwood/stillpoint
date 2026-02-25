@@ -155,6 +155,11 @@ class PreferencesDialog(QDialog):
             config.load_global_feature_keep_search_index_sync_enabled(default=False)
         )
         general_layout.addWidget(self.feature_keep_search_index_sync_checkbox)
+        self.feature_remember_cursor_position_checkbox = QCheckBox("Remember and restore last cursor position")
+        self.feature_remember_cursor_position_checkbox.setChecked(
+            config.load_global_feature_remember_cursor_position_enabled(default=True)
+        )
+        general_layout.addWidget(self.feature_remember_cursor_position_checkbox)
         self.feature_tasks_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_calendar_checkbox.toggled.connect(self._warn_restart_required)
         self.feature_link_navigator_checkbox.toggled.connect(self._warn_restart_required)
@@ -1050,6 +1055,7 @@ class PreferencesDialog(QDialog):
         config.save_feature_remote_vaults_enabled(self.feature_remote_vaults_checkbox.isChecked())
         config.save_feature_homebase_vaults_enabled(self.feature_homebase_vaults_checkbox.isChecked())
         config.save_feature_keep_search_index_sync_enabled(self.feature_keep_search_index_sync_checkbox.isChecked())
+        config.save_feature_remember_cursor_position_enabled(self.feature_remember_cursor_position_checkbox.isChecked())
         selected_theme = self.theme_combo.currentData() or "default"
         if not self._validate_theme_selection(selected_theme):
             return

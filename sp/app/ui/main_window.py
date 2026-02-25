@@ -1645,6 +1645,7 @@ class MainWindow(QMainWindow):
         self._feature_calendar_enabled = config.load_feature_calendar_enabled()
         self._feature_link_navigator_enabled = config.load_feature_link_navigator_enabled()
         self._feature_tags_enabled = config.load_feature_tags_enabled()
+        self._feature_remember_cursor_position_enabled = config.load_feature_remember_cursor_position_enabled()
         
         # Page navigation history
         self.page_history: list[str] = []
@@ -6117,6 +6118,7 @@ class MainWindow(QMainWindow):
         new_calendar = config.load_feature_calendar_enabled()
         new_link_navigator = config.load_feature_link_navigator_enabled()
         new_tags = config.load_feature_tags_enabled()
+        new_remember_cursor_position = config.load_feature_remember_cursor_position_enabled()
         new_ai = config.load_enable_ai_chats()
         changed = (
             new_tasks != self._feature_tasks_enabled
@@ -6128,6 +6130,7 @@ class MainWindow(QMainWindow):
         self._feature_calendar_enabled = new_calendar
         self._feature_link_navigator_enabled = new_link_navigator
         self._feature_tags_enabled = new_tags
+        self._feature_remember_cursor_position_enabled = new_remember_cursor_position
         self.right_panel.set_feature_flags(
             enable_tasks=new_tasks,
             enable_calendar=new_calendar,
@@ -8089,6 +8092,9 @@ class MainWindow(QMainWindow):
         # Persist panel visibility when a page is opened (captures programmatic restores)
         self._save_panel_visibility()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
+        remember_cursor_positions = bool(self._feature_remember_cursor_position_enabled)
+        if not remember_cursor_positions:
+            move_cursor_to_end = False
         restored_history_cursor = False
         final_cursor_pos = None
         def _restore_scroll_position(value: int | None) -> None:
@@ -8100,9 +8106,12 @@ class MainWindow(QMainWindow):
                     scroll_bar.setValue(max(0, min(int(value), scroll_bar.maximum())))
             except Exception:
                 pass
+
+        if not remember_cursor_positions and self._template_cursor_position >= 0:
+            self._template_cursor_position = -1
         
         # Check if we have a template cursor position for this newly created page
-        if self._template_cursor_position >= 0:
+        if remember_cursor_positions and self._template_cursor_position >= 0:
             template_pos = self._template_cursor_position
             self._template_cursor_position = -1  # Reset for next page creation
             cursor = self.editor.textCursor()
@@ -8114,7 +8123,7 @@ class MainWindow(QMainWindow):
             restored_history_cursor = True
             final_cursor_pos = cursor.position()
         
-        if restore_history_cursor:
+        if remember_cursor_positions and restore_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
             saved_scroll = self._history_scroll_positions.get(path)
             if saved_pos is not None or saved_scroll is not None:
@@ -8130,7 +8139,7 @@ class MainWindow(QMainWindow):
                 move_cursor_to_end = False
                 final_cursor_pos = cursor.position()
         # If no explicit restore request, prefer any remembered cursor for this path
-        if not restored_history_cursor:
+        if remember_cursor_positions and not restored_history_cursor:
             saved_pos = self._history_cursor_positions.get(path)
             saved_scroll = self._history_scroll_positions.get(path)
             if saved_pos is not None or saved_scroll is not None:
@@ -8155,14 +8164,15 @@ class MainWindow(QMainWindow):
             self.editor.moveCursor(QTextCursor.Start)
             final_cursor_pos = self.editor.textCursor().position()
         self._suspend_cursor_history = False
-        if final_cursor_pos is not None:
+        if remember_cursor_positions and final_cursor_pos is not None:
             self._history_cursor_positions[path] = final_cursor_pos
-        try:
-            scroll_bar = self.editor.verticalScrollBar()
-            if scroll_bar:
-                self._history_scroll_positions[path] = scroll_bar.value()
-        except Exception:
-            pass
+        if remember_cursor_positions:
+            try:
+                scroll_bar = self.editor.verticalScrollBar()
+                if scroll_bar:
+                    self._history_scroll_positions[path] = scroll_bar.value()
+            except Exception:
+                pass
         # Always show editing status; vi-mode banner is separate
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
@@ -8275,7 +8285,8 @@ class MainWindow(QMainWindow):
         self._last_saved_content = content
         self._update_page_revision(path, resp_payload)
         try:
-            self._history_cursor_positions[path] = self.editor.textCursor().position()
+            if self._feature_remember_cursor_position_enabled:
+                self._history_cursor_positions[path] = self.editor.textCursor().position()
             self._persist_recent_history()
         except Exception:
             pass
@@ -11294,7 +11305,8 @@ class MainWindow(QMainWindow):
         # Force a reload to drop any lingering overlay styling (e.g., width wrap) while keeping cursor.
         if self.current_path:
             try:
-                self._history_cursor_positions[self.current_path] = int(cursor_pos)
+                if self._feature_remember_cursor_position_enabled:
+                    self._history_cursor_positions[self.current_path] = int(cursor_pos)
             except Exception:
                 pass
             # Save current buffer if it is dirty before reloading.
@@ -14672,6 +14684,9 @@ class MainWindow(QMainWindow):
     
     def _reload_page_preserve_cursor(self, path: str) -> None:
         """Reload a page while keeping its last known cursor position."""
+        if not self._feature_remember_cursor_position_enabled:
+            self._open_file(path, add_to_history=False, force=True, restore_history_cursor=False)
+            return
         saved_pos = self._history_cursor_positions.get(path)
         saved_scroll = self._history_scroll_positions.get(path)
         # Prefer the live cursor position if this tab is the one being reloaded
@@ -14709,6 +14724,8 @@ class MainWindow(QMainWindow):
         """Persist last cursor position for the active page whenever it changes."""
         if not self.current_path:
             return
+        if not self._feature_remember_cursor_position_enabled:
+            return
         if self._suspend_cursor_history:
             return
         self._history_cursor_positions[self.current_path] = position
@@ -14718,6 +14735,8 @@ class MainWindow(QMainWindow):
     def _remember_history_cursor(self) -> None:
         """Remember the current cursor position for history restore."""
         if not self.current_path:
+            return
+        if not self._feature_remember_cursor_position_enabled:
             return
         try:
             pos = self.editor.textCursor().position()
@@ -14804,10 +14823,11 @@ class MainWindow(QMainWindow):
         config.save_recent_history(ordered[-50:])
         # Persist cursor positions for the same set
         positions: dict[str, int] = {}
-        for path in ordered[-50:]:
-            pos = self._history_cursor_positions.get(path)
-            if isinstance(pos, int):
-                positions[path] = pos
+        if self._feature_remember_cursor_position_enabled:
+            for path in ordered[-50:]:
+                pos = self._history_cursor_positions.get(path)
+                if isinstance(pos, int):
+                    positions[path] = pos
         config.save_recent_history_positions(positions)
 
     def _restore_recent_history(self) -> None:
@@ -14817,7 +14837,7 @@ class MainWindow(QMainWindow):
         history = [p for p in config.load_recent_history() if self._is_history_path_allowed(p)]
         self.page_history = history[:50]
         self.history_index = len(self.page_history) - 1 if self.page_history else -1
-        positions = config.load_recent_history_positions()
+        positions = config.load_recent_history_positions() if self._feature_remember_cursor_position_enabled else {}
         # Replace per-vault maps so entries from another vault cannot leak across switches.
         self._history_cursor_positions = {k: v for k, v in positions.items() if k in self.page_history}
         self._history_scroll_positions = {

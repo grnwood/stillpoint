@@ -59,6 +59,11 @@ class VaultPreferencesDialog(QDialog):
             config.load_vault_feature_remote_vaults_override(),
         )
         layout.addWidget(self.feature_remote_vaults_checkbox)
+        self.feature_remember_cursor_position_checkbox = self._make_override_checkbox(
+            "Remember and restore last cursor position",
+            config.load_vault_feature_remember_cursor_position_override(),
+        )
+        layout.addWidget(self.feature_remember_cursor_position_checkbox)
 
         layout.addWidget(QLabel("<b>AI</b>"))
         self.ai_chats_checkbox = self._make_override_checkbox(
@@ -112,6 +117,7 @@ class VaultPreferencesDialog(QDialog):
             "link_navigator": self._checkbox_value(self.feature_link_navigator_checkbox),
             "tags": self._checkbox_value(self.feature_tags_checkbox),
             "remote_vaults": self._checkbox_value(self.feature_remote_vaults_checkbox),
+            "remember_cursor_position": self._checkbox_value(self.feature_remember_cursor_position_checkbox),
             "ai_chats": self._checkbox_value(self.ai_chats_checkbox),
         }
 
@@ -122,6 +128,7 @@ class VaultPreferencesDialog(QDialog):
             self.feature_link_navigator_checkbox,
             self.feature_tags_checkbox,
             self.feature_remote_vaults_checkbox,
+            self.feature_remember_cursor_position_checkbox,
             self.ai_chats_checkbox,
         ):
             checkbox.setCheckState(Qt.PartiallyChecked)
@@ -133,6 +140,7 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_link_navigator_override(values["link_navigator"])
         config.save_vault_feature_tags_override(values["tags"])
         config.save_vault_feature_remote_vaults_override(values["remote_vaults"])
+        config.save_vault_feature_remember_cursor_position_override(values["remember_cursor_position"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         super().accept()

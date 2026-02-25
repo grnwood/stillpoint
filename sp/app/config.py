@@ -1111,6 +1111,16 @@ def save_vault_feature_remote_vaults_override(value: Optional[bool]) -> None:
     _save_vault_override_bool("override_feature_remote_vaults_enabled", value)
 
 
+def load_vault_feature_remember_cursor_position_override() -> Optional[bool]:
+    """Return remember/restore cursor position override for this vault."""
+    return _load_vault_override_bool("override_feature_remember_cursor_position_enabled")
+
+
+def save_vault_feature_remember_cursor_position_override(value: Optional[bool]) -> None:
+    """Persist remember/restore cursor position override for this vault."""
+    _save_vault_override_bool("override_feature_remember_cursor_position_enabled", value)
+
+
 def load_vault_enable_ai_chats_override() -> Optional[bool]:
     """Return AI Chats override for this vault."""
     return _load_vault_override_bool("override_enable_ai_chats")
@@ -1229,6 +1239,28 @@ def load_feature_remote_vaults_enabled(default: bool = True) -> bool:
 def save_feature_remote_vaults_enabled(enabled: bool) -> None:
     """Persist preference for enabling remote vaults."""
     _update_global_config({"feature_remote_vaults_enabled": bool(enabled)})
+
+
+def load_global_feature_remember_cursor_position_enabled(default: bool = True) -> bool:
+    """Return whether remembering/restoring cursor position is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_remember_cursor_position_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_remember_cursor_position_enabled(default: bool = True) -> bool:
+    """Return whether cursor position memory is enabled (vault overrides global)."""
+    override = load_vault_feature_remember_cursor_position_override()
+    if override is not None:
+        return override
+    return load_global_feature_remember_cursor_position_enabled(default=default)
+
+
+def save_feature_remember_cursor_position_enabled(enabled: bool) -> None:
+    """Persist preference for remembering/restoring cursor position."""
+    _update_global_config({"feature_remember_cursor_position_enabled": bool(enabled)})
 
 
 def load_global_feature_homebase_vaults_enabled(default: bool = True) -> bool:
