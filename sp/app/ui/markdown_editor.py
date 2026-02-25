@@ -1539,6 +1539,15 @@ class MarkdownEditor(QTextEdit):
         self._vi_has_painted: bool = False
         self._vi_paint_in_progress: bool = False
         self._vi_activation_timer: Optional[QTimer] = None
+        default_paint_guard_ms = 180 if sys.platform.startswith("win") else 0
+        try:
+            self._post_load_paint_guard_ms = max(
+                0, int(os.getenv("SP_POST_LOAD_PAINT_GUARD_MS", str(default_paint_guard_ms)))
+            )
+        except Exception:
+            self._post_load_paint_guard_ms = default_paint_guard_ms
+        self._post_load_paint_guard_until: float = 0.0
+        self._post_load_repaint_armed: bool = False
         self._heading_outline: list[dict] = []
         self._dialog_block_input: bool = False
         self._read_only_mode: bool = False
@@ -1816,6 +1825,27 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         )
 
+    def _arm_post_load_paint_guard(self) -> None:
+        if self._post_load_paint_guard_ms <= 0:
+            return
+        self._post_load_paint_guard_until = time.perf_counter() + (self._post_load_paint_guard_ms / 1000.0)
+        self._post_load_repaint_armed = False
+
+    def _post_load_paint_guard_active(self) -> bool:
+        until = self._post_load_paint_guard_until
+        if until <= 0.0:
+            return False
+        now = time.perf_counter()
+        if now >= until:
+            self._post_load_paint_guard_until = 0.0
+            self._post_load_repaint_armed = False
+            return False
+        if not self._post_load_repaint_armed:
+            self._post_load_repaint_armed = True
+            remaining_ms = max(1, int((until - now) * 1000.0))
+            QTimer.singleShot(remaining_ms, self.viewport().update)
+        return True
+
     def _block_has_hr_object(self, block) -> bool:
         if not block or not block.isValid():
             return False
@@ -1861,6 +1891,8 @@ class MarkdownEditor(QTextEdit):
         """Custom paint to draw horizontal rules as visual lines."""
         if os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
             super().paintEvent(event)
+            return
+        if self._post_load_paint_guard_active():
             return
         if self._suppress_paint or self._suppress_paint_depth:
             return
@@ -2355,6 +2387,7 @@ class MarkdownEditor(QTextEdit):
                         self._cursor_signals_connected = True
                     except Exception:
                         pass
+                self._arm_post_load_paint_guard()
                 self._pop_paint_block()
             t5 = time.perf_counter()
             self._mark_page_load("outline + margin scheduled")
@@ -7355,6 +7388,11 @@ class MarkdownEditor(QTextEdit):
 
     def _refresh_hr_selections(self) -> None:
         if self._mutations_blocked():
+            if not self._hr_refresh_retry_pending:
+                self._hr_refresh_retry_pending = True
+                QTimer.singleShot(0, self._retry_refresh_hr)
+            return
+        if self._post_load_paint_guard_active():
             if not self._hr_refresh_retry_pending:
                 self._hr_refresh_retry_pending = True
                 QTimer.singleShot(0, self._retry_refresh_hr)
