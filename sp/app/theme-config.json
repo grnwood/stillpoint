@@ -231,6 +231,13 @@
       "selected_text": "#ffffff",
       "unselected_text": "#c0c0c0"
     },
+    "toc_widget": {
+      "bg": "#2d2d2d",
+      "border": "#aaaaaa",
+      "text": "#f5f5f5",
+      "hover_bg": "rgba(108, 180, 255, 0.18)",
+      "selected_bg": "rgba(108, 180, 255, 0.18)"
+    },
     "focus_border": {
       "filtered": "#D9534F",
       "default": "#4A90E2"

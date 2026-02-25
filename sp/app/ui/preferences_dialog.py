@@ -1284,7 +1284,10 @@ class PreferencesDialog(QDialog):
             if not any(theme_dir.iterdir()):
                 default_theme = theme_module.default_theme_path()
                 if default_theme.exists():
-                    shutil.copy2(default_theme, theme_dir / "theme-config.json")
+                    shutil.copy2(default_theme, theme_dir / "dark-theme.json")
+                light_theme = default_theme.with_name("light-theme.json")
+                if light_theme.exists():
+                    shutil.copy2(light_theme, theme_dir / "light-theme.json")
         except Exception:
             pass
         try:

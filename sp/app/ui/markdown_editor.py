@@ -789,7 +789,21 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.quote_format.setFontItalic(True)
 
         self.list_format = QTextCharFormat()
-        self.list_format.setForeground(theme_color("markdown_editor.syntax.list", "#ffffff"))
+        app = QApplication.instance()
+        try:
+            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
+        except Exception:
+            base_lightness = 0
+        is_light_palette = base_lightness >= 128
+        pref = (config.load_theme_preference() or "").strip().lower()
+        using_default_dark_theme = pref in {"", "default", "dark-theme", "dark-theme.json", "theme-config", "theme-config.json"}
+        if is_light_palette and using_default_dark_theme:
+            list_color = "#111827"
+        else:
+            list_color = theme_value("markdown_editor.syntax.list", None)
+            if list_color is None:
+                list_color = "#111827" if is_light_palette else "#ffffff"
+        self.list_format.setForeground(QColor(str(list_color)))
 
         self.code_block = QTextCharFormat()
         self.code_block.setBackground(theme_color("markdown_editor.syntax.code_block_bg", "#2a2a2a"))

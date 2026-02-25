@@ -10,12 +10,13 @@ import time
 import traceback
 import shutil
 import tempfile
+import subprocess
 from pathlib import Path
 
 import uvicorn
-from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+from PySide6.QtCore import Qt, QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPalette
 
 from sp.app import config
 from sp.logging_flags import log_enabled
@@ -151,6 +152,147 @@ def _set_app_icon(app: QApplication) -> None:
             app.setWindowIcon(icon)
         except Exception:
             pass
+
+
+def _detect_light_color_scheme(app: QApplication) -> tuple[bool, str]:
+    """Return (is_light, source) for the host OS/UI scheme."""
+    try:
+        scheme = app.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Light:
+            return True, "qt-color-scheme"
+        if scheme == Qt.ColorScheme.Dark:
+            return False, "qt-color-scheme"
+    except Exception as exc:
+        _startup(f"Theme detect probe failed (qt-color-scheme): {exc}")
+
+    # Windows theme signal (Settings > Personalization > Colors > App mode).
+    try:
+        if sys.platform == "win32":
+            import winreg  # type: ignore
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                apps_use_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return bool(int(apps_use_light)), "windows-registry-apps"
+    except Exception as exc:
+        _startup(f"Theme detect probe failed (windows-registry-apps): {exc}")
+
+    # macOS theme signal from Apple global preferences.
+    try:
+        if sys.platform == "darwin":
+            proc = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            combined = f"{proc.stdout or ''} {proc.stderr or ''}".strip().lower()
+            if proc.returncode == 0:
+                # Value is typically "Dark" when dark mode is enabled.
+                if "dark" in combined:
+                    return False, "macos-apple-interface-style"
+                return True, "macos-apple-interface-style"
+            if "does not exist" in combined:
+                # Missing key generally means Light appearance.
+                return True, "macos-apple-interface-style-missing"
+            _startup(
+                f"Theme detect probe inconclusive (macos-apple-interface-style): "
+                f"rc={proc.returncode}, out={combined!r}"
+            )
+    except Exception as exc:
+        _startup(f"Theme detect probe failed (macos-apple-interface-style): {exc}")
+
+    # Linux desktop themes are not always reflected in Qt colorScheme().
+    # Check common environment hints before palette fallback.
+    try:
+        if sys.platform.startswith("linux"):
+            gtk_theme = (os.getenv("GTK_THEME") or "").strip().lower()
+            if "dark" in gtk_theme:
+                return False, "linux-gtk-theme"
+            if "light" in gtk_theme:
+                return True, "linux-gtk-theme"
+            colorfgbg = (os.getenv("COLORFGBG") or "").strip()
+            if ";" in colorfgbg:
+                parts = [p for p in colorfgbg.split(";") if p]
+                try:
+                    bg_code = int(parts[-1])
+                    # 0-6 are generally dark terminal background codes; 7+ light.
+                    return (bg_code >= 7), "linux-colorfgbg"
+                except Exception:
+                    pass
+    except Exception as exc:
+        _startup(f"Theme detect probe failed (linux-env): {exc}")
+
+    try:
+        pal = app.palette()
+        window_l = pal.color(QPalette.ColorRole.Window).lightness()
+        base_l = pal.color(QPalette.ColorRole.Base).lightness()
+        avg_l = (window_l + base_l) / 2.0
+        return (avg_l >= 128), "palette"
+    except Exception as exc:
+        _startup(f"Theme detect probe failed (palette): {exc}")
+        # Prefer dark when unknown to avoid white-on-white regressions.
+        return False, "fallback-dark"
+
+
+def _ensure_user_theme_files() -> bool:
+    """Seed ~/.stillpoint/themes with dark/light themes on first run.
+
+    Returns True when the theme folder was created in this run.
+    """
+    theme_dir = Path.home() / ".stillpoint" / "themes"
+    if theme_dir.exists():
+        return False
+    try:
+        theme_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+
+    app_dir = Path(__file__).resolve().parent
+    dark_source = app_dir / "theme-config.json"
+    light_source = app_dir / "light-theme.json"
+    if not light_source.exists():
+        # Dev fallback: allow bootstrapping directly from the repository sample.
+        fallback = app_dir.parents[2] / "dev-assets" / "theme" / "test-light-theme.json"
+        if fallback.exists():
+            light_source = fallback
+
+    try:
+        if dark_source.exists():
+            shutil.copy2(dark_source, theme_dir / "dark-theme.json")
+    except Exception:
+        pass
+    try:
+        if light_source.exists():
+            shutil.copy2(light_source, theme_dir / "light-theme.json")
+    except Exception:
+        pass
+    return True
+
+
+def _apply_startup_theme_defaults(app: QApplication) -> None:
+    """Apply OS-based default theme selection for users without explicit preference."""
+    created_theme_dir = _ensure_user_theme_files()
+    is_light, source = _detect_light_color_scheme(app)
+    preferred = "light-theme.json" if is_light else "dark-theme.json"
+    # If we had to recreate the theme folder, re-baseline to OS preference.
+    if created_theme_dir:
+        config.save_theme_preference(preferred)
+        _startup(
+            f"Theme auto-selected: {preferred} (mode={'light' if is_light else 'dark'}, source={source}, reason=theme-folder-created)."
+        )
+        return
+    current_pref = (config.load_theme_preference() or "").strip().lower()
+    if current_pref not in {"", "default"}:
+        _startup(
+            f"Theme preserved: {current_pref or '(empty)'} (detected mode={'light' if is_light else 'dark'}, source={source})."
+        )
+        return
+    config.save_theme_preference(preferred)
+    _startup(
+        f"Theme auto-selected: {preferred} (mode={'light' if is_light else 'dark'}, source={source}, reason=default-preference)."
+    )
 
 
 def _write_local_ui_token(token: str) -> None:
@@ -703,6 +845,7 @@ def main() -> None:
     qt_app = QApplication(sys.argv)
     qt_app.aboutToQuit.connect(lambda: _startup("QApplication aboutToQuit emitted."))
     _apply_application_font(qt_app)
+    _apply_startup_theme_defaults(qt_app)
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits

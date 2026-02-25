@@ -11139,6 +11139,25 @@ class MainWindow(QMainWindow):
         toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
         toggle.setFocusPolicy(Qt.NoFocus)
         toggle.setToolTip("Show sidebar")
+        app = QApplication.instance()
+        try:
+            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
+        except Exception:
+            base_lightness = 0
+        is_light_palette = base_lightness >= 128
+        pref = (config.load_theme_preference() or "").strip().lower()
+        using_default_dark_theme = pref in {"", "default", "dark-theme", "dark-theme.json", "theme-config", "theme-config.json"}
+        selected_bg_default = "#eef2f7" if is_light_palette else "#2b2b2b"
+        selected_text_default = "#111827" if is_light_palette else "#ffffff"
+        unselected_text_default = "#4b5563" if is_light_palette else "#c0c0c0"
+        if is_light_palette and using_default_dark_theme:
+            selected_bg = selected_bg_default
+            selected_text = selected_text_default
+            unselected_text = unselected_text_default
+        else:
+            selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
+            selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
+            unselected_text = theme_value("main_window.minibar.unselected_text", unselected_text_default)
         bar = QTabBar()
         bar.setDocumentMode(True)
         bar.setExpanding(False)
@@ -11151,11 +11170,11 @@ class MainWindow(QMainWindow):
         bar.setStyleSheet(
             "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
             "QTabBar::tab:selected { background: "
-            f"{theme_value('main_window.minibar.selected_bg', '#2b2b2b')}; "
+            f"{selected_bg}; "
             "color: "
-            f"{theme_value('main_window.minibar.selected_text', '#ffffff')}; }}"
+            f"{selected_text}; }}"
             "QTabBar::tab:!selected { color: "
-            f"{theme_value('main_window.minibar.unselected_text', '#c0c0c0')}; }}"
+            f"{unselected_text}; }}"
         )
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)

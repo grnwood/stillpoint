@@ -44,6 +44,8 @@ STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION','0.99')
 _datas = [
     (os.path.join(ROOT, 'sp', 'templates'), 'sp/templates'),
     (os.path.join(ROOT, 'sp', 'server', 'templates'), 'sp/server/templates'),
+    (os.path.join(ROOT, 'sp', 'app', 'theme-config.json'), 'sp/app'),
+    (os.path.join(ROOT, 'sp', 'app', 'light-theme.json'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'puml_shortcuts.json'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'calendar-day-insight-prompt.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
