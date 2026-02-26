@@ -14660,7 +14660,7 @@ class MainWindow(QMainWindow):
             print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
-            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+            self._open_file(target_path, add_to_history=True, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -14677,7 +14677,7 @@ class MainWindow(QMainWindow):
             print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
-            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
+            self._open_file(target_path, add_to_history=True, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -15272,7 +15272,7 @@ class MainWindow(QMainWindow):
         self._suspend_selection_open = True
         try:
             self._select_tree_path(parent_path)
-            self._open_file(parent_path, add_to_history=False, restore_history_cursor=True)
+            self._open_file(parent_path, add_to_history=True, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         parent_colon = path_to_colon(parent_path) or parent_path
@@ -15354,7 +15354,7 @@ class MainWindow(QMainWindow):
         self._suspend_selection_open = True
         try:
             self._select_tree_path(child_path)
-            self._open_file(child_path, add_to_history=False, restore_history_cursor=True)
+            self._open_file(child_path, add_to_history=True, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
 
