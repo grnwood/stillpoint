@@ -26,6 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           chmod +x packaging/prune-qt.sh
+          chmod +x packaging/linux-desktop/install-linux.sh
+          chmod +x packaging/server/run-server.sh
+          chmod +x packaging/server/_launch.sh
           sudo apt-get install -y upx
           pip install -r sp/requirements.txt
 
@@ -41,6 +44,8 @@ jobs:
       - name: Smoke test bundle
         run: |
           test -x dist/stillpoint/stillpoint
+          test -f dist/stillpoint/run-server.sh
+          test -f dist/stillpoint/_launch.sh
           test -x dist/stillpoint-capture/stillpoint-capture
 
       - name: Zip bundle

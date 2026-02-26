@@ -89,12 +89,25 @@ if sys.platform == 'win32':
         (os.path.join(ROOT, 'packaging', 'win32', 'windows-quicklaunch-shortcut.png'), '.'),
     ])
 elif sys.platform.startswith('linux'):
-    _datas.extend([
-        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'install-linux.sh'), '.'),
-        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'run-server.sh'), '.'),
-        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'README.txt'), '.'),
-        (os.path.join(ROOT, 'packaging', 'linux-desktop', 'linux-quicklaunch-shortcut.png'), '.'),
-    ])
+    linux_desktop_assets = [
+        'install-linux.sh',
+        'README.txt',
+        'linux-quicklaunch-shortcut.png',
+    ]
+    linux_server_assets = [
+        'run-server.sh',
+        '_launch.sh',
+    ]
+    linux_desktop_dir = os.path.join(ROOT, 'packaging', 'linux-desktop')
+    linux_server_dir = os.path.join(ROOT, 'packaging', 'server')
+    for asset in linux_desktop_assets:
+        asset_path = os.path.join(linux_desktop_dir, asset)
+        if os.path.exists(asset_path):
+            _datas.append((asset_path, '.'))
+    for asset in linux_server_assets:
+        asset_path = os.path.join(linux_server_dir, asset)
+        if os.path.exists(asset_path):
+            _datas.append((asset_path, '.'))
 
 # Add optional subdirectories if they exist
 for subdir in ['assets', 'slipstream', 'rag', 'ai']:
@@ -166,6 +179,7 @@ if sys.platform == 'win32':
 elif sys.platform.startswith('linux'):
     files_to_move.append('install-linux.sh')
     files_to_move.append('run-server.sh')
+    files_to_move.append('_launch.sh')
 
 for filename in files_to_move:
     src = os.path.join(internal_dir, filename)
