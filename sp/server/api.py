@@ -63,6 +63,7 @@ from sp.server.adapters.files import FileAccessError, LEGACY_SUFFIX, PAGE_SUFFIX
 from sp.server.state import vault_state
 from sp.server.vector import vector_manager
 from sp.rag.index import RetrievedChunk
+from sp import VERSION as STILLPOINT_VERSION
 from sp.app import config
 from sp.app import indexer as app_indexer
 from sp.logging_flags import log_enabled
@@ -3632,6 +3633,7 @@ def run_server(
         print(f"{_ANSI_BLUE}{'🚨' * 40}{_ANSI_RESET}\n")
 
     print(f"\n{_ANSI_BLUE}=== StillPoint API Server ==={_ANSI_RESET}")
+    print(f"{_ANSI_BLUE}Version: {STILLPOINT_VERSION}{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}Starting server on http://{host}:{port}{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}API docs: http://{host}:{port}/docs{_ANSI_RESET}")
     print(f"{_ANSI_BLUE}Auth enabled: {AUTH_ENABLED}{_ANSI_RESET}")
