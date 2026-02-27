@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import hashlib
 import html
@@ -92,6 +93,12 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
 _TASK_CACHE_VERSION: int = -1
+_TASKS_QUERY_TIMEOUT_S = max(0.1, float(os.getenv("SP_TASKS_QUERY_TIMEOUT_S", "6.0")))
+_TASKS_QUERY_WORKERS = max(1, int(os.getenv("SP_TASKS_QUERY_WORKERS", "4")))
+_TASKS_QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_TASKS_QUERY_WORKERS,
+    thread_name_prefix="sp-tasks-query",
+)
 
 _TASK_DATE_PATTERN = re.compile(r"\s*[<>][0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TASK_START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
@@ -812,6 +819,36 @@ def _fetch_tasks(
         tasks_from_db = [task for task in tasks_from_db if (task.get("status") or "").lower() != "done"]
     _TASKS_CACHE[cache_key] = tasks_from_db
     return tasks_from_db
+
+
+def _fetch_tasks_with_timeout(
+    query: str,
+    tags: tuple[str, ...],
+    *,
+    include_done: bool,
+    include_ancestors: bool,
+    actionable_only: bool,
+    status: Optional[str],
+) -> list[dict]:
+    future = _TASKS_QUERY_EXECUTOR.submit(
+        _fetch_tasks,
+        query,
+        tags,
+        include_done=include_done,
+        include_ancestors=include_ancestors,
+        actionable_only=actionable_only,
+        status=status,
+    )
+    try:
+        return future.result(timeout=_TASKS_QUERY_TIMEOUT_S)
+    except concurrent.futures.TimeoutError as exc:
+        # Leave the worker running; respond quickly so remote clients don't hang UI.
+        raise HTTPException(
+            status_code=504,
+            detail=f"Task query exceeded {_TASKS_QUERY_TIMEOUT_S:.1f}s timeout",
+        ) from exc
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=503, detail=f"Task query unavailable: {exc}") from exc
 
 
 def _serialize_task(task: dict) -> dict:
@@ -2114,7 +2151,7 @@ def api_tasks(
         include_done_effective = True
     else:
         include_done_effective = bool(include_done)
-    task_rows = _fetch_tasks(
+    task_rows = _fetch_tasks_with_timeout(
         normalized_query,
         normalized_tags,
         include_done=include_done_effective,

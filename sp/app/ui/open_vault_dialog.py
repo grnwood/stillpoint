@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -93,6 +93,22 @@ class AddVaultDialog(QDialog):
 
     def selected_vault(self) -> Optional[dict[str, str]]:
         return self._result
+
+
+class RemoteVaultLoadWorker(QThread):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, loader) -> None:
+        super().__init__()
+        self._loader = loader
+
+    def run(self) -> None:
+        try:
+            result = self._loader() if callable(self._loader) else None
+            self.loaded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class AddHomebaseVaultDialog(QDialog):
@@ -383,6 +399,8 @@ class OpenVaultDialog(QDialog):
         self._selected: Optional[dict[str, str]] = None
         self._select_id = select_id
         self._remote_loaded = False
+        self._remote_loading = False
+        self._remote_worker: Optional[RemoteVaultLoadWorker] = None
         self._remote_vaults_enabled = config.load_feature_remote_vaults_enabled()
         self._homebase_vaults_enabled = config.load_feature_homebase_vaults_enabled()
 
@@ -616,6 +634,15 @@ class OpenVaultDialog(QDialog):
                 name_row.addWidget(status_label)
                 # Make the name label red too
                 name_label.setStyleSheet("color: #d32f2f;")
+            elif status == "slow":
+                status_label = QLabel("●")
+                status_label.setStyleSheet("color: #ed6c02; font-size: 16pt;")
+                latency = vault.get("latency_ms")
+                if latency is not None:
+                    status_label.setToolTip(f"Slow response ({float(latency):.0f} ms)")
+                else:
+                    status_label.setToolTip("Slow response")
+                name_row.addWidget(status_label)
             elif status == "ok":
                 status_label = QLabel("●")
                 status_label.setStyleSheet("color: #4caf50; font-size: 16pt;")
@@ -632,6 +659,8 @@ class OpenVaultDialog(QDialog):
         # Gray color unless there's an error
         if vault.get("kind") == "remote" and vault.get("status") == "error":
             path_label.setStyleSheet("color: #d32f2f;")
+        elif vault.get("kind") == "remote" and vault.get("status") == "slow":
+            path_label.setStyleSheet("color: #ed6c02;")
         else:
             path_label.setStyleSheet("color: #666;")
         layout.addWidget(path_label)
@@ -694,9 +723,11 @@ class OpenVaultDialog(QDialog):
             return
         debug = log_enabled("remote_vaults")
         start = time.perf_counter()
-        if self._remote_loaded:
+        if self._remote_loaded and not self._remote_loading:
             if select_id:
                 self._refresh_remote_list(select_id=select_id)
+            return
+        if self._remote_loading:
             return
         if not self._on_load_remote:
             self.remote_vaults = []
@@ -707,19 +738,32 @@ class OpenVaultDialog(QDialog):
                 print(f"[RemoteVaults] load skipped (no loader) dt={(time.perf_counter()-start)*1000:.1f}ms")
             return
         self._set_remote_loading_entries()
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            updated = self._on_load_remote() if callable(self._on_load_remote) else None
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._remote_loading = True
+        self._remote_worker = RemoteVaultLoadWorker(self._on_load_remote)
+        self._remote_worker.loaded.connect(lambda updated: self._on_remote_loaded(updated, select_id, start, debug))
+        self._remote_worker.failed.connect(lambda error: self._on_remote_load_failed(error, start, debug))
+        self._remote_worker.finished.connect(self._on_remote_load_finished)
+        self._remote_worker.start()
+
+    def _on_remote_load_finished(self) -> None:
+        self._remote_loading = False
+        self._remote_worker = None
+
+    def _on_remote_loaded(
+        self,
+        updated: object,
+        select_id: Optional[str],
+        start: float,
+        debug: bool,
+    ) -> None:
         status_entries: list[dict[str, str]] = []
         if isinstance(updated, tuple) and len(updated) == 2:
             updated, status_entries = updated
-        if updated is not None:
-            if any(v.get("kind") == "remote" for v in updated):
-                self.remote_vaults = [v for v in updated if v.get("kind") == "remote"]
+        if isinstance(updated, list):
+            if any(isinstance(v, dict) and v.get("kind") == "remote" for v in updated):
+                self.remote_vaults = [v for v in updated if isinstance(v, dict) and v.get("kind") == "remote"]
             else:
-                self.remote_vaults = list(updated)
+                self.remote_vaults = [v for v in updated if isinstance(v, dict)]
         self.remote_status_entries = list(status_entries)
         self._remote_loaded = True
         self._refresh_remote_list(select_id=select_id)
@@ -728,6 +772,29 @@ class OpenVaultDialog(QDialog):
                 f"[RemoteVaults] loaded {len(self.remote_vaults)} vault(s) "
                 f"dt={(time.perf_counter()-start)*1000:.1f}ms"
             )
+
+    def _on_remote_load_failed(self, error: str, start: float, debug: bool) -> None:
+        self.remote_vaults = []
+        self.remote_status_entries = [
+            {
+                "kind": "remote_status",
+                "level": "error",
+                "message": f"Failed to load remote vaults: {error}",
+            }
+        ]
+        self._remote_loaded = True
+        self._refresh_remote_list()
+        if debug:
+            print(f"[RemoteVaults] load failed error={error} dt={(time.perf_counter()-start)*1000:.1f}ms")
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        worker = self._remote_worker
+        if worker and worker.isRunning():
+            try:
+                worker.requestInterruption()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def _split_vaults(self, vaults: list[dict[str, str]]) -> None:
         self.local_vaults = [v for v in vaults if v.get("kind") != "remote"]
@@ -927,8 +994,16 @@ class OpenVaultDialog(QDialog):
         if not self.remote_list_widget:
             return
         self.remote_list_widget.clear()
-        
-        # Only show configured vaults with embedded status
+
+        for entry in self.remote_status_entries:
+            item = QListWidgetItem()
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsEnabled)
+            item.setData(Qt.UserRole, {"kind": "remote_status"})
+            widget = self._build_status_item_widget(entry)
+            item.setSizeHint(widget.sizeHint())
+            self.remote_list_widget.addItem(item)
+            self.remote_list_widget.setItemWidget(item, widget)
+
         for vault in self.remote_vaults:
             if "id" not in vault:
                 vault["id"] = vault.get("path")
@@ -960,6 +1035,8 @@ class OpenVaultDialog(QDialog):
         level = entry.get("level")
         if level == "error":
             name_label.setStyleSheet("color: #ff3b30;")
+        elif level == "loading":
+            name_label.setStyleSheet("color: #ed6c02;")
         layout.addWidget(name_label)
 
         path_label = QLabel(entry.get("server_url") or "")
@@ -969,6 +1046,8 @@ class OpenVaultDialog(QDialog):
         path_label.setFont(path_font)
         if level == "error":
             path_label.setStyleSheet("color: #ff3b30;")
+        elif level == "loading":
+            path_label.setStyleSheet("color: #ed6c02;")
         else:
             path_label.setStyleSheet("color: #666;")
         layout.addWidget(path_label)

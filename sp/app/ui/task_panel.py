@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import html
 import os
+import queue
 import re
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -157,6 +159,7 @@ class TaskPanel(QWidget):
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
+    remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
 
     def __init__(
         self,
@@ -446,6 +449,14 @@ class TaskPanel(QWidget):
         self._suppress_task_activation = False
         self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
         self._api_task_cache_ttl = 0.5
+        self._remote_mode = False
+        self._api_task_inflight: set[tuple] = set()
+        self._api_task_error_until: dict[tuple, float] = {}
+        self._api_task_result_queue: queue.Queue[tuple[str, tuple, object, float]] = queue.Queue()
+        self._api_result_timer = QTimer(self)
+        self._api_result_timer.setInterval(75)
+        self._api_result_timer.timeout.connect(self._drain_remote_task_results)
+        self._api_result_timer.start()
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
@@ -3069,6 +3080,14 @@ class TaskPanel(QWidget):
             }
             if tags:
                 params["tags"] = tags
+            if self._remote_mode:
+                error_until = self._api_task_error_until.get(cache_key, 0.0)
+                if now < error_until:
+                    return cached[1] if cached else []
+                if cache_key in self._api_task_inflight:
+                    return cached[1] if cached else []
+                self._queue_remote_task_fetch(cache_key, params)
+                return cached[1] if cached else []
             try:
                 resp = self._http_client.get("/api/tasks", params=params)
                 resp.raise_for_status()
@@ -3107,6 +3126,9 @@ class TaskPanel(QWidget):
                 pass
 
     def set_http_client(self, http_client) -> None:
+        self._api_task_inflight.clear()
+        self._api_task_error_until.clear()
+        self._api_task_result_queue = queue.Queue()
         self._http_client = http_client
         self._vector_api = VectorAPIClient(http_client)
         if self._ai_chat_panel:
@@ -3114,6 +3136,62 @@ class TaskPanel(QWidget):
                 self._ai_chat_panel.set_api_client(http_client)
             except Exception:
                 pass
+
+    def set_remote_mode(self, remote_mode: bool) -> None:
+        self._remote_mode = bool(remote_mode)
+
+    def _queue_remote_task_fetch(self, cache_key: tuple, params: dict) -> None:
+        if not self._http_client or cache_key in self._api_task_inflight:
+            return
+        self._api_task_inflight.add(cache_key)
+        client = self._http_client
+        args = dict(params)
+
+        def _worker() -> None:
+            started = time.perf_counter()
+            try:
+                resp = client.get("/api/tasks", params=args)
+                resp.raise_for_status()
+                payload = resp.json()
+                items = payload.get("items", [])
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._api_task_result_queue.put(("ok", cache_key, items, latency_ms))
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._api_task_result_queue.put(("error", cache_key, str(exc), latency_ms))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _drain_remote_task_results(self) -> None:
+        if not self._remote_mode:
+            self._api_task_inflight.clear()
+            while not self._api_task_result_queue.empty():
+                try:
+                    self._api_task_result_queue.get_nowait()
+                except queue.Empty:
+                    break
+            return
+        had_success = False
+        while True:
+            try:
+                state, cache_key_obj, payload, latency_ms_obj = self._api_task_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            cache_key = tuple(cache_key_obj)
+            self._api_task_inflight.discard(cache_key)
+            latency_ms = float(latency_ms_obj)
+            if state == "ok":
+                items = payload if isinstance(payload, list) else []
+                self._api_task_cache[cache_key] = (time.monotonic(), items)
+                self._api_task_error_until.pop(cache_key, None)
+                self.remoteRequestObserved.emit("ok", latency_ms, "GET /api/tasks")
+                had_success = True
+            else:
+                error_text = str(payload or "unknown error")
+                self._api_task_error_until[cache_key] = time.monotonic() + 2.0
+                self.remoteRequestObserved.emit("error", latency_ms, f"/api/tasks failed: {error_text}")
+        if had_success:
+            QTimer.singleShot(0, self._refresh_tasks)
 
     def set_ai_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)

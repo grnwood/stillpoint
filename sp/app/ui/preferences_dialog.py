@@ -169,6 +169,28 @@ class PreferencesDialog(QDialog):
         self.feature_keep_search_index_sync_checkbox.toggled.connect(self._warn_restart_required)
         add_divider(general_layout)
 
+        general_layout.addWidget(QLabel("<b>Remote Network</b>"))
+        row_remote_connect = QHBoxLayout()
+        row_remote_connect.addWidget(QLabel("Remote connect timeout (s):"))
+        self.remote_connect_timeout_spin = QDoubleSpinBox()
+        self.remote_connect_timeout_spin.setRange(0.1, 120.0)
+        self.remote_connect_timeout_spin.setDecimals(1)
+        self.remote_connect_timeout_spin.setSingleStep(0.5)
+        self.remote_connect_timeout_spin.setValue(config.load_remote_connect_timeout(3.0))
+        row_remote_connect.addWidget(self.remote_connect_timeout_spin, 1)
+        general_layout.addLayout(row_remote_connect)
+
+        row_remote_read = QHBoxLayout()
+        row_remote_read.addWidget(QLabel("Remote read timeout (s):"))
+        self.remote_read_timeout_spin = QDoubleSpinBox()
+        self.remote_read_timeout_spin.setRange(0.1, 300.0)
+        self.remote_read_timeout_spin.setDecimals(1)
+        self.remote_read_timeout_spin.setSingleStep(0.5)
+        self.remote_read_timeout_spin.setValue(config.load_remote_read_timeout(10.0))
+        row_remote_read.addWidget(self.remote_read_timeout_spin, 1)
+        general_layout.addLayout(row_remote_read)
+        add_divider(general_layout)
+
         general_layout.addWidget(QLabel("<b>Capture</b>"))
         row_capture_vault = QHBoxLayout()
         row_capture_vault.addWidget(QLabel("Home Quick Capture Vault:"))
@@ -1056,6 +1078,8 @@ class PreferencesDialog(QDialog):
         config.save_feature_homebase_vaults_enabled(self.feature_homebase_vaults_checkbox.isChecked())
         config.save_feature_keep_search_index_sync_enabled(self.feature_keep_search_index_sync_checkbox.isChecked())
         config.save_feature_remember_cursor_position_enabled(self.feature_remember_cursor_position_checkbox.isChecked())
+        config.save_remote_connect_timeout(self.remote_connect_timeout_spin.value())
+        config.save_remote_read_timeout(self.remote_read_timeout_spin.value())
         selected_theme = self.theme_combo.currentData() or "default"
         if not self._validate_theme_selection(selected_theme):
             return

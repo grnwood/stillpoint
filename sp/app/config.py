@@ -313,6 +313,20 @@ def load_remote_servers() -> list[dict[str, str]]:
                 "verify_ssl": bool(verify_ssl),
                 "selected_vaults": [str(p) for p in selected_vaults if p],
             }
+            connect_timeout = entry.get("connect_timeout_s")
+            read_timeout = entry.get("read_timeout_s")
+            try:
+                parsed_connect = float(connect_timeout)
+                if parsed_connect > 0:
+                    server_entry["connect_timeout_s"] = parsed_connect
+            except (TypeError, ValueError):
+                pass
+            try:
+                parsed_read = float(read_timeout)
+                if parsed_read > 0:
+                    server_entry["read_timeout_s"] = parsed_read
+            except (TypeError, ValueError):
+                pass
             # Preserve server_password_hash if present
             if "server_password_hash" in entry:
                 server_entry["server_password_hash"] = entry["server_password_hash"]
@@ -332,6 +346,8 @@ def add_remote_server(
     verify_ssl: bool = True,
     selected_vaults: Optional[list[str]] = None,
     server_password_hash: Optional[str] = None,
+    connect_timeout_s: Optional[float] = None,
+    read_timeout_s: Optional[float] = None,
 ) -> None:
     """Add or update a remote server entry."""
     import os
@@ -363,6 +379,20 @@ def add_remote_server(
         "verify_ssl": bool(verify_ssl),
         "selected_vaults": selected_vaults or [],
     }
+    if connect_timeout_s is not None:
+        try:
+            parsed_connect = float(connect_timeout_s)
+            if parsed_connect > 0:
+                new_entry["connect_timeout_s"] = parsed_connect
+        except (TypeError, ValueError):
+            pass
+    if read_timeout_s is not None:
+        try:
+            parsed_read = float(read_timeout_s)
+            if parsed_read > 0:
+                new_entry["read_timeout_s"] = parsed_read
+        except (TypeError, ValueError):
+            pass
     if server_password_hash:
         new_entry["server_password_hash"] = server_password_hash
         if debug:
@@ -1854,6 +1884,54 @@ def save_ai_chat_read_timeout(value: float) -> None:
     if parsed <= 0:
         parsed = 15.0
     _update_global_config({"ai_chat_read_timeout": parsed})
+
+
+def load_remote_connect_timeout(default: float = 3.0) -> float:
+    """Load remote vault connect timeout in seconds."""
+    payload = _read_global_config()
+    raw = payload.get("remote_connect_timeout_s", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
+def save_remote_connect_timeout(value: float) -> None:
+    """Persist remote vault connect timeout in seconds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 3.0
+    if parsed <= 0:
+        parsed = 3.0
+    _update_global_config({"remote_connect_timeout_s": parsed})
+
+
+def load_remote_read_timeout(default: float = 10.0) -> float:
+    """Load remote vault read timeout in seconds."""
+    payload = _read_global_config()
+    raw = payload.get("remote_read_timeout_s", default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
+def save_remote_read_timeout(value: float) -> None:
+    """Persist remote vault read timeout in seconds."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 10.0
+    if parsed <= 0:
+        parsed = 10.0
+    _update_global_config({"remote_read_timeout_s": parsed})
 
 
 def load_toc_collapsed() -> bool:

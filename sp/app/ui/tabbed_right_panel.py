@@ -41,6 +41,7 @@ class TabbedRightPanel(QWidget):
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
+    remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
     pageAboutToBeDeleted = Signal(str)  # page about to be deleted (for editor unload)
     pageDeleted = Signal(str)  # page path deleted from calendar panel
     linkBackRequested = Signal()
@@ -66,6 +67,7 @@ class TabbedRightPanel(QWidget):
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
         self._http_client = http_client
+        self._remote_mode = False
         self._pending_calendar_path: Optional[str] = None
         self._pending_calendar_date: Optional[tuple[int, int, int]] = None
         self._pending_calendar_vault_root: Optional[str] = None
@@ -122,6 +124,7 @@ class TabbedRightPanel(QWidget):
         auth_prompt=None,
     ) -> None:
         self._http_client = http_client
+        self._remote_mode = bool(remote_mode)
         if self.calendar_panel:
             self.calendar_panel.http = http_client
             if api_base:
@@ -132,6 +135,7 @@ class TabbedRightPanel(QWidget):
             self.attachments_panel.set_auth_prompt(auth_prompt)
         if self.task_panel:
             self.task_panel.set_http_client(http_client)
+            self.task_panel.set_remote_mode(bool(remote_mode))
         if self.ai_chat_panel:
             self.ai_chat_panel.set_api_client(http_client)
     
@@ -493,8 +497,10 @@ class TabbedRightPanel(QWidget):
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         self.task_panel.taskDatesWillApply.connect(self.taskDatesWillApply)
         self.task_panel.taskDatesApplied.connect(self.taskDatesApplied)
+        self.task_panel.remoteRequestObserved.connect(self.remoteRequestObserved, Qt.QueuedConnection)
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)
+        self.task_panel.set_remote_mode(self._remote_mode)
         self._sync_calendar_task_filters()
 
     def _remove_task_tab(self) -> None:

@@ -30,6 +30,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
     QTimer,
+    QThread,
     QObject,
     QElapsedTimer,
     QAbstractEventDispatcher,
@@ -103,6 +104,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QSpinBox,
+    QDoubleSpinBox,
     QSystemTrayIcon,
     QScrollArea,
     QComboBox,
@@ -642,6 +644,8 @@ class AddRemoteDialog(QDialog):
         self._no_verify = False
         self._server_password = ""
         self._remember_server_password = False
+        self._connect_timeout_s = config.load_remote_connect_timeout(3.0)
+        self._read_timeout_s = config.load_remote_read_timeout(10.0)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -664,6 +668,26 @@ class AddRemoteDialog(QDialog):
         self.no_verify_checkbox = QCheckBox("Do not verify SSL")
         self.no_verify_checkbox.setChecked(False)
         layout.addWidget(self.no_verify_checkbox)
+
+        timeout_row = QHBoxLayout()
+        timeout_row.addWidget(QLabel("Connect timeout (s):"))
+        self.connect_timeout_spin = QDoubleSpinBox()
+        self.connect_timeout_spin.setRange(0.1, 120.0)
+        self.connect_timeout_spin.setDecimals(1)
+        self.connect_timeout_spin.setSingleStep(0.5)
+        self.connect_timeout_spin.setValue(self._connect_timeout_s)
+        timeout_row.addWidget(self.connect_timeout_spin, 1)
+        layout.addLayout(timeout_row)
+
+        read_timeout_row = QHBoxLayout()
+        read_timeout_row.addWidget(QLabel("Read timeout (s):"))
+        self.read_timeout_spin = QDoubleSpinBox()
+        self.read_timeout_spin.setRange(0.1, 300.0)
+        self.read_timeout_spin.setDecimals(1)
+        self.read_timeout_spin.setSingleStep(0.5)
+        self.read_timeout_spin.setValue(self._read_timeout_s)
+        read_timeout_row.addWidget(self.read_timeout_spin, 1)
+        layout.addLayout(read_timeout_row)
 
         # Server admin password (only for remote servers)
         self.server_password_container = QWidget()
@@ -725,16 +749,20 @@ class AddRemoteDialog(QDialog):
         self._port = port
         self._use_https = bool(self.https_checkbox.isChecked())
         self._no_verify = bool(self.no_verify_checkbox.isChecked())
+        self._connect_timeout_s = float(self.connect_timeout_spin.value())
+        self._read_timeout_s = float(self.read_timeout_spin.value())
         super().accept()
 
-    def values(self) -> tuple[str, int, bool, bool, str, bool]:
+    def values(self) -> tuple[str, int, bool, bool, str, bool, float, float]:
         return (
             self._host,
             self._port,
             self._use_https,
             self._no_verify,
             self._server_password,
-            self._remember_server_password
+            self._remember_server_password,
+            self._connect_timeout_s,
+            self._read_timeout_s,
         )
 
 
@@ -1576,6 +1604,12 @@ class MainWindow(QMainWindow):
         self._refresh_token: Optional[str] = None
         self._remember_refresh: bool = False
         self._remote_username: Optional[str] = None
+        self._remote_health_state: str = "unknown"
+        self._remote_health_message: str = ""
+        self._remote_last_latency_ms: Optional[float] = None
+        self._remote_feedback_timer = QTimer(self)
+        self._remote_feedback_timer.setSingleShot(True)
+        self._remote_feedback_timer.timeout.connect(self._hide_remote_feedback)
         self._remote_user_is_admin: bool = False
         self._remote_user_can_write: bool = True
         self._user_read_only: bool = False
@@ -1588,6 +1622,7 @@ class MainWindow(QMainWindow):
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
         def _log_request(request):
+            request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
             except Exception:
@@ -1595,6 +1630,20 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
+            started = response.request.extensions.get("sp_request_started_at")
+            if isinstance(started, (int, float)) and self._remote_mode:
+                latency_ms = (time.perf_counter() - float(started)) * 1000.0
+                if response.status_code >= 500:
+                    self._set_remote_health_state(
+                        "degraded",
+                        f"{response.request.method} {response.request.url.path} -> HTTP {response.status_code}",
+                        latency_ms=latency_ms,
+                    )
+                else:
+                    self._record_remote_latency(
+                        latency_ms,
+                        context=f"{response.request.method} {response.request.url.path}",
+                    )
             try:
                 path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
             except Exception:
@@ -1945,7 +1994,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if self._feature_tasks_enabled:
-            self.right_panel.refresh_tasks()
+            QTimer.singleShot(0, self.right_panel.refresh_tasks)
         self.right_panel.taskActivated.connect(self._open_task_from_panel)
         self.right_panel.linkActivated.connect(self._open_link_from_panel)
         self.right_panel.dateActivated.connect(self._open_journal_date)
@@ -1965,6 +2014,10 @@ class MainWindow(QMainWindow):
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
         self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
+        self.right_panel.remoteRequestObserved.connect(
+            self._on_right_panel_remote_request_observed,
+            Qt.QueuedConnection,
+        )
         self.right_panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
         self.right_panel.taskDatesApplied.connect(self._on_task_dates_applied)
         self.right_panel.linkBackRequested.connect(self._navigate_history_back)
@@ -2538,6 +2591,18 @@ class MainWindow(QMainWindow):
         self._vi_status_label.setToolTip("Shows when vi insert mode is active")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
         self._update_vi_badge_visibility()
+
+        self._remote_feedback_label = QLabel("")
+        self._remote_feedback_label.setObjectName("remoteFeedbackLabel")
+        self._remote_feedback_label.setStyleSheet(
+            self._badge_base_style
+            + " background-color: "
+            f"{theme_value('main_window.remote_badge.slow_bg', '#ed6c02')}; "
+            "margin-right: 6px; color: "
+            f"{theme_value('main_window.remote_badge.text', '#ffffff')};"
+        )
+        self._remote_feedback_label.hide()
+        self.statusBar().addPermanentWidget(self._remote_feedback_label, 0)
 
         self._remote_status_label = QLabel("REMOTE")
         self._remote_status_label.setObjectName("remoteStatusLabel")
@@ -3285,9 +3350,17 @@ class MainWindow(QMainWindow):
             scheme = entry.get("scheme") or "http"
             
             base_url = f"{scheme}://{host}:{port}"
-            display = base_url.replace("http://", "").replace("https://", "")
             verify_ssl = entry.get("verify_ssl", True)
             selected_vaults = entry.get("selected_vaults") or []
+            try:
+                connect_timeout = float(entry.get("connect_timeout_s", config.load_remote_connect_timeout(3.0)))
+            except (TypeError, ValueError):
+                connect_timeout = config.load_remote_connect_timeout(3.0)
+            try:
+                read_timeout = float(entry.get("read_timeout_s", config.load_remote_read_timeout(10.0)))
+            except (TypeError, ValueError):
+                read_timeout = config.load_remote_read_timeout(10.0)
+            timeout = self._http_timeout(connect_timeout, read_timeout)
             
             # Skip servers with no configured vaults
             if not selected_vaults:
@@ -3309,54 +3382,60 @@ class MainWindow(QMainWindow):
                 import hashlib
                 server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
             
-            # Check connectivity for each configured vault individually
-            for vault_path in selected_vaults:
-                start_vault = time.perf_counter()
-                vault_status = "ok"
-                error_message = None
-                vault_name = Path(vault_path).name
-                
-                try:
-                    # Prepare headers with server admin password
-                    headers = {}
-                    if server_password_hash:
-                        headers["X-Server-Admin-Password"] = server_password_hash
-                    
-                    # Try to fetch the specific vault
-                    resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
-                    
-                    # Handle 401 - try to refresh token
-                    if resp.status_code == 401:
-                        server_key = self._server_key_for_url(base_url)
-                        auth_entry = config.load_remote_auth(server_key)
-                        refresh_token = auth_entry.get("refresh_token")
-                        if refresh_token:
-                            refresh_resp = httpx.post(
-                                f"{base_url}/auth/refresh",
-                                headers={"Authorization": f"Bearer {refresh_token}"},
-                                timeout=10.0,
-                                verify=verify_ssl,
-                            )
-                            if refresh_resp.status_code == 200:
-                                payload = refresh_resp.json()
-                                access_token = payload.get("access_token")
-                                new_refresh = payload.get("refresh_token") or refresh_token
-                                if access_token:
-                                    config.save_remote_auth(
-                                        server_key,
-                                        new_refresh,
-                                        username=auth_entry.get("username"),
-                                    )
-                                    auth_headers = {"Authorization": f"Bearer {access_token}"}
-                                    if server_password_hash:
-                                        auth_headers["X-Server-Admin-Password"] = server_password_hash
-                                    resp = httpx.get(
-                                        f"{base_url}/api/vaults",
-                                        headers=auth_headers,
-                                        timeout=10.0,
-                                        verify=verify_ssl,
-                                    )
-                    
+            start_server = time.perf_counter()
+            try:
+                headers: dict[str, str] = {}
+                if server_password_hash:
+                    headers["X-Server-Admin-Password"] = server_password_hash
+                resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=timeout, verify=verify_ssl)
+
+                if resp.status_code == 401:
+                    server_key = self._server_key_for_url(base_url)
+                    auth_entry = config.load_remote_auth(server_key)
+                    refresh_token = auth_entry.get("refresh_token")
+                    if refresh_token:
+                        refresh_resp = httpx.post(
+                            f"{base_url}/auth/refresh",
+                            headers={"Authorization": f"Bearer {refresh_token}"},
+                            timeout=timeout,
+                            verify=verify_ssl,
+                        )
+                        if refresh_resp.status_code == 200:
+                            payload = refresh_resp.json()
+                            access_token = payload.get("access_token")
+                            new_refresh = payload.get("refresh_token") or refresh_token
+                            if access_token:
+                                config.save_remote_auth(
+                                    server_key,
+                                    new_refresh,
+                                    username=auth_entry.get("username"),
+                                )
+                                headers = {"Authorization": f"Bearer {access_token}"}
+                                if server_password_hash:
+                                    headers["X-Server-Admin-Password"] = server_password_hash
+                                resp = httpx.get(
+                                    f"{base_url}/api/vaults",
+                                    headers=headers,
+                                    timeout=timeout,
+                                    verify=verify_ssl,
+                                )
+
+                latency_ms = (time.perf_counter() - start_server) * 1000.0
+                payload = resp.json() if resp.status_code == 200 else {}
+                remote_vaults = payload.get("vaults", []) if isinstance(payload, dict) else []
+                vault_map: dict[str, dict] = {}
+                if isinstance(remote_vaults, list):
+                    for item in remote_vaults:
+                        if not isinstance(item, dict):
+                            continue
+                        item_path = str(item.get("path") or "").strip()
+                        if item_path:
+                            vault_map[item_path] = item
+
+                for vault_path in selected_vaults:
+                    vault_status = "ok"
+                    error_message = None
+                    vault_name = Path(vault_path).name
                     if resp.status_code == 401:
                         vault_status = "error"
                         error_message = "Authentication required"
@@ -3367,21 +3446,14 @@ class MainWindow(QMainWindow):
                         vault_status = "error"
                         error_message = f"HTTP {resp.status_code}"
                     else:
-                        # Check if vault exists in the response
-                        payload = resp.json()
-                        vaults = payload.get("vaults", [])
-                        if isinstance(vaults, list):
-                            vault_data = next((v for v in vaults if v.get("path") == vault_path), None)
-                            if vault_data:
-                                # Vault exists, get its name
-                                vault_name = vault_data.get("name") or Path(vault_path).name
-                            else:
-                                vault_status = "error"
-                                error_message = "Vault not found on server"
-                        else:
+                        vault_data = vault_map.get(vault_path)
+                        if vault_data is None:
                             vault_status = "error"
-                            error_message = "Invalid server response"
-                    
+                            error_message = "Vault not found on server"
+                        else:
+                            vault_name = str(vault_data.get("name") or vault_name)
+                            if latency_ms >= 1500:
+                                vault_status = "slow"
                     results.append(
                         {
                             "kind": "remote",
@@ -3391,17 +3463,31 @@ class MainWindow(QMainWindow):
                             "verify_ssl": verify_ssl,
                             "id": f"remote::{base_url}::{vault_path}",
                             "status": vault_status,
+                            "latency_ms": latency_ms,
                             **({"error": error_message} if error_message else {}),
                         }
                     )
-                    
-                    if debug:
-                        print(
-                            f"[RemoteVaults] {base_url}{vault_path} status={vault_status} "
-                            f"dt={(time.perf_counter()-start_vault)*1000:.1f}ms"
-                        )
-                        
-                except Exception as exc:
+                if resp.status_code >= 500:
+                    self._set_remote_health_state(
+                        "degraded",
+                        f"{self._format_remote_host(base_url)} HTTP {resp.status_code}",
+                        latency_ms=latency_ms,
+                    )
+                else:
+                    self._record_remote_latency(latency_ms, context=f"{self._format_remote_host(base_url)} vault list")
+                if debug:
+                    print(
+                        f"[RemoteVaults] {base_url} status={resp.status_code} vaults={len(selected_vaults)} "
+                        f"dt={latency_ms:.1f}ms"
+                    )
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start_server) * 1000.0
+                self._set_remote_health_state(
+                    "degraded",
+                    f"{self._format_remote_host(base_url)} unreachable: {exc}",
+                    latency_ms=latency_ms,
+                )
+                for vault_path in selected_vaults:
                     results.append(
                         {
                             "kind": "remote",
@@ -3412,13 +3498,14 @@ class MainWindow(QMainWindow):
                             "id": f"remote::{base_url}::{vault_path}",
                             "status": "error",
                             "error": str(exc),
+                            "latency_ms": latency_ms,
                         }
                     )
-                    if debug:
-                        print(
-                            f"[RemoteVaults] {base_url}{vault_path} error={exc} "
-                            f"dt={(time.perf_counter()-start_vault)*1000:.1f}ms"
-                        )
+                if debug:
+                    print(
+                        f"[RemoteVaults] {base_url} error={exc} vaults={len(selected_vaults)} "
+                        f"dt={latency_ms:.1f}ms"
+                    )
         
         if debug:
             print(
@@ -3455,7 +3542,7 @@ class MainWindow(QMainWindow):
     def _encode_remote_ref(self, server_url: str, path: str) -> str:
         return f"remote::{server_url}::{path}"
 
-    def _remote_verify_ssl(self, server_url: str) -> bool:
+    def _remote_server_config_for_url(self, server_url: str) -> Optional[dict]:
         server_key = self._server_key_for_url(server_url)
         for entry in config.load_remote_servers():
             host = entry.get("host")
@@ -3465,18 +3552,63 @@ class MainWindow(QMainWindow):
                 continue
             candidate = f"{scheme}://{host}:{port}"
             if self._server_key_for_url(candidate) == server_key:
-                return bool(entry.get("verify_ssl", True))
+                return entry
+        return None
+
+    def _remote_verify_ssl(self, server_url: str) -> bool:
+        entry = self._remote_server_config_for_url(server_url)
+        if entry is not None:
+            return bool(entry.get("verify_ssl", True))
         return True
+
+    def _remote_timeout_settings_for_url(self, server_url: str) -> tuple[float, float]:
+        entry = self._remote_server_config_for_url(server_url)
+        default_connect = config.load_remote_connect_timeout(3.0)
+        default_read = config.load_remote_read_timeout(10.0)
+        if entry is None:
+            return default_connect, default_read
+        try:
+            connect_timeout = float(entry.get("connect_timeout_s", default_connect))
+        except (TypeError, ValueError):
+            connect_timeout = default_connect
+        try:
+            read_timeout = float(entry.get("read_timeout_s", default_read))
+        except (TypeError, ValueError):
+            read_timeout = default_read
+        if connect_timeout <= 0:
+            connect_timeout = default_connect
+        if read_timeout <= 0:
+            read_timeout = default_read
+        return connect_timeout, read_timeout
+
+    @staticmethod
+    def _http_timeout(connect_timeout: float, read_timeout: float) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=read_timeout,
+            pool=connect_timeout,
+        )
 
     def _add_remote_server(self) -> Optional[list[dict[str, str]]]:
         """Prompt for a remote server and verify it before adding."""
         dlg = AddRemoteDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return None
-        host, port, use_https, no_verify, server_password, remember_server_password = dlg.values()
+        (
+            host,
+            port,
+            use_https,
+            no_verify,
+            server_password,
+            remember_server_password,
+            connect_timeout_s,
+            read_timeout_s,
+        ) = dlg.values()
         scheme = "https" if use_https else "http"
         verify_ssl = not no_verify
         base_url = f"{scheme}://{host}:{port}"
+        timeout = self._http_timeout(connect_timeout_s, read_timeout_s)
         
         # Hash server password if provided
         server_password_hash = None
@@ -3495,11 +3627,13 @@ class MainWindow(QMainWindow):
             headers = {}
             if server_password_hash:
                 headers["X-Server-Admin-Password"] = server_password_hash
-            
-            resp = httpx.get(f"{base_url}/api/health", headers=headers, timeout=10.0, verify=verify_ssl)
+            health_start = time.perf_counter()
+            resp = httpx.get(f"{base_url}/api/health", headers=headers, timeout=timeout, verify=verify_ssl)
+            self._record_remote_latency((time.perf_counter() - health_start) * 1000.0, context=f"{self._format_remote_host(base_url)} health")
             if resp.status_code != 200:
                 raise RuntimeError(f"Health check failed (HTTP {resp.status_code})")
         except Exception as exc:
+            self._set_remote_health_state("degraded", f"{self._format_remote_host(base_url)} health failed: {exc}")
             self._alert(f"Could not verify server {base_url}: {exc}")
             return None
         access_token = None
@@ -3509,8 +3643,9 @@ class MainWindow(QMainWindow):
             headers = {}
             if server_password_hash:
                 headers["X-Server-Admin-Password"] = server_password_hash
-            
-            resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=10.0, verify=verify_ssl)
+            vaults_start = time.perf_counter()
+            resp = httpx.get(f"{base_url}/api/vaults", headers=headers, timeout=timeout, verify=verify_ssl)
+            self._record_remote_latency((time.perf_counter() - vaults_start) * 1000.0, context=f"{self._format_remote_host(base_url)} vault list")
             if resp.status_code == 403:
                 self._alert("Server admin password is invalid or missing.")
                 return None
@@ -3521,7 +3656,7 @@ class MainWindow(QMainWindow):
                 auth_headers = {"Authorization": f"Bearer {access_token}"}
                 if server_password_hash:
                     auth_headers["X-Server-Admin-Password"] = server_password_hash
-                resp = httpx.get(f"{base_url}/api/vaults", headers=auth_headers, timeout=10.0, verify=verify_ssl)
+                resp = httpx.get(f"{base_url}/api/vaults", headers=auth_headers, timeout=timeout, verify=verify_ssl)
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to list vaults (HTTP {resp.status_code})")
             payload = resp.json()
@@ -3576,7 +3711,7 @@ class MainWindow(QMainWindow):
                     f"{base_url}/api/vaults/create",
                     json={"name": name, "auth_username": username, "auth_password": password},
                     headers=headers,
-                    timeout=10.0,
+                    timeout=timeout,
                     verify=verify_ssl,
                 )
                 if create_resp.status_code == 403:
@@ -3588,13 +3723,13 @@ class MainWindow(QMainWindow):
                     headers = {"Authorization": f"Bearer {access_token}"}
                     if server_password_hash:
                         headers["X-Server-Admin-Password"] = server_password_hash
-                    create_resp = httpx.post(
-                        f"{base_url}/api/vaults/create",
-                        json={"name": name, "auth_username": username, "auth_password": password},
-                        headers=headers,
-                        timeout=10.0,
-                        verify=verify_ssl,
-                    )
+                        create_resp = httpx.post(
+                            f"{base_url}/api/vaults/create",
+                            json={"name": name, "auth_username": username, "auth_password": password},
+                            headers=headers,
+                            timeout=timeout,
+                            verify=verify_ssl,
+                        )
                 if create_resp.status_code != 200:
                     raise RuntimeError(f"Failed to create vault (HTTP {create_resp.status_code})")
                 created = create_resp.json()
@@ -3606,6 +3741,7 @@ class MainWindow(QMainWindow):
             if not vaults:
                 selected_path = _prompt_create_remote_vault()
         except Exception as exc:
+            self._set_remote_health_state("degraded", f"{self._format_remote_host(base_url)} vault load failed: {exc}")
             self._alert(f"Could not load vaults from {base_url}: {exc}")
             return None
 
@@ -3658,6 +3794,8 @@ class MainWindow(QMainWindow):
             verify_ssl=verify_ssl,
             selected_vaults=selected_vaults,
             server_password_hash=saved_password_hash,
+            connect_timeout_s=connect_timeout_s,
+            read_timeout_s=read_timeout_s,
         )
         if debug:
             # Verify it was saved
@@ -4209,6 +4347,57 @@ class MainWindow(QMainWindow):
             path = f"/{path}"
         return f"{base}{path}" if base else None
 
+    def _hide_remote_feedback(self) -> None:
+        if hasattr(self, "_remote_feedback_label"):
+            self._remote_feedback_label.hide()
+            self._remote_feedback_label.setText("")
+            self._remote_feedback_label.setToolTip("")
+
+    def _show_remote_feedback(self, message: str, timeout_ms: int = 5000) -> None:
+        if not hasattr(self, "_remote_feedback_label"):
+            return
+        text = str(message or "").strip()
+        if not text:
+            self._hide_remote_feedback()
+            return
+        self._remote_feedback_label.setText(text)
+        self._remote_feedback_label.setToolTip(text)
+        self._remote_feedback_label.show()
+        self._remote_feedback_timer.start(max(1000, int(timeout_ms)))
+
+    def _set_remote_health_state(self, state: str, message: str = "", latency_ms: Optional[float] = None) -> None:
+        self._remote_health_state = state
+        self._remote_health_message = str(message or "")
+        self._remote_last_latency_ms = latency_ms
+        if state == "slow":
+            self._show_remote_feedback("Remote network is slow", timeout_ms=6000)
+        elif state in ("degraded", "offline"):
+            detail = self._remote_health_message or "Remote network issue"
+            self._show_remote_feedback(detail, timeout_ms=7000)
+        else:
+            self._hide_remote_feedback()
+        self._update_remote_status_badge()
+
+    def _record_remote_latency(self, latency_ms: float, context: str = "") -> None:
+        latency = float(latency_ms)
+        context_label = context or "Remote request"
+        if latency >= 4000:
+            self._set_remote_health_state("degraded", f"{context_label} took {latency/1000.0:.1f}s", latency_ms=latency)
+        elif latency >= 1500:
+            self._set_remote_health_state("slow", f"{context_label} took {latency/1000.0:.1f}s", latency_ms=latency)
+        else:
+            self._set_remote_health_state("healthy", latency_ms=latency)
+
+    def _on_right_panel_remote_request_observed(self, state: str, latency_ms: float, message: str) -> None:
+        if QThread.currentThread() != self.thread():
+            return
+        if not self._remote_mode:
+            return
+        if state == "ok":
+            self._record_remote_latency(latency_ms, context=message or "Task request")
+            return
+        self._set_remote_health_state("degraded", message or "Remote task request failed", latency_ms=latency_ms)
+
     def _update_remote_status_badge(self) -> None:
         if not hasattr(self, "_remote_status_label"):
             return
@@ -4224,22 +4413,27 @@ class MainWindow(QMainWindow):
             # Add authentication status and set badge color
             if self._access_token:
                 tooltip_parts.append("Auth: ✓ Active (access token valid)")
-                badge_color = theme_value(
-                    "main_window.remote_badge.authenticated_bg", "#1e88e5"
-                )
             elif self._refresh_token:
                 if self._remember_refresh:
                     tooltip_parts.append("Auth: ✓ Saved (refresh token available)")
                 else:
                     tooltip_parts.append("Auth: Session only (refresh token)")
-                badge_color = theme_value(
-                    "main_window.remote_badge.authenticated_bg", "#1e88e5"
-                )
             else:
                 tooltip_parts.append("Auth: ✗ Not authenticated")
-                badge_color = theme_value(
-                    "main_window.remote_badge.unauthenticated_bg", "#ff9800"
-                )
+            if self._remote_last_latency_ms is not None:
+                tooltip_parts.append(f"Latency: {self._remote_last_latency_ms:.0f} ms")
+            if self._remote_health_message:
+                tooltip_parts.append(f"Network: {self._remote_health_message}")
+            if self._remote_health_state == "degraded":
+                badge_color = theme_value("main_window.remote_badge.degraded_bg", "#d32f2f")
+            elif self._remote_health_state == "offline":
+                badge_color = theme_value("main_window.remote_badge.offline_bg", "#6d4c41")
+            elif self._remote_health_state == "slow":
+                badge_color = theme_value("main_window.remote_badge.slow_bg", "#ed6c02")
+            elif self._access_token or self._refresh_token:
+                badge_color = theme_value("main_window.remote_badge.authenticated_bg", "#1e88e5")
+            else:
+                badge_color = theme_value("main_window.remote_badge.unauthenticated_bg", "#ff9800")
             
             # Add username if known
             if self._remote_username:
@@ -4256,6 +4450,7 @@ class MainWindow(QMainWindow):
         else:
             self._remote_status_label.setToolTip("")
             self._remote_status_label.hide()
+            self._hide_remote_feedback()
 
     def _is_homebase_mode_enabled(self) -> bool:
         if self._remote_mode:
@@ -5141,10 +5336,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
+        timeout: float | httpx.Timeout = 10.0
         if is_remote:
             self._load_remote_auth()
             auth = RemoteTokenAuth(self._get_access_token, self._attempt_refresh)
             headers = {}
+            connect_timeout, read_timeout = self._remote_timeout_settings_for_url(base_url)
+            timeout = self._http_timeout(connect_timeout, read_timeout)
             
             # Add server admin password header for remote servers
             try:
@@ -5173,7 +5371,7 @@ class MainWindow(QMainWindow):
             headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
         return httpx.Client(
             base_url=base_url,
-            timeout=10.0,
+            timeout=timeout,
             event_hooks={"request": [request_hooks[0]], "response": [request_hooks[1]]},
             headers=headers,
             verify=self._verify_tls,
@@ -5189,6 +5387,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         def _log_request(request):
+            request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
             except Exception:
@@ -5196,6 +5395,20 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
+            started = response.request.extensions.get("sp_request_started_at")
+            if isinstance(started, (int, float)) and self._remote_mode:
+                latency_ms = (time.perf_counter() - float(started)) * 1000.0
+                if response.status_code >= 500:
+                    self._set_remote_health_state(
+                        "degraded",
+                        f"{response.request.method} {response.request.url.path} -> HTTP {response.status_code}",
+                        latency_ms=latency_ms,
+                    )
+                else:
+                    self._record_remote_latency(
+                        latency_ms,
+                        context=f"{response.request.method} {response.request.url.path}",
+                    )
             try:
                 path = response.request.url.raw_path.decode("utf-8") if hasattr(response.request.url, "raw_path") else response.request.url.path
             except Exception:
@@ -5237,6 +5450,9 @@ class MainWindow(QMainWindow):
         self._refresh_token = None
         self._remember_refresh = False
         self._remote_username = None
+        self._remote_health_state = "unknown"
+        self._remote_health_message = ""
+        self._remote_last_latency_ms = None
         self._rebuild_http_client()
         self._apply_remote_mode_ui()
         try:
