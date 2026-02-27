@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from sp.app import config, indexer
@@ -128,3 +130,41 @@ def test_actionable_filter_respects_non_actionable_tags(temp_db, monkeypatch) ->
 
     assert "waiting around" not in names_actionable
     assert "do now" in names_actionable
+
+
+def test_fetch_tasks_threaded_connection_stress(temp_db) -> None:
+    """Concurrent task fetches should not share one sqlite connection."""
+    path = "/Stress/Stress.md"
+    content = """
+- [ ] parent task
+    - [ ] child task one @wt
+    - [ ] child task two
+        - [ ] grandchild task
+- [ ] sibling task
+""".strip()
+    tasks = indexer.extract_tasks(path, content)
+    config.update_page_index(path=path, title="Stress", tags=[], links=[], tasks=tasks)
+
+    worker_count = 12
+    iterations = 120
+
+    def _worker() -> tuple[int, int]:
+        conn_id = id(config._get_conn())
+        total = 0
+        for _ in range(iterations):
+            rows = config.fetch_tasks(
+                include_done=False,
+                include_ancestors=True,
+                actionable_only=True,
+            )
+            total += len(rows)
+        return conn_id, total
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        results = list(pool.map(lambda _: _worker(), range(worker_count)))
+
+    conn_ids = {conn_id for conn_id, _ in results}
+    totals = [total for _, total in results]
+
+    assert len(conn_ids) > 1
+    assert all(total > 0 for total in totals)

@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Any, Iterable, Optional, Sequence
 
 from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
@@ -21,6 +21,7 @@ _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
 _ACTIVE_CONN_LOCK = RLock()
 _STALE_ACTIVE_CONNS: list[sqlite3.Connection] = []
+_THREAD_LOCAL = local()
 _TASK_FETCH_CACHE: OrderedDict[tuple, list[dict]] = OrderedDict()
 
 _TASK_FETCH_CACHE_SIZE = 32
@@ -4089,7 +4090,7 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
 def set_active_vault(root: Optional[str]) -> None:
     global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED
     with _ACTIVE_CONN_LOCK:
-        old_conn = _ACTIVE_CONN
+        old_conn = getattr(_THREAD_LOCAL, "conn", None)
         _ACTIVE_CONN = None
         _TASKS_FTS_ENABLED = False
         _invalidate_task_cache()
@@ -4097,20 +4098,28 @@ def set_active_vault(root: Optional[str]) -> None:
         if not root:
             _ACTIVE_ROOT = None
             if old_conn:
-                _STALE_ACTIVE_CONNS.append(old_conn)
+                try:
+                    old_conn.close()
+                except Exception:
+                    _STALE_ACTIVE_CONNS.append(old_conn)
+            _THREAD_LOCAL.conn = None
+            _THREAD_LOCAL.db_path = None
             return
         _ACTIVE_ROOT = Path(root)
         db_dir = _ACTIVE_ROOT / ".stillpoint"
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "settings.db"
-        _ACTIVE_CONN = sqlite3.connect(db_path, check_same_thread=False)
-        _ensure_schema(_ACTIVE_CONN)
-        _prime_page_cache()
-        # Avoid closing the previous shared connection here. Background worker
-        # threads may still be reading from it and closing in-flight can crash
-        # the process in native sqlite code.
+        setup_conn = sqlite3.connect(db_path, check_same_thread=False)
+        _ensure_schema(setup_conn)
+        setup_conn.close()
         if old_conn:
-            _STALE_ACTIVE_CONNS.append(old_conn)
+            try:
+                old_conn.close()
+            except Exception:
+                _STALE_ACTIVE_CONNS.append(old_conn)
+        _THREAD_LOCAL.conn = None
+        _THREAD_LOCAL.db_path = None
+        _prime_page_cache()
 
 
 
@@ -4119,7 +4128,7 @@ def get_active_vault() -> Optional[str]:
 
 
 def has_active_vault() -> bool:
-    return _ACTIVE_CONN is not None
+    return _ACTIVE_ROOT is not None
 
 
 def is_vault_index_empty() -> bool:
@@ -4137,7 +4146,23 @@ def is_vault_index_empty() -> bool:
 
 def _get_conn() -> Optional[sqlite3.Connection]:
     with _ACTIVE_CONN_LOCK:
-        return _ACTIVE_CONN
+        if _ACTIVE_ROOT is None:
+            return None
+        db_path = str(_ACTIVE_ROOT / ".stillpoint" / "settings.db")
+        conn = getattr(_THREAD_LOCAL, "conn", None)
+        conn_db_path = getattr(_THREAD_LOCAL, "db_path", None)
+        if conn is not None and conn_db_path == db_path:
+            return conn
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                _STALE_ACTIVE_CONNS.append(conn)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        _THREAD_LOCAL.conn = conn
+        _THREAD_LOCAL.db_path = db_path
+        return conn
 
 
 def _vault_db_path() -> Optional[Path]:
