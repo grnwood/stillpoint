@@ -452,6 +452,7 @@ class TaskPanel(QWidget):
         self._remote_mode = False
         self._api_task_inflight: set[tuple] = set()
         self._api_task_error_until: dict[tuple, float] = {}
+        self._api_tasks_global_error_until: float = 0.0
         self._api_task_result_queue: queue.Queue[tuple[str, tuple, object, float]] = queue.Queue()
         self._api_result_timer = QTimer(self)
         self._api_result_timer.setInterval(75)
@@ -3080,30 +3081,18 @@ class TaskPanel(QWidget):
             }
             if tags:
                 params["tags"] = tags
-            if self._remote_mode:
-                error_until = self._api_task_error_until.get(cache_key, 0.0)
-                if now < error_until:
-                    return cached[1] if cached else []
-                if cache_key in self._api_task_inflight:
-                    return cached[1] if cached else []
-                self._queue_remote_task_fetch(cache_key, params)
+            if now < self._api_tasks_global_error_until:
                 return cached[1] if cached else []
-            try:
-                resp = self._http_client.get("/api/tasks", params=params)
-                resp.raise_for_status()
-                payload = resp.json()
-                items = payload.get("items", [])
-                if log_enabled("tasks_calendar"):
-                    print(
-                        f"[TASK_PANEL] /api/tasks count={len(items)} "
-                        f"query={query!r} tags={tags} include_done={include_done} "
-                        f"include_ancestors={include_ancestors} actionable_only={actionable_only}"
-                    )
-                self._api_task_cache[cache_key] = (now, items)
-                return items
-            except Exception as exc:
-                print(f"[TASK_PANEL] Failed to fetch tasks via API: {exc}")
-                return []
+            # Avoid launching multiple query variants during the same refresh cycle.
+            if self._api_task_inflight:
+                return cached[1] if cached else []
+            error_until = self._api_task_error_until.get(cache_key, 0.0)
+            if now < error_until:
+                return cached[1] if cached else []
+            if cache_key in self._api_task_inflight:
+                return cached[1] if cached else []
+            self._queue_remote_task_fetch(cache_key, params)
+            return cached[1] if cached else []
         return config.fetch_tasks(
             query,
             tags,
@@ -3128,6 +3117,7 @@ class TaskPanel(QWidget):
     def set_http_client(self, http_client) -> None:
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
+        self._api_tasks_global_error_until = 0.0
         self._api_task_result_queue = queue.Queue()
         self._http_client = http_client
         self._vector_api = VectorAPIClient(http_client)
@@ -3144,6 +3134,8 @@ class TaskPanel(QWidget):
         if not self._http_client or cache_key in self._api_task_inflight:
             return
         self._api_task_inflight.add(cache_key)
+        # Briefly gate additional variants until this request returns.
+        self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, time.monotonic() + 0.4)
         client = self._http_client
         args = dict(params)
 
@@ -3163,14 +3155,6 @@ class TaskPanel(QWidget):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _drain_remote_task_results(self) -> None:
-        if not self._remote_mode:
-            self._api_task_inflight.clear()
-            while not self._api_task_result_queue.empty():
-                try:
-                    self._api_task_result_queue.get_nowait()
-                except queue.Empty:
-                    break
-            return
         had_success = False
         while True:
             try:
@@ -3184,12 +3168,20 @@ class TaskPanel(QWidget):
                 items = payload if isinstance(payload, list) else []
                 self._api_task_cache[cache_key] = (time.monotonic(), items)
                 self._api_task_error_until.pop(cache_key, None)
-                self.remoteRequestObserved.emit("ok", latency_ms, "GET /api/tasks")
+                self._api_tasks_global_error_until = 0.0
+                if self._remote_mode:
+                    self.remoteRequestObserved.emit("ok", latency_ms, "GET /api/tasks")
                 had_success = True
             else:
                 error_text = str(payload or "unknown error")
-                self._api_task_error_until[cache_key] = time.monotonic() + 2.0
-                self.remoteRequestObserved.emit("error", latency_ms, f"/api/tasks failed: {error_text}")
+                now = time.monotonic()
+                # Back off longer on remote task endpoint failures to avoid request storms.
+                self._api_task_error_until[cache_key] = now + 5.0
+                self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, now + 5.0)
+                if self._remote_mode:
+                    if "504" in error_text:
+                        error_text = "Task endpoint timed out (HTTP 504)"
+                    self.remoteRequestObserved.emit("error", latency_ms, f"/api/tasks failed: {error_text}")
         if had_success:
             QTimer.singleShot(0, self._refresh_tasks)
 

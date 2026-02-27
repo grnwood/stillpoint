@@ -91,14 +91,30 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_TASKS_CACHE: dict[tuple[str, tuple[str, ...], Optional[str]], list[dict]] = {}
+_TASKS_CACHE: dict[tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]], list[dict]] = {}
+_TASKS_STALE_CACHE: dict[
+    tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]],
+    tuple[float, list[dict]],
+] = {}
 _TASK_CACHE_VERSION: int = -1
-_TASKS_QUERY_TIMEOUT_S = max(0.1, float(os.getenv("SP_TASKS_QUERY_TIMEOUT_S", "6.0")))
+_TASKS_QUERY_TIMEOUT_S = max(0.1, float(os.getenv("SP_TASKS_QUERY_TIMEOUT_S", "12.0")))
 _TASKS_QUERY_WORKERS = max(1, int(os.getenv("SP_TASKS_QUERY_WORKERS", "4")))
+_TASKS_STALE_MAX_AGE_S = max(1.0, float(os.getenv("SP_TASKS_STALE_MAX_AGE_S", "300.0")))
+_TASKS_ALLOW_STALE_ON_TIMEOUT = os.getenv("SP_TASKS_ALLOW_STALE_ON_TIMEOUT", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 _TASKS_QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_TASKS_QUERY_WORKERS,
     thread_name_prefix="sp-tasks-query",
 )
+_TASKS_INFLIGHT: dict[
+    tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]],
+    concurrent.futures.Future[list[dict]],
+] = {}
+_TASKS_INFLIGHT_LOCK = threading.Lock()
 
 _TASK_DATE_PATTERN = re.compile(r"\s*[<>][0-9]{4}-[0-9]{2}-[0-9]{2}")
 _TASK_START_PATTERN = re.compile(r">([0-9]{4}-[0-9]{2}-[0-9]{2})")
@@ -696,6 +712,9 @@ def _should_use_local_file_ops(request: Request) -> bool:
 def _clear_task_cache() -> None:
     global _TASK_CACHE_VERSION
     _TASKS_CACHE.clear()
+    _TASKS_STALE_CACHE.clear()
+    with _TASKS_INFLIGHT_LOCK:
+        _TASKS_INFLIGHT.clear()
     _TASK_CACHE_VERSION = -1
 
 
@@ -805,7 +824,9 @@ def _fetch_tasks(
         _TASK_CACHE_VERSION = current_version
     cache_key = (query, tags, include_done, include_ancestors, actionable_only, status)
     if cache_key in _TASKS_CACHE:
-        return _TASKS_CACHE[cache_key]
+        cached = _TASKS_CACHE[cache_key]
+        _TASKS_STALE_CACHE[cache_key] = (time.monotonic(), cached)
+        return cached
     tasks_from_db = config.fetch_tasks(
         query=query,
         tags=tags,
@@ -818,6 +839,7 @@ def _fetch_tasks(
     elif status == "todo":
         tasks_from_db = [task for task in tasks_from_db if (task.get("status") or "").lower() != "done"]
     _TASKS_CACHE[cache_key] = tasks_from_db
+    _TASKS_STALE_CACHE[cache_key] = (time.monotonic(), tasks_from_db)
     return tasks_from_db
 
 
@@ -830,18 +852,33 @@ def _fetch_tasks_with_timeout(
     actionable_only: bool,
     status: Optional[str],
 ) -> list[dict]:
-    future = _TASKS_QUERY_EXECUTOR.submit(
-        _fetch_tasks,
-        query,
-        tags,
-        include_done=include_done,
-        include_ancestors=include_ancestors,
-        actionable_only=actionable_only,
-        status=status,
-    )
+    cache_key = (query, tags, include_done, include_ancestors, actionable_only, status)
+    with _TASKS_INFLIGHT_LOCK:
+        future = _TASKS_INFLIGHT.get(cache_key)
+        if future is None:
+            future = _TASKS_QUERY_EXECUTOR.submit(
+                _fetch_tasks,
+                query,
+                tags,
+                include_done=include_done,
+                include_ancestors=include_ancestors,
+                actionable_only=actionable_only,
+                status=status,
+            )
+            _TASKS_INFLIGHT[cache_key] = future
     try:
         return future.result(timeout=_TASKS_QUERY_TIMEOUT_S)
     except concurrent.futures.TimeoutError as exc:
+        if _TASKS_ALLOW_STALE_ON_TIMEOUT:
+            stale_entry = _TASKS_STALE_CACHE.get(cache_key)
+            if stale_entry:
+                fetched_at, stale_items = stale_entry
+                if (time.monotonic() - fetched_at) <= _TASKS_STALE_MAX_AGE_S:
+                    print(
+                        f"[API] /api/tasks timeout after {_TASKS_QUERY_TIMEOUT_S:.1f}s; "
+                        f"returning stale cache ({len(stale_items)} items)"
+                    )
+                    return stale_items
         # Leave the worker running; respond quickly so remote clients don't hang UI.
         raise HTTPException(
             status_code=504,
@@ -849,6 +886,12 @@ def _fetch_tasks_with_timeout(
         ) from exc
     except sqlite3.OperationalError as exc:
         raise HTTPException(status_code=503, detail=f"Task query unavailable: {exc}") from exc
+    finally:
+        if future.done():
+            with _TASKS_INFLIGHT_LOCK:
+                existing = _TASKS_INFLIGHT.get(cache_key)
+                if existing is future:
+                    _TASKS_INFLIGHT.pop(cache_key, None)
 
 
 def _serialize_task(task: dict) -> dict:

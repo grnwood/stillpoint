@@ -6,6 +6,9 @@ import tempfile
 import re
 import os
 import calendar
+import queue
+import threading
+import time
 from datetime import date as Date, datetime, timedelta
 from typing import Optional, Callable
 
@@ -198,6 +201,7 @@ class CalendarPanel(QWidget):
     openInWindowRequested = Signal(str)
     pageAboutToBeDeleted = Signal(str)  # emitted BEFORE page deletion (for editor unload)
     pageDeleted = Signal(str)  # emitted AFTER page is deleted
+    remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
 
     def __init__(
         self,
@@ -253,6 +257,15 @@ class CalendarPanel(QWidget):
         self._suppress_task_filter_sync = False
         self._api_task_cache: dict[tuple[bool, bool, bool], tuple[int, list[dict]]] = {}
         self._task_cache_generation: int = 0
+        self._api_task_inflight: set[tuple[bool, bool, bool]] = set()
+        self._api_task_error_until: dict[tuple[bool, bool, bool], float] = {}
+        self._api_tasks_global_error_until: float = 0.0
+        self._api_task_result_queue: queue.Queue[tuple[str, tuple[bool, bool, bool], object]] = queue.Queue()
+        self._api_task_result_timer = QTimer(self)
+        self._api_task_result_timer.setInterval(75)
+        self._api_task_result_timer.timeout.connect(self._drain_task_fetch_results)
+        self._api_task_result_timer.start()
+        self._remote_mode = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.timeout.connect(self._refresh_now)
@@ -959,6 +972,10 @@ class CalendarPanel(QWidget):
     def _invalidate_task_cache(self) -> None:
         self._task_cache_generation += 1
         self._api_task_cache.clear()
+        self._api_task_inflight.clear()
+        self._api_task_error_until.clear()
+        self._api_tasks_global_error_until = 0.0
+        self._api_task_result_queue = queue.Queue()
 
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Move the calendar to a specific date and expand the tree."""
@@ -3098,29 +3115,110 @@ class CalendarPanel(QWidget):
                 bool(actionable_only),
             )
             cached = self._api_task_cache.get(cache_key)
+            now = time.monotonic()
             if cached and cached[0] == self._task_cache_generation:
                 return cached[1]
+            if now < self._api_tasks_global_error_until:
+                return cached[1] if cached and cached[0] == self._task_cache_generation else []
+            if cache_key in self._api_task_inflight:
+                return cached[1] if cached and cached[0] == self._task_cache_generation else []
+            error_until = self._api_task_error_until.get(cache_key, 0.0)
+            if now < error_until:
+                return cached[1] if cached and cached[0] == self._task_cache_generation else []
             params = {
                 "query": "",
                 "include_done": include_done,
                 "include_ancestors": include_ancestors,
                 "actionable_only": actionable_only,
             }
-            try:
-                resp = self.http.get("/api/tasks", params=params)
-                resp.raise_for_status()
-                payload = resp.json()
-                items = payload.get("items", [])
-                self._api_task_cache[cache_key] = (self._task_cache_generation, items)
-                return items
-            except Exception as exc:
-                print(f"[CALENDAR] Failed to fetch tasks via API: {exc}")
-                return []
+            self._queue_task_fetch(cache_key, params)
+            return cached[1] if cached and cached[0] == self._task_cache_generation else []
         return config.fetch_tasks(
             include_done=include_done,
             include_ancestors=include_ancestors,
             actionable_only=actionable_only,
         )
+
+    def _queue_task_fetch(self, cache_key: tuple[bool, bool, bool], params: dict) -> None:
+        if not self.http or cache_key in self._api_task_inflight:
+            return
+        self._api_task_inflight.add(cache_key)
+        self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, time.monotonic() + 0.4)
+        client = self.http
+        args = dict(params)
+        generation = self._task_cache_generation
+
+        def _worker() -> None:
+            started = time.perf_counter()
+            try:
+                resp = client.get("/api/tasks", params=args)
+                resp.raise_for_status()
+                payload = resp.json()
+                items = payload.get("items", [])
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._api_task_result_queue.put(("ok", cache_key, (generation, items, latency_ms)))
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._api_task_result_queue.put(("error", cache_key, (str(exc), latency_ms)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _drain_task_fetch_results(self) -> None:
+        had_success = False
+        while True:
+            try:
+                state, cache_key, payload = self._api_task_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._api_task_inflight.discard(cache_key)
+            if state == "ok":
+                generation = self._task_cache_generation
+                items = []
+                latency_ms = 0.0
+                if isinstance(payload, tuple):
+                    if len(payload) >= 1:
+                        generation = payload[0]
+                    if len(payload) >= 2 and isinstance(payload[1], list):
+                        items = payload[1]
+                    if len(payload) >= 3:
+                        try:
+                            latency_ms = float(payload[2])
+                        except Exception:
+                            latency_ms = 0.0
+                if generation == self._task_cache_generation:
+                    safe_items = items if isinstance(items, list) else []
+                    self._api_task_cache[cache_key] = (self._task_cache_generation, safe_items)
+                self._api_task_error_until.pop(cache_key, None)
+                self._api_tasks_global_error_until = 0.0
+                if self._remote_mode:
+                    self.remoteRequestObserved.emit("ok", latency_ms, "GET /api/tasks")
+                had_success = True
+                continue
+            now = time.monotonic()
+            self._api_task_error_until[cache_key] = now + 5.0
+            self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, now + 5.0)
+            error_text = ""
+            latency_ms = 0.0
+            if isinstance(payload, tuple):
+                if payload:
+                    error_text = str(payload[0] or "")
+                if len(payload) >= 2:
+                    try:
+                        latency_ms = float(payload[1])
+                    except Exception:
+                        latency_ms = 0.0
+            else:
+                error_text = str(payload or "")
+            print(f"[CALENDAR] Failed to fetch tasks via API: {error_text}")
+            if self._remote_mode:
+                if "504" in error_text:
+                    error_text = "Task endpoint timed out (HTTP 504)"
+                self.remoteRequestObserved.emit("error", latency_ms, f"/api/tasks failed: {error_text}")
+        if had_success:
+            self.schedule_refresh(0)
+
+    def set_remote_mode(self, remote_mode: bool) -> None:
+        self._remote_mode = bool(remote_mode)
 
     @staticmethod
     def _parse_date(value: str) -> Optional[Date]:

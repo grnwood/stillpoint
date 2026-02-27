@@ -129,6 +129,7 @@ class TabbedRightPanel(QWidget):
             self.calendar_panel.http = http_client
             if api_base:
                 self.calendar_panel.api_base = api_base
+            self.calendar_panel.set_remote_mode(bool(remote_mode))
         self.attachments_panel.set_http_client(http_client)
         self.attachments_panel.set_remote_mode(remote_mode, api_base)
         if auth_prompt is not None:
@@ -533,6 +534,8 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.openInWindowRequested.connect(self.openInWindowRequested)
         self.calendar_panel.pageAboutToBeDeleted.connect(self.pageAboutToBeDeleted)
         self.calendar_panel.pageDeleted.connect(self.pageDeleted)
+        self.calendar_panel.remoteRequestObserved.connect(self.remoteRequestObserved, Qt.QueuedConnection)
+        self.calendar_panel.set_remote_mode(self._remote_mode)
         self._sync_calendar_task_filters()
 
     def _remove_calendar_tab(self) -> None:

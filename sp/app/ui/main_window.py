@@ -1631,7 +1631,8 @@ class MainWindow(QMainWindow):
 
         def _log_response(response):
             started = response.request.extensions.get("sp_request_started_at")
-            if isinstance(started, (int, float)) and self._remote_mode:
+            on_ui_thread = QThread.currentThread() == self.thread()
+            if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
                 latency_ms = (time.perf_counter() - float(started)) * 1000.0
                 if response.status_code >= 500:
                     self._set_remote_health_state(
@@ -5396,7 +5397,8 @@ class MainWindow(QMainWindow):
 
         def _log_response(response):
             started = response.request.extensions.get("sp_request_started_at")
-            if isinstance(started, (int, float)) and self._remote_mode:
+            on_ui_thread = QThread.currentThread() == self.thread()
+            if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
                 latency_ms = (time.perf_counter() - float(started)) * 1000.0
                 if response.status_code >= 500:
                     self._set_remote_health_state(
@@ -11033,6 +11035,8 @@ class MainWindow(QMainWindow):
         panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
         panel.taskDatesApplied.connect(self._on_task_dates_applied)
         panel.openInWindowRequested.connect(self._open_page_editor_window)
+        panel.remoteRequestObserved.connect(self._on_right_panel_remote_request_observed, Qt.QueuedConnection)
+        panel.set_remote_mode(bool(self._remote_mode))
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
         window.setWindowTitle("Calendar")
