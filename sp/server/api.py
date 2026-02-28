@@ -134,6 +134,7 @@ _UI_QUICK_CAPTURE_HOOK = None
 
 _REINDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, message, total, current}
 _REINDEX_LOCK = threading.Lock()
+_TASK_AUTO_REINDEX_UNTIL: dict[str, float] = {}
 
 
 def _normalize_tree_path(path: str) -> str:
@@ -756,6 +757,25 @@ def _start_reindex_job(root: Path, rebuild_search: bool) -> str:
     thread = threading.Thread(target=_do_reindex_vault, args=(job_id, root, rebuild_search), daemon=True)
     thread.start()
     return job_id
+
+
+def _maybe_auto_reindex_for_task_error(root: Path, exc: BaseException) -> Optional[str]:
+    """Attempt one background reindex when task queries fail due to DB/schema issues."""
+    key = str(root)
+    now = time.monotonic()
+    cooldown_until = _TASK_AUTO_REINDEX_UNTIL.get(key, 0.0)
+    if now < cooldown_until:
+        return None
+    _TASK_AUTO_REINDEX_UNTIL[key] = now + 60.0
+    try:
+        job_id = _start_reindex_job(root, rebuild_search=False)
+        print(
+            f"[API] /api/tasks auto-reindex started job_id={job_id} "
+            f"root={root} reason={exc.__class__.__name__}: {exc}"
+        )
+        return job_id
+    except Exception:
+        return None
 
 
 def _update_task_line_dates(
@@ -2229,7 +2249,7 @@ def api_tasks(
     include_ancestors: bool = False,
     actionable_only: bool = False,
 ) -> dict:
-    _get_vault_root()
+    root = _get_vault_root()
     normalized_query = (query or "").strip()
     normalized_tags = _normalize_tags(tags)
     normalized_status = _normalize_status(status)
@@ -2239,14 +2259,25 @@ def api_tasks(
         include_done_effective = True
     else:
         include_done_effective = bool(include_done)
-    task_rows = _fetch_tasks_with_timeout(
-        normalized_query,
-        normalized_tags,
-        include_done=include_done_effective,
-        include_ancestors=bool(include_ancestors),
-        actionable_only=bool(actionable_only),
-        status=normalized_status,
-    )
+    try:
+        task_rows = _fetch_tasks_with_timeout(
+            normalized_query,
+            normalized_tags,
+            include_done=include_done_effective,
+            include_ancestors=bool(include_ancestors),
+            actionable_only=bool(actionable_only),
+            status=normalized_status,
+        )
+    except sqlite3.Error as exc:
+        _clear_task_cache()
+        job_id = _maybe_auto_reindex_for_task_error(root, exc)
+        detail = (
+            f"Task index error: {exc}. "
+            "Triggered automatic vault reindex."
+            if job_id
+            else f"Task index error: {exc}."
+        )
+        raise HTTPException(status_code=503, detail=detail) from exc
     if log_enabled("tasks_calendar"):
         print(
             f"[API] /api/tasks count={len(task_rows)} "

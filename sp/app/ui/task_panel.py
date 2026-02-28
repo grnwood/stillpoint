@@ -452,7 +452,6 @@ class TaskPanel(QWidget):
         self._remote_mode = False
         self._api_task_inflight: set[tuple] = set()
         self._api_task_error_until: dict[tuple, float] = {}
-        self._api_tasks_global_error_until: float = 0.0
         self._api_task_result_queue: queue.Queue[tuple[str, tuple, object, float]] = queue.Queue()
         self._api_result_timer = QTimer(self)
         self._api_result_timer.setInterval(75)
@@ -2098,47 +2097,69 @@ class TaskPanel(QWidget):
             iterator += 1
         return items
 
-    def _parse_search_tags(self, text: str) -> tuple[str, list[str]]:
-        """Extract @tags (including the active partial tag) and return (query_without_tags, tokens)."""
-        tokens = TAG_PATTERN.findall(text)
+    def _parse_search_tags(self, text: str) -> tuple[str, list[str], Optional[str]]:
+        """Extract @tags and return (query_without_tags, exact_tokens, active_partial_token)."""
+        tokens = [token.strip() for token in TAG_PATTERN.findall(text) if token.strip()]
+        exact_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for token in tokens:
+            lowered = token.lower()
+            if lowered in seen_tokens:
+                continue
+            seen_tokens.add(lowered)
+            exact_tokens.append(token)
+        partial_token: Optional[str] = None
         active_token = _active_tag_token(text, self.search.cursorPosition())
         if active_token:
             stripped = active_token.lstrip("@")
-            if stripped and stripped not in tokens:
-                tokens.append(stripped)
+            if stripped:
+                lowered = stripped.lower()
+                if lowered not in seen_tokens:
+                    partial_token = stripped
         # Remove tags from the free-text portion
         query = TAG_PATTERN.sub(" ", text)
         if active_token:
             query = query.replace(active_token, " ")
         query = re.sub(r"\s{2,}", " ", query).strip()
-        return query, tokens
+        return query, exact_tokens, partial_token
 
-    def _resolve_tag_groups(self, tokens: list[str]) -> tuple[list[set[str]], set[str], set[str]]:
-        """Return (tag_groups, matched_tags_flat, missing_tokens) from the provided tag tokens.
+    def _resolve_tag_groups(
+        self,
+        exact_tokens: list[str],
+        partial_token: Optional[str] = None,
+    ) -> tuple[list[set[str]], set[str], set[str]]:
+        """Return (tag_groups, matched_tags_flat, missing_tokens) from tag tokens.
 
-        Each token becomes a group of matching tags. Exact matches produce a single-tag group (AND);
-        prefix-only matches produce an OR group of all tags with that prefix.
+        Exact tokens are treated as exact matches. A partial token (currently edited by the cursor)
+        is treated as a prefix group when possible.
         """
         groups: list[set[str]] = []
         matched: set[str] = set()
         missing: set[str] = set()
-        seen: set[str] = set()
-        for token in tokens:
+        for token in exact_tokens:
             token = token.strip()
-            if not token or token in seen:
+            if not token:
                 continue
-            seen.add(token)
-            matches = {tag for tag in self._available_tags if tag.startswith(token)}
-            if not matches:
-                missing.add(token)
+            exact = {tag for tag in self._available_tags if tag.lower() == token.lower()}
+            if exact:
+                groups.append(exact)
+                matched.update(exact)
                 continue
-            has_broader_matches = any(tag != token for tag in matches)
-            if token in self._available_tags and not has_broader_matches:
-                group = {token}
-            else:
-                group = matches
-            groups.append(group)
-            matched.update(group)
+            # Preserve explicit tag filters even when the sidebar tag list is stale.
+            groups.append({token})
+            matched.add(token)
+            missing.add(token)
+        if partial_token:
+            token = partial_token.strip()
+            if token:
+                matches = {tag for tag in self._available_tags if tag.lower().startswith(token.lower())}
+                if matches:
+                    groups.append(matches)
+                    matched.update(matches)
+                else:
+                    groups.append({token})
+                    matched.add(token)
+                    missing.add(token)
         return groups, matched, missing
 
     def _apply_search_tag_feedback(self, tokens_present: bool, has_matches: bool, has_missing: bool) -> None:
@@ -2224,6 +2245,9 @@ class TaskPanel(QWidget):
 
     def clear(self) -> None:
         self.active_tags.clear()
+        self._api_task_cache.clear()
+        self._api_task_inflight.clear()
+        self._api_task_error_until.clear()
         self.tag_list.clear()
         self.task_tree.clear()
         self._visible_tasks = []
@@ -2303,10 +2327,10 @@ class TaskPanel(QWidget):
         self._update_date_filter_button()
         self._configure_task_columns()
         raw_text = self.search.text().strip()
-        query, tokens = self._parse_search_tags(raw_text)
+        query, tokens, partial_token = self._parse_search_tags(raw_text)
         self._tag_source_tasks = None
-        tag_groups, matched_tags, missing_tokens = self._resolve_tag_groups(tokens)
-        tokens_present = bool(tokens)
+        tag_groups, matched_tags, missing_tokens = self._resolve_tag_groups(tokens, partial_token=partial_token)
+        tokens_present = bool(tokens) or bool(partial_token)
         has_matches = bool(tag_groups)
         self._apply_search_tag_feedback(tokens_present, has_matches, bool(missing_tokens))
         # If the search explicitly specifies tags, let those drive the active set
@@ -3120,11 +3144,6 @@ class TaskPanel(QWidget):
             }
             if tags:
                 params["tags"] = tags
-            if now < self._api_tasks_global_error_until:
-                return cached[1] if cached else []
-            # Avoid launching multiple query variants during the same refresh cycle.
-            if self._api_task_inflight:
-                return cached[1] if cached else []
             error_until = self._api_task_error_until.get(cache_key, 0.0)
             if now < error_until:
                 return cached[1] if cached else []
@@ -3146,6 +3165,9 @@ class TaskPanel(QWidget):
         self._apply_show_future_preference()
         self._task_context_dirty = True
         self._task_context_initialized = False
+        self._api_task_cache.clear()
+        self._api_task_inflight.clear()
+        self._api_task_error_until.clear()
         self._set_ai_chat_enabled(False)
         if self._ai_chat_panel:
             try:
@@ -3154,9 +3176,9 @@ class TaskPanel(QWidget):
                 pass
 
     def set_http_client(self, http_client) -> None:
+        self._api_task_cache.clear()
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
-        self._api_tasks_global_error_until = 0.0
         self._api_task_result_queue = queue.Queue()
         self._http_client = http_client
         self._vector_api = VectorAPIClient(http_client)
@@ -3167,14 +3189,17 @@ class TaskPanel(QWidget):
                 pass
 
     def set_remote_mode(self, remote_mode: bool) -> None:
+        changed = self._remote_mode != bool(remote_mode)
         self._remote_mode = bool(remote_mode)
+        if changed:
+            self._api_task_cache.clear()
+            self._api_task_inflight.clear()
+            self._api_task_error_until.clear()
 
     def _queue_remote_task_fetch(self, cache_key: tuple, params: dict) -> None:
         if not self._http_client or cache_key in self._api_task_inflight:
             return
         self._api_task_inflight.add(cache_key)
-        # Briefly gate additional variants until this request returns.
-        self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, time.monotonic() + 0.4)
         client = self._http_client
         args = dict(params)
 
@@ -3223,7 +3248,6 @@ class TaskPanel(QWidget):
                 items = payload if isinstance(payload, list) else []
                 self._api_task_cache[cache_key] = (time.monotonic(), items)
                 self._api_task_error_until.pop(cache_key, None)
-                self._api_tasks_global_error_until = 0.0
                 if self._remote_mode:
                     self.remoteRequestObserved.emit("ok", latency_ms, "GET /api/tasks")
                 had_success = True
@@ -3232,7 +3256,6 @@ class TaskPanel(QWidget):
                 now = time.monotonic()
                 # Back off longer on remote task endpoint failures to avoid request storms.
                 self._api_task_error_until[cache_key] = now + 5.0
-                self._api_tasks_global_error_until = max(self._api_tasks_global_error_until, now + 5.0)
                 if self._remote_mode:
                     if "504" in error_text:
                         error_text = "Task endpoint timed out (HTTP 504)"

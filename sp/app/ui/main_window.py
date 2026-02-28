@@ -6425,6 +6425,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+    def _show_db_repair_notice(self) -> None:
+        """Show a one-time status message when vault cache DB needed repair."""
+        try:
+            notice = config.pop_last_db_repair_notice()
+        except Exception:
+            notice = None
+        if notice:
+            self.statusBar().showMessage(notice, 7000)
+
     def _apply_calendar_action_visibility(self) -> None:
         visible = bool(self._feature_calendar_enabled)
         for action_name in (
@@ -6458,12 +6467,14 @@ class MainWindow(QMainWindow):
                     cache_root = self._remote_vault_cache_root(remote_ref_path or directory)
                     cache_root.mkdir(parents=True, exist_ok=True)
                     config.set_active_vault(str(cache_root))
+                    self._show_db_repair_notice()
                     prefer_read_only = config.load_vault_force_read_only()
                 except Exception:
                     prefer_read_only = False
             else:
                 try:
                     config.set_active_vault(directory)
+                    self._show_db_repair_notice()
                     prefer_read_only = config.load_vault_force_read_only()
                 except Exception:
                     prefer_read_only = False
@@ -6549,9 +6560,11 @@ class MainWindow(QMainWindow):
                     cache_root = self._remote_vault_cache_root(self._remote_vault_ref_path or directory)
                     cache_root.mkdir(parents=True, exist_ok=True)
                     config.set_active_vault(str(cache_root))
+                    self._show_db_repair_notice()
                 else:
                     # For local vaults, use the vault directory itself
                     config.set_active_vault(self.vault_root)
+                    self._show_db_repair_notice()
                 
                 if self._remote_mode:
                     config.save_last_vault(

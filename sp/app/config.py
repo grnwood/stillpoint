@@ -33,6 +33,7 @@ _TASK_VERSION_LOCK = RLock()
 _PAGE_CACHE_ROWS: list[dict] = []
 _PAGE_RESULT_CACHE: OrderedDict[str, list[dict]] = OrderedDict()
 _PAGE_RESULT_CACHE_LIMIT = 64
+_LAST_DB_REPAIR_NOTICE: Optional[str] = None
 
 
 def _invalidate_page_cache() -> None:
@@ -4166,8 +4167,9 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
 
 
 def set_active_vault(root: Optional[str]) -> None:
-    global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED
+    global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED, _LAST_DB_REPAIR_NOTICE
     with _ACTIVE_CONN_LOCK:
+        _LAST_DB_REPAIR_NOTICE = None
         old_conn = getattr(_THREAD_LOCAL, "conn", None)
         _ACTIVE_CONN = None
         _TASKS_FTS_ENABLED = False
@@ -4187,9 +4189,38 @@ def set_active_vault(root: Optional[str]) -> None:
         db_dir = _ACTIVE_ROOT / ".stillpoint"
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "settings.db"
-        setup_conn = sqlite3.connect(db_path, check_same_thread=False)
-        _ensure_schema(setup_conn)
-        setup_conn.close()
+        setup_conn: Optional[sqlite3.Connection] = None
+        try:
+            setup_conn = sqlite3.connect(db_path, check_same_thread=False)
+            row = setup_conn.execute("PRAGMA quick_check").fetchone()
+            if row and str(row[0]).strip().lower() != "ok":
+                raise sqlite3.DatabaseError(f"quick_check failed: {row[0]}")
+            _ensure_schema(setup_conn)
+        except sqlite3.DatabaseError:
+            if setup_conn is not None:
+                try:
+                    setup_conn.close()
+                except Exception:
+                    pass
+            timestamp = int(time.time())
+            backup_path = db_dir / f"settings-corrupt-{timestamp}.db"
+            try:
+                if db_path.exists():
+                    db_path.replace(backup_path)
+            except Exception:
+                try:
+                    db_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            setup_conn = sqlite3.connect(db_path, check_same_thread=False)
+            _ensure_schema(setup_conn)
+            _LAST_DB_REPAIR_NOTICE = f"Local cache DB was repaired (backup: {backup_path.name})"
+        finally:
+            if setup_conn is not None:
+                try:
+                    setup_conn.close()
+                except Exception:
+                    pass
         if old_conn:
             try:
                 old_conn.close()
@@ -4207,6 +4238,14 @@ def get_active_vault() -> Optional[str]:
 
 def has_active_vault() -> bool:
     return _ACTIVE_ROOT is not None
+
+
+def pop_last_db_repair_notice() -> Optional[str]:
+    """Return and clear one-time DB repair notice from the latest vault activation."""
+    global _LAST_DB_REPAIR_NOTICE
+    notice = _LAST_DB_REPAIR_NOTICE
+    _LAST_DB_REPAIR_NOTICE = None
+    return notice
 
 
 def is_vault_index_empty() -> bool:
