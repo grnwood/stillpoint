@@ -269,6 +269,7 @@ class CalendarPanel(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.timeout.connect(self._refresh_now)
+        self._last_refresh_signature: Optional[tuple] = None
         # The calendar tab no longer displays the journal navigator tree.
         # Keep the widget for compatibility, but skip expensive model rebuilds.
         self._journal_tree_enabled = False
@@ -948,6 +949,7 @@ class CalendarPanel(QWidget):
     def set_vault_root(self, vault_root: Optional[str], *, defer_refresh: bool = False) -> None:
         """Set vault root for calendar and tree data."""
         self.vault_root = vault_root
+        self._last_refresh_signature = None
         self._invalidate_task_cache()
         if defer_refresh:
             self.schedule_refresh(0)
@@ -957,8 +959,35 @@ class CalendarPanel(QWidget):
     def schedule_refresh(self, delay_ms: int = 0) -> None:
         self._refresh_timer.start(max(0, int(delay_ms)))
 
-    def refresh(self) -> None:
+    def _refresh_signature(self) -> tuple:
+        selected_dates = tuple(sorted(d.toJulianDay() for d in self.multi_selected_dates if d and d.isValid()))
+        selected = self.calendar.selectedDate()
+        selected_single = selected.toJulianDay() if selected and selected.isValid() else 0
+        return (
+            str(self.vault_root or ""),
+            bool(self._remote_mode),
+            int(self.calendar.yearShown()),
+            int(self.calendar.monthShown()),
+            int(selected_single),
+            selected_dates,
+            bool(self.overdue_checkbox.isChecked()),
+            bool(self.future_checkbox.isChecked()),
+            bool(self.recent_journal_checkbox.isChecked()),
+            bool(self._journal_tree_enabled),
+            int(self._task_cache_generation),
+        )
+
+    def refresh(self, *, force: bool = False) -> None:
         self._refresh_timer.stop()
+        if not force:
+            signature = self._refresh_signature()
+            if signature == self._last_refresh_signature:
+                if log_enabled("tasks_calendar"):
+                    print("[CALENDAR] refresh skipped (unchanged signature)")
+                return
+            self._last_refresh_signature = signature
+        else:
+            self._last_refresh_signature = None
         self._refresh_now()
 
     def _refresh_now(self) -> None:
@@ -971,6 +1000,7 @@ class CalendarPanel(QWidget):
 
     def _invalidate_task_cache(self) -> None:
         self._task_cache_generation += 1
+        self._last_refresh_signature = None
         self._api_task_cache.clear()
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
@@ -3251,7 +3281,10 @@ class CalendarPanel(QWidget):
             self.schedule_refresh(0)
 
     def set_remote_mode(self, remote_mode: bool) -> None:
+        changed = self._remote_mode != bool(remote_mode)
         self._remote_mode = bool(remote_mode)
+        if changed:
+            self._last_refresh_signature = None
 
     @staticmethod
     def _parse_date(value: str) -> Optional[Date]:

@@ -218,8 +218,13 @@ class TaskPanel(QWidget):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks…")
-        self.search.textChanged.connect(self._refresh_tasks)
+        self.search.textChanged.connect(self._on_search_text_changed)
+        self.search.returnPressed.connect(self._trigger_search_refresh_now)
         self.search.installEventFilter(self)
+        self._remote_search_debounce_ms = 180
+        self._search_refresh_timer = QTimer(self)
+        self._search_refresh_timer.setSingleShot(True)
+        self._search_refresh_timer.timeout.connect(self._refresh_tasks)
 
         self.tag_list = QListWidget()
         self.tag_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -460,6 +465,7 @@ class TaskPanel(QWidget):
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
+        self._last_refresh_signature: Optional[tuple] = None
 
     def _format_task_text(self, text: str) -> str:
         """Return plain text with link labels (or URLs) inlined, no markup."""
@@ -2237,17 +2243,58 @@ class TaskPanel(QWidget):
             self.active_tags.add(tag)
         self._refresh_tasks()
 
-    def refresh(self) -> None:
-        if not config.has_active_vault():
-            self.clear()
+    def _on_search_text_changed(self, _text: str) -> None:
+        """Debounce remote search typing to reduce repeated API calls."""
+        if self._remote_mode:
+            self._search_refresh_timer.start(self._remote_search_debounce_ms)
             return
+        self._search_refresh_timer.stop()
         self._refresh_tasks()
 
+    def _trigger_search_refresh_now(self) -> None:
+        """Force an immediate search refresh (e.g., Enter key)."""
+        self._search_refresh_timer.stop()
+        self._refresh_tasks()
+
+    def refresh(self) -> None:
+        if not config.has_active_vault():
+            self._last_refresh_signature = None
+            self.clear()
+            return
+        signature = self._refresh_signature()
+        if signature == self._last_refresh_signature:
+            if log_enabled("tasks_calendar"):
+                print("[TASK_PANEL] refresh skipped (unchanged signature)")
+            return
+        self._last_refresh_signature = signature
+        self._refresh_tasks()
+
+    def _refresh_signature(self) -> tuple:
+        current_version = config.get_task_index_version()
+        return (
+            str(self.vault_root or ""),
+            bool(self._remote_mode),
+            bool(self.show_completed.isChecked()),
+            bool(self.show_future.isChecked()),
+            bool(self.show_actionable.isChecked()),
+            str(self.search.text() or ""),
+            tuple(sorted(self.active_tags)),
+            str(self._nav_filter_prefix or ""),
+            bool(self._nav_filter_enabled),
+            bool(self._include_journal),
+            str(self._date_filter_active_preset or ""),
+            self._date_filter_start.isoformat() if self._date_filter_start else "",
+            self._date_filter_end.isoformat() if self._date_filter_end else "",
+            int(current_version),
+        )
+
     def clear(self) -> None:
+        self._search_refresh_timer.stop()
         self.active_tags.clear()
         self._api_task_cache.clear()
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
+        self._last_refresh_signature = None
         self.tag_list.clear()
         self.task_tree.clear()
         self._visible_tasks = []
@@ -3165,6 +3212,7 @@ class TaskPanel(QWidget):
         self._apply_show_future_preference()
         self._task_context_dirty = True
         self._task_context_initialized = False
+        self._last_refresh_signature = None
         self._api_task_cache.clear()
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
@@ -3176,6 +3224,7 @@ class TaskPanel(QWidget):
                 pass
 
     def set_http_client(self, http_client) -> None:
+        self._last_refresh_signature = None
         self._api_task_cache.clear()
         self._api_task_inflight.clear()
         self._api_task_error_until.clear()
@@ -3192,6 +3241,8 @@ class TaskPanel(QWidget):
         changed = self._remote_mode != bool(remote_mode)
         self._remote_mode = bool(remote_mode)
         if changed:
+            self._search_refresh_timer.stop()
+            self._last_refresh_signature = None
             self._api_task_cache.clear()
             self._api_task_inflight.clear()
             self._api_task_error_until.clear()
