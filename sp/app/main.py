@@ -626,6 +626,9 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
         api_module.get_app(),
         host=host,
         port=port,
+        loop="asyncio",
+        http="h11",
+        ws="none",
         log_level=os.getenv("UVICORN_LOG_LEVEL", "warning"),
         log_config=log_config,
     )

@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint
+from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint, QSignalBlocker
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices, QPalette
 from PySide6.QtGui import QCursor
 from PySide6.QtSvg import QSvgRenderer
@@ -95,7 +95,7 @@ class DebugTaskTree(QTreeWidget):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         from PySide6.QtCore import QTimer
-        self._timer = QTimer()
+        self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._emit_deferred_double_click)
         self._pending_task_data = None
@@ -217,11 +217,12 @@ class TaskPanel(QWidget):
         self._vector_api = VectorAPIClient(None)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search tasks…")
+        self.search.setPlaceholderText("Search tasks… Esc to clear... enter text or @tag(s)...")
         self.search.textChanged.connect(self._on_search_text_changed)
         self.search.returnPressed.connect(self._trigger_search_refresh_now)
         self.search.installEventFilter(self)
         self._remote_search_debounce_ms = 180
+        self._search_commit_next = False
         self._search_refresh_timer = QTimer(self)
         self._search_refresh_timer.setSingleShot(True)
         self._search_refresh_timer.timeout.connect(self._refresh_tasks)
@@ -297,8 +298,8 @@ class TaskPanel(QWidget):
         self.task_tree.itemActivated.connect(self._on_task_activated)
         self.task_tree.itemDoubleClicked.connect(self._on_task_double_clicked)
         self.task_tree.itemClicked.connect(self._on_task_item_clicked)
-        self.task_tree.itemActivated.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
-        self.task_tree.itemDoubleClicked.connect(lambda *_: QTimer.singleShot(0, self._reset_horizontal_scroll))
+        self.task_tree.itemActivated.connect(lambda *_: self._single_shot_ui(0, self._reset_horizontal_scroll))
+        self.task_tree.itemDoubleClicked.connect(lambda *_: self._single_shot_ui(0, self._reset_horizontal_scroll))
         self.task_tree.setSortingEnabled(True)
         self.sort_column = 0
         self.sort_order = Qt.AscendingOrder
@@ -466,6 +467,14 @@ class TaskPanel(QWidget):
         self._update_filter_indicator()
         self._apply_font_size()
         self._last_refresh_signature: Optional[tuple] = None
+
+    def _single_shot_ui(self, delay_ms: int, callback) -> None:
+        """Schedule a UI callback bound to this widget's lifetime."""
+        delay = max(0, int(delay_ms))
+        try:
+            QTimer.singleShot(delay, self, callback)
+        except TypeError:
+            QTimer.singleShot(delay, callback)
 
     def _format_task_text(self, text: str) -> str:
         """Return plain text with link labels (or URLs) inlined, no markup."""
@@ -2011,6 +2020,17 @@ class TaskPanel(QWidget):
                 self.search.text(), self.search.cursorPosition(), self._available_tags
             ):
                 return super().eventFilter(obj, event)
+            if obj is self.task_tree and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                current = self.task_tree.currentItem()
+                if current:
+                    keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                    if keep_panel:
+                        self._mark_activation_source("keyboard_keep_panel")
+                    else:
+                        self._mark_activation_source("keyboard")
+                    self._emit_task_activation(current)
+                    event.accept()
+                    return True
             if obj is self.task_tree and event.text() == "@":
                 if self.task_tree.currentItem():
                     # Reset other filters before jumping into tag search
@@ -2032,7 +2052,11 @@ class TaskPanel(QWidget):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             current = self.task_tree.currentItem()
             if current:
-                self._mark_activation_source("keyboard")
+                keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                if keep_panel:
+                    self._mark_activation_source("keyboard_keep_panel")
+                else:
+                    self._mark_activation_source("keyboard")
                 self._emit_task_activation(current)
                 event.accept()
                 return
@@ -2103,7 +2127,12 @@ class TaskPanel(QWidget):
             iterator += 1
         return items
 
-    def _parse_search_tags(self, text: str) -> tuple[str, list[str], Optional[str]]:
+    def _parse_search_tags(
+        self,
+        text: str,
+        *,
+        commit_active_tag: bool = False,
+    ) -> tuple[str, list[str], Optional[str]]:
         """Extract @tags and return (query_without_tags, exact_tokens, active_partial_token)."""
         tokens = [token.strip() for token in TAG_PATTERN.findall(text) if token.strip()]
         exact_tokens: list[str] = []
@@ -2120,7 +2149,11 @@ class TaskPanel(QWidget):
             stripped = active_token.lstrip("@")
             if stripped:
                 lowered = stripped.lower()
-                if lowered not in seen_tokens:
+                if not commit_active_tag:
+                    # While typing an in-progress tag token, avoid treating it as committed.
+                    exact_tokens = [tok for tok in exact_tokens if tok.lower() != lowered]
+                    partial_token = stripped
+                elif lowered not in seen_tokens:
                     partial_token = stripped
         # Remove tags from the free-text portion
         query = TAG_PATTERN.sub(" ", text)
@@ -2237,6 +2270,8 @@ class TaskPanel(QWidget):
         tag = item.data(Qt.UserRole)
         if not tag:
             return
+        # Prevent a pending debounced keystroke refresh from immediately overriding click-filter results.
+        self._search_refresh_timer.stop()
         if tag in self.active_tags:
             self.active_tags.remove(tag)
         else:
@@ -2254,7 +2289,24 @@ class TaskPanel(QWidget):
     def _trigger_search_refresh_now(self) -> None:
         """Force an immediate search refresh (e.g., Enter key)."""
         self._search_refresh_timer.stop()
+        self._commit_active_search_tag()
+        self._search_commit_next = True
         self._refresh_tasks()
+
+    def _commit_active_search_tag(self) -> None:
+        """Commit in-progress @tag token by inserting a separator so one Enter applies it."""
+        text = self.search.text()
+        cursor = self.search.cursorPosition()
+        active_token = _active_tag_token(text, cursor)
+        if not active_token:
+            return
+        if cursor < len(text) and text[cursor].isspace():
+            return
+        updated = f"{text[:cursor]} {text[cursor:]}"
+        blocker = QSignalBlocker(self.search)
+        self.search.setText(updated)
+        self.search.setCursorPosition(cursor + 1)
+        del blocker
 
     def refresh(self) -> None:
         if not config.has_active_vault():
@@ -2344,8 +2396,13 @@ class TaskPanel(QWidget):
             except Exception:
                 tag_items = []
         self._available_tags = {tag for tag, _ in tag_items}
-        # Drop active tags that are no longer available in the current view
-        if self.active_tags:
+        # Drop active tags that are no longer available in the current view.
+        # In remote mode, avoid clearing selections while requests are in-flight and
+        # tag data is temporarily empty.
+        can_prune_active_tags = not (
+            self._remote_mode and self._api_task_inflight and not tag_items
+        )
+        if self.active_tags and can_prune_active_tags:
             unavailable = {tag for tag in self.active_tags if tag not in self._available_tags}
             if unavailable:
                 self.active_tags.difference_update(unavailable)
@@ -2361,6 +2418,8 @@ class TaskPanel(QWidget):
         self.tag_list.blockSignals(False)
 
     def _refresh_tasks(self) -> None:
+        commit_active_tag = bool(self._search_commit_next)
+        self._search_commit_next = False
         current_item = self.task_tree.currentItem()
         if current_item:
             task = current_item.data(0, Qt.UserRole)
@@ -2374,22 +2433,26 @@ class TaskPanel(QWidget):
         self._update_date_filter_button()
         self._configure_task_columns()
         raw_text = self.search.text().strip()
-        query, tokens, partial_token = self._parse_search_tags(raw_text)
+        query, tokens, partial_token = self._parse_search_tags(
+            raw_text,
+            commit_active_tag=commit_active_tag,
+        )
         self._tag_source_tasks = None
+        exact_tag_groups, exact_matched_tags, exact_missing_tokens = self._resolve_tag_groups(tokens)
         tag_groups, matched_tags, missing_tokens = self._resolve_tag_groups(tokens, partial_token=partial_token)
         tokens_present = bool(tokens) or bool(partial_token)
         has_matches = bool(tag_groups)
         self._apply_search_tag_feedback(tokens_present, has_matches, bool(missing_tokens))
         # If the search explicitly specifies tags, let those drive the active set
-        if tokens_present:
-            self.active_tags = set(matched_tags)
+        if tokens:
+            self.active_tags = set(exact_matched_tags)
         effective_tag_groups: list[set[str]] = []
-        if tokens_present:
-            effective_tag_groups = tag_groups or ([set()] if missing_tokens else [])
+        if tokens:
+            effective_tag_groups = exact_tag_groups or ([set()] if exact_missing_tokens else [])
         elif self.active_tags:
             effective_tag_groups = [{tag} for tag in sorted(self.active_tags)]
         include_done = self.show_completed.isChecked()
-        searching = bool(query) or bool(effective_tag_groups) or tokens_present
+        searching = bool(query) or bool(effective_tag_groups) or bool(tokens)
         actionable_toggle = self.show_actionable.isChecked()
         use_sql_tags = bool(effective_tag_groups) and all(len(group) == 1 for group in effective_tag_groups)
         sql_tags = sorted(next(iter(group)) for group in effective_tag_groups) if use_sql_tags else []
@@ -2407,7 +2470,7 @@ class TaskPanel(QWidget):
                 include_ancestors=True,
                 actionable_only=actionable_only,
             )
-            if self._remote_mode and not tasks:
+            if self._remote_mode and not tasks and not tokens_present and not query:
                 fallback_variants: list[tuple[bool, bool]] = []
                 fallback_variants.append((False, actionable_only))
                 if actionable_only:
@@ -2457,6 +2520,10 @@ class TaskPanel(QWidget):
         else:
             if impossible_tag_filter:
                 self._tag_source_tasks = []
+                extra_tasks = []
+            elif self._remote_mode and tokens_present:
+                # While remote tag typing is in progress, avoid extra fetch variants.
+                self._tag_source_tasks = list(tasks)
                 extra_tasks = []
             else:
                 extra_tasks = self._fetch_tasks_api(
@@ -2570,7 +2637,7 @@ class TaskPanel(QWidget):
         self._restore_last_keyboard_selection(items_by_id)
         self._refresh_tags()
         self._update_summary_footer(visible_tasks)
-        QTimer.singleShot(0, self._reset_horizontal_scroll)
+        self._single_shot_ui(0, self._reset_horizontal_scroll)
 
     def _filter_tasks_to_tag_groups(self, tasks: list[dict], tag_groups: list[set[str]]) -> list[dict]:
         """Apply tag filtering for OR-within-prefix semantics."""
@@ -2759,7 +2826,7 @@ class TaskPanel(QWidget):
                 indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
             except Exception:
                 pass
-        QTimer.singleShot(100, self._refresh_tasks)
+        self._single_shot_ui(100, self._refresh_tasks)
 
     def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
         menu = QMenu(self)
@@ -2925,11 +2992,11 @@ class TaskPanel(QWidget):
                 resp.raise_for_status()
             except Exception as exc:
                 print(f"[TASK_PANEL] Failed to update task dates via API: {exc}")
-                QTimer.singleShot(150, self._refresh_tasks)
+                self._single_shot_ui(150, self._refresh_tasks)
                 return
             if affected_paths:
                 self.taskDatesApplied.emit(affected_paths)
-            QTimer.singleShot(150, self._refresh_tasks)
+            self._single_shot_ui(150, self._refresh_tasks)
             return
         if not config.has_active_vault():
             return
@@ -2983,7 +3050,7 @@ class TaskPanel(QWidget):
                     pass
         if affected_paths:
             self.taskDatesApplied.emit(affected_paths)
-        QTimer.singleShot(150, self._refresh_tasks)
+        self._single_shot_ui(150, self._refresh_tasks)
 
     def _update_task_line_dates(
         self,
@@ -3312,7 +3379,7 @@ class TaskPanel(QWidget):
                         error_text = "Task endpoint timed out (HTTP 504)"
                     self.remoteRequestObserved.emit("error", latency_ms, f"/api/tasks failed: {error_text}")
         if had_success:
-            QTimer.singleShot(0, self._refresh_tasks)
+            self._single_shot_ui(0, self._refresh_tasks)
 
     def set_ai_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)

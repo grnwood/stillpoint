@@ -6,7 +6,7 @@ source venv/bin/activate
 # Note: the Python entrypoint only accepts host/port/vault options (no SSL), so we use uvicorn directly.
 
 export STILLPOINT_VAULTS_ROOT="./vaults"
-export SERVER_ADMIN_PASSWORD="change-me-to-secure-password"
+export SERVER_ADMIN_PASSWORD="changeme"
 #export STILLPOINT_INSECURE=1
 
 # Alternative: use python -m instead of uvicorn directly

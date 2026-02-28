@@ -40,7 +40,8 @@ The Tasks panel shows all tasks from your vault.
 - Click or double-click date columns to update start/due dates quickly.
 - Use the search box to filter tasks.
 - While editing, use `Ctrl+\` to jump focus to Tasks quickly.
-- Fast keyboard flow: `Ctrl+\` -> type search text -> arrow keys -> Enter -> jump to task in editor.
+- Fast keyboard flow: `Ctrl+\` -> type search text -> arrow keys -> `Enter` to jump and focus editor.
+- Use `Ctrl+Enter` or `Shift+Enter` to jump but keep focus in the task list (Tasks and Calendar task lists).
 - Open the Tasks panel in its own window (`View -> Open Task Panel Window`) to keep it on a second monitor.
 
 ## Filtering Tasks

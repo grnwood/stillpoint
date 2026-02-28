@@ -687,6 +687,8 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.header().sectionResized.connect(lambda *_: self._header_save_timer.start())
         self.tasks_due_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tasks_due_list.customContextMenuRequested.connect(self._open_task_date_context_menu)
+        self.tasks_due_list.installEventFilter(self)
+        self.tasks_due_list.viewport().installEventFilter(self)
 
         due_row = QWidget()
         due_row_layout = QHBoxLayout()
@@ -719,7 +721,7 @@ class CalendarPanel(QWidget):
             }}
             """
         )
-        self.overdue_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
+        self.overdue_checkbox.toggled.connect(self._on_task_filters_changed)
         due_row_layout.addWidget(due_label)
         due_row_layout.addStretch(1)
         self.date_filter_btn = QToolButton()
@@ -776,7 +778,7 @@ class CalendarPanel(QWidget):
             }}
             """
         )
-        self.future_checkbox.toggled.connect(lambda _: self._update_insights_for_selection())
+        self.future_checkbox.toggled.connect(self._on_task_filters_changed)
         due_row_layout.addWidget(self.future_checkbox)
         due_row_layout.addWidget(self.overdue_checkbox)
         due_row.setLayout(due_row_layout)
@@ -901,10 +903,19 @@ class CalendarPanel(QWidget):
 
         self.vault_root: Optional[str] = None
         self.setFocusPolicy(Qt.StrongFocus)
+        self._last_activation_source: Optional[str] = None
 
     def set_page_text_provider(self, provider: Callable[[Optional[str]], str]) -> None:
         """Allow caller to supply live editor text for a given page path (relative, with leading slash)."""
         self._page_text_provider = provider
+
+    def _single_shot_ui(self, delay_ms: int, callback) -> None:
+        """Schedule a UI callback bound to this widget's lifetime."""
+        delay = max(0, int(delay_ms))
+        try:
+            QTimer.singleShot(delay, self, callback)
+        except TypeError:
+            QTimer.singleShot(delay, callback)
 
     def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
         """Allow parent to provide a date filter opener for the Task panel."""
@@ -937,7 +948,7 @@ class CalendarPanel(QWidget):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is getattr(self, "calendar_row", None) and event.type() in (QEvent.Resize, QEvent.Show):
-            QTimer.singleShot(0, self._update_calendar_layout)
+            self._single_shot_ui(0, self._update_calendar_layout)
         return super().eventFilter(obj, event)
         self._enforce_calendar_min_width()
         self.ensure_splitter_visible()
@@ -1055,7 +1066,7 @@ class CalendarPanel(QWidget):
                 sub_name = parts[idx + 4]
             # Defer selection to ensure day listing is populated
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(10, lambda: self._select_subpage_item(y, m, d, sub_name, rel_path))
+            self._single_shot_ui(10, lambda: self._select_subpage_item(y, m, d, sub_name, rel_path))
         # Update insights list selection
         self._update_insights_for_selection(rel_path)
 
@@ -1981,14 +1992,6 @@ class CalendarPanel(QWidget):
         self._apply_multi_selection_formats()
         self._sync_aux_calendars()
         self._update_insights_for_selection()
-        # Also update the due-tasks panel to reflect the visible month range
-        try:
-            first = QDate(year, month, 1)
-            last_day = first.daysInMonth()
-            last = QDate(year, month, last_day)
-            self._update_due_tasks([first, last])
-        except Exception:
-            pass
         if not self._suppress_task_filter_sync:
             try:
                 if self._task_date_filter_setter:
@@ -2042,6 +2045,16 @@ class CalendarPanel(QWidget):
         self._sync_aux_calendars()
         if not is_shift:
             self.dateActivated.emit(date.year(), date.month(), date.day())
+
+    def _selected_dates_for_tasks(self) -> list[QDate]:
+        if self.multi_selected_dates:
+            return sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
+        selected = self.calendar.selectedDate()
+        return [selected] if selected and selected.isValid() else []
+
+    def _on_task_filters_changed(self, _checked: bool) -> None:
+        # Recompute tasks immediately when overdue/future filters toggle.
+        self._update_insights_for_selection()
 
     def _update_today_visibility(self) -> None:
         if not hasattr(self, "today_btn"):
@@ -2423,6 +2436,20 @@ class CalendarPanel(QWidget):
         return False
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        task_list = getattr(self, "tasks_due_list", None)
+        task_viewport = task_list.viewport() if task_list else None
+        if obj in (task_list, task_viewport) and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                current = self.tasks_due_list.currentItem()
+                if current and current.data(0, PATH_ROLE):
+                    keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                    if keep_panel:
+                        self._mark_activation_source("keyboard_keep_panel")
+                    else:
+                        self._mark_activation_source("keyboard")
+                    self._open_task_item(current)
+                    event.accept()
+                    return True
         # Handle calendar widget events to detect shift-click
         if obj is self.calendar:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -2662,13 +2689,7 @@ class CalendarPanel(QWidget):
 
     def _update_insights_for_selection(self, current_path: Optional[str] = None) -> None:
         """Update insights based on the current multi-selection."""
-        dates_for_tasks: list[QDate] = []
-        if self.multi_selected_dates:
-            dates = sorted(self.multi_selected_dates, key=lambda d: d.toJulianDay())
-            dates_for_tasks = dates
-        else:
-            date = self.calendar.selectedDate()
-            dates_for_tasks = [date]
+        dates_for_tasks = self._selected_dates_for_tasks()
         # Update the due-tasks list first so insight counts reflect the visible rows
         self._update_due_tasks(dates_for_tasks)
         if self._ai_enabled:
@@ -3522,7 +3543,7 @@ class CalendarPanel(QWidget):
                 clear_start=False,
                 clear_due=False,
             )
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
 
     def _clear_task_date_choice(self, role: str, targets: list[dict]) -> None:
         if role == "start":
@@ -3545,7 +3566,7 @@ class CalendarPanel(QWidget):
                 clear_start=False,
                 clear_due=True,
             )
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
 
     def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
         anchor_pos = anchor or QCursor.pos()
@@ -3580,7 +3601,7 @@ class CalendarPanel(QWidget):
                 clear_start=False,
                 clear_due=False,
             )
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
 
     def _task_date_anchor(self) -> QPoint:
         items = self.tasks_due_list.selectedItems()
@@ -3723,7 +3744,7 @@ class CalendarPanel(QWidget):
             clear_due=self._task_date_clear_due,
         )
         self._close_task_date_popup()
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
 
     def _update_tasks_with_dates(
         self,
@@ -3771,7 +3792,7 @@ class CalendarPanel(QWidget):
             if affected_paths:
                 self.taskDatesApplied.emit(affected_paths)
             self._invalidate_task_cache()
-            QTimer.singleShot(200, self._update_insights_for_selection)
+            self._single_shot_ui(200, self._update_insights_for_selection)
             self.tasksUpdated.emit()
             return
         if not self.vault_root:
@@ -3823,7 +3844,7 @@ class CalendarPanel(QWidget):
                 except Exception:
                     pass
         self._invalidate_task_cache()
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
         if affected_paths:
             self.taskDatesApplied.emit(affected_paths)
         self.tasksUpdated.emit()
@@ -3928,7 +3949,7 @@ class CalendarPanel(QWidget):
             except Exception:
                 pass
         self._invalidate_task_cache()
-        QTimer.singleShot(200, self._update_insights_for_selection)
+        self._single_shot_ui(200, self._update_insights_for_selection)
         self.tasksUpdated.emit()
 
     def _update_insights(self, date: QDate, current_path: Optional[str] = None) -> None:
@@ -4076,7 +4097,7 @@ class CalendarPanel(QWidget):
         self._render_activity_prompt("Fetching activity…")
         
         # Use QTimer to allow UI to update before blocking call
-        QTimer.singleShot(0, lambda: self._do_fetch_recent(dates, current_path, expand_single))
+        self._single_shot_ui(0, lambda: self._do_fetch_recent(dates, current_path, expand_single))
     
     def _do_fetch_recent(self, dates: list[QDate], current_path: Optional[str], expand_single: bool) -> None:
         """Actually fetch the recent data (called via timer to avoid blocking UI)."""
@@ -4297,6 +4318,14 @@ class CalendarPanel(QWidget):
             norm = "/" + norm.lstrip("/")
         self.taskActivated.emit(norm, max(1, line_num))
 
+    def _mark_activation_source(self, source: str) -> None:
+        self._last_activation_source = source
+
+    def consume_activation_source(self) -> Optional[str]:
+        src = self._last_activation_source
+        self._last_activation_source = None
+        return src
+
     def _on_task_item_clicked(self, item: QTreeWidgetItem, col: int) -> None:
         if not item or not item.data(0, PATH_ROLE):
             return
@@ -4434,7 +4463,7 @@ class CalendarPanel(QWidget):
             # Emit signal BEFORE deletion so main window can unload editor
             # Use QTimer to defer and avoid focus change issues during signal processing
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, lambda: self.pageAboutToBeDeleted.emit(rel_path))
+            self._single_shot_ui(0, lambda: self.pageAboutToBeDeleted.emit(rel_path))
             
             # Give the signal handler time to process
             from PySide6.QtWidgets import QApplication

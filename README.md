@@ -126,7 +126,8 @@ AI features are opt-in and require configuration. Current capabilities include:
 The built-in help vault includes a full shortcuts guide:
 
 - Help menu: **Help → Keyboard Shortcuts**
-- File in repo: `sp/help-vault/Keyboard Shortcuts/Keyboard Shortcuts.md`
+- File in repo: `sp/help-vault/Shortcuts/Shortcuts.md`
+- Tasks/Calendar task lists: `Enter` opens and focuses editor; `Ctrl+Enter`/`Shift+Enter` opens and keeps focus in the task list.
 
 The help vault is copied to `~/.stillpoint/help-vault` on first open. To refresh it from the repo, delete or rename that folder and reopen Help → Documentation.
 
@@ -333,4 +334,3 @@ If you find this project useful and would like to support its continued developm
   https://ko-fi.com/grnwood
 
 Support is always optional. The core project remains fully open source and usable without payment.
-

@@ -30,6 +30,8 @@ These shortcuts will speed up your workflow:
 ### Tasks
 - `F12`: Toggle task completion
 - `Ctrl+\`: Focus tasks search
+- `Enter` (task selected): Open task target and focus editor
+- `Ctrl+Enter` or `Shift+Enter` (task selected): Open task target and keep focus in task list
 
 ### Panels
 - `Ctrl+Shift+Space`: Cycle focus between panels

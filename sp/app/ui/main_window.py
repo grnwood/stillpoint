@@ -10830,8 +10830,10 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(sender, "consume_activation_source"):
                 activation_source = sender.consume_activation_source()
-            elif hasattr(sender, "task_panel") and hasattr(sender.task_panel, "consume_activation_source"):
+            if activation_source is None and hasattr(sender, "task_panel") and hasattr(sender.task_panel, "consume_activation_source"):
                 activation_source = sender.task_panel.consume_activation_source()
+            if activation_source is None and hasattr(sender, "calendar_panel") and hasattr(sender.calendar_panel, "consume_activation_source"):
+                activation_source = sender.calendar_panel.consume_activation_source()
         except Exception:
             activation_source = None
         
@@ -10840,7 +10842,8 @@ class MainWindow(QMainWindow):
             self._open_file(path, sync_calendar=not preserve_calendar_state)
         self._goto_line(line, select_line=True)
         
-        # Keyboard activation: move focus to editor; mouse: restore task focus
+        # Keyboard activation: move focus to editor.
+        # Ctrl+Enter activation keeps focus in the originating task list.
         if activation_source == "keyboard":
             try:
                 self._exit_vi_insert_on_activate()
@@ -10850,6 +10853,40 @@ class MainWindow(QMainWindow):
                 self.editor.setFocus(Qt.OtherFocusReason)
             except Exception:
                 pass
+        elif activation_source == "keyboard_keep_panel":
+            target_focus_widget = None
+            if sender is not None:
+                try:
+                    if hasattr(sender, "task_panel") and getattr(sender.task_panel, "task_tree", None):
+                        target_focus_widget = sender.task_panel.task_tree
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and hasattr(sender, "calendar_panel") and getattr(sender.calendar_panel, "tasks_due_list", None):
+                        target_focus_widget = sender.calendar_panel.tasks_due_list
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and getattr(sender, "task_tree", None):
+                        target_focus_widget = sender.task_tree
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and getattr(sender, "tasks_due_list", None):
+                        target_focus_widget = sender.tasks_due_list
+                except Exception:
+                    pass
+            if target_focus_widget is None and focused_widget is not None:
+                target_focus_widget = focused_widget
+
+            def _restore_panel_focus() -> None:
+                try:
+                    if target_focus_widget is not None:
+                        target_focus_widget.setFocus(Qt.OtherFocusReason)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _restore_panel_focus)
         elif focused_widget and "Task" in focused_widget.__class__.__name__:
             focused_widget.setFocus()
             if log_enabled("ui_state"):
@@ -10901,24 +10938,18 @@ class MainWindow(QMainWindow):
         if not targets:
             return
         if self.current_path in targets:
-            can_reload = True
             try:
-                can_reload = not (self._dirty_flag or self.editor.document().isModified())
+                if self._dirty_flag or self.editor.document().isModified():
+                    self._save_current_file(auto=True, reason="task date post-apply")
             except Exception:
-                can_reload = not self._dirty_flag
-            if can_reload:
-                self._open_file(
-                    self.current_path,
-                    add_to_history=False,
-                    force=True,
-                    restore_history_cursor=True,
-                    sync_calendar=False,
-                )
-            else:
-                self.statusBar().showMessage(
-                    "Task date updated on current page; reload skipped (unsaved edits).",
-                    4000,
-                )
+                pass
+            self._open_file(
+                self.current_path,
+                add_to_history=False,
+                force=True,
+                restore_history_cursor=True,
+                sync_calendar=False,
+            )
         for win in list(getattr(self, "_page_windows", [])):
             try:
                 src = self._normalize_editor_path(str(getattr(win, "_source_path", "") or ""))
@@ -10928,7 +10959,7 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 if bool(win._is_dirty()):
-                    continue
+                    win._save_current_file(auto=True, reason="task date post-apply")
             except Exception:
                 pass
             try:
