@@ -106,6 +106,13 @@ _TASKS_ALLOW_STALE_ON_TIMEOUT = os.getenv("SP_TASKS_ALLOW_STALE_ON_TIMEOUT", "1"
     "yes",
     "on",
 )
+_TASKS_ALLOW_DEGRADED_FALLBACK = os.getenv("SP_TASKS_ALLOW_DEGRADED_FALLBACK", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_TASKS_FALLBACK_TIMEOUT_S = max(0.1, float(os.getenv("SP_TASKS_FALLBACK_TIMEOUT_S", "4.0")))
 _TASKS_QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_TASKS_QUERY_WORKERS,
     thread_name_prefix="sp-tasks-query",
@@ -879,6 +886,44 @@ def _fetch_tasks_with_timeout(
                         f"returning stale cache ({len(stale_items)} items)"
                     )
                     return stale_items
+        if _TASKS_ALLOW_DEGRADED_FALLBACK:
+            fallback_timeout = min(_TASKS_FALLBACK_TIMEOUT_S, _TASKS_QUERY_TIMEOUT_S)
+            fallback_variants: list[tuple[bool, bool, str]] = []
+            if include_ancestors:
+                fallback_variants.append((False, actionable_only, "include_ancestors=false"))
+            if actionable_only:
+                fallback_variants.append((False, False, "include_ancestors=false actionable_only=false"))
+            for fallback_include_ancestors, fallback_actionable_only, fallback_label in fallback_variants:
+                fallback_key = (
+                    query,
+                    tags,
+                    include_done,
+                    fallback_include_ancestors,
+                    fallback_actionable_only,
+                    status,
+                )
+                if fallback_key == cache_key:
+                    continue
+                try:
+                    fallback_future = _TASKS_QUERY_EXECUTOR.submit(
+                        _fetch_tasks,
+                        query,
+                        tags,
+                        include_done=include_done,
+                        include_ancestors=fallback_include_ancestors,
+                        actionable_only=fallback_actionable_only,
+                        status=status,
+                    )
+                    fallback_items = fallback_future.result(timeout=fallback_timeout)
+                    print(
+                        f"[API] /api/tasks timeout after {_TASKS_QUERY_TIMEOUT_S:.1f}s; "
+                        f"using degraded fallback ({fallback_label}) with {len(fallback_items)} items"
+                    )
+                    return fallback_items
+                except concurrent.futures.TimeoutError:
+                    continue
+                except sqlite3.OperationalError:
+                    continue
         # Leave the worker running; respond quickly so remote clients don't hang UI.
         raise HTTPException(
             status_code=504,

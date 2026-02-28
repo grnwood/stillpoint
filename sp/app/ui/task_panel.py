@@ -764,6 +764,9 @@ class TaskPanel(QWidget):
             display: inline-block;
             vertical-align: top;
         }}
+        .task-indent {{
+            padding-left: var(--task-indent, 0px);
+        }}
         .task-done .task-text {{
             text-decoration: line-through;
         }}
@@ -842,7 +845,7 @@ class TaskPanel(QWidget):
             task_text = self._linkify_task_text_html(task.get("text", "") or "")
             indent_px = max(0, depth) * 18
             task_html = (
-                f"<span class=\"task-text\" style=\"margin-left: {indent_px}px;\">"
+                f"<span class=\"task-text task-indent\" style=\"--task-indent: {indent_px}px;\">"
                 f"<span class=\"task-checkbox\">{checkbox}</span>{task_text}</span>"
             )
 
@@ -2324,6 +2327,8 @@ class TaskPanel(QWidget):
             tasks = []
         else:
             actionable_only = actionable_toggle or (not include_done and not searching)
+            used_degraded_fallback = False
+            fallback_actionable_only = actionable_only
             tasks = self._fetch_tasks_api(
                 query,
                 sql_tags,
@@ -2331,6 +2336,31 @@ class TaskPanel(QWidget):
                 include_ancestors=True,
                 actionable_only=actionable_only,
             )
+            if self._remote_mode and not tasks:
+                fallback_variants: list[tuple[bool, bool]] = []
+                fallback_variants.append((False, actionable_only))
+                if actionable_only:
+                    fallback_variants.append((False, False))
+                for fb_include_ancestors, fb_actionable_only in fallback_variants:
+                    if fb_include_ancestors and fb_actionable_only == actionable_only:
+                        continue
+                    fallback_tasks = self._fetch_tasks_api(
+                        query,
+                        sql_tags,
+                        include_done=include_done,
+                        include_ancestors=fb_include_ancestors,
+                        actionable_only=fb_actionable_only,
+                    )
+                    if fallback_tasks:
+                        tasks = fallback_tasks
+                        used_degraded_fallback = True
+                        fallback_actionable_only = fb_actionable_only
+                        if log_enabled("tasks_calendar"):
+                            print(
+                                "[TASK_PANEL] using degraded remote fallback "
+                                f"include_ancestors={fb_include_ancestors} actionable_only={fb_actionable_only}"
+                            )
+                        break
             if (
                 not tasks
                 and actionable_only
@@ -2344,6 +2374,8 @@ class TaskPanel(QWidget):
                     include_ancestors=True,
                     actionable_only=False,
                 )
+            if used_degraded_fallback and actionable_toggle and not fallback_actionable_only:
+                tasks = [task for task in tasks if bool(task.get("actionable", True))]
             tasks = self._apply_nav_filter(tasks)
             if effective_tag_groups and not use_sql_tags:
                 tasks = self._filter_tasks_to_tag_groups(tasks, effective_tag_groups)
@@ -2402,11 +2434,18 @@ class TaskPanel(QWidget):
             if task["id"] not in visible_ids:
                 continue
             visible_tasks.append(task)
+            try:
+                task_level = max(0, int(task.get("level") or 0))
+            except Exception:
+                task_level = 0
             priority_level = min(task.get("priority", 0) or 0, 3)
             due = task.get("due", "") or ""
             start = (task.get("starts") or task.get("start") or "").strip()
             text = task["text"]
             display_text = self._format_task_text(text)
+            # QTree indentation renders in column 0; mirror nesting in task text column.
+            if task_level:
+                display_text = ("  " * task_level) + display_text
             display_path = self._present_path(task["path"])
             priority_text, due_overdue = self._priority_time_label(task)
             due_idx = 2
@@ -3142,6 +3181,15 @@ class TaskPanel(QWidget):
         def _worker() -> None:
             started = time.perf_counter()
             try:
+                if log_enabled("tasks_calendar"):
+                    print(
+                        f"[TASK_PANEL] dispatch /api/tasks "
+                        f"query={args.get('query', '')!r} tags={args.get('tags', [])} "
+                        f"include_done={args.get('include_done')} "
+                        f"include_ancestors={args.get('include_ancestors')} "
+                        f"actionable_only={args.get('actionable_only')} "
+                        f"remote_mode={self._remote_mode}"
+                    )
                 resp = client.get("/api/tasks", params=args)
                 resp.raise_for_status()
                 payload = resp.json()
@@ -3150,7 +3198,14 @@ class TaskPanel(QWidget):
                 self._api_task_result_queue.put(("ok", cache_key, items, latency_ms))
             except Exception as exc:
                 latency_ms = (time.perf_counter() - started) * 1000.0
-                self._api_task_result_queue.put(("error", cache_key, str(exc), latency_ms))
+                exc_name = exc.__class__.__name__.lower()
+                error_text = str(exc)
+                if "readtimeout" in exc_name:
+                    error_text = (
+                        "Client read timeout waiting for /api/tasks response "
+                        "(request may not appear in server logs)"
+                    )
+                self._api_task_result_queue.put(("error", cache_key, error_text, latency_ms))
 
         threading.Thread(target=_worker, daemon=True).start()
 

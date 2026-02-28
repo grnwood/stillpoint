@@ -1283,6 +1283,11 @@ class CalendarPanel(QWidget):
         rows = []
         def _append_task_row(item: QTreeWidgetItem) -> None:
             task = item.data(0, Qt.UserRole) or {}
+            try:
+                task_level = max(0, int(task.get("level") or 0))
+            except Exception:
+                task_level = 0
+            indent_px = task_level * 16
             priority_level = min(task.get("priority", 0) or 0, 3)
             _, due_overdue = self._priority_time_label(task)
             pri_style = ""
@@ -1300,7 +1305,12 @@ class CalendarPanel(QWidget):
             for col in range(self.tasks_due_list.columnCount()):
                 text = item.text(col)
                 if col == 1:
-                    safe = self._linkify_task_text_html(text or "")
+                    base_text = (task.get("text") or text or "").strip()
+                    safe_text = self._linkify_task_text_html(base_text)
+                    safe = (
+                        f"<span class=\"task-text task-indent\" "
+                        f"style=\"--task-indent: {indent_px}px;\">{safe_text}</span>"
+                    )
                 else:
                     safe = html.escape(text or "")
                 cell_style = ""
@@ -2789,7 +2799,14 @@ class CalendarPanel(QWidget):
         priority_txt, is_overdue = self._priority_time_label(task)
         row_values = [""] * self.tasks_due_list.columnCount()
         row_values[0] = priority_txt
-        row_values[1] = task.get("text") or "(task)"
+        try:
+            task_level = max(0, int(task.get("level") or 0))
+        except Exception:
+            task_level = 0
+        task_text = task.get("text") or "(task)"
+        if task_level:
+            task_text = ("  " * task_level) + task_text
+        row_values[1] = task_text
         row_values[due_idx] = task.get("due") or ""
         if self._show_task_start_column and start_idx is not None:
             row_values[start_idx] = start_value
@@ -3151,6 +3168,15 @@ class CalendarPanel(QWidget):
         def _worker() -> None:
             started = time.perf_counter()
             try:
+                if log_enabled("tasks_calendar"):
+                    print(
+                        f"[CALENDAR] dispatch /api/tasks "
+                        f"query={args.get('query', '')!r} "
+                        f"include_done={args.get('include_done')} "
+                        f"include_ancestors={args.get('include_ancestors')} "
+                        f"actionable_only={args.get('actionable_only')} "
+                        f"remote_mode={self._remote_mode}"
+                    )
                 resp = client.get("/api/tasks", params=args)
                 resp.raise_for_status()
                 payload = resp.json()
@@ -3159,7 +3185,14 @@ class CalendarPanel(QWidget):
                 self._api_task_result_queue.put(("ok", cache_key, (generation, items, latency_ms)))
             except Exception as exc:
                 latency_ms = (time.perf_counter() - started) * 1000.0
-                self._api_task_result_queue.put(("error", cache_key, (str(exc), latency_ms)))
+                exc_name = exc.__class__.__name__.lower()
+                error_text = str(exc)
+                if "readtimeout" in exc_name:
+                    error_text = (
+                        "Client read timeout waiting for /api/tasks response "
+                        "(request may not appear in server logs)"
+                    )
+                self._api_task_result_queue.put(("error", cache_key, (error_text, latency_ms)))
 
         threading.Thread(target=_worker, daemon=True).start()
 

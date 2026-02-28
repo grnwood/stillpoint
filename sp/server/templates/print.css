@@ -94,6 +94,11 @@ th, td {
   text-align: left;
 }
 
+.task-indent {
+  display: inline-block;
+  padding-left: var(--task-indent, 0px);
+}
+
 th {
   background: #f0f0f0;
   font-weight: 600;

@@ -1607,6 +1607,12 @@ class MainWindow(QMainWindow):
         self._remote_health_state: str = "unknown"
         self._remote_health_message: str = ""
         self._remote_last_latency_ms: Optional[float] = None
+        self._remote_slow_threshold_ms: float = 2500.0
+        self._remote_degraded_threshold_ms: float = 6000.0
+        self._remote_slow_strikes_required: int = 2
+        self._remote_timeout_strikes_required: int = 2
+        self._remote_slow_strikes: int = 0
+        self._remote_timeout_strikes: int = 0
         self._remote_feedback_timer = QTimer(self)
         self._remote_feedback_timer.setSingleShot(True)
         self._remote_feedback_timer.timeout.connect(self._hide_remote_feedback)
@@ -4382,11 +4388,21 @@ class MainWindow(QMainWindow):
     def _record_remote_latency(self, latency_ms: float, context: str = "") -> None:
         latency = float(latency_ms)
         context_label = context or "Remote request"
-        if latency >= 4000:
+        if latency >= self._remote_degraded_threshold_ms:
+            self._remote_slow_strikes = 0
+            self._remote_timeout_strikes = 0
             self._set_remote_health_state("degraded", f"{context_label} took {latency/1000.0:.1f}s", latency_ms=latency)
-        elif latency >= 1500:
-            self._set_remote_health_state("slow", f"{context_label} took {latency/1000.0:.1f}s", latency_ms=latency)
+        elif latency >= self._remote_slow_threshold_ms:
+            self._remote_slow_strikes += 1
+            self._remote_timeout_strikes = 0
+            if self._remote_slow_strikes >= self._remote_slow_strikes_required:
+                self._set_remote_health_state("slow", f"{context_label} took {latency/1000.0:.1f}s", latency_ms=latency)
+            else:
+                # One-off slow sample should not immediately mark the connection as slow.
+                self._set_remote_health_state("healthy", latency_ms=latency)
         else:
+            self._remote_slow_strikes = 0
+            self._remote_timeout_strikes = 0
             self._set_remote_health_state("healthy", latency_ms=latency)
 
     def _on_right_panel_remote_request_observed(self, state: str, latency_ms: float, message: str) -> None:
@@ -4397,7 +4413,17 @@ class MainWindow(QMainWindow):
         if state == "ok":
             self._record_remote_latency(latency_ms, context=message or "Task request")
             return
-        self._set_remote_health_state("degraded", message or "Remote task request failed", latency_ms=latency_ms)
+        msg = str(message or "")
+        lowered = msg.lower()
+        if "read timeout" in lowered or "timed out waiting" in lowered:
+            self._remote_timeout_strikes += 1
+            self._remote_slow_strikes = 0
+            if self._remote_timeout_strikes >= self._remote_timeout_strikes_required:
+                self._set_remote_health_state("slow", msg or "Remote task request timed out", latency_ms=latency_ms)
+            return
+        self._remote_slow_strikes = 0
+        self._remote_timeout_strikes = 0
+        self._set_remote_health_state("degraded", msg or "Remote task request failed", latency_ms=latency_ms)
 
     def _update_remote_status_badge(self) -> None:
         if not hasattr(self, "_remote_status_label"):
@@ -5455,6 +5481,8 @@ class MainWindow(QMainWindow):
         self._remote_health_state = "unknown"
         self._remote_health_message = ""
         self._remote_last_latency_ms = None
+        self._remote_slow_strikes = 0
+        self._remote_timeout_strikes = 0
         self._rebuild_http_client()
         self._apply_remote_mode_ui()
         try:
@@ -12792,8 +12820,11 @@ class MainWindow(QMainWindow):
             else theme_value("main_window.focus_border.default", "#4A90E2")
         )
         editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
-        right_arrow_path = self._find_asset("right-arrow.svg")
-        down_arrow_path = self._find_asset("down-arrow.svg")
+        is_light_theme = QApplication.palette().color(QPalette.Base).lightness() >= 150
+        right_arrow_name = "right-arrow-dark.svg" if is_light_theme else "right-arrow.svg"
+        down_arrow_name = "down-arrow-dark.svg" if is_light_theme else "down-arrow.svg"
+        right_arrow_path = self._find_asset(right_arrow_name)
+        down_arrow_path = self._find_asset(down_arrow_name)
         arrow_closed = (
             str(right_arrow_path).replace("\\", "/") if right_arrow_path else ""
         )
