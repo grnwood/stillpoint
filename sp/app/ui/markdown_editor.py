@@ -1539,7 +1539,9 @@ class MarkdownEditor(QTextEdit):
         self._vi_has_painted: bool = False
         self._vi_paint_in_progress: bool = False
         self._vi_activation_timer: Optional[QTimer] = None
-        default_paint_guard_ms = 180 if sys.platform.startswith("win") else 0
+        # A short cross-platform paint guard prevents rare Qt paint races
+        # immediately after document replacement/reload.
+        default_paint_guard_ms = 180 if sys.platform.startswith("win") else 120
         try:
             self._post_load_paint_guard_ms = max(
                 0, int(os.getenv("SP_POST_LOAD_PAINT_GUARD_MS", str(default_paint_guard_ms)))
@@ -1843,8 +1845,22 @@ class MarkdownEditor(QTextEdit):
         if not self._post_load_repaint_armed:
             self._post_load_repaint_armed = True
             remaining_ms = max(1, int((until - now) * 1000.0))
-            QTimer.singleShot(remaining_ms, self.viewport().update)
+            QTimer.singleShot(remaining_ms, self._deferred_post_load_repaint)
         return True
+
+    def _deferred_post_load_repaint(self) -> None:
+        if not self._is_alive(self) or not self._editor_alive:
+            return
+        try:
+            viewport = self.viewport()
+        except Exception:
+            return
+        if not self._is_alive(viewport):
+            return
+        try:
+            viewport.update()
+        except Exception:
+            pass
 
     def _block_has_hr_object(self, block) -> bool:
         if not block or not block.isValid():
@@ -3187,6 +3203,23 @@ class MarkdownEditor(QTextEdit):
                     self.imageSaved.emit(saved.name)
                     return
 
+        # 2) Explicit markdown MIME should bypass HTML flattening.
+        if source.hasFormat("text/markdown"):
+            try:
+                markdown_payload = bytes(source.data("text/markdown")).decode("utf-8")
+            except Exception:
+                markdown_payload = ""
+            if markdown_payload:
+                self._insert_markdown_text(markdown_payload)
+                return
+
+        # 3) If clipboard has both HTML and plain text, preserve plain markdown syntax.
+        if source.hasHtml() and source.hasText():
+            plain_text = source.text()
+            if plain_text and self._has_markdown_syntax(plain_text):
+                self._insert_markdown_text(plain_text)
+                return
+
         # 2) Rich HTML → convert to plain markdown-friendly text.
         if source.hasHtml():
             html = source.html()
@@ -3198,7 +3231,7 @@ class MarkdownEditor(QTextEdit):
                 self._insert_markdown_text(source.text())
                 return
 
-        # 3) Default paste - also sanitize to prevent sentinel character injection
+        # 4) Default paste - also sanitize to prevent sentinel character injection
         if source.hasText():
             self._insert_markdown_text(source.text())
             return

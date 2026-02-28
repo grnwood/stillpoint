@@ -235,6 +235,29 @@ def test_html_paste_prefers_anchor_conversion(editor):
     assert "[https://example.com/task/456|https://example.com/task/456]" in markdown
 
 
+def test_paste_prefers_plain_markdown_when_html_also_present(editor):
+    markdown_src = (
+        "## Paste Title\n"
+        "- **Bold** item\n"
+        "- [Task 123](https://example.com/task/123)"
+    )
+    mime = QMimeData()
+    mime.setHtml(
+        "<h2>Paste Title</h2>"
+        "<ul>"
+        "<li><strong>Bold</strong> item</li>"
+        "<li><a href='https://example.com/task/123'>Task 123</a></li>"
+        "</ul>"
+    )
+    mime.setText(markdown_src)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "## Paste Title" in markdown
+    assert "**Bold** item" in markdown
+    assert "[https://example.com/task/123|Task 123]" in markdown
+
+
 def test_paste_markdown_link_with_control_chars_normalizes_to_wiki(editor):
     mime = QMimeData()
     mime.setText("[Task\u2060 123](https://example.com/task/123\u200b)")

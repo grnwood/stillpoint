@@ -2044,6 +2044,18 @@ class TaskPanel(QWidget):
                     self.search.insert("@")
                     event.accept()
                     return True
+            if (
+                obj is self.task_tree
+                and event.text() == "/"
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+            ):
+                # Vim-style quick focus for plain-text task search.
+                self.active_tags.clear()
+                self.search.clear()
+                self.search.setFocus(Qt.ShortcutFocusReason)
+                self.search.setCursorPosition(len(self.search.text()))
+                event.accept()
+                return True
             if self._handle_task_nav_key(event):
                 return True
         return super().eventFilter(obj, event)
@@ -2784,12 +2796,22 @@ class TaskPanel(QWidget):
         if not vault_root_val:
             return
         vault_root = Path(vault_root_val)
+        affected_paths = sorted(
+            {
+                "/" + str(t.get("path") or "").strip().lstrip("/")
+                for t in targets
+                if str(t.get("path") or "").strip()
+            }
+        )
+        if affected_paths:
+            self.taskDatesWillApply.emit(affected_paths)
         targets_by_path: dict[str, list[dict]] = {}
         for target in targets:
             path = target.get("path")
             if not path:
                 continue
             targets_by_path.setdefault(str(path), []).append(target)
+        changed_paths: set[str] = set()
         for rel_path, items in targets_by_path.items():
             file_path = vault_root / rel_path.lstrip("/")
             if not file_path.exists():
@@ -2826,6 +2848,9 @@ class TaskPanel(QWidget):
                 indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
             except Exception:
                 pass
+            changed_paths.add("/" + str(rel_path).lstrip("/"))
+        if changed_paths:
+            self.taskDatesApplied.emit(sorted(changed_paths))
         self._single_shot_ui(100, self._refresh_tasks)
 
     def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:

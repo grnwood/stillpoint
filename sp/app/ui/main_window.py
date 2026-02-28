@@ -1443,9 +1443,14 @@ class MenuCommandBar(QWidget):
     def _refresh_list(self) -> None:
         search_text = self._search.text().lower().strip()
         self._list.clear()
+        visible_entries: list[MenuCommandBar.Entry] = []
         for entry in self._entries:
             if search_text and search_text not in entry.label.lower():
                 continue
+            visible_entries.append(entry)
+        if search_text:
+            visible_entries.sort(key=lambda e: self._entry_match_sort_key(e, search_text))
+        for entry in visible_entries:
             item = QListWidgetItem(entry.label)
             item.setData(Qt.UserRole, entry)
             if not entry.action.isEnabled():
@@ -1453,6 +1458,35 @@ class MenuCommandBar(QWidget):
             self._list.addItem(item)
         if self._list.count():
             self._list.setCurrentRow(0)
+
+    @staticmethod
+    def _entry_match_sort_key(entry: "MenuCommandBar.Entry", query: str) -> tuple[int, int, str]:
+        """Rank command-bar matches so likely-intent commands appear first."""
+        label = entry.label or ""
+        lowered = label.lower()
+        is_go = lowered.startswith("go / ")
+        go_bias = 0 if is_go else 1
+
+        # Go command labels are shaped like "Go / <command>"
+        go_command = ""
+        if is_go:
+            _, _, tail = lowered.partition("go / ")
+            go_command = tail.strip()
+            if query and go_command.startswith(query):
+                # Strongest signal: typing a prefix of a Go command name
+                # should put that Go command at the top.
+                return (0, go_bias, lowered)
+
+        if lowered.startswith(query):
+            return (1, go_bias, lowered)
+
+        # Next best: any token in the label starts with the query.
+        tokens = re.split(r"[\s/:\-]+", lowered)
+        if any(tok.startswith(query) for tok in tokens if tok):
+            return (2, go_bias, lowered)
+
+        # Finally: generic contains match.
+        return (3, go_bias, lowered)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj == self._search and event.type() == QEvent.KeyPress:
@@ -2019,7 +2053,7 @@ class MainWindow(QMainWindow):
         self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
         self.right_panel.openCalendarWindowRequested.connect(self._open_calendar_panel_window)
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
-        self.right_panel.openAiWindowRequested.connect(self._open_ai_chat_window)
+        self.right_panel.openAiWindowRequested.connect(lambda: self._open_ai_chat_window(detached_only=True))
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
         self.right_panel.remoteRequestObserved.connect(
             self._on_right_panel_remote_request_observed,
@@ -2400,6 +2434,10 @@ class MainWindow(QMainWindow):
         home_action.triggered.connect(self._go_home)
         go_menu.addAction(home_action)
 
+        vault_action = QAction("Vault", self)
+        vault_action.triggered.connect(self._focus_vault_tab)
+        go_menu.addAction(vault_action)
+
         if self._feature_tasks_enabled:
             tasks_action = QAction("Tasks", self)
             tasks_action.triggered.connect(self._focus_tasks_search)
@@ -2421,7 +2459,7 @@ class MainWindow(QMainWindow):
 
         if self._feature_link_navigator_enabled:
             link_action = QAction("Link Navigator", self)
-            link_action.triggered.connect(lambda: self._apply_navigation_focus("navigator"))
+            link_action.triggered.connect(self._focus_link_navigator)
             go_menu.addAction(link_action)
 
         ai_action = QAction("AI Chat", self)
@@ -11162,24 +11200,27 @@ class MainWindow(QMainWindow):
         self._detached_link_panels.append(panel)
         window.destroyed.connect(lambda: self._remove_detached_link_panel(panel))
 
-    def _open_ai_chat_window(self) -> None:
+    def _open_ai_chat_window(self, *, detached_only: bool = False) -> None:
         if not config.load_enable_ai_chats():
             self._alert("Enable AI Chat in settings to use this window.")
             return
         
         # First check if there's a detached AI chat window
-        if self._detached_ai_chat_window and self._detached_ai_chat_window.isVisible():
+        if self._detached_ai_chat_window:
             try:
+                self._detached_ai_chat_window.showNormal()
                 self._detached_ai_chat_window.raise_()
                 self._detached_ai_chat_window.activateWindow()
                 if self._detached_ai_chat_panel:
+                    if self.current_path:
+                        self._detached_ai_chat_panel.set_current_page(self._normalize_editor_path(self.current_path))
                     self._detached_ai_chat_panel.focus_input()
             except Exception:
                 pass
             return
         
         # Check if AI Chat tab exists in right panel
-        if self.right_panel.ai_chat_panel:
+        if self.right_panel.ai_chat_panel and not detached_only:
             # Ensure right panel is visible
             self._ensure_right_panel_visible()
             
@@ -11729,7 +11770,7 @@ class MainWindow(QMainWindow):
             action.triggered.connect(self._open_link_panel_window)
         elif widget == self.right_panel.ai_chat_panel:
             action = menu.addAction("Open in New Window")
-            action.triggered.connect(self._open_ai_chat_window)
+            action.triggered.connect(lambda: self._open_ai_chat_window(detached_only=True))
         else:
             return
         menu.exec(bar.mapToGlobal(pos))
@@ -12653,6 +12694,30 @@ class MainWindow(QMainWindow):
     def _focus_editor(self) -> None:
         self.editor.setFocus()
 
+    def _focus_vault_tab(self) -> None:
+        """Switch to Vault tab and focus the tree."""
+        self._ensure_left_panel_visible()
+        try:
+            self.left_tab_widget.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.tree_view.setFocus(Qt.ShortcutFocusReason)
+        except Exception:
+            pass
+
+    def _focus_detached_panel_window(self, title: str) -> Optional[QMainWindow]:
+        """Raise and activate the most-recent visible detached panel window by title."""
+        for window in reversed(list(getattr(self, "_detached_panels", []))):
+            try:
+                if window.isVisible() and window.windowTitle() == title:
+                    window.raise_()
+                    window.activateWindow()
+                    return window
+            except Exception:
+                continue
+        return None
+
     def _focus_tasks_search(self) -> None:
         """Focus the Tasks tab search bar. If external task window exists, focus that instead."""
         if not self._feature_tasks_enabled:
@@ -12715,6 +12780,15 @@ class MainWindow(QMainWindow):
         """Switch to Calendar tab and focus calendar widget."""
         if not self._feature_calendar_enabled:
             return
+        detached = self._focus_detached_panel_window("Calendar")
+        if detached is not None:
+            try:
+                panel = detached.centralWidget()
+                if panel and hasattr(panel, "calendar"):
+                    panel.calendar.setFocus(Qt.ShortcutFocusReason)
+            except Exception:
+                pass
+            return
         # Ensure right panel is visible
         self._ensure_right_panel_visible()
         
@@ -12729,6 +12803,19 @@ class MainWindow(QMainWindow):
                     break
         except Exception:
             pass
+
+    def _focus_link_navigator(self) -> None:
+        """Focus Link Navigator, preferring a detached window when present."""
+        detached = self._focus_detached_panel_window("Link Navigator")
+        if detached is not None:
+            try:
+                panel = detached.centralWidget()
+                if panel and hasattr(panel, "graph_view"):
+                    panel.graph_view.setFocus(Qt.ShortcutFocusReason)
+            except Exception:
+                pass
+            return
+        self._apply_navigation_focus("navigator")
 
     def _focus_tags_tab(self) -> None:
         """Switch to Tags tab and focus the search bar."""
