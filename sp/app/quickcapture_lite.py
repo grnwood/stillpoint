@@ -150,6 +150,11 @@ def _capture_to_files(
         rel_path = f"/{target.relative_to(vault_root).as_posix()}"
     else:
         rel_path = _resolve_custom_page_ref(page_ref or "")
+        # Ensure custom capture folder exists so read_file can scaffold page content.
+        try:
+            (vault_root / rel_path.lstrip("/")).resolve().parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
     content = files.read_file(vault_root, rel_path)
     from datetime import datetime
 

@@ -1765,6 +1765,10 @@ class MainWindow(QMainWindow):
         self._suspend_dirty_tracking: bool = False
         self._homebase_has_unsynced_local_changes: bool = False
         self._homebase_unsynced_marked_at: Optional[datetime] = None
+        self._homebase_sync_blue_threshold_seconds: float = 0.5
+        self._homebase_sync_activity_started_at: Optional[float] = None
+        self._homebase_sync_cycle_had_true_activity: bool = False
+        self._homebase_last_real_sync_at: Optional[str] = None
         self._suppress_focus_borders: bool = False
         
         # Track virtual (unsaved) pages
@@ -4540,6 +4544,8 @@ class MainWindow(QMainWindow):
         self._homebase_sync_engine = None
         self._homebase_conflict_seen_keys.clear()
         self._homebase_conflict_popup_open = False
+        self._homebase_sync_activity_started_at = None
+        self._homebase_sync_cycle_had_true_activity = False
         self._update_homebase_status_badge(None)
         self._update_homebase_sync_action_state()
 
@@ -4595,7 +4601,7 @@ class MainWindow(QMainWindow):
         if self._homebase_status_clears_unsynced_marker(status):
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
-        self._update_homebase_status_badge(status)
+            self._homebase_sync_cycle_had_true_activity = True
         self._maybe_show_homebase_conflict_popup(status)
         if self._homebase_sync_engine:
             try:
@@ -4603,6 +4609,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 updates = []
             if updates:
+                self._homebase_sync_cycle_had_true_activity = True
                 self._on_homebase_remote_updates(updates)
         if self._homebase_pending_reload_path and self._is_editor_idle_for_remote_reload():
             pending = self._homebase_pending_reload_path
@@ -4615,6 +4622,7 @@ class MainWindow(QMainWindow):
                     restore_history_cursor=True,
                     sync_calendar=False,
                 )
+        self._update_homebase_status_badge(status)
         self._update_homebase_sync_action_state()
 
     def _mark_homebase_unsynced_local_change(self) -> None:
@@ -4933,6 +4941,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_homebase_status_label"):
             return
         if not status or not self._is_homebase_mode_enabled():
+            self._homebase_sync_activity_started_at = None
             self._homebase_status_label.hide()
             self._homebase_status_label.setToolTip("")
             return
@@ -4940,13 +4949,46 @@ class MainWindow(QMainWindow):
             self._homebase_sync_engine and getattr(self._homebase_sync_engine.cfg, "auto_sync", False)
         )
         state = status.state
+        pending_uploads = int(getattr(status, "pending_uploads", 0) or 0)
+        pending_downloads = int(getattr(status, "pending_downloads", 0) or 0)
         has_pending_work = bool(
             status.pending
-            or state == "syncing"
-            or int(getattr(status, "pending_uploads", 0) or 0) > 0
-            or int(getattr(status, "pending_downloads", 0) or 0) > 0
+            or pending_uploads > 0
+            or pending_downloads > 0
             or bool(getattr(self, "_dirty_flag", False))
             or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+        )
+        has_true_sync_activity = bool(
+            status.pending
+            or pending_uploads > 0
+            or pending_downloads > 0
+            or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+            or bool(getattr(self, "_dirty_flag", False))
+        )
+        has_manifest_delta = bool(
+            pending_uploads > 0
+            or pending_downloads > 0
+            or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+            or bool(getattr(self, "_homebase_sync_cycle_had_true_activity", False))
+        )
+        if state == "syncing" and has_true_sync_activity:
+            if self._homebase_sync_activity_started_at is None:
+                self._homebase_sync_activity_started_at = time.monotonic()
+            self._homebase_sync_cycle_had_true_activity = True
+        elif state in {"idle", "hibernated"}:
+            if self._homebase_sync_cycle_had_true_activity and status.last_sync_at:
+                self._homebase_last_real_sync_at = str(status.last_sync_at)
+            self._homebase_sync_activity_started_at = None
+            self._homebase_sync_cycle_had_true_activity = False
+        else:
+            self._homebase_sync_activity_started_at = None
+        sync_elapsed = 0.0
+        if self._homebase_sync_activity_started_at is not None:
+            sync_elapsed = max(0.0, time.monotonic() - self._homebase_sync_activity_started_at)
+        show_syncing_blue = bool(
+            state == "syncing"
+            and has_true_sync_activity
+            and sync_elapsed >= float(getattr(self, "_homebase_sync_blue_threshold_seconds", 0.5))
         )
         star = "*" if has_pending_work else ""
         text = f"HOMEBASE{star}"
@@ -4964,15 +5006,19 @@ class MainWindow(QMainWindow):
         elif auth_error:
             text = f"HOMEBASE AUTH{star}"
             bg = theme_value("main_window.homebase_badge.auth_bg", "#d32f2f")
-        elif state == "syncing" or status.pending:
+        elif show_syncing_blue:
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
-        elif state == "hibernated" or not auto_sync_enabled:
+        elif state == "hibernated" and not has_manifest_delta:
+            bg = theme_value("main_window.homebase_badge.idle_bg", "#757575")
+        elif not auto_sync_enabled:
             bg = theme_value("main_window.homebase_badge.idle_bg", "#757575")
         else:
             bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
         tooltip = status.summary
         if status.last_sync_at:
             tooltip += f"\nLast sync: {status.last_sync_at}"
+        if self._homebase_last_real_sync_at:
+            tooltip += f"\nLast real sync: {self._homebase_last_real_sync_at}"
         if status.last_error:
             tooltip += f"\nLast error: {status.last_error}"
         self._homebase_status_label.setText(text)
@@ -5014,6 +5060,32 @@ class MainWindow(QMainWindow):
             profile["interval_seconds"] = int(interval_seconds)
             profile["push_debounce_seconds"] = int(push_debounce_seconds)
             profile["max_parallel_transfers"] = int(max_parallel_transfers)
+            updated = True
+            break
+        if updated:
+            config.save_homebase_vault_profiles(profiles)
+
+    def _persist_homebase_passphrase_to_profile(self, passphrase: str) -> None:
+        if not self.vault_root:
+            return
+        current_path = self._normalize_vault_path(self.vault_root)
+        if not current_path:
+            return
+        current_server = config.load_homebase_remote_url().strip()
+        current_vault_id = (config.load_homebase_vault_id() or "").strip()
+        profiles = config.load_homebase_vault_profiles()
+        updated = False
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
+            if profile_path != current_path:
+                continue
+            if current_server and str(profile.get("server_url") or "").strip() != current_server:
+                continue
+            if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
+                continue
+            profile["passphrase"] = str(passphrase or "")
             updated = True
             break
         if updated:
@@ -5236,6 +5308,7 @@ class MainWindow(QMainWindow):
         save_settings_btn = QPushButton("Save Settings")
         sync_now_btn = QPushButton("Sync Now")
         reset_auth_btn = QPushButton("Reset Auth")
+        reset_passphrase_btn = QPushButton("Reset Encryption Passphrase")
         conflicts_btn = None
         if status.conflicts > 0 and self._homebase_sync_engine:
             conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
@@ -5246,6 +5319,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(save_settings_btn)
         button_row.addWidget(sync_now_btn)
         button_row.addWidget(reset_auth_btn)
+        button_row.addWidget(reset_passphrase_btn)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
         layout.addLayout(button_row)
@@ -5282,10 +5356,47 @@ class MainWindow(QMainWindow):
         save_settings_btn.clicked.connect(_save_settings)
         sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
         reset_auth_btn.clicked.connect(self._reset_homebase_auth)
+        reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
         if conflicts_btn is not None:
             conflicts_btn.clicked.connect(_view_conflicts)
 
         dialog.exec()
+
+    def _reset_homebase_passphrase(self, parent_dialog=None) -> None:
+        if not self.vault_root or not self._is_homebase_mode_enabled():
+            self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
+            return
+        try:
+            self._ensure_config_active_vault_context()
+            current = config.load_homebase_passphrase().strip()
+            new_passphrase, ok = QInputDialog.getText(
+                parent_dialog or self,
+                "Reset Encryption Passphrase",
+                "Encryption Passphrase:",
+                QLineEdit.Password,
+                current,
+            )
+            if not ok:
+                return
+            cleaned = str(new_passphrase or "").strip()
+            if not cleaned:
+                QMessageBox.warning(
+                    parent_dialog or self,
+                    "Missing Passphrase",
+                    "Encryption passphrase cannot be empty.",
+                )
+                return
+            config.save_homebase_passphrase(cleaned)
+            self._persist_homebase_passphrase_to_profile(cleaned)
+            self._configure_homebase_sync_for_vault()
+            if self._homebase_sync_engine:
+                try:
+                    self._homebase_sync_engine.sync_now("passphrase reset")
+                except Exception:
+                    pass
+            self.statusBar().showMessage("Homebase encryption passphrase updated.", 5000)
+        except Exception as exc:
+            QMessageBox.critical(parent_dialog or self, "Reset Encryption Passphrase Failed", str(exc))
 
     def _reset_homebase_auth(self) -> None:
         if not self.vault_root or not self._is_homebase_mode_enabled():
@@ -8375,7 +8486,6 @@ class MainWindow(QMainWindow):
         self._last_saved_content = content
         self._update_dirty_indicator()
         self._capture_undo_snapshot(path, content, source="load")
-        self._schedule_homebase_sync("page load")
         updated = indexer.index_page(path, content)
         if updated:
             self.right_panel.refresh_tasks()
@@ -10693,10 +10803,12 @@ class MainWindow(QMainWindow):
 
 
     def _show_quick_capture_overlay(self) -> None:
-        target = self._resolve_quick_capture_target()
+        target, reason = self._resolve_quick_capture_target()
         if not target:
             print("[QuickCapture] UI overlay aborted: no capture target resolved.")
-            self._show_quick_capture_unavailable()
+            self._show_quick_capture_unavailable(reason)
+            if reason:
+                self._quick_capture_fail(reason)
             return
         print(f"[QuickCapture] UI overlay target resolved: {target}")
 
@@ -10715,41 +10827,83 @@ class MainWindow(QMainWindow):
         overlay.activateWindow()
         overlay.input.setFocus()
 
-    def _resolve_quick_capture_target(self) -> Optional[dict[str, Optional[str]]]:
-        # Quick capture works with both local and remote vaults (remote is API-based)
-        home_vault = config.load_quick_capture_vault()
-        vault_path = home_vault or self.vault_root
-        
-        if not vault_path:
-            return None
-        
-        # For remote vaults, we can skip local filesystem checks since it's API-based
-        if self._remote_mode and not home_vault:
-            # Capturing to current remote vault
-            if self._read_only:
-                return None
-            return {"vault_path": vault_path, "page_mode": config.load_quick_capture_page_mode(), "page_ref": config.load_quick_capture_custom_page() if config.load_quick_capture_page_mode() == "custom" else None}
-        
-        # For local vaults or explicit home vault, do filesystem checks
-        vault_root = Path(vault_path).expanduser()
-        if not vault_root.exists():
-            return None
-        if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
-            return None
-        if not os.access(vault_root, os.W_OK):
-            return None
+    def _resolve_quick_capture_target(self) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         page_mode = config.load_quick_capture_page_mode()
         page_ref = config.load_quick_capture_custom_page() if page_mode == "custom" else None
         if page_mode == "custom" and not page_ref:
-            return None
-        return {"vault_path": str(vault_root), "page_mode": page_mode, "page_ref": page_ref}
+            return None, "Custom capture page is enabled but not configured."
 
-    def _show_quick_capture_unavailable(self) -> None:
+        home_vault = config.load_quick_capture_vault()
+        if home_vault:
+            kind, server_url, remote_path = self._decode_vault_ref(home_vault)
+            if kind == "remote" and server_url and remote_path:
+                if (
+                    self._remote_mode
+                    and self._server_key_for_url(server_url) == self._remote_server_key()
+                    and (self._remote_vault_ref_path or self.vault_root) == remote_path
+                    and self._read_only
+                ):
+                    return None, "Target remote vault is read-only."
+                return {
+                    "kind": "remote",
+                    "server_url": server_url,
+                    "vault_path": remote_path,
+                    "page_mode": page_mode,
+                    "page_ref": page_ref,
+                }, None
+            vault_root = Path(home_vault).expanduser()
+            if not vault_root.exists():
+                return None, f"Home vault does not exist: {home_vault}"
+            if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
+                return None, "Target local vault is read-only."
+            if not os.access(vault_root, os.W_OK):
+                return None, f"No write access to home vault: {home_vault}"
+            return {
+                "kind": "local",
+                "vault_path": str(vault_root),
+                "page_mode": page_mode,
+                "page_ref": page_ref,
+            }, None
+
+        # No explicit home vault: use currently open vault (local or remote).
+        if self._remote_mode:
+            remote_path = self._remote_vault_ref_path or self.vault_root
+            if not remote_path:
+                return None, "No current remote vault is open."
+            if self._read_only:
+                return None, "Current remote vault is read-only."
+            return {
+                "kind": "remote",
+                "server_url": self.api_base,
+                "vault_path": remote_path,
+                "page_mode": page_mode,
+                "page_ref": page_ref,
+            }, None
+
+        if not self.vault_root:
+            return None, "No current vault is open."
+        vault_root = Path(self.vault_root).expanduser()
+        if not vault_root.exists():
+            return None, f"Current vault does not exist: {self.vault_root}"
+        if self._read_only:
+            return None, "Current vault is read-only."
+        if not os.access(vault_root, os.W_OK):
+            return None, f"No write access to current vault: {self.vault_root}"
+        return {
+            "kind": "local",
+            "vault_path": str(vault_root),
+            "page_mode": page_mode,
+            "page_ref": page_ref,
+        }, None
+
+    def _show_quick_capture_unavailable(self, reason: Optional[str] = None) -> None:
         msg = QMessageBox(self)
         msg.setWindowTitle("Quick Capture")
+        detail = (reason or "").strip()
+        detail_text = f"\nReason: {detail}" if detail else ""
         msg.setText(
             "Quick Capture isn't ready yet.\n"
-            "Choose a home vault in Settings to enable it."
+            f"Choose a home vault in Settings to enable it.{detail_text}"
         )
         msg.setIcon(QMessageBox.Information)
         msg.setStandardButtons(QMessageBox.NoButton)
@@ -10758,51 +10912,130 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == open_settings:
             self._open_preferences()
 
-    def _submit_quick_capture(self, text: str, target: dict[str, Optional[str]], attachments: Optional[list[dict]] = None) -> None:
+    def _quick_capture_fail(self, reason: str) -> None:
+        cleaned = str(reason or "").strip()
+        if not cleaned:
+            cleaned = "Unknown error"
+        self.statusBar().showMessage(f"Quick Capture failed: {cleaned}", 12000)
+
+    def _quick_capture_http_detail(self, response: Optional[httpx.Response]) -> str:
+        if response is None:
+            return "No response from server"
+        detail = ""
+        try:
+            payload = response.json()
+            raw = payload.get("detail") if isinstance(payload, dict) else payload
+            if isinstance(raw, dict):
+                detail = str(raw.get("message") or raw.get("exception") or raw).strip()
+            elif raw is not None:
+                detail = str(raw).strip()
+        except Exception:
+            detail = ""
+        if detail:
+            return f"HTTP {response.status_code}: {detail}"
+        return f"HTTP {response.status_code}"
+
+    def _quick_capture_headers_for_server(self, server_url: str) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        server_key = self._server_key_for_url(server_url)
+        auth_entry = config.load_remote_auth(server_key)
+        refresh_token = str(auth_entry.get("refresh_token") or "").strip()
+        if refresh_token:
+            verify_ssl = self._remote_verify_ssl(server_url)
+            connect_timeout, read_timeout = self._remote_timeout_settings_for_url(server_url)
+            timeout = self._http_timeout(connect_timeout, read_timeout)
+            try:
+                refresh_resp = httpx.post(
+                    f"{server_url}/auth/refresh",
+                    headers={"Authorization": f"Bearer {refresh_token}"},
+                    timeout=timeout,
+                    verify=verify_ssl,
+                )
+                if refresh_resp.status_code == 200:
+                    payload = refresh_resp.json()
+                    access_token = str(payload.get("access_token") or "").strip()
+                    new_refresh = str(payload.get("refresh_token") or refresh_token).strip()
+                    if access_token:
+                        headers["Authorization"] = f"Bearer {access_token}"
+                        config.save_remote_auth(
+                            server_key,
+                            new_refresh,
+                            username=auth_entry.get("username"),
+                        )
+            except Exception:
+                pass
+        try:
+            parsed = urlparse(server_url)
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            scheme = parsed.scheme or "http"
+            server_password_hash = self._session_server_passwords.get(server_key)
+            if not server_password_hash and host:
+                server_password_hash = config.get_server_password_hash(host, port, scheme)
+            if server_password_hash:
+                headers["X-Server-Admin-Password"] = server_password_hash
+        except Exception:
+            pass
+        return headers
+
+    def _submit_quick_capture(self, text: str, target: dict[str, Any], attachments: Optional[list[dict]] = None) -> None:
         payload = {
-            "vault_path": None if self._remote_mode else target.get("vault_path"),
+            "vault_path": target.get("vault_path"),
             "page_mode": target.get("page_mode"),
             "page_ref": target.get("page_ref"),
             "text": text,
         }
         attachments = attachments or []
-        if attachments and not self._remote_mode:
+        if target.get("kind") == "local":
             try:
                 from sp.app import quickcapture as qc
-                from sp.server.adapters import files
                 vault_root = Path(target.get("vault_path") or "")
                 page_mode = target.get("page_mode") or "today"
                 page_ref = target.get("page_ref")
-                if page_mode == "today":
-                    target_file, _created = files.ensure_journal_today(vault_root, template=None)
-                    rel_path = f"/{target_file.relative_to(vault_root).as_posix()}"
-                else:
-                    rel_path = qc._resolve_custom_page_ref(page_ref or "")
-                content = files.read_file(vault_root, rel_path)
-                from datetime import datetime
-                now = datetime.now()
-                if rel_path.startswith("/Journal/"):
-                    timestamp = now.strftime("%I:%M %p").lower()
-                else:
-                    timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
-                saved_images = qc._persist_attachments(vault_root, rel_path, attachments)
-                entry_lines = qc._build_quick_capture_entry(text, timestamp, saved_images)
-                updated = qc._append_quick_capture_section(content, entry_lines)
-                files.write_file(vault_root, rel_path, updated)
+                qc._capture_to_files(vault_root, page_mode, page_ref, text, attachments)
                 self.statusBar().showMessage("Quick Capture saved.", 3000)
                 return
-            except Exception:
-                self.statusBar().showMessage("Quick Capture failed.", 4000)
+            except Exception as exc:
+                self._quick_capture_fail(str(exc))
                 return
+        if attachments and target.get("kind") == "remote":
+            self._quick_capture_fail("Attachments are not supported for remote Quick Capture yet.")
+            return
         try:
-            resp = self.http.post("/api/quick-capture", json=payload)
+            if target.get("kind") == "remote":
+                server_url = str(target.get("server_url") or "").rstrip("/")
+                if not server_url:
+                    self._quick_capture_fail("Remote target is missing server URL.")
+                    return
+                verify_ssl = self._remote_verify_ssl(server_url)
+                connect_timeout, read_timeout = self._remote_timeout_settings_for_url(server_url)
+                timeout = self._http_timeout(connect_timeout, read_timeout)
+                headers = self._quick_capture_headers_for_server(server_url)
+                resp = httpx.post(
+                    f"{server_url}/api/quick-capture",
+                    json=payload,
+                    headers=headers or None,
+                    timeout=timeout,
+                    verify=verify_ssl,
+                )
+            else:
+                resp = self.http.post("/api/quick-capture", json=payload)
             resp.raise_for_status()
-        except Exception:
-            self.statusBar().showMessage("Quick Capture failed.", 4000)
+            self.statusBar().showMessage("Quick Capture saved.", 3000)
+        except httpx.HTTPStatusError as exc:
+            self._quick_capture_fail(self._quick_capture_http_detail(exc.response))
+        except httpx.HTTPError as exc:
+            self._quick_capture_fail(str(exc))
+        except Exception as exc:
+            self._quick_capture_fail(str(exc))
 
-    def _quick_capture_subtitle(self, target: dict[str, Optional[str]]) -> str:
+    def _quick_capture_subtitle(self, target: dict[str, Any]) -> str:
         vault_path = target.get("vault_path") or ""
         vault_name = Path(vault_path).name or vault_path
+        if target.get("kind") == "remote":
+            server_url = str(target.get("server_url") or "")
+            if server_url:
+                vault_name = f"{vault_name} @ {self._format_remote_host(server_url)}"
         page_mode = target.get("page_mode") or "today"
         page_ref = target.get("page_ref") or ""
         page_label = "Today's Journal" if page_mode == "today" else page_ref

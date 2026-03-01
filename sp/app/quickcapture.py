@@ -227,6 +227,11 @@ def _capture_to_files(
         rel_path = f"/{target.relative_to(vault_root).as_posix()}"
     else:
         rel_path = _resolve_custom_page_ref(page_ref or "")
+        # Ensure custom capture folder exists so read_file can scaffold page content.
+        try:
+            (vault_root / rel_path.lstrip("/")).resolve().parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
     content = files.read_file(vault_root, rel_path)
     now = datetime.now()
     if rel_path.startswith("/Journal/"):
@@ -280,10 +285,15 @@ def _show_overlay_via_api(base: str, token: Optional[str]) -> bool:
 
 def _resolve_vault_path(vault_arg: Optional[str]) -> Path:
     if vault_arg:
+        if vault_arg.startswith("remote::"):
+            raise ValueError("Remote vault refs are not supported for local file capture.")
         return Path(vault_arg).expanduser().resolve()
     configured = config.load_quick_capture_vault()
     if configured:
-        return Path(configured).expanduser().resolve()
+        if configured.startswith("remote::"):
+            configured = None
+        else:
+            return Path(configured).expanduser().resolve()
     last = config.load_last_vault()
     if last and isinstance(last, str) and not last.startswith("remote::"):
         return Path(last).expanduser().resolve()

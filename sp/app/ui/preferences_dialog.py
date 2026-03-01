@@ -1213,15 +1213,46 @@ class PreferencesDialog(QDialog):
         self.quick_capture_vault_combo.blockSignals(True)
         self.quick_capture_vault_combo.clear()
         self.quick_capture_vault_combo.addItem("No home vault (use current vault)", None)
+        seen: set[str] = set()
         for vault in config.load_known_vaults():
             path = vault.get("path")
             if not path:
                 continue
+            if path in seen:
+                continue
             name = vault.get("name") or Path(path).name
             self.quick_capture_vault_combo.addItem(name, path)
+            seen.add(path)
+        for server in config.load_remote_servers():
+            host = str(server.get("host") or "").strip()
+            port = server.get("port")
+            scheme = str(server.get("scheme") or "http").strip() or "http"
+            if not host or not port:
+                continue
+            selected_vaults = server.get("selected_vaults")
+            if not isinstance(selected_vaults, list):
+                continue
+            base_url = f"{scheme}://{host}:{port}"
+            for vault_path in selected_vaults:
+                path = str(vault_path or "").strip()
+                if not path:
+                    continue
+                ref = f"remote::{base_url}::{path}"
+                if ref in seen:
+                    continue
+                name = f"[Remote] {host}: {Path(path).name or path}"
+                self.quick_capture_vault_combo.addItem(name, ref)
+                seen.add(ref)
         saved = config.load_quick_capture_vault()
         if saved and self.quick_capture_vault_combo.findData(saved) == -1:
-            display = Path(saved).name or saved
+            if saved.startswith("remote::"):
+                parts = saved.split("::", 2)
+                if len(parts) == 3:
+                    display = f"[Remote] {parts[1]}: {Path(parts[2]).name or parts[2]}"
+                else:
+                    display = saved
+            else:
+                display = Path(saved).name or saved
             self.quick_capture_vault_combo.addItem(f"{display} (missing)", saved)
         idx = self.quick_capture_vault_combo.findData(saved)
         self.quick_capture_vault_combo.setCurrentIndex(idx if idx != -1 else 0)

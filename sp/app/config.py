@@ -7,6 +7,7 @@ import sqlite3
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from collections import OrderedDict
 from pathlib import Path
 from threading import RLock, local
@@ -212,7 +213,11 @@ def load_known_vaults() -> list[dict[str, str]]:
             if _is_help_vault_path(path):
                 continue
             name = entry.get("name") or Path(path).name
-            result.append({"name": str(name), "path": str(path)})
+            row = {"name": str(name), "path": str(path)}
+            last_opened = entry.get("last_opened_at")
+            if isinstance(last_opened, str) and last_opened.strip():
+                row["last_opened_at"] = last_opened.strip()
+            result.append(row)
     return result
 
 
@@ -233,8 +238,41 @@ def remember_vault(path: str, name: Optional[str] = None) -> None:
         return
     display_name = name or Path(normalized_path).name
     vaults = [v for v in load_known_vaults() if v.get("path") != normalized_path]
-    vaults.insert(0, {"name": display_name, "path": normalized_path})
+    vaults.insert(
+        0,
+        {
+            "name": display_name,
+            "path": normalized_path,
+            "last_opened_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     _update_global_config({"vaults": vaults})
+
+
+def load_vault_last_opened(vault_key: str) -> Optional[str]:
+    key = str(vault_key or "").strip()
+    if not key:
+        return None
+    payload = _read_global_config()
+    values = payload.get("vault_last_opened")
+    if not isinstance(values, dict):
+        return None
+    value = values.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def mark_vault_last_opened(vault_key: str, when_iso: Optional[str] = None) -> None:
+    key = str(vault_key or "").strip()
+    if not key:
+        return
+    payload = _read_global_config()
+    values = payload.get("vault_last_opened")
+    if not isinstance(values, dict):
+        values = {}
+    values[key] = when_iso or datetime.now(timezone.utc).isoformat()
+    _update_global_config({"vault_last_opened": values})
 
 
 def delete_known_vault(path: str) -> None:

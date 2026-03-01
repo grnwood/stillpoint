@@ -6,6 +6,7 @@ import copy
 import hashlib
 import html
 import importlib
+from importlib import resources as importlib_resources
 from importlib import metadata as importlib_metadata
 import json
 import os
@@ -2182,7 +2183,10 @@ def quick_capture(
     text = (payload.text or "").strip()
     if not text:
         return {"ok": True, "skipped": True}
-    root = Path(payload.vault_path).expanduser().resolve()
+    try:
+        root = _resolve_vault_path(payload.vault_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=404, detail="Vault not found")
     _init_vault_db(root)
@@ -3108,6 +3112,34 @@ def _print_override_dirs(root: Path) -> list[Path]:
     ]
 
 
+def _builtin_print_templates_dir() -> Optional[Path]:
+    candidates: list[Path] = []
+    base = Path(__file__).resolve().parent
+    candidates.append(base / "templates")
+    candidates.append(base / "sp" / "server" / "templates")
+    candidates.append(base.parent / "sp" / "server" / "templates")
+    try:
+        server_pkg = importlib.import_module("sp.server")
+        pkg_path = Path(getattr(server_pkg, "__file__", "")).resolve().parent
+        candidates.append(pkg_path / "templates")
+    except Exception:
+        pass
+    try:
+        resource_path = importlib_resources.files("sp.server").joinpath("templates")
+        if resource_path.is_dir():
+            candidates.append(Path(str(resource_path)))
+    except Exception:
+        pass
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
 def _find_print_override(root: Path, filename: str) -> Optional[Path]:
     for base in _print_override_dirs(root):
         candidate = base / filename
@@ -3119,6 +3151,13 @@ def _find_print_override(root: Path, filename: str) -> Optional[Path]:
 def _load_print_template(root: Path):
     override = _find_print_override(root, "print.html")
     if not override:
+        builtin_dir = _builtin_print_templates_dir()
+        if builtin_dir:
+            env = Environment(
+                loader=FileSystemLoader(builtin_dir),
+                autoescape=select_autoescape(["html", "xml"]),
+            )
+            return env.get_template("print.html")
         return _PRINT_TEMPLATES.get_template("print.html")
     env = Environment(
         loader=FileSystemLoader(override.parent),
@@ -3131,7 +3170,8 @@ def _load_print_css(root: Path) -> str:
     override = _find_print_override(root, "print.css")
     if override:
         return override.read_text(encoding="utf-8")
-    css_path = Path(__file__).parent / "templates" / "print.css"
+    builtin_dir = _builtin_print_templates_dir()
+    css_path = (builtin_dir / "print.css") if builtin_dir else (Path(__file__).parent / "templates" / "print.css")
     return css_path.read_text(encoding="utf-8")
 
 
