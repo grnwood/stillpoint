@@ -2010,10 +2010,18 @@ class TaskPanel(QWidget):
     def eventFilter(self, obj, event):
         if getattr(self, "tag_list", None):
             viewport = self.tag_list.viewport()
-            if obj is viewport and event.type() == QEvent.MouseButtonPress:
-                if self.tag_list.itemAt(event.pos()) is None:
-                    self.active_tags.clear()
-                    self._refresh_tasks()
+            if obj is viewport and event.type() == QEvent.MouseButtonRelease:
+                # Handle empty-area clear only on release so a valid click can activate a tag on first try.
+                pos = event.pos()
+                idx = self.tag_list.indexAt(pos)
+                if not idx.isValid():
+                    # Some styles only mark the text/icon region as hittable for indexAt(x, y).
+                    # Retry with x near the left edge so clicks anywhere on the row still count.
+                    idx = self.tag_list.indexAt(QPoint(1, pos.y()))
+                if not idx.isValid():
+                    if self.active_tags:
+                        self.active_tags.clear()
+                        self._refresh_tasks()
                     return True
         if obj in (self.search, self.task_tree) and event.type() == QEvent.KeyPress:
             if obj is self.search and _should_suspend_nav_for_tag(
@@ -2284,10 +2292,16 @@ class TaskPanel(QWidget):
             return
         # Prevent a pending debounced keystroke refresh from immediately overriding click-filter results.
         self._search_refresh_timer.stop()
+        before = set(self.active_tags)
         if tag in self.active_tags:
             self.active_tags.remove(tag)
         else:
             self.active_tags.add(tag)
+        if log_enabled("tasks_calendar"):
+            print(
+                f"[TASK_PANEL] tag click tag={tag!r} before={sorted(before)} after={sorted(self.active_tags)} "
+                f"remote_mode={self._remote_mode} has_http_client={bool(self._http_client)}"
+            )
         self._refresh_tasks()
 
     def _on_search_text_changed(self, _text: str) -> None:
@@ -2408,16 +2422,27 @@ class TaskPanel(QWidget):
             except Exception:
                 tag_items = []
         self._available_tags = {tag for tag, _ in tag_items}
-        # Drop active tags that are no longer available in the current view.
-        # In remote mode, avoid clearing selections while requests are in-flight and
-        # tag data is temporarily empty.
-        can_prune_active_tags = not (
-            self._remote_mode and self._api_task_inflight and not tag_items
-        )
+        before_active = set(self.active_tags)
+        # Drop active tags only when we have positive tag evidence.
+        # For API-backed mode (including local UI+server), an empty tag set can be
+        # a transient refresh state while requests are in-flight; pruning here causes
+        # a clicked tag to be cleared and an immediate unfiltered reload.
+        if self._http_client or self._remote_mode:
+            can_prune_active_tags = bool(tag_items)
+        else:
+            can_prune_active_tags = True
         if self.active_tags and can_prune_active_tags:
             unavailable = {tag for tag in self.active_tags if tag not in self._available_tags}
             if unavailable:
                 self.active_tags.difference_update(unavailable)
+        if log_enabled("tasks_calendar"):
+            print(
+                "[TASK_PANEL] refresh_tags "
+                f"tag_items={len(tag_items)} available={sorted(self._available_tags)} "
+                f"before_active={sorted(before_active)} after_active={sorted(self.active_tags)} "
+                f"can_prune={can_prune_active_tags} inflight={len(self._api_task_inflight)} "
+                f"remote_mode={self._remote_mode} has_http_client={bool(self._http_client)}"
+            )
         for tag, count in tag_items:
             item = QListWidgetItem(f"{tag} ({count})")
             item.setData(Qt.UserRole, tag)
@@ -2458,6 +2483,14 @@ class TaskPanel(QWidget):
         # If the search explicitly specifies tags, let those drive the active set
         if tokens:
             self.active_tags = set(exact_matched_tags)
+        if log_enabled("tasks_calendar"):
+            print(
+                "[TASK_PANEL] refresh_tasks "
+                f"query={query!r} raw={raw_text!r} tokens={tokens} partial={partial_token!r} "
+                f"active_tags={sorted(self.active_tags)} matched={sorted(matched_tags)} "
+                f"missing={sorted(missing_tokens)} remote_mode={self._remote_mode} "
+                f"has_http_client={bool(self._http_client)}"
+            )
         effective_tag_groups: list[set[str]] = []
         if tokens:
             effective_tag_groups = exact_tag_groups or ([set()] if exact_missing_tokens else [])

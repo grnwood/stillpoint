@@ -3214,9 +3214,16 @@ class MarkdownEditor(QTextEdit):
                 return
 
         # 3) If clipboard has both HTML and plain text, preserve plain markdown syntax.
+        #    But if plain text doesn't carry the actual URL while HTML does, prefer HTML parsing.
         if source.hasHtml() and source.hasText():
             plain_text = source.text()
             if plain_text and self._has_markdown_syntax(plain_text):
+                has_plain_http = ("http://" in plain_text or "https://" in plain_text)
+                if not has_plain_http:
+                    html_preview = self._html_to_plaintext_with_links(source.html())
+                    if html_preview and ("http://" in html_preview or "https://" in html_preview):
+                        self._insert_markdown_text(html_preview)
+                        return
                 self._insert_markdown_text(plain_text)
                 return
 
@@ -3245,9 +3252,6 @@ class MarkdownEditor(QTextEdit):
         clean_text = self._normalize_pasted_link_artifacts(clean_text)
         if not clean_text:
             return
-        cursor = self.textCursor()
-        cursor.insertText(clean_text)
-        self.setTextCursor(cursor)
         try:
             has_wiki = bool(WIKI_LINK_STORAGE_PATTERN.search(clean_text))
             has_colon = any(COLON_LINK_PATTERN.match(line).hasMatch() for line in clean_text.splitlines())
@@ -3258,11 +3262,36 @@ class MarkdownEditor(QTextEdit):
             has_colon = False
             has_camel = False
             has_http = False
-        if has_wiki or has_colon or has_camel or has_http:
-            self._refresh_display()
+        has_linkish = has_wiki or has_colon or has_camel or has_http
+        if has_http:
+            clean_text = self._wrap_plain_http_links(clean_text)
+
+        scroll_bar = self.verticalScrollBar()
+        h_scroll_bar = self.horizontalScrollBar()
+        old_v_scroll = scroll_bar.value() if has_linkish and self._is_alive(scroll_bar) else 0
+        old_h_scroll = h_scroll_bar.value() if has_linkish and self._is_alive(h_scroll_bar) else 0
+
+        insert_text = self._to_display(clean_text) if has_linkish else clean_text
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.insertText(insert_text)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+        if has_linkish:
             # Keep caret out of hidden sentinel boundaries after link rendering.
             try:
                 self._move_cursor_to_link_end_on_enter(self.textCursor())
+            except Exception:
+                pass
+            try:
+                if self._is_alive(scroll_bar):
+                    scroll_bar.setValue(old_v_scroll)
+            except Exception:
+                pass
+            try:
+                if self._is_alive(h_scroll_bar):
+                    h_scroll_bar.setValue(old_h_scroll)
             except Exception:
                 pass
         if "![" in clean_text:
@@ -3295,6 +3324,7 @@ class MarkdownEditor(QTextEdit):
 
         # Capture outer scope reference for link normalization
         normalize_link = self._normalize_external_link
+        clean_label = self._clean_pasted_link_label
 
         class _PlainLinkParser(HTMLParser):
             block_tags = {
@@ -3342,11 +3372,12 @@ class MarkdownEditor(QTextEdit):
                         self._ignored_depth -= 1
                     return
                 if tag == "a":
-                    label = "".join(self._link_text).strip()
+                    label = clean_label("".join(self._link_text))
                     href = self._link_href or ""
                     if href:
                         link_target = normalize_link(href)
-                        display = label or ""
+                        # Keep href authoritative; avoid malformed wiki labels from rich-app text.
+                        display = (label or "").replace("|", " ").replace("]", " ").strip()
                         self.parts.append(f"[{link_target}|{display}]")
                     else:
                         self.parts.append(label)
@@ -3406,16 +3437,10 @@ class MarkdownEditor(QTextEdit):
         return "".join(cleaned_chars)
 
     def _normalize_pasted_link_artifacts(self, text: str) -> str:
-        """Repair common malformed Teams/Jira link artifacts into stable wiki links."""
+        """Repair malformed pasted wiki-link artifacts while preserving markdown links."""
         text = self._strip_problematic_control_chars(text)
         if not text:
             return text
-
-        text = re.sub(
-            r"\[(?P<label>[^\]\n]+)\]\((?P<url>https?://[^)\s]+)\)",
-            lambda m: f"[{self._normalize_external_link(m.group('url'))}|{self._clean_pasted_link_label(m.group('label'))}]",
-            text,
-        )
 
         if "[" not in text or "|" not in text:
             return text
@@ -5198,25 +5223,109 @@ class MarkdownEditor(QTextEdit):
             pass
         return text.strip()
 
-    def _selection_as_markdown_for_clipboard(self) -> str:
-        cursor = self.textCursor()
-        if not cursor.hasSelection():
+    def _clipboard_markdown_payload(self) -> str:
+        """Read preferred markdown-ish payload from clipboard.
+
+        Priority:
+        1) internal StillPoint markdown mime
+        2) explicit text/markdown mime
+        3) plain text
+        """
+        try:
+            clipboard = QGuiApplication.clipboard()
+            mime = clipboard.mimeData()
+        except Exception:
             return ""
+        if not mime:
+            return ""
+
+        if mime.hasFormat("application/x-stillpoint-markdown"):
+            try:
+                payload = bytes(mime.data("application/x-stillpoint-markdown")).decode("utf-8")
+            except Exception:
+                payload = ""
+            if payload:
+                return payload
+
+        if mime.hasFormat("text/markdown"):
+            try:
+                payload = bytes(mime.data("text/markdown")).decode("utf-8")
+            except Exception:
+                payload = ""
+            if payload:
+                return payload
+
+        try:
+            return mime.text() or ""
+        except Exception:
+            return ""
+
+    def _set_clipboard_markdown(
+        self,
+        markdown_text: str,
+        *,
+        include_internal_payload: bool,
+        include_text_markdown: bool = False,
+        html: Optional[str] = None,
+    ) -> None:
+        """Write markdown payload to clipboard with optional MIME variants."""
+        markdown_text = (markdown_text or "").replace(LINK_SENTINEL, "")
+        plain_text = self._sanitize_for_clipboard(markdown_text)
+        mime_data = QMimeData()
+        mime_data.setText(plain_text)
+        if html:
+            mime_data.setHtml(html)
+        if include_text_markdown:
+            try:
+                mime_data.setData("text/markdown", markdown_text.encode("utf-8"))
+            except Exception:
+                pass
+        if include_internal_payload:
+            try:
+                mime_data.setData("application/x-stillpoint-markdown", markdown_text.encode("utf-8"))
+            except Exception:
+                pass
+        QApplication.clipboard().setMimeData(mime_data)
+
+    def _selection_storage_markdown(self, cursor: QTextCursor) -> Optional[str]:
+        """Return selected content normalized to storage markdown format."""
+        if not cursor.hasSelection():
+            return None
         selected_link_markdown = self._selected_display_link_markdown(cursor)
         if selected_link_markdown:
             return selected_link_markdown
-        # Preserve inline images and decode display links.
         text = self._vi_selection_as_markdown(cursor)
         if text is None:
             text = cursor.selection().toPlainText()
-        text = (text or "").replace("\u2029", "\n")
+        if not text:
+            return None
+        normalized = text.replace("\u2029", "\n")
         try:
-            text = self._from_display(text)
+            normalized = self._from_display(normalized)
         except Exception:
             pass
-        # Safety: copied markdown payload should never contain display sentinels.
-        text = text.replace(LINK_SENTINEL, "")
-        return text
+        normalized = normalized.replace(LINK_SENTINEL, "")
+        return normalized or None
+
+    def _selection_as_markdown_for_clipboard(self) -> str:
+        cursor = self.textCursor()
+        text = self._selection_storage_markdown(cursor)
+        return text or ""
+
+    def _storage_links_to_markdown_links(self, text: str) -> str:
+        """Convert storage links [target|label] to markdown links [label](target)."""
+        if not text or "[" not in text or "|" not in text:
+            return text
+
+        def _rewrite(match: re.Match[str]) -> str:
+            target = (match.group("link") or "").strip()
+            if not target:
+                return match.group(0)
+            label = (match.group("label") or "").strip()
+            display = label or target
+            return f"[{display}]({target})"
+
+        return WIKI_LINK_STORAGE_PATTERN.sub(_rewrite, text)
 
     def _selected_display_link_markdown(self, cursor: QTextCursor) -> Optional[str]:
         """Return storage markdown for a selected rendered link label, if selection matches one."""
@@ -5245,16 +5354,19 @@ class MarkdownEditor(QTextEdit):
                 if raw_link.endswith("|") and visible_end > visible_start:
                     visible_end -= 1
 
-            # Match either full rendered link selection or exact visible label selection.
-            is_full_link = start <= link_start and end >= link_end
+            # Match either exact full rendered link selection or exact visible label selection.
+            # IMPORTANT: Do not collapse larger selections that merely contain a link.
+            is_full_link = start == link_start and end == link_end
             is_visible_only = start == visible_start and end == visible_end
-            # Also treat mixed target+label selections inside one rendered link as a full link copy.
-            # This is the common case that otherwise flattens to ":targetlabel".
+            # Also treat mixed target+label selections confined to one rendered link as a full link copy.
+            # This preserves link semantics when users select across hidden+visible portions of a link,
+            # but avoids truncating multi-line or multi-paragraph selections that include surrounding text.
             spans_link_and_label = False
             if label:
                 overlap_link = start < link_part_end and end > link_part_start
                 overlap_label = start < label_part_end and end > label_part_start
-                spans_link_and_label = overlap_link and overlap_label
+                within_link_content = start >= link_part_start and end <= label_part_end
+                spans_link_and_label = within_link_content and overlap_link and overlap_label
 
             if not (is_full_link or is_visible_only or spans_link_and_label):
                 continue
@@ -5267,15 +5379,7 @@ class MarkdownEditor(QTextEdit):
         markdown_text = self._selection_as_markdown_for_clipboard()
         if not markdown_text:
             return
-        markdown_text = markdown_text.replace(LINK_SENTINEL, "")
-        plain_text = self._sanitize_for_clipboard(markdown_text)
-        mime_data = QMimeData()
-        mime_data.setText(plain_text)
-        try:
-            mime_data.setData("application/x-stillpoint-markdown", markdown_text.encode("utf-8"))
-        except Exception:
-            pass
-        QApplication.clipboard().setMimeData(mime_data)
+        self._set_clipboard_markdown(markdown_text, include_internal_payload=True)
 
     def copy(self) -> None:  # type: ignore[override]
         """Copy selection as plain external text + internal markdown payload."""
@@ -5287,12 +5391,9 @@ class MarkdownEditor(QTextEdit):
         if not cursor.hasSelection():
             return
         
-        # Get selected text and normalize it
-        selected_text = cursor.selectedText()
-        # Convert Qt's paragraph separator to newlines
-        markdown_text = selected_text.replace("\u2029", "\n")
-        # Convert storage format links [target|label] to markdown [label](target)
-        markdown_text = self._from_display(markdown_text)
+        markdown_text = self._selection_storage_markdown(cursor)
+        if not markdown_text:
+            return
         
         try:
             # Convert markdown to HTML with common extensions
@@ -5301,16 +5402,12 @@ class MarkdownEditor(QTextEdit):
                 extensions=["extra", "sane_lists", "tables", "fenced_code", "nl2br"]
             )
             
-            # Copy to clipboard
-            clipboard = QGuiApplication.clipboard()
-            mime_data = QMimeData()
-            mime_data.setHtml(html)
-            mime_data.setText(markdown_text)  # Also provide plain text fallback
-            try:
-                mime_data.setData("application/x-stillpoint-markdown", markdown_text.encode("utf-8"))
-            except Exception:
-                pass
-            clipboard.setMimeData(mime_data)
+            self._set_clipboard_markdown(
+                markdown_text,
+                include_internal_payload=True,
+                include_text_markdown=True,
+                html=html,
+            )
             
         except Exception as e:
             logger.error(f"Failed to convert selection to HTML: {e}")
@@ -5333,23 +5430,21 @@ class MarkdownEditor(QTextEdit):
         def do_copy_md():
             cursor = self.textCursor()
             if cursor.hasSelection():
-                display_text = cursor.selection().toPlainText()
-                try:
-                    txt = self._from_display(display_text)
-                except Exception:
-                    txt = display_text
+                txt = self._selection_as_markdown_for_clipboard()
             else:
                 txt = self.to_markdown()
-            QApplication.clipboard().setText(self._sanitize_for_clipboard(txt))
+            txt = self._storage_links_to_markdown_links(txt)
+            self._set_clipboard_markdown(
+                txt,
+                include_internal_payload=False,
+                include_text_markdown=True,
+            )
 
         copy_action = QAction("Copy", parent)
         copy_action.triggered.connect(lambda checked=False: do_copy())
         md_action = QAction("Copy As Markdown", parent)
         md_action.triggered.connect(lambda checked=False: do_copy_md())
         return copy_action, md_action
-        # Remove original copy action if present
-        if copy_act:
-            menu.removeAction(copy_act)
 
     def _emit_ai_chat_send(self) -> None:
         payload = self._ai_chat_payload_text()
@@ -6795,12 +6890,6 @@ class MarkdownEditor(QTextEdit):
         op = QTextCursor.WordRight if forward else QTextCursor.WordLeft
         self._vi_move_cursor(op)
 
-    def _system_clipboard_text(self) -> str:
-        try:
-            return QGuiApplication.clipboard().text() or ""
-        except Exception:
-            return ""
-
     def _system_clipboard_set(self, text: str) -> None:
         try:
             QGuiApplication.clipboard().setText(text)
@@ -6943,24 +7032,8 @@ class MarkdownEditor(QTextEdit):
         return "".join(parts)
 
     def _vi_selection_text(self, cursor: QTextCursor) -> Optional[str]:
-        selected_link_markdown = self._selected_display_link_markdown(cursor)
-        if selected_link_markdown:
-            text = selected_link_markdown
-        else:
-            text = self._vi_selection_as_markdown(cursor)
-        if text is None:
-            if not cursor.hasSelection():
-                return None
-            text = cursor.selectedText()
-        if not text:
-            return None
-        normalized = text.replace("\u2029", "\n")
-        if LINK_SENTINEL in normalized:
-            try:
-                normalized = self._from_display(normalized)
-            except Exception:
-                pass
-        return normalized if normalized else None
+        text = self._selection_storage_markdown(cursor)
+        return text if text else None
 
     def _vi_cut_selection_or_char(self) -> None:
         cursor = self.textCursor()
@@ -7050,7 +7123,7 @@ class MarkdownEditor(QTextEdit):
         self._insert_markdown_text(text)
 
     def _vi_paste_buffer(self) -> Optional[str]:
-        sys_clip = self._system_clipboard_text()
+        sys_clip = self._clipboard_markdown_payload()
         if sys_clip:
             self._vi_clipboard = sys_clip
         if not self._vi_clipboard:

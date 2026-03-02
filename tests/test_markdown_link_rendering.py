@@ -255,16 +255,16 @@ def test_paste_prefers_plain_markdown_when_html_also_present(editor):
     markdown = editor.to_markdown()
     assert "## Paste Title" in markdown
     assert "**Bold** item" in markdown
-    assert "[https://example.com/task/123|Task 123]" in markdown
+    assert "[Task 123](https://example.com/task/123)" in markdown
 
 
-def test_paste_markdown_link_with_control_chars_normalizes_to_wiki(editor):
+def test_paste_markdown_link_with_control_chars_normalizes_markdown_link(editor):
     mime = QMimeData()
     mime.setText("[Task\u2060 123](https://example.com/task/123\u200b)")
     editor.insertFromMimeData(mime)
 
     markdown = editor.to_markdown()
-    assert "[https://example.com/task/123|Task 123]" in markdown
+    assert "[Task 123](https://example.com/task/123)" in markdown
     assert "\u2060" not in markdown
     assert "\u200b" not in markdown
 
@@ -319,6 +319,88 @@ def test_html_paste_ignores_style_blocks(editor):
     assert "white-space: pre-wrap" not in markdown
     assert "border-width: 0" not in markdown
     assert "http://www.google.com" in markdown
+
+
+def test_html_paste_teams_message_link_preserves_target(editor):
+    teams_url = (
+        "https://teams.microsoft.com/l/message/"
+        "19:meeting_YTRjODk2YWEtNTY0Mi00NmFiLThhYjktYWI3NTA2MjM5YzRi@thread.v2/"
+        "1772485404346?context=%7B%22contextType%22%3A%22chat%22%7D"
+    )
+    mime = QMimeData()
+    mime.setHtml(f"<p><a href='{teams_url}'>Open in Teams</a></p>")
+    mime.setText("- Open in Teams")
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert f"[{teams_url}|Open in Teams]" in markdown
+
+
+def test_html_paste_prefers_html_anchor_when_plain_markdown_lacks_url(editor):
+    teams_url = (
+        "https://teams.microsoft.com/l/message/"
+        "19:meeting_YTRjODk2YWEtNTY0Mi00NmFiLThhYjktYWI3NTA2MjM5YzRi@thread.v2/"
+        "1772485404346?context=%7B%22contextType%22%3A%22chat%22%7D"
+    )
+    mime = QMimeData()
+    mime.setHtml(f"<p><a href='{teams_url}'>Open in Teams</a></p>")
+    mime.setText("- Open in Teams")
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert f"[{teams_url}|Open in Teams]" in markdown
+    assert "- Open in Teams" not in markdown
+
+
+def test_plain_link_paste_keeps_cursor_after_link(editor):
+    url = "https://teams.microsoft.com/l/message/19:meeting_abc@thread.v2/1?context=%7B%22contextType%22%3A%22chat%22%7D"
+    editor.setPlainText("before after")
+    cursor = editor.textCursor()
+    cursor.setPosition(len("before "))
+    editor.setTextCursor(cursor)
+
+    mime = QMimeData()
+    mime.setText(url)
+    editor.insertFromMimeData(mime)
+
+    text = editor.toPlainText()
+    pos = editor.textCursor().position()
+    assert 0 <= pos <= len(text)
+    assert pos > len("before ")
+    assert editor._is_cursor_at_link_activation_point(editor.textCursor()) is False
+
+
+def test_plain_link_paste_does_not_jump_viewport_and_undo_once(editor, qapp):
+    lines = [f"line {i}" for i in range(300)]
+    editor.setPlainText("\n".join(lines))
+    editor.resize(800, 400)
+    editor.show()
+    qapp.processEvents()
+
+    target_block = editor.document().findBlockByNumber(220)
+    cursor = editor.textCursor()
+    cursor.setPosition(target_block.position())
+    editor.setTextCursor(cursor)
+    editor.ensureCursorVisible()
+    qapp.processEvents()
+
+    vbar = editor.verticalScrollBar()
+    before_scroll = vbar.value()
+    before_md = editor.to_markdown()
+
+    url = "https://teams.microsoft.com/l/message/19:meeting_abc@thread.v2/2?context=%7B%22contextType%22%3A%22chat%22%7D"
+    mime = QMimeData()
+    mime.setText(url)
+    editor.insertFromMimeData(mime)
+    qapp.processEvents()
+
+    after_scroll = vbar.value()
+    assert abs(after_scroll - before_scroll) <= 2
+    assert f"[{url}|]" in editor.to_markdown()
+
+    editor.undo()
+    qapp.processEvents()
+    assert editor.to_markdown() == before_md
 
 
 def test_plain_url_paste_leaves_caret_outside_link(editor):
@@ -439,6 +521,53 @@ def test_copy_selection_spanning_hidden_target_and_label_preserves_link(editor):
     assert mime.hasFormat("application/x-stillpoint-markdown")
     md_payload = bytes(mime.data("application/x-stillpoint-markdown")).decode("utf-8")
     assert md_payload == original
+
+
+def test_copy_as_markdown_links_work(editor):
+    source = "[:duck:duck:go|Duck Duck Go]"
+    editor.set_markdown(source)
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+
+    _, markdown_action = editor._build_copy_actions(editor)
+    markdown_action.trigger()
+
+    copied = QGuiApplication.clipboard().text()
+    assert copied == "[Duck Duck Go](:duck:duck:go)"
+    mime = QGuiApplication.clipboard().mimeData()
+    assert mime is not None
+    assert mime.hasFormat("text/markdown")
+    assert not mime.hasFormat("application/x-stillpoint-markdown")
+
+
+def test_copy_as_markdown_multi_paragraph_selection_with_links_preserves_full_selection(editor):
+    source = (
+        "First paragraph with [:alpha:page|Alpha Page].\n\n"
+        "Second paragraph keeps [:beta:page|Beta Page] and trailing text."
+    )
+    editor.set_markdown(source)
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+
+    _, markdown_action = editor._build_copy_actions(editor)
+    markdown_action.trigger()
+
+    copied = QGuiApplication.clipboard().text()
+    assert "First paragraph with [Alpha Page](:alpha:page)." in copied
+    assert "Second paragraph keeps [Beta Page](:beta:page) and trailing text." in copied
+    assert "\n\n" in copied
+
+
+def test_paste_markdown_links_does_not_convert_to_wiki(editor):
+    mime = QMimeData()
+    mime.setText("[Duck Duck Go](https://duckduckgo.com)")
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "[Duck Duck Go](https://duckduckgo.com)" in markdown
+    assert "[https://duckduckgo.com|Duck Duck Go]" not in markdown
 
 
 def test_copy_line_under_cursor_preserves_internal_link_markdown(editor):

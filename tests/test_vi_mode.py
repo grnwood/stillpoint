@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QMimeData
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
@@ -46,6 +46,24 @@ def test_vi_clipboard_cycle_tracks_selection(qapp: QApplication) -> None:
     assert editor.toPlainText().startswith(" beta")
     editor._vi_paste_buffer()
     assert editor.toPlainText().startswith("alpha beta")
+    editor.close()
+
+
+def test_vi_paste_prefers_internal_markdown_payload(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("")
+    editor.set_vi_mode_enabled(True)
+
+    mime = QMimeData()
+    mime.setText("plain clipboard text")
+    mime.setData("application/x-stillpoint-markdown", b"[:duck:duck:go|Duck Duck Go]")
+    QApplication.clipboard().setMimeData(mime)
+
+    inserted = editor._vi_paste_buffer()
+
+    assert inserted == "[:duck:duck:go|Duck Duck Go]"
+    assert "[:duck:duck:go|Duck Duck Go]" in editor.to_markdown()
     editor.close()
 
 

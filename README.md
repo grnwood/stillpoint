@@ -127,6 +127,7 @@ The built-in help vault includes a full shortcuts guide:
 
 - Help menu: **Help → Keyboard Shortcuts**
 - File in repo: `sp/help-vault/Shortcuts/Shortcuts.md`
+- Developer notes: [Clipboard Behavior Matrix](docs/clipboard-behavior.md)
 - Tasks/Calendar task lists: `Enter` opens and focuses editor; `Ctrl+Enter`/`Shift+Enter` opens and keeps focus in the task list.
 
 The help vault is copied to `~/.stillpoint/help-vault` on first open. To refresh it from the repo, delete or rename that folder and reopen Help → Documentation.
