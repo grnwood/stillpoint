@@ -22,7 +22,7 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Detect build type and set paths accordingly
 # Case 1: PyInstaller build - exe is in same dir as script or script is in dist/
-# Case 2: Source build - exe is in dist/stillpoint/stillpoint.exe relative to script
+# Case 2: Source build - exe is in ../../dist/stillpoint/stillpoint.exe relative to script
 
 $DistDir = $null
 $ExePathInDist = $null
@@ -45,17 +45,17 @@ if (Test-Path $PyInstallerExe) {
     }
 }
 # Try source build structure (dist/stillpoint/stillpoint.exe)
-elseif (Test-Path (Join-Path $ScriptRoot "dist\stillpoint\$ExeName")) {
+elseif (Test-Path (Join-Path $ScriptRoot "..\..\dist\stillpoint\$ExeName")) {
     Write-Host "Detected source build"
-    $DistDir = Join-Path $ScriptRoot "dist\stillpoint"
+    $DistDir = Join-Path $ScriptRoot "..\..\dist\stillpoint"
     $ExePathInDist = Join-Path $DistDir $ExeName
     # For source builds, assets are in dist/stillpoint/_internal/sp/assets
     $AssetsDir = Join-Path $DistDir "_internal\sp\assets"
     # Fallback: try relative to script root
     if (-not (Test-Path $AssetsDir)) {
-        $AssetsDir = Join-Path $ScriptRoot "sp\assets"
+        $AssetsDir = Join-Path $ScriptRoot "..\..\sp\assets"
     }
-    $CaptureDistDir = Join-Path $ScriptRoot "dist\stillpoint-capture"
+    $CaptureDistDir = Join-Path $ScriptRoot "..\..\dist\stillpoint-capture"
     $CaptureDistExists = Test-Path $CaptureDistDir
     if ($CaptureDistExists -and (Test-Path (Join-Path $CaptureDistDir $CaptureExeName))) {
         $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
@@ -64,7 +64,7 @@ elseif (Test-Path (Join-Path $ScriptRoot "dist\stillpoint\$ExeName")) {
 else {
     Write-Host "ERROR: Could not locate $ExeName" -ForegroundColor Red
     Write-Host "  Tried PyInstaller: $PyInstallerExe" -ForegroundColor Yellow
-    Write-Host "  Tried source build: $(Join-Path $ScriptRoot "dist\stillpoint\$ExeName")" -ForegroundColor Yellow
+    Write-Host "  Tried source build: $(Join-Path $ScriptRoot "..\..\dist\stillpoint\$ExeName")" -ForegroundColor Yellow
     exit 1
 }
 
