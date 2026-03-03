@@ -105,12 +105,63 @@ class WebServer:
         """
         # TODO: Integrate with StillPoint's markdown renderer
         # For now, use basic markdown
+        text = self._rewrite_task_and_dash_markers(text)
         text = self._normalize_markdown_lists(text)
+        text = self._rewrite_highlight(text)
         text = self._rewrite_strikethrough(text)
         text = self._rewrite_wiki_style_links(text)
         text = self._rewrite_markdown_image_links(text, page_path)
         import markdown
-        return markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+        html = markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+        return self._rewrite_task_checkboxes(html)
+
+    @staticmethod
+    def _rewrite_task_and_dash_markers(text: str) -> str:
+        """Preserve '-' lines as dashed text and render checkbox markers consistently."""
+        lines = text.splitlines()
+        normalized: list[str] = []
+        in_fence = False
+        fence_marker = ""
+        checkbox_re = re.compile(r"^(?P<indent>[ \t]*)(?:(?:[-+*]|\d+\.)[ \t]+)?\[(?P<state>[ xX])\][ \t]+(?P<rest>.*)$")
+        dash_re = re.compile(r"^(?P<indent>[ \t]*)-[ \t]+(?P<rest>.*)$")
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                normalized.append(line)
+                continue
+
+            if in_fence:
+                normalized.append(line)
+                continue
+
+            checkbox_match = checkbox_re.match(line)
+            if checkbox_match:
+                state = (checkbox_match.group("state") or " ").lower()
+                checked = state == "x"
+                cls = "md-checkbox md-checkbox--checked" if checked else "md-checkbox md-checkbox--unchecked"
+                indent = checkbox_match.group("indent") or ""
+                rest = checkbox_match.group("rest") or ""
+                normalized.append(f'{indent}<span class="{cls}" aria-hidden="true"></span>{rest}')
+                continue
+
+            dash_match = dash_re.match(line)
+            if dash_match:
+                indent = dash_match.group("indent") or ""
+                rest = dash_match.group("rest") or ""
+                normalized.append(f"{indent}\\- {rest}")
+                continue
+
+            normalized.append(line)
+
+        return "\n".join(normalized)
 
     @staticmethod
     def _rewrite_wiki_style_links(text: str) -> str:
@@ -329,6 +380,54 @@ class WebServer:
             normalized.append(_replace_inline(line))
 
         return "\n".join(normalized)
+
+    @staticmethod
+    def _rewrite_highlight(text: str) -> str:
+        """Convert ==text== to <mark>text</mark> outside code fences/inline code."""
+        lines = text.splitlines()
+        normalized: list[str] = []
+        in_fence = False
+        fence_marker = ""
+
+        def _replace_inline(value: str) -> str:
+            parts = value.split("`")
+            for idx in range(0, len(parts), 2):
+                parts[idx] = re.sub(r"==(.+?)==", r"<mark>\1</mark>", parts[idx])
+            return "`".join(parts)
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                marker = stripped[:3]
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+                normalized.append(line)
+                continue
+
+            if in_fence:
+                normalized.append(line)
+                continue
+
+            normalized.append(_replace_inline(line))
+
+        return "\n".join(normalized)
+
+    @staticmethod
+    def _rewrite_task_checkboxes(html_text: str) -> str:
+        """Render markdown task markers as stylable checkbox spans."""
+        pattern = re.compile(r"(<li>\s*)\[(?P<state>[ xX])\]\s+", re.IGNORECASE)
+
+        def _replace(match: re.Match[str]) -> str:
+            state = (match.group("state") or " ").lower()
+            checked = state == "x"
+            cls = "md-checkbox md-checkbox--checked" if checked else "md-checkbox md-checkbox--unchecked"
+            return f'{match.group(1)}<span class="{cls}" aria-hidden="true"></span>'
+
+        return pattern.sub(_replace, html_text)
 
     def _setup_routes(self):
         """Setup Flask routes."""

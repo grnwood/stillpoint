@@ -2758,7 +2758,6 @@ class MainWindow(QMainWindow):
         up_icon = self._load_icon(self._find_asset("up.svg"), icon_color, size=18)
         down_icon = self._load_icon(self._find_asset("down.svg"), icon_color, size=18)
         filter_icon = self._load_icon(self._find_asset("stack.svg"), icon_color, size=18)
-        clear_filter_icon = self._load_icon(self._find_asset("cancel.svg"), icon_color, size=18)
 
         # Home button (navigate to vault root page)
         home_action = QAction("Home", self)
@@ -2770,18 +2769,19 @@ class MainWindow(QMainWindow):
         self.toolbar.addSeparator()
 
         self._toolbar_filter_vault_action = QAction("Filter Vault From Here", self)
+        self._toolbar_filter_vault_action.setCheckable(True)
         if filter_icon:
             self._toolbar_filter_vault_action.setIcon(filter_icon)
         self._toolbar_filter_vault_action.setToolTip("Filter vault navigation from current page")
-        self._toolbar_filter_vault_action.triggered.connect(self._filter_vault_from_current_page)
+        self._toolbar_filter_vault_action.toggled.connect(self._toggle_toolbar_vault_filter)
         self.toolbar.addAction(self._toolbar_filter_vault_action)
 
-        self._toolbar_remove_filter_action = QAction("Remove Vault Filter", self)
-        if clear_filter_icon:
-            self._toolbar_remove_filter_action.setIcon(clear_filter_icon)
-        self._toolbar_remove_filter_action.setToolTip("Remove active vault navigation filter")
-        self._toolbar_remove_filter_action.triggered.connect(self._remove_vault_filter)
-        self.toolbar.addAction(self._toolbar_remove_filter_action)
+        try:
+            filter_btn = self.toolbar.widgetForAction(self._toolbar_filter_vault_action)
+            if isinstance(filter_btn, QToolButton):
+                filter_btn.setProperty("navFilterToggle", "true")
+        except Exception:
+            pass
 
         self.toolbar.addSeparator()
 
@@ -2888,6 +2888,11 @@ class MainWindow(QMainWindow):
 
         # Store default style to restore later
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
+
+        filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
+        filter_active_border = filter_active.name()
+        filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 72)"
+        filter_fill_hover = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 110)"
         
         # Apply blue color to bookmark button via stylesheet
         self.toolbar.setStyleSheet(
@@ -2899,7 +2904,21 @@ class MainWindow(QMainWindow):
             "font-weight: "
             f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
             "}"
+            "QToolButton[navFilterToggle=\"true\"] { "
+            "border: 1px solid transparent; border-radius: 4px; padding: 2px; "
+            "}"
+            "QToolButton[navFilterToggle=\"true\"]:checked { "
+            "border: 1px solid "
+            f"{filter_active_border}; "
+            "background: "
+            f"{filter_fill_soft}; "
+            "}"
+            "QToolButton[navFilterToggle=\"true\"]:checked:hover { "
+            "background: "
+            f"{filter_fill_hover}; "
+            "}"
         )
+        self._sync_filter_toolbar_toggle(bool(getattr(self, "_nav_filter_path", None)))
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
@@ -7701,18 +7720,40 @@ class MainWindow(QMainWindow):
         current_page = self._current_editor_page_path()
         if not current_page:
             self.statusBar().showMessage("No current page to filter from", 3000)
+            self._sync_filter_toolbar_toggle(False)
             return
         self._set_nav_filter(current_page)
         display = path_to_colon(current_page) or current_page
         self.statusBar().showMessage(f"Filter vault from: {display}", 2500)
 
-    def _remove_vault_filter(self) -> None:
+    def _toggle_toolbar_vault_filter(self, checked: bool) -> None:
+        """Toggle filter state from toolbar button."""
+        if checked:
+            self._filter_vault_from_current_page()
+        else:
+            self._remove_vault_filter(silent=True)
+
+    def _sync_filter_toolbar_toggle(self, active: bool) -> None:
+        action = getattr(self, "_toolbar_filter_vault_action", None)
+        if not action:
+            return
+        target = bool(active)
+        if action.isChecked() == target:
+            return
+        blocker = QSignalBlocker(action)
+        action.setChecked(target)
+        del blocker
+
+    def _remove_vault_filter(self, *, silent: bool = False) -> None:
         """Remove active vault navigation filter."""
         if not self._nav_filter_path:
-            self.statusBar().showMessage("No active vault filter", 2000)
+            if not silent:
+                self.statusBar().showMessage("No active vault filter", 2000)
+            self._sync_filter_toolbar_toggle(False)
             return
         self._clear_nav_filter()
-        self.statusBar().showMessage("Vault filter removed", 2000)
+        if not silent:
+            self.statusBar().showMessage("Vault filter removed", 2000)
 
     def _clear_nav_filter(self) -> None:
         """Disable tree filter and restore full view."""
@@ -16800,6 +16841,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_filter_status_label"):
             return
         filter_path = getattr(self, "_nav_filter_path", None)
+        self._sync_filter_toolbar_toggle(bool(filter_path))
         if filter_path:
             display_path = path_to_colon(filter_path) or filter_path
             self._filter_status_label.setText("Filtered")
