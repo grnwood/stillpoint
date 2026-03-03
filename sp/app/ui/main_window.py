@@ -2480,6 +2480,17 @@ class MainWindow(QMainWindow):
         self._action_go_today.triggered.connect(self._open_journal_today)
         self._action_go_today.setVisible(self._feature_calendar_enabled)
         go_menu.addAction(self._action_go_today)
+
+        self._action_go_filter_vault_from_here = QAction("Filter Vault From Here", self)
+        self._action_go_filter_vault_from_here.setToolTip("Filter vault navigation from current page")
+        self._action_go_filter_vault_from_here.triggered.connect(self._filter_vault_from_current_page)
+        go_menu.addAction(self._action_go_filter_vault_from_here)
+
+        self._action_go_remove_filter = QAction("Remove Filter", self)
+        self._action_go_remove_filter.setToolTip("Remove active vault navigation filter")
+        self._action_go_remove_filter.triggered.connect(self._remove_vault_filter)
+        go_menu.addAction(self._action_go_remove_filter)
+
         command_bar_action = QAction("Command Bar", self)
         command_bar_action.triggered.connect(self._show_command_bar)
         go_menu.addAction(command_bar_action)
@@ -2746,6 +2757,8 @@ class MainWindow(QMainWindow):
         forward_icon = self._load_icon(self._find_asset("right.svg"), icon_color, size=18)
         up_icon = self._load_icon(self._find_asset("up.svg"), icon_color, size=18)
         down_icon = self._load_icon(self._find_asset("down.svg"), icon_color, size=18)
+        filter_icon = self._load_icon(self._find_asset("stack.svg"), icon_color, size=18)
+        clear_filter_icon = self._load_icon(self._find_asset("cancel.svg"), icon_color, size=18)
 
         # Home button (navigate to vault root page)
         home_action = QAction("Home", self)
@@ -2753,6 +2766,24 @@ class MainWindow(QMainWindow):
         home_action.setToolTip("Go to vault home page")
         home_action.triggered.connect(self._go_home)
         self.toolbar.addAction(home_action)
+
+        self.toolbar.addSeparator()
+
+        self._toolbar_filter_vault_action = QAction("Filter Vault From Here", self)
+        if filter_icon:
+            self._toolbar_filter_vault_action.setIcon(filter_icon)
+        self._toolbar_filter_vault_action.setToolTip("Filter vault navigation from current page")
+        self._toolbar_filter_vault_action.triggered.connect(self._filter_vault_from_current_page)
+        self.toolbar.addAction(self._toolbar_filter_vault_action)
+
+        self._toolbar_remove_filter_action = QAction("Remove Vault Filter", self)
+        if clear_filter_icon:
+            self._toolbar_remove_filter_action.setIcon(clear_filter_icon)
+        self._toolbar_remove_filter_action.setToolTip("Remove active vault navigation filter")
+        self._toolbar_remove_filter_action.triggered.connect(self._remove_vault_filter)
+        self.toolbar.addAction(self._toolbar_remove_filter_action)
+
+        self.toolbar.addSeparator()
 
         # Search button (search across vault)
         search_action = QAction("Search", self)
@@ -7652,6 +7683,36 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._apply_nav_filter_style()
+
+    def _current_editor_page_path(self) -> Optional[str]:
+        """Return current editor page path if available."""
+        if self.current_path:
+            return self.current_path
+        try:
+            rel = self.editor.current_relative_path()
+        except Exception:
+            rel = None
+        if not rel:
+            return None
+        return rel if rel.startswith("/") else f"/{rel}"
+
+    def _filter_vault_from_current_page(self) -> None:
+        """Filter vault navigation from the current page in the editor."""
+        current_page = self._current_editor_page_path()
+        if not current_page:
+            self.statusBar().showMessage("No current page to filter from", 3000)
+            return
+        self._set_nav_filter(current_page)
+        display = path_to_colon(current_page) or current_page
+        self.statusBar().showMessage(f"Filter vault from: {display}", 2500)
+
+    def _remove_vault_filter(self) -> None:
+        """Remove active vault navigation filter."""
+        if not self._nav_filter_path:
+            self.statusBar().showMessage("No active vault filter", 2000)
+            return
+        self._clear_nav_filter()
+        self.statusBar().showMessage("Vault filter removed", 2000)
 
     def _clear_nav_filter(self) -> None:
         """Disable tree filter and restore full view."""
