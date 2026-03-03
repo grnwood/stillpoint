@@ -16,7 +16,7 @@ from pathlib import Path
 import uvicorn
 from PySide6.QtCore import Qt, QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon, QPalette
+from PySide6.QtGui import QIcon, QPalette, QColor
 
 from sp.app import config
 from sp.logging_flags import log_enabled
@@ -237,52 +237,51 @@ def _detect_light_color_scheme(app: QApplication) -> tuple[bool, str]:
 
 
 def _ensure_user_theme_files() -> bool:
-    """Seed ~/.stillpoint/themes with dark/light themes on first run.
+    """Ensure ~/.stillpoint/themes contains bundled dark/light theme files.
 
-    Returns True when the theme folder was created in this run.
+    Returns True when one or more theme files were copied in this run.
     """
     theme_dir = Path.home() / ".stillpoint" / "themes"
-    if theme_dir.exists():
-        return False
+    copied_any = False
     try:
         theme_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         return False
 
     app_dir = Path(__file__).resolve().parent
-    dark_source = app_dir / "theme-config.json"
-    light_source = app_dir / "light-theme.json"
-    if not light_source.exists():
+    theme_sources: dict[str, Path] = {
+        "dark-theme.json": app_dir / "theme-config.json",
+        "light-theme.json": app_dir / "light-theme.json",
+        "midnight-blue.json": app_dir / "midnight-blue.json",
+        "deep-purple.json": app_dir / "deep-purple.json",
+        "pickles-green.json": app_dir / "pickles-green.json",
+        "sunset-blaze.json": app_dir / "sunset-blaze.json",
+        "charcoal-copper.json": app_dir / "charcoal-copper.json",
+        "arctic-night.json": app_dir / "arctic-night.json",
+        "ember-rose.json": app_dir / "ember-rose.json",
+    }
+    if not theme_sources["light-theme.json"].exists():
         # Dev fallback: allow bootstrapping directly from the repository sample.
         fallback = app_dir.parents[2] / "dev-assets" / "theme" / "test-light-theme.json"
         if fallback.exists():
-            light_source = fallback
+            theme_sources["light-theme.json"] = fallback
 
-    try:
-        if dark_source.exists():
-            shutil.copy2(dark_source, theme_dir / "dark-theme.json")
-    except Exception:
-        pass
-    try:
-        if light_source.exists():
-            shutil.copy2(light_source, theme_dir / "light-theme.json")
-    except Exception:
-        pass
-    return True
+    for filename, source in theme_sources.items():
+        dest = theme_dir / filename
+        try:
+            if source.exists() and not dest.exists():
+                shutil.copy2(source, dest)
+                copied_any = True
+        except Exception:
+            continue
+    return copied_any
 
 
 def _apply_startup_theme_defaults(app: QApplication) -> None:
     """Apply OS-based default theme selection for users without explicit preference."""
-    created_theme_dir = _ensure_user_theme_files()
+    seeded_theme_files = _ensure_user_theme_files()
     is_light, source = _detect_light_color_scheme(app)
     preferred = "light-theme.json" if is_light else "dark-theme.json"
-    # If we had to recreate the theme folder, re-baseline to OS preference.
-    if created_theme_dir:
-        config.save_theme_preference(preferred)
-        _startup(
-            f"Theme auto-selected: {preferred} (mode={'light' if is_light else 'dark'}, source={source}, reason=theme-folder-created)."
-        )
-        return
     current_pref = (config.load_theme_preference() or "").strip().lower()
     if current_pref not in {"", "default"}:
         _startup(
@@ -290,9 +289,38 @@ def _apply_startup_theme_defaults(app: QApplication) -> None:
         )
         return
     config.save_theme_preference(preferred)
+    reason = "default-preference+seeded-theme-files" if seeded_theme_files else "default-preference"
     _startup(
-        f"Theme auto-selected: {preferred} (mode={'light' if is_light else 'dark'}, source={source}, reason=default-preference)."
+        f"Theme auto-selected: {preferred} (mode={'light' if is_light else 'dark'}, source={source}, reason={reason})."
     )
+
+
+def _apply_startup_theme_palette(app: QApplication) -> None:
+    """Apply a Qt palette derived from the selected StillPoint theme."""
+    try:
+        from sp.app.ui.theme import theme_value
+    except Exception as exc:
+        _startup(f"Theme palette apply skipped (theme import failed): {exc}")
+        return
+    try:
+        base_bg = str(theme_value("markdown_editor.base.bg", "#0b0b0b"))
+        base_text = str(theme_value("markdown_editor.base.text", "#d6f5d6"))
+        selection_bg = str(theme_value("markdown_editor.base.selection_bg", "#2f4c74"))
+        selection_text = str(theme_value("markdown_editor.base.selection_text", "#ffffff"))
+        window_bg = str(theme_value("page_editor_window.base.bg", base_bg))
+        pal = app.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(window_bg))
+        pal.setColor(QPalette.ColorRole.Base, QColor(base_bg))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor(base_bg))
+        pal.setColor(QPalette.ColorRole.Button, QColor(window_bg))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor(base_text))
+        pal.setColor(QPalette.ColorRole.Text, QColor(base_text))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor(base_text))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(selection_bg))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(selection_text))
+        app.setPalette(pal)
+    except Exception as exc:
+        _startup(f"Theme palette apply failed: {exc}")
 
 
 def _write_local_ui_token(token: str) -> None:
@@ -849,6 +877,7 @@ def main() -> None:
     qt_app.aboutToQuit.connect(lambda: _startup("QApplication aboutToQuit emitted."))
     _apply_application_font(qt_app)
     _apply_startup_theme_defaults(qt_app)
+    _apply_startup_theme_palette(qt_app)
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits

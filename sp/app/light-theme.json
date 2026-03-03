@@ -91,7 +91,9 @@
       "drag_invalid_bg": "#ffd6d6",
       "drag_invalid_text": "#7a1b1b",
       "collapse_button": "#1f2937",
-      "header_border": "#e5e7eb"
+      "header_border": "#e5e7eb",
+      "header_bg": "#f8fafc",
+      "item_divider": "#e5e7eb"
     },
     "history": {
       "border": "#e5e7eb",
@@ -298,6 +300,9 @@
       "user": "#0b0b0b",
       "assistant": "#0b0b0b",
       "summary_border": "#d1d5db",
+      "code_bg": "#f3f4f6",
+      "code_text": "#0f5e3b",
+      "code_border": "#d1d5db",
       "think_border": "#cbd5e1",
       "think_text": "#4b5563"
     },

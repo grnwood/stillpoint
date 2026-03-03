@@ -467,6 +467,8 @@ class TaskPanel(QWidget):
         self._update_filter_indicator()
         self._apply_font_size()
         self._last_refresh_signature: Optional[tuple] = None
+        self._vault_accent_color: Optional[str] = None
+        self._apply_selection_style()
 
     def _single_shot_ui(self, delay_ms: int, callback) -> None:
         """Schedule a UI callback bound to this widget's lifetime."""
@@ -475,6 +477,44 @@ class TaskPanel(QWidget):
             QTimer.singleShot(delay, self, callback)
         except TypeError:
             QTimer.singleShot(delay, callback)
+
+    def _selection_text_for_background(self, bg_hex: str) -> str:
+        return contrast_text_color(QColor(bg_hex)).name()
+
+    def _selection_bg_for_accent(self, bg_hex: str) -> str:
+        color = QColor(bg_hex)
+        if not color.isValid():
+            return bg_hex
+        return color.name()
+
+    def _apply_selection_style(self) -> None:
+        accent = (self._vault_accent_color or "").strip()
+        if not accent:
+            self.task_tree.setStyleSheet("")
+            return
+        selected_bg = self._selection_bg_for_accent(accent)
+        selected_text = self._selection_text_for_background(selected_bg)
+        hover_bg = theme_value("task_panel.task_tree.hover_bg", "palette(alternate-base)")
+        self.task_tree.setStyleSheet(
+            f"""
+            QTreeWidget::item:selected {{
+                background: {selected_bg};
+                color: {selected_text};
+            }}
+            QTreeWidget::item:selected:active {{
+                background: {selected_bg};
+                color: {selected_text};
+            }}
+            QTreeWidget::item:hover {{
+                background: {hover_bg};
+            }}
+            """
+        )
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        candidate = (color_hex or "").strip()
+        self._vault_accent_color = candidate if candidate.startswith("#") else None
+        self._apply_selection_style()
 
     def _format_task_text(self, text: str) -> str:
         """Return plain text with link labels (or URLs) inlined, no markup."""

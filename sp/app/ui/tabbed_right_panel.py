@@ -72,6 +72,7 @@ class TabbedRightPanel(QWidget):
         self._pending_calendar_date: Optional[tuple[int, int, int]] = None
         self._pending_calendar_vault_root: Optional[str] = None
         self._pending_calendar_refresh: bool = False
+        self._vault_accent_color: Optional[str] = None
         self._calendar_sync_timer = QTimer(self)
         self._calendar_sync_timer.setSingleShot(True)
         self._calendar_sync_timer.setInterval(75)
@@ -250,6 +251,13 @@ class TabbedRightPanel(QWidget):
             config.save_ai_chat_font_size(self._ai_chat_font_size)
         except Exception:
             pass
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        self._vault_accent_color = (color_hex or "").strip() or None
+        if self.task_panel:
+            self.task_panel.set_vault_accent_color(self._vault_accent_color)
+        if self.calendar_panel:
+            self.calendar_panel.set_vault_accent_color(self._vault_accent_color)
 
     def get_ai_font_size(self) -> int:
         """Return current AI chat font size."""
@@ -502,6 +510,7 @@ class TabbedRightPanel(QWidget):
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)
         self.task_panel.set_remote_mode(self._remote_mode)
+        self.task_panel.set_vault_accent_color(self._vault_accent_color)
         self._sync_calendar_task_filters()
 
     def _remove_task_tab(self) -> None:
@@ -536,6 +545,7 @@ class TabbedRightPanel(QWidget):
         self.calendar_panel.pageDeleted.connect(self.pageDeleted)
         self.calendar_panel.remoteRequestObserved.connect(self.remoteRequestObserved, Qt.QueuedConnection)
         self.calendar_panel.set_remote_mode(self._remote_mode)
+        self.calendar_panel.set_vault_accent_color(self._vault_accent_color)
         self._sync_calendar_task_filters()
 
     def _remove_calendar_tab(self) -> None:

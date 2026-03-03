@@ -71,6 +71,10 @@
     }
   },
   "page_editor_window": {
+    "base": {
+      "bg": "#161c24",
+      "text": "#d8e0ea"
+    },
     "badge": {
       "border": "#666666",
       "readonly_bg": "#9e9e9e",
@@ -103,6 +107,12 @@
     }
   },
   "markdown_editor": {
+    "base": {
+      "bg": "#161c24",
+      "text": "#d8e0ea",
+      "selection_bg": "#355171",
+      "selection_text": "#ffffff"
+    },
     "ai_overlay": {
       "bg": "#000000",
       "text": "#ffffff",
@@ -165,7 +175,9 @@
       "drag_invalid_bg": "#c62828",
       "drag_invalid_text": "#ffffff",
       "collapse_button": "#ffffff",
-      "header_border": "#555555"
+      "header_border": "#3b4350",
+      "header_bg": "#202835",
+      "item_divider": "rgba(210, 220, 235, 0.12)"
     },
     "history": {
       "border": "#555555",
@@ -227,7 +239,7 @@
       "bg": "#c62828"
     },
     "minibar": {
-      "selected_bg": "#2b2b2b",
+      "selected_bg": "#2a3342",
       "selected_text": "#ffffff",
       "unselected_text": "#c0c0c0"
     },
@@ -288,6 +300,9 @@
       "user": "#f2e7a1",
       "assistant": "#8fe39b",
       "summary_border": "#2f4f2f",
+      "code_bg": "#2a2a2a",
+      "code_text": "#a3ffab",
+      "code_border": "#2f4f2f",
       "think_border": "#ffffff",
       "think_text": "#bdbdbd"
     },

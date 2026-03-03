@@ -1853,6 +1853,18 @@ class AIChatPanel(QtWidgets.QWidget):
         base_color = theme_value("ai_chat_panel.chat_html.base_bg", "#0b0b0b")
         text_color = theme_value("ai_chat_panel.chat_html.text", "#d6f5d6")
         accent = theme_value("ai_chat_panel.chat_html.accent", "#7fd4a7")
+        code_bg = theme_value(
+            "ai_chat_panel.chat_html.code_bg",
+            theme_value("markdown_editor.syntax.code_block_bg", "#2a2a2a"),
+        )
+        code_text = theme_value(
+            "ai_chat_panel.chat_html.code_text",
+            theme_value("markdown_editor.syntax.code_block_text", "#a3ffab"),
+        )
+        code_border = theme_value(
+            "ai_chat_panel.chat_html.code_border",
+            theme_value("ai_chat_panel.chat_html.summary_border", "#2f4f2f"),
+        )
         parts.append(
             f"<style>body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
@@ -1863,6 +1875,10 @@ class AIChatPanel(QtWidgets.QWidget):
             f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', '#f2e7a1')}; background:transparent; }}"
             f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', '#8fe39b')}; background:transparent; }}"
             f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', '#2f4f2f')}; }}"
+            f".bubble pre {{ background:{code_bg}; color:{code_text}; border:1px solid {code_border}; "
+            f"border-radius:6px; padding:8px; overflow-x:auto; white-space:pre-wrap; }}"
+            f".bubble code {{ background:{code_bg}; color:{code_text}; border-radius:4px; padding:0 4px; }}"
+            f".bubble pre code {{ border-radius:0; padding:0; background:transparent; color:{code_text}; }}"
             f".debug {{ color:#888; background:transparent; }}"
             f".debug details {{ margin-top:4px; }}"
             f".debug-toggle {{ cursor:pointer; color:{accent}; text-decoration:underline; display:inline-block; }}"

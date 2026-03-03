@@ -88,12 +88,18 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         self.calendar_widget = calendar_widget
 
     def _date_for_index(self, index) -> QDate:
-        date_val = index.data(Qt.UserRole)
-        if isinstance(date_val, QDate) and date_val.isValid():
-            return date_val
-        day_val = index.data(Qt.DisplayRole)
-        if not isinstance(day_val, int):
-            return QDate()
+        # Prefer exact date payload from the Qt model when available.
+        base_role = int(Qt.ItemDataRole.UserRole)
+        role_candidates = [int(Qt.ItemDataRole.DisplayRole)] + [base_role + i for i in range(0, 64)]
+        for role in role_candidates:
+            try:
+                date_val = index.data(role)
+            except Exception:
+                date_val = None
+            if isinstance(date_val, QDate) and date_val.isValid():
+                return date_val
+
+        # Fallback for model variants that only expose day number.
         if not self.calendar_widget:
             return QDate()
         year = self.calendar_widget.yearShown()
@@ -101,14 +107,16 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         first = QDate(year, month, 1)
         if not first.isValid():
             return QDate()
-        row = index.row()
-        if row == 0 and day_val > 20:
-            prev = first.addMonths(-1)
-            return QDate(prev.year(), prev.month(), day_val)
-        if row >= 4 and day_val < 15:
-            nxt = first.addMonths(1)
-            return QDate(nxt.year(), nxt.month(), day_val)
-        return QDate(year, month, day_val)
+        first_day_enum = self.calendar_widget.firstDayOfWeek()
+        first_day = int(getattr(first_day_enum, "value", first_day_enum))
+        first_of_month_weekday = first.dayOfWeek()  # 1=Mon .. 7=Sun
+        leading_days = (first_of_month_weekday - first_day + 7) % 7
+        # When the month starts on the first weekday column, Qt still renders
+        # a leading week from the previous month in the calendar grid.
+        if leading_days == 0:
+            leading_days = 7
+        day_offset = index.row() * 7 + index.column() - leading_days
+        return first.addDays(day_offset)
     
     def paint(self, painter, option, index):
         # Try multiple ways to get the date from this cell
@@ -287,8 +295,11 @@ class CalendarPanel(QWidget):
         # Prominent selected day colors
         selected_bg = theme_value("calendar_panel.calendar.selected_bg", "#2D7FF9")
         selected_text = theme_value("calendar_panel.calendar.selected_text", "#FFFFFF")
-        self._calendar_selected_bg = QColor(selected_bg)
-        self._calendar_selected_text = QColor(selected_text)
+        self._calendar_theme_selected_bg = QColor(selected_bg)
+        self._calendar_theme_selected_text = QColor(selected_text)
+        self._calendar_selected_bg = QColor(self._calendar_theme_selected_bg)
+        self._calendar_selected_text = QColor(self._calendar_theme_selected_text)
+        self._vault_accent_color: Optional[str] = None
         
         # Friendly calendar styling
         grid_color = (
@@ -317,58 +328,10 @@ class CalendarPanel(QWidget):
             else theme_value("calendar_panel.calendar.nav_text_light", "#1F1F1F")
         )
         
-        self.calendar.setStyleSheet(
-            f"""
-            QCalendarWidget QWidget#qt_calendar_navigationbar {{
-                background-color: {header_bg};
-                color: {nav_text};
-            }}
-            QCalendarWidget QWidget {{
-                alternate-background-color: palette(base);
-            }}
-            QCalendarWidget QToolButton {{
-                padding: 6px 8px;
-                font-weight: bold;
-                border-radius: 4px;
-                background-color: {header_bg};
-                color: {nav_text};
-            }}
-            QCalendarWidget QToolButton:hover {{
-                background-color: {selected_bg};
-                color: {selected_text};
-            }}
-            QCalendarWidget QMenu {{
-                background-color: palette(base);
-            }}
-            QCalendarWidget QSpinBox {{
-                border-radius: 4px;
-                padding: 4px;
-                color: {nav_text};
-                background-color: {header_bg};
-            }}
-            QCalendarWidget QTableView {{
-                selection-background-color: {selected_bg};
-                selection-color: {selected_text};
-                gridline-color: {grid_color};
-                border-radius: 6px;
-            }}
-            QCalendarWidget QTableView::item {{
-                border: 1px solid {grid_color};
-                padding: 6px;
-                border-radius: 4px;
-            }}
-            QCalendarWidget QTableView::item:selected {{
-                background-color: {selected_bg};
-                color: {selected_text};
-                font-weight: bold;
-                border: 2px solid {selected_bg};
-            }}
-            QCalendarWidget QTableView::item:hover {{
-                background-color: {selected_bg};
-                color: {selected_text};
-            }}
-            """
-        )
+        self._calendar_grid_color = grid_color
+        self._calendar_header_bg = header_bg
+        self._calendar_nav_text = nav_text
+        self._apply_calendar_stylesheet()
         self.calendar.clicked.connect(self._on_date_clicked)
         self.calendar.currentPageChanged.connect(self._on_month_changed)
         self.calendar.selectionChanged.connect(self._update_today_visibility)
@@ -689,6 +652,7 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.customContextMenuRequested.connect(self._open_task_date_context_menu)
         self.tasks_due_list.installEventFilter(self)
         self.tasks_due_list.viewport().installEventFilter(self)
+        self._apply_task_list_selection_style()
 
         due_row = QWidget()
         due_row_layout = QHBoxLayout()
@@ -835,23 +799,7 @@ class CalendarPanel(QWidget):
         except Exception:
             pass
         self.today_btn.setMinimumHeight(28)
-        self.today_btn.setStyleSheet(
-            f"""
-            QToolButton {{
-                padding: 4px 10px;
-                border-radius: 6px;
-                border: 1px solid {theme_value('calendar_panel.today.border', '#2b6cb0')};
-                background: {theme_value('calendar_panel.today.bg', '#2b6cb0')};
-                color: {theme_value('calendar_panel.today.text', '#ffffff')};
-            }}
-            QToolButton:hover {{
-                background: {theme_value('calendar_panel.today.hover_bg', '#2f76c6')};
-            }}
-            QToolButton:pressed {{
-                background: {theme_value('calendar_panel.today.pressed_bg', '#255a92')};
-            }}
-            """
-        )
+        self._apply_today_button_style()
         self.today_btn.clicked.connect(lambda: self.set_calendar_date(QDate.currentDate().year(), QDate.currentDate().month(), QDate.currentDate().day()))
         zoom_row.addWidget(self.today_btn)
         zoom_row.addWidget(self.zoom_out_btn)
@@ -916,6 +864,159 @@ class CalendarPanel(QWidget):
             QTimer.singleShot(delay, self, callback)
         except TypeError:
             QTimer.singleShot(delay, callback)
+
+    def _selection_text_for_background(self, bg: QColor) -> QColor:
+        return contrast_text_color(bg)
+
+    def _selection_bg_for_accent(self, accent_hex: str) -> QColor:
+        color = QColor(accent_hex)
+        if not color.isValid():
+            return QColor(accent_hex)
+        return QColor(color)
+
+    def _apply_calendar_stylesheet(self) -> None:
+        selected_bg = self._calendar_selected_bg.name()
+        selected_text = self._calendar_selected_text.name()
+        self.calendar.setStyleSheet(
+            f"""
+            QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                background-color: {self._calendar_header_bg};
+                color: {self._calendar_nav_text};
+            }}
+            QCalendarWidget QWidget {{
+                alternate-background-color: palette(base);
+            }}
+            QCalendarWidget QToolButton {{
+                padding: 6px 8px;
+                font-weight: bold;
+                border-radius: 4px;
+                background-color: {self._calendar_header_bg};
+                color: {self._calendar_nav_text};
+            }}
+            QCalendarWidget QToolButton:hover {{
+                background-color: {selected_bg};
+                color: {selected_text};
+            }}
+            QCalendarWidget QMenu {{
+                background-color: palette(base);
+            }}
+            QCalendarWidget QSpinBox {{
+                border-radius: 4px;
+                padding: 4px;
+                color: {self._calendar_nav_text};
+                background-color: {self._calendar_header_bg};
+            }}
+            QCalendarWidget QTableView {{
+                selection-background-color: transparent;
+                selection-color: {selected_text};
+                gridline-color: {self._calendar_grid_color};
+                border-radius: 6px;
+            }}
+            QCalendarWidget QTableView::item {{
+                border: 1px solid {self._calendar_grid_color};
+                padding: 6px;
+                border-radius: 4px;
+            }}
+            QCalendarWidget QTableView::item:selected {{
+                background-color: transparent;
+                color: palette(text);
+                font-weight: normal;
+                border: none;
+            }}
+            """
+        )
+
+    def _apply_aux_calendar_styles(self) -> None:
+        dim_text = theme_value("calendar_panel.calendar.dim_text", "#a0a0a0")
+        aux_style = (
+            self.calendar.styleSheet()
+            + "\nQCalendarWidget { color: "
+            + f"{dim_text}; }}"
+            + "\nQCalendarWidget QTableView::item { color: "
+            + f"{dim_text}; }}"
+            + "\nQCalendarWidget QTableView::item:selected { background: transparent; color: "
+            + f"{dim_text}; border: none; }}"
+        )
+        self.prev_calendar.setStyleSheet(aux_style)
+        self.next_calendar.setStyleSheet(aux_style)
+
+    def _apply_today_button_style(self) -> None:
+        accent = (self._vault_accent_color or "").strip()
+        if accent.startswith("#"):
+            base_color = QColor(accent)
+            border = base_color.darker(120).name()
+            bg = base_color.name()
+            text = self._selection_text_for_background(base_color).name()
+            hover = base_color.lighter(112).name()
+            pressed = base_color.darker(130).name()
+        else:
+            border = theme_value("calendar_panel.today.border", "#2b6cb0")
+            bg = theme_value("calendar_panel.today.bg", "#2b6cb0")
+            text = theme_value("calendar_panel.today.text", "#ffffff")
+            hover = theme_value("calendar_panel.today.hover_bg", "#2f76c6")
+            pressed = theme_value("calendar_panel.today.pressed_bg", "#255a92")
+        self.today_btn.setStyleSheet(
+            f"""
+            QToolButton {{
+                padding: 4px 10px;
+                border-radius: 6px;
+                border: 1px solid {border};
+                background: {bg};
+                color: {text};
+            }}
+            QToolButton:hover {{
+                background: {hover};
+            }}
+            QToolButton:pressed {{
+                background: {pressed};
+            }}
+            """
+        )
+
+    def _apply_task_list_selection_style(self) -> None:
+        task_list = getattr(self, "tasks_due_list", None)
+        if task_list is None:
+            return
+        accent = (self._vault_accent_color or "").strip()
+        if not accent:
+            task_list.setStyleSheet("")
+            return
+        selected_bg = self._selection_bg_for_accent(accent)
+        selected_text = self._selection_text_for_background(selected_bg).name()
+        hover_bg = theme_value("calendar_panel.task_tree.hover_bg", "palette(alternate-base)")
+        task_list.setStyleSheet(
+            f"""
+            QTreeWidget::item:selected {{
+                background: {selected_bg.name()};
+                color: {selected_text};
+            }}
+            QTreeWidget::item:selected:active {{
+                background: {selected_bg.name()};
+                color: {selected_text};
+            }}
+            QTreeWidget::item:hover {{
+                background: {hover_bg};
+            }}
+            """
+        )
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        candidate = (color_hex or "").strip()
+        if candidate.startswith("#"):
+            self._vault_accent_color = candidate
+            self._calendar_selected_bg = self._selection_bg_for_accent(candidate)
+            self._calendar_selected_text = self._selection_text_for_background(self._calendar_selected_bg)
+        else:
+            self._vault_accent_color = None
+            self._calendar_selected_bg = QColor(self._calendar_theme_selected_bg)
+            self._calendar_selected_text = QColor(self._calendar_theme_selected_text)
+        self.calendar_delegate.highlight_color = self._calendar_selected_bg
+        self.calendar_delegate.text_color = self._calendar_selected_text
+        self._apply_calendar_stylesheet()
+        self._apply_aux_calendar_styles()
+        self._apply_today_button_style()
+        self._apply_task_list_selection_style()
+        self._apply_multi_selection_formats()
 
     def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
         """Allow parent to provide a date filter opener for the Task panel."""
@@ -2252,9 +2353,7 @@ class CalendarPanel(QWidget):
         """Highlight all currently multi-selected dates."""
         # Update the delegate
         self.calendar_delegate.multi_selected_dates = self.multi_selected_dates.copy()
-        
-        # Also use QTextCharFormat for reliable highlighting
-        highlight_color = self._calendar_selected_bg
+
         text_color = self._calendar_selected_text
         
         def apply_for_calendar(cal: QCalendarWidget, *, allow_selection: bool) -> None:
@@ -2271,17 +2370,6 @@ class CalendarPanel(QWidget):
                     cal.setDateTextFormat(day_date, default_format)
 
             if allow_selection:
-                highlight_format = QTextCharFormat()
-                highlight_format.setBackground(QBrush(highlight_color))
-                highlight_format.setForeground(QBrush(text_color))
-                bold_font = QFont()
-                bold_font.setBold(True)
-                bold_font.setWeight(QFont.Bold)
-                highlight_format.setFont(bold_font)
-                for date in self.multi_selected_dates:
-                    if date.isValid():
-                        cal.setDateTextFormat(date, highlight_format)
-
                 today = QDate.currentDate()
                 if today.isValid() and today not in self.multi_selected_dates:
                     today_format = QTextCharFormat()

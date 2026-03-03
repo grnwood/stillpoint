@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional
 
 from PySide6.QtCore import QPoint, Qt, Signal, QPropertyAnimation
-from PySide6.QtGui import QAction, QPalette
+from PySide6.QtGui import QAction, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from sp.app import config
 from .heading_utils import heading_slug
 from .theme import theme_value
 
@@ -31,6 +30,7 @@ class TableOfContentsWidget(QFrame):
         super().__init__(parent)
         self.setObjectName("tocWidget")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._vault_accent_color: Optional[str] = None
         self._apply_theme_styles()
         self._collapsed = False
         self._expanded_width = 220
@@ -53,25 +53,24 @@ class TableOfContentsWidget(QFrame):
         except Exception:
             base_lightness = 0
         is_light_palette = base_lightness >= 128
-        pref = (config.load_theme_preference() or "").strip().lower()
-        using_default_dark_theme = pref in {"", "default", "dark-theme", "dark-theme.json", "theme-config", "theme-config.json"}
         bg_default = "#f3f4f6" if is_light_palette else "#2d2d2d"
         border_default = "#d1d5db" if is_light_palette else "#aaa"
         text_default = "#111827" if is_light_palette else "#f5f5f5"
         hover_default = "rgba(37, 99, 235, 0.12)" if is_light_palette else "rgba(108, 180, 255, 0.18)"
         selected_default = hover_default
-        if is_light_palette and using_default_dark_theme:
-            bg = bg_default
-            border = border_default
-            text = text_default
-            hover_bg = hover_default
-            selected_bg = selected_default
+        bg = theme_value("main_window.toc_widget.bg", bg_default)
+        border = theme_value("main_window.toc_widget.border", border_default)
+        text = theme_value("main_window.toc_widget.text", text_default)
+        hover_bg = theme_value("main_window.toc_widget.hover_bg", hover_default)
+        selected_bg = theme_value("main_window.toc_widget.selected_bg", selected_default)
+        accent = (self._vault_accent_color or "").strip()
+        if accent.startswith("#"):
+            color = QColor(accent)
+            selected_color = color if color.isValid() else color
+            selected_bg = selected_color.name()
+            selected_text = "#111111" if selected_color.lightness() >= 140 else "#ffffff"
         else:
-            bg = theme_value("main_window.toc_widget.bg", bg_default)
-            border = theme_value("main_window.toc_widget.border", border_default)
-            text = theme_value("main_window.toc_widget.text", text_default)
-            hover_bg = theme_value("main_window.toc_widget.hover_bg", hover_default)
-            selected_bg = theme_value("main_window.toc_widget.selected_bg", selected_default)
+            selected_text = theme_value("main_window.toc_widget.selected_text", text)
         self.setStyleSheet(
             f"""
             QFrame#tocWidget {{
@@ -94,6 +93,7 @@ class TableOfContentsWidget(QFrame):
             }}
             QTreeWidget#tocTree::item:selected {{
                 background: {selected_bg};
+                color: {selected_text};
                 border: none;
                 outline: none;
             }}
@@ -169,6 +169,11 @@ class TableOfContentsWidget(QFrame):
     def set_base_path(self, colon_path: str) -> None:
         """Set the base colon path for copy-link actions."""
         self._base_path = colon_path or ""
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        candidate = (color_hex or "").strip()
+        self._vault_accent_color = candidate if candidate.startswith("#") else None
+        self._apply_theme_styles()
 
     def set_collapsed(self, collapsed: bool) -> None:
         # Collapse toggle removed; always stay expanded but keep API compatibility.

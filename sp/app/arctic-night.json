@@ -1,0 +1,89 @@
+{
+  "page_editor_window": {
+    "base": {
+      "bg": "#0f1b2d",
+      "text": "#dff4ff"
+    }
+  },
+  "markdown_editor": {
+    "base": {
+      "bg": "#0f1b2d",
+      "text": "#dff4ff",
+      "selection_bg": "#1f4f68",
+      "selection_text": "#f3fbff"
+    },
+    "syntax": {
+      "heading": "#9fe9ff",
+      "bold": "#c7f4ff",
+      "italic": "#8de2ff",
+      "bold_italic": "#d9f8ff",
+      "code_text": "#dff4ff",
+      "code_bg": "#14253a",
+      "code_block_text": "#dff4ff",
+      "code_block_bg": "#14253a",
+      "code_fence": "#70d8ff",
+      "quote": "#70d8ff",
+      "list": "#dff4ff",
+      "tag": "#7dd3fc",
+      "strikethrough": "#91b9c9",
+      "link": "#7de9ff"
+    }
+  },
+  "main_window": {
+    "menu_command_bar": {
+      "bg": "#0f1b2d",
+      "text": "#dff4ff",
+      "border": "#2b4f67",
+      "search_text": "#dff4ff",
+      "search_bg": "rgba(125, 233, 255, 0.10)",
+      "search_border": "rgba(125, 233, 255, 0.32)",
+      "list_text": "#dff4ff"
+    },
+    "tree": {
+      "collapse_button": "#dff4ff",
+      "header_border": "#2b4f67",
+      "header_bg": "#15273f",
+      "item_divider": "rgba(125, 233, 255, 0.14)"
+    },
+    "history": {
+      "border": "#2b4f67",
+      "button_border": "#2b4f67"
+    },
+    "minibar": {
+      "selected_bg": "#1c3654",
+      "selected_text": "#f3fbff",
+      "unselected_text": "#9fe9ff"
+    },
+    "toc_widget": {
+      "bg": "#15273f",
+      "border": "#2b4f67",
+      "text": "#dff4ff",
+      "hover_bg": "rgba(125, 233, 255, 0.22)",
+      "selected_bg": "rgba(125, 233, 255, 0.22)"
+    },
+    "focus_border": {
+      "default": "#7de9ff",
+      "filtered": "#ffb86b"
+    }
+  },
+  "ai_chat_panel": {
+    "chat_view": {
+      "bg": "#0f1b2d",
+      "text": "#dff4ff",
+      "border": "#2b4f67"
+    },
+    "chat_html": {
+      "base_bg": "#0f1b2d",
+      "text": "#dff4ff",
+      "accent": "#7de9ff",
+      "user": "#c7f4ff",
+      "assistant": "#9fe9ff",
+      "summary_border": "#2b4f67",
+      "code_bg": "#14253a",
+      "code_text": "#dff4ff",
+      "code_border": "#2b4f67",
+      "think_border": "#7de9ff",
+      "think_text": "#bfe8f6"
+    }
+  }
+}

@@ -108,6 +108,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QScrollArea,
     QComboBox,
+    QToolBar,
 )
 
 from sp.app import config, indexer
@@ -1895,7 +1896,9 @@ class MainWindow(QMainWindow):
 
         self.tree_header_widget.setLayout(tree_header_layout)
         self.tree_header_widget.setStyleSheet(
-            "background: palette(midlight); border-bottom: 1px solid "
+            "background: "
+            f"{theme_value('main_window.tree.header_bg', 'palette(midlight)')}; "
+            "border-bottom: 1px solid "
             f"{theme_value('main_window.tree.header_border', '#555555')};"
         )
         
@@ -2702,6 +2705,7 @@ class MainWindow(QMainWindow):
             pass
         self._update_dirty_indicator()
         self._update_filter_indicator()
+        self._apply_vault_accent_visuals()
 
         # Startup vault selection is orchestrated by main.py via .startup()
         self.editor.set_ai_actions_enabled(config.load_enable_ai_chats())
@@ -2746,6 +2750,22 @@ class MainWindow(QMainWindow):
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
+        self._vault_accent_toolbar = QToolBar("Vault Accent", self)
+        self._vault_accent_toolbar.setMovable(False)
+        self._vault_accent_toolbar.setFloatable(False)
+        self._vault_accent_toolbar.setAllowedAreas(Qt.TopToolBarArea)
+        self._vault_accent_toolbar.setContentsMargins(0, 0, 0, 0)
+        self._vault_accent_toolbar.setStyleSheet(
+            "QToolBar { border: none; margin: 0; padding: 0; spacing: 0; }"
+        )
+        self._vault_accent_strip = QFrame()
+        self._vault_accent_strip.setObjectName("vaultAccentStrip")
+        self._vault_accent_strip.setFixedHeight(8)
+        self._vault_accent_strip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._vault_accent_toolbar.addWidget(self._vault_accent_strip)
+        self.addToolBar(Qt.TopToolBarArea, self._vault_accent_toolbar)
+        self.addToolBarBreak(Qt.TopToolBarArea)
+
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
         icon_color = self._main_icon_color()
@@ -2835,6 +2855,7 @@ class MainWindow(QMainWindow):
         self.bookmark_layout.setSpacing(4)
 
         self.bookmark_scroll_area = QScrollArea()
+        self.bookmark_scroll_area.setObjectName("bookmarkScrollArea")
         self.bookmark_scroll_area.setFrameShape(QFrame.NoFrame)
         self.bookmark_scroll_area.setWidgetResizable(False)
         self.bookmark_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -2856,6 +2877,7 @@ class MainWindow(QMainWindow):
         self.bookmark_scroll_right.clicked.connect(lambda: self._scroll_bookmarks(180))
 
         self.bookmark_container = QWidget()
+        self.bookmark_container.setObjectName("bookmarkContainer")
         self.bookmark_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._toolbar_height = self.toolbar.iconSize().height() + 8
         self.bookmark_container.setMinimumHeight(self._toolbar_height)
@@ -4032,6 +4054,7 @@ class MainWindow(QMainWindow):
             self._apply_feature_overrides()
             self._apply_vault_read_only_pref()
             self._configure_homebase_sync_for_vault()
+            self._apply_vault_accent_visuals()
 
     def _reload_vault(self) -> None:
         if not self.vault_root:
@@ -6610,6 +6633,58 @@ class MainWindow(QMainWindow):
             self._refresh_left_minibar_tabs()
         self._apply_calendar_action_visibility()
 
+    @staticmethod
+    def _badge_text_for_background(bg_hex: str) -> str:
+        color = QColor(bg_hex)
+        return "#111111" if color.lightness() >= 140 else "#ffffff"
+
+    @staticmethod
+    def _selection_bg_for_accent(accent_hex: str) -> str:
+        color = QColor(accent_hex)
+        if not color.isValid():
+            return accent_hex
+        return color.name()
+
+    def _current_vault_accent_color(self) -> Optional[str]:
+        if not self.vault_root:
+            return None
+        try:
+            self._ensure_config_active_vault_context()
+            return config.load_vault_accent_color()
+        except Exception:
+            return None
+
+    def _apply_vault_accent_visuals(self) -> None:
+        accent = self._current_vault_accent_color()
+        self._vault_accent_color = accent
+        try:
+            self.right_panel.set_vault_accent_color(accent)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "toc_widget", None):
+                self.toc_widget.set_vault_accent_color(accent)
+        except Exception:
+            pass
+        self._update_active_page_chicklets()
+        strip = getattr(self, "_vault_accent_strip", None)
+        toolbar = getattr(self, "_vault_accent_toolbar", None)
+        if strip is None or toolbar is None:
+            self._apply_focus_borders()
+            return
+        if not accent:
+            strip.setStyleSheet("QFrame#vaultAccentStrip { background: transparent; }")
+            toolbar.setVisible(False)
+            self._apply_focus_borders()
+            return
+        strip.setStyleSheet(
+            "QFrame#vaultAccentStrip { "
+            f"background: {accent};"
+            "}"
+        )
+        toolbar.setVisible(True)
+        self._apply_focus_borders()
+
     def _ensure_config_active_vault_context(self) -> None:
         """Make config reads resolve against this window's active vault."""
         if not self.vault_root:
@@ -6832,6 +6907,7 @@ class MainWindow(QMainWindow):
                 self.right_panel.set_current_page(None, None)
                 self.statusBar().showMessage(f"Vault: {self.vault_root}")
                 self._update_window_title()
+                self._apply_vault_accent_visuals()
                 self._restore_nav_filter_state()
                 self._populate_vault_tree()
 
@@ -7205,9 +7281,24 @@ class MainWindow(QMainWindow):
     def _apply_bookmark_button_style(self, btn: QPushButton, bookmark_path: str) -> None:
         is_active = bool(self.current_path and bookmark_path == self.current_path)
         is_filtered = self._bookmark_matches_nav_filter(bookmark_path)
-        active_border = theme_value("main_window.bookmark.active_border", theme_value("main_window.focus_border.default", "#4A90E2"))
-        active_bg = theme_value("main_window.bookmark.active_bg", "palette(highlight)")
-        active_text = theme_value("main_window.bookmark.active_text", "palette(highlighted-text)")
+        vault_accent = getattr(self, "_vault_accent_color", None)
+        active_border = (
+            vault_accent
+            if vault_accent
+            else theme_value(
+                "main_window.bookmark.active_border",
+                theme_value("main_window.focus_border.default", "#4A90E2"),
+            )
+        )
+        active_bg = (
+            vault_accent
+            if vault_accent
+            else theme_value("main_window.bookmark.active_bg", "palette(highlight)")
+        )
+        if vault_accent:
+            active_text = self._badge_text_for_background(active_bg)
+        else:
+            active_text = theme_value("main_window.bookmark.active_text", "palette(highlighted-text)")
         filtered_border = theme_value("main_window.bookmark.filtered_border", "#D9534F")
         filtered_bg = theme_value("main_window.bookmark.filtered_bg", filtered_border)
         filtered_text = theme_value("main_window.bookmark.filtered_text", "#ffffff")
@@ -7227,9 +7318,24 @@ class MainWindow(QMainWindow):
     def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
         is_active = bool(self.current_path and history_path == self.current_path)
         normal_border = theme_value("main_window.history.button_border", "#555555")
-        active_border = theme_value("main_window.history.active_border", theme_value("main_window.focus_border.default", "#4A90E2"))
-        active_bg = theme_value("main_window.history.active_bg", "palette(highlight)")
-        active_text = theme_value("main_window.history.active_text", "palette(highlighted-text)")
+        vault_accent = getattr(self, "_vault_accent_color", None)
+        active_border = (
+            vault_accent
+            if vault_accent
+            else theme_value(
+                "main_window.history.active_border",
+                theme_value("main_window.focus_border.default", "#4A90E2"),
+            )
+        )
+        active_bg = (
+            vault_accent
+            if vault_accent
+            else theme_value("main_window.history.active_bg", "palette(highlight)")
+        )
+        if vault_accent:
+            active_text = self._badge_text_for_background(active_bg)
+        else:
+            active_text = theme_value("main_window.history.active_text", "palette(highlighted-text)")
         border_color = active_border if is_active else normal_border
         style = (
             f"QPushButton {{ border: 1px solid {border_color}; "
@@ -12044,19 +12150,12 @@ class MainWindow(QMainWindow):
         except Exception:
             base_lightness = 0
         is_light_palette = base_lightness >= 128
-        pref = (config.load_theme_preference() or "").strip().lower()
-        using_default_dark_theme = pref in {"", "default", "dark-theme", "dark-theme.json", "theme-config", "theme-config.json"}
         selected_bg_default = "#eef2f7" if is_light_palette else "#2b2b2b"
         selected_text_default = "#111827" if is_light_palette else "#ffffff"
         unselected_text_default = "#4b5563" if is_light_palette else "#c0c0c0"
-        if is_light_palette and using_default_dark_theme:
-            selected_bg = selected_bg_default
-            selected_text = selected_text_default
-            unselected_text = unselected_text_default
-        else:
-            selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
-            selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
-            unselected_text = theme_value("main_window.minibar.unselected_text", unselected_text_default)
+        selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
+        selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
+        unselected_text = theme_value("main_window.minibar.unselected_text", unselected_text_default)
         bar = QTabBar()
         bar.setDocumentMode(True)
         bar.setExpanding(False)
@@ -13280,10 +13379,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
+        vault_accent = getattr(self, "_vault_accent_color", None)
         focus_border = (
             theme_value("main_window.focus_border.filtered", "#D9534F")
             if getattr(self, "_nav_filter_path", None)
-            else theme_value("main_window.focus_border.default", "#4A90E2")
+            else (
+                self._selection_bg_for_accent(vault_accent)
+                if vault_accent
+                else theme_value("main_window.focus_border.default", "#4A90E2")
+            )
         )
         editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
         is_light_theme = QApplication.palette().color(QPalette.Base).lightness() >= 150
@@ -13297,10 +13401,17 @@ class MainWindow(QMainWindow):
         arrow_open = (
             str(down_arrow_path).replace("\\", "/") if down_arrow_path else ""
         )
+        tree_item_divider = theme_value("main_window.tree.item_divider", "palette(midlight)")
+        if vault_accent:
+            tree_selected_bg = self._selection_bg_for_accent(vault_accent)
+            tree_selected_text = self._badge_text_for_background(tree_selected_bg)
+        else:
+            tree_selected_bg = "palette(highlight)"
+            tree_selected_text = "palette(highlighted-text)"
         tree_style = (
             "QTreeView { border: 1px solid transparent; background: palette(base); }"
-            "QTreeView::item { padding: 2px 6px 2px 2px; border-bottom: 1px solid palette(midlight); }"
-            "QTreeView::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
+            f"QTreeView::item {{ padding: 2px 6px 2px 2px; border-bottom: 1px solid {tree_item_divider}; }}"
+            f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
             "QTreeView::item:hover { background: palette(alternate-base); }"
             "QTreeView::branch { width: 16px; height: 16px; }"
         )
@@ -15902,10 +16013,17 @@ class MainWindow(QMainWindow):
     def _flash_heading(self, cursor: QTextCursor) -> None:
         """Briefly highlight the heading line."""
         try:
+            highlight_color = getattr(self, "_vault_accent_color", None) or theme_value(
+                "main_window.highlight.selection_bg",
+                "#ffd54f",
+            )
+            accent = getattr(self, "_vault_accent_color", None)
+            if accent:
+                highlight_color = self._selection_bg_for_accent(accent)
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(theme_color("main_window.highlight.selection_bg", "#ffd54f"))
+            sel.format.setBackground(QColor(str(highlight_color)))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = self.editor.extraSelections()

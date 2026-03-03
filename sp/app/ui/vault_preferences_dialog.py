@@ -5,8 +5,10 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QHBoxLayout,
     QLabel,
     QVBoxLayout,
 )
@@ -16,12 +18,26 @@ from sp.app import config
 
 class VaultPreferencesDialog(QDialog):
     """Dialog for per-vault preference overrides."""
+    ACCENT_CHOICES: list[tuple[str, str]] = [
+        ("Use Theme Default", ""),
+        ("Ocean Blue", "#3B82F6"),
+        ("Cyan", "#22D3EE"),
+        ("Violet", "#A78BFA"),
+        ("Magenta", "#EC4899"),
+        ("Coral", "#FB7185"),
+        ("Sunset Orange", "#F97316"),
+        ("Amber", "#F59E0B"),
+        ("Lime", "#84CC16"),
+        ("Emerald", "#10B981"),
+        ("Slate", "#64748B"),
+    ]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Vault Preferences")
         self.setModal(True)
-        self.resize(420, 360)
+        self.resize(680, 560)
+        self.setMinimumSize(620, 500)
 
         layout = QVBoxLayout(self)
         note = QLabel(
@@ -32,6 +48,18 @@ class VaultPreferencesDialog(QDialog):
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
         layout.addWidget(note)
+
+        layout.addWidget(QLabel("<b>Vault Accent</b>"))
+        accent_row = QHBoxLayout()
+        accent_row.addWidget(QLabel("Accent Color:"))
+        self.vault_accent_combo = QComboBox()
+        for label, color in self.ACCENT_CHOICES:
+            self.vault_accent_combo.addItem(label, color)
+        current_accent = config.load_vault_accent_color() or ""
+        accent_idx = self.vault_accent_combo.findData(current_accent)
+        self.vault_accent_combo.setCurrentIndex(accent_idx if accent_idx != -1 else 0)
+        accent_row.addWidget(self.vault_accent_combo, 1)
+        layout.addLayout(accent_row)
 
         layout.addWidget(QLabel("<b>Features</b>"))
         self.feature_tasks_checkbox = self._make_override_checkbox(
@@ -122,6 +150,7 @@ class VaultPreferencesDialog(QDialog):
         }
 
     def _reset_to_global(self) -> None:
+        self.vault_accent_combo.setCurrentIndex(0)
         for checkbox in (
             self.feature_tasks_checkbox,
             self.feature_calendar_checkbox,
@@ -135,6 +164,7 @@ class VaultPreferencesDialog(QDialog):
 
     def accept(self) -> None:  # type: ignore[override]
         values = self._collect_values()
+        config.save_vault_accent_color(self.vault_accent_combo.currentData() or None)
         config.save_vault_feature_tasks_override(values["tasks"])
         config.save_vault_feature_calendar_override(values["calendar"])
         config.save_vault_feature_link_navigator_override(values["link_navigator"])

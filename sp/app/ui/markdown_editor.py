@@ -948,10 +948,23 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         style = self._pygments_formatter.style.style_for_token(token)
         fmt = QTextCharFormat(self.code_block)
-        if style.get("color"):
-            fmt.setForeground(QColor(f"#{style['color']}"))
-        if style.get("bgcolor"):
-            fmt.setBackground(QColor(f"#{style['bgcolor']}"))
+        base_fg = self.code_block.foreground().color()
+        base_bg = self.code_block.background().color()
+
+        # Keep plain text tokens on the theme's base code colors so `txt` fences stay readable.
+        is_text_token = key == "Token.Text" or key.startswith("Token.Text.")
+
+        if style.get("color") and not is_text_token:
+            candidate_fg = QColor(f"#{style['color']}")
+            if candidate_fg.isValid() and self._color_contrast_ratio(candidate_fg, base_bg) >= 3.0:
+                fmt.setForeground(candidate_fg)
+            else:
+                fmt.setForeground(base_fg)
+        else:
+            fmt.setForeground(base_fg)
+
+        # Avoid per-token background overrides from Pygments; rely on theme code block background.
+        fmt.setBackground(base_bg)
         if style.get("bold"):
             fmt.setFontWeight(QFont.Weight.Bold)
         if style.get("italic"):
@@ -960,6 +973,26 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             fmt.setFontUnderline(True)
         self._pygments_format_cache[key] = fmt
         return fmt
+
+    @staticmethod
+    def _color_contrast_ratio(fg: QColor, bg: QColor) -> float:
+        """Return WCAG contrast ratio between two QColor values."""
+        def channel(c: float) -> float:
+            c = c / 255.0
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        def luminance(color: QColor) -> float:
+            return (
+                0.2126 * channel(color.red())
+                + 0.7152 * channel(color.green())
+                + 0.0722 * channel(color.blue())
+            )
+
+        l1 = luminance(fg)
+        l2 = luminance(bg)
+        lighter = max(l1, l2)
+        darker = min(l1, l2)
+        return (lighter + 0.05) / (darker + 0.05)
 
     def _cache_code_block_spans(self, start_block, lang: Optional[str]) -> None:
         if not self._pygments_enabled:

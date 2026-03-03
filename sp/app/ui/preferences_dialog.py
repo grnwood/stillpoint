@@ -317,9 +317,10 @@ class PreferencesDialog(QDialog):
         row_theme = QHBoxLayout()
         row_theme.addWidget(QLabel("Theme:"))
         self.theme_combo = QComboBox()
-        self._populate_theme_options()
         row_theme.addWidget(self.theme_combo, 1)
         appearance_layout.addLayout(row_theme)
+
+        self._populate_theme_options()
 
         row_theme_actions = QHBoxLayout()
         self.refresh_theme_list_btn = QPushButton("Refresh Themes")
@@ -1288,8 +1289,8 @@ class PreferencesDialog(QDialog):
         self.theme_combo.addItem("Default Theme", "default")
         for path in self._list_theme_files():
             self.theme_combo.addItem(path.name, path.name)
-        current = config.load_theme_preference()
-        idx = self.theme_combo.findData(current)
+        current_global = config.load_theme_preference()
+        idx = self.theme_combo.findData(current_global)
         if idx == -1:
             idx = 0
         self.theme_combo.setCurrentIndex(idx)

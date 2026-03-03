@@ -191,6 +191,44 @@ def save_theme_preference(theme_name: str) -> None:
     _update_global_config({"theme_name": name or "default"})
 
 
+def load_vault_accent_color() -> Optional[str]:
+    """Return per-vault accent color (hex #RRGGBB), or None when unset."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'vault_accent_color'").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or row[0] is None:
+        return None
+    value = str(row[0]).strip()
+    if not re.match(r"^#[0-9a-fA-F]{6}$", value):
+        return None
+    return value
+
+
+def save_vault_accent_color(color_hex: Optional[str]) -> None:
+    """Persist per-vault accent color (#RRGGBB), or clear when None/empty."""
+    conn = _get_conn()
+    if not conn:
+        return
+    value = str(color_hex or "").strip()
+    if value and not re.match(r"^#[0-9a-fA-F]{6}$", value):
+        return
+    try:
+        if not value:
+            conn.execute("DELETE FROM kv WHERE key = 'vault_accent_color'")
+        else:
+            conn.execute(
+                "REPLACE INTO kv(key, value) VALUES(?, ?)",
+                ("vault_accent_color", value),
+            )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
 def _is_help_vault_path(path: str) -> bool:
     try:
         return Path(path).name.lower() == "help-vault"
