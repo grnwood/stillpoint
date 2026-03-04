@@ -11,7 +11,8 @@ def test_rag_retrieve_pdf(tmp_path: Path) -> None:
     vault_root.mkdir()
     marker_page = vault_root / "PersonalNotes.md"
     marker_page.write_text("vault page marker", encoding="utf-8")
-    pdf_source = Path("dev-assets/richesrestaurant.pdf")
+    repo_root = Path(__file__).resolve().parent.parent
+    pdf_source = repo_root / "dev-assets" / "richesrestaurant.pdf"
     assert pdf_source.exists(), f"{pdf_source} not found for test"
     pdf_dest = vault_root / pdf_source.name
     copy2(pdf_source, pdf_dest)

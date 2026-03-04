@@ -2,8 +2,14 @@ import pytest
 from PySide6.QtCore import QMimeData, Qt
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtGui import QImage
+from PySide6.QtTest import QTest
 
-from sp.app.ui.markdown_editor import LINK_SENTINEL, MarkdownEditor
+from sp.app.ui.markdown_editor import (
+    LINK_SENTINEL,
+    MarkdownEditor,
+    heading_level_from_char,
+    heading_sentinel,
+)
 
 
 @pytest.fixture
@@ -193,6 +199,34 @@ def test_paste_heading_formats_trailing_character(editor, qapp):
 
     assert last_fmt.foreground().color() == prev_fmt.foreground().color()
     assert last_fmt.fontPointSize() == prev_fmt.fontPointSize()
+
+
+def test_editing_rendered_heading_stays_heading_until_line_exit(editor, qapp):
+    editor.setPlainText(f"{heading_sentinel(1)}Stable Heading")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    # Use editor internals directly so this test stays stable regardless of vi mode.
+    assert editor._prepare_heading_edit_on_input(editor.textCursor())
+    cursor = editor.textCursor()
+    cursor.insertText("x")
+    editor.setTextCursor(cursor)
+    qapp.processEvents()
+
+    block = editor.document().firstBlock()
+    assert block.text().startswith("# ")
+    assert block.text().endswith("x")
+
+    editor._finalize_heading_block(block)
+    qapp.processEvents()
+
+    first = editor.document().firstBlock()
+    stripped = first.text().lstrip()
+    assert stripped
+    assert heading_level_from_char(stripped[0]) == 1
 
 
 def test_paste_teams_jira_artifact_links_stabilizes_markdown(editor):

@@ -3991,7 +3991,7 @@ class MarkdownEditor(QTextEdit):
         self._schedule_heading_outline()
 
     def _prepare_heading_edit_on_input(self, cursor: QTextCursor) -> bool:
-        """Strip heading sentinel for editing and remember prior heading level."""
+        """Switch rendered heading sentinel to markdown form for stable in-line editing."""
         block = cursor.block()
         if not block.isValid():
             return False
@@ -4006,19 +4006,21 @@ class MarkdownEditor(QTextEdit):
         post_sentinel = stripped[1:]
         space_count = len(post_sentinel) - len(post_sentinel.lstrip())
         content = post_sentinel.lstrip()
-        new_line = indent + content
+        marker = "#" * level
+        new_line = f"{indent}{marker} {content}"
         if new_line == text:
             return False
 
         line_start = block.position()
+        old_content_start = len(indent) + 1 + space_count
+        new_content_start = len(indent) + len(marker) + 1
 
         def _adjust_rel(rel: int) -> int:
             if rel <= len(indent):
                 return rel
-            content_start = len(indent) + 1 + space_count
-            if rel > content_start:
-                return max(len(indent), rel - (1 + space_count))
-            return len(indent)
+            if rel <= old_content_start:
+                return new_content_start
+            return new_content_start + (rel - old_content_start)
 
         if cursor.hasSelection():
             sel_start = cursor.selectionStart()
@@ -8062,7 +8064,16 @@ class MarkdownEditor(QTextEdit):
                     self._pending_heading_level = None
                     return
                 indent = text[: len(text) - len(stripped)]
-                converted = f"{indent}{heading_sentinel(self._pending_heading_level)}{stripped}"
+                if stripped.startswith("#"):
+                    hashes = len(stripped) - len(stripped.lstrip("#"))
+                    body = stripped[hashes:].lstrip()
+                    if 1 <= hashes <= HEADING_MAX_LEVEL:
+                        level = hashes
+                    else:
+                        level = self._pending_heading_level
+                    converted = f"{indent}{heading_sentinel(level)}{body}"
+                else:
+                    converted = f"{indent}{heading_sentinel(self._pending_heading_level)}{stripped}"
 
             current = self.textCursor()
             current_pos = current.position()
