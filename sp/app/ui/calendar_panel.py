@@ -87,26 +87,35 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         self.text_color = theme_color("calendar_panel.multi_select.text", "#FFFFFF")
         self.calendar_widget = calendar_widget
 
-    def _date_for_index(self, index) -> QDate:
-        # Prefer exact date payload from the Qt model when available.
-        base_role = int(Qt.ItemDataRole.UserRole)
-        role_candidates = [int(Qt.ItemDataRole.DisplayRole)] + [base_role + i for i in range(0, 64)]
-        for role in role_candidates:
+    @staticmethod
+    def _first_data_row(model) -> int:
+        rows = model.rowCount()
+        cols = model.columnCount()
+        for r in range(rows):
+            for c in range(cols):
+                val = model.index(r, c).data(int(Qt.ItemDataRole.DisplayRole))
+                if isinstance(val, int) and 1 <= val <= 31:
+                    return r
+        return 0
+
+    def _date_for_index_with_role(self, index) -> tuple[QDate, Optional[int]]:
+        # Prefer exact per-cell date payload when available.
+        for role in (int(Qt.ItemDataRole.UserRole), int(Qt.ItemDataRole.EditRole)):
             try:
                 date_val = index.data(role)
             except Exception:
                 date_val = None
             if isinstance(date_val, QDate) and date_val.isValid():
-                return date_val
+                return date_val, role
 
         # Fallback for model variants that only expose day number.
         if not self.calendar_widget:
-            return QDate()
+            return QDate(), None
         year = self.calendar_widget.yearShown()
         month = self.calendar_widget.monthShown()
         first = QDate(year, month, 1)
         if not first.isValid():
-            return QDate()
+            return QDate(), None
         first_day_enum = self.calendar_widget.firstDayOfWeek()
         first_day = int(getattr(first_day_enum, "value", first_day_enum))
         first_of_month_weekday = first.dayOfWeek()  # 1=Mon .. 7=Sun
@@ -115,8 +124,15 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         # a leading week from the previous month in the calendar grid.
         if leading_days == 0:
             leading_days = 7
-        day_offset = index.row() * 7 + index.column() - leading_days
-        return first.addDays(day_offset)
+        model = index.model()
+        first_row = self._first_data_row(model) if model is not None else 0
+        row = index.row() - first_row
+        day_offset = row * 7 + index.column() - leading_days
+        return first.addDays(day_offset), None
+
+    def _date_for_index(self, index) -> QDate:
+        date_val, _role = self._date_for_index_with_role(index)
+        return date_val
     
     def paint(self, painter, option, index):
         # Try multiple ways to get the date from this cell
@@ -2144,8 +2160,53 @@ class CalendarPanel(QWidget):
         self._update_insights_for_selection()
         self._update_today_visibility()
         self._sync_aux_calendars()
+        self._debug_log_calendar_resolution(date)
         if not is_shift:
             self.dateActivated.emit(date.year(), date.month(), date.day())
+
+    def _debug_log_calendar_resolution(self, clicked_date: QDate) -> None:
+        view = getattr(self, "calendar_view", None)
+        if not view or not Shiboken.isValid(view):
+            print("[CALENDAR_DEBUG] calendar_view missing/invalid")
+            return
+        model = view.model()
+        if model is None:
+            print("[CALENDAR_DEBUG] calendar model missing")
+            return
+        current = view.currentIndex()
+        selected = self.calendar.selectedDate()
+        print(
+            "[CALENDAR_DEBUG] click="
+            f"{clicked_date.toString('yyyy-MM-dd')} "
+            f"calendar.selected={selected.toString('yyyy-MM-dd')} "
+            f"view.current=({current.row()},{current.column()}) "
+            f"yearShown={self.calendar.yearShown()} monthShown={self.calendar.monthShown()}"
+        )
+        target_day = clicked_date.day()
+        rows = model.rowCount()
+        cols = model.columnCount()
+        for r in range(rows):
+            for c in range(cols):
+                idx = model.index(r, c)
+                disp = idx.data(int(Qt.ItemDataRole.DisplayRole))
+                if disp != target_day:
+                    continue
+                resolved, role = self.calendar_delegate._date_for_index_with_role(idx)
+                is_selected = any(
+                    d.isValid()
+                    and resolved.isValid()
+                    and d.year() == resolved.year()
+                    and d.month() == resolved.month()
+                    and d.day() == resolved.day()
+                    for d in self.multi_selected_dates
+                )
+                print(
+                    "[CALENDAR_DEBUG] cell "
+                    f"r={r} c={c} display={disp} "
+                    f"resolved={resolved.toString('yyyy-MM-dd') if resolved.isValid() else 'INVALID'} "
+                    f"role={role} "
+                    f"in_multi={is_selected}"
+                )
 
     def _selected_dates_for_tasks(self) -> list[QDate]:
         if self.multi_selected_dates:
@@ -2572,6 +2633,7 @@ class CalendarPanel(QWidget):
                     self._apply_multi_selection_formats()
                     self._update_day_listing(date)
                     self._update_insights_for_selection()
+                    self._debug_log_calendar_resolution(date)
                     if not is_shift:
                         self.dateActivated.emit(date.year(), date.month(), date.day())
                     return True
@@ -2606,15 +2668,7 @@ class CalendarPanel(QWidget):
         idx = self.calendar_view.indexAt(pos)
         if not idx.isValid():
             return QDate()
-        model = idx.model()
-        if model:
-            val = idx.data(Qt.UserRole)
-            if isinstance(val, QDate) and val.isValid():
-                return val
-            day_val = idx.data(Qt.DisplayRole)
-            if isinstance(day_val, int):
-                return self._resolve_day_from_index(idx.row(), idx.column(), day_val)
-        return QDate()
+        return self.calendar_delegate._date_for_index(idx)
 
     def _resolve_day_from_index(self, row: int, col: int, day: int) -> QDate:
         """Best-effort mapping from table index to a real date."""
