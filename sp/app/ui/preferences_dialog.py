@@ -1215,6 +1215,7 @@ class PreferencesDialog(QDialog):
         self.quick_capture_vault_combo.clear()
         self.quick_capture_vault_combo.addItem("No home vault (use current vault)", None)
         seen: set[str] = set()
+        homebase_profiles = config.load_homebase_vault_profiles()
         for vault in config.load_known_vaults():
             path = vault.get("path")
             if not path:
@@ -1223,6 +1224,13 @@ class PreferencesDialog(QDialog):
                 continue
             name = vault.get("name") or Path(path).name
             self.quick_capture_vault_combo.addItem(name, path)
+            seen.add(path)
+        for profile in homebase_profiles:
+            path = str(profile.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            name = str(profile.get("name") or Path(path).name)
+            self.quick_capture_vault_combo.addItem(f"[Homebase] {name}", path)
             seen.add(path)
         for server in config.load_remote_servers():
             host = str(server.get("host") or "").strip()
@@ -1245,6 +1253,16 @@ class PreferencesDialog(QDialog):
                 self.quick_capture_vault_combo.addItem(name, ref)
                 seen.add(ref)
         saved = config.load_quick_capture_vault()
+        selected_value = saved
+        if saved and saved.startswith("homebase::"):
+            for profile in homebase_profiles:
+                profile_id = str(profile.get("id") or "").strip()
+                if profile_id != saved:
+                    continue
+                profile_path = str(profile.get("path") or "").strip()
+                if profile_path:
+                    selected_value = profile_path
+                break
         if saved and self.quick_capture_vault_combo.findData(saved) == -1:
             if saved.startswith("remote::"):
                 parts = saved.split("::", 2)
@@ -1252,10 +1270,23 @@ class PreferencesDialog(QDialog):
                     display = f"[Remote] {parts[1]}: {Path(parts[2]).name or parts[2]}"
                 else:
                     display = saved
+            elif saved.startswith("homebase::"):
+                display = saved
+                for profile in homebase_profiles:
+                    profile_id = str(profile.get("id") or "").strip()
+                    if profile_id != saved:
+                        continue
+                    profile_name = str(profile.get("name") or "").strip()
+                    profile_path = str(profile.get("path") or "").strip()
+                    label = profile_name or (Path(profile_path).name if profile_path else "")
+                    display = f"[Homebase] {label or saved}"
+                    break
             else:
                 display = Path(saved).name or saved
             self.quick_capture_vault_combo.addItem(f"{display} (missing)", saved)
-        idx = self.quick_capture_vault_combo.findData(saved)
+        idx = self.quick_capture_vault_combo.findData(selected_value)
+        if idx == -1:
+            idx = self.quick_capture_vault_combo.findData(saved)
         self.quick_capture_vault_combo.setCurrentIndex(idx if idx != -1 else 0)
         self.quick_capture_vault_combo.blockSignals(False)
 
