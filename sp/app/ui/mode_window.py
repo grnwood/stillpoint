@@ -506,12 +506,9 @@ class ModeWindow(QMainWindow):
             self._shortcuts.append(sc)
             return sc
 
-        # Close by repeating the toggle key
-        if self.mode == "focus":
-            seq = "Ctrl+Alt+F"
-        else:
-            seq = "Ctrl+Alt+A"
-        _add_shortcut(seq, self._request_close)
+        # Treat both mode hotkeys as toggles while overlay is open.
+        _add_shortcut("Ctrl+Alt+F", self._request_close)
+        _add_shortcut("Ctrl+Alt+A", self._request_close)
 
         if self.mode == "audience":
             _add_shortcut("Ctrl+Alt+=", lambda: self._adjust_font_scale(0.05))
@@ -1034,6 +1031,18 @@ class ModeWindow(QMainWindow):
         headings = self._heading_popup_candidates()
         if not headings:
             return
+        selected_bg = theme_value(
+            "mode_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        try:
+            accent = config.load_vault_accent_color()
+            if accent:
+                color = QColor(accent)
+                if color.isValid():
+                    selected_bg = color.name()
+        except Exception:
+            pass
         # Dispose any existing picker
         if hasattr(self, "_heading_picker") and self._heading_picker:
             try:
@@ -1054,7 +1063,7 @@ class ModeWindow(QMainWindow):
             f"{theme_value('mode_window.picker_popup.list_text', '#f5f5f5')}; border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
             "QListWidget::item:selected { background: "
-            f"{theme_value('mode_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
+            f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -1294,7 +1303,7 @@ class ModeWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(theme_color("mode_window.highlight.selection_bg", "#ffd54f"))
+            sel.format.setBackground(self._flash_highlight_color())
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9992)  # Different from _flash_cursor_line
             current = self.editor.extraSelections()
@@ -1544,7 +1553,7 @@ class ModeWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(theme_color("mode_window.highlight.selection_bg", "#ffd54f"))
+            sel.format.setBackground(self._flash_highlight_color())
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = editor.extraSelections()
@@ -1560,6 +1569,18 @@ class ModeWindow(QMainWindow):
             QTimer.singleShot(220, clear_flash)
         except Exception:
             pass
+
+    def _flash_highlight_color(self) -> QColor:
+        accent = None
+        try:
+            accent = config.load_vault_accent_color()
+        except Exception:
+            accent = None
+        if accent:
+            color = QColor(accent)
+            if color.isValid():
+                return color
+        return theme_color("mode_window.highlight.selection_bg", "#ffd54f")
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date in the overlay editor."""

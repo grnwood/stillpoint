@@ -5,7 +5,7 @@ Vi mode is now a user-level preference (Preferences → Editing → Enable Vi Mo
 ## When vi mode is disabled
 
 - The status bar shows only the dirty badge; the `INS` label is hidden.
-- All keys behave like a standard QTextEdit. Existing shortcuts such as recent-pages (`Ctrl+Tab`), heading navigator (`Ctrl+Shift+Tab`), `Ctrl+J`/`Ctrl+L`, task helpers, etc., continue unchanged.
+- All keys behave like a standard QTextEdit. Existing shortcuts such as recent-pages (`Ctrl+Tab`), heading navigator (`Ctrl+Shift+Tab` / `Ctrl+Alt+T`), `Ctrl+J`/`Ctrl+L`, task helpers, etc., continue unchanged.
 
 ## When vi mode is enabled
 
@@ -45,5 +45,5 @@ Vi mode is now a user-level preference (Preferences → Editing → Enable Vi Mo
 ### Additional guarantees
 
 - Tab/backtab behavior is unchanged; multi-line indents continue to work.
-- Recent-pages (`Ctrl+Tab`) and heading navigator (`Ctrl+Shift+Tab`) dialogues still suspend typing but do not disturb vi state once dismissed.
+- Recent-pages (`Ctrl+Tab`) and heading navigator (`Ctrl+Shift+Tab` / `Ctrl+Alt+T`) dialogues still suspend typing but do not disturb vi state once dismissed.
 - Vi activation is deferred until after the first paint so startup with vi mode enabled no longer hangs or crashes on Windows.

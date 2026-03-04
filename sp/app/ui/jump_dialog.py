@@ -233,29 +233,26 @@ class JumpToPageDialog(QDialog):
                 return
             if key in (Qt.Key_Backspace, Qt.Key_Delete):
                 self.search.setFocus()
-                QApplication.sendEvent(self.search, event)
+                self._apply_search_delete(backspace=(key == Qt.Key_Backspace))
                 event.accept()
                 return
         # Handle arrow keys and vi-mode shortcuts (Shift+J/K)
         if event.key() in (Qt.Key_Up, Qt.Key_Down):
-            QApplication.sendEvent(self.list_widget, event)
-            if previous_focus is not self.list_widget:
-                previous_focus.setFocus()
+            self._move_list_selection(-1 if event.key() == Qt.Key_Up else 1)
+            if previous_focus is not None and previous_focus is not self.list_widget:
+                try:
+                    previous_focus.setFocus()
+                except Exception:
+                    pass
             event.accept()
             return
         # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
         elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
-            # Directly manipulate list selection instead of sending synthetic events
-            current_row = self.list_widget.currentRow()
-            if current_row < self.list_widget.count() - 1:
-                self.list_widget.setCurrentRow(current_row + 1)
+            self._move_list_selection(1)
             event.accept()
             return
         elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
-            # Directly manipulate list selection instead of sending synthetic events
-            current_row = self.list_widget.currentRow()
-            if current_row > 0:
-                self.list_widget.setCurrentRow(current_row - 1)
+            self._move_list_selection(-1)
             event.accept()
             return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -273,7 +270,7 @@ class JumpToPageDialog(QDialog):
                 return True
             if key in (Qt.Key_Backspace, Qt.Key_Delete):
                 self.search.setFocus()
-                QApplication.sendEvent(self.search, event)
+                self._apply_search_delete(backspace=(key == Qt.Key_Backspace))
                 return True
         return super().eventFilter(obj, event)
 
@@ -282,6 +279,39 @@ class JumpToPageDialog(QDialog):
             self.accept()
             return True
         return False
+
+    def _move_list_selection(self, delta: int) -> None:
+        count = self.list_widget.count()
+        if count <= 0:
+            return
+        current_row = self.list_widget.currentRow()
+        if current_row < 0:
+            current_row = 0 if delta >= 0 else count - 1
+        next_row = max(0, min(count - 1, current_row + delta))
+        if next_row != current_row:
+            self.list_widget.setCurrentRow(next_row)
+
+    def _apply_search_delete(self, *, backspace: bool) -> None:
+        text = self.search.text()
+        sel_start = self.search.selectionStart()
+        cursor_pos = self.search.cursorPosition()
+        if sel_start >= 0:
+            sel_len = len(self.search.selectedText())
+            start = sel_start
+            end = sel_start + sel_len
+            self.search.setText(text[:start] + text[end:])
+            self.search.setCursorPosition(start)
+            return
+        if backspace:
+            if cursor_pos <= 0:
+                return
+            self.search.setText(text[: cursor_pos - 1] + text[cursor_pos:])
+            self.search.setCursorPosition(cursor_pos - 1)
+            return
+        if cursor_pos >= len(text):
+            return
+        self.search.setText(text[:cursor_pos] + text[cursor_pos + 1 :])
+        self.search.setCursorPosition(cursor_pos)
 
     def _refresh(self) -> None:
         term = self.search.text().strip()

@@ -837,6 +837,18 @@ class PageEditorWindow(QMainWindow):
         if not headings:
             print("[PageEditor] No headings to show")
             return
+        selected_bg = theme_value(
+            "page_editor_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        try:
+            accent = config.load_vault_accent_color()
+            if accent:
+                color = QColor(accent)
+                if color.isValid():
+                    selected_bg = color.name()
+        except Exception:
+            pass
         # Dispose any existing picker
         if hasattr(self, "_heading_picker") and self._heading_picker:
             try:
@@ -858,7 +870,7 @@ class PageEditorWindow(QMainWindow):
             "border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
             "QListWidget::item:selected { background: "
-            f"{theme_value('page_editor_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
+            f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)

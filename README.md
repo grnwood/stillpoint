@@ -77,9 +77,10 @@ Key UI features:
 
 - Vault picker, New Vault flow, and multi-window support.
 - Left tree navigator with inline rename, create, and delete.
+- Tree keyboard navigation is selection-first (`Alt+PgUp/PgDn` or arrows), with explicit open on `Enter` (or `Ctrl+Enter` to keep tree focus).
 - Drag and drop to reorder pages within the same folder.
 - Right-click "Move To..." to relocate pages or folders to different parents.
-- History popup (Ctrl+Tab) and heading switcher (Ctrl+Shift+Tab).
+- History popup (Ctrl+Tab) and heading switcher (Ctrl+Shift+Tab or Ctrl+Alt+T).
 - Task panel with tag filtering and search.
 - Calendar panel and "Today" journal actions.
 - Attachments, link navigator, and AI panels (optional).

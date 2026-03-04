@@ -1938,8 +1938,7 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):  # type: ignore[override]
         """Custom paint to draw horizontal rules as visual lines."""
-        if os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", ""):
-            super().paintEvent(event)
+        if self._vi_paint_in_progress:
             return
         if self._post_load_paint_guard_active():
             return
@@ -1947,23 +1946,18 @@ class MarkdownEditor(QTextEdit):
             return
         if self._mutations_blocked():
             return
-        if self._vi_paint_in_progress:
+        # Guard against paint events firing while underlying Qt objects are
+        # being replaced/torn down. Calling into QTextEdit paint in this state
+        # can segfault on some platforms.
+        if (
+            not self._editor_alive
+            or not self._document_alive
+            or not self._layout_alive
+            or not self._viewport_alive
+            or not self._is_alive(self)
+        ):
             return
-        self._vi_paint_in_progress = True
-        painter: Optional[QPainter] = None
         try:
-            # Guard against paint events firing while the underlying Qt objects are
-            # being torn down (e.g., during vault switches). Hitting an invalid
-            # document/layout inside QTextEdit's paintEvent can segfault, so we bail
-            # out early if anything looks dead.
-            if (
-                not self._editor_alive
-                or not self._document_alive
-                or not self._layout_alive
-                or not self._viewport_alive
-                or not self._is_alive(self)
-            ):
-                return
             document = self.document()
             if not self._is_alive(document):
                 return
@@ -1973,7 +1967,44 @@ class MarkdownEditor(QTextEdit):
             viewport = self.viewport()
             if not self._is_alive(viewport):
                 return
+        except Exception:
+            return
 
+        # Keep the extra HR overlay opt-in; relying on QTextEdit's native paint path
+        # is significantly more stable across focus/app-state churn and platform Qt quirks.
+        enable_hr_overlay = os.getenv("SP_ENABLE_HR_OVERLAY", "0") in ("1", "true", "True")
+        disable_hr_overlay = os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", "")
+        if not enable_hr_overlay or disable_hr_overlay:
+            self._vi_paint_in_progress = True
+            try:
+                super().paintEvent(event)
+                if not self._vi_has_painted:
+                    self._vi_has_painted = True
+            finally:
+                self._vi_paint_in_progress = False
+            return
+
+        self._vi_paint_in_progress = True
+        painter: Optional[QPainter] = None
+        try:
+            if log_enabled("editor_render"):
+                try:
+                    logger.info(
+                        "[MD_PAINT] super.paintEvent begin alive=%s/%s/%s/%s visible=%s updates=%s "
+                        "doc_blocks=%s load_guard=%s suppress=%s depth=%s",
+                        self._editor_alive,
+                        self._document_alive,
+                        self._layout_alive,
+                        self._viewport_alive,
+                        self.isVisible(),
+                        self.updatesEnabled(),
+                        document.blockCount(),
+                        type(self)._LOAD_GUARD_DEPTH,
+                        self._suppress_paint,
+                        self._suppress_paint_depth,
+                    )
+                except Exception:
+                    pass
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
@@ -4356,6 +4387,19 @@ class MarkdownEditor(QTextEdit):
         # Reserve Ctrl+\ and Ctrl+Backslash for application shortcuts (task panel focus)
         if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Backslash, 0x5C):
             event.ignore()
+            return
+        # Non-vi shortcut for heading picker (same popup vi mode uses for `t`)
+        if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() == Qt.Key_T:
+            cursor_rect = self.cursorRect()
+            viewport = self.viewport()
+            prefer_above = False
+            try:
+                prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+            except Exception:
+                prefer_above = False
+            global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+            self.headingPickerRequested.emit(global_point, prefer_above)
+            event.accept()
             return
         # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
         if event.modifiers() == Qt.ControlModifier:

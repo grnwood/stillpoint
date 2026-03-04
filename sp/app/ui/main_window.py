@@ -1034,6 +1034,7 @@ class InlineNameEdit(QLineEdit):
 
 class VaultTreeView(QTreeView):
     enterActivated = Signal()
+    ctrlEnterActivated = Signal()
     arrowNavigated = Signal()
     escapePressed = Signal()
     rowClicked = Signal(QModelIndex)
@@ -1056,21 +1057,85 @@ class VaultTreeView(QTreeView):
         self.setDragDropMode(QAbstractItemView.InternalMove)
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        mods = event.modifiers() & ~Qt.KeypadModifier
+        vi_nav_enabled = False
+        try:
+            host = self.window()
+            vi_nav_enabled = bool(getattr(host, "_vi_enabled", False))
+        except Exception:
+            vi_nav_enabled = False
+
         if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
             self.escapePressed.emit()
             self.collapseAll()
             event.accept()
             return
-        if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Down, Qt.Key_Up):
+        if mods == Qt.NoModifier and event.key() in (Qt.Key_Backslash, 0x5C):
+            self.collapseAll()
+            event.accept()
+            return
+        if mods == Qt.ControlModifier and event.key() in (Qt.Key_Down, Qt.Key_Up):
             direction = 1 if event.key() == Qt.Key_Down else -1
             self._walk_tree(direction)
             self.arrowNavigated.emit()
             event.accept()
             return
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.NoModifier:
-            super().keyPressEvent(event)
-            self.enterActivated.emit()
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.isAutoRepeat():
+            event.accept()
             return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods in (
+            Qt.ControlModifier,
+            Qt.AltModifier,
+        ):
+            self.ctrlEnterActivated.emit()
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.NoModifier:
+            # Keep Enter deterministic: route through our own open/focus handler only.
+            # Calling the default QTreeView Enter behavior here can trigger extra
+            # selection/edit/expand activity and race with our selection-open logic.
+            self.enterActivated.emit()
+            event.accept()
+            return
+        if vi_nav_enabled and mods == Qt.NoModifier:
+            if event.key() == Qt.Key_J:
+                self._walk_tree(1)
+                self.arrowNavigated.emit()
+                event.accept()
+                return
+            if event.key() == Qt.Key_K:
+                self._walk_tree(-1)
+                self.arrowNavigated.emit()
+                event.accept()
+                return
+            if event.key() == Qt.Key_H:
+                idx = self.currentIndex()
+                if idx.isValid():
+                    if self.isExpanded(idx):
+                        self.collapse(idx)
+                    else:
+                        parent = idx.parent()
+                        if parent.isValid():
+                            self.setCurrentIndex(parent)
+                            self.scrollTo(parent)
+                self.arrowNavigated.emit()
+                event.accept()
+                return
+            if event.key() == Qt.Key_L:
+                idx = self.currentIndex()
+                model = self.model()
+                if idx.isValid() and model is not None:
+                    if model.rowCount(idx) > 0:
+                        if not self.isExpanded(idx):
+                            self.expand(idx)
+                        else:
+                            child = model.index(0, 0, idx)
+                            if child.isValid():
+                                self.setCurrentIndex(child)
+                                self.scrollTo(child)
+                self.arrowNavigated.emit()
+                event.accept()
+                return
         if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
             self.arrowNavigated.emit()
         super().keyPressEvent(event)
@@ -1710,8 +1775,6 @@ class MainWindow(QMainWindow):
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
-        self._tree_nav_open_timer: Optional[QTimer] = None
-        self._tree_nav_open_target: Optional[str] = None
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
         self._hierarchy_last_child_by_parent: dict[str, str] = {}
@@ -1808,6 +1871,7 @@ class MainWindow(QMainWindow):
         self.tree_view.customContextMenuRequested.connect(self._open_context_menu)
         self.tree_view.selectionModel().currentChanged.connect(self._on_selection_changed)
         self.tree_view.enterActivated.connect(self._focus_editor_from_tree)
+        self.tree_view.ctrlEnterActivated.connect(self._activate_tree_selection_keep_focus)
         self.tree_view.arrowNavigated.connect(self._mark_tree_arrow_nav)
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
@@ -1931,6 +1995,12 @@ class MainWindow(QMainWindow):
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.textChanged.connect(lambda: self.autosave_timer.start())
         self.editor.focusLost.connect(self._on_editor_focus_lost)
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.connect(self._on_application_state_changed)
+            except Exception:
+                pass
         self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
         self.editor.linkHovered.connect(self._on_link_hovered)
         self.editor.linkCopied.connect(self._on_link_copied)
@@ -2750,22 +2820,6 @@ class MainWindow(QMainWindow):
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
-        self._vault_accent_toolbar = QToolBar("Vault Accent", self)
-        self._vault_accent_toolbar.setMovable(False)
-        self._vault_accent_toolbar.setFloatable(False)
-        self._vault_accent_toolbar.setAllowedAreas(Qt.TopToolBarArea)
-        self._vault_accent_toolbar.setContentsMargins(0, 0, 0, 0)
-        self._vault_accent_toolbar.setStyleSheet(
-            "QToolBar { border: none; margin: 0; padding: 0; spacing: 0; }"
-        )
-        self._vault_accent_strip = QFrame()
-        self._vault_accent_strip.setObjectName("vaultAccentStrip")
-        self._vault_accent_strip.setFixedHeight(8)
-        self._vault_accent_strip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._vault_accent_toolbar.addWidget(self._vault_accent_strip)
-        self.addToolBar(Qt.TopToolBarArea, self._vault_accent_toolbar)
-        self.addToolBarBreak(Qt.TopToolBarArea)
-
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
         icon_color = self._main_icon_color()
@@ -3071,8 +3125,8 @@ class MainWindow(QMainWindow):
         nav_forward.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._on_nav_up_shortcut)
         nav_down.activated.connect(self._on_nav_down_shortcut)
-        nav_pg_up.activated.connect(lambda: self._navigate_tree(-1, leaves_only=False))
-        nav_pg_down.activated.connect(lambda: self._navigate_tree(1, leaves_only=False))
+        nav_pg_up.activated.connect(lambda: self._on_nav_page_shortcut(-1))
+        nav_pg_down.activated.connect(lambda: self._on_nav_page_shortcut(1))
         reload_page.activated.connect(self._reload_current_page)
         toggle_left.activated.connect(self._toggle_left_panel)
         toggle_right.activated.connect(self._toggle_right_panel)
@@ -6667,22 +6721,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._update_active_page_chicklets()
-        strip = getattr(self, "_vault_accent_strip", None)
-        toolbar = getattr(self, "_vault_accent_toolbar", None)
-        if strip is None or toolbar is None:
-            self._apply_focus_borders()
-            return
-        if not accent:
-            strip.setStyleSheet("QFrame#vaultAccentStrip { background: transparent; }")
-            toolbar.setVisible(False)
-            self._apply_focus_borders()
-            return
-        strip.setStyleSheet(
-            "QFrame#vaultAccentStrip { "
-            f"background: {accent};"
-            "}"
-        )
-        toolbar.setVisible(True)
         self._apply_focus_borders()
 
     def _ensure_config_active_vault_context(self) -> None:
@@ -7969,6 +8007,13 @@ class MainWindow(QMainWindow):
         headings = self._toc_headings or []
         if not headings:
             return
+        selected_bg = theme_value(
+            "main_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        accent = getattr(self, "_vault_accent_color", None)
+        if accent:
+            selected_bg = self._selection_bg_for_accent(accent)
         # Dispose any existing picker
         if hasattr(self, "_heading_picker") and self._heading_picker:
             try:
@@ -7994,7 +8039,7 @@ class MainWindow(QMainWindow):
             "border: none; }}"
             "QListWidget::item { padding: 4px 6px; }"
             "QListWidget::item:selected { background: "
-            f"{theme_value('main_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; }}"
+            f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -9760,6 +9805,17 @@ class MainWindow(QMainWindow):
         else:
             self._remember_history_cursor()
             self._save_current_file(auto=True, reason="focus lost")
+
+    def _on_application_state_changed(self, state) -> None:
+        """Persist editor content when app deactivates (Alt+Tab/window switch)."""
+        try:
+            inactive = state == Qt.ApplicationState.ApplicationInactive
+        except Exception:
+            inactive = False
+        if not inactive:
+            return
+        self._remember_history_cursor()
+        self._save_current_file(auto=True, reason="application deactivated")
 
     def _find_asset(self, name: str) -> Optional[Path]:
         """Locate an asset in development or PyInstaller layouts."""
@@ -13099,22 +13155,41 @@ class MainWindow(QMainWindow):
         elif focus_target == "editor":
             self.editor.setFocus()
 
-    def _focus_editor_from_tree(self) -> None:
+    def _activate_tree_selection(self, *, focus_editor: bool) -> None:
         self._tree_enter_focus = True
+        self._cancel_tree_nav_open()
         index = self.tree_view.currentIndex()
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE) if index.isValid() else None
+        if log_enabled("navigation"):
+            print(
+                f"[TREE] enterActivated index_valid={index.isValid()} "
+                f"target={target!r} current={self.current_path!r}"
+            )
         if target == FILTER_BANNER:
             self._clear_nav_filter()
             return
         if target and target != self.current_path:
             self._skip_next_selection_open = True
             self._open_file(target)
-        self._focus_editor()
+        if focus_editor:
+            self._focus_editor()
+        else:
+            try:
+                self.tree_view.setFocus(Qt.ShortcutFocusReason)
+            except Exception:
+                pass
         QTimer.singleShot(0, lambda: setattr(self, "_tree_enter_focus", False))
         self._tree_keyboard_nav = False
 
+    def _focus_editor_from_tree(self) -> None:
+        self._activate_tree_selection(focus_editor=True)
+
+    def _activate_tree_selection_keep_focus(self) -> None:
+        self._activate_tree_selection(focus_editor=False)
+
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
         """Open and focus editor when a tree row is clicked."""
+        self._cancel_tree_nav_open()
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
         if target == FILTER_BANNER:
             self._clear_nav_filter()
@@ -15468,10 +15543,17 @@ class MainWindow(QMainWindow):
             rows = model.rowCount(parent_index)
             for row in range(rows):
                 idx = model.index(row, 0, parent_index)
+                if not idx.isValid():
+                    continue
+                # Skip placeholders/non-navigable rows.
+                if not (idx.data(PATH_ROLE) or idx.data(OPEN_ROLE)):
+                    continue
                 is_dir = bool(idx.data(TYPE_ROLE))
                 if not leaves_only or not is_dir:
                     flat.append(idx)
-                recurse(idx)
+                # Match visible tree navigation semantics: only descend into expanded nodes.
+                if self.tree_view.isExpanded(idx):
+                    recurse(idx)
 
         recurse(QModelIndex())
         return [idx for idx in flat if idx.isValid()]
@@ -16123,6 +16205,13 @@ class MainWindow(QMainWindow):
             print(f"[HIER] Alt+Down activated current={self.current_path!r}")
         self._navigate_hierarchy_down()
 
+    def _on_nav_page_shortcut(self, delta: int) -> None:
+        if log_enabled("navigation"):
+            direction = "PgDown" if delta > 0 else "PgUp"
+            print(f"[HIER] Alt+{direction} activated current={self.current_path!r}")
+        self._focus_vault_tab()
+        self._navigate_tree(delta, leaves_only=False)
+
     def _navigate_hierarchy_down(self) -> None:
         """Navigate down in page hierarchy (Alt+Down): Open previous child, else first child page."""
         self._exit_vi_insert_on_activate()
@@ -16197,6 +16286,7 @@ class MainWindow(QMainWindow):
         indexes = self._gather_indexes(leaves_only)
         if not indexes:
             return
+        self._cancel_tree_nav_open()
         current = self.tree_view.currentIndex()
         try:
             idx = indexes.index(current)
@@ -16212,29 +16302,17 @@ class MainWindow(QMainWindow):
             self.tree_view.scrollTo(target)
         finally:
             self._suspend_selection_open = False
-        
-        # Open the page for this node (whether folder or file)
-        open_target = target.data(OPEN_ROLE) or target.data(PATH_ROLE)
-        if open_target and open_target != self.current_path:
-            self._schedule_tree_nav_open(str(open_target))
 
-    def _schedule_tree_nav_open(self, open_target: str, debounce_ms: int = 280) -> None:
-        target = str(open_target or "").strip()
-        if not target:
-            return
-        self._tree_nav_open_target = target
-        if self._tree_nav_open_timer is None:
-            self._tree_nav_open_timer = QTimer(self)
-            self._tree_nav_open_timer.setSingleShot(True)
-            self._tree_nav_open_timer.timeout.connect(self._flush_tree_nav_open)
-        self._tree_nav_open_timer.start(max(1, int(debounce_ms)))
-
-    def _flush_tree_nav_open(self) -> None:
-        target = str(self._tree_nav_open_target or "").strip()
-        self._tree_nav_open_target = None
-        if not target or target == self.current_path:
-            return
-        self._open_file(target)
+    def _cancel_tree_nav_open(self) -> None:
+        # Legacy no-op now that keyboard tree navigation is selection-only.
+        timer = getattr(self, "_tree_nav_open_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        if hasattr(self, "_tree_nav_open_target"):
+            self._tree_nav_open_target = None
 
     def _rebuild_vault_index_from_disk(self) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""

@@ -12,6 +12,10 @@ Global / Navigation
 - `Ctrl+Shift+N`: Toggle right panel.
 - `Ctrl+R`: Reload current page from disk.
 - `Ctrl+Shift+Space`: Cycle focus between tree, editor, right panel.
+- `Alt+PgUp` / `Alt+PgDown`: Move selection in the tree (selection-only; does not auto-open page).
+- `Enter` (tree focused): Open selected page and focus editor.
+- `Ctrl+Enter` (tree focused): Open selected page and keep focus in tree.
+- `\` (tree focused): Collapse the entire tree.
 
 Editor Basics
 -------------
@@ -25,6 +29,7 @@ Editor Basics
 - `Ctrl+Shift+B`: Toggle bookmarks bar.
 - `Ctrl+Tab`: Recent pages popup (hold Ctrl, tap Tab to cycle; release to open).
 - `Ctrl+Shift+Tab`: Headings popup for current page (hold Ctrl+Shift, tap Tab to cycle; release to jump and highlight).
+- `Ctrl+Alt+T`: Open heading picker for the current page (non-vi equivalent of `t`).
 
 Tasks / Vi Mode
 ---------------
@@ -33,6 +38,7 @@ Tasks / Vi Mode
 - Vi Mode: enable globally from **Preferences → Editing → Enable Vi Mode** (default: off).
   - Editors open in vi navigation mode with an `INS` badge in the status bar; the badge turns yellow only while insert mode is active.
   - Navigation keys: `h` `j` `k` `l`, `0` or `q` (line start), `;` or `$` (line end), `^` (first nonblank), `g`/`G` (file top/bottom), `w`/`b` (next/previous word).
+  - In the tree (when focused): `j`/`k` move selection down/up, `h`/`l` collapse/expand.
   - Selection helpers map to Shift+Arrow behavior: `Shift+N` selects down, `Shift+U` selects up, `Shift+;` selects to end-of-line.
   - Insert commands: `i` (before cursor), `a` (after cursor), `o`/`O` (new line below/above). `Esc` returns to navigation mode and clears insert highlighting.
   - Editing clipboard: `c` copies the current selection (or whole line) into the vi buffer, `x` cuts the selection/character into that buffer, `p` pastes from it. `d` deletes the current line, `r` replaces the character under the cursor once, `u` undoes, and `.` repeats the last edit.

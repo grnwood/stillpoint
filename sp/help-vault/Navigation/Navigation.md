@@ -8,6 +8,11 @@ The left sidebar shows your vault structure.
 - Expand/collapse folders with the arrow icons.
 - Right-click for more options like rename or delete.
 - You can right-click a folder/page and filter navigation from that point.
+- Keyboard nav in the tree is selection-first:
+  - `Alt+PgUp` / `Alt+PgDown` (or arrow keys while the tree is focused) moves selection only.
+  - `Enter` opens the selected page and focuses the editor.
+  - `Ctrl+Enter` opens the selected page and keeps focus in the tree.
+  - `\` collapses the full tree.
 - Filtering acts like a project-focused zoom:
   - The app treats that location as your working context.
   - Tasks, jump dialogs, and link pickers follow that filtered scope.
@@ -17,17 +22,17 @@ The left sidebar shows your vault structure.
 - `Ctrl+Shift+P`: open Command Bar (pages, commands, settings).
 - `Alt+Left` / `Alt+Right`: back/forward in history.
 - `Alt+Home`: go to your home page.
-- `Alt+PgUp` / `Alt+PgDown`: cycle through pages in the current nav list.
+- `Alt+PgUp` / `Alt+PgDown`: move selection through the current nav list (open with `Enter` or `Ctrl+Enter`).
 
 ## Quick Switchers
 - `Ctrl+Tab`: cycle through recent pages so you can jump back to something you were just working on.
-- `Ctrl+Shift+Tab`: open/cycle page headings so you can jump to a section in the current page.
+- `Ctrl+Shift+Tab` or `Ctrl+Alt+T`: open/cycle page headings so you can jump to a section in the current page.
 - These are great when you want to stay in the editor and move without touching the mouse.
 
 Recent pages (`Ctrl+Tab`):
 ![paste_image_001](./paste_image_001.png)
 
-Topics/headings (`Ctrl+Shift+Tab`):
+Topics/headings (`Ctrl+Shift+Tab` or `Ctrl+Alt+T`):
 ![paste_image_002](./paste_image_002.png)
 
 ## Keyboard-First Flow

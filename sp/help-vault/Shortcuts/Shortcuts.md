@@ -23,6 +23,11 @@ These shortcuts will speed up your workflow:
 - `Alt+Left`: Go back
 - `Alt+Right`: Go forward
 - `Alt+Home`: Go to home page
+- `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
+- `Enter` (file nav selected): Open selected page and focus editor
+- `Ctrl+Enter` (file nav selected): Open selected page and keep focus in file nav
+- `\` (file nav focused): Collapse the whole tree
+- `Ctrl+Alt+T`: Open heading picker
 - `Ctrl+Shift+P`: Open command bar
 - `Ctrl+L`: Insert link
 - `Ctrl+Shift+L`: Insert link to new page
@@ -79,6 +84,7 @@ If VI mode is enabled:
 - `Ctrl+Shift+L`: Copy link or heading (also stores it for `p`)
 - `Alt+h/j/k/l`: History navigation (back/forward/down/up)
 - With a selection: `-`, `*`, `>` apply list or quote styles
+- While file nav is focused: `j/k` move down/up, `h/l` collapse/expand
 
 ## Tips
 - Use the command bar (Ctrl+Shift+P) to discover more actions.
