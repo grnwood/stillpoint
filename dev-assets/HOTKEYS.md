@@ -24,6 +24,7 @@ Editor Basics
 - `Ctrl+N`: New page (inline create).
 - `Ctrl+D`: Insert date.
 - `Ctrl+J`: Jump to page.
+- `Ctrl+Alt+J`: Jump to bookmarked pages (bookmark-filtered picker).
 - `Ctrl+L`: Insert link.
 - `Ctrl+Shift+L`: Copy current page link.
 - `Ctrl+Shift+B`: Toggle bookmarks bar.
@@ -37,7 +38,7 @@ Tasks / Vi Mode
 - `Ctrl+\` or `Ctrl+Backslash`: Focus Tasks search.
 - Vi Mode: enable globally from **Preferences → Editing → Enable Vi Mode** (default: off).
   - Editors open in vi navigation mode with an `INS` badge in the status bar; the badge turns yellow only while insert mode is active.
-  - Navigation keys: `h` `j` `k` `l`, `0` or `q` (line start), `;` or `$` (line end), `^` (first nonblank), `g`/`G` (file top/bottom), `w`/`b` (next/previous word).
+  - Navigation keys: `h` `j` `k` `l`, `0` or `q` (line start), `;` or `$` (line end), `^` (first nonblank), `g`/`G` (file top/bottom), `w`/`b` (next/previous word), `f` (bookmark picker).
   - In the tree (when focused): `j`/`k` move selection down/up, `h`/`l` collapse/expand.
   - Selection helpers map to Shift+Arrow behavior: `Shift+N` selects down, `Shift+U` selects up, `Shift+;` selects to end-of-line.
   - Insert commands: `i` (before cursor), `a` (after cursor), `o`/`O` (new line below/above). `Esc` returns to navigation mode and clears insert highlighting.

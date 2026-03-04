@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from pathlib import Path
 from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QEvent
 from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
@@ -88,6 +89,7 @@ class JumpToPageDialog(QDialog):
         current_page_path: str | None = None,
         implied_target_path: str | None = None,
         implied_target_label: str | None = None,
+        allowed_paths: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._launch_mode = launch_mode  # 'jump', 'insert_link', or 'create_new'
@@ -105,6 +107,21 @@ class JumpToPageDialog(QDialog):
         self._show_rewrite_links_checkbox = show_rewrite_links_checkbox
         self._implied_target_path = self._normalize_implied_target_path(implied_target_path)
         self._implied_target_label = implied_target_label.strip() if isinstance(implied_target_label, str) else ""
+        self._allowed_paths: list[str] = []
+        if allowed_paths:
+            seen: set[str] = set()
+            for raw in allowed_paths:
+                if not isinstance(raw, str):
+                    continue
+                path = raw.strip()
+                if not path:
+                    continue
+                if not path.startswith("/"):
+                    path = f"/{path}"
+                if path in seen:
+                    continue
+                seen.add(path)
+                self._allowed_paths.append(path)
         self.rewrite_links_checkbox = None
         self.http = http_client
         self._remote_mode = remote_mode
@@ -317,18 +334,29 @@ class JumpToPageDialog(QDialog):
         term = self.search.text().strip()
         if term.startswith(":"):
             term = term.lstrip(":")
-        
-        # Get pages from remote API or local config
-        if self._remote_mode and self.http:
-            try:
-                resp = self.http.get("/api/pages/search", params={"q": term, "limit": 100})
-                resp.raise_for_status()
-                pages = resp.json().get("pages", [])
-            except Exception as exc:
-                print(f"[JumpDialog] Failed to fetch pages from API: {exc}")
-                pages = []
+
+        pages: list[dict]
+        if self._allowed_paths:
+            needle = term.lower().strip()
+            pages = []
+            for page_path in self._allowed_paths:
+                title = Path(page_path).stem or path_to_colon(page_path) or page_path
+                haystack = f"{title} {path_to_colon(page_path)}".lower()
+                if needle and needle not in haystack:
+                    continue
+                pages.append({"path": page_path, "title": title})
         else:
-            pages = config.search_pages(term)
+            # Get pages from remote API or local config
+            if self._remote_mode and self.http:
+                try:
+                    resp = self.http.get("/api/pages/search", params={"q": term, "limit": 100})
+                    resp.raise_for_status()
+                    pages = resp.json().get("pages", [])
+                except Exception as exc:
+                    print(f"[JumpDialog] Failed to fetch pages from API: {exc}")
+                    pages = []
+            else:
+                pages = config.search_pages(term)
         
         self.list_widget.clear()
         implied_inserted = False
@@ -463,6 +491,8 @@ class JumpToPageDialog(QDialog):
                 vault_level = self._get_current_vault_level()
                 return f"Create New Page in {vault_level}"
             return "Insert Link to Page"
+        if self._launch_mode == "bookmarks":
+            return "Jump to Bookmark"
         return "Jump to Page"
     
     def _get_current_vault_level(self) -> str:

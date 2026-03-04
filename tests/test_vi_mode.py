@@ -140,3 +140,18 @@ def test_vi_insert_ctrl_enter_activates_link(monkeypatch, qapp: QApplication) ->
 
     assert activated == ["https://example.com"]
     editor.close()
+
+
+def test_vi_f_opens_bookmark_picker_signal(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("Example")
+    editor.set_vi_mode_enabled(True)
+
+    fired: list[bool] = []
+    editor.bookmarkPickerRequested.connect(lambda: fired.append(True))
+
+    QTest.keyClick(editor, Qt.Key_F)
+
+    assert fired == [True]
+    editor.close()

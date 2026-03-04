@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from PySide6.QtCore import QByteArray, QRectF, Qt, QUrl, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QDesktopServices, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -369,6 +369,21 @@ class OpenVaultDialog(QDialog):
         except Exception:
             return False
 
+    @staticmethod
+    def _normalized_path_key(path: Optional[str]) -> str:
+        """Return a normalized filesystem path key for de-duplication."""
+        if not path:
+            return ""
+        try:
+            raw = str(path).strip()
+            if not raw:
+                return ""
+            expanded = os.path.expanduser(raw)
+            normalized = os.path.normpath(expanded)
+            return os.path.normcase(normalized)
+        except Exception:
+            return str(path or "").strip()
+
     def __init__(
         self,
         parent=None,
@@ -388,17 +403,22 @@ class OpenVaultDialog(QDialog):
         self.local_vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
         self.homebase_vaults: list[dict[str, str]] = config.load_homebase_vault_profiles()
         homebase_paths = {
-            str(v.get("path") or "").strip()
+            self._normalized_path_key(str(v.get("path") or ""))
             for v in self.homebase_vaults
-            if str(v.get("path") or "").strip()
+            if self._normalized_path_key(str(v.get("path") or ""))
         }
         self.local_vaults = [
             v
             for v in self.local_vaults
             if not self._is_help_vault_path(v.get("path"))
-            and str(v.get("path") or "").strip() not in homebase_paths
+            and self._normalized_path_key(str(v.get("path") or "")) not in homebase_paths
         ]
-        if not self.local_vaults and current_vault and not self._is_help_vault_path(current_vault):
+        if (
+            not self.local_vaults
+            and current_vault
+            and not self._is_help_vault_path(current_vault)
+            and self._normalized_path_key(current_vault) not in homebase_paths
+        ):
             self.local_vaults.append({"name": Path(current_vault).name, "path": current_vault})
         self.remote_vaults: list[dict[str, str]] = []
         self.remote_status_entries: list[dict[str, str]] = []
@@ -496,6 +516,8 @@ class OpenVaultDialog(QDialog):
         self.edit_configs_homebase_btn = None
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._ctrl_tab_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        self._ctrl_tab_shortcut.activated.connect(self._toggle_tab)
 
         default_row = QHBoxLayout()
         default_row.addWidget(QLabel("Default vault:"))
@@ -522,6 +544,25 @@ class OpenVaultDialog(QDialog):
         if getattr(self, "_open_new_window", False):
             return self._selected
         return None
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._focus_active_list_widget()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        mods = event.modifiers() & ~Qt.KeypadModifier
+        if event.key() == Qt.Key_Tab and (mods & Qt.AltModifier) and self.tabs.count() > 1:
+            self._toggle_tab()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _toggle_tab(self) -> None:
+        if self.tabs.count() <= 1:
+            return
+        current = self.tabs.currentIndex()
+        self.tabs.setCurrentIndex((current + 1) % self.tabs.count())
+        self._focus_active_list_widget()
 
     def _populate_list(
         self,
@@ -556,7 +597,16 @@ class OpenVaultDialog(QDialog):
                 list_widget.setCurrentItem(list_widget.item(0))
 
     def _combined_local_vault_entries(self) -> list[dict[str, str]]:
-        entries = [dict(v) for v in self.local_vaults]
+        homebase_path_keys = {
+            self._normalized_path_key(str(profile.get("path") or ""))
+            for profile in self.homebase_vaults
+            if self._normalized_path_key(str(profile.get("path") or ""))
+        }
+        entries = [
+            dict(v)
+            for v in self.local_vaults
+            if self._normalized_path_key(str(v.get("path") or "")) not in homebase_path_keys
+        ]
         for profile in self.homebase_vaults:
             entry = dict(profile)
             entry.setdefault("kind", "homebase")
@@ -898,7 +948,22 @@ class OpenVaultDialog(QDialog):
         remote_list = getattr(self, "remote_list_widget", None)
         if self._remote_vaults_enabled and remote_list and current_widget and remote_list.parentWidget() == current_widget:
             self._load_remote_vaults(select_id=self._select_id)
+        self._focus_active_list_widget()
         self._update_buttons()
+
+    def _focus_active_list_widget(self) -> None:
+        list_widget = self._active_list_widget()
+        if list_widget is None:
+            return
+        if list_widget.count() > 0 and list_widget.currentItem() is None:
+            list_widget.setCurrentRow(0)
+        try:
+            list_widget.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            try:
+                list_widget.setFocus()
+            except Exception:
+                pass
 
     def _load_remote_vaults(self, select_id: Optional[str] = None) -> None:
         if not self._remote_vaults_enabled or not self.remote_list_widget:

@@ -6,7 +6,8 @@ These shortcuts will speed up your workflow:
 ### File Operations
 - `Ctrl+S`: Save the current page
 - `Ctrl+N`: Create a new page
-- `Ctrl+O`: Open a page (jump to page)
+- `Ctrl+J`: Open a page (jump to page)
+- `Ctrl+Alt+J`: Open bookmarked pages picker
 - `Ctrl+Shift+S`: Save all open pages
 
 ### Editing
@@ -72,6 +73,7 @@ If VI mode is enabled:
 - `*`: Find word under cursor (forward)
 - `#`: Find word under cursor (backward)
 - `t`: Open heading picker
+- `f`: Open bookmark picker
 - `c`: Copy selection or current line
 - `x`: Cut selection or current character
 - `d`: Delete selection or current line

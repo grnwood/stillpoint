@@ -170,15 +170,36 @@ def _capture_to_files(
     return rel_path
 
 
+def _resolve_homebase_ref_to_path(value: str) -> Optional[str]:
+    ref = str(value or "").strip()
+    if not ref.startswith("homebase::"):
+        return None
+    for profile in config.load_homebase_vault_profiles():
+        profile_id = str(profile.get("id") or "").strip()
+        if profile_id != ref:
+            continue
+        local_path = str(profile.get("path") or "").strip()
+        return local_path or None
+    parts = ref.split("::", 3)
+    if len(parts) == 4:
+        local_path = parts[3].strip()
+        return local_path or None
+    return None
+
+
 def _resolve_local_vault_path(vault_arg: Optional[str]) -> Optional[str]:
     if vault_arg:
         if vault_arg.startswith("remote::"):
             return None
+        if vault_arg.startswith("homebase::"):
+            return _resolve_homebase_ref_to_path(vault_arg)
         return vault_arg
     configured = config.load_quick_capture_vault()
     if configured:
         if configured.startswith("remote::"):
             return None
+        if configured.startswith("homebase::"):
+            return _resolve_homebase_ref_to_path(configured)
         return configured
     last = config.load_last_vault()
     if isinstance(last, str) and not last.startswith("remote::"):
@@ -188,20 +209,33 @@ def _resolve_local_vault_path(vault_arg: Optional[str]) -> Optional[str]:
 
 def _local_vault_options() -> list[dict[str, str]]:
     options: list[dict[str, str]] = []
+    seen: set[str] = set()
     configured = config.load_quick_capture_vault()
     if configured and not configured.startswith("remote::"):
-        options.append({"name": Path(configured).name, "path": configured})
+        if configured.startswith("homebase::"):
+            configured = _resolve_homebase_ref_to_path(configured)
+        if configured and configured not in seen:
+            options.append({"name": Path(configured).name, "path": configured})
+            seen.add(configured)
     last = config.load_last_vault()
     if isinstance(last, str) and last and not last.startswith("remote::"):
-        if not any(opt.get("path") == last for opt in options):
+        if last not in seen:
             options.append({"name": Path(last).name, "path": last})
+            seen.add(last)
     for entry in config.load_known_vaults():
         path = entry.get("path")
         if not path or path.startswith("remote::"):
             continue
-        if any(opt.get("path") == path for opt in options):
+        if path in seen:
             continue
         options.append({"name": entry.get("name") or Path(path).name, "path": path})
+        seen.add(path)
+    for profile in config.load_homebase_vault_profiles():
+        path = str(profile.get("path") or "").strip()
+        if not path or path in seen:
+            continue
+        options.append({"name": str(profile.get("name") or Path(path).name), "path": path})
+        seen.add(path)
     return options
 
 

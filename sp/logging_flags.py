@@ -21,6 +21,7 @@ AREA_DEFAULTS: Dict[str, bool] = {
     "tasks_calendar": False,
     "remote_vaults": False,
     "homebase_sync": False,
+    "homebaseclient": False,
     "ai_chat": False,
     "rag_vector": False,
     "diagrams": False,

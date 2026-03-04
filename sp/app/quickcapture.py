@@ -283,14 +283,43 @@ def _show_overlay_via_api(base: str, token: Optional[str]) -> bool:
     return False
 
 
+def _resolve_homebase_ref_to_path(value: str) -> Optional[str]:
+    ref = str(value or "").strip()
+    if not ref.startswith("homebase::"):
+        return None
+    for profile in config.load_homebase_vault_profiles():
+        profile_id = str(profile.get("id") or "").strip()
+        if profile_id != ref:
+            continue
+        local_path = str(profile.get("path") or "").strip()
+        return local_path or None
+    # Backward-compatible fallback for refs shaped as:
+    # homebase::<server_url>::<vault_id>::<local_path>
+    parts = ref.split("::", 3)
+    if len(parts) == 4:
+        local_path = parts[3].strip()
+        return local_path or None
+    return None
+
+
 def _resolve_vault_path(vault_arg: Optional[str]) -> Path:
     if vault_arg:
         if vault_arg.startswith("remote::"):
             raise ValueError("Remote vault refs are not supported for local file capture.")
+        if vault_arg.startswith("homebase::"):
+            local_path = _resolve_homebase_ref_to_path(vault_arg)
+            if not local_path:
+                raise ValueError("Homebase vault ref could not be resolved to a local path.")
+            return Path(local_path).expanduser().resolve()
         return Path(vault_arg).expanduser().resolve()
     configured = config.load_quick_capture_vault()
     if configured:
         if configured.startswith("remote::"):
+            configured = None
+        elif configured.startswith("homebase::"):
+            local_path = _resolve_homebase_ref_to_path(configured)
+            if local_path:
+                return Path(local_path).expanduser().resolve()
             configured = None
         else:
             return Path(configured).expanduser().resolve()

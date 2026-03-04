@@ -25,6 +25,7 @@ from sp.sync.local_fs import bytes_equal, conflict_copy_path, iter_files, read_b
 
 
 _HOMEBASE_LOG = log_enabled("homebase_sync")
+_HOMEBASECLIENT_LOG = log_enabled("homebaseclient")
 _ANSI_BLUE = "\033[94m"
 _ANSI_RED = "\033[91m"
 _ANSI_RESET = "\033[0m"
@@ -34,6 +35,11 @@ def _log(message: str) -> None:
     if _HOMEBASE_LOG:
         color = _ANSI_RED if "conflict" in str(message).lower() else _ANSI_BLUE
         print(f"{color}[HomebaseClient] {message}{_ANSI_RESET}")
+
+
+def _log_token(message: str) -> None:
+    if _HOMEBASECLIENT_LOG:
+        print(f"{_ANSI_BLUE}[HomebaseToken] {message}{_ANSI_RESET}")
 
 
 def _utc_now_iso() -> str:
@@ -655,6 +661,11 @@ class HomebaseSyncEngine:
         except httpx.HTTPStatusError as exc:
             self._hibernating = False
             self._no_change_streak = 0
+            if exc.response is not None and exc.response.status_code == 401:
+                _log_token(
+                    "sync request returned 401; access token rejected, "
+                    "attempting refresh if a refresh token is available"
+                )
             if (
                 allow_refresh_retry
                 and exc.response is not None
@@ -707,14 +718,20 @@ class HomebaseSyncEngine:
 
     def _refresh_tokens(self) -> bool:
         refresh_token = str(self.cfg.refresh_token or "").strip()
+        _log_token(
+            f"refresh path: access={'set' if bool(self.cfg.auth_token) else 'missing'} "
+            f"refresh={'set' if bool(refresh_token) else 'missing'}"
+        )
         if not refresh_token:
             _log("auth refresh skipped (no refresh token)")
+            _log_token("refresh skipped: no refresh token; re-auth required")
             return False
         url = f"{self.cfg.remote_url.rstrip('/')}/v1/homebase/bootstrap/refresh"
         headers: dict[str, str] = {}
         if self.cfg.local_ui_token:
             headers["x-local-ui-token"] = self.cfg.local_ui_token
         _log("auth 401 detected; attempting token refresh")
+        _log_token("calling /v1/homebase/bootstrap/refresh")
         try:
             resp = httpx.post(
                 url,
@@ -729,6 +746,7 @@ class HomebaseSyncEngine:
             refreshed = str(payload.get("refresh_token") or "").strip()
             if not access or not refreshed:
                 _log("auth refresh failed (missing access/refresh token in response)")
+                _log_token("refresh failed: response missing rotated tokens")
                 return False
             self.cfg.auth_token = access
             self.cfg.refresh_token = refreshed
@@ -738,6 +756,7 @@ class HomebaseSyncEngine:
                 except Exception:
                     pass
             _log("auth refresh completed")
+            _log_token("refresh succeeded: rotated access+refresh tokens stored")
             return True
         except Exception as exc:
             details = ""
@@ -747,6 +766,13 @@ class HomebaseSyncEngine:
             except Exception:
                 details = ""
             _log(f"auth refresh failed: {exc}{details}")
+            if "resp" in locals():
+                try:
+                    _log_token(f"refresh failed: status={resp.status_code}")
+                except Exception:
+                    _log_token("refresh failed: response unavailable")
+            else:
+                _log_token("refresh failed: request/transport exception")
             return False
 
     def _build_local_manifest(self) -> dict[str, Any]:

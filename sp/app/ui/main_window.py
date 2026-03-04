@@ -885,6 +885,11 @@ def _log_ui_state(message: str) -> None:
         print(message)
 
 
+def _log_homebase_client(message: str) -> None:
+    if log_enabled("homebaseclient"):
+        print(f"[HomebaseToken] {message}")
+
+
 class VaultTreeModel(QStandardItemModel):
     """Custom model that only allows reordering within the same parent."""
     
@@ -1779,6 +1784,7 @@ class MainWindow(QMainWindow):
         self._history_scroll_positions: dict[str, int] = {}
         self._hierarchy_last_child_by_parent: dict[str, str] = {}
         self._homebase_pending_reload_path: Optional[str] = None
+        self._homebase_reload_not_before: float = 0.0
         self._homebase_conflict_seen_keys: set[str] = set()
         self._homebase_conflict_popup_open: bool = False
         self._tree_refresh_in_progress: bool = False
@@ -1993,7 +1999,7 @@ class MainWindow(QMainWindow):
             lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
         )
         self.editor.imageSaved.connect(self._on_image_saved)
-        self.editor.textChanged.connect(lambda: self.autosave_timer.start())
+        self.editor.textChanged.connect(self._on_editor_text_changed)
         self.editor.focusLost.connect(self._on_editor_focus_lost)
         app = QApplication.instance()
         if app is not None:
@@ -2022,6 +2028,7 @@ class MainWindow(QMainWindow):
         self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.headingPickerRequested.connect(self._show_heading_picker_popup)
+        self.editor.bookmarkPickerRequested.connect(self._jump_to_bookmark)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
@@ -2547,6 +2554,10 @@ class MainWindow(QMainWindow):
         jump_action.setToolTip("Jump to a page (Ctrl+J)")
         jump_action.triggered.connect(self._jump_to_page)
         go_menu.addAction(jump_action)
+        jump_bookmark_action = QAction("Jump To Bookmark… (Ctrl+Alt+J)", self)
+        jump_bookmark_action.setToolTip("Jump to a bookmarked page (Ctrl+Alt+J)")
+        jump_bookmark_action.triggered.connect(self._jump_to_bookmark)
+        go_menu.addAction(jump_bookmark_action)
 
         self._action_go_today = QAction("Today", self)
         self._action_go_today.setToolTip("Today's journal entry (Alt+D)")
@@ -3035,6 +3046,9 @@ class MainWindow(QMainWindow):
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
         jump_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
         jump_shortcut.activated.connect(self._jump_to_page)
+        jump_bookmark_shortcut = QShortcut(QKeySequence("Ctrl+Alt+J"), self)
+        jump_bookmark_shortcut.setContext(Qt.ApplicationShortcut)
+        jump_bookmark_shortcut.activated.connect(self._jump_to_bookmark)
         link_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
         link_shortcut.setContext(Qt.ApplicationShortcut)
         link_shortcut.activated.connect(self._insert_link)
@@ -4738,7 +4752,11 @@ class MainWindow(QMainWindow):
             if updates:
                 self._homebase_sync_cycle_had_true_activity = True
                 self._on_homebase_remote_updates(updates)
-        if self._homebase_pending_reload_path and self._is_editor_idle_for_remote_reload():
+        if (
+            self._homebase_pending_reload_path
+            and self._can_auto_reload_homebase_current_page()
+            and self._is_editor_idle_for_remote_reload()
+        ):
             pending = self._homebase_pending_reload_path
             self._homebase_pending_reload_path = None
             if pending and self.current_path == pending:
@@ -4818,6 +4836,24 @@ class MainWindow(QMainWindow):
             pass
         return True
 
+    def _can_auto_reload_homebase_current_page(self) -> bool:
+        now = time.monotonic()
+        if now < float(getattr(self, "_homebase_reload_not_before", 0.0)):
+            return False
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                if app.applicationState() != Qt.ApplicationState.ApplicationActive:
+                    return False
+            except Exception:
+                pass
+        try:
+            if not self.isActiveWindow():
+                return False
+        except Exception:
+            pass
+        return True
+
     def _on_homebase_remote_updates(self, updated_paths: list[str]) -> None:
         if not updated_paths or not self.vault_root or self._remote_mode:
             return
@@ -4842,7 +4878,7 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_tree()
         if self.current_path and self.current_path in seen:
-            if self._is_editor_idle_for_remote_reload():
+            if self._can_auto_reload_homebase_current_page() and self._is_editor_idle_for_remote_reload():
                 self._open_file(
                     self.current_path,
                     add_to_history=False,
@@ -5979,10 +6015,21 @@ class MainWindow(QMainWindow):
         if local_ui_token:
             headers["x-local-ui-token"] = local_ui_token
         url = f"{base_url}/v1/homebase/{vault_id}{path}"
+        _log_homebase_client(
+            f"{method} {path}: access={'set' if bool(auth_token) else 'missing'} "
+            f"refresh={'set' if bool(refresh_token) else 'missing'}"
+        )
         resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
         if resp.status_code != 401 or not refresh_token:
+            if resp.status_code == 401:
+                _log_homebase_client(
+                    f"{method} {path}: 401 and no refresh token available; re-auth required"
+                )
+            else:
+                _log_homebase_client(f"{method} {path}: status={resp.status_code} via access token")
             return resp
         try:
+            _log_homebase_client(f"{method} {path}: access token rejected (401), attempting refresh")
             refresh_resp = httpx.post(
                 f"{base_url}/v1/homebase/bootstrap/refresh",
                 json={"vault_id": vault_id, "refresh_token": refresh_token},
@@ -5990,16 +6037,25 @@ class MainWindow(QMainWindow):
                 verify=verify_ssl,
             )
             if refresh_resp.status_code != 200:
+                _log_homebase_client(
+                    f"{method} {path}: refresh failed status={refresh_resp.status_code}; re-auth required"
+                )
                 return resp
             data = refresh_resp.json()
             access = str(data.get("access_token") or "").strip()
             refreshed = str(data.get("refresh_token") or "").strip()
             if not access or not refreshed:
+                _log_homebase_client(
+                    f"{method} {path}: refresh response missing tokens; re-auth required"
+                )
                 return resp
             self._store_homebase_tokens(access, refreshed)
+            _log_homebase_client(f"{method} {path}: refresh succeeded, retrying with new access token")
             headers["Authorization"] = f"Bearer {access}"
             resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
+            _log_homebase_client(f"{method} {path}: retry status={resp.status_code}")
         except Exception:
+            _log_homebase_client(f"{method} {path}: refresh attempt raised exception; keeping original 401")
             return resp
         return resp
 
@@ -9220,21 +9276,30 @@ class MainWindow(QMainWindow):
         self._finalize_save(path, merged, resp.json(), message)
         return True
 
-    def _save_current_file(self, auto: bool = False, reason: str = "save") -> None:
+    def _save_current_file(
+        self,
+        auto: bool = False,
+        reason: str = "save",
+        *,
+        force: bool = False,
+        allow_when_suspended: bool = False,
+    ) -> None:
         if getattr(self, "_heading_picker_active", False):
             # Skip saves triggered while the heading picker popup is active (vi 't')
             return
         if self._merge_dialog_open:
             return
-        if self._suspend_autosave:
+        if self._suspend_autosave and not allow_when_suspended:
             self._debug("Autosave suppressed (suspend flag set).")
             return
+        if self._suspend_autosave and allow_when_suspended:
+            self._debug(f"Autosave suspend bypassed (reason={reason}, force={force}).")
         if auto and self._read_only:
             # In read-only mode, silently skip autosaves/background saves
             return
         
         # Skip autosave if content hasn't changed
-        if auto:
+        if auto and not force:
             # Check Qt's built-in modified flag first (most reliable)
             try:
                 doc_modified = bool(self.editor.document().isModified())
@@ -9547,8 +9612,8 @@ class MainWindow(QMainWindow):
         dirty = bool(getattr(self, "_dirty_flag", False))
         if not dirty:
             return False
-        if not self._homebase_sync_engine:
-            return True
+        # Keep dirty state content-based across all vault modes. Qt's modified
+        # flag can occasionally flip during load/render churn without real edits.
         try:
             current_content = self.editor.to_markdown()
             if self._last_saved_content is not None and current_content == self._last_saved_content:
@@ -9814,7 +9879,13 @@ class MainWindow(QMainWindow):
             self._remember_history_cursor()
         else:
             self._remember_history_cursor()
-            self._save_current_file(auto=True, reason="focus lost")
+            force_save = self._is_editor_dirty()
+            self._save_current_file(
+                auto=True,
+                reason="focus lost",
+                force=force_save,
+                allow_when_suspended=force_save,
+            )
 
     def _on_application_state_changed(self, state) -> None:
         """Persist editor content when app deactivates (Alt+Tab/window switch)."""
@@ -9823,9 +9894,45 @@ class MainWindow(QMainWindow):
         except Exception:
             inactive = False
         if not inactive:
+            # Small cooldown after app re-activation to avoid immediate
+            # Homebase auto-reload races with pending editor state changes.
+            self._homebase_reload_not_before = time.monotonic() + 1.0
+            QTimer.singleShot(0, self._refresh_editor_visual_state_after_activation)
             return
+        self._homebase_reload_not_before = time.monotonic() + 3.0
         self._remember_history_cursor()
-        self._save_current_file(auto=True, reason="application deactivated")
+        force_save = self._is_editor_dirty()
+        if log_enabled("autosave"):
+            self._debug(
+                f"App deactivated: dirty={force_save} "
+                f"suspended={bool(getattr(self, '_suspend_autosave', False))}"
+            )
+        self._save_current_file(
+            auto=True,
+            reason="application deactivated",
+            force=force_save,
+            allow_when_suspended=force_save,
+        )
+
+    def _refresh_editor_visual_state_after_activation(self) -> None:
+        """Repair occasional palette/highlighter drift after app activation."""
+        try:
+            self._apply_focus_borders()
+        except Exception:
+            pass
+        try:
+            self.editor._apply_theme_palette()
+        except Exception:
+            pass
+        try:
+            if getattr(self.editor, "highlighter", None):
+                self.editor.highlighter.rehighlight()
+        except Exception:
+            pass
+        try:
+            self.editor.viewport().update()
+        except Exception:
+            pass
 
     def _find_asset(self, name: str) -> Optional[Path]:
         """Locate an asset in development or PyInstaller layouts."""
@@ -10253,6 +10360,31 @@ class MainWindow(QMainWindow):
         )
         result = dlg.exec()
         
+        if result == QDialog.Accepted:
+            target = dlg.selected_path()
+            if target:
+                self._exit_vi_insert_on_activate()
+                self._open_file(target)
+
+    def _jump_to_bookmark(self) -> None:
+        if not config.has_active_vault():
+            return
+        bookmark_paths = [p for p in self.bookmarks if isinstance(p, str) and p.strip()]
+        if not bookmark_paths:
+            self.statusBar().showMessage("No bookmarks to jump to.", 2000)
+            return
+
+        dlg = JumpToPageDialog(
+            self,
+            allow_filter_removal=False,
+            geometry_key="bookmark_jump_dialog",
+            http_client=self.http,
+            remote_mode=self._remote_mode,
+            launch_mode="bookmarks",
+            allowed_paths=bookmark_paths,
+        )
+        result = dlg.exec()
+
         if result == QDialog.Accepted:
             target = dlg.selected_path()
             if target:
@@ -13474,7 +13606,16 @@ class MainWindow(QMainWindow):
                 else theme_value("main_window.focus_border.default", "#4A90E2")
             )
         )
-        editor_style = f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; }}" if editor_has else "QTextEdit { border: 1px solid transparent; }"
+        if editor_has:
+            editor_style = (
+                f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; "
+                "background: palette(base); color: palette(text); }}"
+            )
+        else:
+            editor_style = (
+                "QTextEdit { border: 1px solid transparent; "
+                "background: palette(base); color: palette(text); }"
+            )
         is_light_theme = QApplication.palette().color(QPalette.Base).lightness() >= 150
         right_arrow_name = "right-arrow-dark.svg" if is_light_theme else "right-arrow.svg"
         down_arrow_name = "down-arrow-dark.svg" if is_light_theme else "down-arrow.svg"
@@ -17062,20 +17203,40 @@ class MainWindow(QMainWindow):
         """Lightweight dirty flag updater (avoid full markdown diff)."""
         if getattr(self, "_suspend_dirty_tracking", False):
             return
-        new_state = bool(modified)
-        if new_state and self._homebase_sync_engine:
-            try:
-                current_content = self.editor.to_markdown()
-                if self._last_saved_content is not None and current_content == self._last_saved_content:
-                    new_state = False
-            except Exception:
-                pass
+        new_state = self._dirty_state_from_editor(default=bool(modified))
         if new_state != getattr(self, "_dirty_flag", False):
             self._dirty_flag = new_state
             self._update_dirty_indicator()
             if not new_state and self._is_homebase_mode_enabled():
                 status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
                 self._update_homebase_status_badge(status)
+
+    def _on_editor_text_changed(self) -> None:
+        """Start autosave and reconcile dirty state from current editor content."""
+        if getattr(self, "_suspend_autosave", False):
+            return
+        self.autosave_timer.start()
+        if getattr(self, "_suspend_dirty_tracking", False):
+            return
+        if not self.current_path:
+            return
+        new_state = self._dirty_state_from_editor(default=True)
+        if new_state != getattr(self, "_dirty_flag", False):
+            self._dirty_flag = new_state
+            self._update_dirty_indicator()
+            if not new_state and self._is_homebase_mode_enabled():
+                status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+                self._update_homebase_status_badge(status)
+
+    def _dirty_state_from_editor(self, *, default: bool) -> bool:
+        """Compute dirty state from markdown content vs last saved snapshot."""
+        try:
+            current_content = self.editor.to_markdown()
+            if self._last_saved_content is not None:
+                return current_content != self._last_saved_content
+        except Exception:
+            return bool(default)
+        return bool(default)
 
     def _apply_vi_preferences(self) -> None:
         self._vi_enabled = config.load_vi_mode_enabled()

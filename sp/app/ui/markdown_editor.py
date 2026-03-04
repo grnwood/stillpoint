@@ -1527,6 +1527,7 @@ class MarkdownEditor(QTextEdit):
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
+    bookmarkPickerRequested = Signal()  # Request bookmark quick picker
     pageTagInserted = Signal(str)  # Emits tag when a new page tag is inserted
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
@@ -6758,6 +6759,9 @@ class MarkdownEditor(QTextEdit):
                 prefer_above = False
             global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
             self.headingPickerRequested.emit(global_point, prefer_above)
+            return True
+        if key == Qt.Key_F and not shift:
+            self.bookmarkPickerRequested.emit()
             return True
         if key == Qt.Key_N:
             self.search_repeat_last(reverse=False)
