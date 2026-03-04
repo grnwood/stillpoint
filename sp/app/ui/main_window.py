@@ -4808,6 +4808,14 @@ class MainWindow(QMainWindow):
                 return False
         except Exception:
             pass
+        # Defensive check: if dirty tracking and Qt modified state diverge, do not
+        # treat the editor as idle. This avoids clobbering unsaved buffers on reload.
+        try:
+            current_content = self.editor.to_markdown()
+            if self._last_saved_content is None or current_content != self._last_saved_content:
+                return False
+        except Exception:
+            pass
         return True
 
     def _on_homebase_remote_updates(self, updated_paths: list[str]) -> None:
@@ -9229,7 +9237,9 @@ class MainWindow(QMainWindow):
         if auto:
             # Check Qt's built-in modified flag first (most reliable)
             try:
-                if not self.editor.document().isModified():
+                doc_modified = bool(self.editor.document().isModified())
+                dirty_flag = bool(getattr(self, "_dirty_flag", False))
+                if not doc_modified and not dirty_flag:
                     self._debug(f"Skipping autosave (reason={reason}): document not modified")
                     return
             except Exception:
