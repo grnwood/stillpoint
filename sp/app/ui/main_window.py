@@ -890,6 +890,14 @@ def _log_homebase_client(message: str) -> None:
         print(f"[HomebaseToken] {message}")
 
 
+def _token_state(token: Optional[str]) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return "missing"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    return f"set(len={len(value)} hash={digest})"
+
+
 class VaultTreeModel(QStandardItemModel):
     """Custom model that only allows reordering within the same parent."""
     
@@ -4092,14 +4100,28 @@ class MainWindow(QMainWindow):
 
     def _apply_homebase_profile(self, profile: dict) -> None:
         try:
+            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
+            profile_server = str(profile.get("server_url") or "").strip()
+            profile_vault_id = str(profile.get("vault_id") or "").strip()
+            profile_access = str(profile.get("access_token") or "").strip()
+            profile_refresh = str(profile.get("refresh_token") or "").strip()
+            _log_homebase_client(
+                "apply profile: "
+                f"path={profile_path or '<none>'} "
+                f"server={profile_server or '<none>'} "
+                f"vault_id={profile_vault_id or '<none>'} "
+                f"verify_ssl={bool(profile.get('verify_ssl', True))} "
+                f"access={_token_state(profile_access)} "
+                f"refresh={_token_state(profile_refresh)}"
+            )
             self._ensure_config_active_vault_context()
             config.save_vault_remote_mode("homebase_remote")
-            config.save_homebase_remote_url(str(profile.get("server_url") or "").strip())
+            config.save_homebase_remote_url(profile_server)
             config.save_homebase_verify_ssl(bool(profile.get("verify_ssl", True)))
-            config.save_homebase_vault_id(str(profile.get("vault_id") or "").strip())
+            config.save_homebase_vault_id(profile_vault_id)
             config.save_homebase_username(str(profile.get("username") or "").strip())
-            config.save_homebase_auth_token(str(profile.get("access_token") or "").strip())
-            config.save_homebase_refresh_token(str(profile.get("refresh_token") or "").strip())
+            config.save_homebase_auth_token(profile_access)
+            config.save_homebase_refresh_token(profile_refresh)
             config.save_homebase_passphrase(str(profile.get("passphrase") or ""))
             config.save_homebase_auto_sync(bool(profile.get("auto_sync", True)))
             config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
@@ -4109,6 +4131,7 @@ class MainWindow(QMainWindow):
             self._configure_homebase_sync_for_vault()
             self._apply_remote_mode_ui()
         except Exception as exc:
+            _log_homebase_client(f"apply profile failed: {exc}")
             self.statusBar().showMessage(f"Homebase profile apply failed: {exc}", 5000)
 
     def _open_vault_preferences(self) -> None:
@@ -4693,31 +4716,63 @@ class MainWindow(QMainWindow):
     def _configure_homebase_sync_for_vault(self) -> None:
         self._shutdown_homebase_sync()
         if not self.vault_root or not self._is_homebase_mode_enabled():
+            _log_homebase_client(
+                "sync config skipped: "
+                f"vault_root={'set' if bool(self.vault_root) else 'missing'} "
+                f"homebase_mode={self._is_homebase_mode_enabled()}"
+            )
             self._update_homebase_sync_action_state()
             return
         try:
             remote_url = config.load_homebase_remote_url().strip()
             passphrase = config.load_homebase_passphrase()
+            auth_token = config.load_homebase_auth_token().strip()
+            refresh_token = config.load_homebase_refresh_token().strip()
+            vault_id = config.load_homebase_vault_id() or config.ensure_homebase_vault_id()
+            verify_ssl = config.load_homebase_verify_ssl()
+            local_ui_token = self._homebase_local_ui_token_for_url(remote_url)
+            _log_homebase_client(
+                "sync config loaded: "
+                f"vault_root={self._normalize_vault_path(self.vault_root)} "
+                f"remote_url={remote_url or '<none>'} "
+                f"vault_id={vault_id or '<none>'} "
+                f"verify_ssl={verify_ssl} "
+                f"passphrase={'set' if bool(passphrase) else 'missing'} "
+                f"access={_token_state(auth_token)} "
+                f"refresh={_token_state(refresh_token)} "
+                f"local_ui_token={_token_state(local_ui_token)}"
+            )
             if not remote_url or not passphrase:
+                _log_homebase_client(
+                    "sync config invalid: missing "
+                    f"{'remote_url' if not remote_url else ''}"
+                    f"{' and ' if (not remote_url and not passphrase) else ''}"
+                    f"{'passphrase' if not passphrase else ''}"
+                )
                 self._update_homebase_status_badge(
                     HomebaseSyncStatus(state="error", summary="Homebase not configured")
                 )
                 return
             cfg = HomebaseSyncConfig(
                 vault_root=Path(self.vault_root),
-                vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
+                vault_id=vault_id,
                 device_id=config.load_homebase_device_id(),
                 remote_url=remote_url,
-                verify_ssl=config.load_homebase_verify_ssl(),
-                auth_token=config.load_homebase_auth_token().strip(),
-                local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
+                verify_ssl=verify_ssl,
+                auth_token=auth_token,
+                local_ui_token=local_ui_token,
                 passphrase=passphrase,
-                refresh_token=config.load_homebase_refresh_token().strip(),
+                refresh_token=refresh_token,
                 auto_sync=config.load_homebase_auto_sync(),
                 interval_seconds=config.load_homebase_interval_seconds(),
                 push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
                 max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
                 token_update_callback=self._store_homebase_tokens,
+            )
+            _log_homebase_client(
+                "sync engine start: "
+                f"auto_sync={cfg.auto_sync} interval={cfg.interval_seconds}s "
+                f"debounce={cfg.push_debounce_seconds}s parallel={cfg.max_parallel_transfers}"
             )
             self._homebase_sync_engine = HomebaseSyncEngine(cfg)
             self._homebase_sync_engine.start()
@@ -4732,6 +4787,7 @@ class MainWindow(QMainWindow):
             self._refresh_homebase_user_info()
             self._update_user_management_ui()
         except Exception as exc:
+            _log_homebase_client(f"sync config failed: {exc}")
             self._update_homebase_status_badge(
                 HomebaseSyncStatus(state="error", summary=f"Homebase error: {exc}")
             )
@@ -5652,9 +5708,14 @@ class MainWindow(QMainWindow):
 
     def _store_homebase_tokens(self, access_token: str, refresh_token: str) -> None:
         try:
+            _log_homebase_client(
+                "store tokens requested: "
+                f"access={_token_state(access_token)} refresh={_token_state(refresh_token)}"
+            )
             self._ensure_config_active_vault_context()
             config.save_homebase_auth_token(access_token)
             config.save_homebase_refresh_token(refresh_token)
+            _log_homebase_client("saved vault-scoped access/refresh tokens")
             # Keep global Homebase profile tokens in sync so reopening from
             # Homebase Vaults does not reapply stale/expired tokens.
             if self.vault_root:
@@ -5662,6 +5723,13 @@ class MainWindow(QMainWindow):
                 current_server = config.load_homebase_remote_url().strip()
                 current_vault_id = (config.load_homebase_vault_id() or "").strip()
                 profiles = config.load_homebase_vault_profiles()
+                _log_homebase_client(
+                    "profile sync lookup: "
+                    f"path={current_path or '<none>'} "
+                    f"server={current_server or '<none>'} "
+                    f"vault_id={current_vault_id or '<none>'} "
+                    f"profiles={len(profiles)}"
+                )
                 updated = False
                 for profile in profiles:
                     if not isinstance(profile, dict):
@@ -5676,11 +5744,22 @@ class MainWindow(QMainWindow):
                     profile["access_token"] = access_token
                     profile["refresh_token"] = refresh_token
                     updated = True
+                    _log_homebase_client(
+                        "profile sync match: "
+                        f"path={profile_path or '<none>'} "
+                        f"server={str(profile.get('server_url') or '').strip() or '<none>'} "
+                        f"vault_id={str(profile.get('vault_id') or '').strip() or '<none>'}"
+                    )
                     break
                 if updated:
                     config.save_homebase_vault_profiles(profiles)
-        except Exception:
-            pass
+                    _log_homebase_client("profile sync saved updated tokens")
+                else:
+                    _log_homebase_client("profile sync skipped: no matching profile")
+            else:
+                _log_homebase_client("profile sync skipped: no active vault_root")
+        except Exception as exc:
+            _log_homebase_client(f"store tokens failed: {exc}")
 
     def _build_http_client(self, base_url: str, is_remote: bool, local_auth_token: Optional[str], request_hooks) -> httpx.Client:
         timeout: float | httpx.Timeout = 10.0
