@@ -8193,19 +8193,49 @@ class MainWindow(QMainWindow):
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
 
+        hr_line_color = theme_value("markdown_editor.syntax.hr_line", "#60656f")
+
         def populate(query: str = "") -> None:
             list_widget.clear()
             needle = query.lower().strip()
+            # Two-pass: collect visible items, then render with HR dedup
+            visible: list[dict] = []
             for h in headings:
+                if h.get("type") == "hr":
+                    visible.append(h)
+                    continue
                 title = h.get("title") or "(heading)"
                 if needle and needle not in title.lower():
                     continue
+                visible.append(h)
+            # Strip leading/trailing HRs and collapse consecutive HRs
+            heading_since_last_hr = False
+            pending_hr = False
+            for h in visible:
+                if h.get("type") == "hr":
+                    if heading_since_last_hr:
+                        pending_hr = True
+                    continue
+                # Flush a pending HR divider before this heading
+                if pending_hr:
+                    item = QListWidgetItem()
+                    item.setFlags(Qt.NoItemFlags)
+                    item.setSizeHint(QSize(0, 3))
+                    list_widget.addItem(item)
+                    line_frame = QFrame()
+                    line_frame.setFrameShape(QFrame.HLine)
+                    line_frame.setFixedHeight(3)
+                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: 0 8px;")
+                    list_widget.setItemWidget(item, line_frame)
+                    pending_hr = False
+                title = h.get("title") or "(heading)"
                 line = h.get("line", 1)
                 level = max(1, min(5, int(h.get("level", 1))))
                 indent = "    " * (level - 1)
                 item = QListWidgetItem(f"{indent}{title}  (line {line})")
                 item.setData(Qt.UserRole, h)
                 list_widget.addItem(item)
+                heading_since_last_hr = True
             if list_widget.count():
                 list_widget.setCurrentRow(0)
 
@@ -8243,20 +8273,34 @@ class MainWindow(QMainWindow):
         editor_ref = self.editor
 
         class _PickerFilter(QObject):
+            @staticmethod
+            def _next_selectable(start: int, delta: int) -> int:
+                """Find next selectable row, skipping HR dividers."""
+                row = start + delta
+                count = list_widget.count()
+                while 0 <= row < count:
+                    item = list_widget.item(row)
+                    if item and item.flags() != Qt.NoItemFlags:
+                        return row
+                    row += delta
+                return start  # stay put if no selectable item found
+
             def eventFilter(self, obj, ev):  # type: ignore[override]
                 if ev.type() == QEvent.KeyPress:
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() == Qt.Key_J and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
-                        row = list_widget.currentRow()
-                        if list_widget.count():
-                            list_widget.setCurrentRow(min(list_widget.count() - 1, row + 1))
+                    if ev.key() in (Qt.Key_Down, Qt.Key_J) and (
+                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                    ):
+                        row = self._next_selectable(list_widget.currentRow(), 1)
+                        list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() == Qt.Key_K and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
-                        row = list_widget.currentRow()
-                        if list_widget.count():
-                            list_widget.setCurrentRow(max(0, row - 1))
+                    if ev.key() in (Qt.Key_Up, Qt.Key_K) and (
+                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                    ):
+                        row = self._next_selectable(list_widget.currentRow(), -1)
+                        list_widget.setCurrentRow(row)
                         return True
                     if ev.key() == Qt.Key_Escape:
                         finish_picker()
