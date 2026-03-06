@@ -4,7 +4,7 @@
 #   (Set STILLPOINT_VERSION env var for version stamping if desired.)
 
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # Resolve project root regardless of where the spec file lives
 
@@ -64,6 +64,9 @@ hidden = (
     + collect_submodules('docx')
 )
 
+_charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normalizer')
+hidden += _charset_hidden
+
 STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION','0.99')
 
 # Data files: templates + bundled assets
@@ -118,6 +121,8 @@ for subdir in ['assets', 'slipstream', 'rag', 'ai']:
 _assets_dir = os.path.join(ROOT, 'sp', 'assets')
 
 datas = _datas
+datas += _charset_datas
+binaries = _charset_binaries
 
 block_cipher = None
 
@@ -126,7 +131,7 @@ from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
 a = Analysis(
     [MAIN],
     pathex=[ROOT],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],

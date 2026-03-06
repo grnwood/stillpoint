@@ -37,6 +37,38 @@ jobs:
           if (!(Test-Path "dist/stillpoint/stillpoint.exe")) { throw "dist/stillpoint/stillpoint.exe not found" }
           if (!(Test-Path "dist/stillpoint-capture/stillpoint-capture.exe")) { throw "dist/stillpoint-capture/stillpoint-capture.exe not found" }
 
+      - name: Runtime smoke test (stillpoint startup)
+        run: |
+          $exe = "dist/stillpoint/stillpoint.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+
+          if ($proc.HasExited) {
+            if ($proc.ExitCode -ne 0) {
+              throw "stillpoint.exe exited early with non-zero code $($proc.ExitCode)"
+            }
+            Write-Host "stillpoint.exe exited cleanly during smoke window."
+          } else {
+            Stop-Process -Id $proc.Id -Force
+            Write-Host "stillpoint.exe started successfully and was terminated after smoke timeout."
+          }
+
+      - name: Runtime smoke test (stillpoint-capture startup)
+        run: |
+          $exe = "dist/stillpoint-capture/stillpoint-capture.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+
+          if ($proc.HasExited) {
+            if ($proc.ExitCode -ne 0) {
+              throw "stillpoint-capture.exe exited early with non-zero code $($proc.ExitCode)"
+            }
+            Write-Host "stillpoint-capture.exe exited cleanly during smoke window."
+          } else {
+            Stop-Process -Id $proc.Id -Force
+            Write-Host "stillpoint-capture.exe started successfully and was terminated after smoke timeout."
+          }
+
       - name: Generate Inno version include
         run: |
           python packaging/win32/generate-version.py
