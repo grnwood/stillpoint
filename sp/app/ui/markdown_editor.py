@@ -825,7 +825,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         )
 
         self._hr_line_color = theme_color("markdown_editor.syntax.hr_line", "#60656f")
-        self._hr_block_color = theme_color("markdown_editor.syntax.hr_block", "#242a33")
+        self._hr_block_color = theme_color("markdown_editor.syntax.hr_block", "#1e2530")
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(self._hr_line_color)
         self.hr_format.setBackground(QColor(0, 0, 0, 0))
@@ -1621,7 +1621,7 @@ class MarkdownEditor(QTextEdit):
             self.highlighter, "_hr_line_color", theme_color("markdown_editor.syntax.hr_line", "#60656f")
         )
         self._hr_block_color = getattr(
-            self.highlighter, "_hr_block_color", theme_color("markdown_editor.syntax.hr_block", "#242a33")
+            self.highlighter, "_hr_block_color", theme_color("markdown_editor.syntax.hr_block", "#1e2530")
         )
         self.cursorPositionChanged.connect(self._emit_cursor)
         self.cursorPositionChanged.connect(self._maybe_update_vi_cursor)
@@ -1971,11 +1971,10 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             return
 
-        # Keep the extra HR overlay opt-in; relying on QTextEdit's native paint path
-        # is significantly more stable across focus/app-state churn and platform Qt quirks.
-        enable_hr_overlay = os.getenv("SP_ENABLE_HR_OVERLAY", "0") in ("1", "true", "True")
-        disable_hr_overlay = os.getenv("SP_DISABLE_HR_OVERLAY", "0") not in ("0", "false", "False", "")
-        if not enable_hr_overlay or disable_hr_overlay:
+        # HR paint overlay is on by default; set SP_DISABLE_HR_OVERLAY=1 to fall back
+        # to plain QTextEdit rendering if platform-specific issues arise.
+        disable_hr_overlay = os.getenv("SP_DISABLE_HR_OVERLAY", "0") in ("1", "true", "True")
+        if disable_hr_overlay:
             self._vi_paint_in_progress = True
             try:
                 super().paintEvent(event)
@@ -7260,7 +7259,15 @@ class MarkdownEditor(QTextEdit):
             cursor.insertBlock()
             self.setTextCursor(cursor)
         if was_hr:
-            self._reset_insert_format(self.textCursor())
+            cursor = self.textCursor()
+            self._reset_insert_format(cursor)
+            # Clear block-level margins inherited from the HR block
+            block_fmt = cursor.blockFormat()
+            block_fmt.setTopMargin(0)
+            block_fmt.setBottomMargin(0)
+            cursor.setBlockFormat(block_fmt)
+            self.setTextCursor(cursor)
+            QTimer.singleShot(0, self._refresh_hr_selections)
         self._enter_vi_insert_mode()
 
     def _vi_open_line_above(self) -> None:
@@ -7278,7 +7285,15 @@ class MarkdownEditor(QTextEdit):
         cursor.endEditBlock()
         self.setTextCursor(cursor)
         if was_hr:
-            self._reset_insert_format(self.textCursor())
+            cursor = self.textCursor()
+            self._reset_insert_format(cursor)
+            # Clear block-level margins inherited from the HR block
+            block_fmt = cursor.blockFormat()
+            block_fmt.setTopMargin(0)
+            block_fmt.setBottomMargin(0)
+            cursor.setBlockFormat(block_fmt)
+            self.setTextCursor(cursor)
+            QTimer.singleShot(0, self._refresh_hr_selections)
         self._enter_vi_insert_mode()
 
     def _vi_insert_before_cursor(self) -> None:
@@ -8592,7 +8607,15 @@ class MarkdownEditor(QTextEdit):
         cursor.insertText("\n" + indent)
         cursor.endEditBlock()
         if was_hr:
-            self._reset_insert_format(self.textCursor())
+            cursor = self.textCursor()
+            self._reset_insert_format(cursor)
+            # Clear block-level margins inherited from the HR block
+            block_fmt = cursor.blockFormat()
+            block_fmt.setTopMargin(0)
+            block_fmt.setBottomMargin(0)
+            cursor.setBlockFormat(block_fmt)
+            self.setTextCursor(cursor)
+            QTimer.singleShot(0, self._refresh_hr_selections)
         return True
 
     def _dedent_line_text(self, text: str, indent_unit: Optional[str] = None) -> tuple[str, int]:
