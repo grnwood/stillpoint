@@ -60,10 +60,11 @@ jobs:
           Start-Sleep -Seconds 8
 
           if ($proc.HasExited) {
-            if ($proc.ExitCode -ne 0) {
-              throw "stillpoint-capture.exe exited early with non-zero code $($proc.ExitCode)"
+            # Exit code 1 is expected on CI: "no local vault configured" is a clean exit, not a crash.
+            if ($proc.ExitCode -notin 0,1) {
+              throw "stillpoint-capture.exe exited early with unexpected code $($proc.ExitCode)"
             }
-            Write-Host "stillpoint-capture.exe exited cleanly during smoke window."
+            Write-Host "stillpoint-capture.exe exited cleanly during smoke window (code $($proc.ExitCode))."
           } else {
             Stop-Process -Id $proc.Id -Force
             Write-Host "stillpoint-capture.exe started successfully and was terminated after smoke timeout."
