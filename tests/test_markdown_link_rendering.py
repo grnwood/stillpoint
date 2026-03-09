@@ -289,16 +289,16 @@ def test_paste_prefers_plain_markdown_when_html_also_present(editor):
     markdown = editor.to_markdown()
     assert "## Paste Title" in markdown
     assert "**Bold** item" in markdown
-    assert "[Task 123](https://example.com/task/123)" in markdown
+    assert "[https://example.com/task/123|Task 123]" in markdown
 
 
-def test_paste_markdown_link_with_control_chars_normalizes_markdown_link(editor):
+def test_paste_markdown_link_with_control_chars_normalizes_to_clean_wiki_link(editor):
     mime = QMimeData()
     mime.setText("[Task\u2060 123](https://example.com/task/123\u200b)")
     editor.insertFromMimeData(mime)
 
     markdown = editor.to_markdown()
-    assert "[Task 123](https://example.com/task/123)" in markdown
+    assert "[https://example.com/task/123|Task 123]" in markdown
     assert "\u2060" not in markdown
     assert "\u200b" not in markdown
 
@@ -594,14 +594,30 @@ def test_copy_as_markdown_multi_paragraph_selection_with_links_preserves_full_se
     assert "\n\n" in copied
 
 
-def test_paste_markdown_links_does_not_convert_to_wiki(editor):
+def test_paste_markdown_links_converts_to_wiki_for_clean_label_rendering(editor):
     mime = QMimeData()
     mime.setText("[Duck Duck Go](https://duckduckgo.com)")
     editor.insertFromMimeData(mime)
 
     markdown = editor.to_markdown()
-    assert "[Duck Duck Go](https://duckduckgo.com)" in markdown
-    assert "[https://duckduckgo.com|Duck Duck Go]" not in markdown
+    assert "[https://duckduckgo.com|Duck Duck Go]" in markdown
+    assert "[Duck Duck Go](https://duckduckgo.com)" not in markdown
+
+
+def test_paste_markdown_link_with_escaped_label_chars_normalizes_to_wiki(editor):
+    mime = QMimeData()
+    source = (
+        r"*   Growth pressures and complexity driving OMS/Inventory modernization    "
+        r"[\[DigiKey OM...ry SOW v01 \| Word\]]"
+        r"(https://capgemininar.sharepoint.com/sites/DigiKey-RFSOMSImplementation/_layouts/15/Doc.aspx?sourcedoc=%7BC72E4E80-CFB0-4EFE-A1E4-AE923093889B%7D&file=DigiKey%20OMS%20Design%20%26%20Discovery%20SOW%20v01.docx&action=default&mobileredirect=true&DefaultItemOpen=1)"
+    )
+    mime.setText(source)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "[https://capgemininar.sharepoint.com/sites/DigiKey-RFSOMSImplementation/" in markdown
+    assert "|DigiKey OM...ry SOW v01 | Word]" in markdown
+    assert r"[\[DigiKey OM...ry SOW v01 \| Word\]](" not in markdown
 
 
 def test_copy_line_under_cursor_preserves_internal_link_markdown(editor):

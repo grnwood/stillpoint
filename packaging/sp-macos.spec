@@ -1,6 +1,6 @@
 # packaging/sp-macos.spec
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 def _find_root():
     cand = os.getcwd()
@@ -51,6 +51,9 @@ hidden = (
     + collect_submodules('docx')
 )
 
+_charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normalizer')
+hidden += _charset_hidden
+
 _datas = [
     (os.path.join(ROOT, 'sp', 'templates'), 'sp/templates'),
     (os.path.join(ROOT, 'sp', 'server', 'templates'), 'sp/server/templates'),
@@ -74,10 +77,13 @@ block_cipher = None
 
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
+datas += _charset_datas
+binaries = _charset_binaries
+
 a = Analysis(
     [MAIN],
     pathex=[ROOT],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden,
     hookspath=[],

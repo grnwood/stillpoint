@@ -277,6 +277,19 @@ def test_is_editor_dirty_clears_false_positive_for_local_mode() -> None:
 
 
 def test_on_document_modified_ignores_noop_content_change_in_local_mode() -> None:
+    """
+    Test that document modification events are ignored when content hasn't actually changed in local mode.
+    This test verifies that when a document is marked as modified but the content remains the same
+    as the last saved content, and the application is in local mode (not homebase sync mode), the
+    dirty flag should not be set and the dirty indicator should not be updated.
+    The test creates a dummy MainWindow instance with:
+    - Homebase sync disabled (local mode)
+    - Editor content matching the last saved content
+    - Modified flag set to True on the editor
+    It then triggers the _on_document_modified handler and asserts that:
+    - The dirty flag remains False (no-op change detected)
+    - The update counter remains 0 (dirty indicator not updated)
+    """
     class _Dummy:
         _suspend_dirty_tracking = False
         _dirty_flag = False
@@ -292,6 +305,9 @@ def test_on_document_modified_ignores_noop_content_change_in_local_mode() -> Non
 
         def _is_homebase_mode_enabled(self) -> bool:
             return False
+
+        def _dirty_state_from_editor(self, *, default: bool) -> bool:
+            return MainWindow._dirty_state_from_editor(self, default=default)
 
     dummy = _Dummy()
     MainWindow._on_document_modified(dummy, True)

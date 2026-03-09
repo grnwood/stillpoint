@@ -236,14 +236,14 @@ COLON_LINK_PATTERN = QRegularExpression(r"(?<!\S)(?P<link>:[^\s\[\]]+(?:#[^\s\[\
 # Unified wiki-style link storage format: [link|label]
 # Matches both HTTP and page links (label can be empty)
 WIKI_LINK_STORAGE_PATTERN = re.compile(
-    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\]",
+    r"\[(?P<link>(?:\\.|[^\]|])*)\|(?P<label>(?:\\.|[^\]])*)\]",
     re.MULTILINE
 )
 
 # Handles a rare duplication bug where a wiki link tail is re-appended after decoding,
 # e.g. [link|label]tail|label] where tail is a suffix of link.
 WIKI_LINK_DUPLICATE_TAIL_PATTERN = re.compile(
-    r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
+    r"\[(?P<link>(?:\\.|[^\]|])*)\|(?P<label>(?:\\.|[^\]])*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
 )
 
 LINK_SENTINEL = "\uE100"
@@ -1073,7 +1073,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             r'(?P<strike>~~[^~]+~~)|'
             r'(?P<highlight>==[^=]+==)|'
             r'(?P<tag>(?<![\w.+-])@[A-Za-z0-9_]+|(?<!\S)#[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*(?=\s|$))|'
-            r'(?P<wiki_link>\[[^\]|]+\|[^\]]*\])|'
+            r'(?P<wiki_link>\[(?:\\.|[^\]|])*\|(?:\\.|[^\]])*\])|'
             r'(?P<camel_link>(?<!\S)\+[A-Za-z][\w]*(?=\s|$))|'
             r'(?P<colon_link>(?<!\S):[^\s\[\]]+(?:#[^\s\[\]]+)?)|'
             r'(?P<file_link>\[[^\]]+\]\s*\((?:\./)?[^)\n]+\.[A-Za-z0-9]{1,8}\))|'
@@ -1472,13 +1472,11 @@ class MarkdownEditor(QTextEdit):
                 base_dir = None
         # Find all [link|label] spans so we can skip +CamelCase in the label part
         link_spans = []
-        for m in re.finditer(r'\[([^\]|]+)\|([^\]]*)\]', text):
-            # Mark the label part (after the |)
+        for m in re.finditer(r'\[(?P<link>(?:\\.|[^\]|])*)\|(?P<label>(?:\\.|[^\]])*)\]', text):
+            # Mark the label part (after the unescaped delimiter |)
             link_start = m.start()
-            pipe = text.find('|', link_start, m.end())
-            if pipe != -1:
-                label_start = pipe + 1
-                link_spans.append((label_start, m.end() - 1))  # exclude the closing ]
+            label_start = link_start + 1 + len(m.group("link")) + 1
+            link_spans.append((label_start, m.end() - 1))  # exclude the closing ]
         def is_in_label(pos):
             return any(start <= pos < end for start, end in link_spans)
         allowed_prefixes = {"(", "[", "{", "<", "'", '"'}
@@ -3501,10 +3499,26 @@ class MarkdownEditor(QTextEdit):
         return "".join(cleaned_chars)
 
     def _normalize_pasted_link_artifacts(self, text: str) -> str:
-        """Repair malformed pasted wiki-link artifacts while preserving markdown links."""
+        """Repair malformed pasted links and normalize markdown HTTP links for clean rendering."""
         text = self._strip_problematic_control_chars(text)
         if not text:
             return text
+
+        # Normalize standard markdown HTTP links to storage format so pasted content
+        # renders as clean clickable labels in the editor.
+        # Example: [Label](https://example.com) -> [https://example.com|Label]
+        markdown_http_link_pattern = re.compile(
+            r"(?<!!)\[(?P<label>(?:\\.|[^\]\\])*)\]\((?P<url>https?://[^\s)]+)\)"
+        )
+
+        def _markdown_http_to_wiki(match: re.Match[str]) -> str:
+            raw_label = match.group("label") or ""
+            unescaped_label = re.sub(r"\\([\\\[\]\|()])", r"\1", raw_label)
+            label = self._clean_pasted_link_label(unescaped_label)
+            url = self._normalize_external_link(match.group("url") or "")
+            return f"[{url}|{label}]"
+
+        text = markdown_http_link_pattern.sub(_markdown_http_to_wiki, text)
 
         if "[" not in text or "|" not in text:
             return text
@@ -3562,7 +3576,7 @@ class MarkdownEditor(QTextEdit):
             return f"[{left_url}|{label}]"
 
         return re.sub(
-            r"\[(?P<left>[^\[\]\n|]{0,600})\|(?P<right>[^\[\]\n|]{0,600})\]",
+            r"\[(?P<left>(?:\\.|[^\[\]\n|]){0,600})\|(?P<right>(?:\\.|[^\[\]\n]){0,600})\]",
             _rewrite,
             text,
         )
@@ -6200,13 +6214,17 @@ class MarkdownEditor(QTextEdit):
             idx += 1
         
         # Check storage-format wiki-style links: [link|label]
-        wiki_pattern = r"\[([^\]|]+)\|([^\]]*)\]"
+        wiki_pattern = r"\[(?:\\.|[^\]|])*\|(?:\\.|[^\]])*\]"
         import re as regex_module
         for match in regex_module.finditer(wiki_pattern, text):
             start = match.start()
             end = match.end()
-            link = match.group(1)
-            label = match.group(2)
+            full = match.group(0)
+            split = re.match(r"^\[(?P<link>(?:\\.|[^\]|])*)\|(?P<label>(?:\\.|[^\]])*)\]$", full)
+            if not split:
+                continue
+            link = split.group("link")
+            label = split.group("label")
             # Determine visible part (label if non-empty, otherwise link)
             if label:
                 visible_start = start + 1 + len(link) + 1  # After '[link|'
