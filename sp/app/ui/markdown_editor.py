@@ -1645,6 +1645,10 @@ class MarkdownEditor(QTextEdit):
         self._hr_resize_timer.setSingleShot(True)
         self._hr_resize_timer.timeout.connect(self._refresh_hr_selections)
         self._hr_live_refresh_enabled = os.getenv("SP_HR_LIVE_REFRESH", "0") in ("1", "true", "True")
+        self._disable_inline_images = os.getenv("SP_DISABLE_INLINE_IMAGES", "0") in ("1", "true", "True")
+        # Qt's SVG image plugin can crash in native paint on some Linux setups.
+        # Keep raster inline images enabled and allow opting back in for SVG.
+        self._enable_inline_svg = os.getenv("SP_ENABLE_INLINE_SVG", "0") in ("1", "true", "True")
         if self._hr_live_refresh_enabled:
             self.textChanged.connect(self._schedule_hr_selections)
         # Timer for CamelCase link conversion; explicitly started on key triggers
@@ -8869,6 +8873,8 @@ class MarkdownEditor(QTextEdit):
         This operates on the current document by selecting each pattern range
         and inserting a QTextImageFormat created from the resolved path.
         """
+        if self._disable_inline_images:
+            return
         if self._mutations_blocked():
             if not self._render_images_retry_pending:
                 self._render_images_retry_pending = True
@@ -8998,6 +9004,8 @@ class MarkdownEditor(QTextEdit):
     def _create_image_format(self, raw_path: str, alt: str, width: Optional[str]) -> Optional[QTextImageFormat]:
         resolved = self._resolve_image_path(raw_path)
         if resolved is None or not resolved.exists():
+            return None
+        if resolved.suffix.lower() == ".svg" and sys.platform.startswith("linux") and not self._enable_inline_svg:
             return None
         image = QImage(str(resolved))
         if image.isNull():
