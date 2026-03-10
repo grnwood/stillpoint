@@ -30,7 +30,7 @@ jobs:
           chmod +x packaging/server/run-server.sh
           chmod +x packaging/server/_launch.sh
           sudo apt-get install -y upx
-          pip install -r sp/requirements.txt
+          pip install --no-binary charset_normalizer -r sp/requirements.txt
 
       - name: PyInstaller build
         run: |
