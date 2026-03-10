@@ -7662,6 +7662,8 @@ class MarkdownEditor(QTextEdit):
         self.setExtraSelections(existing)
 
     def _retry_refresh_hr(self) -> None:
+        if not Shiboken.isValid(self):
+            return
         self._hr_refresh_retry_pending = False
         self._refresh_hr_selections()
 
@@ -8779,6 +8781,8 @@ class MarkdownEditor(QTextEdit):
             pass
 
     def _retry_scroll_margin(self) -> None:
+        if not Shiboken.isValid(self):
+            return
         self._scroll_margin_retry_pending = False
         self._apply_scroll_past_end_margin()
 
@@ -8990,6 +8994,8 @@ class MarkdownEditor(QTextEdit):
         )
 
     def _retry_render_images(self, display_text: str, scheduled_at: Optional[float]) -> None:
+        if not Shiboken.isValid(self):
+            return
         self._render_images_retry_pending = False
         self._render_images(display_text, scheduled_at)
 

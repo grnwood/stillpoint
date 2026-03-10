@@ -8838,6 +8838,14 @@ class MainWindow(QMainWindow):
                 lambda p=path, r=retry, a=add_to_history, f=force, c=cursor_at_end, rh=restore_history_cursor, sc=sync_calendar: self._open_file(p, r, a, f, c, rh, sc),
             )
             return
+        # Stop any running scroll animation before switching pages to prevent
+        # _finish_flash from firing with a cursor from the old document after
+        # the document is cleared and replaced.
+        if self._scroll_anim is not None:
+            try:
+                self._scroll_anim.stop()
+            except Exception:
+                pass
         # Remember current cursor before switching pages
         self._remember_history_cursor()
         tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
@@ -16352,6 +16360,11 @@ class MainWindow(QMainWindow):
         anim.setEndValue(target_val)
         def _finish_flash() -> None:
             try:
+                # Guard: only apply cursor if it still belongs to the current
+                # editor document.  A page switch clears the document and any
+                # cursor from the old content would be invalid at that point.
+                if cursor.document() is not self.editor.document():
+                    return
                 self.editor.setTextCursor(cursor)
                 self.editor.ensureCursorVisible()
                 if flash:
