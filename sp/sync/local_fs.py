@@ -8,12 +8,15 @@ from typing import Iterator, Optional
 
 
 EXCLUDE_DIRS = {".stillpoint"}
+EXCLUDE_FILES = {"AGENTS.md"}
 
 
 def iter_files(vault_root: Path) -> Iterator[tuple[str, Path]]:
     for root, dirs, files in os.walk(vault_root):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
         for name in files:
+            if name in EXCLUDE_FILES:
+                continue
             full = Path(root) / name
             rel = full.relative_to(vault_root).as_posix()
             if rel.startswith(".stillpoint/"):
@@ -52,4 +55,3 @@ def conflict_copy_path(rel_path: str, device_id: str, ts: Optional[int] = None) 
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(ts or int(time.time())))
     path = Path(rel_path)
     return f"{path.with_suffix('').as_posix()}.sync-conflict-{stamp}-{device_id}{path.suffix}"
-

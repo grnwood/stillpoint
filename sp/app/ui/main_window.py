@@ -10,11 +10,13 @@ import os
 import shutil
 import socket
 import platform
+import shlex
 import sqlite3
 import subprocess
 import sys
 import tempfile 
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 import faulthandler
 import re
@@ -40,6 +42,7 @@ from PySide6.QtCore import (
     QMimeData,
     QSignalBlocker,
     QSize,
+    QFileSystemWatcher,
 )
 from PySide6.QtGui import (
     QAction,
@@ -772,7 +775,7 @@ class RemoteVaultSelectDialog(QDialog):
 
     def __init__(self, vaults: list[dict[str, str]], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Select Remote Vault")
+        self.setWindowTitle("Select Vault")
         self.setModal(True)
         self.resize(480, 360)
         self._selected_path: Optional[str] = None
@@ -887,7 +890,7 @@ def _log_ui_state(message: str) -> None:
 
 def _log_homebase_client(message: str) -> None:
     if log_enabled("homebaseclient"):
-        print(f"[HomebaseToken] {message}")
+        print(f"{_ANSI_BLUE}[HomebaseToken] {message}{_ANSI_RESET}")
 
 
 def _token_state(token: Optional[str]) -> str:
@@ -1710,6 +1713,7 @@ class MainWindow(QMainWindow):
         self._server_url: Optional[str] = None
         self._verify_tls = True
         self._remote_cache_root: Optional[Path] = None
+        self._remote_context_id = uuid.uuid4().hex
         self._local_auth_token = local_auth_token
         self._embedded_server_admin_password = embedded_server_admin_password
         self._session_server_passwords: dict[str, str] = {}  # Cache server passwords for current session
@@ -1738,6 +1742,16 @@ class MainWindow(QMainWindow):
         self._homebase_user_info_refreshing: bool = False
         self._homebase_sync_engine: Optional[HomebaseSyncEngine] = None
         self._homebase_status_poll_timer: Optional[QTimer] = None
+        self._homebase_fs_watcher: Optional[QFileSystemWatcher] = None
+        self._homebase_watch_refresh_timer: Optional[QTimer] = None
+        self._local_fs_ui_quiet_timer: Optional[QTimer] = QTimer(self)
+        self._local_fs_ui_quiet_timer.setSingleShot(True)
+        self._local_fs_ui_quiet_timer.timeout.connect(self._on_local_fs_ui_quiet_timeout)
+        self._homebase_fs_sync_quiet_timer: Optional[QTimer] = QTimer(self)
+        self._homebase_fs_sync_quiet_timer.setSingleShot(True)
+        self._homebase_fs_sync_quiet_timer.timeout.connect(self._on_homebase_fs_sync_quiet_timeout)
+        self._homebase_watched_dirs: set[str] = set()
+        self._homebase_watch_root: Optional[Path] = None
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
         def _log_request(request):
@@ -1847,6 +1861,8 @@ class MainWindow(QMainWindow):
         self._homebase_sync_activity_started_at: Optional[float] = None
         self._homebase_sync_cycle_had_true_activity: bool = False
         self._homebase_last_real_sync_at: Optional[str] = None
+        self._homebase_tree_refresh_pending: bool = False
+        self._homebase_tree_refresh_reason: str = ""
         self._suppress_focus_borders: bool = False
         
         # Track virtual (unsaved) pages
@@ -2361,6 +2377,10 @@ class MainWindow(QMainWindow):
         vault_prefs_action.setToolTip("Override global preferences for this vault")
         vault_prefs_action.triggered.connect(self._open_vault_preferences)
         vault_menu.addAction(vault_prefs_action)
+        self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
+        self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
+        self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
+        vault_menu.addAction(self._action_open_vault_terminal)
         self._action_homebase_sync_now = QAction("Sync Now", self)
         self._action_homebase_sync_now.setToolTip("Run Homebase sync immediately")
         self._action_homebase_sync_now.triggered.connect(
@@ -2379,17 +2399,17 @@ class MainWindow(QMainWindow):
         close_vault_action.setToolTip("Close this window")
         close_vault_action.triggered.connect(self._close_vault_window)
         vault_menu.addAction(close_vault_action)
-        self._remote_vault_menu = vault_menu.addMenu("Remote Vault")
+        self._remote_vault_menu = vault_menu.addMenu("Homebase")
         try:
             self._remote_vault_menu.menuAction().setVisible(False)
         except Exception:
             self._remote_vault_menu.setVisible(False)
-        self._action_server_login = QAction("Login - Authenticate to Remote Vault", self)
-        self._action_server_login.setToolTip("Authenticate to the remote vault")
+        self._action_server_login = QAction("Login - Authenticate to Homebase", self)
+        self._action_server_login.setToolTip("Authenticate to the Homebase server")
         self._action_server_login.triggered.connect(self._handle_remote_vault_login)
         self._remote_vault_menu.addAction(self._action_server_login)
-        self._action_server_logout = QAction("Logout - Clear Remote Vault Credentials", self)
-        self._action_server_logout.setToolTip("Clear stored remote vault credentials")
+        self._action_server_logout = QAction("Logout - Clear Homebase Credentials", self)
+        self._action_server_logout.setToolTip("Clear stored Homebase credentials")
         self._action_server_logout.triggered.connect(self._handle_remote_vault_logout)
         self._remote_vault_menu.addAction(self._action_server_logout)
         self._action_manage_users = QAction("Manage Users...", self)
@@ -2501,6 +2521,7 @@ class MainWindow(QMainWindow):
         self._action_tooltips = {
             self._action_new_vault: self._action_new_vault.toolTip(),
             self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
+            self._action_open_vault_terminal: self._action_open_vault_terminal.toolTip(),
             self._action_zim_import: self._action_zim_import.toolTip(),
             self._action_rebuild_index: self._action_rebuild_index.toolTip(),
             self._action_rebuild_search_index: self._action_rebuild_search_index.toolTip(),
@@ -2766,6 +2787,8 @@ class MainWindow(QMainWindow):
             f"{theme_value('main_window.remote_badge.text', '#ffffff')};"
         )
         self._remote_status_label.setToolTip("")
+        self._remote_status_label.setCursor(QCursor(Qt.PointingHandCursor))
+        self._remote_status_label.mousePressEvent = lambda event: self._show_remote_status_summary()
         self._remote_status_label.hide()
         self.statusBar().addPermanentWidget(self._remote_status_label, 0)
 
@@ -3866,7 +3889,7 @@ class MainWindow(QMainWindow):
                 while not name:
                     name, ok = QInputDialog.getText(
                         self,
-                        "Create Remote Vault",
+                        "Create Vault",
                         "Enter a new vault name:",
                     )
                     if not ok:
@@ -4036,8 +4059,6 @@ class MainWindow(QMainWindow):
             current_vault=seed_path,
             vaults=vaults,
             select_id=select_id,
-            on_add_remote=self._add_remote_server,
-            on_load_remote=self._fetch_remote_vaults_with_status,
         )
         if dialog.exec() != QDialog.Accepted:
             return False
@@ -4139,7 +4160,11 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         self._ensure_config_active_vault_context()
-        dialog = VaultPreferencesDialog(self)
+        dialog = VaultPreferencesDialog(
+            self,
+            remote_mode=bool(self._remote_mode),
+            remote_read_only=bool(self._read_only or not self._remote_user_can_write),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._ensure_config_active_vault_context()
             self._apply_feature_overrides()
@@ -4477,6 +4502,14 @@ class MainWindow(QMainWindow):
             else:
                 action.setEnabled(True)
                 action.setToolTip(self._action_tooltips.get(action, label))
+        self._action_open_vault_terminal.setText("Open Vault in Terminal")
+        self._action_open_vault_terminal.setEnabled(bool(self.vault_root))
+        self._action_open_vault_terminal.setToolTip(
+            self._action_tooltips.get(
+                self._action_open_vault_terminal,
+                "Open the current local vault in your system terminal",
+            )
+        )
         
         # Reindex actions are now supported for both local and remote vaults
         self._action_rebuild_index.setEnabled(True)
@@ -4505,6 +4538,115 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
         self._update_periodic_search_sync_timer()
+
+    def _open_vault_workspace_terminal(self) -> None:
+        self._open_local_vault_terminal()
+
+    def _shutdown_homebase_watcher(self) -> None:
+        if self._local_fs_ui_quiet_timer:
+            try:
+                self._local_fs_ui_quiet_timer.stop()
+            except Exception:
+                pass
+        if self._homebase_fs_sync_quiet_timer:
+            try:
+                self._homebase_fs_sync_quiet_timer.stop()
+            except Exception:
+                pass
+        if self._homebase_watch_refresh_timer:
+            try:
+                self._homebase_watch_refresh_timer.stop()
+            except Exception:
+                pass
+        self._homebase_watch_refresh_timer = None
+        if self._homebase_fs_watcher:
+            try:
+                self._homebase_fs_watcher.directoryChanged.disconnect(self._on_homebase_fs_changed)
+            except Exception:
+                pass
+            try:
+                self._homebase_fs_watcher.fileChanged.disconnect(self._on_homebase_fs_changed)
+            except Exception:
+                pass
+            try:
+                self._homebase_fs_watcher.deleteLater()
+            except Exception:
+                pass
+        self._homebase_fs_watcher = None
+        self._homebase_watched_dirs.clear()
+        self._homebase_watch_root = None
+
+    def _refresh_homebase_watch_paths(self) -> None:
+        root = self._homebase_watch_root
+        watcher = self._homebase_fs_watcher
+        if watcher is None or root is None:
+            return
+        dir_paths: set[str] = set()
+        try:
+            for current_root, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d != ".stillpoint"]
+                files[:] = [name for name in files if name != "AGENTS.md"]
+                dir_paths.add(str(Path(current_root)))
+        except Exception:
+            dir_paths = {str(root)}
+        try:
+            existing = set(watcher.directories())
+        except Exception:
+            existing = set()
+        remove_paths = sorted(existing - dir_paths)
+        add_paths = sorted(dir_paths - existing)
+        if remove_paths:
+            try:
+                watcher.removePaths(remove_paths)
+            except Exception:
+                pass
+        if add_paths:
+            try:
+                watcher.addPaths(add_paths)
+            except Exception:
+                pass
+        self._homebase_watched_dirs = dir_paths
+
+    def _ensure_homebase_watcher(self, vault_root: Path) -> None:
+        self._shutdown_homebase_watcher()
+        self._homebase_watch_root = vault_root
+        watcher = QFileSystemWatcher(self)
+        watcher.directoryChanged.connect(self._on_homebase_fs_changed)
+        watcher.fileChanged.connect(self._on_homebase_fs_changed)
+        self._homebase_fs_watcher = watcher
+        refresh_timer = QTimer(self)
+        refresh_timer.setSingleShot(True)
+        refresh_timer.setInterval(400)
+        refresh_timer.timeout.connect(self._refresh_homebase_watch_paths)
+        self._homebase_watch_refresh_timer = refresh_timer
+        self._refresh_homebase_watch_paths()
+
+    def _on_homebase_fs_changed(self, path: str) -> None:
+        self._schedule_local_filesystem_ui_refresh("filesystem change")
+        if self._is_homebase_mode_enabled() and self._homebase_sync_engine:
+            self._mark_homebase_unsynced_local_change()
+            if self._homebase_fs_sync_quiet_timer:
+                self._homebase_fs_sync_quiet_timer.start(20000)
+        try:
+            changed_path = str(path or "").strip()
+            if changed_path:
+                if self._is_homebase_mode_enabled() and self._homebase_sync_engine:
+                    self.statusBar().showMessage("Local file changes detected; waiting for Homebase quiet time...", 2500)
+                else:
+                    self.statusBar().showMessage("Local file changes detected; waiting for quiet time before tree refresh...", 2500)
+        except Exception:
+            pass
+        if self._homebase_watch_refresh_timer:
+            self._homebase_watch_refresh_timer.start()
+        status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        if self._is_homebase_mode_enabled():
+            self._update_homebase_status_badge(status)
+
+    def _open_local_vault_terminal(self) -> None:
+        if not self.vault_root:
+            self.statusBar().showMessage("Open a vault first.", 3000)
+            return
+        self._open_terminal_for_workspace(Path(self.vault_root), title="Open Vault in Terminal")
 
     def _update_periodic_search_sync_timer(self) -> None:
         """Enable/disable periodic local search index sync based on mode and preferences."""
@@ -4635,8 +4777,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_remote_status_label"):
             return
         if self._remote_mode and self.vault_root:
-            self._remote_status_label.setText("REMOTE")
-            
+            text = "REMOTE"
+
             # Build detailed tooltip with connection and auth status
             tooltip_parts = []
             connection_str = self._remote_connection_string()
@@ -4671,8 +4813,9 @@ class MainWindow(QMainWindow):
             # Add username if known
             if self._remote_username:
                 tooltip_parts.append(f"User: {self._remote_username}")
-            
+
             tooltip = "\n".join(tooltip_parts) if tooltip_parts else ""
+            self._remote_status_label.setText(text)
             self._remote_status_label.setToolTip(tooltip)
             self._remote_status_label.setStyleSheet(
                 self._badge_base_style
@@ -4685,6 +4828,53 @@ class MainWindow(QMainWindow):
             self._remote_status_label.hide()
             self._hide_remote_feedback()
 
+    def _show_remote_status_summary(self) -> None:
+        if not self._remote_mode:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Remote Connection")
+        dialog.setModal(True)
+        dialog.resize(560, 380)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Remote connection status")
+        title.setStyleSheet("font-weight: 600; font-size: 15px;")
+        layout.addWidget(title)
+
+        info_box = QFrame()
+        info_box.setFrameShape(QFrame.StyledPanel)
+        info_layout = QGridLayout(info_box)
+        info_layout.setContentsMargins(12, 12, 12, 12)
+        info_layout.setHorizontalSpacing(10)
+        info_layout.setVerticalSpacing(6)
+        row = 0
+        info_layout.addWidget(QLabel("Connection:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel(self._remote_connection_string() or "Unknown"), row, 1)
+        row += 1
+        auth_text = "Authenticated" if (self._access_token or self._refresh_token) else "Not authenticated"
+        info_layout.addWidget(QLabel("Auth:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel(auth_text), row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Network:"), row, 0, Qt.AlignTop)
+        info_layout.addWidget(QLabel(self._remote_health_message or self._remote_health_state or "Unknown"), row, 1)
+        row += 1
+        if self._remote_last_latency_ms is not None:
+            info_layout.addWidget(QLabel("Latency:"), row, 0, Qt.AlignTop)
+            info_layout.addWidget(QLabel(f"{self._remote_last_latency_ms:.0f} ms"), row, 1)
+            row += 1
+        layout.addWidget(info_box)
+
+        button_row = QHBoxLayout()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        dialog.exec()
+
     def _is_homebase_mode_enabled(self) -> bool:
         if self._remote_mode:
             return False
@@ -4693,7 +4883,93 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _remote_auth_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {"X-StillPoint-Window-Id": self._remote_context_id}
+        access = self._get_access_token()
+        if access:
+            headers["Authorization"] = f"Bearer {access}"
+        try:
+            server_url = self.api_base or self._server_url or ""
+            server_key = self._server_key_for_url(server_url) if server_url else ""
+            server_cfg = self._remote_server_config_for_url(server_url) if server_url else None
+            server_password_hash = None
+            if server_cfg:
+                host = server_cfg.get("host")
+                port = server_cfg.get("port")
+                scheme = server_cfg.get("scheme") or "http"
+                if host and port:
+                    server_password_hash = config.get_server_password_hash(str(host), int(port), str(scheme))
+            if not server_password_hash and server_key:
+                server_password_hash = self._session_server_passwords.get(server_key)
+            if (
+                not server_password_hash
+                and server_url == self._local_api_base
+                and self._embedded_server_admin_password
+            ):
+                server_password_hash = hashlib.sha256(self._embedded_server_admin_password.encode()).hexdigest()
+            if server_password_hash:
+                headers["X-Server-Admin-Password"] = server_password_hash
+        except Exception:
+            pass
+        return headers
+
+    def _seed_agents_file_if_needed(self, workspace_root: Path) -> None:
+        try:
+            if not config.load_seed_agents_workspace():
+                return
+            workspace_root = workspace_root.expanduser()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            agents_path = workspace_root / "AGENTS.md"
+            if agents_path.exists():
+                return
+            template_path = Path(__file__).resolve().parents[3] / "SP-vault-AGENTS.md"
+            if not template_path.exists():
+                return
+            agents_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _open_terminal_for_workspace(self, workspace_root: Path, *, title: str) -> None:
+        try:
+            folder = workspace_root.expanduser()
+            self._seed_agents_file_if_needed(folder)
+            folder.mkdir(parents=True, exist_ok=True)
+            system = platform.system()
+            if system == "Windows":
+                subprocess.Popen(
+                    ["cmd.exe", "/K", "cd", "/D", str(folder)],
+                    cwd=str(folder),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            elif system == "Darwin":
+                script = f'tell application "Terminal" to do script "cd {shlex.quote(str(folder))}"'
+                subprocess.Popen(["osascript", "-e", script])
+            else:
+                terminals = [
+                    ["gnome-terminal", "--working-directory", str(folder)],
+                    ["x-terminal-emulator", "--working-directory", str(folder)],
+                    ["konsole", "--workdir", str(folder)],
+                    ["xfce4-terminal", "--working-directory", str(folder)],
+                    ["alacritty", "--working-directory", str(folder)],
+                    ["kitty", "--directory", str(folder)],
+                    ["xterm", "-e", f"cd {shlex.quote(str(folder))} && exec $SHELL"],
+                ]
+                launched = False
+                for term_cmd in terminals:
+                    try:
+                        subprocess.Popen(term_cmd)
+                        launched = True
+                        break
+                    except FileNotFoundError:
+                        continue
+                if not launched:
+                    raise RuntimeError("No supported terminal application was found.")
+            self.statusBar().showMessage(f"Opened {title}.", 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, title, f"Could not open terminal: {exc}")
+
     def _shutdown_homebase_sync(self) -> None:
+        self._shutdown_homebase_watcher()
         if self._homebase_status_poll_timer:
             try:
                 self._homebase_status_poll_timer.stop()
@@ -4721,6 +4997,8 @@ class MainWindow(QMainWindow):
                 f"vault_root={'set' if bool(self.vault_root) else 'missing'} "
                 f"homebase_mode={self._is_homebase_mode_enabled()}"
             )
+            if self.vault_root and not self._remote_mode:
+                self._ensure_homebase_watcher(Path(self.vault_root))
             self._update_homebase_sync_action_state()
             return
         try:
@@ -4775,6 +5053,7 @@ class MainWindow(QMainWindow):
                 f"debounce={cfg.push_debounce_seconds}s parallel={cfg.max_parallel_transfers}"
             )
             self._homebase_sync_engine = HomebaseSyncEngine(cfg)
+            self._ensure_homebase_watcher(Path(self.vault_root))
             self._homebase_sync_engine.start()
             self._homebase_status_poll_timer = QTimer(self)
             self._homebase_status_poll_timer.setInterval(1000)
@@ -4795,10 +5074,13 @@ class MainWindow(QMainWindow):
 
     def _poll_homebase_status(self) -> None:
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        should_refresh_tree_for_local_sync = False
         if self._homebase_status_clears_unsynced_marker(status):
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
             self._homebase_sync_cycle_had_true_activity = True
+            should_refresh_tree_for_local_sync = True
+            _log_homebase_client("status poll: local sync completed; scheduling tree refresh")
         self._maybe_show_homebase_conflict_popup(status)
         if self._homebase_sync_engine:
             try:
@@ -4823,8 +5105,76 @@ class MainWindow(QMainWindow):
                     restore_history_cursor=True,
                     sync_calendar=False,
                 )
+        if should_refresh_tree_for_local_sync:
+            self._schedule_homebase_tree_refresh_on_ui_activity("local sync completed")
         self._update_homebase_status_badge(status)
         self._update_homebase_sync_action_state()
+
+    def _schedule_local_filesystem_ui_refresh(self, reason: str) -> None:
+        if self._remote_mode or not self.vault_root:
+            return
+        quiet_seconds = 10
+        try:
+            quiet_seconds = int(config.load_local_filesystem_quiet_seconds())
+        except Exception:
+            quiet_seconds = 10
+        if self._local_fs_ui_quiet_timer:
+            self._local_fs_ui_quiet_timer.start(max(1, quiet_seconds) * 1000)
+        self._homebase_tree_refresh_reason = str(reason or "").strip() or "filesystem change"
+
+    def _on_local_fs_ui_quiet_timeout(self) -> None:
+        if self._remote_mode or not self.vault_root:
+            return
+        reason = self._homebase_tree_refresh_reason or "filesystem quiet period"
+        try:
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+        except Exception:
+            pass
+        _log_homebase_client(f"filesystem quiet timer fired; refreshing tree (reason={reason})")
+        self.statusBar().showMessage("Filesystem quiet; refreshing vault tree...", 2500)
+        self._refresh_tree()
+
+    def _on_homebase_fs_sync_quiet_timeout(self) -> None:
+        if not self._is_homebase_mode_enabled() or not self._homebase_sync_engine:
+            return
+        try:
+            self.statusBar().showMessage("Filesystem quiet; syncing Homebase...", 2500)
+            self._homebase_sync_engine.schedule_sync("fs quiet period")
+            status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+            self._update_homebase_status_badge(status)
+        except Exception:
+            return
+
+    def _schedule_homebase_tree_refresh_on_ui_activity(self, reason: str) -> None:
+        if self._remote_mode or not self.vault_root:
+            return
+        self._homebase_tree_refresh_reason = str(reason or "").strip() or "homebase sync"
+        try:
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+        except Exception:
+            pass
+        self.statusBar().showMessage("Local changes synced; refreshing vault tree...", 2500)
+        self._refresh_tree()
+
+    def _flush_pending_homebase_tree_refresh(self) -> None:
+        if not self._homebase_tree_refresh_pending:
+            return
+        self._homebase_tree_refresh_pending = False
+        reason = self._homebase_tree_refresh_reason or "homebase sync"
+        self._homebase_tree_refresh_reason = ""
+        try:
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+        except Exception:
+            pass
+        _log_homebase_client(f"flushing deferred tree refresh on UI activity: reason={reason}")
+        self.statusBar().showMessage("Refreshing vault tree...", 2500)
+        self._refresh_tree()
 
     def _mark_homebase_unsynced_local_change(self) -> None:
         if not self._is_homebase_mode_enabled():
@@ -5715,7 +6065,12 @@ class MainWindow(QMainWindow):
             self._ensure_config_active_vault_context()
             config.save_homebase_auth_token(access_token)
             config.save_homebase_refresh_token(refresh_token)
-            _log_homebase_client("saved vault-scoped access/refresh tokens")
+            saved_access = config.load_homebase_auth_token().strip()
+            saved_refresh = config.load_homebase_refresh_token().strip()
+            _log_homebase_client(
+                "saved vault-scoped access/refresh tokens: "
+                f"access={_token_state(saved_access)} refresh={_token_state(saved_refresh)}"
+            )
             # Keep global Homebase profile tokens in sync so reopening from
             # Homebase Vaults does not reapply stale/expired tokens.
             if self.vault_root:
@@ -5753,7 +6108,10 @@ class MainWindow(QMainWindow):
                     break
                 if updated:
                     config.save_homebase_vault_profiles(profiles)
-                    _log_homebase_client("profile sync saved updated tokens")
+                    _log_homebase_client(
+                        "profile sync saved updated tokens: "
+                        f"access={_token_state(access_token)} refresh={_token_state(refresh_token)}"
+                    )
                 else:
                     _log_homebase_client("profile sync skipped: no matching profile")
             else:
@@ -5766,7 +6124,7 @@ class MainWindow(QMainWindow):
         if is_remote:
             self._load_remote_auth()
             auth = RemoteTokenAuth(self._get_access_token, self._attempt_refresh)
-            headers = {}
+            headers = {"X-StillPoint-Window-Id": self._remote_context_id}
             connect_timeout, read_timeout = self._remote_timeout_settings_for_url(base_url)
             timeout = self._http_timeout(connect_timeout, read_timeout)
             
@@ -5965,8 +6323,8 @@ class MainWindow(QMainWindow):
             if not pages:
                 reply = QMessageBox.question(
                     self,
-                    "Remote Vault Index Empty",
-                    "The remote vault's page index is empty.\n\n"
+                    "Vault Index Empty",
+                    "The selected vault's page index is empty.\n\n"
                     "Would you like to build the vault index now?\n"
                     "(This will scan all pages and populate the database)",
                     QMessageBox.Yes | QMessageBox.No,
@@ -6035,9 +6393,11 @@ class MainWindow(QMainWindow):
         if not self._refresh_token:
             return False
         try:
+            headers = self._remote_auth_headers()
+            headers["Authorization"] = f"Bearer {self._refresh_token}"
             resp = httpx.post(
                 f"{self.api_base}/auth/refresh",
-                headers={"Authorization": f"Bearer {self._refresh_token}"},
+                headers=headers,
                 timeout=10.0,
                 verify=self._verify_tls,
             )
@@ -6095,20 +6455,24 @@ class MainWindow(QMainWindow):
             headers["x-local-ui-token"] = local_ui_token
         url = f"{base_url}/v1/homebase/{vault_id}{path}"
         _log_homebase_client(
-            f"{method} {path}: access={'set' if bool(auth_token) else 'missing'} "
-            f"refresh={'set' if bool(refresh_token) else 'missing'}"
+            f"{method} {path}: access={_token_state(auth_token)} "
+            f"refresh={_token_state(refresh_token)}"
         )
         resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
         if resp.status_code != 401 or not refresh_token:
             if resp.status_code == 401:
                 _log_homebase_client(
-                    f"{method} {path}: 401 and no refresh token available; re-auth required"
+                    f"{method} {path}: 401 and no usable refresh token available "
+                    f"(refresh={_token_state(refresh_token)}); re-auth required"
                 )
             else:
                 _log_homebase_client(f"{method} {path}: status={resp.status_code} via access token")
             return resp
         try:
-            _log_homebase_client(f"{method} {path}: access token rejected (401), attempting refresh")
+            _log_homebase_client(
+                f"{method} {path}: access token rejected (401), attempting refresh "
+                f"with refresh={_token_state(refresh_token)}"
+            )
             refresh_resp = httpx.post(
                 f"{base_url}/v1/homebase/bootstrap/refresh",
                 json={"vault_id": vault_id, "refresh_token": refresh_token},
@@ -6117,7 +6481,8 @@ class MainWindow(QMainWindow):
             )
             if refresh_resp.status_code != 200:
                 _log_homebase_client(
-                    f"{method} {path}: refresh failed status={refresh_resp.status_code}; re-auth required"
+                    f"{method} {path}: refresh failed status={refresh_resp.status_code} "
+                    f"for refresh={_token_state(refresh_token)}; re-auth required"
                 )
                 return resp
             data = refresh_resp.json()
@@ -6128,13 +6493,20 @@ class MainWindow(QMainWindow):
                     f"{method} {path}: refresh response missing tokens; re-auth required"
                 )
                 return resp
+            _log_homebase_client(
+                f"{method} {path}: refresh returned "
+                f"access={_token_state(access)} refresh={_token_state(refreshed)}"
+            )
             self._store_homebase_tokens(access, refreshed)
             _log_homebase_client(f"{method} {path}: refresh succeeded, retrying with new access token")
             headers["Authorization"] = f"Bearer {access}"
             resp = httpx.request(method, url, headers=headers, json=payload, timeout=15.0, verify=verify_ssl)
             _log_homebase_client(f"{method} {path}: retry status={resp.status_code}")
-        except Exception:
-            _log_homebase_client(f"{method} {path}: refresh attempt raised exception; keeping original 401")
+        except Exception as exc:
+            _log_homebase_client(
+                f"{method} {path}: refresh attempt raised exception "
+                f"({type(exc).__name__}: {exc}); keeping original 401"
+            )
             return resp
         return resp
 
@@ -6145,12 +6517,15 @@ class MainWindow(QMainWindow):
             return
         self._homebase_user_info_refreshing = True
         try:
+            _log_homebase_client("refresh user info: requesting /auth/me")
             resp = self._homebase_request("GET", "/auth/me")
             if resp.status_code != 200:
+                _log_homebase_client(f"refresh user info: /auth/me status={resp.status_code}")
                 return
             try:
                 info = resp.json()
             except Exception:
+                _log_homebase_client("refresh user info: /auth/me returned invalid JSON")
                 return
             role = str(info.get("role") or "").strip().lower()
             perm = str(info.get("perm") or "").strip().lower()
@@ -6160,6 +6535,11 @@ class MainWindow(QMainWindow):
                 can_write = role == "admin" or perm in ("read_write", "read+write", "write", "readwrite")
             self._apply_homebase_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
             self._homebase_user_info_loaded = True
+            _log_homebase_client(
+                "refresh user info: success "
+                f"role={role or '<none>'} perm={perm or '<none>'} "
+                f"is_admin={bool(is_admin)} can_write={bool(can_write)}"
+            )
             self._update_user_management_ui()
         finally:
             self._homebase_user_info_refreshing = False
@@ -6170,6 +6550,7 @@ class MainWindow(QMainWindow):
             resp = httpx.post(
                 f"{self.api_base}/auth/setup",
                 json={"username": username, "password": password},
+                headers=self._remote_auth_headers(),
                 timeout=10.0,
                 verify=self._verify_tls,
             )
@@ -6203,6 +6584,7 @@ class MainWindow(QMainWindow):
             resp = httpx.post(
                 f"{self.api_base}/auth/login",
                 json={"username": username, "password": password},
+                headers=self._remote_auth_headers(),
                 timeout=10.0,
                 verify=self._verify_tls,
             )
@@ -6245,6 +6627,7 @@ class MainWindow(QMainWindow):
                     "old_password": old_password,
                     "new_password": new_password,
                 },
+                headers=self._remote_auth_headers(),
                 timeout=10.0,
                 verify=self._verify_tls,
             )
@@ -6371,7 +6754,7 @@ class MainWindow(QMainWindow):
         if self._is_homebase_mode_enabled():
             self._homebase_login()
             return
-        self._alert("Remote vault login is only available when a remote or Homebase vault is active.")
+        self._alert("Homebase login is only available when a Homebase vault is active.")
 
     def _handle_remote_vault_logout(self) -> None:
         if self._remote_mode:
@@ -6380,7 +6763,7 @@ class MainWindow(QMainWindow):
         if self._is_homebase_mode_enabled():
             self._homebase_logout()
             return
-        self._alert("Remote vault logout is only available when a remote or Homebase vault is active.")
+        self._alert("Homebase logout is only available when a Homebase vault is active.")
 
     def _handle_remote_vault_reset_password(self) -> None:
         if self._remote_mode:
@@ -6389,7 +6772,7 @@ class MainWindow(QMainWindow):
         if self._is_homebase_mode_enabled():
             self._prompt_homebase_reset_password()
             return
-        self._alert("Password reset is only available for remote or Homebase vaults.")
+        self._alert("Password reset is only available for Homebase vaults.")
 
     def _fetch_remote_users(self) -> list[dict]:
         resp = self.http.get("/auth/users")
@@ -6526,7 +6909,7 @@ class MainWindow(QMainWindow):
                 create_user=self._create_remote_user,
                 edit_user=self._edit_remote_user,
                 delete_user=self._delete_remote_user,
-                title="Manage Users (Remote Vault)",
+                title="Manage Users (Server)",
             )
             dialog.exec()
             return
@@ -7111,6 +7494,7 @@ class MainWindow(QMainWindow):
                 
                 # Register this process's window for tray menu (cross-process)
                 self._register_process_window()
+                self._apply_remote_mode_ui()
                 self._update_periodic_search_sync_timer()
                 
                 return True
@@ -10242,6 +10626,8 @@ class MainWindow(QMainWindow):
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
+                if page_file.name == "AGENTS.md":
+                    continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                     continue
                 txt_files.append(page_file)
@@ -13737,17 +14123,29 @@ class MainWindow(QMainWindow):
                 else theme_value("main_window.focus_border.default", "#4A90E2")
             )
         )
+        app_palette = QApplication.palette()
+        editor_palette = self.editor.palette() if getattr(self, "editor", None) else app_palette
+        tree_palette = self.tree_view.palette() if getattr(self, "tree_view", None) else app_palette
+        base_color = editor_palette.color(QPalette.Base).name()
+        text_color = editor_palette.color(QPalette.Text).name()
+        alternate_base = tree_palette.color(QPalette.AlternateBase).name()
+        editor_selection_bg = editor_palette.color(QPalette.Highlight).name()
+        editor_selection_text = editor_palette.color(QPalette.HighlightedText).name()
         if editor_has:
             editor_style = (
                 f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; "
-                "background: palette(base); color: palette(text); }}"
+                f"background: {base_color}; color: {text_color}; "
+                f"selection-background-color: {editor_selection_bg}; "
+                f"selection-color: {editor_selection_text}; }}"
             )
         else:
             editor_style = (
                 "QTextEdit { border: 1px solid transparent; "
-                "background: palette(base); color: palette(text); }"
+                f"background: {base_color}; color: {text_color}; "
+                f"selection-background-color: {editor_selection_bg}; "
+                f"selection-color: {editor_selection_text}; }}"
             )
-        is_light_theme = QApplication.palette().color(QPalette.Base).lightness() >= 150
+        is_light_theme = app_palette.color(QPalette.Base).lightness() >= 150
         right_arrow_name = "right-arrow-dark.svg" if is_light_theme else "right-arrow.svg"
         down_arrow_name = "down-arrow-dark.svg" if is_light_theme else "down-arrow.svg"
         right_arrow_path = self._find_asset(right_arrow_name)
@@ -13763,13 +14161,16 @@ class MainWindow(QMainWindow):
             tree_selected_bg = self._selection_bg_for_accent(vault_accent)
             tree_selected_text = self._badge_text_for_background(tree_selected_bg)
         else:
-            tree_selected_bg = "palette(highlight)"
-            tree_selected_text = "palette(highlighted-text)"
+            tree_selected_bg = tree_palette.color(QPalette.Highlight).name()
+            tree_selected_text = tree_palette.color(QPalette.HighlightedText).name()
+        tree_text_color = tree_palette.color(QPalette.Text).name()
         tree_style = (
-            "QTreeView { border: 1px solid transparent; background: palette(base); }"
+            f"QTreeView {{ border: 1px solid transparent; background: {tree_palette.color(QPalette.Base).name()}; color: {tree_text_color}; }}"
             f"QTreeView::item {{ padding: 2px 6px 2px 2px; border-bottom: 1px solid {tree_item_divider}; }}"
             f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
-            "QTreeView::item:hover { background: palette(alternate-base); }"
+            f"QTreeView::item:selected:active {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
+            f"QTreeView::item:selected:!active {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
+            f"QTreeView::item:hover {{ background: {alternate_base}; }}"
             "QTreeView::branch { width: 16px; height: 16px; }"
         )
         if arrow_closed and arrow_open:
@@ -15563,7 +15964,6 @@ class MainWindow(QMainWindow):
             except httpx.HTTPError as exc:
                 self._alert_api_error(exc, f"Failed to delete {folder_path}")
                 return
-            
             # Remove deleted paths from history buffer
             self._remove_deleted_paths_from_history(folder_path)
             
@@ -16688,6 +17088,8 @@ class MainWindow(QMainWindow):
                 txt_files = []
                 for suffix in PAGE_SUFFIXES:
                     for page_file in sorted(root.rglob(f"*{suffix}")):
+                        if page_file.name == "AGENTS.md":
+                            continue
                         if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                             continue
                         txt_files.append(page_file)
@@ -17040,6 +17442,8 @@ class MainWindow(QMainWindow):
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
+                if page_file.name == "AGENTS.md":
+                    continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                     continue
                 txt_files.append(page_file)
@@ -17256,6 +17660,11 @@ class MainWindow(QMainWindow):
             if obj in (getattr(self, "bookmark_scroll_area", None), getattr(self, "toolbar", None)):
                 QTimer.singleShot(0, self._sync_bookmark_scroll_range)
                 QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
+        if (
+            self._homebase_tree_refresh_pending
+            and event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.FocusIn)
+        ):
+            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
         if event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
                 self._show_command_bar()
@@ -17463,7 +17872,7 @@ class MainWindow(QMainWindow):
         self._search_sync.stop()
         self.geometry_save_timer.stop()
         self._shutdown_homebase_sync()
-        
+
         # Disconnect signals to prevent callbacks after window deletion
         try:
             self.editor.focusLost.disconnect()

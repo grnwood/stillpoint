@@ -92,6 +92,7 @@ _LOCAL_FILE_OPS_ENABLED = os.getenv("ATTACHMENTS_LOCAL_FILE_OPS", "0") not in (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_REMOTE_CONTEXT_HEADER = "x-stillpoint-window-id"
 _TASKS_CACHE: dict[tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]], list[dict]] = {}
 _TASKS_STALE_CACHE: dict[
     tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]],
@@ -1164,6 +1165,25 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+
+@app.middleware("http")
+async def bind_vault_context(request: Request, call_next):
+    session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
+    vault_token = None
+    config_token = None
+    if session_id:
+        root = vault_state.get_session_root(session_id)
+        if root is not None:
+            vault_token = vault_state.push_context_root(root)
+            config_token = config.push_active_vault_context(str(root))
+    try:
+        return await call_next(request)
+    finally:
+        if config_token is not None:
+            config.reset_active_vault_context(config_token)
+        if vault_token is not None:
+            vault_state.reset_context_root(vault_token)
+
 homebase_api.register_homebase_routes(
     app,
     ensure_vaults_root=_ensure_vaults_root,
@@ -1568,22 +1588,37 @@ async def create_vault(request: Request, payload: VaultCreatePayload, _admin: No
 
 
 @app.post("/api/vault/select")
-def select_vault(payload: VaultSelectPayload) -> dict:
+def select_vault(request: Request, payload: VaultSelectPayload) -> dict:
     try:
         resolved = _resolve_vault_path(payload.path)
-        root = vault_state.set_root(str(resolved))
+        session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
+        if session_id:
+            root = vault_state.bind_session_root(session_id, str(resolved))
+            vault_token = vault_state.push_context_root(root)
+            config_token = config.push_active_vault_context(str(root))
+        else:
+            root = vault_state.set_root(str(resolved))
+            vault_token = None
+            config_token = None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _clear_tree_cache()
     try:
-        config.set_active_vault(str(root))
+        if not session_id:
+            config.set_active_vault(str(root))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to initialize vault: {exc}") from exc
-    _clear_task_cache()
-    reindex_job_id = None
-    if _vault_needs_task_index(root):
-        reindex_job_id = _start_reindex_job(root, rebuild_search=False)
-    return {"root": str(root), "reindex_job_id": reindex_job_id}
+    try:
+        _clear_task_cache()
+        reindex_job_id = None
+        if _vault_needs_task_index(root):
+            reindex_job_id = _start_reindex_job(root, rebuild_search=False)
+        return {"root": str(root), "reindex_job_id": reindex_job_id}
+    finally:
+        if config_token is not None:
+            config.reset_active_vault_context(config_token)
+        if vault_token is not None:
+            vault_state.reset_context_root(vault_token)
 
 
 def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
@@ -1602,6 +1637,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
+                if page_file.name == "AGENTS.md":
+                    continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                     continue
                 txt_files.append(page_file)

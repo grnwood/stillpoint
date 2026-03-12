@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QHBoxLayout,
     QLabel,
     QVBoxLayout,
 )
@@ -18,6 +15,7 @@ from sp.app import config
 
 class VaultPreferencesDialog(QDialog):
     """Dialog for per-vault preference overrides."""
+
     ACCENT_CHOICES: list[tuple[str, str]] = [
         ("Use Theme Default", ""),
         ("Ocean Blue", "#3B82F6"),
@@ -32,12 +30,14 @@ class VaultPreferencesDialog(QDialog):
         ("Slate", "#64748B"),
     ]
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, remote_mode: bool = False, remote_read_only: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Vault Preferences")
         self.setModal(True)
         self.resize(680, 560)
         self.setMinimumSize(620, 500)
+        self._remote_mode = bool(remote_mode)
+        self._remote_read_only = bool(remote_read_only)
 
         layout = QVBoxLayout(self)
         note = QLabel(
@@ -82,11 +82,6 @@ class VaultPreferencesDialog(QDialog):
             config.load_vault_feature_tags_override(),
         )
         layout.addWidget(self.feature_tags_checkbox)
-        self.feature_remote_vaults_checkbox = self._make_override_checkbox(
-            "Remote Vaults",
-            config.load_vault_feature_remote_vaults_override(),
-        )
-        layout.addWidget(self.feature_remote_vaults_checkbox)
         self.feature_remember_cursor_position_checkbox = self._make_override_checkbox(
             "Remember and restore last cursor position",
             config.load_vault_feature_remember_cursor_position_override(),
@@ -99,6 +94,7 @@ class VaultPreferencesDialog(QDialog):
             config.load_vault_enable_ai_chats_override(),
         )
         layout.addWidget(self.ai_chats_checkbox)
+
         layout.addWidget(QLabel("<b>Access</b>"))
         self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
         self.force_read_only_checkbox.setToolTip(
@@ -111,8 +107,6 @@ class VaultPreferencesDialog(QDialog):
         layout.addWidget(self.force_read_only_checkbox)
 
         layout.addStretch(1)
-
-        self._initial_values = self._collect_values()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         reset_btn = buttons.addButton("Use Global Defaults", QDialogButtonBox.ResetRole)
@@ -144,7 +138,6 @@ class VaultPreferencesDialog(QDialog):
             "calendar": self._checkbox_value(self.feature_calendar_checkbox),
             "link_navigator": self._checkbox_value(self.feature_link_navigator_checkbox),
             "tags": self._checkbox_value(self.feature_tags_checkbox),
-            "remote_vaults": self._checkbox_value(self.feature_remote_vaults_checkbox),
             "remember_cursor_position": self._checkbox_value(self.feature_remember_cursor_position_checkbox),
             "ai_chats": self._checkbox_value(self.ai_chats_checkbox),
         }
@@ -156,7 +149,6 @@ class VaultPreferencesDialog(QDialog):
             self.feature_calendar_checkbox,
             self.feature_link_navigator_checkbox,
             self.feature_tags_checkbox,
-            self.feature_remote_vaults_checkbox,
             self.feature_remember_cursor_position_checkbox,
             self.ai_chats_checkbox,
         ):
@@ -169,7 +161,6 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_calendar_override(values["calendar"])
         config.save_vault_feature_link_navigator_override(values["link_navigator"])
         config.save_vault_feature_tags_override(values["tags"])
-        config.save_vault_feature_remote_vaults_override(values["remote_vaults"])
         config.save_vault_feature_remember_cursor_position_override(values["remember_cursor_position"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
