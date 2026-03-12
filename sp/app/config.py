@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from collections import OrderedDict
+from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock, local
 from typing import Any, Iterable, Optional, Sequence
@@ -34,15 +35,28 @@ _TASK_VERSION_LOCK = RLock()
 _PAGE_CACHE_ROWS: list[dict] = []
 _PAGE_RESULT_CACHE: OrderedDict[str, list[dict]] = OrderedDict()
 _PAGE_RESULT_CACHE_LIMIT = 64
+_PAGE_CACHE_ROOT: Optional[Path] = None
 _LAST_DB_REPAIR_NOTICE: Optional[str] = None
+_ACTIVE_ROOT_CONTEXT: ContextVar[Optional[Path]] = ContextVar("sp_config_active_root", default=None)
 
 
 def _invalidate_page_cache() -> None:
+    global _PAGE_CACHE_ROOT
     _PAGE_CACHE_ROWS.clear()
     _PAGE_RESULT_CACHE.clear()
+    _PAGE_CACHE_ROOT = None
+
+
+def _current_active_root() -> Optional[Path]:
+    contextual = _ACTIVE_ROOT_CONTEXT.get()
+    if contextual is not None:
+        return contextual
+    return _ACTIVE_ROOT
 
 
 def _prime_page_cache() -> None:
+    global _PAGE_CACHE_ROOT
+    current_root = _current_active_root()
     conn = _get_conn()
     if not conn:
         _invalidate_page_cache()
@@ -65,10 +79,11 @@ def _prime_page_cache() -> None:
         for row in rows
     ]
     _PAGE_RESULT_CACHE.clear()
+    _PAGE_CACHE_ROOT = current_root
 
 
 def _ensure_page_cache_loaded() -> None:
-    if _PAGE_CACHE_ROWS:
+    if _PAGE_CACHE_ROWS and _PAGE_CACHE_ROOT == _current_active_root():
         return
     _prime_page_cache()
 
@@ -1095,6 +1110,36 @@ def save_enable_ai_agents(enabled: bool) -> None:
     _update_global_config({"enable_ai_agents": bool(enabled)})
 
 
+def load_seed_agents_workspace(default: bool = True) -> bool:
+    """Return whether opening a vault workspace terminal should seed AGENTS.md."""
+    payload = _read_global_config()
+    val = payload.get("seed_agents_workspace")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def save_seed_agents_workspace(enabled: bool) -> None:
+    """Persist whether opening a vault workspace terminal should seed AGENTS.md."""
+    _update_global_config({"seed_agents_workspace": bool(enabled)})
+
+
+def load_local_filesystem_quiet_seconds(default: int = 10) -> int:
+    """Return the quiet-time debounce before local filesystem changes refresh the UI."""
+    payload = _read_global_config()
+    raw = payload.get("local_filesystem_quiet_seconds", default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(1, value)
+
+
+def save_local_filesystem_quiet_seconds(seconds: int) -> None:
+    """Persist the quiet-time debounce before local filesystem changes refresh the UI."""
+    _update_global_config({"local_filesystem_quiet_seconds": max(1, int(seconds))})
+
+
 def load_agent_tool_settings() -> dict:
     """Load agent tool configuration settings."""
     payload = _read_global_config()
@@ -1169,6 +1214,51 @@ def _save_vault_override_bool(key: str, value: Optional[bool]) -> None:
         return
 
 
+def _load_vault_kv(key: str) -> Optional[str]:
+    """Return a raw per-vault kv value, or None if unset."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.execute("SELECT value FROM kv WHERE key = ?", (key,))
+        row = cur.fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    value = row[0]
+    return None if value is None else str(value)
+
+
+def _save_vault_kv(key: str, value: Optional[str]) -> None:
+    """Persist or clear a raw per-vault kv value."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        if value is None:
+            conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+        else:
+            conn.execute("REPLACE INTO kv(key, value) VALUES(?, ?)", (key, str(value)))
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def _load_vault_int(key: str, default: int) -> int:
+    value = _load_vault_kv(key)
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _save_vault_int(key: str, value: int) -> None:
+    _save_vault_kv(key, str(int(value)))
+
+
 def load_vault_feature_tasks_override() -> Optional[bool]:
     """Return Tasks feature override for this vault."""
     return _load_vault_override_bool("override_feature_tasks_enabled")
@@ -1210,12 +1300,12 @@ def save_vault_feature_tags_override(value: Optional[bool]) -> None:
 
 
 def load_vault_feature_remote_vaults_override() -> Optional[bool]:
-    """Return Remote Vaults feature override for this vault."""
+    """Return the legacy remote-vault feature override for this vault."""
     return _load_vault_override_bool("override_feature_remote_vaults_enabled")
 
 
 def save_vault_feature_remote_vaults_override(value: Optional[bool]) -> None:
-    """Persist Remote Vaults feature override for this vault."""
+    """Persist the legacy remote-vault feature override for this vault."""
     _save_vault_override_bool("override_feature_remote_vaults_enabled", value)
 
 
@@ -1237,6 +1327,8 @@ def load_vault_enable_ai_chats_override() -> Optional[bool]:
 def save_vault_enable_ai_chats_override(value: Optional[bool]) -> None:
     """Persist AI Chats override for this vault."""
     _save_vault_override_bool("override_enable_ai_chats", value)
+
+
 
 
 def load_global_feature_tasks_enabled(default: bool = True) -> bool:
@@ -4242,7 +4334,7 @@ def fetch_page_titles(paths: Iterable[str]) -> dict[str, str]:
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def set_active_vault(root: Optional[str]) -> None:
+def _activate_root(root_path: Optional[Path], *, persist_global: bool) -> None:
     global _ACTIVE_CONN, _ACTIVE_ROOT, _TASKS_FTS_ENABLED, _LAST_DB_REPAIR_NOTICE
     with _ACTIVE_CONN_LOCK:
         _LAST_DB_REPAIR_NOTICE = None
@@ -4251,8 +4343,9 @@ def set_active_vault(root: Optional[str]) -> None:
         _TASKS_FTS_ENABLED = False
         _invalidate_task_cache()
         _invalidate_page_cache()
-        if not root:
-            _ACTIVE_ROOT = None
+        if persist_global:
+            _ACTIVE_ROOT = root_path
+        if root_path is None:
             if old_conn:
                 try:
                     old_conn.close()
@@ -4261,8 +4354,7 @@ def set_active_vault(root: Optional[str]) -> None:
             _THREAD_LOCAL.conn = None
             _THREAD_LOCAL.db_path = None
             return
-        _ACTIVE_ROOT = Path(root)
-        db_dir = _ACTIVE_ROOT / ".stillpoint"
+        db_dir = root_path / ".stillpoint"
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "settings.db"
         setup_conn: Optional[sqlite3.Connection] = None
@@ -4307,13 +4399,33 @@ def set_active_vault(root: Optional[str]) -> None:
         _prime_page_cache()
 
 
+def set_active_vault(root: Optional[str]) -> None:
+    root_path = Path(root).expanduser().resolve() if root else None
+    _activate_root(root_path, persist_global=True)
+
+
+def push_active_vault_context(root: Optional[str]):
+    root_path = Path(root).expanduser().resolve() if root else None
+    token = _ACTIVE_ROOT_CONTEXT.set(root_path)
+    _activate_root(root_path, persist_global=False)
+    return token
+
+
+def reset_active_vault_context(token) -> None:
+    try:
+        _ACTIVE_ROOT_CONTEXT.reset(token)
+    except Exception:
+        pass
+
+
 
 def get_active_vault() -> Optional[str]:
-    return str(_ACTIVE_ROOT) if _ACTIVE_ROOT else None
+    active_root = _current_active_root()
+    return str(active_root) if active_root else None
 
 
 def has_active_vault() -> bool:
-    return _ACTIVE_ROOT is not None
+    return _current_active_root() is not None
 
 
 def pop_last_db_repair_notice() -> Optional[str]:
@@ -4339,9 +4451,10 @@ def is_vault_index_empty() -> bool:
 
 def _get_conn() -> Optional[sqlite3.Connection]:
     with _ACTIVE_CONN_LOCK:
-        if _ACTIVE_ROOT is None:
+        active_root = _current_active_root()
+        if active_root is None:
             return None
-        db_path = str(_ACTIVE_ROOT / ".stillpoint" / "settings.db")
+        db_path = str(active_root / ".stillpoint" / "settings.db")
         conn = getattr(_THREAD_LOCAL, "conn", None)
         conn_db_path = getattr(_THREAD_LOCAL, "db_path", None)
         if conn is not None and conn_db_path == db_path:
@@ -4359,9 +4472,10 @@ def _get_conn() -> Optional[sqlite3.Connection]:
 
 
 def _vault_db_path() -> Optional[Path]:
-    if _ACTIVE_ROOT is None:
+    active_root = _current_active_root()
+    if active_root is None:
         return None
-    return _ACTIVE_ROOT / ".stillpoint" / "settings.db"
+    return active_root / ".stillpoint" / "settings.db"
 
 
 def _connect_to_vault_db() -> sqlite3.Connection:

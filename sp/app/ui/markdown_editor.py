@@ -946,7 +946,20 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         if fmt:
             return fmt
 
-        style = self._pygments_formatter.style.style_for_token(token)
+        style = None
+        lookup_token = token
+        while lookup_token is not None:
+            try:
+                style = self._pygments_formatter.style.style_for_token(lookup_token)
+                break
+            except KeyError:
+                parent = getattr(lookup_token, "parent", None)
+                if parent is None or parent == lookup_token:
+                    lookup_token = None
+                else:
+                    lookup_token = parent
+        if style is None:
+            style = {}
         fmt = QTextCharFormat(self.code_block)
         base_fg = self.code_block.foreground().color()
         base_bg = self.code_block.background().color()
@@ -1971,9 +1984,13 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             return
 
-        # HR paint overlay is on by default; set SP_DISABLE_HR_OVERLAY=1 to fall back
-        # to plain QTextEdit rendering if platform-specific issues arise.
-        disable_hr_overlay = os.getenv("SP_DISABLE_HR_OVERLAY", "0") in ("1", "true", "True")
+        # The custom horizontal-rule overlay has triggered paint instability on some
+        # Linux setups. Keep it off by default there, while allowing explicit opt-in.
+        hr_overlay_env = os.getenv("SP_DISABLE_HR_OVERLAY")
+        if hr_overlay_env is None:
+            disable_hr_overlay = sys.platform.startswith("linux")
+        else:
+            disable_hr_overlay = hr_overlay_env in ("1", "true", "True")
         if disable_hr_overlay:
             self._vi_paint_in_progress = True
             try:
