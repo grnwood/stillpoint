@@ -47,5 +47,5 @@ stillpoint --web --port 3000
 ## Tips
 - Use for quick access from mobile devices
 - Great for sharing notes with others locally
-- Combine with remote vaults for full access anywhere
+- Combine with Homebase when you want multi-device sync plus a local-first vault
 - Check browser compatibility for best experience

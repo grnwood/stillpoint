@@ -22,10 +22,10 @@ Attachments keep files in context with the page you are working on.
 - Keep related docs, exports, and media next to the page that explains them.
 - For bigger topics, combine page links + attachment links so everything stays navigable.
 
-## Remote Vault Behavior
-- In remote mode, attachments are listed from the server for the current page.
-- Opening remote attachments can create local cached copies for viewing/editing.
-- The panel still gives a page-centered view of what belongs to that note.
+## Homebase and Local Behavior
+- Attachments live next to the page in the local vault folder.
+- If Homebase is enabled, those local attachment files are included in sync.
+- This also makes attachments easy to generate or update from local tools, scripts, and coding agents.
 
 ## Practical Tips
 - Keep one page as the "hub" for a project and attach relevant files there.

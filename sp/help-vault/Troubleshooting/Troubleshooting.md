@@ -76,13 +76,23 @@ Try these first:
 - **Possible cause**: Font scanning overhead on some systems.
 - **Fix**: Enable `Use Minimal Font Scan (For Fast Window Startup)` in Preferences and restart.
 
-## Remote Vault Connection Problems
-- **Symptom**: Cannot open or browse a remote vault.
+## Homebase Authentication or Sync Problems
+- **Symptom**: Homebase sync is not working or the vault keeps asking you to authenticate.
 - **Checks**:
-1. Verify server URL and credentials.
-2. Use `Vault -> Login - Authenticate to Remote Vault`.
-3. Confirm remote-vault feature is enabled in Preferences.
+1. Verify the Homebase server URL and credentials.
+2. Use `Vault -> Homebase -> Login - Authenticate to Homebase`.
+3. Confirm the vault is configured for Homebase sync.
 4. Check network access and server availability.
+5. If needed, use `Vault -> Homebase -> Sync Now`.
+
+## Files Created in Terminal or by an Agent Do Not Appear
+- **Symptom**: Files exist in the vault folder but the tree has not updated yet.
+- **Checks**:
+1. Wait for the local filesystem quiet period to complete.
+2. Confirm the files were created inside the actual vault root.
+3. Use `Tools -> Rebuild Vault Index` if the structure was created outside StillPoint.
+4. If Homebase is enabled, wait for sync or use `Vault -> Homebase -> Sync Now`.
+5. Make sure the generated files follow StillPoint page structure rules and are not writing into `.stillpoint/`.
 
 ## If You Still Need to Reset
 Use this carefully after backing up your vault:
@@ -102,7 +112,7 @@ There will be detailed logging on `stdout` in the terminal.  Often times you can
 ## Reporting a Problem
 Include:
 - OS and StillPoint version
-- local or remote vault
+- local vault or Homebase vault
 - exact steps to reproduce
 - error message text (or screenshot)
 - whether `Tools -> Rebuild Vault Index` or `Rebuild Vault Search Index` changed behavior

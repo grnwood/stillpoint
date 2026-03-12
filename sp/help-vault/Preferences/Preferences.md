@@ -27,7 +27,6 @@ Preferences let you shape StillPoint to your workflow: what features are on, how
 - **Enable Calendar**: Shows calendar/journal navigation panels and related actions.
 - **Enable Link Navigator**: Enables the page-link graph/navigation tools.
 - **Enable Page Tags**: Enables tag parsing and the tags panel/workflows.
-- **Enable Remote Vaults**: Allows connecting to and opening vaults served remotely.
 - **Force read-only mode for this vault**: Opens the current vault without taking a write lock.
 
 Note: Feature toggles may require reopening the vault or restarting the app.
@@ -92,6 +91,8 @@ Note: Feature toggles may require reopening the vault or restarting the app.
 - **Default Model**: Chooses which model is preselected for chats.
 - **Refresh Models**: Reloads the available model list from the selected server.
 - **Enable AI Agents in chat**: Allows tool-using agent behavior in chat.
+- **Add AGENTS.md to vault workspace when opening a terminal**: Seeds vault guidance for coding agents and terminal workflows.
+- **Local filesystem quiet time (s)**: Controls how long StillPoint waits after local file changes before refreshing the UI.
 - **Agent Tools table**: Edit tool examples and tool settings used by agents.
 
 ## PlantUML
@@ -130,7 +131,6 @@ Available per-vault overrides:
 - **Calendar**: Overrides whether calendar features are enabled in this vault.
 - **Link Navigator**: Overrides whether link graph/navigation tools are enabled in this vault.
 - **Page Tags**: Overrides whether tag features are enabled in this vault.
-- **Remote Vaults**: Overrides whether remote-vault features are enabled in this vault.
 - **AI Chats**: Overrides whether AI chat is enabled in this vault.
 
 Use **Use Global Defaults** to reset all per-vault overrides back to global behavior.

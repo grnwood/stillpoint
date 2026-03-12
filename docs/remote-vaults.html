@@ -4,7 +4,7 @@
     <script src="ga.js"></script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Remote Vaults & Homebase · StillPoint</title>
+    <title>Homebase Vaults · StillPoint</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -29,7 +29,7 @@
           <a href="thegraph.html">The Graph</a>
           <a href="dia.html">Diagramming</a>
           <a href="uses.html">Use Cases</a>
-          <a href="remote-vaults.html">Remote Vaults</a>
+          <a href="remote-vaults.html">Homebase</a>
           <a href="ai.html">AI Infused</a>
           <a href="howitcompares.html">Comparisons</a>
           <a href="power.html">Power</a>
@@ -42,11 +42,11 @@
       <section class="hero reveal" style="--d: 0.05s">
         <div>
           <span class="pill">Vaults</span>
-          <h1>Remote Vaults and Homebase Vaults.</h1>
+          <h1>Homebase keeps StillPoint local first.</h1>
           <p>
-            StillPoint works offline by default, but grows with you when you want sync,
-            shared access, or a zero-trust storage model. Remote Vaults and Homebase Vaults
-            are two paths to that future.
+            StillPoint vaults live on your filesystem. When you want sync across devices,
+            Homebase is the remote option: local copies first, synchronized through a server
+            without turning the server into the source of truth.
           </p>
         </div>
         <div class="image-stack">
@@ -54,41 +54,41 @@
             class="lightbox-trigger"
             type="button"
             data-lightbox="img/remote-vault-approaches.png"
-            data-lightbox-caption="Remote Vaults vs Homebase Vaults architecture overview."
+            data-lightbox-caption="Homebase local-first architecture overview."
             style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
           >
             <img
               src="img/remote-vault-approaches.png"
-              alt="Remote Vaults versus Homebase Vaults architecture diagram"
+              alt="Homebase local-first architecture diagram"
             />
           </button>
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.15s">
-        <div class="eyebrow">Two paths</div>
-        <h2>Pick the vault model that matches your workflow.</h2>
+        <div class="eyebrow">Local First</div>
+        <h2>One vault model on disk, with Homebase for sync.</h2>
         <div class="grid">
           <div class="card">
-            <h3>Remote Vaults</h3>
+            <h3>Local vaults</h3>
             <p>
-              A live server-backed vault with user management. Great for teams, shared spaces,
-              and centralized administration. Think of it like a collaborative vault hosted on
-              infrastructure you control.
+              Your vault is a normal local folder full of Markdown pages and attachments.
+              That keeps the model simple and makes the files usable from StillPoint,
+              editors, scripts, and the terminal.
             </p>
           </div>
           <div class="card">
             <h3>Homebase Vaults</h3>
             <p>
-              A personal-first sync model with encrypted blobs on the server and keys kept local.
-              Built for multi-device continuity without giving up privacy.
+              Homebase adds sync on top of that same local vault model. Each device keeps
+              a full local copy and synchronizes through the Homebase server.
             </p>
           </div>
           <div class="card">
-            <h3>Both feel local</h3>
+            <h3>Zero-trust direction</h3>
             <p>
-              StillPoint keeps the same interface, the same flow, and the same speed. The mode
-              changes the sync and security model, not the way you think.
+              The server stores encrypted blobs and sync metadata while your local device
+              remains the place where plaintext work happens.
             </p>
           </div>
         </div>
@@ -96,149 +96,74 @@
 
       <section class="section split reveal" style="--d: 0.25s">
         <div>
-          <h2>When to use Remote Vaults</h2>
+          <h2>Why Homebase fits StillPoint</h2>
           <p>
-            Remote Vaults are best when multiple people need to work in the same vault, or when
-            your organization wants central control over access and storage.
+            Homebase preserves the filesystem-first workflow instead of replacing it.
+            You keep a real local vault, work offline when needed, and sync later.
           </p>
           <div class="grid">
             <div class="card">
-              <h3>Team collaboration</h3>
-              <p>Shared notes, shared structure, and a single source of truth.</p>
+              <h3>Offline first</h3>
+              <p>Work locally and let sync catch up when the network is available.</p>
             </div>
             <div class="card">
-              <h3>Admin control</h3>
-              <p>Admins manage users, roles, and write permissions.</p>
+              <h3>Multi-device continuity</h3>
+              <p>Use the same vault on your laptop, desktop, or travel machine.</p>
             </div>
             <div class="card">
-              <h3>Infrastructure-owned</h3>
-              <p>Host it on your own servers or keep it local to your network.</p>
+              <h3>Conflict aware</h3>
+              <p>StillPoint can surface sync conflicts instead of silently overwriting work.</p>
             </div>
           </div>
         </div>
         <div>
-          <h2>When to use Homebase Vaults</h2>
+          <h2>Use coding agents and TUIs directly against the vault.</h2>
           <p>
-            Homebase is built for personal continuity across devices. It gives you sync and
-            backups without handing your plaintext to a server.
+            Because the vault stays local, coding agents, TUIs, and CLI tools can create or
+            expand pages directly into the vault folder.
           </p>
           <p>
-            Think of Homebase like a Git model for notes: each device keeps a full local copy,
-            works independently, then pushes and pulls changes through the Homebase server with
-            eventual consistency.
+            StillPoint can seed an <code>AGENTS.md</code> file at the vault root so tools understand
+            StillPoint page folders, colon links, and naming rules.
           </p>
           <div class="grid">
             <div class="card">
-              <h3>Private by design</h3>
-              <p>Encrypted blobs live on the server; your passphrase stays local.</p>
+              <h3>Open the vault in a terminal</h3>
+              <p>Run local tools against the actual vault root, not a cache or export copy.</p>
             </div>
             <div class="card">
-              <h3>Multi-device flow</h3>
-              <p>Use StillPoint on your laptop, desktop, or travel machine.</p>
+              <h3>Generate pages locally</h3>
+              <p>Let agents write Markdown pages and attachments using StillPoint's structure.</p>
             </div>
             <div class="card">
-              <h3>Offline first</h3>
-              <p>Work anywhere, sync later, keep full local performance.</p>
+              <h3>Let Homebase sync it</h3>
+              <p>After local work lands, Homebase can synchronize those files to your other devices.</p>
             </div>
           </div>
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.35s">
-        <div class="eyebrow">Security</div>
-        <h2>Different threat models, both intentional.</h2>
+        <div class="eyebrow">Practical Setup</div>
+        <h2>Start local, then add Homebase when you need sync.</h2>
         <div class="grid">
           <div class="card">
-            <h3>Remote Vaults</h3>
-            <p>
-              Access is controlled with user roles and permissions. The server stores the vault
-              content directly and enforces authentication on every request. Best for
-              shared environments where the server is trusted and access is managed.
-            </p>
+            <h3>1. Create or open a local vault</h3>
+            <p>StillPoint works directly against a normal folder on disk.</p>
           </div>
           <div class="card">
-            <h3>Homebase Vaults</h3>
-            <p>
-              The server stores encrypted blobs and metadata. The encryption passphrase stays
-              on your device, so the server cannot read plaintext. Tokens authenticate access,
-              but do not reveal your content.
-            </p>
+            <h3>2. Work locally first</h3>
+            <p>Use StillPoint, your editor, or the terminal to build out the vault.</p>
           </div>
           <div class="card">
-            <h3>Practical takeaway</h3>
-            <p>
-              Remote Vaults optimize for collaboration and administration. Homebase optimizes
-              for privacy and personal control. Choose the model that matches the trust boundary
-              you need.
-            </p>
+            <h3>3. Enable Homebase</h3>
+            <p>Authenticate, pair the vault, and let sync handle multi-device continuity.</p>
           </div>
         </div>
-      </section>
-
-      <section class="section reveal" style="--d: 0.45s">
-        <div class="eyebrow">Comparison</div>
-        <h2>Remote Vaults vs Homebase Vaults</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Feature</th>
-                <th>Remote Vaults</th>
-                <th>Homebase Vaults</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Best for</td>
-                <td>Teams, shared workspaces, central admin</td>
-                <td>Personal or small-team sync across devices</td>
-              </tr>
-              <tr>
-                <td>Permissions</td>
-                <td>Admins, read, read+write per user</td>
-                <td>Admin roles, local-first control</td>
-              </tr>
-              <tr>
-                <td>Security model</td>
-                <td>Server-enforced auth and access control</td>
-                <td>Client-side encryption, server stores encrypted blobs</td>
-              </tr>
-              <tr>
-                <td>Offline use</td>
-                <td>Designed for connected use</td>
-                <td>Fully offline, syncs when available</td>
-              </tr>
-              <tr>
-                <td>Sync model</td>
-                <td>Live server-first pull/push</td>
-                <td>Git-like local-first push/pull with eventual consistency</td>
-              </tr>
-              <tr>
-                <td>Setup</td>
-                <td>Connect to a remote server and vault</td>
-                <td>Pair devices with Homebase and a passphrase</td>
-              </tr>
-              <tr>
-                <td>Why choose it</td>
-                <td>Collaboration, governance, shared structure</td>
-                <td>Privacy-first sync with zero-trust storage</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="section reveal" style="--d: 0.55s">
-        <div class="eyebrow">Decision</div>
-        <h2>If you're unsure, start local.</h2>
-        <p>
-          You can begin with a local vault and move to Remote or Homebase later. StillPoint keeps
-          your notes in plain files, so the path forward is always open.
-        </p>
       </section>
 
       <footer class="site-footer">
-        <span>Flexible by default, powerful when needed.</span>
+        <span>Local first, synced when you want it.</span>
         <span>Docs for GitHub Pages · StillPoint</span>
               <span><a href="philo.html#funding-support">Support the project</a></span>
       </footer>
