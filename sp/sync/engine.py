@@ -131,6 +131,48 @@ class HomebaseSyncEngine:
         self._scan_path = self._sync_dir / "last_scan.json"
         self._object_cache_path = self._sync_dir / "object_cache.json"
 
+    def _canonical_rel_path(self, rel_path: str) -> str:
+        rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_key:
+            return ""
+        vault_name = self.cfg.vault_root.name
+        root_shorthand = f"{vault_name}.md"
+        canonical_root = f"{vault_name}/{vault_name}.md"
+        if rel_key == root_shorthand:
+            return canonical_root
+        return rel_key
+
+    def _iter_sync_files(self) -> list[tuple[str, Path]]:
+        items = list(iter_files(self.cfg.vault_root))
+        rel_keys = {
+            str(rel or "").strip().replace("\\", "/").lstrip("/")
+            for rel, _full in items
+        }
+        vault_name = self.cfg.vault_root.name
+        root_shorthand = f"{vault_name}.md"
+        canonical_root = f"{vault_name}/{vault_name}.md"
+        results: list[tuple[str, Path]] = []
+        for rel, full in items:
+            rel_key = str(rel or "").strip().replace("\\", "/").lstrip("/")
+            if rel_key == root_shorthand and canonical_root in rel_keys:
+                _log(f"scan skip duplicate legacy root page path={rel_key} canonical={canonical_root}")
+                continue
+            results.append((self._canonical_rel_path(rel_key), full))
+        return results
+
+    def _canonicalize_manifest_entries(self, entries: Any) -> dict[str, Any]:
+        if not isinstance(entries, dict):
+            return {}
+        canonical: dict[str, Any] = {}
+        for rel, meta in entries.items():
+            rel_key = self._canonical_rel_path(str(rel or ""))
+            if not rel_key:
+                continue
+            current_is_canonical = rel_key == str(rel or "").strip().replace("\\", "/").lstrip("/")
+            if rel_key not in canonical or current_is_canonical:
+                canonical[rel_key] = meta
+        return canonical
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -216,7 +258,7 @@ class HomebaseSyncEngine:
                 },
             )
             current_scan = {}
-            for rel, full in iter_files(self.cfg.vault_root):
+            for rel, full in self._iter_sync_files():
                 size, mtime = stat_file(full)
                 current_scan[rel] = {"size": int(size), "mtime": int(mtime)}
             _write_json(
@@ -777,7 +819,7 @@ class HomebaseSyncEngine:
 
     def _build_local_manifest(self) -> dict[str, Any]:
         entries: dict[str, Any] = {}
-        for rel, full in iter_files(self.cfg.vault_root):
+        for rel, full in self._iter_sync_files():
             size, mtime = stat_file(full)
             entries[rel] = {
                 "size": size,
@@ -803,7 +845,7 @@ class HomebaseSyncEngine:
         _log(f"pull begin checkpoint={checkpoint_id}")
         manifest_bytes = client.get_manifest(checkpoint_id)
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-        entries = manifest.get("entries", {})
+        entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
         remote_device_id = str(manifest.get("device_id") or "remote")
         _log(f"pull manifest entries={len(entries)} remote_device={remote_device_id}")
         applied_paths: list[str] = []
@@ -823,7 +865,7 @@ class HomebaseSyncEngine:
             object_id = meta.get("object_id")
             if not object_id:
                 continue
-            rel_key = str(rel).strip().replace("\\", "/").lstrip("/")
+            rel_key = self._canonical_rel_path(str(rel))
             object_id_text = str(object_id).strip().lower()
             if self._is_valid_object_id(object_id_text):
                 pulled_cache[rel_key] = object_id_text
@@ -873,7 +915,7 @@ class HomebaseSyncEngine:
                     f"remote_device={remote_device_id}"
                 )
                 continue
-            conflict_rel = conflict_copy_path(str(rel), remote_device_id)
+            conflict_rel = conflict_copy_path(rel_key, remote_device_id)
             conflict_path = self.cfg.vault_root / conflict_rel
             write_bytes_atomic(conflict_path, plaintext)
             applied_paths.append(str(conflict_rel))
@@ -885,7 +927,7 @@ class HomebaseSyncEngine:
                 f"conflict_copy={conflict_rel}"
             )
             self._record_conflict(
-                path=str(rel),
+                path=rel_key,
                 conflict_copy=str(conflict_rel),
                 remote_checkpoint_id=checkpoint_id,
                 remote_device_id=remote_device_id,
@@ -910,7 +952,7 @@ class HomebaseSyncEngine:
         _log(f"reset pull begin checkpoint={checkpoint_id}")
         manifest_bytes = client.get_manifest(checkpoint_id)
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-        entries = manifest.get("entries", {})
+        entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
         pulled_cache: dict[str, str] = {}
         written = 0
         for rel, meta in entries.items():
@@ -922,16 +964,17 @@ class HomebaseSyncEngine:
             if not object_id:
                 continue
             object_id_text = object_id.lower()
+            rel_key = self._canonical_rel_path(str(rel))
             if self._is_valid_object_id(object_id_text):
-                pulled_cache[str(rel)] = object_id_text
+                pulled_cache[rel_key] = object_id_text
             ciphertext = client.get_object(object_id)
             try:
                 plaintext = decrypt_bytes(key, ciphertext)
             except CryptoError as exc:
                 raise ValueError(
-                    f"Homebase decryption failed for '{rel}' (passphrase mismatch or corrupted object)"
+                    f"Homebase decryption failed for '{rel_key}' (passphrase mismatch or corrupted object)"
                 ) from exc
-            local_path = self.cfg.vault_root / rel
+            local_path = self.cfg.vault_root / rel_key
             write_bytes_atomic(local_path, plaintext)
             remote_mtime = int(meta.get("mtime", 0) or 0)
             if remote_mtime > 0:

@@ -9,6 +9,7 @@ from typing import Iterator, Optional
 
 EXCLUDE_DIRS = {".stillpoint"}
 EXCLUDE_FILES = {"AGENTS.md"}
+CONFLICT_COPY_MARKER = ".sync-conflict-"
 
 
 def iter_files(vault_root: Path) -> Iterator[tuple[str, Path]]:
@@ -20,6 +21,8 @@ def iter_files(vault_root: Path) -> Iterator[tuple[str, Path]]:
             full = Path(root) / name
             rel = full.relative_to(vault_root).as_posix()
             if rel.startswith(".stillpoint/"):
+                continue
+            if CONFLICT_COPY_MARKER in rel:
                 continue
             yield rel, full
 
