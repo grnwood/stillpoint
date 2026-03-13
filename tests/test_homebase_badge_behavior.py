@@ -468,3 +468,84 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
         ("resume", "manual rebuild index"),
     ]
     assert dummy.alerts == []
+
+
+def test_rebuild_index_retries_after_settings_db_permission_error(tmp_path, monkeypatch) -> None:
+    class _DummyStatusBar:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def showMessage(self, message: str, timeout: int = 0) -> None:
+            self.messages.append((message, timeout))
+
+    class _DummySearchSync:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def suspend(self, reason: str) -> None:
+            self.calls.append(("suspend", reason))
+
+        def resume(self, reason: str) -> None:
+            self.calls.append(("resume", reason))
+
+    class _Dummy:
+        _remote_mode = False
+
+        def __init__(self, vault_root: str) -> None:
+            self.vault_root = vault_root
+            self._status = _DummyStatusBar()
+            self._search_sync = _DummySearchSync()
+            self.reindex_calls = []
+            self.alerts = []
+
+        def _ensure_writable(self, _reason: str) -> bool:
+            return True
+
+        def statusBar(self) -> _DummyStatusBar:
+            return self._status
+
+        def _alert(self, message: str) -> None:
+            self.alerts.append(message)
+
+        def _homebase_profile_for_path(self, _local_path: str):
+            return None
+
+        def _apply_homebase_profile(self, _profile) -> None:
+            raise AssertionError("No Homebase profile expected")
+
+        def _reindex_vault(self, *, show_progress: bool = False) -> None:
+            self.reindex_calls.append(show_progress)
+
+    vault_root = tmp_path / "vault"
+    settings_db = vault_root / ".stillpoint" / "settings.db"
+    settings_db.parent.mkdir(parents=True, exist_ok=True)
+    settings_db.write_text("placeholder", encoding="utf-8")
+
+    dummy = _Dummy(str(vault_root))
+    active_vault_calls: list[str | None] = []
+    close_calls: list[str] = []
+    unlink_attempts = {"count": 0}
+    original_unlink = Path.unlink
+
+    def flaky_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == settings_db and unlink_attempts["count"] == 0:
+            unlink_attempts["count"] += 1
+            raise PermissionError("The process cannot access the file because it is being used by another process")
+        unlink_attempts["count"] += 1
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(config, "has_active_vault", lambda: True)
+    monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
+    monkeypatch.setattr(config, "close_cached_vault_connections", lambda: close_calls.append("closed"))
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    MainWindow._rebuild_vault_index_from_disk(dummy)
+
+    assert active_vault_calls == [None, str(vault_root)]
+    assert close_calls == ["closed", "closed"]
+    assert unlink_attempts["count"] == 2
+    assert dummy.reindex_calls == [True]
+    assert not settings_db.exists()
+    assert dummy.alerts == []

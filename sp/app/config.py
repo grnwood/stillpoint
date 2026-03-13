@@ -4404,6 +4404,28 @@ def set_active_vault(root: Optional[str]) -> None:
     _activate_root(root_path, persist_global=True)
 
 
+def close_cached_vault_connections() -> None:
+    """Best-effort close for cached sqlite handles held by this process."""
+    global _ACTIVE_CONN
+    with _ACTIVE_CONN_LOCK:
+        _ACTIVE_CONN = None
+        conn = getattr(_THREAD_LOCAL, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _THREAD_LOCAL.conn = None
+        _THREAD_LOCAL.db_path = None
+        stale = list(_STALE_ACTIVE_CONNS)
+        _STALE_ACTIVE_CONNS.clear()
+        for conn in stale:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def push_active_vault_context(root: Optional[str]):
     root_path = Path(root).expanduser().resolve() if root else None
     token = _ACTIVE_ROOT_CONTEXT.set(root_path)

@@ -17549,11 +17549,23 @@ class MainWindow(QMainWindow):
                 try:
                     # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
                     config.set_active_vault(None)
+                    config.close_cached_vault_connections()
                     db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
-                    try:
-                        db_path.unlink()
-                    except FileNotFoundError:
-                        pass
+                    unlink_error: Exception | None = None
+                    for _attempt in range(3):
+                        try:
+                            db_path.unlink()
+                            unlink_error = None
+                            break
+                        except FileNotFoundError:
+                            unlink_error = None
+                            break
+                        except PermissionError as exc:
+                            unlink_error = exc
+                            config.close_cached_vault_connections()
+                            time.sleep(0.1)
+                    if unlink_error is not None:
+                        raise unlink_error
                     config.set_active_vault(self.vault_root)
                     if homebase_profile:
                         self._apply_homebase_profile(homebase_profile)
