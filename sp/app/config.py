@@ -4426,6 +4426,27 @@ def close_cached_vault_connections() -> None:
                 pass
 
 
+def close_context_vault_connection(expected_root: Optional[Path] = None) -> None:
+    """Close the current thread's contextual sqlite handle for a request-scoped vault."""
+    with _ACTIVE_CONN_LOCK:
+        conn = getattr(_THREAD_LOCAL, "conn", None)
+        db_path = getattr(_THREAD_LOCAL, "db_path", None)
+        if conn is None:
+            _THREAD_LOCAL.conn = None
+            _THREAD_LOCAL.db_path = None
+            return
+        if expected_root is not None:
+            expected_db_path = str(expected_root / ".stillpoint" / "settings.db")
+            if db_path != expected_db_path:
+                return
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _THREAD_LOCAL.conn = None
+        _THREAD_LOCAL.db_path = None
+
+
 def push_active_vault_context(root: Optional[str]):
     root_path = Path(root).expanduser().resolve() if root else None
     token = _ACTIVE_ROOT_CONTEXT.set(root_path)
@@ -4434,6 +4455,8 @@ def push_active_vault_context(root: Optional[str]):
 
 
 def reset_active_vault_context(token) -> None:
+    contextual_root = _ACTIVE_ROOT_CONTEXT.get()
+    close_context_vault_connection(contextual_root)
     try:
         _ACTIVE_ROOT_CONTEXT.reset(token)
     except Exception:

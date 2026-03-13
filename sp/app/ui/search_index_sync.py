@@ -34,6 +34,8 @@ class PeriodicSearchIndexSync(QObject):
         self._log = log_fn
         self._in_progress = False
         self._suspend_count = 0
+        self._idle_event = threading.Event()
+        self._idle_event.set()
 
         self._timer = QTimer(self)
         self._timer.setInterval(interval_ms)
@@ -91,6 +93,7 @@ class PeriodicSearchIndexSync(QObject):
             return
 
         self._in_progress = True
+        self._idle_event.clear()
         self._log("[SearchIndex] periodic sync started")
         print(
             "[SearchIndex] periodic sync starting "
@@ -228,5 +231,11 @@ class PeriodicSearchIndexSync(QObject):
                 )
                 self.statusReady.emit(status_line, 4000)
                 self._in_progress = False
+                self._idle_event.set()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def wait_for_idle(self, timeout_s: float = 5.0) -> bool:
+        if not self._in_progress:
+            return True
+        return self._idle_event.wait(timeout=max(0.0, float(timeout_s)))

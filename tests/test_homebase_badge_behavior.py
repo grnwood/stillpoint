@@ -1,5 +1,6 @@
-import time
 import inspect
+import sqlite3
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -447,22 +448,29 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
     vault_root = tmp_path / "vault"
     settings_db = vault_root / ".stillpoint" / "settings.db"
     settings_db.parent.mkdir(parents=True, exist_ok=True)
-    settings_db.write_text("placeholder", encoding="utf-8")
+    with sqlite3.connect(settings_db) as conn:
+        conn.execute("CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO kv(key, value) VALUES(?, ?)", ("preserved", "yes"))
+        conn.commit()
 
     dummy = _Dummy(str(vault_root))
     active_vault_calls: list[str | None] = []
+    rebuild_calls: list[Path] = []
 
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     monkeypatch.setattr(config, "has_active_vault", lambda: True)
     monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
+    monkeypatch.setattr(config, "close_cached_vault_connections", lambda: None)
+    monkeypatch.setattr(config, "rebuild_index_from_disk", lambda root: rebuild_calls.append(root))
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
 
-    assert active_vault_calls == [None, str(vault_root)]
+    assert active_vault_calls == [str(vault_root)]
+    assert rebuild_calls == [vault_root]
     assert dummy.profile_applied is not None
     assert dummy.profile_applied["server_url"] == "https://homebase.example"
     assert dummy.reindex_calls == [True]
-    assert not settings_db.exists()
+    assert settings_db.exists()
     assert dummy._search_sync.calls == [
         ("suspend", "manual rebuild index"),
         ("resume", "manual rebuild index"),
@@ -470,7 +478,7 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
     assert dummy.alerts == []
 
 
-def test_rebuild_index_retries_after_settings_db_permission_error(tmp_path, monkeypatch) -> None:
+def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch) -> None:
     class _DummyStatusBar:
         def __init__(self) -> None:
             self.messages = []
@@ -517,35 +525,28 @@ def test_rebuild_index_retries_after_settings_db_permission_error(tmp_path, monk
             self.reindex_calls.append(show_progress)
 
     vault_root = tmp_path / "vault"
-    settings_db = vault_root / ".stillpoint" / "settings.db"
-    settings_db.parent.mkdir(parents=True, exist_ok=True)
-    settings_db.write_text("placeholder", encoding="utf-8")
-
     dummy = _Dummy(str(vault_root))
     active_vault_calls: list[str | None] = []
     close_calls: list[str] = []
-    unlink_attempts = {"count": 0}
-    original_unlink = Path.unlink
+    rebuild_attempts = {"count": 0}
 
-    def flaky_unlink(path: Path, missing_ok: bool = False) -> None:
-        if path == settings_db and unlink_attempts["count"] == 0:
-            unlink_attempts["count"] += 1
-            raise PermissionError("The process cannot access the file because it is being used by another process")
-        unlink_attempts["count"] += 1
-        return original_unlink(path, missing_ok=missing_ok)
+    def flaky_rebuild(_root: Path) -> None:
+        if rebuild_attempts["count"] == 0:
+            rebuild_attempts["count"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        rebuild_attempts["count"] += 1
 
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     monkeypatch.setattr(config, "has_active_vault", lambda: True)
     monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
     monkeypatch.setattr(config, "close_cached_vault_connections", lambda: close_calls.append("closed"))
-    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    monkeypatch.setattr(config, "rebuild_index_from_disk", flaky_rebuild)
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
 
-    assert active_vault_calls == [None, str(vault_root)]
+    assert active_vault_calls == [str(vault_root)]
     assert close_calls == ["closed", "closed"]
-    assert unlink_attempts["count"] == 2
+    assert rebuild_attempts["count"] == 2
     assert dummy.reindex_calls == [True]
-    assert not settings_db.exists()
     assert dummy.alerts == []

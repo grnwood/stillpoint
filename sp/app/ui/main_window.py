@@ -17547,26 +17547,22 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Reindexing vault from files...", 0)
                 homebase_profile = self._homebase_profile_for_path(self.vault_root)
                 try:
-                    # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
-                    config.set_active_vault(None)
+                    if hasattr(self._search_sync, "wait_for_idle"):
+                        self._search_sync.wait_for_idle(timeout_s=5.0)
                     config.close_cached_vault_connections()
-                    db_path = Path(self.vault_root) / ".stillpoint" / "settings.db"
-                    unlink_error: Exception | None = None
+                    config.set_active_vault(self.vault_root)
+                    rebuild_error: Exception | None = None
                     for _attempt in range(3):
                         try:
-                            db_path.unlink()
-                            unlink_error = None
+                            config.rebuild_index_from_disk(Path(self.vault_root))
+                            rebuild_error = None
                             break
-                        except FileNotFoundError:
-                            unlink_error = None
-                            break
-                        except PermissionError as exc:
-                            unlink_error = exc
+                        except sqlite3.OperationalError as exc:
+                            rebuild_error = exc
                             config.close_cached_vault_connections()
                             time.sleep(0.1)
-                    if unlink_error is not None:
-                        raise unlink_error
-                    config.set_active_vault(self.vault_root)
+                    if rebuild_error is not None:
+                        raise rebuild_error
                     if homebase_profile:
                         self._apply_homebase_profile(homebase_profile)
                 except Exception as exc:
