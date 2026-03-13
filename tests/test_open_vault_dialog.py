@@ -1,24 +1,22 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 
-def test_open_vault_dialog_uses_two_top_level_tabs(qtbot, monkeypatch) -> None:
+def test_open_vault_dialog_uses_single_vaults_tab(qtbot, monkeypatch) -> None:
     from sp.app.ui.open_vault_dialog import OpenVaultDialog
     from sp.app import config
 
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: True)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
 
-    dlg = OpenVaultDialog(vaults=[], on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=[])
     qtbot.addWidget(dlg)
 
     top_labels = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
-    assert top_labels == ["Local", "Remote Vault"]
+    assert top_labels == ["Vaults"]
+    assert dlg.tabs.count() == 1
 
 
 def test_open_vault_dialog_lists_local_and_homebase_together(qtbot, monkeypatch) -> None:
@@ -35,14 +33,13 @@ def test_open_vault_dialog_lists_local_and_homebase_together(qtbot, monkeypatch)
     }
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [homebase_profile])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: False)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
 
     local_vaults = [
         {"name": "Hybrid Vault", "path": "/vaults/hybrid"},
         {"name": "Plain Local", "path": "/vaults/local"},
     ]
-    dlg = OpenVaultDialog(vaults=local_vaults, on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=local_vaults)
     qtbot.addWidget(dlg)
 
     entries = dlg._combined_local_vault_entries()
@@ -68,14 +65,13 @@ def test_open_vault_dialog_dedupes_local_and_homebase_when_paths_differ_only_by_
     }
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [homebase_profile])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: False)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
 
     local_vaults = [
         {"name": "Hybrid Vault", "path": "/vaults/hybrid"},
         {"name": "Plain Local", "path": "/vaults/local"},
     ]
-    dlg = OpenVaultDialog(vaults=local_vaults, on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=local_vaults)
     qtbot.addWidget(dlg)
 
     entries = dlg._combined_local_vault_entries()
@@ -103,11 +99,10 @@ def test_homebase_row_hides_vault_id_in_line_but_shows_in_tooltip(qtbot, monkeyp
     }
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [homebase_profile])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: False)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
     monkeypatch.setattr(config, "load_vault_last_opened", lambda _k: "2026-03-01T10:30:00+00:00")
 
-    dlg = OpenVaultDialog(vaults=[], on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=[])
     qtbot.addWidget(dlg)
 
     visible = dlg._format_vault_path(homebase_profile)
@@ -126,10 +121,9 @@ def test_icon_name_mapping_prefers_remote_icon_for_homebase(qtbot, monkeypatch) 
 
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: False)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
 
-    dlg = OpenVaultDialog(vaults=[], on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=[])
     qtbot.addWidget(dlg)
 
     assert dlg._vault_icon_name({"kind": "local"}) == "notebook.svg"
@@ -151,9 +145,7 @@ def test_homebase_svg_recolor_only_updates_notebook_outline() -> None:
     """
     themed = OpenVaultDialog._homebase_svg_with_outline_color(source, "#FFFFFF")
     assert '<path d="M0" fill="#FFFFFF"/>' in themed
-    # Badge stroke/fills remain unchanged.
     assert '<circle fill="url(#badgeFill)" stroke="#1C274C"/>' in themed
-    # Only first outline fill token should be replaced.
     assert '<path d="M1" fill="#1C274C"/>' in themed
 
 
@@ -163,10 +155,9 @@ def test_open_vault_dialog_focuses_list_on_show(qtbot, monkeypatch) -> None:
 
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: False)
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: False)
 
-    dlg = OpenVaultDialog(vaults=[{"name": "Local Vault", "path": "/tmp/local-vault"}], on_load_remote=lambda: [])
+    dlg = OpenVaultDialog(vaults=[{"name": "Local Vault", "path": "/tmp/local-vault"}])
     qtbot.addWidget(dlg)
     dlg.show()
     QApplication.processEvents()
@@ -174,61 +165,62 @@ def test_open_vault_dialog_focuses_list_on_show(qtbot, monkeypatch) -> None:
     assert QApplication.focusWidget() is dlg.local_list_widget
 
 
-def test_open_vault_dialog_alt_tab_cycles_tabs_and_focuses_active_list(qtbot, monkeypatch) -> None:
+def test_remove_selected_removes_local_vault_and_clears_default(qtbot, monkeypatch) -> None:
     from sp.app.ui.open_vault_dialog import OpenVaultDialog
     from sp.app import config
 
+    removed_paths: list[str] = []
+    saved_defaults: list[str | None] = []
+
     monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
-    monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: True)
+    monkeypatch.setattr(config, "load_default_vault", lambda: "/tmp/local-vault")
     monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: False)
+    monkeypatch.setattr(config, "delete_known_vault", lambda path: removed_paths.append(path))
+    monkeypatch.setattr(config, "save_default_vault", lambda path: saved_defaults.append(path))
 
-    remote = [{"id": "remote::x::/v", "kind": "remote", "name": "Remote", "path": "/v", "server_url": "http://x"}]
-    dlg = OpenVaultDialog(vaults=[{"name": "Local Vault", "path": "/tmp/local-vault"}], on_load_remote=lambda: remote)
+    dlg = OpenVaultDialog(vaults=[{"name": "Local Vault", "path": "/tmp/local-vault"}])
     qtbot.addWidget(dlg)
-    dlg.show()
-    QApplication.processEvents()
+    dlg.local_list_widget.setCurrentRow(0)
 
-    assert dlg.tabs.count() == 2
-    assert dlg.tabs.currentIndex() == 0
-    assert QApplication.focusWidget() is dlg.local_list_widget
+    dlg._remove_selected()
 
-    QTest.keyClick(dlg, Qt.Key_Tab, Qt.AltModifier)
-    QApplication.processEvents()
-    assert dlg.tabs.currentIndex() == 1
-    assert QApplication.focusWidget() is dlg.remote_list_widget
-
-    QTest.keyClick(dlg, Qt.Key_Tab, Qt.AltModifier | Qt.ShiftModifier)
-    QApplication.processEvents()
-    assert dlg.tabs.currentIndex() == 0
-    assert QApplication.focusWidget() is dlg.local_list_widget
+    assert removed_paths == ["/tmp/local-vault"]
+    assert saved_defaults == [None]
+    assert dlg.local_list_widget.count() == 0
+    assert dlg.default_vault is None
 
 
-def test_open_vault_dialog_ctrl_tab_cycles_tabs_and_focuses_active_list(qtbot, monkeypatch) -> None:
+def test_remove_selected_deletes_homebase_profile(qtbot, monkeypatch) -> None:
     from sp.app.ui.open_vault_dialog import OpenVaultDialog
     from sp.app import config
 
-    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
+    homebase_profile = {
+        "id": "homebase::https://server::vault123::/vaults/hybrid",
+        "kind": "homebase",
+        "name": "Hybrid Vault",
+        "path": "/vaults/hybrid",
+        "server_url": "https://server",
+        "vault_id": "vault123",
+    }
+    deleted_ids: list[str] = []
+    profiles = [homebase_profile]
+
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: list(profiles))
     monkeypatch.setattr(config, "load_default_vault", lambda: None)
-    monkeypatch.setattr(config, "load_feature_remote_vaults_enabled", lambda: True)
-    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: False)
+    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
 
-    remote = [{"id": "remote::x::/v", "kind": "remote", "name": "Remote", "path": "/v", "server_url": "http://x"}]
-    dlg = OpenVaultDialog(vaults=[{"name": "Local Vault", "path": "/tmp/local-vault"}], on_load_remote=lambda: remote)
+    def fake_delete_homebase_vault_profile(profile_id: str) -> None:
+        deleted_ids.append(profile_id)
+        profiles[:] = []
+
+    monkeypatch.setattr(config, "delete_homebase_vault_profile", fake_delete_homebase_vault_profile)
+
+    dlg = OpenVaultDialog(vaults=[])
     qtbot.addWidget(dlg)
-    dlg.show()
-    QApplication.processEvents()
+    dlg.local_list_widget.setCurrentRow(0)
 
-    assert dlg.tabs.count() == 2
-    assert dlg.tabs.currentIndex() == 0
-    assert QApplication.focusWidget() is dlg.local_list_widget
+    dlg._remove_selected()
 
-    QTest.keyClick(dlg.local_list_widget, Qt.Key_Tab, Qt.ControlModifier)
-    QApplication.processEvents()
-    assert dlg.tabs.currentIndex() == 1
-    assert QApplication.focusWidget() is dlg.remote_list_widget
+    assert deleted_ids == [homebase_profile["id"]]
+    assert dlg.local_list_widget.count() == 0
 
-    QTest.keyClick(dlg.remote_list_widget, Qt.Key_Tab, Qt.ControlModifier)
-    QApplication.processEvents()
-    assert dlg.tabs.currentIndex() == 0
-    assert QApplication.focusWidget() is dlg.local_list_widget

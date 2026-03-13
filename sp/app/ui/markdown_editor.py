@@ -1528,6 +1528,7 @@ class MarkdownEditor(QTextEdit):
     insertDateRequested = Signal()
     attachmentDropped = Signal(str)  # Emits filename when a file is dropped into the editor
     backlinksRequested = Signal(str)  # Emits current page path when backlinks are requested
+    linkRelationsPopupRequested = Signal(str)  # Emits current page path or link target for links popup
     aiChatRequested = Signal(str)  # Emits current page path when AI Chat is requested
     aiChatSendRequested = Signal(str)  # Send selected/whole text to the open chat
     aiChatPageFocusRequested = Signal(str)  # Request the chat tab focused on this page
@@ -1584,6 +1585,8 @@ class MarkdownEditor(QTextEdit):
         self._vi_has_painted: bool = False
         self._vi_paint_in_progress: bool = False
         self._vi_activation_timer: Optional[QTimer] = None
+        self._vi_pending_prefix: Optional[str] = None
+        self._vi_prefix_timer: Optional[QTimer] = None
         # A short cross-platform paint guard prevents rare Qt paint races
         # immediately after document replacement/reload.
         default_paint_guard_ms = 180 if sys.platform.startswith("win") else 120
@@ -1705,6 +1708,10 @@ class MarkdownEditor(QTextEdit):
         self._suppress_paint = False
         self._suppress_paint_depth = 0
         self._saved_updates_enabled: Optional[bool] = None
+        self._load_generation = 0
+        self._load_in_flight_token = 0
+        self._post_load_repaint_token = 0
+        self._post_load_logger_token = 0
         self.textChanged.connect(self._update_tag_suggest)
         self.cursorPositionChanged.connect(self._maybe_close_tag_suggest)
         self.textChanged.connect(self._update_task_tag_suggest)
@@ -1876,28 +1883,87 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         )
 
-    def _arm_post_load_paint_guard(self) -> None:
+    def current_load_token(self) -> int:
+        return int(self._load_generation)
+
+    def _is_current_load_token(self, load_token: Optional[int]) -> bool:
+        if load_token is None:
+            return True
+        return int(load_token) == int(self._load_generation)
+
+    def _begin_page_load(self) -> int:
+        self._load_generation += 1
+        load_token = int(self._load_generation)
+        self._load_in_flight_token = load_token
+        self._post_load_repaint_token = 0
+        if self._page_load_logger:
+            self._post_load_logger_token = load_token
+        else:
+            self._post_load_logger_token = 0
+        self._post_load_paint_guard_until = 0.0
+        self._post_load_repaint_armed = False
+        return load_token
+
+    def _finish_page_load(self, load_token: int) -> None:
+        if not self._is_current_load_token(load_token):
+            return
+        self._load_in_flight_token = 0
+        self._arm_post_load_paint_guard(load_token)
+
+    def _queue_post_load_repaint(self, load_token: Optional[int]) -> None:
+        if not self._is_current_load_token(load_token):
+            return
+        if self._post_load_repaint_armed:
+            return
+        remaining_ms = 1
+        until = self._post_load_paint_guard_until
+        if until > 0.0:
+            remaining_ms = max(1, int((until - time.perf_counter()) * 1000.0))
+        self._post_load_repaint_armed = True
+        QTimer.singleShot(
+            remaining_ms,
+            lambda tok=load_token: self._deferred_post_load_repaint(tok),
+        )
+
+    def _arm_post_load_paint_guard(self, load_token: Optional[int] = None) -> None:
+        if not self._is_current_load_token(load_token):
+            return
         if self._post_load_paint_guard_ms <= 0:
+            if sys.platform.startswith("linux"):
+                self._queue_post_load_repaint(load_token)
             return
         self._post_load_paint_guard_until = time.perf_counter() + (self._post_load_paint_guard_ms / 1000.0)
         self._post_load_repaint_armed = False
 
     def _post_load_paint_guard_active(self) -> bool:
+        load_token = self.current_load_token()
+        if sys.platform.startswith("linux") and self._load_in_flight_token == load_token:
+            self._queue_post_load_repaint(load_token)
+            return True
         until = self._post_load_paint_guard_until
         if until <= 0.0:
+            if sys.platform.startswith("linux") and self._post_load_repaint_token != load_token:
+                self._queue_post_load_repaint(load_token)
+                return True
             return False
         now = time.perf_counter()
         if now >= until:
             self._post_load_paint_guard_until = 0.0
+            if sys.platform.startswith("linux") and self._post_load_repaint_token != load_token:
+                self._queue_post_load_repaint(load_token)
+                return True
             self._post_load_repaint_armed = False
             return False
-        if not self._post_load_repaint_armed:
-            self._post_load_repaint_armed = True
-            remaining_ms = max(1, int((until - now) * 1000.0))
-            QTimer.singleShot(remaining_ms, self._deferred_post_load_repaint)
+        self._queue_post_load_repaint(load_token)
         return True
 
-    def _deferred_post_load_repaint(self) -> None:
+    def _deferred_post_load_repaint(self, load_token: Optional[int] = None) -> None:
+        self._post_load_repaint_armed = False
+        if not self._is_current_load_token(load_token):
+            return
+        if sys.platform.startswith("linux") and self._load_in_flight_token == self.current_load_token():
+            self._queue_post_load_repaint(load_token)
+            return
         if not self._is_alive(self) or not self._editor_alive:
             return
         try:
@@ -1906,10 +1972,15 @@ class MarkdownEditor(QTextEdit):
             return
         if not self._is_alive(viewport):
             return
+        self._post_load_repaint_token = self.current_load_token()
+        if not self._vi_has_painted:
+            self._vi_has_painted = True
         try:
             viewport.update()
         except Exception:
             pass
+        if self._vi_pending_activation:
+            self._schedule_vi_activation()
 
     def _block_has_hr_object(self, block) -> bool:
         if not block or not block.isValid():
@@ -2069,6 +2140,25 @@ class MarkdownEditor(QTextEdit):
                     painter.end()
         finally:
             self._vi_paint_in_progress = False
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        if not self._is_alive(self) or not self._editor_alive:
+            return
+        try:
+            viewport = self.viewport()
+        except Exception:
+            viewport = None
+        if self._is_alive(viewport):
+            try:
+                viewport.update()
+            except Exception:
+                pass
+        if self._vi_pending_activation and not self._vi_has_painted:
+            # Offscreen/backends under test do not always deliver a real paint event
+            # after show(), but vi activation still needs a visible, settled widget.
+            self._vi_has_painted = True
+            self._schedule_vi_activation()
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None
@@ -2319,20 +2409,22 @@ class MarkdownEditor(QTextEdit):
             insert_link = True
         self._move_selected_text_to_page(dest, insert_link=insert_link)
 
-    def _mark_page_load(self, label: str) -> None:
-        if self._page_load_logger:
+    def _mark_page_load(self, label: str, load_token: Optional[int] = None) -> None:
+        if self._page_load_logger and (load_token is None or load_token == self._post_load_logger_token):
             self._page_load_logger.mark(label)
 
-    def _complete_page_load_logging(self, label: str) -> None:
-        if self._page_load_logger:
+    def _complete_page_load_logging(self, label: str, load_token: Optional[int] = None) -> None:
+        if self._page_load_logger and (load_token is None or load_token == self._post_load_logger_token):
             self._page_load_logger.end(label)
             self._page_load_logger = None
+            self._post_load_logger_token = 0
 
     def set_markdown(self, content: str) -> None:
         self._push_paint_block()
         # Show busy cursor during page load/rendering
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            load_token = self._begin_page_load()
             # CRITICAL: Clear any pending heading state from previous file/edits
             # This prevents sentinel characters from the previous file from corrupting this load
             self._pending_heading_block_num = None
@@ -2341,7 +2433,7 @@ class MarkdownEditor(QTextEdit):
             import time
             from os import getenv
             t0 = time.perf_counter()
-            self._mark_page_load("render start")
+            self._mark_page_load("render start", load_token)
             if content.endswith('\\n'):
                 stripped = content.rstrip('\\n')
                 trailing_count = len(content) - len(stripped)
@@ -2351,7 +2443,7 @@ class MarkdownEditor(QTextEdit):
             content = self._sanitize_input_markdown(content)
             normalized = self._normalize_markdown_images(content)
             t1 = time.perf_counter()
-            self._mark_page_load("normalize images")
+            self._mark_page_load("normalize images", load_token)
             
             # Check page cache for converted display text (speeds up back/forth navigation)
             cache_key = None
@@ -2387,7 +2479,7 @@ class MarkdownEditor(QTextEdit):
                             f"[MD_CACHE] ✗ MISS: {self._current_path} (converted and cached, cache size: {len(type(self)._display_cache)})"
                         )
             t2 = time.perf_counter()
-            self._mark_page_load("convert to display text")
+            self._mark_page_load("convert to display text", load_token)
             self.highlighter.enable_timing(True)
             self.highlighter.reset_timing()
             type(self)._LOAD_GUARD_DEPTH += 1
@@ -2457,7 +2549,7 @@ class MarkdownEditor(QTextEdit):
                     t3 = time.perf_counter()
                     # Restore cursor after full setPlainText
                     restore_cursor_after_load(len(display))
-                self._mark_page_load("document populated")
+                self._mark_page_load("document populated", load_token)
                 self.textChanged.connect(self._enforce_display_symbols)
                 self.textChanged.connect(self._schedule_heading_outline)
                 if highlighter_disabled:
@@ -2466,13 +2558,13 @@ class MarkdownEditor(QTextEdit):
                     # Qt's default is async (deferred), which means stats would be checked before highlighting runs
                     self.highlighter.rehighlight()
                 self.setUpdatesEnabled(True)
-                self._render_images(display, time.perf_counter())
+                self._render_images(display, time.perf_counter(), load_token=load_token)
                 t4 = time.perf_counter()
-                self._mark_page_load("render images")
+                self._mark_page_load("render images", load_token)
                 self._display_guard = False
                 self._schedule_heading_outline()
-                self._refresh_hr_selections()
-                self._apply_scroll_past_end_margin()
+                self._refresh_hr_selections(load_token=load_token)
+                self._apply_scroll_past_end_margin(load_token=load_token)
             finally:
                 del blocker
                 self._suppress_vi_cursor = False
@@ -2486,10 +2578,10 @@ class MarkdownEditor(QTextEdit):
                         self._cursor_signals_connected = True
                     except Exception:
                         pass
-                self._arm_post_load_paint_guard()
+                self._finish_page_load(load_token)
                 self._pop_paint_block()
             t5 = time.perf_counter()
-            self._mark_page_load("outline + margin scheduled")
+            self._mark_page_load("outline + margin scheduled", load_token)
             if _DETAILED_LOGGING:
                 print(f"[MD_TIMING] set_markdown breakdown:")
                 print(f"  normalize_images: {(t1-t0)*1000:.1f}ms")
@@ -2523,7 +2615,7 @@ class MarkdownEditor(QTextEdit):
                     total = self.highlighter._timing_total * 1000.0
                     print(f"[MD_TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
             self.highlighter.enable_timing(False)
-            self._mark_page_load("editor focus ready")
+            self._mark_page_load("editor focus ready", load_token)
             self.setFocus()
         finally:
             # Restore normal cursor after page load
@@ -4405,6 +4497,10 @@ class MarkdownEditor(QTextEdit):
             mods = event.modifiers() & ~Qt.KeypadModifier
             if mods == Qt.AltModifier:
                 key = event.key()
+                if key == Qt.Key_B:
+                    self._request_link_relations_popup()
+                    event.accept()
+                    return
                 if key == Qt.Key_H:
                     self._trigger_history_navigation(Qt.Key_Left)
                     event.accept()
@@ -4425,6 +4521,10 @@ class MarkdownEditor(QTextEdit):
         if event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_Backslash, 0x5C):
             event.ignore()
             return
+        if event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_B:
+            if self._request_link_relations_popup():
+                event.accept()
+                return
         # Non-vi shortcut for heading picker (same popup vi mode uses for `t`)
         if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() == Qt.Key_T:
             cursor_rect = self.cursorRect()
@@ -6604,6 +6704,33 @@ class MarkdownEditor(QTextEdit):
         self._vi_pending_activation = False
         self._enter_vi_navigation_mode(force_emit=True)
 
+    def _clear_vi_prefix(self) -> None:
+        self._vi_pending_prefix = None
+        if self._vi_prefix_timer is not None:
+            try:
+                self._vi_prefix_timer.stop()
+            except Exception:
+                pass
+
+    def _start_vi_prefix(self, prefix: str) -> None:
+        self._vi_pending_prefix = prefix
+        if self._vi_prefix_timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._clear_vi_prefix)
+            self._vi_prefix_timer = timer
+        self._vi_prefix_timer.start(750)
+
+    def _request_link_relations_popup(self) -> bool:
+        target = self._current_path or ""
+        link = self._link_under_cursor(self.textCursor())
+        if link:
+            target = link
+        if not target:
+            return False
+        self.linkRelationsPopupRequested.emit(target)
+        return True
+
     def _enter_vi_navigation_mode(self, force_emit: bool = False) -> None:
         if not self._vi_feature_enabled:
             return
@@ -6674,6 +6801,13 @@ class MarkdownEditor(QTextEdit):
         key = event.key()
         text_char = event.text() or ""
         read_only = self._read_only_mode
+        if self._vi_pending_prefix:
+            prefix = self._vi_pending_prefix
+            self._clear_vi_prefix()
+            if prefix == "z":
+                if key == Qt.Key_B:
+                    return self._request_link_relations_popup()
+                return True
         cursor = self.textCursor()
 
         def _block_vi_edit() -> bool:
@@ -6797,6 +6931,9 @@ class MarkdownEditor(QTextEdit):
                 prefer_above = False
             global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
             self.headingPickerRequested.emit(global_point, prefer_above)
+            return True
+        if key == Qt.Key_Z and not shift:
+            self._start_vi_prefix("z")
             return True
         if key == Qt.Key_F and not shift:
             self.bookmarkPickerRequested.emit()
@@ -7629,16 +7766,19 @@ class MarkdownEditor(QTextEdit):
             return
         self._hr_timer.start()
 
-    def _refresh_hr_selections(self) -> None:
+    def _refresh_hr_selections(self, load_token: Optional[int] = None) -> None:
+        if not self._is_current_load_token(load_token):
+            self._hr_refresh_retry_pending = False
+            return
         if self._mutations_blocked():
             if not self._hr_refresh_retry_pending:
                 self._hr_refresh_retry_pending = True
-                QTimer.singleShot(0, self._retry_refresh_hr)
+                QTimer.singleShot(0, lambda tok=load_token: self._retry_refresh_hr(tok))
             return
         if self._post_load_paint_guard_active():
             if not self._hr_refresh_retry_pending:
                 self._hr_refresh_retry_pending = True
-                QTimer.singleShot(0, self._retry_refresh_hr)
+                QTimer.singleShot(0, lambda tok=load_token: self._retry_refresh_hr(tok))
             return
         self._hr_refresh_retry_pending = False
         doc = self.document()
@@ -7678,11 +7818,14 @@ class MarkdownEditor(QTextEdit):
         existing.extend(selections)
         self.setExtraSelections(existing)
 
-    def _retry_refresh_hr(self) -> None:
+    def _retry_refresh_hr(self, load_token: Optional[int] = None) -> None:
         if not Shiboken.isValid(self):
             return
+        if not self._is_current_load_token(load_token):
+            self._hr_refresh_retry_pending = False
+            return
         self._hr_refresh_retry_pending = False
-        self._refresh_hr_selections()
+        self._refresh_hr_selections(load_token=load_token)
 
     def _reset_insert_format(self, cursor: QTextCursor) -> None:
         fmt = QTextCharFormat()
@@ -8777,12 +8920,15 @@ class MarkdownEditor(QTextEdit):
 
     # --- Scrolling helpers ---
 
-    def _apply_scroll_past_end_margin(self) -> None:
+    def _apply_scroll_past_end_margin(self, load_token: Optional[int] = None) -> None:
         """Add bottom margin to the document so the view can scroll past the last line."""
+        if not self._is_current_load_token(load_token):
+            self._scroll_margin_retry_pending = False
+            return
         if self._mutations_blocked() or self._suppress_vi_cursor:
             if not self._scroll_margin_retry_pending:
                 self._scroll_margin_retry_pending = True
-                QTimer.singleShot(0, self._retry_scroll_margin)
+                QTimer.singleShot(0, lambda tok=load_token: self._retry_scroll_margin(tok))
             return
         self._scroll_margin_retry_pending = False
         try:
@@ -8797,11 +8943,14 @@ class MarkdownEditor(QTextEdit):
             # Be defensive—failure to set margin shouldn't break editing
             pass
 
-    def _retry_scroll_margin(self) -> None:
+    def _retry_scroll_margin(self, load_token: Optional[int] = None) -> None:
         if not Shiboken.isValid(self):
             return
+        if not self._is_current_load_token(load_token):
+            self._scroll_margin_retry_pending = False
+            return
         self._scroll_margin_retry_pending = False
-        self._apply_scroll_past_end_margin()
+        self._apply_scroll_past_end_margin(load_token=load_token)
 
     def _scroll_one_line_down(self) -> None:
         """Scroll the viewport down by roughly one line height."""
@@ -8888,12 +9037,20 @@ class MarkdownEditor(QTextEdit):
         suffix = f"{{width={width_prop}}}" if width_prop else ""
         return f"![{alt}]({original}){suffix}"
 
-    def _render_images(self, display_text: str, scheduled_at: Optional[float] = None) -> None:
+    def _render_images(
+        self,
+        display_text: str,
+        scheduled_at: Optional[float] = None,
+        load_token: Optional[int] = None,
+    ) -> None:
         """Replace markdown image patterns in the given display text with inline images.
 
         This operates on the current document by selecting each pattern range
         and inserting a QTextImageFormat created from the resolved path.
         """
+        if not self._is_current_load_token(load_token):
+            self._render_images_retry_pending = False
+            return
         if self._disable_inline_images:
             return
         if self._mutations_blocked():
@@ -8901,7 +9058,7 @@ class MarkdownEditor(QTextEdit):
                 self._render_images_retry_pending = True
                 QTimer.singleShot(
                     0,
-                    lambda: self._retry_render_images(display_text, scheduled_at),
+                    lambda text=display_text, at=scheduled_at, tok=load_token: self._retry_render_images(text, at, tok),
                 )
             return
         self._render_images_retry_pending = False
@@ -8946,21 +9103,24 @@ class MarkdownEditor(QTextEdit):
                     f"path={path} alt_len={len(alt)} width={width or ''} snippet={snippet!r} match={match_text!r}"
                 )
         if not matches:
-            self._mark_page_load(f"render images skipped (0) delay={delay_ms:.1f}ms")
+            self._mark_page_load(f"render images skipped (0) delay={delay_ms:.1f}ms", load_token)
             QTimer.singleShot(
                 0,
-                lambda: self._complete_page_load_logging(
-                    f"qt idle after images delay={(time.perf_counter() - (scheduled_at or time.perf_counter()))*1000:.1f}ms"
+                lambda tok=load_token: self._complete_page_load_logging(
+                    f"qt idle after images delay={(time.perf_counter() - (scheduled_at or time.perf_counter()))*1000:.1f}ms",
+                    tok,
                 ),
             )
             return
         if _DETAILED_LOGGING:
             print(f"[TIMING] Rendering {len(matches)} images...")
-        self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms")
+        self._mark_page_load(f"render images start count={len(matches)} delay={delay_ms:.1f}ms", load_token)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         try:
             for idx, (start_pos, end_pos, path, alt, width, selected, match_text) in enumerate(reversed(matches)):
+                if not self._is_current_load_token(load_token):
+                    break
                 t_img_start = time.perf_counter()
                 cursor.setPosition(start_pos)
                 cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
@@ -9001,20 +9161,31 @@ class MarkdownEditor(QTextEdit):
                     print(f"  Image {idx+1}/{len(matches)} ({path}): {(t_img_end - t_img_start)*1000:.1f}ms")
         finally:
             cursor.endEditBlock()
-        self._mark_page_load(f"render images done count={len(matches)}")
+        if not self._is_current_load_token(load_token):
+            return
+        self._mark_page_load(f"render images done count={len(matches)}", load_token)
         end_at = time.perf_counter()
         QTimer.singleShot(
             0,
-            lambda: self._complete_page_load_logging(
-                f"qt idle after images delay={(time.perf_counter() - end_at)*1000:.1f}ms"
+            lambda tok=load_token: self._complete_page_load_logging(
+                f"qt idle after images delay={(time.perf_counter() - end_at)*1000:.1f}ms",
+                tok,
             ),
         )
 
-    def _retry_render_images(self, display_text: str, scheduled_at: Optional[float]) -> None:
+    def _retry_render_images(
+        self,
+        display_text: str,
+        scheduled_at: Optional[float],
+        load_token: Optional[int] = None,
+    ) -> None:
         if not Shiboken.isValid(self):
             return
+        if not self._is_current_load_token(load_token):
+            self._render_images_retry_pending = False
+            return
         self._render_images_retry_pending = False
-        self._render_images(display_text, scheduled_at)
+        self._render_images(display_text, scheduled_at, load_token=load_token)
 
     def _insert_image_from_path(self, raw_path: str, alt: str = "", width: Optional[int] = None) -> None:
         fmt = self._create_image_format(raw_path, alt, str(width) if width else None)

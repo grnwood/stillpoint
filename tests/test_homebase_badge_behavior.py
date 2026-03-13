@@ -1,9 +1,12 @@
 import time
 import inspect
+from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMessageBox
 
 from sp.app.ui.main_window import MainWindow
+from sp.app import config
 from sp.sync.engine import HomebaseSyncStatus
 
 
@@ -387,3 +390,81 @@ def test_poll_homebase_status_does_not_reload_pending_page_when_auto_reload_bloc
     MainWindow._poll_homebase_status(dummy)
     assert dummy.open_calls == 0
     assert dummy._homebase_pending_reload_path == "/Journal/2026/03/04/Test.md"
+
+
+def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monkeypatch) -> None:
+    class _DummyStatusBar:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def showMessage(self, text: str, timeout: int = 0) -> None:
+            self.messages.append((text, timeout))
+
+    class _DummySearchSync:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def suspend(self, reason: str) -> None:
+            self.calls.append(("suspend", reason))
+
+        def resume(self, reason: str) -> None:
+            self.calls.append(("resume", reason))
+
+    class _Dummy:
+        _remote_mode = False
+
+        def __init__(self, vault_root: str) -> None:
+            self.vault_root = vault_root
+            self._search_sync = _DummySearchSync()
+            self._status = _DummyStatusBar()
+            self.profile_applied = None
+            self.reindex_calls = []
+            self.alerts = []
+
+        def _ensure_writable(self, _reason: str) -> bool:
+            return True
+
+        def statusBar(self) -> _DummyStatusBar:
+            return self._status
+
+        def _alert(self, message: str) -> None:
+            self.alerts.append(message)
+
+        def _homebase_profile_for_path(self, local_path: str):
+            assert local_path == self.vault_root
+            return {
+                "path": self.vault_root,
+                "server_url": "https://homebase.example",
+                "vault_id": "vault-123",
+            }
+
+        def _apply_homebase_profile(self, profile) -> None:
+            self.profile_applied = profile
+
+        def _reindex_vault(self, *, show_progress: bool = False) -> None:
+            self.reindex_calls.append(show_progress)
+
+    vault_root = tmp_path / "vault"
+    settings_db = vault_root / ".stillpoint" / "settings.db"
+    settings_db.parent.mkdir(parents=True, exist_ok=True)
+    settings_db.write_text("placeholder", encoding="utf-8")
+
+    dummy = _Dummy(str(vault_root))
+    active_vault_calls: list[str | None] = []
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(config, "has_active_vault", lambda: True)
+    monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
+
+    MainWindow._rebuild_vault_index_from_disk(dummy)
+
+    assert active_vault_calls == [None, str(vault_root)]
+    assert dummy.profile_applied is not None
+    assert dummy.profile_applied["server_url"] == "https://homebase.example"
+    assert dummy.reindex_calls == [True]
+    assert not settings_db.exists()
+    assert dummy._search_sync.calls == [
+        ("suspend", "manual rebuild index"),
+        ("resume", "manual rebuild index"),
+    ]
+    assert dummy.alerts == []

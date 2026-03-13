@@ -219,8 +219,7 @@ class TestTreeExpansionNavigation:
 
 class TestTreeExpansionPreservation:
     """Test that tree expansion state is preserved during refresh operations."""
-    
-    @pytest.mark.skip(reason="Requires backend server")
+
     def test_expansion_preserved_after_tree_refresh(self, main_window):
         """Test that expanded folders stay open after _populate_vault_tree."""
         # Expand some folders
@@ -228,6 +227,7 @@ class TestTreeExpansionPreservation:
         if root.rowCount() > 0:
             first_folder = root.child(0)
             idx = main_window.tree_model.indexFromItem(first_folder)
+            path = first_folder.data(Qt.UserRole)
             main_window.tree_view.expand(idx)
             QApplication.processEvents()
             
@@ -239,7 +239,7 @@ class TestTreeExpansionPreservation:
             QApplication.processEvents()
             
             # Find the same folder in the new tree (by path)
-            path = first_folder.data(Qt.UserRole)
+            root = main_window.tree_model.invisibleRootItem()
             for row in range(root.rowCount()):
                 item = root.child(row)
                 if item.data(Qt.UserRole) == path:
@@ -247,13 +247,33 @@ class TestTreeExpansionPreservation:
                     assert main_window.tree_view.isExpanded(new_idx), \
                         "Folder should remain expanded after tree refresh"
                     break
-    
-    @pytest.mark.skip(reason="Requires backend server")
+
     def test_expansion_preserved_after_file_move(self, main_window):
-        """Test that expanded folders stay open after moving a file."""
-        # This would test the full integration with move operations
-        # Requires a running backend and actual file operations
-        pass
+        """Test that expanded folders stay open after refreshing tree data with moved children."""
+        root = main_window.tree_model.invisibleRootItem()
+        page_a = root.child(0)
+        idx = main_window.tree_model.indexFromItem(page_a)
+        main_window.tree_view.expand(idx)
+        QApplication.processEvents()
+
+        assert main_window.tree_view.isExpanded(idx)
+        assert "/PageA" in main_window._expanded_paths
+
+        main_window._test_tree_state[0]["children"] = [
+            {
+                "name": "ChildMoved",
+                "path": "/PageA/ChildMoved",
+                "open_path": "/PageA/ChildMoved/ChildMoved.md",
+                "children": [],
+            }
+        ]
+        main_window._populate_vault_tree()
+        QApplication.processEvents()
+
+        refreshed_root = main_window.tree_model.invisibleRootItem()
+        refreshed_page_a = refreshed_root.child(0)
+        refreshed_idx = main_window.tree_model.indexFromItem(refreshed_page_a)
+        assert main_window.tree_view.isExpanded(refreshed_idx)
 
 
 class TestTreeCollapseRestore:

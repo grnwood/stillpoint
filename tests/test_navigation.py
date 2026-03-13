@@ -1,16 +1,8 @@
-"""Tests for page navigation (history and hierarchy).
-
-NOTE: These tests require a running backend server and are marked as integration tests.
-They test the full navigation stack including history and hierarchy navigation.
-Run with: pytest tests/test_navigation.py --runintegration
-"""
+"""Tests for page navigation (history and hierarchy)."""
 import pytest
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QTimer
-
-
-pytestmark = pytest.mark.skip(reason="Navigation tests require running backend server - run integration tests separately")
 
 
 class TestHistoryNavigation:
@@ -164,18 +156,18 @@ class TestHierarchyNavigation:
         main_window._navigate_hierarchy_up()
         QApplication.processEvents()
         
-        assert main_window.current_path == "/test_vault.md"
+        assert main_window.current_path == main_window._vault_root_page_path()
     
     def test_navigate_up_at_root(self, main_window):
         """Test that navigating up at root stays at root."""
-        main_window._open_file("/test_vault.md")
+        main_window._open_file(main_window._vault_root_page_path())
         QApplication.processEvents()
         
         # Try to navigate up - should stay at root
         main_window._navigate_hierarchy_up()
         QApplication.processEvents()
         
-        assert main_window.current_path == "/test_vault.md"
+        assert main_window.current_path == main_window._vault_root_page_path()
     
     def test_navigate_down_to_first_child(self, main_window):
         """Test navigating down to first child page."""

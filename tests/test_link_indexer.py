@@ -51,3 +51,20 @@ def test_fetch_link_relations_incoming(tmp_path):
     relations = config.fetch_link_relations("/Target/Target.md")
     assert relations["incoming"] == ["/Source/Source.md"]
     assert relations["outgoing"] == []
+
+
+def test_indexer_ignores_definition_list_colons(tmp_path):
+    config.set_active_vault(str(tmp_path))
+    page_path = "/Glossary/Glossary.md"
+    content = """
+## Definitions
+
+- **Vault**: A local StillPoint vault (filesystem-backed via FastAPI).
+- **Day Page**: The journal page for a given date.
+- **Capture Section**: A dedicated section within a day page where captured thoughts are appended.
+"""
+    indexer.index_page(page_path, content)
+
+    relations = config.fetch_link_relations(page_path)
+    assert relations["outgoing"] == []
+    assert relations["incoming"] == []

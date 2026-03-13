@@ -1752,6 +1752,7 @@ class MainWindow(QMainWindow):
         self._homebase_fs_sync_quiet_timer.timeout.connect(self._on_homebase_fs_sync_quiet_timeout)
         self._homebase_watched_dirs: set[str] = set()
         self._homebase_watch_root: Optional[Path] = None
+        self._local_fs_page_snapshot: dict[str, tuple[int, int]] = {}
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
         def _log_request(request):
@@ -2044,6 +2045,7 @@ class MainWindow(QMainWindow):
         self.editor.backlinksRequested.connect(
             lambda path="": self._show_link_navigator_for_path(path or self.current_path)
         )
+        self.editor.linkRelationsPopupRequested.connect(self._show_link_relations_popup)
         self.editor.aiChatRequested.connect(
             lambda path="": self._open_ai_chat_for_path(path or self.current_path, create=True, focus_tab=True)
         )
@@ -4575,6 +4577,116 @@ class MainWindow(QMainWindow):
         self._homebase_fs_watcher = None
         self._homebase_watched_dirs.clear()
         self._homebase_watch_root = None
+        self._local_fs_page_snapshot = {}
+
+    def _snapshot_local_page_state(self, root: Path) -> dict[str, tuple[int, int]]:
+        snapshot: dict[str, tuple[int, int]] = {}
+        for suffix in PAGE_SUFFIXES:
+            for page_file in sorted(root.rglob(f"*{suffix}")):
+                if ".stillpoint" in page_file.parts or page_file.name == "AGENTS.md":
+                    continue
+                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                    continue
+                try:
+                    stat = page_file.stat()
+                except OSError:
+                    continue
+                rel_path = "/" + page_file.relative_to(root).as_posix()
+                snapshot[rel_path] = (int(getattr(stat, "st_mtime_ns", 0) or 0), int(stat.st_size or 0))
+        return snapshot
+
+    def _apply_incremental_page_index_changes(
+        self,
+        changed_paths: list[str],
+        removed_paths: list[str],
+    ) -> dict[str, Any]:
+        result = {
+            "indexed_paths": [],
+            "removed_paths": [],
+            "current_page_changed": False,
+            "current_page_removed": False,
+        }
+        if self._remote_mode or not self.vault_root:
+            return result
+        if not changed_paths and not removed_paths:
+            return result
+        try:
+            self._ensure_config_active_vault_context()
+        except Exception:
+            return result
+
+        indexed_paths: list[str] = []
+        removed_index_paths: list[str] = []
+        root = Path(self.vault_root)
+
+        for page_path in sorted(set(changed_paths)):
+            abs_path = root / page_path.lstrip("/")
+            try:
+                content = abs_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            try:
+                indexer.index_page(page_path, content)
+                indexed_paths.append(page_path)
+            except Exception:
+                continue
+
+        for page_path in sorted(set(removed_paths)):
+            try:
+                config.delete_page_index(page_path)
+                removed_index_paths.append(page_path)
+            except Exception:
+                continue
+        if removed_index_paths:
+            try:
+                config.bump_sync_revision()
+            except Exception:
+                pass
+
+        current_path = str(self.current_path or "").strip()
+        result["indexed_paths"] = indexed_paths
+        result["removed_paths"] = removed_index_paths
+        result["current_page_changed"] = current_path in indexed_paths
+        result["current_page_removed"] = current_path in removed_index_paths
+        if indexed_paths or removed_index_paths:
+            try:
+                self.right_panel.refresh_tasks()
+            except Exception:
+                pass
+            try:
+                self.right_panel.refresh_links(self.current_path)
+            except Exception:
+                pass
+        return result
+
+    def _reconcile_local_filesystem_index(self) -> dict[str, Any]:
+        result = {
+            "indexed_paths": [],
+            "removed_paths": [],
+            "structure_changed": False,
+            "current_page_changed": False,
+            "current_page_removed": False,
+        }
+        if self._remote_mode or not self.vault_root:
+            return result
+        root = Path(self.vault_root)
+        current_snapshot = self._snapshot_local_page_state(root)
+        previous_snapshot = dict(self._local_fs_page_snapshot)
+        if not previous_snapshot:
+            self._local_fs_page_snapshot = current_snapshot
+            return result
+
+        changed_paths = [
+            path for path, meta in current_snapshot.items()
+            if previous_snapshot.get(path) != meta
+        ]
+        removed_paths = [path for path in previous_snapshot.keys() if path not in current_snapshot]
+        self._local_fs_page_snapshot = current_snapshot
+        result.update(self._apply_incremental_page_index_changes(changed_paths, removed_paths))
+        result["structure_changed"] = bool(
+            any(path not in previous_snapshot for path in changed_paths) or removed_paths
+        )
+        return result
 
     def _refresh_homebase_watch_paths(self) -> None:
         root = self._homebase_watch_root
@@ -4610,6 +4722,7 @@ class MainWindow(QMainWindow):
     def _ensure_homebase_watcher(self, vault_root: Path) -> None:
         self._shutdown_homebase_watcher()
         self._homebase_watch_root = vault_root
+        self._local_fs_page_snapshot = self._snapshot_local_page_state(vault_root)
         watcher = QFileSystemWatcher(self)
         watcher.directoryChanged.connect(self._on_homebase_fs_changed)
         watcher.fileChanged.connect(self._on_homebase_fs_changed)
@@ -5126,15 +5239,31 @@ class MainWindow(QMainWindow):
         if self._remote_mode or not self.vault_root:
             return
         reason = self._homebase_tree_refresh_reason or "filesystem quiet period"
+        reconcile = self._reconcile_local_filesystem_index()
+        indexed_paths = list(reconcile.get("indexed_paths") or [])
+        removed_paths = list(reconcile.get("removed_paths") or [])
+        structure_changed = bool(reconcile.get("structure_changed"))
+        current_page_changed = bool(reconcile.get("current_page_changed"))
         try:
             self._ensure_config_active_vault_context()
-            config.bump_tree_version()
-            config.bump_sync_revision()
+            if structure_changed:
+                config.bump_tree_version()
         except Exception:
             pass
-        _log_homebase_client(f"filesystem quiet timer fired; refreshing tree (reason={reason})")
-        self.statusBar().showMessage("Filesystem quiet; refreshing vault tree...", 2500)
-        self._refresh_tree()
+        if structure_changed:
+            _log_homebase_client(f"filesystem quiet timer fired; refreshing tree (reason={reason})")
+            self.statusBar().showMessage("Filesystem quiet; refreshing vault tree...", 2500)
+            self._refresh_tree()
+        elif indexed_paths or removed_paths:
+            self.statusBar().showMessage("Filesystem quiet; updated vault index.", 2500)
+        if current_page_changed and self.current_path and self._is_editor_idle_for_remote_reload():
+            self._open_file(
+                self.current_path,
+                add_to_history=False,
+                force=True,
+                restore_history_cursor=True,
+                sync_calendar=False,
+            )
 
     def _on_homebase_fs_sync_quiet_timeout(self) -> None:
         if not self._is_homebase_mode_enabled() or not self._homebase_sync_engine:
@@ -5265,25 +5394,46 @@ class MainWindow(QMainWindow):
             return
         normalized: list[str] = []
         seen: set[str] = set()
+        removed_paths: list[str] = []
+        structure_changed = False
         for rel in updated_paths:
             rel_path = str(rel or "").strip().replace("\\", "/").lstrip("/")
             if not rel_path or rel_path.startswith(".stillpoint/"):
                 continue
             abs_path = Path(self.vault_root) / rel_path
             page_path = "/" + abs_path.relative_to(self.vault_root).as_posix()
+            if not abs_path.exists():
+                removed_paths.append(page_path)
+                if page_path in self._local_fs_page_snapshot:
+                    structure_changed = True
+                self._local_fs_page_snapshot.pop(page_path, None)
+                continue
+            try:
+                stat = abs_path.stat()
+                current_meta = (int(getattr(stat, "st_mtime_ns", 0) or 0), int(stat.st_size or 0))
+                if page_path not in self._local_fs_page_snapshot:
+                    structure_changed = True
+                self._local_fs_page_snapshot[page_path] = current_meta
+            except OSError:
+                continue
             if page_path not in seen:
                 seen.add(page_path)
                 normalized.append(page_path)
         if not normalized:
-            return
+            if not removed_paths:
+                return
+        reconcile = self._apply_incremental_page_index_changes(normalized, removed_paths)
+        structure_changed = structure_changed or bool(reconcile.get("removed_paths"))
         try:
             self._ensure_config_active_vault_context()
-            config.bump_tree_version()
-            config.bump_sync_revision()
+            if structure_changed:
+                config.bump_tree_version()
         except Exception:
             pass
-        self._refresh_tree()
-        if self.current_path and self.current_path in seen:
+        if structure_changed:
+            self._refresh_tree()
+        current_page_removed = bool(reconcile.get("current_page_removed"))
+        if self.current_path and self.current_path in seen and not current_page_removed:
             if self._can_auto_reload_homebase_current_page() and self._is_editor_idle_for_remote_reload():
                 self._open_file(
                     self.current_path,
@@ -5298,6 +5448,11 @@ class MainWindow(QMainWindow):
                     "Remote sync updated this page; reload deferred until editor is idle.",
                     4000,
                 )
+        elif current_page_removed and self.current_path:
+            self.statusBar().showMessage(
+                "Remote sync removed the current page from disk.",
+                4000,
+            )
 
     def _homebase_conflict_key(self, entry: dict[str, Any]) -> str:
         return "|".join(
@@ -8529,6 +8684,218 @@ class MainWindow(QMainWindow):
         cursor.setPosition(max(0, min(pos, safe_max)))
         return cursor
 
+    def _resolve_link_relations_target(self, target_ref: Optional[str]) -> Optional[str]:
+        target = str(target_ref or self.current_path or "").strip()
+        if not target:
+            return None
+        if target.startswith(("http://", "https://")):
+            return None
+        if self._is_attachment_link(target) or self._is_local_file_link(target):
+            return None
+        try:
+            return self._normalize_editor_path(target)
+        except Exception:
+            return None
+
+    def _show_link_relations_popup(self, target_ref: Optional[str] = None) -> None:
+        target_path = self._resolve_link_relations_target(target_ref)
+        if not target_path:
+            target_path = self._resolve_link_relations_target(self.current_path)
+        if not target_path:
+            self.statusBar().showMessage("No page links target available.", 3000)
+            return
+
+        relations = config.fetch_link_relations(target_path)
+        incoming = list(relations.get("incoming") or [])
+        outgoing = list(relations.get("outgoing") or [])
+        if not incoming and not outgoing:
+            display = path_to_colon(target_path) or target_path
+            self.statusBar().showMessage(f"No links found for {display}", 3000)
+            return
+        titles = config.fetch_page_titles({target_path, *incoming, *outgoing})
+        selected_bg = theme_value(
+            "main_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        accent = getattr(self, "_vault_accent_color", None)
+        if accent:
+            selected_bg = self._selection_bg_for_accent(accent)
+        if hasattr(self, "_link_relations_picker") and self._link_relations_picker:
+            try:
+                self._link_relations_picker.close()
+            except Exception:
+                pass
+
+        self._link_relations_picker_active = True
+        self._link_relations_picker_autosave_active = self.autosave_timer.isActive()
+        self.autosave_timer.stop()
+        popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        popup.setStyleSheet(
+            "QWidget { background: "
+            f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLineEdit { border: 1px solid "
+            f"{theme_value('main_window.picker_popup.input_border', '#777777')}; "
+            "border-radius: 4px; padding: 4px 6px; }"
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }}"
+            "QListWidget::item { padding: 4px 6px; }"
+            "QListWidget::item:selected { background: "
+            f"{selected_bg}; }}"
+        )
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        display = path_to_colon(target_path) or target_path
+        title = QLabel(f"Links for {display}", popup)
+        title.setStyleSheet("font-weight: bold; border: none;")
+        filter_edit = QLineEdit(popup)
+        filter_edit.setPlaceholderText("Filter links…")
+        list_widget = QListWidget(popup)
+        layout.addWidget(title)
+        layout.addWidget(filter_edit)
+        layout.addWidget(list_widget, 1)
+
+        entries = [
+            {
+                "section": "Links to here",
+                "arrow": "←",
+                "path": path,
+                "title": str(titles.get(path) or Path(path).stem or path),
+                "display": path_to_colon(path) or path,
+            }
+            for path in incoming
+        ] + [
+            {
+                "section": "Links from here",
+                "arrow": "→",
+                "path": path,
+                "title": str(titles.get(path) or Path(path).stem or path),
+                "display": path_to_colon(path) or path,
+            }
+            for path in outgoing
+        ]
+        section_order = ("Links to here", "Links from here")
+
+        def populate(query: str = "") -> None:
+            list_widget.clear()
+            needle = query.lower().strip()
+            for section_name in section_order:
+                section_entries = [entry for entry in entries if entry["section"] == section_name]
+                visible = [
+                    entry
+                    for entry in section_entries
+                    if not needle
+                    or needle in f"{entry['title']} {entry['display']} {entry['section']}".lower()
+                ]
+                if not visible:
+                    continue
+                header_item = QListWidgetItem(section_name)
+                header_item.setFlags(Qt.NoItemFlags)
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+                header_item.setForeground(
+                    QColor(theme_value("main_window.picker_popup.section_text", "#c9c9c9"))
+                )
+                list_widget.addItem(header_item)
+                for entry in visible:
+                    item = QListWidgetItem(f"{entry['arrow']} {entry['display']} ({entry['title']})")
+                    item.setData(Qt.UserRole, entry["path"])
+                    list_widget.addItem(item)
+            for row in range(list_widget.count()):
+                item = list_widget.item(row)
+                if item and item.flags() != Qt.NoItemFlags:
+                    list_widget.setCurrentRow(row)
+                    break
+
+        def finish_picker() -> None:
+            self._link_relations_picker_active = False
+            if getattr(self, "_link_relations_picker_autosave_active", False) and not self._read_only:
+                try:
+                    self.autosave_timer.start()
+                except Exception:
+                    pass
+            self._link_relations_picker_autosave_active = False
+
+        def activate_current() -> None:
+            item = list_widget.currentItem()
+            selected_path = item.data(Qt.UserRole) if item else None
+            finish_picker()
+            popup.close()
+            if not selected_path:
+                return
+            self._open_file(str(selected_path), restore_history_cursor=True)
+            QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+
+        filter_edit.textChanged.connect(populate)
+        list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
+        list_widget.itemActivated.connect(lambda *_: activate_current())
+        popup.destroyed.connect(lambda *_: finish_picker())
+
+        editor_ref = self.editor
+
+        class _RelationsFilter(QObject):
+            @staticmethod
+            def _next_selectable(start: int, delta: int) -> int:
+                row = start + delta
+                count = list_widget.count()
+                while 0 <= row < count:
+                    item = list_widget.item(row)
+                    if item and item.flags() != Qt.NoItemFlags:
+                        return row
+                    row += delta
+                return start
+
+            def eventFilter(self, obj, ev):  # type: ignore[override]
+                if ev.type() == QEvent.KeyPress:
+                    if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                        activate_current()
+                        return True
+                    if ev.key() in (Qt.Key_Down, Qt.Key_J) and (
+                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                    ):
+                        list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
+                        return True
+                    if ev.key() in (Qt.Key_Up, Qt.Key_K) and (
+                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                    ):
+                        list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), -1))
+                        return True
+                    if ev.key() == Qt.Key_Escape:
+                        finish_picker()
+                        popup.close()
+                        if editor_ref:
+                            QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
+                        return True
+                return False
+
+        filt = _RelationsFilter(popup)
+        filter_edit.installEventFilter(filt)
+        list_widget.installEventFilter(filt)
+        populate("")
+
+        editor_rect = self.editor.viewport().rect()
+        global_pos = self.editor.viewport().mapToGlobal(self.editor.cursorRect().bottomLeft())
+        screen = QApplication.primaryScreen().availableGeometry()
+        popup.resize(420, min(360, max(180, list_widget.sizeHintForRow(0) * min(10, max(1, list_widget.count())) + 80)))
+        size = popup.size()
+        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
+        y = global_pos.y() + 12
+        if y + size.height() > screen.y() + screen.height():
+            y = global_pos.y() - size.height() - 8
+        if y < screen.y():
+            top_left = self.editor.viewport().mapToGlobal(editor_rect.topLeft())
+            y = top_left.y() + max(16, (editor_rect.height() - size.height()) // 3)
+        popup.move(x, y)
+        popup.show()
+        popup.raise_()
+        filter_edit.setFocus()
+        self._link_relations_picker = popup
+
     def _show_heading_picker_popup(self, global_pos, prefer_above: bool = False) -> None:
         """Show a filterable heading picker near the cursor (vi 't')."""
         headings = self._toc_headings or []
@@ -10695,14 +11062,30 @@ class MainWindow(QMainWindow):
             self._open_file(path)
         finally:
             self.editor._suppress_focus_on_load = prev_suppress
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
         
         # Scroll to the line with flash animation if line number is provided
         if position is not None and position >= 0:
             _log_search(f"[SearchNav] Scheduling scroll to position {position}")
-            QTimer.singleShot(50, lambda: self._scroll_to_position_with_flash(position))
+            QTimer.singleShot(
+                50,
+                lambda p=position, path_hint=expected_path, load_token=expected_load_token: self._scroll_to_position_with_flash(
+                    p,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
         elif line > 0:
             _log_search(f"[SearchNav] Scheduling scroll to line {line}")
-            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+            QTimer.singleShot(
+                50,
+                lambda ln=line, path_hint=expected_path, load_token=expected_load_token: self._scroll_to_line_with_flash(
+                    ln,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
         
         # Return focus to search results tree only if the user hasn't moved to the search box
         def _maybe_refocus_results() -> None:
@@ -10721,19 +11104,65 @@ class MainWindow(QMainWindow):
     def _on_search_result_selected_with_editor_focus(self, path: str, line: int, position: int = -1) -> None:
         """Handle navigation from search results with editor focus (Ctrl+Enter)."""
         self._open_file(path)
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
         
         # Scroll to the line with flash animation if line number is provided
         if position is not None and position >= 0:
-            QTimer.singleShot(50, lambda: self._scroll_to_position_with_flash(position))
+            QTimer.singleShot(
+                50,
+                lambda p=position, path_hint=expected_path, load_token=expected_load_token: self._scroll_to_position_with_flash(
+                    p,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
         elif line > 0:
-            QTimer.singleShot(50, lambda: self._scroll_to_line_with_flash(line))
+            QTimer.singleShot(
+                50,
+                lambda ln=line, path_hint=expected_path, load_token=expected_load_token: self._scroll_to_line_with_flash(
+                    ln,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
         
         # Focus editor instead of returning to search results
         QTimer.singleShot(100, lambda: self.editor.setFocus())
-    
-    def _scroll_to_line_with_flash(self, line: int) -> None:
+
+    def _current_editor_load_token(self) -> Optional[int]:
+        try:
+            getter = getattr(self.editor, "current_load_token", None)
+            if getter is None:
+                return None
+            return int(getter())
+        except Exception:
+            return None
+
+    def _editor_load_still_matches(
+        self,
+        expected_path: Optional[str] = None,
+        expected_load_token: Optional[int] = None,
+    ) -> bool:
+        if expected_path is not None and expected_path != self.current_path:
+            return False
+        if expected_load_token is None:
+            return True
+        current_token = self._current_editor_load_token()
+        return current_token == expected_load_token
+
+    def _scroll_to_line_with_flash(
+        self,
+        line: int,
+        *,
+        expected_path: Optional[str] = None,
+        expected_load_token: Optional[int] = None,
+    ) -> None:
         """Scroll to a specific line number and flash it."""
         _log_search(f"[SearchNav] _scroll_to_line_with_flash called with line {line}")
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            _log_search("[SearchNav] Skipping stale line scroll request")
+            return
         if line <= 0:
             _log_search(f"[SearchNav] Line {line} is invalid, skipping")
             return
@@ -10762,9 +11191,18 @@ class MainWindow(QMainWindow):
         self.editor.setTextCursor(cursor)
         self._animate_or_flash_to_cursor(cursor)
 
-    def _scroll_to_position_with_flash(self, position: int) -> None:
+    def _scroll_to_position_with_flash(
+        self,
+        position: int,
+        *,
+        expected_path: Optional[str] = None,
+        expected_load_token: Optional[int] = None,
+    ) -> None:
         """Scroll to a character offset and flash it."""
         _log_search(f"[SearchNav] _scroll_to_position_with_flash called with position {position}")
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            _log_search("[SearchNav] Skipping stale position scroll request")
+            return
         doc = self.editor.document()
         if not doc:
             return
@@ -16247,12 +16685,13 @@ class MainWindow(QMainWindow):
         self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index -= 1
+        self._refresh_history_buttons()
         target_path = self.page_history[self.history_index]
         if log_enabled("navigation"):
             print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
-            self._open_file(target_path, add_to_history=True, restore_history_cursor=True)
+            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -16264,12 +16703,13 @@ class MainWindow(QMainWindow):
         self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index += 1
+        self._refresh_history_buttons()
         target_path = self.page_history[self.history_index]
         if log_enabled("navigation"):
             print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
         self._suspend_selection_open = True
         try:
-            self._open_file(target_path, add_to_history=True, restore_history_cursor=True)
+            self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         QTimer.singleShot(0, self.editor.setFocus)
@@ -16876,7 +17316,7 @@ class MainWindow(QMainWindow):
         self._suspend_selection_open = True
         try:
             self._select_tree_path(parent_path)
-            self._open_file(parent_path, add_to_history=True, restore_history_cursor=True)
+            self._open_file(parent_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
         parent_colon = path_to_colon(parent_path) or parent_path
@@ -16965,7 +17405,7 @@ class MainWindow(QMainWindow):
         self._suspend_selection_open = True
         try:
             self._select_tree_path(child_path)
-            self._open_file(child_path, add_to_history=True, restore_history_cursor=True)
+            self._open_file(child_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
 
@@ -17030,6 +17470,7 @@ class MainWindow(QMainWindow):
                     return
                 print("[UI] Rebuild index from disk start")
                 self.statusBar().showMessage("Reindexing vault from files...", 0)
+                homebase_profile = self._homebase_profile_for_path(self.vault_root)
                 try:
                     # Close any active connection and wipe the settings DB so it is rebuilt like first-time startup
                     config.set_active_vault(None)
@@ -17039,6 +17480,8 @@ class MainWindow(QMainWindow):
                     except FileNotFoundError:
                         pass
                     config.set_active_vault(self.vault_root)
+                    if homebase_profile:
+                        self._apply_homebase_profile(homebase_profile)
                 except Exception as exc:
                     self.statusBar().showMessage("Reindex failed", 4000)
                     self._alert(f"Failed to reindex: {exc}")

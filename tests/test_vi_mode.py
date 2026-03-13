@@ -10,11 +10,21 @@ from sp.app.ui.markdown_editor import MarkdownEditor
 def _force_initial_paint(widget: MarkdownEditor, app: QApplication) -> None:
     widget.resize(400, 300)
     widget.show()
-    for _ in range(5):
+    for _ in range(10):
         app.processEvents()
         QTest.qWait(10)
-    widget.repaint()
+        widget.repaint()
     app.processEvents()
+
+
+def _wait_for(predicate, app: QApplication, timeout_ms: int = 400) -> bool:
+    deadline = timeout_ms // 10
+    for _ in range(max(1, deadline)):
+        if predicate():
+            return True
+        app.processEvents()
+        QTest.qWait(10)
+    return predicate()
 
 
 def test_vi_mode_defers_until_widget_paints(qapp: QApplication) -> None:
@@ -24,7 +34,8 @@ def test_vi_mode_defers_until_widget_paints(qapp: QApplication) -> None:
     assert editor._vi_pending_activation is True
     assert editor._vi_mode_active is False
     _force_initial_paint(editor, qapp)
-    assert editor._vi_has_painted is True
+    assert _wait_for(lambda: editor._vi_has_painted, qapp)
+    assert _wait_for(lambda: editor._vi_mode_active, qapp)
     assert editor._vi_pending_activation is False
     assert editor._vi_mode_active is True
     editor.close()

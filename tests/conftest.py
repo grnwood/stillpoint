@@ -4,6 +4,7 @@ import os
 import sys
 import gc
 from pathlib import Path
+import httpx
 
 # Configure Qt platform before importing any PySide modules.
 # VS Code test workers can crash (SIGSEGV) when Qt picks a GUI backend
@@ -30,10 +31,6 @@ def _flush_qt(app: QApplication, rounds: int = 2) -> None:
             pass
         try:
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-        except Exception:
-            pass
-        try:
-            app.processEvents()
         except Exception:
             pass
 
@@ -149,3 +146,123 @@ def qtbot(qapp: QApplication):
         except Exception:
             pass
     _flush_qt(qapp, rounds=2)
+
+
+class _TestHttpResponse:
+    def __init__(self, payload: dict | None = None, status_code: int = 200, url: str = "http://localhost/test") -> None:
+        self._payload = payload or {}
+        self.status_code = status_code
+        self.request = httpx.Request("GET", url)
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=self.request,
+                response=httpx.Response(self.status_code, request=self.request),
+            )
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture
+def main_window(qtbot, monkeypatch, tmp_path):
+    from sp.app.ui.main_window import MainWindow
+    from sp.app import config, indexer
+
+    vault_root = tmp_path / "test_vault"
+    page_a = vault_root / "PageA" / "PageA.md"
+    child_1 = vault_root / "PageA" / "Child1" / "Child1.md"
+    page_b = vault_root / "PageB" / "PageB.md"
+    page_c = vault_root / "PageC" / "PageC.md"
+    root_page = vault_root / "test_vault" / "test_vault.md"
+    for path in (page_a, child_1, page_b, page_c, root_page):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {path.stem}\n\nContent for {path.stem}\nMore content here.\n", encoding="utf-8")
+
+    page_map = {
+        "/PageA/PageA.md": page_a.read_text(encoding="utf-8"),
+        "/PageA/Child1/Child1.md": child_1.read_text(encoding="utf-8"),
+        "/PageB/PageB.md": page_b.read_text(encoding="utf-8"),
+        "/PageC/PageC.md": page_c.read_text(encoding="utf-8"),
+        "/test_vault/test_vault.md": root_page.read_text(encoding="utf-8"),
+    }
+
+    tree_state = [
+        {
+            "name": "PageA",
+            "path": "/PageA",
+            "open_path": "/PageA/PageA.md",
+            "children": [
+                {
+                    "name": "Child1",
+                    "path": "/PageA/Child1",
+                    "open_path": "/PageA/Child1/Child1.md",
+                    "children": [],
+                }
+            ],
+        },
+        {"name": "PageB", "path": "/PageB", "open_path": "/PageB/PageB.md", "children": []},
+        {"name": "PageC", "path": "/PageC", "open_path": "/PageC/PageC.md", "children": []},
+    ]
+
+    def tree_payload() -> list[dict]:
+        return [
+            {
+                "path": "/",
+                "children": [dict(child) for child in tree_state],
+            }
+        ]
+
+    class _WindowHttpClient:
+        def post(self, path, json=None):
+            if path != "/api/file/read":
+                raise AssertionError(f"Unexpected POST path: {path}")
+            page_path = str((json or {}).get("path") or "")
+            return _TestHttpResponse(
+                payload={"content": page_map.get(page_path, ""), "rev": 1, "mtime_ns": 1},
+                url=f"http://localhost{path}",
+            )
+
+        def get(self, path, params=None):
+            if path != "/api/vault/tree":
+                raise AssertionError(f"Unexpected GET path: {path}")
+            return _TestHttpResponse(
+                payload={"tree": tree_payload(), "version": 1},
+                url=f"http://localhost{path}",
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(config, "load_feature_remember_cursor_position_enabled", lambda: True)
+    monkeypatch.setattr(config, "has_active_vault", lambda: False)
+    monkeypatch.setattr(indexer, "index_page", lambda *args, **kwargs: False)
+
+    window = MainWindow(api_base="http://localhost:5050")
+    qtbot.addWidget(window)
+    window.http = _WindowHttpClient()
+    window.vault_root = str(vault_root)
+    window.vault_root_name = vault_root.name
+    monkeypatch.setattr(window.right_panel, "refresh_tasks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window.right_panel, "refresh_calendar", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window.right_panel, "refresh_links", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_refresh_detached_link_panels", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_save_panel_visibility", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_update_active_page_chicklets", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_update_window_title", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_update_calendar_for_journal_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_capture_undo_snapshot", lambda *args, **kwargs: None)
+    window._test_tree_state = tree_state
+    window._populate_vault_tree()
+    yield window
+    try:
+        window.close()
+    except Exception:
+        pass
+    try:
+        window.deleteLater()
+    except Exception:
+        pass
+    _flush_qt(qapp, rounds=1)
