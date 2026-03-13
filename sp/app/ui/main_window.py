@@ -17555,6 +17555,7 @@ class MainWindow(QMainWindow):
                     for _attempt in range(3):
                         try:
                             config.rebuild_index_from_disk(Path(self.vault_root))
+                            config.clear_page_hashes()
                             rebuild_error = None
                             break
                         except sqlite3.OperationalError as exc:
@@ -17572,6 +17573,18 @@ class MainWindow(QMainWindow):
                     return
                 print("[UI] Rebuild index from disk: indexing files")
                 self._reindex_vault(show_progress=True)
+                try:
+                    config.bump_tree_version()
+                except Exception:
+                    pass
+                try:
+                    self._refresh_tree()
+                except Exception:
+                    pass
+                try:
+                    self._load_bookmarks()
+                except Exception:
+                    pass
                 self.statusBar().showMessage("Reindex complete", 4000)
                 print("[UI] Reindex from files complete")
         finally:

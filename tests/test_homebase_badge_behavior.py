@@ -421,6 +421,8 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
             self.profile_applied = None
             self.reindex_calls = []
             self.alerts = []
+            self.refresh_tree_calls = 0
+            self.load_bookmarks_calls = 0
 
         def _ensure_writable(self, _reason: str) -> bool:
             return True
@@ -445,6 +447,12 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
         def _reindex_vault(self, *, show_progress: bool = False) -> None:
             self.reindex_calls.append(show_progress)
 
+        def _refresh_tree(self) -> None:
+            self.refresh_tree_calls += 1
+
+        def _load_bookmarks(self) -> None:
+            self.load_bookmarks_calls += 1
+
     vault_root = tmp_path / "vault"
     settings_db = vault_root / ".stillpoint" / "settings.db"
     settings_db.parent.mkdir(parents=True, exist_ok=True)
@@ -456,20 +464,28 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
     dummy = _Dummy(str(vault_root))
     active_vault_calls: list[str | None] = []
     rebuild_calls: list[Path] = []
+    cleared_hashes: list[str] = []
+    bumped_tree_versions: list[str] = []
 
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     monkeypatch.setattr(config, "has_active_vault", lambda: True)
     monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
     monkeypatch.setattr(config, "close_cached_vault_connections", lambda: None)
     monkeypatch.setattr(config, "rebuild_index_from_disk", lambda root: rebuild_calls.append(root))
+    monkeypatch.setattr(config, "clear_page_hashes", lambda: cleared_hashes.append("cleared"))
+    monkeypatch.setattr(config, "bump_tree_version", lambda: bumped_tree_versions.append("bumped"))
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
 
     assert active_vault_calls == [str(vault_root)]
     assert rebuild_calls == [vault_root]
+    assert cleared_hashes == ["cleared"]
+    assert bumped_tree_versions == ["bumped"]
     assert dummy.profile_applied is not None
     assert dummy.profile_applied["server_url"] == "https://homebase.example"
     assert dummy.reindex_calls == [True]
+    assert dummy.refresh_tree_calls == 1
+    assert dummy.load_bookmarks_calls == 1
     assert settings_db.exists()
     assert dummy._search_sync.calls == [
         ("suspend", "manual rebuild index"),
@@ -505,6 +521,8 @@ def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch
             self._search_sync = _DummySearchSync()
             self.reindex_calls = []
             self.alerts = []
+            self.refresh_tree_calls = 0
+            self.load_bookmarks_calls = 0
 
         def _ensure_writable(self, _reason: str) -> bool:
             return True
@@ -524,6 +542,12 @@ def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch
         def _reindex_vault(self, *, show_progress: bool = False) -> None:
             self.reindex_calls.append(show_progress)
 
+        def _refresh_tree(self) -> None:
+            self.refresh_tree_calls += 1
+
+        def _load_bookmarks(self) -> None:
+            self.load_bookmarks_calls += 1
+
     vault_root = tmp_path / "vault"
     dummy = _Dummy(str(vault_root))
     active_vault_calls: list[str | None] = []
@@ -541,6 +565,8 @@ def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch
     monkeypatch.setattr(config, "set_active_vault", lambda path: active_vault_calls.append(path))
     monkeypatch.setattr(config, "close_cached_vault_connections", lambda: close_calls.append("closed"))
     monkeypatch.setattr(config, "rebuild_index_from_disk", flaky_rebuild)
+    monkeypatch.setattr(config, "clear_page_hashes", lambda: None)
+    monkeypatch.setattr(config, "bump_tree_version", lambda: None)
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
@@ -549,4 +575,6 @@ def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch
     assert close_calls == ["closed", "closed"]
     assert rebuild_attempts["count"] == 2
     assert dummy.reindex_calls == [True]
+    assert dummy.refresh_tree_calls == 1
+    assert dummy.load_bookmarks_calls == 1
     assert dummy.alerts == []

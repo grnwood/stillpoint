@@ -2160,6 +2160,18 @@ def set_page_hash(path: str, digest: str) -> None:
         return
 
 
+def clear_page_hashes() -> None:
+    """Remove cached page hashes so a rebuild reindexes every page."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute("DELETE FROM kv WHERE key LIKE 'hash:/%'")
+        conn.commit()
+    except sqlite3.Error:
+        return
+
+
 def load_bookmarks() -> list[str]:
     """Load bookmarked page paths. Returns list of paths."""
     conn = _get_conn()
