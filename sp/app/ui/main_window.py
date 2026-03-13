@@ -5553,8 +5553,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(detail_label)
         buttons = QHBoxLayout()
         open_diff_btn = QPushButton("Open Diff Viewer", dialog)
+        keep_server_btn = QPushButton("Keep Server Version", dialog)
+        keep_local_btn = QPushButton("Keep My Version", dialog)
         close_btn = QPushButton("Close", dialog)
         buttons.addStretch(1)
+        buttons.addWidget(keep_local_btn)
+        buttons.addWidget(keep_server_btn)
         buttons.addWidget(open_diff_btn)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
@@ -5564,6 +5568,8 @@ class MainWindow(QMainWindow):
             if item is None:
                 detail_label.setText("")
                 open_diff_btn.setEnabled(False)
+                keep_server_btn.setEnabled(False)
+                keep_local_btn.setEnabled(False)
                 return
             entry = item.data(Qt.UserRole) or {}
             path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
@@ -5582,6 +5588,8 @@ class MainWindow(QMainWindow):
                 )
             )
             open_diff_btn.setEnabled(True)
+            keep_server_btn.setEnabled(True)
+            keep_local_btn.setEnabled(True)
 
         def _open_diff() -> None:
             item = list_widget.currentItem()
@@ -5596,8 +5604,36 @@ class MainWindow(QMainWindow):
                 else:
                     list_widget.setCurrentRow(max(0, row - 1))
 
+        def _keep_server() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                return
+            entry = item.data(Qt.UserRole) or {}
+            if self._resolve_homebase_conflict_keep_server(entry):
+                row = list_widget.row(item)
+                list_widget.takeItem(row)
+                if list_widget.count() == 0:
+                    dialog.accept()
+                else:
+                    list_widget.setCurrentRow(max(0, row - 1))
+
+        def _keep_local() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                return
+            entry = item.data(Qt.UserRole) or {}
+            if self._resolve_homebase_conflict_keep_local(entry):
+                row = list_widget.row(item)
+                list_widget.takeItem(row)
+                if list_widget.count() == 0:
+                    dialog.accept()
+                else:
+                    list_widget.setCurrentRow(max(0, row - 1))
+
         list_widget.currentItemChanged.connect(lambda current, previous: _update_detail())
         open_diff_btn.clicked.connect(_open_diff)
+        keep_server_btn.clicked.connect(_keep_server)
+        keep_local_btn.clicked.connect(_keep_local)
         close_btn.clicked.connect(dialog.accept)
         if list_widget.count():
             list_widget.setCurrentRow(0)
@@ -5606,6 +5642,128 @@ class MainWindow(QMainWindow):
             dialog.exec()
         finally:
             self._homebase_conflict_popup_open = False
+
+    def _apply_homebase_conflict_resolution(
+        self,
+        entry: dict[str, Any],
+        resolved_text: str,
+        *,
+        resolution: str,
+        applied_mtime: Optional[int] = None,
+    ) -> bool:
+        if not self.vault_root:
+            return False
+        path_rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        conflict_rel = str(entry.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+        if not path_rel or not conflict_rel:
+            QMessageBox.warning(self, "Homebase Conflict", "Missing conflict path data.")
+            return False
+        local_path = (Path(self.vault_root) / path_rel).resolve()
+        conflict_path = (Path(self.vault_root) / conflict_rel).resolve()
+        try:
+            root = Path(self.vault_root).resolve()
+            local_path.relative_to(root)
+            conflict_path.relative_to(root)
+        except Exception:
+            QMessageBox.warning(self, "Homebase Conflict", "Conflict path is outside vault root.")
+            return False
+        page_path = "/" + path_rel
+        try:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(resolved_text, encoding="utf-8")
+            if applied_mtime and applied_mtime > 0:
+                try:
+                    os.utime(local_path, (applied_mtime, applied_mtime))
+                except OSError:
+                    pass
+            if conflict_path.exists():
+                conflict_path.unlink()
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.resolve_conflict_entry(conflict_rel, resolution=resolution)
+            self._ensure_config_active_vault_context()
+            config.bump_tree_version()
+            config.bump_sync_revision()
+            indexer.index_page(page_path, resolved_text)
+            self.right_panel.refresh_tasks()
+            self.right_panel.refresh_links(self.current_path)
+            if self.current_path == page_path and self._is_editor_idle_for_remote_reload():
+                self._open_file(
+                    page_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
+            else:
+                self._refresh_tree()
+            if self._homebase_sync_engine:
+                try:
+                    self._homebase_sync_engine.sync_now(f"conflict resolved ({resolution})")
+                except Exception:
+                    pass
+            self.statusBar().showMessage(f"Resolved Homebase conflict for {page_path}", 5000)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Homebase Conflict", f"Failed to apply conflict resolution: {exc}")
+            return False
+
+    def _resolve_homebase_conflict_keep_server(self, entry: dict[str, Any]) -> bool:
+        if not self.vault_root:
+            return False
+        conflict_rel = str(entry.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+        path_rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not path_rel or not conflict_rel:
+            QMessageBox.warning(self, "Homebase Conflict", "Missing conflict path data.")
+            return False
+        conflict_path = (Path(self.vault_root) / conflict_rel).resolve()
+        if not conflict_path.exists():
+            if self._homebase_sync_engine:
+                try:
+                    self._homebase_sync_engine.resolve_conflict_entry(conflict_rel, resolution="missing-conflict-copy")
+                except Exception:
+                    pass
+            QMessageBox.information(self, "Homebase Conflict", "Conflict copy no longer exists. Marked as resolved.")
+            return True
+        try:
+            conflict_text = conflict_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            QMessageBox.warning(self, "Homebase Conflict", f"Conflict copy is not UTF-8 text: /{conflict_rel}")
+            return False
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase Conflict", f"Failed to read conflict copy: {exc}")
+            return False
+        remote_mtime = int(entry.get("remote_mtime") or 0)
+        return self._apply_homebase_conflict_resolution(
+            entry,
+            conflict_text,
+            resolution="keep-remote",
+            applied_mtime=remote_mtime,
+        )
+
+    def _resolve_homebase_conflict_keep_local(self, entry: dict[str, Any]) -> bool:
+        if not self.vault_root:
+            return False
+        path_rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not path_rel:
+            QMessageBox.warning(self, "Homebase Conflict", "Missing conflict path data.")
+            return False
+        local_path = (Path(self.vault_root) / path_rel).resolve()
+        if not local_path.exists():
+            QMessageBox.warning(self, "Homebase Conflict", f"Local file no longer exists: /{path_rel}")
+            return False
+        try:
+            local_text = local_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            QMessageBox.warning(self, "Homebase Conflict", f"Local file is not UTF-8 text: /{path_rel}")
+            return False
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase Conflict", f"Failed to read local file: {exc}")
+            return False
+        return self._apply_homebase_conflict_resolution(
+            entry,
+            local_text,
+            resolution="keep-local",
+        )
 
     def _resolve_homebase_conflict_with_diff(self, entry: dict[str, Any]) -> bool:
         if not self.vault_root:
@@ -5658,34 +5816,7 @@ class MainWindow(QMainWindow):
         merged_text = merge_dialog.merged_text()
         if merged_text is None:
             return False
-        try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_text(merged_text, encoding="utf-8")
-            if conflict_path.exists():
-                conflict_path.unlink()
-            if self._homebase_sync_engine:
-                self._homebase_sync_engine.resolve_conflict_entry(conflict_rel, resolution="merged")
-            self._ensure_config_active_vault_context()
-            config.bump_tree_version()
-            config.bump_sync_revision()
-            indexer.index_page(page_path, merged_text)
-            self.right_panel.refresh_tasks()
-            if self.current_path == page_path and self._is_editor_idle_for_remote_reload():
-                self._open_file(
-                    page_path,
-                    add_to_history=False,
-                    force=True,
-                    restore_history_cursor=True,
-                    sync_calendar=False,
-                )
-            else:
-                self._refresh_tree()
-            self._schedule_homebase_sync("conflict resolved")
-            self.statusBar().showMessage(f"Resolved Homebase conflict for {page_path}", 5000)
-            return True
-        except Exception as exc:
-            QMessageBox.critical(self, "Homebase Conflict", f"Failed to apply merged file: {exc}")
-            return False
+        return self._apply_homebase_conflict_resolution(entry, merged_text, resolution="merged")
 
     def _update_homebase_status_badge(self, status: Optional[HomebaseSyncStatus]) -> None:
         if not hasattr(self, "_homebase_status_label"):

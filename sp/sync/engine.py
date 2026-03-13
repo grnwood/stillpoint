@@ -341,6 +341,28 @@ class HomebaseSyncEngine:
             self._set_status_locked(conflicts=self._conflict_count())
         return changed
 
+    def _resolved_conflict_resolution(self, path: str, remote_checkpoint_id: str) -> Optional[str]:
+        cleaned_path = str(path or "").strip().replace("\\", "/").lstrip("/")
+        cleaned_checkpoint = str(remote_checkpoint_id or "").strip()
+        if not cleaned_path or not cleaned_checkpoint:
+            return None
+        payload = _read_json(self._conflict_path, {"conflicts": []})
+        conflicts = payload.get("conflicts")
+        if not isinstance(conflicts, list):
+            return None
+        for item in reversed(conflicts):
+            if not isinstance(item, dict):
+                continue
+            if not item.get("resolved_at"):
+                continue
+            item_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            item_checkpoint = str(item.get("remote_checkpoint_id") or "").strip()
+            if item_path != cleaned_path or item_checkpoint != cleaned_checkpoint:
+                continue
+            resolution = str(item.get("resolution") or "").strip()
+            return resolution or None
+        return None
+
     def _queue_remote_updates(self, paths: list[str]) -> None:
         if not paths:
             return
@@ -915,6 +937,15 @@ class HomebaseSyncEngine:
                     f"remote_device={remote_device_id}"
                 )
                 continue
+            prior_resolution = self._resolved_conflict_resolution(rel_key, checkpoint_id)
+            if prior_resolution == "keep-local":
+                _log(
+                    f"pull decision=keep-local path={rel} local_mtime={local_mtime_i} "
+                    f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
+                    f"remote_device={remote_device_id}"
+                )
+                unchanged += 1
+                continue
             conflict_rel = conflict_copy_path(rel_key, remote_device_id)
             conflict_path = self.cfg.vault_root / conflict_rel
             write_bytes_atomic(conflict_path, plaintext)
@@ -1008,18 +1039,39 @@ class HomebaseSyncEngine:
         if not isinstance(conflicts, list):
             conflicts = []
             payload["conflicts"] = conflicts
-        conflicts.append(
-            {
-                "ts": _utc_now_iso(),
-                "path": path,
-                "conflict_copy_path": conflict_copy,
-                "remote_checkpoint_id": remote_checkpoint_id,
-                "remote_device_id": remote_device_id,
-                "local_mtime": int(local_mtime),
-                "remote_mtime": int(remote_mtime),
-                "reason": reason,
-            }
-        )
+        updated = False
+        for item in conflicts:
+            if not isinstance(item, dict):
+                continue
+            if item.get("resolved_at"):
+                continue
+            item_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            item_checkpoint = str(item.get("remote_checkpoint_id") or "").strip()
+            if item_path != str(path).strip().replace("\\", "/").lstrip("/"):
+                continue
+            if item_checkpoint != str(remote_checkpoint_id or "").strip():
+                continue
+            item["ts"] = _utc_now_iso()
+            item["conflict_copy_path"] = conflict_copy
+            item["remote_device_id"] = remote_device_id
+            item["local_mtime"] = int(local_mtime)
+            item["remote_mtime"] = int(remote_mtime)
+            item["reason"] = reason
+            updated = True
+            break
+        if not updated:
+            conflicts.append(
+                {
+                    "ts": _utc_now_iso(),
+                    "path": path,
+                    "conflict_copy_path": conflict_copy,
+                    "remote_checkpoint_id": remote_checkpoint_id,
+                    "remote_device_id": remote_device_id,
+                    "local_mtime": int(local_mtime),
+                    "remote_mtime": int(remote_mtime),
+                    "reason": reason,
+                }
+            )
         _write_json(self._conflict_path, payload)
 
     def _conflict_count(self) -> int:
