@@ -349,6 +349,24 @@ class RemoteChangePasswordDialog(QDialog):
         return self._username, self._old_password, self._new_password, self._remember
 
 
+class HomebaseResetWorker(QThread):
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, cfg: HomebaseSyncConfig, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._cfg = cfg
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            reset_engine = HomebaseSyncEngine(self._cfg)
+            reset_engine.reset_to_server_authoritative()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit()
+
+
 class UserCreateDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -5846,6 +5864,9 @@ class MainWindow(QMainWindow):
         if not self.vault_root or not self._is_homebase_mode_enabled():
             self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
             return
+        if getattr(self, "_homebase_reset_worker", None):
+            self.statusBar().showMessage("Homebase reset already in progress.", 3000)
+            return
         confirm = QMessageBox.question(
             self,
             "Reset Homebase Sync State",
@@ -5880,26 +5901,78 @@ class MainWindow(QMainWindow):
                 max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
                 token_update_callback=self._store_homebase_tokens,
             )
-            reset_engine = HomebaseSyncEngine(cfg)
-            reset_engine.reset_to_server_authoritative()
-            self._configure_homebase_sync_for_vault()
-            if self._homebase_sync_engine:
-                self._homebase_sync_engine.sync_now("post-reset")
-            self.statusBar().showMessage("Homebase sync state reset complete (server authoritative).", 5000)
         except Exception as exc:
             self._configure_homebase_sync_for_vault()
             QMessageBox.critical(self, "Homebase Reset Failed", str(exc))
+            return
+
+        progress = QProgressDialog("Resetting Homebase sync state...", None, 0, 0, self)
+        progress.setWindowTitle("Homebase Reset")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setLabelText("Downloading authoritative server snapshot and rebuilding local sync state...")
+        progress.show()
+
+        worker = HomebaseResetWorker(cfg, self)
+        self._homebase_reset_worker = worker
+        self._homebase_reset_progress = progress
+        self._update_homebase_sync_action_state()
+
+        def _cleanup_reset_worker() -> None:
+            self._homebase_reset_worker = None
+            self._homebase_reset_progress = None
+            self._update_homebase_sync_action_state()
+
+        def _finish_reset_success() -> None:
+            try:
+                progress.setLabelText("Restarting Homebase sync...")
+            except Exception:
+                pass
+            self._configure_homebase_sync_for_vault()
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.sync_now("post-reset")
+            try:
+                progress.close()
+            except Exception:
+                pass
+            self.statusBar().showMessage("Homebase sync state reset complete (server authoritative).", 5000)
+            _cleanup_reset_worker()
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+
+        def _finish_reset_failure(message: str) -> None:
+            self._configure_homebase_sync_for_vault()
+            try:
+                progress.close()
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Homebase Reset Failed", str(message or "Unknown error"))
+            _cleanup_reset_worker()
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+
+        worker.finished.connect(_finish_reset_success)
+        worker.failed.connect(_finish_reset_failure)
+        worker.start()
 
     def _update_homebase_sync_action_state(self) -> None:
         action = getattr(self, "_action_homebase_sync_now", None)
         reset_action = getattr(self, "_action_homebase_reset_sync", None)
         if action is None and reset_action is None:
             return
-        enabled = bool(self._homebase_sync_engine) and self._is_homebase_mode_enabled()
+        reset_in_progress = bool(getattr(self, "_homebase_reset_worker", None))
+        enabled = bool(self._homebase_sync_engine) and self._is_homebase_mode_enabled() and not reset_in_progress
         if action is not None:
             action.setEnabled(enabled)
             if enabled:
                 action.setToolTip(self._action_tooltips.get(action, "Run Homebase sync immediately"))
+            elif reset_in_progress:
+                action.setToolTip("Disabled while Homebase reset is in progress.")
             else:
                 action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
         if reset_action is not None:
@@ -5911,6 +5984,8 @@ class MainWindow(QMainWindow):
                         "Discard local sync state/conflicts and re-seed local files from server",
                     )
                 )
+            elif reset_in_progress:
+                reset_action.setToolTip("Homebase reset is already in progress.")
             else:
                 reset_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
 
