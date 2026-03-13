@@ -17555,6 +17555,8 @@ class MainWindow(QMainWindow):
                     for _attempt in range(3):
                         try:
                             config.rebuild_index_from_disk(Path(self.vault_root))
+                            config.close_cached_vault_connections()
+                            config.set_active_vault(self.vault_root)
                             config.clear_page_hashes()
                             rebuild_error = None
                             break

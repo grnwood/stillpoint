@@ -477,7 +477,7 @@ def test_rebuild_index_reapplies_homebase_profile_after_db_reset(tmp_path, monke
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
 
-    assert active_vault_calls == [str(vault_root)]
+    assert active_vault_calls == [str(vault_root), str(vault_root)]
     assert rebuild_calls == [vault_root]
     assert cleared_hashes == ["cleared"]
     assert bumped_tree_versions == ["bumped"]
@@ -571,8 +571,8 @@ def test_rebuild_index_retries_after_database_locked_error(tmp_path, monkeypatch
 
     MainWindow._rebuild_vault_index_from_disk(dummy)
 
-    assert active_vault_calls == [str(vault_root)]
-    assert close_calls == ["closed", "closed"]
+    assert active_vault_calls == [str(vault_root), str(vault_root)]
+    assert close_calls == ["closed", "closed", "closed"]
     assert rebuild_attempts["count"] == 2
     assert dummy.reindex_calls == [True]
     assert dummy.refresh_tree_calls == 1
