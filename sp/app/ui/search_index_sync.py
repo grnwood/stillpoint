@@ -24,6 +24,7 @@ class PeriodicSearchIndexSync(QObject):
         get_vault_root: Callable[[], Optional[str]],
         get_db_path: Callable[[], Optional[str]],
         log_fn: Callable[[str], None],
+        is_editor_idle: Callable[[], bool] | None = None,
         interval_ms: int = 30 * 60 * 1000,
     ) -> None:
         super().__init__(parent)
@@ -32,10 +33,13 @@ class PeriodicSearchIndexSync(QObject):
         self._get_vault_root = get_vault_root
         self._get_db_path = get_db_path
         self._log = log_fn
+        self._is_editor_idle = is_editor_idle
         self._in_progress = False
         self._suspend_count = 0
+        self._skip_cycles = 0
         self._idle_event = threading.Event()
         self._idle_event.set()
+        self._startup_delay_ms = 2 * 60 * 1000  # 2 minutes
 
         self._timer = QTimer(self)
         self._timer.setInterval(interval_ms)
@@ -51,7 +55,8 @@ class PeriodicSearchIndexSync(QObject):
         if should_run:
             if not self._timer.isActive():
                 self._timer.start()
-                self.maybe_run()
+                # Delay the first run instead of firing immediately on vault open.
+                QTimer.singleShot(self._startup_delay_ms, self.maybe_run)
         else:
             if self._timer.isActive():
                 self._timer.stop()
@@ -71,8 +76,9 @@ class PeriodicSearchIndexSync(QObject):
         if self._suspend_count > 0:
             self._suspend_count -= 1
         if self._suspend_count == 0:
+            self._skip_cycles = 2
             suffix = f" ({reason})" if reason else ""
-            self._log(f"[SearchIndex] periodic sync resumed{suffix}")
+            self._log(f"[SearchIndex] periodic sync resumed{suffix}, skipping next {self._skip_cycles} cycles")
             self.update_timer()
 
     def maybe_run(self) -> None:
@@ -81,6 +87,13 @@ class PeriodicSearchIndexSync(QObject):
         if self._is_remote_mode() or not self._get_vault_root():
             return
         if not self._is_enabled():
+            return
+        if self._skip_cycles > 0:
+            self._skip_cycles -= 1
+            self._log(f"[SearchIndex] periodic sync skipped (cooldown, {self._skip_cycles} remaining)")
+            return
+        if self._is_editor_idle and not self._is_editor_idle():
+            self._log("[SearchIndex] periodic sync deferred: editor not idle")
             return
         if self._in_progress:
             self._log("[SearchIndex] periodic sync skipped: previous run still in progress")

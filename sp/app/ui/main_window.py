@@ -2051,6 +2051,7 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
+        self._last_editor_activity = 0.0
         self._search_sync = PeriodicSearchIndexSync(
             self,
             is_enabled=lambda: config.load_global_feature_keep_search_index_sync_enabled(default=False),
@@ -2058,6 +2059,7 @@ class MainWindow(QMainWindow):
             get_vault_root=lambda: self.vault_root,
             get_db_path=config._vault_db_path,
             log_fn=_log_search,
+            is_editor_idle=lambda: (time.monotonic() - self._last_editor_activity) >= 30,
         )
         self._search_sync.statusReady.connect(
             lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
@@ -9700,7 +9702,13 @@ class MainWindow(QMainWindow):
                 self.tree_view.expand(child_index)
 
     def _ensure_tree_path_loaded(self, target_path: str) -> None:
-        """Ensure the tree has loaded nodes along the target path."""
+        """Ensure the tree has loaded nodes along the target path.
+
+        For lazy-loading vaults this pre-fetches children for every ancestor
+        segment in a single ``/api/vault/tree/expand-path`` call and populates
+        the client-side cache so that the subsequent per-segment
+        ``_load_children_for_path`` calls are instant cache hits.
+        """
         if not target_path:
             return
         if not self._use_lazy_loading:
@@ -9710,6 +9718,36 @@ class MainWindow(QMainWindow):
                     self._pending_selection = target_path
                     self._populate_vault_tree()
             return
+
+        # --- Batch pre-fetch all ancestor segments in one HTTP call ---
+        try:
+            resp = self.http.get(
+                "/api/vault/tree/expand-path",
+                params={
+                    "target": target_path,
+                    "include_journal": "true" if self._show_journal_in_nav else "false",
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            segments: dict[str, list] = payload.get("segments") or {}
+            try:
+                new_ver = int(payload.get("version", self._tree_version) or 0)
+                if new_ver != self._tree_version:
+                    logNav(f"_ensure_tree_path_loaded: version bump {self._tree_version} -> {new_ver}")
+                    self._tree_version = new_ver
+            except Exception:
+                pass
+            for seg_path, children in segments.items():
+                norm = self._normalize_tree_path(seg_path)
+                if children:
+                    self._tree_cache[norm] = list(children)
+                    self._tree_path_version[norm] = self._tree_version
+            logNav(f"_ensure_tree_path_loaded: pre-cached {len(segments)} segments for {target_path}")
+        except httpx.HTTPError as e:
+            logNav(f"_ensure_tree_path_loaded: batch prefetch failed ({e}), falling back to per-segment")
+
+        # --- Walk down the tree, expanding each ancestor ---
         folder_path = self._file_path_to_folder(target_path) or "/"
         parts = [p for p in folder_path.strip("/").split("/") if p]
         current_path = "/"
@@ -9726,7 +9764,7 @@ class MainWindow(QMainWindow):
             # Skip already-included parts in traversal
             parts = parts[len(prefix_parts):]
         parent_item = root_item
-        # Load root children
+        # Load root children (cache hit after batch prefetch)
         self._load_children_for_path(parent_item, current_path)
         try:
             self.tree_view.expand(parent_item.index())
@@ -9847,7 +9885,26 @@ class MainWindow(QMainWindow):
         if tracer:
             tracer.mark("api read start")
         
-        # Add to page history (unless we're navigating through history)
+        try:
+            resp = self.http.post("/api/file/read", json={"path": path})
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            print(f"[UI] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
+            detail = exc.response.text if exc.response else str(exc)
+            if tracer:
+                tracer.mark(f"api read failed ({detail})")
+            self.statusBar().showMessage(f"Page not found: {path}", 8000)
+            self._remove_deleted_paths_from_history(path)
+            return
+        except httpx.HTTPError as exc:
+            print(f"[UI] Failed to read page {path}: {exc}", file=sys.stderr)
+            if tracer:
+                tracer.mark(f"api read failed ({exc})")
+            self.statusBar().showMessage(f"Failed to open page: {path}", 8000)
+            self._remove_deleted_paths_from_history(path)
+            return
+        
+        # Add to page history only after successful read
         if add_to_history and self._is_history_path_allowed(path) and path != self.current_path:
             # Remove any forward history when opening a new page
             if self.history_index < len(self.page_history) - 1:
@@ -9861,22 +9918,6 @@ class MainWindow(QMainWindow):
                 # Refresh history buttons
                 self._refresh_history_buttons()
         
-        try:
-            resp = self.http.post("/api/file/read", json={"path": path})
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            print(f"[UI] Failed to read page {path}: status={exc.response.status_code if exc.response else 'unknown'} body={exc.response.text if exc.response else ''}", file=sys.stderr)
-            detail = exc.response.text if exc.response else str(exc)
-            if tracer:
-                tracer.mark(f"api read failed ({detail})")
-            self._alert(f"Reason: {detail}")
-            return
-        except httpx.HTTPError as exc:
-            print(f"[UI] Failed to read page {path}: {exc}", file=sys.stderr)
-            if tracer:
-                tracer.mark(f"api read failed ({exc})")
-            self._alert_api_error(exc, f"Failed to open {path}")
-            return
         payload = resp.json()
         content = payload.get("content", "")
         rev = payload.get("rev")
@@ -17139,34 +17180,47 @@ class MainWindow(QMainWindow):
         if self._history_popup is None:
             popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            popup.setStyleSheet(
-                "background: "
-                f"{theme_value('main_window.history_popup.bg', 'rgba(30,30,30,220)')}; "
-                "border: 1px solid "
-                f"{theme_value('main_window.history_popup.border', '#888888')}; "
-                "border-radius: 6px; padding: 8px;"
-            )
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._history_popup_label = QLabel(popup)
             self._history_popup_label.setStyleSheet(
-                "color: "
-                f"{theme_value('main_window.history_popup.label_text', '#f5f5f5')}; "
                 "font-weight: bold;"
             )
             layout.addWidget(self._history_popup_label)
             self._history_popup_list = QListWidget(popup)
-            self._history_popup_list.setStyleSheet(
-                "QListWidget { background: transparent; color: "
-                f"{theme_value('main_window.history_popup.list_text', '#f5f5f5')}; "
-                "border: none; }}"
-                "QListWidget::item { padding: 4px 6px; }"
-                "QListWidget::item:selected { background: "
-                f"{theme_value('main_window.history_popup.list_selected_bg', 'rgba(255,255,255,40)')}; }}"
-            )
             self._history_popup_list.viewport().installEventFilter(self)
             layout.addWidget(self._history_popup_list)
             self._history_popup = popup
+        self._apply_history_popup_style()
+
+    def _apply_history_popup_style(self) -> None:
+        if not self._history_popup or not self._history_popup_list:
+            return
+        selected_bg = theme_value(
+            "main_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        accent = getattr(self, "_vault_accent_color", None)
+        if accent:
+            selected_bg = self._selection_bg_for_accent(accent)
+        self._history_popup.setStyleSheet(
+            "QWidget { background: "
+            f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }}"
+            "QLineEdit { border: 1px solid "
+            f"{theme_value('main_window.picker_popup.input_border', '#777777')}; "
+            "border-radius: 4px; padding: 4px 6px; }}"
+        )
+        self._history_popup_list.setStyleSheet(
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }}"
+            "QListWidget::item { padding: 4px 6px; }"
+            "QListWidget::item:selected { background: "
+            f"{selected_bg}; }}"
+        )
 
     def _show_history_popup(self) -> None:
         self._ensure_history_popup()
@@ -18459,6 +18513,7 @@ class MainWindow(QMainWindow):
 
     def _on_editor_text_changed(self) -> None:
         """Start autosave and reconcile dirty state from current editor content."""
+        self._last_editor_activity = time.monotonic()
         if getattr(self, "_suspend_autosave", False):
             return
         self.autosave_timer.start()

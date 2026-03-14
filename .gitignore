@@ -47,3 +47,4 @@ vaults/
 chroma/
 qt_plugins.log
 sp/help-vault/.stillpoint/undo_cache.json
+db.sqlite

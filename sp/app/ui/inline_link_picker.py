@@ -257,10 +257,6 @@ class InlineLinkPickerOverlay(QDialog):
             pages = config.search_pages(term)
             term_lower = term.lower()
             matches = []
-            exact_exists = False
-            normalized_term = normalize_link_target(term).lstrip(":").lower()
-            term_leaf = normalized_term.split(":")[-1] if normalized_term else ""
-            typed_hierarchy = ":" in normalized_term
             
             for page in pages:
                 page_path = page.get("path", "")
@@ -269,13 +265,6 @@ class InlineLinkPickerOverlay(QDialog):
                     continue
                 colon_path = path_to_colon(page_path)
                 if colon_path:
-                    normalized_colon = normalize_link_target(":" + colon_path.lstrip(":")).lstrip(":").lower()
-                    if normalized_colon == normalized_term:
-                        exact_exists = True
-                    if not typed_hierarchy and term_leaf:
-                        page_leaf = normalized_colon.split(":")[-1]
-                        if page_leaf == term_leaf:
-                            exact_exists = True
                     matches.append((page_path, colon_path))
             
             # Sort by relevance (exact match, starts with, contains)
@@ -307,9 +296,8 @@ class InlineLinkPickerOverlay(QDialog):
                 item.setData(Qt.UserRole, colon_path)
                 self.list_widget.addItem(item)
 
-            show_create = bool(term) and not exact_exists
-            if show_create:
-                create_text = f"<i>Create new page: <b>{html.escape(term)}</b></i>"
+            if term:
+                create_text = f"<i>Create '<b>{html.escape(term)}</b>' here...</i>"
                 item = QListWidgetItem(create_text)
                 item.setData(
                     Qt.UserRole,

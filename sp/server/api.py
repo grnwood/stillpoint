@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import copy
 import hashlib
 import html
 import importlib
@@ -218,7 +217,7 @@ def _get_cached_tree(root: Path, path: str, recursive: bool, include_journal: bo
         _TREE_CACHE.pop(key, None)
         return None
     try:
-        return copy.deepcopy(cached["tree"])
+        return json.loads(cached["tree"])
     except Exception:
         return None
 
@@ -228,7 +227,7 @@ def _set_cached_tree(
 ) -> None:
     _TREE_CACHE[(str(root), path, recursive, include_journal)] = {
         "version": version,
-        "tree": copy.deepcopy(tree),
+        "tree": json.dumps(tree),
     }
 
 
@@ -1817,9 +1816,59 @@ def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = 
     return {"root": str(root), "tree": tree, "version": version}
 
 
+@app.get("/api/vault/tree/expand-path")
+def vault_tree_expand_path(target: str, include_journal: bool = False) -> dict:
+    """Return tree children for every ancestor segment of *target* in one call.
+
+    This allows the client to pre-populate its local tree cache for lazy
+    loading without issuing N sequential ``/api/vault/tree`` requests.
+    """
+    root = vault_state.get_root()
+    version = config.get_tree_version()
+    clean = _normalize_tree_path(target)
+    parts = [p for p in clean.strip("/").split("/") if p]
+
+    # Build the list of ancestor paths to fetch: /, /A, /A/B, …
+    paths_to_fetch: list[str] = ["/"]
+    current = "/"
+    for part in parts:
+        current = f"{current.rstrip('/')}/{part}" if current != "/" else f"/{part}"
+        paths_to_fetch.append(current)
+
+    order_map: dict[str, int] | None = None
+    segments: dict[str, list[dict]] = {}
+
+    for seg_path in paths_to_fetch:
+        norm = _normalize_tree_path(seg_path)
+        cached = _get_cached_tree(root, norm, False, include_journal, version)
+        if cached is not None:
+            children = cached[0].get("children") or [] if cached else []
+            segments[norm] = children
+            continue
+        try:
+            tree = files.list_dir(root, subpath=norm, recursive=False)
+        except Exception:
+            segments[norm] = []
+            continue
+        if norm in ("/", "") and not include_journal:
+            tree = _filter_out_journal(tree)
+        if order_map is None:
+            order_map = config.fetch_display_order_map()
+        _sort_tree_nodes(tree, order_map)
+        _set_cached_tree(root, norm, False, include_journal, version, tree)
+        children = tree[0].get("children") or [] if tree else []
+        segments[norm] = children
+
+    _log_api(
+        f"{_ANSI_BLUE}[API] GET /api/vault/tree/expand-path target={clean} "
+        f"segments={len(segments)} version={version}{_ANSI_RESET}"
+    )
+    return {"segments": segments, "version": version}
+
+
 @app.get("/api/vault/stats")
 def vault_stats() -> dict:
-    """Get vault statistics including folder count for lazy loading decisions."""
+    """Get vault statistics including folder count for lazy loading decision."""
     root = vault_state.get_root()
     folder_count = config.count_folders()
     _log_api(f"{_ANSI_BLUE}[API] GET /api/vault/stats folder_count={folder_count}{_ANSI_RESET}")
