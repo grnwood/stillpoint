@@ -226,12 +226,34 @@ def main_window(qtbot, monkeypatch, tmp_path):
             )
 
         def get(self, path, params=None):
-            if path != "/api/vault/tree":
-                raise AssertionError(f"Unexpected GET path: {path}")
-            return _TestHttpResponse(
-                payload={"tree": tree_payload(), "version": 1},
-                url=f"http://localhost{path}",
-            )
+            if path == "/api/vault/tree":
+                return _TestHttpResponse(
+                    payload={"tree": tree_payload(), "version": 1},
+                    url=f"http://localhost{path}",
+                )
+            if path == "/api/vault/stats":
+                return _TestHttpResponse(
+                    payload={"folder_count": 0},
+                    url=f"http://localhost{path}",
+                )
+            if path == "/api/vault/tree/expand-path":
+                # Build segments dict from the tree state for each ancestor
+                target = (params or {}).get("target", "/")
+                segments = {"/": [dict(c) for c in tree_state]}
+                parts = [p for p in target.strip("/").split("/") if p]
+                current = "/"
+                for part in parts:
+                    current = f"/{part}" if current == "/" else f"{current}/{part}"
+                    # Find children in tree_state for this path
+                    for node in tree_state:
+                        if node.get("path") == current:
+                            segments[current] = node.get("children", [])
+                            break
+                return _TestHttpResponse(
+                    payload={"segments": segments, "version": 1},
+                    url=f"http://localhost{path}",
+                )
+            raise AssertionError(f"Unexpected GET path: {path}")
 
         def close(self) -> None:
             return None

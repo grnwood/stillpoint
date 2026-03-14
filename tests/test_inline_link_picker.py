@@ -22,7 +22,7 @@ def test_quick_link_shows_create_option_when_no_exact_match(qapp, monkeypatch):
     assert payload.get("target") == ":Area:Sprint_Plan"
 
 
-def test_quick_link_hides_create_option_when_exact_page_exists(qapp, monkeypatch):
+def test_quick_link_shows_create_option_even_when_exact_page_exists(qapp, monkeypatch):
     monkeypatch.setattr(
         "sp.app.ui.inline_link_picker.config.search_pages",
         lambda *_: [{"path": "/Area/Sprint_Plan/Sprint_Plan.md"}],
@@ -34,6 +34,10 @@ def test_quick_link_hides_create_option_when_exact_page_exists(qapp, monkeypatch
     overlay.search.setText("Sprint Plan")
     overlay._refresh()
 
-    assert overlay.list_widget.count() == 1
-    payload = overlay.list_widget.item(0).data(Qt.UserRole)
-    assert not isinstance(payload, dict)
+    # Create option at row 0, search result at row 1
+    assert overlay.list_widget.count() == 2
+    create_payload = overlay.list_widget.item(0).data(Qt.UserRole)
+    assert isinstance(create_payload, dict)
+    assert create_payload.get("create") is True
+    search_payload = overlay.list_widget.item(1).data(Qt.UserRole)
+    assert not isinstance(search_payload, dict)

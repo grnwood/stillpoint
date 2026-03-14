@@ -24,9 +24,10 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 # Wiki-style links used by the editor's storage format: [target|label]
 WIKI_LINK_PATTERN = re.compile(r"\[(?P<link>[^\]|]+)\|[^\]]*\]")
 # Plain colon links written directly in text, e.g., :Journal:2024:01:05:05#Morning.
-# Require the first character after ':' to be non-whitespace so prose like
-# "Label: description" does not get indexed as a link target.
-PLAIN_COLON_LINK_PATTERN = re.compile(r"(?<!\w):(?P<link>[^\s\n\[\]<>\"'()][^\n\[\]<>\"'()]*)")
+# A colon link must be at the start of a line or preceded by whitespace so that
+# JSON like {"key":null} is not indexed.  The first char after ':' must also be
+# non-whitespace so prose like "Label: description" is skipped.
+PLAIN_COLON_LINK_PATTERN = re.compile(r"(?:^|(?<=\s)):(?P<link>[^\s\n\[\]<>\"'()][^\n\[\]<>\"'()]*)", re.MULTILINE)
 # Tasks: support markdown checkboxes "- [ ]" and "- [x]" plus symbol bullets "☐/☑"
 TASK_PATTERN = re.compile(
     r"^(?P<indent>\s*)"

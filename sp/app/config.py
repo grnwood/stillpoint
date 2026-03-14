@@ -3772,19 +3772,38 @@ def _bump_sync_revision_in_conn(conn: sqlite3.Connection, count: int = 1) -> int
     return new_val
 
 
+_DISPLAY_ORDER_CACHE: dict[str, object] = {}   # {"version": int, "map": dict}
+
+
 def fetch_display_order_map() -> dict[str, int]:
-    """Return mapping of page path -> display_order for tree sorting."""
+    """Return mapping of page path -> display_order for tree sorting.
+
+    The result is cached per tree-version so repeated calls within the same
+    version (e.g. multiple ``/api/vault/tree`` fetches before a mutation)
+    avoid redundant full-table scans.
+    """
+    version = get_tree_version()
+    cached = _DISPLAY_ORDER_CACHE
+    if cached.get("version") == version and isinstance(cached.get("map"), dict):
+        return cached["map"]
     try:
         conn = _connect_to_vault_db()
     except Exception:
         return {}
     try:
         cur = conn.execute("SELECT path, display_order FROM pages")
-        return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+        result = {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+        _DISPLAY_ORDER_CACHE.update({"version": version, "map": result})
+        return result
     except sqlite3.OperationalError:
         return {}
     finally:
         conn.close()
+
+
+def invalidate_display_order_cache() -> None:
+    """Clear the display-order cache (called after mutations)."""
+    _DISPLAY_ORDER_CACHE.clear()
 
 
 def get_home_page_path() -> Optional[str]:
@@ -3820,29 +3839,48 @@ def count_folders() -> int:
     
     A folder is identified by having a page file with the same name as its directory.
     Example: /Joe/Joe.md is a folder, /Joe/SubPage.md is not.
+    
+    Uses a SQL query with the parent_path column to avoid loading all paths
+    into Python.  For each page the stem (path minus extension) is split into
+    the part donated by *parent_path* and a remainder.  The remainder of a
+    folder page has the shape ``<name>/<name>`` (exactly one ``/`` with
+    identical halves).
     """
     try:
         conn = _connect_to_vault_db()
     except Exception:
         return 0
     try:
-        cur = conn.execute("SELECT path FROM pages")
-        paths = [row[0] for row in cur.fetchall()]
-        
-        # Count paths where filename matches parent folder name
-        folder_count = 0
-        for path in paths:
-            # Extract folder name and filename
-            # /Joe/Joe.md -> folder=Joe, filename=Joe.md
-            # /Joe/SubPage.md -> folder=Joe, filename=SubPage.md
-            parts = path.split('/')
-            if len(parts) >= 2:
-                filename = strip_page_suffix(parts[-1])
-                parent_folder = parts[-2]
-                if filename == parent_folder:
-                    folder_count += 1
-        
-        return folder_count
+        cur = conn.execute("""
+            WITH rs AS (
+                SELECT
+                    CASE
+                        WHEN parent_path = '/' THEN
+                            SUBSTR(
+                                CASE WHEN path LIKE '%.md' THEN SUBSTR(path, 1, LENGTH(path) - 3)
+                                     ELSE SUBSTR(path, 1, LENGTH(path) - 4)
+                                END,
+                                2
+                            )
+                        ELSE
+                            SUBSTR(
+                                CASE WHEN path LIKE '%.md' THEN SUBSTR(path, 1, LENGTH(path) - 3)
+                                     ELSE SUBSTR(path, 1, LENGTH(path) - 4)
+                                END,
+                                LENGTH(parent_path) + 2
+                            )
+                    END AS remainder
+                FROM pages
+                WHERE parent_path IS NOT NULL
+                  AND (path LIKE '%.md' OR path LIKE '%.txt')
+            )
+            SELECT COUNT(*) FROM rs
+            WHERE LENGTH(remainder) - LENGTH(REPLACE(remainder, '/', '')) = 1
+              AND SUBSTR(remainder, 1, INSTR(remainder, '/') - 1)
+                  = SUBSTR(remainder, INSTR(remainder, '/') + 1)
+        """)
+        row = cur.fetchone()
+        return row[0] if row else 0
     except sqlite3.OperationalError:
         return 0
     finally:

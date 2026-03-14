@@ -82,7 +82,7 @@ def test_update_timer_gates_on_feature_mode_and_vault(qapp) -> None:
     assert not sync._timer.isActive()
 
 
-def test_update_timer_runs_immediately_once_when_enabled(monkeypatch, qapp) -> None:
+def test_update_timer_schedules_deferred_first_run_when_enabled(monkeypatch, qapp) -> None:
     _parent, sync, state, _logs = _build_sync(enabled=False, remote=False, vault_root=None, db_path="db.sqlite")
     calls: list[str] = []
     monkeypatch.setattr(sync, "maybe_run", lambda: calls.append("run"))
@@ -92,11 +92,15 @@ def test_update_timer_runs_immediately_once_when_enabled(monkeypatch, qapp) -> N
 
     state["enabled"] = True
     state["vault_root"] = "/tmp/vault"
+    # Use a very short startup delay so the deferred timer fires during processEvents
+    sync._startup_delay_ms = 0
     sync.update_timer()
+    qapp.processEvents()
     assert calls == ["run"]
 
     # Re-applying while already active should not trigger a second immediate run.
     sync.update_timer()
+    qapp.processEvents()
     assert calls == ["run"]
 
 
@@ -111,10 +115,13 @@ def test_suspend_prevents_timer_and_runs_until_resumed(monkeypatch, qapp) -> Non
     assert calls == []
     assert "[SearchIndex] periodic sync suspended (test)" in logs
 
+    # Use a very short startup delay so deferred timer fires during processEvents
+    sync._startup_delay_ms = 0
     sync.resume("test")
+    qapp.processEvents()
     assert sync._timer.isActive()
     assert calls == ["run"]
-    assert "[SearchIndex] periodic sync resumed (test)" in logs
+    assert any("periodic sync resumed (test)" in log for log in logs)
 
     state["enabled"] = False
     sync.update_timer()
