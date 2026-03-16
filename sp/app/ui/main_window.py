@@ -1188,27 +1188,48 @@ class VaultTreeView(QTreeView):
         if new_idx == idx:
             return
         target = indexes[new_idx]
-        # Don't auto-collapse/expand - just navigate to the target
+        # Set the keyboard-navigation flag on the host window *before* calling
+        # setCurrentIndex.  setCurrentIndex synchronously emits currentChanged,
+        # whose handler (_on_selection_changed) would otherwise run with
+        # _tree_keyboard_nav=False (arrowNavigated is emitted only after this
+        # method returns, too late to suppress the handler).  Without the flag
+        # the handler may open a file and trigger a tree model reset, which
+        # invalidates all pre-collected QModelIndex objects including `target`.
+        # Accessing a stale QModelIndex in scrollTo then causes a Windows
+        # access-violation crash.
+        host = self.window()
+        if host is not None and hasattr(host, "_tree_keyboard_nav"):
+            host._tree_keyboard_nav = True
         self.setCurrentIndex(target)
-        self.scrollTo(target)
+        # Use self.currentIndex() rather than the pre-collected `target` so
+        # that scrollTo always receives a valid, up-to-date index even if the
+        # model was reset during the currentChanged signal chain above.
+        self.scrollTo(self.currentIndex())
 
     def _flatten(self) -> list[QModelIndex]:
-        """Get list of all VISIBLE (expanded) nodes in tree order."""
+        """Get list of all VISIBLE (expanded) nodes in tree order.
+
+        Uses an explicit stack instead of Python recursion to avoid call-stack
+        growth on deep or wide trees and to prevent RecursionError / C-stack
+        overflows that can manifest as access violations on Windows.
+        """
         model = self.model()
         if model is None:
             return []
         order: list[QModelIndex] = []
-
-        def recurse(parent_index: QModelIndex) -> None:
-            rows = model.rowCount(parent_index)
-            for row in range(rows):
-                idx = model.index(row, 0, parent_index)
-                order.append(idx)
-                # Only recurse into expanded nodes
-                if self.isExpanded(idx):
-                    recurse(idx)
-
-        recurse(QModelIndex())
+        # Stack entries: (parent_index, next_row_to_visit)
+        stack: list[tuple[QModelIndex, int]] = [(QModelIndex(), 0)]
+        while stack:
+            parent, row = stack[-1]
+            rows = model.rowCount(parent)
+            if row >= rows:
+                stack.pop()
+                continue
+            stack[-1] = (parent, row + 1)
+            idx = model.index(row, 0, parent)
+            order.append(idx)
+            if self.isExpanded(idx) and model.rowCount(idx) > 0:
+                stack.append((idx, 0))
         return order
 
     def mousePressEvent(self, event):  # type: ignore[override]
@@ -4598,18 +4619,26 @@ class MainWindow(QMainWindow):
         self._local_fs_page_snapshot = {}
 
     def _snapshot_local_page_state(self, root: Path) -> dict[str, tuple[int, int]]:
+        # Walk the vault once instead of calling rglob once per suffix (which
+        # would perform multiple full directory traversals for large vaults).
         snapshot: dict[str, tuple[int, int]] = {}
-        for suffix in PAGE_SUFFIXES:
-            for page_file in sorted(root.rglob(f"*{suffix}")):
-                if ".stillpoint" in page_file.parts or page_file.name == "AGENTS.md":
+        suffix_set = set(PAGE_SUFFIXES)
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Skip the hidden .stillpoint metadata directory
+            dirnames[:] = [d for d in dirnames if d != ".stillpoint"]
+            for name in filenames:
+                if name == "AGENTS.md":
                     continue
-                if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
+                file_path = Path(dirpath) / name
+                if file_path.suffix not in suffix_set:
+                    continue
+                if file_path.suffix == LEGACY_SUFFIX and file_path.with_suffix(PAGE_SUFFIX).exists():
                     continue
                 try:
-                    stat = page_file.stat()
+                    stat = file_path.stat()
                 except OSError:
                     continue
-                rel_path = "/" + page_file.relative_to(root).as_posix()
+                rel_path = "/" + file_path.relative_to(root).as_posix()
                 snapshot[rel_path] = (int(getattr(stat, "st_mtime_ns", 0) or 0), int(stat.st_size or 0))
         return snapshot
 
