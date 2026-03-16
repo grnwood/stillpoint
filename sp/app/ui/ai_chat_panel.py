@@ -321,6 +321,321 @@ class ClickableLabel(QtWidgets.QLabel):
         super().mousePressEvent(event)
         self.clicked.emit()
 
+
+class QuickChoiceOverlay(QtWidgets.QDialog):
+    chosen = QtCore.Signal(str)
+
+    def __init__(self, *, parent: QtWidgets.QWidget, title: str, placeholder: str) -> None:
+        super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setModal(False)
+        self._title_text = title
+        self._items: list[str] = []
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        card = QtWidgets.QFrame(self)
+        card.setObjectName("QuickChoiceCard")
+        card.setStyleSheet(
+            "QFrame#QuickChoiceCard {"
+            "  background: #0b0b0b;"
+            "  border: 1px solid #1f1f1f;"
+            "  border-radius: 8px;"
+            "}"
+        )
+        outer.addWidget(card)
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+        title_label = QtWidgets.QLabel(title, card)
+        title_label.setStyleSheet("font-weight: 600; font-size: 11px; color: #9fb7a9;")
+        layout.addWidget(title_label)
+        self.search = QtWidgets.QLineEdit(card)
+        self.search.setPlaceholderText(placeholder)
+        self.search.setStyleSheet(
+            "padding: 6px;"
+            "background: #111;"
+            "color: #d6f5d6;"
+            "border: 1px solid #1f1f1f;"
+            "border-radius: 6px;"
+            "font-size: 12px;"
+        )
+        self.search.textChanged.connect(self._refresh)
+        self.search.returnPressed.connect(self._accept_current)
+        layout.addWidget(self.search)
+        self.list_widget = QtWidgets.QListWidget(card)
+        self.list_widget.setFocusPolicy(Qt.NoFocus)
+        self.list_widget.setStyleSheet(
+            "QListWidget {"
+            "  background: #0d0d0d;"
+            "  color: #d6f5d6;"
+            "  border: 1px solid #1a1a1a;"
+            "  border-radius: 6px;"
+            "  padding: 4px;"
+            "  font-size: 11px;"
+            "}"
+            "QListWidget::item { padding: 4px; border-radius: 4px; }"
+            "QListWidget::item:selected { background: #1a4d2e; }"
+        )
+        self.list_widget.itemActivated.connect(self._accept_current)
+        self.list_widget.itemDoubleClicked.connect(self._accept_current)
+        layout.addWidget(self.list_widget)
+        hint = QtWidgets.QLabel("↑↓ to navigate, Enter to select, Esc to cancel", card)
+        hint.setStyleSheet("color: #7b8f84; font-size: 10px;")
+        layout.addWidget(hint)
+        self.resize(420, 300)
+
+    def set_items(self, items: list[str]) -> None:
+        self._items = list(items)
+        self._refresh()
+
+    def popup_at(self, anchor: QtCore.QPoint) -> None:
+        parent = self.parentWidget()
+        if parent:
+            width = max(260, min(420, max(300, parent.width() // 2)))
+            height = min(300, max(180, parent.height() // 3))
+            self.resize(width, height)
+        try:
+            screen = QtWidgets.QApplication.screenAt(anchor) or QtWidgets.QApplication.primaryScreen()
+            if screen:
+                geo = screen.availableGeometry()
+                left = max(geo.left(), min(anchor.x() - self.width() // 2, geo.right() - self.width()))
+                top = max(geo.top(), min(anchor.y() - self.height() // 2, geo.bottom() - self.height()))
+                self.move(left, top)
+        except Exception:
+            pass
+        self.show()
+        self.raise_()
+        self.search.setFocus(QtCore.Qt.PopupFocusReason)
+        self.search.selectAll()
+
+    def _refresh(self) -> None:
+        term = self.search.text().strip().lower()
+        self.list_widget.clear()
+        matches = [item for item in self._items if not term or term in item.lower()]
+        for item in matches:
+            self.list_widget.addItem(item)
+        if self.list_widget.count():
+            self.list_widget.setCurrentRow(0)
+
+    def _accept_current(self) -> None:
+        current = self.list_widget.currentItem()
+        if not current:
+            return
+        self.chosen.emit(current.text())
+        self.accept()
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if event.key() == QtCore.Qt.Key_Down:
+            row = min(self.list_widget.currentRow() + 1, self.list_widget.count() - 1)
+            self.list_widget.setCurrentRow(max(0, row))
+            return
+        if event.key() == QtCore.Qt.Key_Up:
+            row = max(0, self.list_widget.currentRow() - 1)
+            self.list_widget.setCurrentRow(row)
+            return
+        super().keyPressEvent(event)
+
+
+class ChatTreeWidget(QtWidgets.QTreeWidget):
+    itemMoveRequested = QtCore.Signal(int, int, int, str)
+    deleteRequested = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._accent_color = QColor(theme_value("ai_chat_panel.chat_html.accent", "#7fd4a7"))
+        self._drag_session_id: Optional[int] = None
+        self._drag_item_type: str = ""
+        self._drop_target: Optional[tuple[QtWidgets.QTreeWidgetItem, int, str]] = None
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(False)
+        self.setDefaultDropAction(Qt.MoveAction)
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        color = QColor((color_hex or "").strip()) if color_hex else QColor()
+        if not color.isValid():
+            color = QColor(theme_value("ai_chat_panel.chat_html.accent", "#7fd4a7"))
+        self._accent_color = color
+        self.viewport().update()
+
+    def startDrag(self, supportedActions):  # type: ignore[override]
+        item = self.currentItem()
+        data = item.data(0, QtCore.Qt.UserRole) if item else None
+        if not isinstance(data, dict) or data.get("type") not in {"chat", "folder"}:
+            return
+        if data.get("type") == "folder" and data.get("path") == "/":
+            return
+        try:
+            self._drag_session_id = int(data.get("id"))
+            self._drag_item_type = str(data.get("type") or "")
+        except Exception:
+            self._drag_session_id = None
+            self._drag_item_type = ""
+            return
+        super().startDrag(supportedActions)
+        self._drag_session_id = None
+        self._drag_item_type = ""
+        self._drop_target = None
+        self.viewport().update()
+
+    def dragEnterEvent(self, event):  # type: ignore[override]
+        if self._drag_session_id is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):  # type: ignore[override]
+        if self._drag_session_id is None:
+            event.ignore()
+            return
+        target = self._resolve_drop_target(event.position().toPoint())
+        self._drop_target = target
+        if target is None:
+            event.ignore()
+        else:
+            event.acceptProposedAction()
+        self.viewport().update()
+
+    def dragLeaveEvent(self, event):  # type: ignore[override]
+        self._drop_target = None
+        self.viewport().update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):  # type: ignore[override]
+        if self._drag_session_id is None:
+            event.ignore()
+            return
+        target = self._resolve_drop_target(event.position().toPoint())
+        self._drop_target = None
+        self.viewport().update()
+        if target is None:
+            event.ignore()
+            return
+        folder_item, insert_index, _mode = target
+        data = folder_item.data(0, QtCore.Qt.UserRole) or {}
+        try:
+            folder_id = int(data.get("id"))
+            session_id = int(self._drag_session_id)
+            dragged_type = self._drag_item_type
+        except Exception:
+            event.ignore()
+            return
+        self.itemMoveRequested.emit(session_id, folder_id, insert_index, dragged_type)
+        event.acceptProposedAction()
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if event.key() == QtCore.Qt.Key_Delete and not event.modifiers():
+            self.deleteRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):  # type: ignore[override]
+        super().paintEvent(event)
+        if not self._drop_target:
+            return
+        item, insert_index, mode = self._drop_target
+        painter = QPainter(self.viewport())
+        color = QColor(self._accent_color)
+        if mode == "inside":
+            rect = self.visualItemRect(item).adjusted(4, 2, -4, -2)
+            fill = QColor(color)
+            fill.setAlpha(40)
+            painter.fillRect(rect, fill)
+            pen = QtCore.Qt.PenStyle.SolidLine
+            painter.setPen(QColor(color))
+            painter.drawRoundedRect(rect, 4, 4)
+        else:
+            rect = self.visualItemRect(item)
+            parent = item.parent()
+            if parent:
+                x = self.visualItemRect(parent).left() + 18
+            else:
+                x = rect.left() + 8
+            y = rect.top() if insert_index <= self._row_for_item(item) else rect.bottom()
+            line_color = QColor(color)
+            line_color.setAlpha(230)
+            pen = painter.pen()
+            pen.setColor(line_color)
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawLine(x, y, self.viewport().width() - 8, y)
+            painter.setBrush(line_color)
+            painter.drawEllipse(QtCore.QPoint(x, y), 4, 4)
+        painter.end()
+
+    def _row_for_item(self, item: QtWidgets.QTreeWidgetItem) -> int:
+        parent = item.parent()
+        if parent is None:
+            return self.indexOfTopLevelItem(item)
+        return parent.indexOfChild(item)
+
+    def _typed_insert_index_for_parent(
+        self, parent: QtWidgets.QTreeWidgetItem, before_item: Optional[QtWidgets.QTreeWidgetItem] = None
+        , item_type: str = "chat"
+    ) -> int:
+        count = 0
+        for idx in range(parent.childCount()):
+            child = parent.child(idx)
+            if child is before_item:
+                break
+            data = child.data(0, QtCore.Qt.UserRole) or {}
+            if data.get("type") == item_type:
+                count += 1
+        return count
+
+    def _root_folder_item(self) -> Optional[QtWidgets.QTreeWidgetItem]:
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            data = item.data(0, QtCore.Qt.UserRole) or {}
+            if data.get("type") == "folder" and data.get("path") == "/":
+                return item
+        return self.topLevelItem(0) if self.topLevelItemCount() else None
+
+    def _resolve_drop_target(
+        self, pos: QtCore.QPoint
+    ) -> Optional[tuple[QtWidgets.QTreeWidgetItem, int, str]]:
+        item = self.itemAt(pos)
+        if item is None:
+            root_item = self._root_folder_item()
+            if root_item is None:
+                return None
+            dragged_type = self._dragged_type()
+            if dragged_type == "folder":
+                return root_item, self._typed_insert_index_for_parent(root_item, item_type="folder"), "inside"
+            return root_item, self._typed_insert_index_for_parent(root_item, item_type="chat"), "inside"
+        data = item.data(0, QtCore.Qt.UserRole) or {}
+        item_type = data.get("type")
+        dragged_type = self._dragged_type()
+        if item_type == "folder":
+            if dragged_type == "folder":
+                rect = self.visualItemRect(item)
+                parent = item.parent() or self._root_folder_item()
+                if parent is None:
+                    return None
+                if pos.y() < rect.top() + max(6, rect.height() // 4):
+                    return parent, self._typed_insert_index_for_parent(parent, before_item=item, item_type="folder"), "between"
+                if pos.y() > rect.bottom() - max(6, rect.height() // 4):
+                    return parent, self._typed_insert_index_for_parent(parent, before_item=item, item_type="folder") + 1, "between"
+                dragged_id = self._drag_session_id
+                target_id = data.get("id")
+                if dragged_id is not None and int(target_id or -1) == int(dragged_id):
+                    return None
+                return item, self._typed_insert_index_for_parent(item, item_type="folder"), "inside"
+            return item, self._typed_insert_index_for_parent(item, item_type="chat"), "inside"
+        if item_type != "chat" or dragged_type == "folder":
+            return None
+        parent = item.parent() or self._root_folder_item()
+        if parent is None:
+            return None
+        rect = self.visualItemRect(item)
+        insert_index = self._typed_insert_index_for_parent(parent, before_item=item, item_type="chat")
+        if pos.y() >= rect.center().y():
+            insert_index += 1
+        return parent, insert_index, "between"
+
+    def _dragged_type(self) -> str:
+        return self._drag_item_type
+
 def fetch_and_cache_models(server_config: dict) -> List[str]:
     """Fetch models from the server and cache them in the config file under 'server_models'."""
     server = server_config or {}
@@ -562,6 +877,8 @@ class AIChatStore:
                 parent_id INTEGER,
                 path TEXT,
                 type TEXT DEFAULT 'chat',
+                auto_title INTEGER DEFAULT 1,
+                sort_order INTEGER DEFAULT 0,
                 last_model TEXT,
                 last_server TEXT,
                 system_prompt TEXT,
@@ -593,6 +910,12 @@ class AIChatStore:
             if "last_model" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN last_model TEXT")
                 schema_updated = True
+            if "auto_title" not in cols:
+                cur.execute("ALTER TABLE sessions ADD COLUMN auto_title INTEGER DEFAULT 1")
+                schema_updated = True
+            if "sort_order" not in cols:
+                cur.execute("ALTER TABLE sessions ADD COLUMN sort_order INTEGER DEFAULT 0")
+                schema_updated = True
             if "last_server" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN last_server TEXT")
                 schema_updated = True
@@ -603,6 +926,23 @@ class AIChatStore:
                 cur.execute("ALTER TABLE sessions ADD COLUMN ai_conversation_id INTEGER")
                 schema_updated = True
             if schema_updated:
+                conn.commit()
+            if "sort_order" not in cols:
+                cur.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY COALESCE(parent_id, -1)
+                            ORDER BY id
+                        ) AS seq
+                        FROM sessions
+                    )
+                    UPDATE sessions
+                    SET sort_order = (
+                        SELECT seq FROM ranked WHERE ranked.id = sessions.id
+                    )
+                    """
+                )
                 conn.commit()
             if "ai_conversation_id" in cols:
                 cur.execute(
@@ -627,7 +967,7 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
+            "SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
             (session_id,),
         )
         row = cur.fetchone()
@@ -637,9 +977,10 @@ class AIChatStore:
     def _create_session(self, name: str, parent_id: Optional[int], path: str, type_: str) -> int:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
+        sort_order = self._next_sort_order(conn, parent_id)
         cur.execute(
-            "INSERT OR REPLACE INTO sessions (name, parent_id, path, type, last_model, last_server, system_prompt) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (name, parent_id, path, type_, None, None, None),
+            "INSERT OR REPLACE INTO sessions (name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, parent_id, path, type_, 1 if type_ == "chat" else 0, sort_order, None, None, None),
         )
         conn.commit()
         new_id = cur.lastrowid
@@ -651,7 +992,7 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE path = ? AND type = ?",
+            "SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE path = ? AND type = ?",
             (path, type_),
         )
         row = cur.fetchone()
@@ -663,11 +1004,24 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, last_model, last_server, system_prompt, ai_conversation_id FROM sessions ORDER BY id"
+            """
+            SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id
+            FROM sessions
+            ORDER BY COALESCE(parent_id, -1), sort_order, id
+            """
         )
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return rows
+
+    def _next_sort_order(self, conn: sqlite3.Connection, parent_id: Optional[int]) -> int:
+        cur = conn.cursor()
+        if parent_id is None:
+            cur.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sessions WHERE parent_id IS NULL")
+        else:
+            cur.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sessions WHERE parent_id = ?", (parent_id,))
+        row = cur.fetchone()
+        return int(row[0] or 1)
 
     def _normalize_folder_path(self, folder_path: Optional[str]) -> str:
         if not folder_path:
@@ -736,8 +1090,8 @@ class AIChatStore:
 
     def _create_root_chat(self) -> Dict:
         root_id = self._ensure_root_folder()
-        chat_id = self._create_session("Root Chat", root_id, "/", "chat")
-        return {"id": chat_id, "name": "Root Chat", "parent_id": root_id, "path": "/", "type": "chat"}
+        chat_id = self._create_session("New Chat", root_id, "/new-chat", "chat")
+        return {"id": chat_id, "name": "New Chat", "parent_id": root_id, "path": "/new-chat", "type": "chat", "auto_title": 1}
 
     def get_messages(self, session_id: int) -> List[Tuple[str, str]]:
         conn = sqlite3.connect(self.db_path)
@@ -781,6 +1135,168 @@ class AIChatStore:
         cur.execute("UPDATE sessions SET ai_conversation_id = ? WHERE id = ?", (conv_id, session_id))
         conn.commit()
         conn.close()
+
+    def rename_session(self, session_id: int, new_name: str, *, manual: bool = False) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        if manual:
+            cur.execute("UPDATE sessions SET name = ?, auto_title = 0 WHERE id = ?", (new_name, session_id))
+        else:
+            cur.execute("UPDATE sessions SET name = ? WHERE id = ?", (new_name, session_id))
+        conn.commit()
+        conn.close()
+
+    def _unique_chat_path_for_parent(
+        self,
+        conn: sqlite3.Connection,
+        folder_path: str,
+        base_name: str,
+        *,
+        exclude_session_id: Optional[int] = None,
+    ) -> str:
+        base_path = self._normalize_folder_path(folder_path).rstrip("/")
+        slug = base_name or "Chat"
+        candidate = f"{base_path}/{slug}".replace("//", "/")
+        idx = 2
+        cur = conn.cursor()
+        while True:
+            if exclude_session_id is None:
+                cur.execute("SELECT 1 FROM sessions WHERE path = ? AND type = 'chat' LIMIT 1", (candidate,))
+            else:
+                cur.execute(
+                    "SELECT 1 FROM sessions WHERE path = ? AND type = 'chat' AND id != ? LIMIT 1",
+                    (candidate, exclude_session_id),
+                )
+            if not cur.fetchone():
+                return candidate
+            candidate = f"{base_path}/{slug}-{idx}"
+            idx += 1
+
+    def _unique_folder_path_for_parent(
+        self,
+        conn: sqlite3.Connection,
+        parent_folder_path: str,
+        base_name: str,
+        *,
+        exclude_session_id: Optional[int] = None,
+    ) -> str:
+        parent_path = self._normalize_folder_path(parent_folder_path).rstrip("/")
+        slug = base_name or "Folder"
+        candidate = f"{parent_path}/{slug}".replace("//", "/")
+        idx = 2
+        cur = conn.cursor()
+        while True:
+            if exclude_session_id is None:
+                cur.execute("SELECT 1 FROM sessions WHERE path = ? AND type = 'folder' LIMIT 1", (candidate,))
+            else:
+                cur.execute(
+                    "SELECT 1 FROM sessions WHERE path = ? AND type = 'folder' AND id != ? LIMIT 1",
+                    (candidate, exclude_session_id),
+                )
+            if not cur.fetchone():
+                return candidate
+            candidate = f"{parent_path}/{slug}-{idx}"
+            idx += 1
+
+    def move_chat(self, session_id: int, folder_id: int, insert_index: int) -> Optional[Dict]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, parent_id, path, type FROM sessions WHERE id = ?", (session_id,))
+        session = cur.fetchone()
+        cur.execute("SELECT id, path, type FROM sessions WHERE id = ?", (folder_id,))
+        folder = cur.fetchone()
+        if not session or not folder or session["type"] != "chat" or folder["type"] != "folder":
+            conn.close()
+            return None
+        new_parent_id = int(folder["id"])
+        folder_path = str(folder["path"] or "/")
+        cur.execute(
+            "SELECT id FROM sessions WHERE type = 'chat' AND parent_id = ? ORDER BY sort_order, id",
+            (new_parent_id,),
+        )
+        sibling_ids = [int(row[0]) for row in cur.fetchall() if int(row[0]) != session_id]
+        insert_at = max(0, min(int(insert_index), len(sibling_ids)))
+        sibling_ids.insert(insert_at, session_id)
+        new_path = self._unique_chat_path_for_parent(
+            conn, folder_path, str(session["name"] or "Chat"), exclude_session_id=session_id
+        )
+        cur.execute(
+            "UPDATE sessions SET parent_id = ?, path = ? WHERE id = ?",
+            (new_parent_id, new_path, session_id),
+        )
+        for idx, sibling_id in enumerate(sibling_ids, start=1):
+            cur.execute("UPDATE sessions SET sort_order = ? WHERE id = ?", (idx, sibling_id))
+        conn.commit()
+        cur.execute(
+            "SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
+            (session_id,),
+        )
+        moved = cur.fetchone()
+        conn.close()
+        return dict(moved) if moved else None
+
+    def move_folder(self, session_id: int, target_parent_id: int, insert_index: int) -> Optional[Dict]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, parent_id, path, type FROM sessions WHERE id = ?", (session_id,))
+        session = cur.fetchone()
+        cur.execute("SELECT id, path, type FROM sessions WHERE id = ?", (target_parent_id,))
+        target_parent = cur.fetchone()
+        if (
+            not session
+            or not target_parent
+            or session["type"] != "folder"
+            or target_parent["type"] != "folder"
+            or str(session["path"] or "/") == "/"
+        ):
+            conn.close()
+            return None
+        old_path = str(session["path"] or "/")
+        target_parent_path = str(target_parent["path"] or "/")
+        if target_parent_path == old_path or target_parent_path.startswith(f"{old_path.rstrip('/')}/"):
+            conn.close()
+            return None
+        new_parent_id = int(target_parent["id"])
+        cur.execute(
+            "SELECT id FROM sessions WHERE type = 'folder' AND parent_id = ? ORDER BY sort_order, id",
+            (new_parent_id,),
+        )
+        sibling_ids = [int(row[0]) for row in cur.fetchall() if int(row[0]) != session_id]
+        insert_at = max(0, min(int(insert_index), len(sibling_ids)))
+        sibling_ids.insert(insert_at, session_id)
+        new_path = self._unique_folder_path_for_parent(
+            conn, target_parent_path, str(session["name"] or "Folder"), exclude_session_id=session_id
+        )
+        cur.execute(
+            "UPDATE sessions SET parent_id = ?, path = ? WHERE id = ?",
+            (new_parent_id, new_path, session_id),
+        )
+        old_prefix = f"{old_path.rstrip('/')}/"
+        new_prefix = f"{new_path.rstrip('/')}/"
+        cur.execute("SELECT id, path FROM sessions WHERE path LIKE ?", (f"{old_prefix}%",))
+        descendants = cur.fetchall()
+        for row in descendants:
+            descendant_path = str(row["path"] or "")
+            updated_path = f"{new_prefix}{descendant_path[len(old_prefix):]}"
+            cur.execute("UPDATE sessions SET path = ? WHERE id = ?", (updated_path, int(row["id"])))
+        for idx, sibling_id in enumerate(sibling_ids, start=1):
+            cur.execute("UPDATE sessions SET sort_order = ? WHERE id = ?", (idx, sibling_id))
+        conn.commit()
+        cur.execute(
+            "SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
+            (session_id,),
+        )
+        moved = cur.fetchone()
+        conn.close()
+        return dict(moved) if moved else None
+
+    def can_auto_title(self, session_id: int) -> bool:
+        session = self.get_session_by_id(session_id)
+        if not session:
+            return False
+        return bool(session.get("auto_title", 1))
 
     def clear_chat(self, session_id: int) -> None:
         """Delete all messages for a chat and reset last-used metadata."""
@@ -828,6 +1344,44 @@ class AIChatStore:
         row = cur.fetchone()
         conn.close()
         return bool(row)
+
+    def count_chats_under(self, folder_path: Optional[str]) -> int:
+        """Return the number of chats at or under the given folder path."""
+        if not folder_path:
+            return 0
+        normalized = self._normalize_folder_path(folder_path)
+        like_pattern = f"{normalized.rstrip('/')}/%"
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM sessions WHERE type = 'chat' AND (path = ? OR path LIKE ?)",
+            (normalized, like_pattern),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return int(row[0] or 0) if row else 0
+
+    def get_chats_under(self, folder_path: Optional[str]) -> list[Dict]:
+        """Return chat sessions at or under the given folder path."""
+        if not folder_path:
+            return []
+        normalized = self._normalize_folder_path(folder_path)
+        like_pattern = f"{normalized.rstrip('/')}/%"
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id
+            FROM sessions
+            WHERE type = 'chat' AND (path = ? OR path LIKE ?)
+            ORDER BY sort_order, id
+            """,
+            (normalized, like_pattern),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
 
     def delete_chats_under(self, folder_path: Optional[str]) -> None:
         """Delete chats and their messages at or under the given folder path."""
@@ -1185,6 +1739,9 @@ class AIChatPanel(QtWidgets.QWidget):
             key_event = event  # type: ignore[assignment]
             if key_event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                 modifiers = key_event.modifiers()
+                if not (modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.AltModifier)):
+                    if self._maybe_open_slash_command():
+                        return True
                 if modifiers & QtCore.Qt.ControlModifier:
                     self._send_message()
                     return True
@@ -1203,8 +1760,26 @@ class AIChatPanel(QtWidgets.QWidget):
                     if self._navigate_chat_history(1):
                         return True
             if key_event.key() == QtCore.Qt.Key_Space and not (key_event.modifiers() & ~QtCore.Qt.KeypadModifier):
+                if self._maybe_open_slash_command():
+                    return True
                 QtCore.QTimer.singleShot(0, self._maybe_open_context_picker)
         return super().eventFilter(obj, event)
+
+    def _maybe_open_slash_command(self) -> bool:
+        raw = self.input_edit.toPlainText().strip()
+        if raw == "/server":
+            self.input_edit.clear()
+            self._show_server_command_picker()
+            return True
+        if raw == "/model":
+            self.input_edit.clear()
+            self._show_model_command_picker()
+            return True
+        if raw == "/system":
+            self.input_edit.clear()
+            self._open_prompt_dialog()
+            return True
+        return False
 
     def __init__(self, parent=None, font_size=13, api_client: Optional[httpx.Client] = None):
         super().__init__(parent)
@@ -1248,6 +1823,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._context_popup.refreshed.connect(self._context_popup_refresh_handler)
         self._context_popup_position: Optional[QtCore.QPoint] = None
         self._context_popup_width: Optional[int] = None
+        self._quick_choice_overlay: Optional[QuickChoiceOverlay] = None
         self._page_title_link_cache: dict[str, Optional[str]] = {}
         self._vector_api = VectorAPIClient(api_client)
         self._api_client = api_client
@@ -1288,6 +1864,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_flush_timer.timeout.connect(self._flush_condense_buffer)
         self._preserve_session_on_reset = False
         self._reset_keep_context = False
+        self._vault_accent_color: Optional[str] = None
+        self._folder_icon = _load_icon("folder.svg", QSize(14, 14))
+        self._chat_icon = _load_icon("chat-bubble.svg", QSize(14, 14))
+        self._chat_list_visible_icon = _load_tinted_icon(_get_asset_directory() / "folder-collapse.svg", QSize(20, 20))
+        self._chat_list_hidden_icon = _load_tinted_icon(_get_asset_directory() / "folder-expand.svg", QSize(20, 20))
         self._build_ui()
         self._load_system_prompts()
         self._refresh_server_dropdown()
@@ -1315,14 +1896,12 @@ class AIChatPanel(QtWidgets.QWidget):
         layout.setSpacing(6)
         icon_row = QtWidgets.QHBoxLayout()
         icon_row.setSpacing(4)
-        # Global chat button + context label
-        global_icon_path = _get_asset_directory() / "global.svg"
-        self.global_btn = QtWidgets.QToolButton()
-        self.global_btn.setIcon(_load_tinted_icon(global_icon_path, QSize(18, 18)))
-        self.global_btn.setToolTip("Switch to Global Chat")
-        self.global_btn.setAutoRaise(True)
-        self.global_btn.clicked.connect(lambda: self.open_chat_for_page(None))
-        icon_row.addWidget(self.global_btn)
+        self.new_chat_btn = QtWidgets.QToolButton()
+        new_chat_path = _get_asset_directory() / "new-chat.svg"
+        self.new_chat_btn.setIcon(_load_tinted_icon(new_chat_path, QSize(18, 18)))
+        self.new_chat_btn.setToolTip("Create a new chat")
+        self.new_chat_btn.setAutoRaise(True)
+        self.new_chat_btn.clicked.connect(self._new_chat_from_selection)
         self.context_label = QtWidgets.QLabel("")
         self.context_label.setStyleSheet(
             "color: "
@@ -1341,38 +1920,25 @@ class AIChatPanel(QtWidgets.QWidget):
         self.server_config_btn.setChecked(False)
         self.server_config_btn.toggled.connect(self._toggle_server_config)
         self.show_chats_btn = QtWidgets.QToolButton()
-        binoculars_path = _get_asset_directory() / "binoculars.svg"
-        self.show_chats_btn.setIcon(_load_tinted_icon(binoculars_path, QSize(20, 20)))
         self.show_chats_btn.setCheckable(True)
-        self.show_chats_btn.setChecked(False)
-        self.show_chats_btn.setToolTip("Show chats")
+        self.show_chats_btn.setChecked(True)
         self.show_chats_btn.toggled.connect(self._toggle_chat_list)
+        self._update_chat_list_toggle_button(True)
         self.zoom_out_btn = QtWidgets.QToolButton()
-        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setText("A-")
         self.zoom_out_btn.setToolTip("Decrease font size")
         self.zoom_out_btn.setAutoRaise(True)
         self.zoom_out_btn.setFixedSize(22, 22)
         self.zoom_out_btn.clicked.connect(lambda: self.set_font_size(self.font_size - 1))
         self.zoom_in_btn = QtWidgets.QToolButton()
-        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setText("A+")
         self.zoom_in_btn.setToolTip("Increase font size")
         self.zoom_in_btn.setAutoRaise(True)
         self.zoom_in_btn.setFixedSize(22, 22)
         self.zoom_in_btn.clicked.connect(lambda: self.set_font_size(self.font_size + 1))
-        icon_row.addWidget(self.show_chats_btn)
         icon_row.addWidget(self.server_config_btn)
         icon_row.addWidget(self.zoom_out_btn)
         icon_row.addWidget(self.zoom_in_btn)
-        self.load_page_chat_label = ClickableLabel("")
-        self.load_page_chat_label.setStyleSheet(
-            "color:"
-            f"{theme_value('ai_chat_panel.load_page.color', '#cc2222')}; "
-            "font-weight:"
-            f"{theme_value('ai_chat_panel.load_page.weight', 'bold')};"
-        )
-        self.load_page_chat_label.setVisible(False)
-        self.load_page_chat_label.clicked.connect(self._load_current_page_chat)
-        icon_row.addWidget(self.load_page_chat_label)
         layout.addLayout(icon_row)
         self.server_config_widget = QtWidgets.QWidget()
         self.server_config_widget.setVisible(False)
@@ -1418,6 +1984,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.context_refresh_btn.setToolTip("Refresh current page context")
         self.context_refresh_btn.setAutoRaise(True)
         self.context_refresh_btn.clicked.connect(self._refresh_current_page_context)
+        context_layout.addWidget(self.show_chats_btn)
         context_layout.addWidget(self.context_refresh_btn)
         self.context_summary_label = ClickableLabel("Context: —")
         self.context_summary_label.setStyleSheet(
@@ -1437,12 +2004,22 @@ class AIChatPanel(QtWidgets.QWidget):
         header_row = QtWidgets.QHBoxLayout()
         header_row.addWidget(QtWidgets.QLabel("Chat Folders"))
         header_row.addStretch()
+        header_row.addWidget(self.new_chat_btn)
+        add_folder_btn = QtWidgets.QToolButton()
+        new_folder_path = _get_asset_directory() / "new-folder.svg"
+        add_folder_btn.setIcon(_load_tinted_icon(new_folder_path, QSize(18, 18)))
+        add_folder_btn.setToolTip("Create folder")
+        add_folder_btn.setAutoRaise(True)
+        add_folder_btn.clicked.connect(self._new_folder_from_selection)
+        header_row.addWidget(add_folder_btn)
         left_layout.addLayout(header_row)
-        self.chat_tree = QtWidgets.QTreeWidget()
+        self.chat_tree = ChatTreeWidget()
         self.chat_tree.setHeaderHidden(True)
         self.chat_tree.itemSelectionChanged.connect(self._on_chat_selected)
         self.chat_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_tree.customContextMenuRequested.connect(self._on_chat_context_menu)
+        self.chat_tree.itemMoveRequested.connect(self._move_tree_session)
+        self.chat_tree.deleteRequested.connect(self._delete_selected_tree_item)
         left_layout.addWidget(self.chat_tree, 1)
         self.chat_tree_container = left_container
         self.splitter.addWidget(left_container)
@@ -1550,7 +2127,7 @@ class AIChatPanel(QtWidgets.QWidget):
         right_layout.addWidget(input_container)
         self.splitter.addWidget(right_container)
         layout.addWidget(self.splitter, 1)
-        self._toggle_chat_list(False)
+        self._toggle_chat_list(True)
         self._update_context_summary()
         self._apply_font_size()
 
@@ -1672,25 +2249,59 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _toggle_chat_list(self, checked: bool) -> None:
         self.chat_tree_container.setVisible(checked)
-        self.show_chats_btn.setToolTip("Hide chats" if checked else "Show chats")
+        self._update_chat_list_toggle_button(checked)
         if checked:
             self.splitter.setSizes([240, 760])
         else:
             self.splitter.setSizes([0, 1])
 
+    def _update_chat_list_toggle_button(self, visible: bool) -> None:
+        self.show_chats_btn.setIcon(self._chat_list_visible_icon if visible else self._chat_list_hidden_icon)
+        self.show_chats_btn.setToolTip("Hide chats" if visible else "Show chats")
+
     def _on_chat_context_menu(self, pos: QtCore.QPoint) -> None:
         item = self.chat_tree.itemAt(pos)
+        menu = QtWidgets.QMenu(self)
+
+        if not item:
+            create_folder = menu.addAction("New Folder")
+            create_folder.triggered.connect(self._new_folder)
+            menu.exec(self.chat_tree.viewport().mapToGlobal(pos))
+            return
+
+        data = item.data(0, QtCore.Qt.UserRole) or {}
+        item_type = data.get("type")
+        if item_type == "folder":
+            create_folder = menu.addAction("New Subfolder")
+            create_folder.triggered.connect(lambda: self._new_folder(parent_data=data))
+            create_chat = menu.addAction("New Chat")
+            create_chat.triggered.connect(lambda: self._new_chat(parent_data=data))
+            rename_folder = menu.addAction("Rename Folder")
+            rename_folder.triggered.connect(lambda: self._rename_folder(data))
+            delete_folder = menu.addAction("Delete Folder")
+            delete_folder.triggered.connect(lambda: self._delete_folder(data))
+        elif item_type == "chat":
+            rename_chat = menu.addAction("Rename Chat")
+            rename_chat.triggered.connect(lambda: self._rename_chat(data))
+            delete_chat = menu.addAction("Delete Chat")
+            delete_chat.triggered.connect(lambda: self._delete_chat_session(data))
+        menu.exec(self.chat_tree.viewport().mapToGlobal(pos))
+
+    def _delete_selected_tree_item(self) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before deleting chats.", "#f6c343")
+            return
+        item = self.chat_tree.currentItem() if hasattr(self, "chat_tree") else None
         if not item:
             return
         data = item.data(0, QtCore.Qt.UserRole) or {}
-        if data.get("type") != "chat":
+        if not isinstance(data, dict):
             return
-        menu = QtWidgets.QMenu(self)
-        go_action = menu.addAction("Go To Page")
-        go_action.triggered.connect(lambda: self._go_to_page_for_chat(data))
-        delete_action = menu.addAction("Delete Chat")
-        delete_action.triggered.connect(lambda: self._delete_chat_session(data))
-        menu.exec(self.chat_tree.viewport().mapToGlobal(pos))
+        item_type = data.get("type")
+        if item_type == "chat":
+            self._delete_chat_session(data)
+        elif item_type == "folder":
+            self._delete_folder(data)
 
     def _toggle_server_config(self, checked: bool) -> None:
         self.server_config_widget.setVisible(checked)
@@ -1707,10 +2318,8 @@ class AIChatPanel(QtWidgets.QWidget):
             self.stop_btn.setVisible(active)
         if hasattr(self, "chat_tree"):
             self.chat_tree.setEnabled(not active)
-        if hasattr(self, "global_btn"):
-            self.global_btn.setEnabled(not active)
-        if hasattr(self, "load_page_chat_label"):
-            self.load_page_chat_label.setEnabled(not active)
+        if hasattr(self, "new_chat_btn"):
+            self.new_chat_btn.setEnabled(not active)
 
     def _set_status(self, text: str, color: str | None = None) -> None:
         self.status_label.setText(text)
@@ -1874,6 +2483,8 @@ class AIChatPanel(QtWidgets.QWidget):
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
             f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', '#f2e7a1')}; background:transparent; }}"
             f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', '#8fe39b')}; background:transparent; }}"
+            f".app {{ color:{theme_value('ai_chat_panel.chat_html.app', '#a9b7aa')}; background:transparent; "
+            f"font-size:0.92em; font-style:italic; }}"
             f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', '#2f4f2f')}; }}"
             f".bubble pre {{ background:{code_bg}; color:{code_text}; border:1px solid {code_border}; "
             f"border-radius:6px; padding:8px; overflow-x:auto; white-space:pre-wrap; }}"
@@ -1891,7 +2502,8 @@ class AIChatPanel(QtWidgets.QWidget):
             f" background:rgba(0,0,0,0.35); max-height:7em; overflow:auto; white-space:pre-wrap;"
             f" color:{theme_value('ai_chat_panel.chat_html.think_text', '#bdbdbd')}; }}"
             f"@keyframes thinkPulse {{ 0% {{ opacity:0.4; }} 50% {{ opacity:1; }} 100% {{ opacity:0.4; }} }}"
-            f".role {{ font-weight:bold; color:{accent}; }}</style>"
+            f".role {{ font-weight:bold; color:{accent}; }}"
+            f".app .role {{ font-size:0.95em; }}</style>"
         )
         self._message_map = {}
         debug_by_anchor: dict[int, list[dict]] = {}
@@ -1916,7 +2528,12 @@ class AIChatPanel(QtWidgets.QWidget):
                     f"</div>"
                 )
         for idx, (role, content) in enumerate(self.messages):
-            cls = "assistant" if role == "assistant" else "user"
+            if role == "assistant":
+                cls = "assistant"
+            elif role == "app":
+                cls = "app"
+            else:
+                cls = "user"
             msg_id = f"msg-{idx}"
             linkified = self._linkify_vault_paths(content)
             rendered = markdown(linkified, extensions=["fenced_code", "tables"])
@@ -1952,9 +2569,10 @@ class AIChatPanel(QtWidgets.QWidget):
                         f"<a href='action:think:{msg_id}' title='Toggle thinking details' style='{gray_style}'>{label}</a>"
                         f"{body}</div>"
                     )
+            role_label = "StillPoint" if role == "app" else role.title()
             parts.append(
                 f"<div class='bubble {cls}' id='{msg_id}'><a name='{msg_id}' href='msg:{msg_id}'></a>"
-                f"<span class='role'>{role.title()}:</span><br>{think_html}{rendered}"
+                f"<span class='role'>{role_label}:</span><br>{think_html}{rendered}"
                 f"<div class='actions'>{' | '.join(actions)}</div>"
                 f"</div>"
             )
@@ -1991,10 +2609,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 else:
                     safe = html.escape(summary_linkified).replace("\n", "<br>")
                     summary_html = f"<p>{safe}</p>"
+            action_html = ("<div class='actions'>" + " | ".join(actions) + "</div>") if actions else ""
             parts.append(
                 f"<div class='bubble summary' id='summary'><a name='summary'></a>"
                 f"<span class='role'>Summary:</span><br>{summary_html}"
-                f"{'<div class=\"actions\">' + ' | '.join(actions) + '</div>' if actions else ''}"
+                f"{action_html}"
                 f"</div>"
             )
         if debug_enabled:
@@ -2132,18 +2751,6 @@ class AIChatPanel(QtWidgets.QWidget):
             self._context_items = []
         self._update_context_summary()
 
-    def _ensure_page_context_added(self) -> None:
-        if not self.ai_manager or not self._current_ai_conversation_id or not self.current_page_path:
-            return
-        if any(item.kind == "page" and item.page_ref == self.current_page_path for item in self._context_items):
-            return
-        try:
-            self.ai_manager.add_context_page(self._current_ai_conversation_id, self.current_page_path)
-            self._index_context_item("@", ContextCandidate(page_ref=self.current_page_path, label=self.current_page_path))
-        except Exception:
-            return
-        self._refresh_context_items()
-
     def _bind_ai_conversation(self) -> None:
         if not self.ai_manager or not self.current_session_id:
             self._current_ai_conversation_id = None
@@ -2158,10 +2765,7 @@ class AIChatPanel(QtWidgets.QWidget):
         conv = self.ai_manager.get_conversation(conv_id) if conv_id else None
         if not conv:
             title = session.get("name") or "Chat"
-            if self.current_page_path:
-                conv = self.ai_manager.get_or_create_page_chat(self.current_page_path, title=title)
-            else:
-                conv = self.ai_manager.create_global_chat(title=title)
+            conv = self.ai_manager.create_global_chat(title=title)
             conv_id = conv.id
             try:
                 self.store.update_session_ai_conversation(self.current_session_id, conv_id)
@@ -2169,7 +2773,6 @@ class AIChatPanel(QtWidgets.QWidget):
                 pass
         self._current_ai_conversation_id = conv_id
         self._refresh_context_items()
-        self._ensure_page_context_added()
 
     def _update_context_summary(self) -> None:
         counts = Counter(item.kind for item in self._context_items)
@@ -2295,23 +2898,6 @@ class AIChatPanel(QtWidgets.QWidget):
                 self._tree_candidates = trees
                 candidates = self._candidates_for_trigger(trigger)
         if not candidates:
-            if trigger in ("@", "#") and self.vault_root:
-                if self._context_reload_in_progress:
-                    self._set_status(
-                        "Building context index…",
-                        theme_value("ai_chat_panel.status.warning", "#f6c343"),
-                    )
-                    if attempt < 6:
-                        QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
-                    return
-                self._reload_context_index()
-                self._set_status(
-                    "Building context index…",
-                    theme_value("ai_chat_panel.status.warning", "#f6c343"),
-                )
-                if attempt < 6:
-                    QtCore.QTimer.singleShot(250, lambda: self._try_open_context_picker(attempt + 1))
-                return
             QtWidgets.QMessageBox.information(self, "Context", "No context items are available.")
             return
         cursor_rect = self.input_edit.cursorRect()
@@ -2320,12 +2906,25 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _candidates_for_trigger(self, trigger: str) -> List[ContextCandidate]:
         if trigger == "@":
-            return self._page_candidates
+            return self._ordered_page_candidates()
         if trigger == "#":
             return self._tree_candidates
         if trigger == "!":
             return self._attachment_candidates_for_trigger()
         return []
+
+    def _ordered_page_candidates(self) -> List[ContextCandidate]:
+        if not self.current_page_path:
+            return list(self._page_candidates)
+        current = self.current_page_path
+        exact: list[ContextCandidate] = []
+        rest: list[ContextCandidate] = []
+        for candidate in self._page_candidates:
+            if candidate.page_ref == current:
+                exact.append(candidate)
+            else:
+                rest.append(candidate)
+        return exact + rest
 
     def _attachment_candidates_for_trigger(self) -> List[ContextCandidate]:
         if not self.vault_root:
@@ -2559,6 +3158,7 @@ class AIChatPanel(QtWidgets.QWidget):
             and (kind != "attachment" or item.attachment_name == candidate.attachment_name)
         )
         if already:
+            self._set_status("That context is already attached.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
             return
         try:
             if trigger == "@":
@@ -2570,8 +3170,28 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.ai_manager.add_context_attachment(conv_id, candidate.page_ref, name)
             self._index_context_item(trigger, candidate)
         except Exception:
-            pass
+            return
         self._refresh_context_items()
+        self._append_app_message(self._context_added_message(trigger, candidate))
+        self._set_status("Context added.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
+
+    def _context_added_message(self, trigger: str, candidate: ContextCandidate) -> str:
+        if trigger == "@":
+            return f"Added page context: {self._page_label(candidate.page_ref)}"
+        if trigger == "#":
+            return f"Added folder context: {candidate.page_ref}"
+        if candidate.attachment_name:
+            return f"Added attachment context: {self._page_label(candidate.page_ref)} • {candidate.attachment_name}"
+        return f"Added context: {candidate.label or candidate.page_ref}"
+
+    def _append_app_message(self, text: str) -> None:
+        note = (text or "").strip()
+        if not note:
+            return
+        self.messages.append(("app", note))
+        if self.current_session_id:
+            self.store.save_message(self.current_session_id, "app", note)
+        self._render_messages()
 
     def _ensure_context_conversation(self) -> bool:
         if not self.ai_manager or not self.current_session_id:
@@ -2583,9 +3203,6 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_context_overlay_selected(self, candidate: ContextCandidate) -> None:
         trigger = self._context_overlay.current_trigger()
         if not trigger:
-            return
-        if trigger == "@":
-            self._insert_context_link(candidate)
             return
         self._apply_context_selection(trigger, candidate)
 
@@ -2664,7 +3281,7 @@ class AIChatPanel(QtWidgets.QWidget):
         if target:
             self._refresh_context_item(target)
             return
-        self._ensure_page_context_added()
+        self.ensure_context_page_ref(self.current_page_path, index=True)
 
     def _index_context_item(self, trigger: str, candidate: ContextCandidate) -> None:
         if not self._vector_api.available():
@@ -2754,75 +3371,17 @@ class AIChatPanel(QtWidgets.QWidget):
         return candidate if candidate.exists() else None
 
     def _reload_context_index(self) -> None:
-        if not self.vault_root and not self._api_client_available():
+        if not self._api_client_available():
             self._page_candidates = []
             self._tree_candidates = []
             self._attachment_candidates = []
             self._context_reload_in_progress = False
             self._context_reload_pending = False
             return
-        _log_vector(
-            f"Reloading context index (vault_root={'set' if self.vault_root else 'none'}, "
-            f"api_client={'ready' if self._api_client_available() else 'missing'})"
-        )
         if self._context_reload_in_progress:
             self._context_reload_pending = True
             return
         self._context_reload_in_progress = True
-        root = Path(self.vault_root) if self.vault_root else None
-
-        def _scan_local_candidates() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
-            if not root:
-                return [], [], []
-            pages: list[ContextCandidate] = []
-            trees: list[ContextCandidate] = []
-            attachments: list[ContextCandidate] = []
-            seen: set[str] = set()
-            for suffix in PAGE_SUFFIXES:
-                for page_file in sorted(root.rglob(f"*{suffix}")):
-                    if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
-                        continue
-                    if ".stillpoint" in page_file.parts:
-                        continue
-                    rel_page = "/" + page_file.relative_to(root).as_posix()
-                    pages.append(ContextCandidate(page_ref=rel_page, label=rel_page))
-                    folder = page_file.parent
-                    if folder == root:
-                        folder_rel = "/"
-                    else:
-                        folder_rel = "/" + folder.relative_to(root).as_posix()
-                    if folder_rel not in seen:
-                        seen.add(folder_rel)
-                        trees.append(ContextCandidate(page_ref=folder_rel, label=folder_rel))
-                    for attachment in sorted(folder.iterdir()):
-                        if not attachment.is_file():
-                            continue
-                        if attachment.suffix.lower() in PAGE_SUFFIXES:
-                            continue
-                        if attachment.name.startswith("."):
-                            continue
-                        if ".stillpoint" in attachment.parts:
-                            continue
-                        display = f"{rel_page} · {attachment.name}"
-                        attachments.append(
-                            ContextCandidate(page_ref=rel_page, label=display, attachment_name=attachment.name)
-                        )
-            return pages, trees, attachments
-
-        def _scan_api_candidates() -> tuple[list[ContextCandidate], list[ContextCandidate]]:
-            return self._fetch_context_candidates_from_api()
-
-        def scan() -> tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]:
-            pages: list[ContextCandidate] = []
-            trees: list[ContextCandidate] = []
-            attachments: list[ContextCandidate] = []
-            if self._api_client_available():
-                pages, trees = _scan_api_candidates()
-                if root:
-                    _, _, attachments = _scan_local_candidates()
-            elif root:
-                pages, trees, attachments = _scan_local_candidates()
-            return pages, trees, attachments
 
         def finish(result: tuple[list[ContextCandidate], list[ContextCandidate], list[ContextCandidate]]) -> None:
             pages, trees, attachments = result
@@ -2836,7 +3395,8 @@ class AIChatPanel(QtWidgets.QWidget):
 
         def worker() -> None:
             try:
-                result = scan()
+                pages, trees = self._fetch_context_candidates_from_api()
+                result = (pages, trees, [])
             except Exception as exc:
                 _log_vector(f"Failed to build context index: {exc}")
                 result = ([], [], [])
@@ -2908,8 +3468,40 @@ class AIChatPanel(QtWidgets.QWidget):
         goto_act.triggered.connect(lambda: self.chat_view.scrollToAnchor(msg_id))
         del_act = menu.addAction("Delete Message")
         del_act.triggered.connect(lambda: self._delete_message(msg_id))
+        if self.current_session_id:
+            menu.addSeparator()
+            delete_chat_act = menu.addAction("Delete Chat")
+            delete_chat_act.triggered.connect(self._delete_current_chat_from_context_menu)
         menu.addSeparator()
         menu.exec(self.chat_view.mapToGlobal(pos))
+
+    def _delete_current_chat_from_context_menu(self) -> None:
+        if not self.current_session_id:
+            return
+        session = self.store.get_session_by_id(self.current_session_id)
+        if not session:
+            return
+        name = str(session.get("name") or "Chat")
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Delete Chat",
+            f"Delete chat '{name}'?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if confirm != QtWidgets.QMessageBox.Yes:
+            return
+        self._delete_chat_session(session)
+
+    def _set_main_window_focus_border_suppressed(self, suppressed: bool) -> None:
+        window = self.window()
+        if window is None:
+            return
+        if hasattr(window, "_suppress_focus_borders"):
+            try:
+                window._suppress_focus_borders = bool(suppressed)
+            except Exception:
+                pass
 
     def _ai_overlay_payload_text(self) -> str:
         """Return selected text in chat view or full chat content."""
@@ -2955,6 +3547,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.aiOverlayRequested.emit(text, anchor)
 
     def _select_default_chat(self) -> None:
+<<<<<<< HEAD
         chat = self.store.get_session_by_path("/", "chat")
         if not chat:
             chat = self.store._create_root_chat()  # type: ignore[attr-defined]
@@ -2972,11 +3565,22 @@ class AIChatPanel(QtWidgets.QWidget):
             # was skipped (e.g. due to an active but-cancelling worker).
             self._load_chat_messages(chat["id"])
 
+=======
+        sessions = self.store.get_sessions()
+        first_chat = next((sess for sess in sessions if sess.get("type") == "chat"), None)
+        if not first_chat:
+            first_chat = self.store._create_root_chat()  # type: ignore[attr-defined]
+        if first_chat:
+            self.current_session_id = first_chat["id"]
+            self._load_chat_tree(select_id=first_chat["id"])
+            self._load_chat_messages(first_chat["id"])
+>>>>>>> c151c48 (stuff)
     def _load_chat_tree(self, select_id: Optional[int] = None) -> None:
         self._building_tree = True
         self.chat_tree.clear()
         sessions = self.store.get_sessions()
         items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
+        children_by_parent: Dict[Optional[int], list[Dict]] = {}
         for sess in sessions:
             item = QtWidgets.QTreeWidgetItem([sess["name"]])
             item.setData(0, QtCore.Qt.UserRole, sess)
@@ -2984,20 +3588,67 @@ class AIChatPanel(QtWidgets.QWidget):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
-            items[sess["id"]] = item
-        for sess in sessions:
-            item = items[sess["id"]]
-            parent_id = sess.get("parent_id")
-            if parent_id and parent_id in items:
-                items[parent_id].addChild(item)
+                item.setIcon(0, self._chat_icon)
+                item.setFlags((item.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
             else:
-                self.chat_tree.addTopLevelItem(item)
+                item.setIcon(0, self._folder_icon)
+                folder_flags = item.flags() | Qt.ItemIsDropEnabled
+                if sess.get("path") != "/":
+                    folder_flags |= Qt.ItemIsDragEnabled
+                else:
+                    folder_flags &= ~Qt.ItemIsDragEnabled
+                item.setFlags(folder_flags)
+            items[sess["id"]] = item
+
+            parent_id = sess.get("parent_id")
+            children_by_parent.setdefault(parent_id, []).append(sess)
+
+        def _ordered_children(parent_id: Optional[int]) -> list[Dict]:
+            rows = list(children_by_parent.get(parent_id, []))
+            folders = [row for row in rows if row.get("type") == "folder"]
+            chats = [row for row in rows if row.get("type") == "chat"]
+            folders.sort(key=lambda row: (int(row.get("sort_order") or 0), int(row.get("id") or 0)))
+            chats.sort(key=lambda row: (int(row.get("sort_order") or 0), int(row.get("id") or 0)))
+            return folders + chats
+
+        def _attach(parent_item: Optional[QtWidgets.QTreeWidgetItem], parent_id: Optional[int]) -> None:
+            for sess in _ordered_children(parent_id):
+                item = items[sess["id"]]
+                if parent_item is None:
+                    self.chat_tree.addTopLevelItem(item)
+                else:
+                    parent_item.addChild(item)
+                _attach(item, sess["id"])
+
+        _attach(None, None)
         self.chat_tree.expandAll()
         self._building_tree = False
         if select_id:
             self._select_chat_by_id(select_id)
         elif self.current_session_id:
             self._select_chat_by_id(self.current_session_id)
+
+    def _move_tree_session(self, session_id: int, folder_id: int, insert_index: int, item_type: str) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before moving chats.", "#f6c343")
+            self._select_chat_by_id(self.current_session_id or session_id)
+            return
+        session = self.store.get_session_by_id(session_id)
+        folder = self.store.get_session_by_id(folder_id)
+        if not session or not folder or folder.get("type") != "folder":
+            self._load_chat_tree(select_id=self.current_session_id)
+            return
+        moved = None
+        if item_type == "chat" and session.get("type") == "chat":
+            moved = self.store.move_chat(session_id, folder_id, insert_index)
+        elif item_type == "folder" and session.get("type") == "folder":
+            moved = self.store.move_folder(session_id, folder_id, insert_index)
+        if not moved:
+            self._load_chat_tree(select_id=self.current_session_id)
+            return
+        moved_label = "Folder" if item_type == "folder" else "Chat"
+        self._set_status(f"Moved {moved_label.lower()} '{moved.get('name', moved_label)}' to {folder.get('name', 'Folder')}.")
+        QtCore.QTimer.singleShot(0, lambda sid=session_id: self._load_chat_tree(select_id=sid))
 
     def _select_chat_by_id(self, session_id: int) -> None:
         def walk(item: QtWidgets.QTreeWidgetItem) -> bool:
@@ -3176,6 +3827,74 @@ class AIChatPanel(QtWidgets.QWidget):
             self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
         self._update_model_status()
 
+    def _slash_command_anchor(self) -> QtCore.QPoint:
+        cursor_rect = self.input_edit.cursorRect()
+        return self.input_edit.mapToGlobal(cursor_rect.bottomLeft())
+
+    def _ensure_quick_choice_overlay(self, title: str, placeholder: str, on_chosen) -> QuickChoiceOverlay:
+        if self._quick_choice_overlay is not None:
+            try:
+                self._quick_choice_overlay.close()
+            except Exception:
+                pass
+        overlay = QuickChoiceOverlay(parent=self, title=title, placeholder=placeholder)
+        overlay.chosen.connect(on_chosen)
+        overlay.finished.connect(lambda _result: setattr(self, "_quick_choice_overlay", None))
+        self._quick_choice_overlay = overlay
+        return overlay
+
+    def _show_server_command_picker(self) -> None:
+        names = self.server_manager.list_server_names()
+        if not names:
+            self._set_status("No AI servers configured.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
+            return
+        overlay = self._ensure_quick_choice_overlay(
+            "Quick Server",
+            "Type to search servers...",
+            self._apply_server_command_choice,
+        )
+        overlay.set_items(names)
+        current = self.server_combo.currentText().strip()
+        if current:
+            overlay.search.setText(current)
+        overlay.popup_at(self._slash_command_anchor())
+
+    def _apply_server_command_choice(self, name: str) -> None:
+        idx = self.server_combo.findText(name)
+        if idx >= 0:
+            self.server_combo.setCurrentIndex(idx)
+        else:
+            self.server_combo.setCurrentText(name)
+        self._set_status(f"Switched to server: {name}", theme_value("ai_chat_panel.status.success", "#2ecc71"))
+        self.focus_input()
+
+    def _show_model_command_picker(self) -> None:
+        models = [self.model_combo.itemText(i) for i in range(self.model_combo.count()) if self.model_combo.itemText(i)]
+        if not models and self.current_server:
+            models = get_available_models(self.current_server)
+        if not models:
+            self._set_status("No models available for the current server.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
+            return
+        overlay = self._ensure_quick_choice_overlay(
+            "Quick Model",
+            "Type to search models...",
+            self._apply_model_command_choice,
+        )
+        overlay.set_items(models)
+        current = self.model_combo.currentText().strip()
+        if current:
+            overlay.search.setText(current)
+        overlay.popup_at(self._slash_command_anchor())
+
+    def _apply_model_command_choice(self, model_name: str) -> None:
+        idx = self.model_combo.findText(model_name)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.setCurrentText(model_name)
+        self._set_status(f"Model set to {model_name}", theme_value("ai_chat_panel.status.success", "#2ecc71"))
+        self.focus_input()
+
     def _manage_servers(self) -> None:
         dialog = ServerConfigDialog(self, self.current_server, existing_names=self.server_manager.list_server_names())
         if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.result:
@@ -3210,7 +3929,10 @@ class AIChatPanel(QtWidgets.QWidget):
     def _ensure_active_chat(self) -> bool:
         if self.current_session_id:
             return True
-        chat = self.store.get_or_create_chat_for_page(self.current_page_path)
+        sessions = self.store.get_sessions()
+        chat = next((sess for sess in sessions if sess.get("type") == "chat"), None)
+        if not chat:
+            chat = self.store._create_root_chat()  # type: ignore[attr-defined]
         if chat:
             self.current_session_id = chat["id"]
             self._load_chat_tree(select_id=chat["id"])
@@ -3317,7 +4039,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 history_source = self.store.get_messages(self.current_session_id)
             except Exception:
                 history_source = self.messages
-        history_text = "\n\n".join(f"{role.upper()}: {content}" for role, content in history_source)
+        history_text = "\n\n".join(
+            f"{role.upper()}: {content}"
+            for role, content in history_source
+            if role in {"user", "assistant"}
+        )
         blocks = [{"role": "system", "content": self.condense_prompt}, {"role": "user", "content": history_text}]
         self._condense_buffer = ""
         self._summary_content = None
@@ -3368,7 +4094,11 @@ class AIChatPanel(QtWidgets.QWidget):
         }
         self._render_messages()
         try:
-            blocks = [{"role": role, "content": text} for role, text in self.messages[:-1]]
+            blocks = [
+                {"role": role, "content": text}
+                for role, text in self.messages[:-1]
+                if role in {"user", "assistant"}
+            ]
             merged_systems: List[str] = []
             context_prompt = self._build_context_prompt(content)
             if context_prompt:
@@ -3531,7 +4261,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 "current_path": self.current_page_path or "",
                 "chat_page_path": self._current_chat_path or "",
                 "current_editor_path": self._current_editor_path or "",
-                "chat_scope": "global" if self._is_global_chat_path(self._current_chat_path) else "page",
+                "chat_scope": "chat",
                 "vault_root_name": Path(self.vault_root).name if self.vault_root else "",
                 "last_read_path": self._last_agent_read_path or "",
                 "debug": bool(getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked()),
@@ -3732,6 +4462,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 self.store.save_message(self.current_session_id, "assistant", clean_full)
                 self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
                 self.store.update_session_last_server(self.current_session_id, self.current_server.get("name", ""))
+                self._maybe_auto_title_chat()
         self._render_messages()
         self._set_status(
             "Response received.",
@@ -3748,6 +4479,37 @@ class AIChatPanel(QtWidgets.QWidget):
         self._api_worker = None
         self._update_stop_button()
         _log_llm_response(f"[AIChat][stream complete] response_len={len(full)}")
+
+    def _maybe_auto_title_chat(self) -> None:
+        if not self.current_session_id:
+            return
+        if not self.store.can_auto_title(self.current_session_id):
+            return
+        assistant_count = sum(1 for role, _ in self.messages if role == "assistant")
+        if assistant_count != 1:
+            return
+        user_msgs = [text.strip() for role, text in self.messages if role == "user" and text.strip()]
+        assistant_msgs = [text.strip() for role, text in self.messages if role == "assistant" and text.strip()]
+        if not user_msgs or not assistant_msgs:
+            return
+        prompt = (user_msgs[-1] + " " + assistant_msgs[-1]).strip()
+        title = self._summarize_chat_title(prompt)
+        if not title:
+            return
+        self.store.rename_session(self.current_session_id, title, manual=False)
+        self._load_chat_tree(select_id=self.current_session_id)
+
+    def _summarize_chat_title(self, text: str) -> Optional[str]:
+        text = (text or "").strip()
+        if not text:
+            return None
+        words = [w.strip(".,:;!?()[]{}\"'") for w in text.split()]
+        words = [w for w in words if w]
+        if not words:
+            return None
+        clipped = words[:6]
+        title = " ".join(clipped)
+        return title[:72]
 
     def _handle_condense_chunk(self, chunk: str) -> None:
         if self._cancel_pending_condense:
@@ -3964,6 +4726,18 @@ class AIChatPanel(QtWidgets.QWidget):
         if path:
             self.chatNavigateRequested.emit(path)
 
+    def _chat_has_contents(self, session_id: int) -> bool:
+        try:
+            messages = self.store.get_messages(session_id)
+        except Exception:
+            return True
+        for role, content in messages:
+            if role not in {"user", "assistant"}:
+                continue
+            if (content or "").strip():
+                return True
+        return False
+
     def _delete_chat_session(self, data: Dict) -> None:
         session_id = data.get("id")
         if not session_id:
@@ -3997,6 +4771,16 @@ class AIChatPanel(QtWidgets.QWidget):
         self._pending_stream_chunks.clear()
 
         session = self.store.get_session_by_id(session_id) or data
+        if self._chat_has_contents(int(session_id)):
+            confirm = QtWidgets.QMessageBox.question(
+                self,
+                "Delete Chat",
+                f"Delete chat '{session.get('name', 'Chat')}'?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if confirm != QtWidgets.QMessageBox.Yes:
+                return
         conv_id = session.get("ai_conversation_id")
         if self.ai_manager and conv_id:
             try:
@@ -4069,6 +4853,22 @@ class AIChatPanel(QtWidgets.QWidget):
             "Chat deleted.",
             theme_value("ai_chat_panel.status.success", "#2ecc71"),
         )
+
+    def _clear_loaded_chat_state(self) -> None:
+        self.current_session_id = None
+        self.messages = []
+        self.chat_view.clear()
+        self._context_items = []
+        self._current_ai_conversation_id = None
+        self._current_chat_path = None
+        self._update_context_summary()
+        self._condense_buffer = ""
+        self._summary_content = None
+        self._message_think.clear()
+        self._message_think_active.clear()
+        self._message_think_expanded.clear()
+        self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
+        self._clear_debug_entries()
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString(QUrl.FullyDecoded).strip()
@@ -4227,13 +5027,14 @@ class AIChatPanel(QtWidgets.QWidget):
                 return picked
         return ""
 
-    def _new_chat(self) -> None:
-        folder_path = self._current_folder_path()
-        name, ok = QtWidgets.QInputDialog.getText(self, "New Chat", "Chat context:", text="Chat")
-        if not ok or not name.strip():
+    def _new_chat(self, parent_data: Optional[Dict] = None) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before switching chats.", "#f6c343")
             return
-        chat = self.store.create_named_chat(folder_path, name.strip())
-        # Apply default server/model preferences to the new chat
+        folder_path = "/"
+        if parent_data and parent_data.get("type") == "folder":
+            folder_path = parent_data.get("path") or "/"
+        chat = self.store.create_named_chat(folder_path, "New Chat")
         default_server = self._config_default_server()
         if default_server:
             self.store.update_session_last_server(chat["id"], default_server)
@@ -4250,6 +5051,141 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_messages(chat["id"])
         self.status_label.setText(f"Created chat '{chat['name']}'")
 
+    def _selected_folder_target(self) -> Optional[Dict]:
+        item = self.chat_tree.currentItem() if hasattr(self, "chat_tree") else None
+        if not item:
+            return None
+        data = item.data(0, QtCore.Qt.UserRole) or {}
+        if not isinstance(data, dict):
+            return None
+        if data.get("type") == "folder":
+            return data
+        if data.get("type") == "chat":
+            parent_id = data.get("parent_id")
+            if parent_id:
+                parent = self.store.get_session_by_id(int(parent_id))
+                if parent and parent.get("type") == "folder":
+                    return parent
+        return None
+
+    def _new_chat_from_selection(self) -> None:
+        self._new_chat(parent_data=self._selected_folder_target())
+
+    def _new_folder(self, parent_data: Optional[Dict] = None) -> None:
+        name, ok = QtWidgets.QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
+        if not ok or not name.strip():
+            return
+        parent_path = "/"
+        if parent_data and parent_data.get("type") == "folder":
+            parent_path = parent_data.get("path") or "/"
+        base_path = self.store._normalize_folder_path(parent_path)
+        new_path = (f"{base_path.rstrip('/')}/{name.strip()}").replace("//", "/") if base_path != "/" else f"/{name.strip()}"
+        if self.store.get_session_by_path(new_path, "folder"):
+            QtWidgets.QMessageBox.information(self, "Folder", "A folder with that name already exists.")
+            return
+        parent_id, _ = self.store._ensure_folder_chain(base_path)
+        folder_id = self.store._create_session(name.strip(), parent_id, new_path, "folder")
+        self._load_chat_tree(select_id=folder_id)
+
+    def _new_folder_from_selection(self) -> None:
+        self._new_folder(parent_data=self._selected_folder_target())
+
+    def _rename_folder(self, data: Dict) -> None:
+        old_name = data.get("name") or "Folder"
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Rename Folder", "Folder name:", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        self.store.rename_session(data["id"], new_name.strip(), manual=True)
+        self._load_chat_tree(select_id=data["id"])
+
+    def _rename_chat(self, data: Dict) -> None:
+        old_name = data.get("name") or "New Chat"
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Rename Chat", "Chat name:", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        self.store.rename_session(data["id"], new_name.strip(), manual=True)
+        self._load_chat_tree(select_id=data["id"])
+
+    def _delete_folder(self, data: Dict) -> None:
+        folder_path = data.get("path")
+        if not folder_path:
+            return
+        if folder_path == "/":
+            QtWidgets.QMessageBox.information(self, "Folder", "Cannot delete the root folder.")
+            return
+        chats_under = self.store.get_chats_under(folder_path)
+        chat_count = len(chats_under)
+        populated_count = sum(1 for chat in chats_under if self._chat_has_contents(int(chat.get("id") or 0)))
+        if populated_count > 0:
+            if populated_count == 1 and chat_count == 1:
+                prompt = f"Delete folder '{data.get('name', 'Folder')}' and its chat with contents?"
+            else:
+                prompt = (
+                    f"Delete folder '{data.get('name', 'Folder')}' and its {chat_count} chats? "
+                    f"{populated_count} contain saved conversation data."
+                )
+            self._set_main_window_focus_border_suppressed(True)
+            try:
+                confirm = QtWidgets.QMessageBox.question(
+                    self,
+                    "Delete Folder",
+                    prompt,
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+            finally:
+                self._set_main_window_focus_border_suppressed(False)
+            if confirm != QtWidgets.QMessageBox.Yes:
+                return
+        self._set_main_window_focus_border_suppressed(True)
+        try:
+            current_session = self.store.get_session_by_id(self.current_session_id or -1) if self.current_session_id else None
+            current_in_folder = False
+            if current_session:
+                current_path = str(current_session.get("path") or "")
+                current_in_folder = current_path == folder_path or current_path.startswith(f"{str(folder_path).rstrip('/')}/")
+            if current_in_folder:
+                self._clear_loaded_chat_state()
+                try:
+                    self.chat_tree.clearSelection()
+                except Exception:
+                    pass
+                try:
+                    self.setFocus(QtCore.Qt.OtherFocusReason)
+                except Exception:
+                    pass
+                try:
+                    self.chat_view.clearFocus()
+                except Exception:
+                    pass
+                try:
+                    self.input_edit.clearFocus()
+                except Exception:
+                    pass
+            if self.ai_manager:
+                for chat in chats_under:
+                    conv_id = chat.get("ai_conversation_id")
+                    if not conv_id:
+                        continue
+                    try:
+                        items = self.ai_manager.list_context_items(conv_id)
+                    except Exception:
+                        items = []
+                    for item in items:
+                        try:
+                            self._delete_context_source(item)
+                        except Exception:
+                            pass
+                    try:
+                        self.ai_manager.delete_conversation(conv_id)
+                    except Exception:
+                        pass
+            self.store.delete_chats_under(folder_path)
+            self.store.delete_session(data["id"])
+            self._load_chat_tree()
+            self._ensure_active_chat()
+        finally:
+            self._set_main_window_focus_border_suppressed(False)
     def _load_system_prompts(self):
         self.system_prompts = []
         self.system_prompts_tree = {}
@@ -4375,21 +5311,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_load_current_page_button()
 
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
-        """Explicitly open (and create if needed) chat for the given page."""
-        if self._has_active_operation():
-            self._set_status("Wait for the active run to finish before switching chats.", "#f6c343")
-            return
-        self.current_page_path = rel_path
-        # Avoid triggering navigation back to the page on initial focus switch
-        self._suppress_navigation = True
-        chat = self.store.get_or_create_chat_for_page(rel_path)
-        if chat:
-            self.current_session_id = chat["id"]
-            self._load_chat_tree(select_id=chat["id"])
-            self._load_chat_messages(chat["id"])
-        self._update_model_status()
-        self._update_load_current_page_button()
-
+        """Backward-compatible shim: page-scoped chat removed; opens a new chat."""
+        _ = rel_path
+        self._new_chat()
     def open_named_chat(self, name: str, folder_path: str = "/") -> None:
         """Open (and create if needed) a stable named chat under the given folder."""
         if self._has_active_operation():
@@ -4432,44 +5356,17 @@ class AIChatPanel(QtWidgets.QWidget):
         self._refresh_context_items()
 
     def _load_current_page_chat(self) -> None:
-        if not self.current_page_path:
-            return
-        self.open_chat_for_page(self.current_page_path)
-
+        self._new_chat()
     def _page_has_existing_chat(self, rel_path: Optional[str]) -> bool:
-        if not rel_path:
-            return False
-        folder_path = "/" + Path(rel_path.lstrip("/")).parent.as_posix()
-        existing = self.store.get_session_by_path(folder_path, "chat")
-        return bool(existing)
-
+        _ = rel_path
+        return False
     @staticmethod
     def _is_global_chat_path(path: Optional[str]) -> bool:
-        """Return True when the chat represents the global/root context."""
-        if not path:
-            return True
-        return path.strip("/") == ""
-
+        _ = path
+        return False
     def _update_load_current_page_button(self) -> None:
-        path = self.current_page_path
-        show = bool(path and path != self._current_chat_path and self._page_has_existing_chat(path))
-        if path and self._context_matches_page(path):
-            show = False
-        self.load_page_chat_label.setVisible(show)
-        if path and show:
-            display = self._page_label(path)
-            self.load_page_chat_label.setText(f"Load chat for {display}")
-        else:
-            self.load_page_chat_label.setText("")
-        # Update context label for header
-        if not self._is_global_chat_path(self._current_chat_path):
-            label = self._page_label(self._current_chat_path) or "Page Chat"
-            self.context_label.setText(f"Page Chat: {label}")
-            self.context_bar.setVisible(True)
-        else:
-            self.context_label.setText("Global Chat")
-            self.context_bar.setVisible(False)
-
+        self.context_label.setText("Chat")
+        self.context_bar.setVisible(True)
     def get_active_chat_path(self) -> Optional[str]:
         """Return the folder path for the currently loaded chat session."""
         return self._current_chat_path
@@ -4486,6 +5383,11 @@ class AIChatPanel(QtWidgets.QWidget):
         """Expose store lookup for whether a chat exists for the given page path."""
         return self.store.has_chat_for_path(rel_path)
 
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        self._vault_accent_color = (color_hex or "").strip() or None
+        if hasattr(self, "chat_tree") and self.chat_tree is not None:
+            self.chat_tree.set_vault_accent_color(self._vault_accent_color)
+
     def set_vault_root(self, vault_root: Optional[str]) -> None:
         """Switch backing store to the current vault's .stillpoint folder."""
         self.vault_root = vault_root
@@ -4500,13 +5402,13 @@ class AIChatPanel(QtWidgets.QWidget):
         self._current_ai_conversation_id = None
         self._context_items = []
         self._update_context_summary()
-        self._reload_context_index()
         self.store = AIChatStore(vault_root=vault_root)
         self.current_session_id = None
         self.messages = []
         self.chat_view.clear()
         self._load_system_prompts()
         self._load_chat_tree()
+        self.set_vault_accent_color(config.load_vault_accent_color())
 
     def set_api_client(self, api_client: Optional[httpx.Client]) -> None:
         """Update the shared HTTP client used for vector operations."""

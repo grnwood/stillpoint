@@ -254,6 +254,8 @@ class TabbedRightPanel(QWidget):
 
     def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
         self._vault_accent_color = (color_hex or "").strip() or None
+        if self.ai_chat_panel:
+            self.ai_chat_panel.set_vault_accent_color(self._vault_accent_color)
         if self.task_panel:
             self.task_panel.set_vault_accent_color(self._vault_accent_color)
         if self.calendar_panel:

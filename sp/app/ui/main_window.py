@@ -3234,14 +3234,49 @@ class MainWindow(QMainWindow):
             pass
         return ""
 
-    def _command_bar_open_ai_chat(self, *, create: bool, global_chat: bool) -> None:
-        if global_chat:
-            self._handle_ai_action("Load Global Chat", "", self._command_bar_selection_text())
+    def _focus_current_ai_chat(self) -> None:
+        if not config.load_enable_ai_chats():
             return
-        target_path = self.current_path
-        if not target_path:
+        detached = self._active_ai_chat_panel()
+        if detached:
+            if self.current_path:
+                detached.set_current_page(self.current_path)
+            detached.focus_input()
+            try:
+                if self._detached_ai_chat_window:
+                    self._detached_ai_chat_window.raise_()
+                    self._detached_ai_chat_window.activateWindow()
+            except Exception:
+                pass
             return
-        self._open_ai_chat_for_path(target_path, create=create, focus_tab=True)
+        if not self.right_panel.ai_chat_panel:
+            return
+        self._ensure_right_panel_visible()
+        if self.current_path:
+            self.right_panel.ai_chat_panel.set_current_page(self.current_path)
+        if self.right_panel.ai_chat_index is not None:
+            self.right_panel.tabs.setCurrentIndex(self.right_panel.ai_chat_index)
+        self.right_panel.focus_ai_chat_input()
+
+    def _start_new_ai_chat(self) -> None:
+        if not config.load_enable_ai_chats():
+            return
+        detached = self._active_ai_chat_panel()
+        if detached:
+            detached.open_chat_for_page(None)
+            detached.focus_input()
+            try:
+                if self._detached_ai_chat_window:
+                    self._detached_ai_chat_window.raise_()
+                    self._detached_ai_chat_window.activateWindow()
+            except Exception:
+                pass
+            return
+        if not self.right_panel.ai_chat_panel:
+            return
+        self._ensure_right_panel_visible()
+        self.right_panel.focus_ai_chat(None, create=True)
+        self.right_panel.focus_ai_chat_input()
 
     def _clear_command_bar_context(self) -> None:
         self._command_bar_ai_text_override = None
@@ -3259,55 +3294,37 @@ class MainWindow(QMainWindow):
         base_label = "AI"
         entries.append(
             (
-                f"{base_label} / Send selection to Page Chat",
+                f"{base_label} / Send selection to Current Chat",
                 _make_action(
-                    "AI: Send selection to Page Chat",
-                    lambda: self._handle_ai_action("Send selection to Page Chat", "", self._command_bar_selection_text()),
+                    "AI: Send selection to Current Chat",
+                    lambda: self._handle_ai_action("Send selection to Current Chat", "", self._command_bar_selection_text()),
                 ),
             )
         )
         entries.append(
             (
-                f"{base_label} / Send selection to Global Chat",
+                f"{base_label} / Send selection to New Chat",
                 _make_action(
-                    "AI: Send selection to Global Chat",
-                    lambda: self._handle_ai_action("Send selection to Global Chat", "", self._command_bar_selection_text()),
+                    "AI: Send selection to New Chat",
+                    lambda: self._handle_ai_action("Send selection to New Chat", "", self._command_bar_selection_text()),
                 ),
             )
         )
         entries.append(
             (
-                f"{base_label} / Chat: Start Chat with this Page",
+                f"{base_label} / Chat: Open Current Chat",
                 _make_action(
-                    "AI: Start Chat with this Page",
-                    lambda: self._command_bar_open_ai_chat(create=True, global_chat=False),
+                    "AI: Open Current Chat",
+                    self._focus_current_ai_chat,
                 ),
             )
         )
         entries.append(
             (
-                f"{base_label} / Chat: with Page",
+                f"{base_label} / Chat: Start New Chat",
                 _make_action(
-                    "AI: Chat with Page",
-                    lambda: self._command_bar_open_ai_chat(create=False, global_chat=False),
-                ),
-            )
-        )
-        entries.append(
-            (
-                f"{base_label} / Chat: With Global",
-                _make_action(
-                    "AI: Chat With Global",
-                    lambda: self._command_bar_open_ai_chat(create=True, global_chat=True),
-                ),
-            )
-        )
-        entries.append(
-            (
-                f"{base_label} / Load Global Chat",
-                _make_action(
-                    "AI: Load Global Chat",
-                    lambda: self._handle_ai_action("Load Global Chat", "", self._command_bar_selection_text()),
+                    "AI: Start New Chat",
+                    self._start_new_ai_chat,
                 ),
             )
         )
@@ -15317,48 +15334,29 @@ class MainWindow(QMainWindow):
             # Perform one-shot inline replacement
             self._perform_one_shot_prompt(text)
             return
-        if action == "Load Global Chat":
+        if action in {"Load Global Chat", "Open Current Chat"}:
             if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
                 QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
                 return
-            detached = self._active_ai_chat_panel()
-            if detached:
-                detached.open_chat_for_page(None)
-                detached.focus_input()
-                try:
-                    if self._detached_ai_chat_window:
-                        self._detached_ai_chat_window.raise_()
-                        self._detached_ai_chat_window.activateWindow()
-                except Exception:
-                    pass
-                return
-            self._ensure_right_panel_visible()
-            self.right_panel.focus_ai_chat(None, create=True)
-            self.right_panel.focus_ai_chat_input()
+            self._focus_current_ai_chat()
             return
-        if action == "Send selection to Global Chat":
+        if action in {"Send selection to Current Chat", "Send selection to Global Chat"}:
             if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
                 QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
                 return
-            detached = self._active_ai_chat_panel()
-            if detached:
-                detached.open_chat_for_page(None)
-                detached.send_text_message(text)
-                detached.focus_input()
-                try:
-                    if self._detached_ai_chat_window:
-                        self._detached_ai_chat_window.raise_()
-                        self._detached_ai_chat_window.activateWindow()
-                except Exception:
-                    pass
-                return
-            self._ensure_right_panel_visible()
-            self.right_panel.focus_ai_chat(None, create=True)
-            if not self.right_panel.send_text_to_chat(text):
-                self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
+            self._send_selection_to_ai_chat(text, create_new=False)
             return
-        if action == "Send selection to Page Chat":
-            self._send_selection_to_ai_chat(text)
+        if action in {"Send selection to New Chat", "Send selection to Page Chat"}:
+            if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
+                QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
+                return
+            self._send_selection_to_ai_chat(text, create_new=True)
+            return
+        if action == "Start New Chat":
+            if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
+                QMessageBox.information(self, "AI Chat", "Enable AI Chats in Preferences to use AI actions.")
+                return
+            self._start_new_ai_chat()
             return
 
         if not config.load_enable_ai_chats() or not self.right_panel.ai_chat_panel:
@@ -15368,7 +15366,7 @@ class MainWindow(QMainWindow):
         detached = self._active_ai_chat_panel()
         if detached:
             if target_path:
-                detached.open_chat_for_page(target_path)
+                detached.set_current_page(target_path)
             detached.send_action_message(action, prompt, text)
             detached.focus_input()
             try:
@@ -15380,7 +15378,9 @@ class MainWindow(QMainWindow):
             return
         self._ensure_right_panel_visible()
         if target_path:
-            self.right_panel.focus_ai_chat(target_path, create=True)
+            self.right_panel.ai_chat_panel.set_current_page(target_path)
+            if self.right_panel.ai_chat_index is not None:
+                self.right_panel.tabs.setCurrentIndex(self.right_panel.ai_chat_index)
         self.right_panel.send_ai_action(action, prompt, text)
         if target_path:
             self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
@@ -15793,14 +15793,16 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _send_selection_to_ai_chat(self, text: str) -> None:
+    def _send_selection_to_ai_chat(self, text: str, *, create_new: bool = False) -> None:
         if not text.strip():
             return
         target_path = self.current_path
         detached = self._active_ai_chat_panel()
         if detached:
-            if target_path:
-                detached.open_chat_for_page(target_path)
+            if create_new:
+                detached.open_chat_for_page(None)
+            elif target_path:
+                detached.set_current_page(target_path)
             detached.send_text_message(text)
             detached.focus_input()
             try:
@@ -15814,8 +15816,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Enable AI chats to send text from the editor.", 4000)
             return
         self._ensure_right_panel_visible()
-        if target_path:
-            self.right_panel.focus_ai_chat(target_path, create=True)
+        if create_new:
+            self.right_panel.focus_ai_chat(None, create=True)
+        elif target_path:
+            self.right_panel.ai_chat_panel.set_current_page(target_path)
+            if self.right_panel.ai_chat_index is not None:
+                self.right_panel.tabs.setCurrentIndex(self.right_panel.ai_chat_index)
             self.editor.set_ai_chat_available(True, active=self.right_panel.is_active_chat_for_page(target_path))
         else:
             if self.right_panel.ai_chat_index is not None:

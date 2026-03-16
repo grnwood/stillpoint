@@ -459,9 +459,18 @@ def register_homebase_routes(
             refresh_bucket.pop(refresh_token, None)
             _save_tokens(base, tokens)
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-        refresh_bucket.pop(refresh_token, None)
+        # Keep refresh tokens reusable for their full TTL so auth can recover
+        # after restarts or concurrent refresh attempts. Extend the token window
+        # on successful use to preserve a 30-day inactivity timeout.
+        now = _utc_now_epoch()
+        refresh_bucket[refresh_token] = {
+            "username": username,
+            "exp": now + _REFRESH_TTL_SECONDS,
+            "created_at": _utc_now_iso(),
+        }
         _save_tokens(base, tokens)
         fresh = _issue_tokens(base, username)
+        fresh["refresh_token"] = refresh_token
         _log_server(f"POST /bootstrap/refresh vault_id={vault_id} username={username}")
         return {
             "vault_id": vault_id,

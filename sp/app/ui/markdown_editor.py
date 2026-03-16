@@ -377,15 +377,10 @@ class AIActionOverlay(QWidget):
     def _update_entries(self) -> None:
         self._entries = []
         if not self._current_group:
-            if not self._has_chat:
-                self._entries.append(AIActionOverlay.Entry("Send selection to Global Chat", "send_global"))
-                self._entries.append(AIActionOverlay.Entry("Chat: Start Chat with this Page", "start_chat"))
-                self._entries.append(AIActionOverlay.Entry("Chat: with Global", "load_global"))
-            else:
-                self._entries.append(AIActionOverlay.Entry("Send selection to Page Chat", "send_page"))
-                self._entries.append(AIActionOverlay.Entry("Send selection to Global Chat", "send_global"))
-                self._entries.append(AIActionOverlay.Entry("Chat: with Page", "load_chat"))
-                self._entries.append(AIActionOverlay.Entry("Chat: With Global", "load_global"))
+            self._entries.append(AIActionOverlay.Entry("Send selection to Current Chat", "send_current"))
+            self._entries.append(AIActionOverlay.Entry("Send selection to New Chat", "send_new"))
+            self._entries.append(AIActionOverlay.Entry("Chat: Open Current Chat", "load_chat"))
+            self._entries.append(AIActionOverlay.Entry("Chat: Start New Chat", "start_chat"))
             # One-shot prompt: send selected text directly to the configured model
             # and replace the selection with the model response (does not add to chat history).
             self._entries.append(AIActionOverlay.Entry("One-Shot Prompt Selection", "one_shot"))
@@ -477,20 +472,17 @@ class AIActionOverlay(QWidget):
         entry = item.data(Qt.UserRole)
         if not entry:
             return
-        if entry.kind == "send_page":
-            self.actionTriggered.emit("Send selection to Page Chat", "")
+        if entry.kind == "send_current":
+            self.actionTriggered.emit("Send selection to Current Chat", "")
             self.hide()
-        elif entry.kind == "send_global":
-            self.actionTriggered.emit("Send selection to Global Chat", "")
+        elif entry.kind == "send_new":
+            self.actionTriggered.emit("Send selection to New Chat", "")
             self.hide()
         elif entry.kind == "start_chat":
-            self.startChat.emit()
+            self.actionTriggered.emit("Start New Chat", "")
             self.hide()
         elif entry.kind == "load_chat":
-            self.loadChat.emit()
-            self.hide()
-        elif entry.kind == "load_global":
-            self.actionTriggered.emit("Load Global Chat", "")
+            self.actionTriggered.emit("Open Current Chat", "")
             self.hide()
         elif entry.kind == "group":
             self._current_group = entry.group

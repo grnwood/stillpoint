@@ -22,7 +22,8 @@ AI_ACTION_GROUPS: list[AIActionGroup] = [
     AIActionGroup(
         title="Chat",
         actions=[
-            AIActionItem("Load Global Chat", "Switch AI chat to the global/root context."),
+            AIActionItem("Open Current Chat", "Focus the currently open AI chat."),
+            AIActionItem("Start New Chat", "Create and open a new AI chat."),
         ],
     ),
     AIActionGroup(
