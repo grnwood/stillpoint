@@ -2968,6 +2968,8 @@ class AIChatPanel(QtWidgets.QWidget):
         if chat:
             self.current_session_id = chat["id"]
             self._load_chat_tree(select_id=chat["id"])
+            # Load messages explicitly as a safety net in case _on_chat_selected
+            # was skipped (e.g. due to an active but-cancelling worker).
             self._load_chat_messages(chat["id"])
 
     def _load_chat_tree(self, select_id: Optional[int] = None) -> None:
@@ -3966,6 +3968,34 @@ class AIChatPanel(QtWidgets.QWidget):
         session_id = data.get("id")
         if not session_id:
             return
+
+        # Tear down any in-flight streaming/API operations that reference this
+        # session before removing state.  Leaving workers or flush timers alive
+        # while we clear widget state below can cause callbacks to fire against
+        # already-cleaned-up objects, which in turn triggers cascading repaints
+        # that can crash the underlying Qt C++ paint machinery.
+        if self._api_worker:
+            try:
+                self._api_worker.request_cancel()
+            except Exception:
+                pass
+        if self._condense_worker:
+            try:
+                self._condense_worker.request_cancel()
+            except Exception:
+                pass
+        try:
+            if self._stream_flush_timer.isActive():
+                self._stream_flush_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._condense_flush_timer.isActive():
+                self._condense_flush_timer.stop()
+        except Exception:
+            pass
+        self._pending_stream_chunks.clear()
+
         session = self.store.get_session_by_id(session_id) or data
         conv_id = session.get("ai_conversation_id")
         if self.ai_manager and conv_id:
@@ -4007,12 +4037,34 @@ class AIChatPanel(QtWidgets.QWidget):
             next_chat = next((s for s in sessions if s.get("type") == "chat"), None)
             if next_chat:
                 self.current_session_id = next_chat["id"]
-                self._load_chat_tree(select_id=next_chat["id"])
+                # Block tree-selection signals while we rebuild the tree so that
+                # _on_chat_selected / _load_chat_messages is not called
+                # re-entrantly during the tree clear-and-repopulate sequence.
+                # We load messages explicitly afterwards.
+                self.chat_tree.blockSignals(True)
+                try:
+                    self._load_chat_tree(select_id=next_chat["id"])
+                finally:
+                    self.chat_tree.blockSignals(False)
+                self._load_chat_messages(next_chat["id"])
             else:
-                self._load_chat_tree()
+                self.chat_tree.blockSignals(True)
+                try:
+                    self._load_chat_tree()
+                finally:
+                    self.chat_tree.blockSignals(False)
                 self._select_default_chat()
         else:
-            self._load_chat_tree()
+            # Deleting a non-current session: rebuild the tree with signals
+            # blocked so that _on_chat_selected / _load_chat_messages is NOT
+            # re-triggered for the unchanged current session.  _load_chat_tree
+            # will still visually re-select the current item via
+            # _select_chat_by_id even with signals suppressed.
+            self.chat_tree.blockSignals(True)
+            try:
+                self._load_chat_tree()
+            finally:
+                self.chat_tree.blockSignals(False)
         self._set_status(
             "Chat deleted.",
             theme_value("ai_chat_panel.status.success", "#2ecc71"),

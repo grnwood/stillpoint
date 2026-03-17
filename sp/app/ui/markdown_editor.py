@@ -2054,6 +2054,11 @@ class MarkdownEditor(QTextEdit):
             viewport = self.viewport()
             if not self._is_alive(viewport):
                 return
+            # Extra check: verify that the document layout is in a paintable
+            # state by probing document size.  A corrupted or partially-torn-down
+            # layout can raise RuntimeError here, which we treat as a signal to
+            # skip the paint rather than crash.
+            _ = layout.documentSize()
         except Exception:
             return
 
