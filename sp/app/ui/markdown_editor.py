@@ -1929,7 +1929,12 @@ class MarkdownEditor(QTextEdit):
 
     def _post_load_paint_guard_active(self) -> bool:
         load_token = self.current_load_token()
-        if sys.platform.startswith("linux") and self._load_in_flight_token == load_token:
+        # Block painting on all platforms while a document load is in flight.
+        # The document is in an inconsistent (partially cleared/repopulated) state
+        # between _begin_page_load() and _finish_page_load(), and calling
+        # super().paintEvent() against that state can cause an access violation on
+        # Windows (and similar instability on other platforms).
+        if self._load_in_flight_token == load_token:
             self._queue_post_load_repaint(load_token)
             return True
         until = self._post_load_paint_guard_until
@@ -1953,7 +1958,11 @@ class MarkdownEditor(QTextEdit):
         self._post_load_repaint_armed = False
         if not self._is_current_load_token(load_token):
             return
-        if sys.platform.startswith("linux") and self._load_in_flight_token == self.current_load_token():
+        # If a new load has started before this deferred repaint fires, re-queue
+        # so the repaint happens after the current load completes.  Apply this
+        # guard on all platforms (the previous Linux-only restriction left Windows
+        # exposed to painting against a partially-loaded document).
+        if self._load_in_flight_token == self.current_load_token():
             self._queue_post_load_repaint(load_token)
             return
         if not self._is_alive(self) or not self._editor_alive:
@@ -2055,10 +2064,12 @@ class MarkdownEditor(QTextEdit):
             return
 
         # The custom horizontal-rule overlay has triggered paint instability on some
-        # Linux setups. Keep it off by default there, while allowing explicit opt-in.
+        # Linux and Windows setups (the secondary QPainter created after
+        # super().paintEvent() can access a stale viewport on these platforms).
+        # Keep it off by default on both, while allowing explicit opt-in.
         hr_overlay_env = os.getenv("SP_DISABLE_HR_OVERLAY")
         if hr_overlay_env is None:
-            disable_hr_overlay = sys.platform.startswith("linux")
+            disable_hr_overlay = sys.platform.startswith("linux") or sys.platform == "win32"
         else:
             disable_hr_overlay = hr_overlay_env in ("1", "true", "True")
         if disable_hr_overlay:
