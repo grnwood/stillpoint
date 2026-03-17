@@ -3481,16 +3481,6 @@ class AIChatPanel(QtWidgets.QWidget):
         session = self.store.get_session_by_id(self.current_session_id)
         if not session:
             return
-        name = str(session.get("name") or "Chat")
-        confirm = QtWidgets.QMessageBox.question(
-            self,
-            "Delete Chat",
-            f"Delete chat '{name}'?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No,
-        )
-        if confirm != QtWidgets.QMessageBox.Yes:
-            return
         self._delete_chat_session(session)
 
     def _set_main_window_focus_border_suppressed(self, suppressed: bool) -> None:
@@ -3547,34 +3537,22 @@ class AIChatPanel(QtWidgets.QWidget):
         self.aiOverlayRequested.emit(text, anchor)
 
     def _select_default_chat(self) -> None:
-<<<<<<< HEAD
-        chat = self.store.get_session_by_path("/", "chat")
-        if not chat:
-            chat = self.store._create_root_chat()  # type: ignore[attr-defined]
-            if chat:
-                default_server = self._config_default_server()
-                if default_server:
-                    self.store.update_session_last_server(chat["id"], default_server)
-                default_model = self._config_default_model()
-                if default_model:
-                    self.store.update_session_last_model(chat["id"], default_model)
-        if chat:
-            self.current_session_id = chat["id"]
-            self._load_chat_tree(select_id=chat["id"])
-            # Load messages explicitly as a safety net in case _on_chat_selected
-            # was skipped (e.g. due to an active but-cancelling worker).
-            self._load_chat_messages(chat["id"])
-
-=======
         sessions = self.store.get_sessions()
         first_chat = next((sess for sess in sessions if sess.get("type") == "chat"), None)
         if not first_chat:
             first_chat = self.store._create_root_chat()  # type: ignore[attr-defined]
+            if first_chat:
+                default_server = self._config_default_server()
+                if default_server:
+                    self.store.update_session_last_server(first_chat["id"], default_server)
+                default_model = self._config_default_model()
+                if default_model:
+                    self.store.update_session_last_model(first_chat["id"], default_model)
         if first_chat:
             self.current_session_id = first_chat["id"]
             self._load_chat_tree(select_id=first_chat["id"])
             self._load_chat_messages(first_chat["id"])
->>>>>>> c151c48 (stuff)
+
     def _load_chat_tree(self, select_id: Optional[int] = None) -> None:
         self._building_tree = True
         self.chat_tree.clear()
@@ -4738,6 +4716,27 @@ class AIChatPanel(QtWidgets.QWidget):
                 return True
         return False
 
+    def _prepare_chat_delete_focus_state(self, deleting_current: bool) -> None:
+        if not deleting_current:
+            return
+        self._clear_loaded_chat_state()
+        try:
+            self.chat_tree.clearSelection()
+        except Exception:
+            pass
+        try:
+            self.setFocus(QtCore.Qt.OtherFocusReason)
+        except Exception:
+            pass
+        try:
+            self.chat_view.clearFocus()
+        except Exception:
+            pass
+        try:
+            self.input_edit.clearFocus()
+        except Exception:
+            pass
+
     def _delete_chat_session(self, data: Dict) -> None:
         session_id = data.get("id")
         if not session_id:
@@ -4771,84 +4770,79 @@ class AIChatPanel(QtWidgets.QWidget):
         self._pending_stream_chunks.clear()
 
         session = self.store.get_session_by_id(session_id) or data
+        was_current = int(session_id) == int(self.current_session_id or -1)
         if self._chat_has_contents(int(session_id)):
-            confirm = QtWidgets.QMessageBox.question(
-                self,
-                "Delete Chat",
-                f"Delete chat '{session.get('name', 'Chat')}'?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
-            )
+            self._set_main_window_focus_border_suppressed(True)
+            try:
+                confirm = QtWidgets.QMessageBox.question(
+                    self,
+                    "Delete Chat",
+                    f"Delete chat '{session.get('name', 'Chat')}'?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+            finally:
+                self._set_main_window_focus_border_suppressed(False)
             if confirm != QtWidgets.QMessageBox.Yes:
                 return
-        conv_id = session.get("ai_conversation_id")
-        if self.ai_manager and conv_id:
-            try:
-                items = self.ai_manager.list_context_items(conv_id)
-            except Exception:
-                items = []
-            for item in items:
+        self._set_main_window_focus_border_suppressed(True)
+        try:
+            self._prepare_chat_delete_focus_state(was_current)
+            conv_id = session.get("ai_conversation_id")
+            if self.ai_manager and conv_id:
                 try:
-                    self._delete_context_source(item)
+                    items = self.ai_manager.list_context_items(conv_id)
+                except Exception:
+                    items = []
+                for item in items:
+                    try:
+                        self._delete_context_source(item)
+                    except Exception:
+                        pass
+                try:
+                    self.ai_manager.delete_conversation(conv_id)
                 except Exception:
                     pass
             try:
-                self.ai_manager.delete_conversation(conv_id)
-            except Exception:
-                pass
-        try:
-            self.store.delete_session(session_id)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Delete Chat", str(exc))
-            return
-        was_current = session_id == self.current_session_id
-        if was_current:
-            self.current_session_id = None
-            self.messages = []
-            self.chat_view.clear()
-            self._context_items = []
-            self._current_ai_conversation_id = None
-            self._update_context_summary()
-            self._condense_buffer = ""
-            self._summary_content = None
-            self._message_think.clear()
-            self._message_think_active.clear()
-            self._message_think_expanded.clear()
-            self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
-            self._clear_debug_entries()
-        if was_current:
-            sessions = self.store.get_sessions()
-            next_chat = next((s for s in sessions if s.get("type") == "chat"), None)
-            if next_chat:
-                self.current_session_id = next_chat["id"]
-                # Block tree-selection signals while we rebuild the tree so that
-                # _on_chat_selected / _load_chat_messages is not called
-                # re-entrantly during the tree clear-and-repopulate sequence.
-                # We load messages explicitly afterwards.
-                self.chat_tree.blockSignals(True)
-                try:
-                    self._load_chat_tree(select_id=next_chat["id"])
-                finally:
-                    self.chat_tree.blockSignals(False)
-                self._load_chat_messages(next_chat["id"])
+                self.store.delete_session(session_id)
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(self, "Delete Chat", str(exc))
+                return
+            if was_current:
+                sessions = self.store.get_sessions()
+                next_chat = next((s for s in sessions if s.get("type") == "chat"), None)
+                if next_chat:
+                    self.current_session_id = next_chat["id"]
+                    # Block tree-selection signals while we rebuild the tree so that
+                    # _on_chat_selected / _load_chat_messages is not called
+                    # re-entrantly during the tree clear-and-repopulate sequence.
+                    # We load messages explicitly afterwards.
+                    self.chat_tree.blockSignals(True)
+                    try:
+                        self._load_chat_tree(select_id=next_chat["id"])
+                    finally:
+                        self.chat_tree.blockSignals(False)
+                    self._load_chat_messages(next_chat["id"])
+                else:
+                    self.chat_tree.blockSignals(True)
+                    try:
+                        self._load_chat_tree()
+                    finally:
+                        self.chat_tree.blockSignals(False)
+                    self._select_default_chat()
             else:
+                # Deleting a non-current session: rebuild the tree with signals
+                # blocked so that _on_chat_selected / _load_chat_messages is NOT
+                # re-triggered for the unchanged current session.  _load_chat_tree
+                # will still visually re-select the current item via
+                # _select_chat_by_id even with signals suppressed.
                 self.chat_tree.blockSignals(True)
                 try:
                     self._load_chat_tree()
                 finally:
                     self.chat_tree.blockSignals(False)
-                self._select_default_chat()
-        else:
-            # Deleting a non-current session: rebuild the tree with signals
-            # blocked so that _on_chat_selected / _load_chat_messages is NOT
-            # re-triggered for the unchanged current session.  _load_chat_tree
-            # will still visually re-select the current item via
-            # _select_chat_by_id even with signals suppressed.
-            self.chat_tree.blockSignals(True)
-            try:
-                self._load_chat_tree()
-            finally:
-                self.chat_tree.blockSignals(False)
+        finally:
+            self._set_main_window_focus_border_suppressed(False)
         self._set_status(
             "Chat deleted.",
             theme_value("ai_chat_panel.status.success", "#2ecc71"),
