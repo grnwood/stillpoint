@@ -280,20 +280,7 @@ def test_is_editor_dirty_clears_false_positive_for_local_mode() -> None:
     assert dummy._dirty_flag is False
 
 
-def test_on_document_modified_ignores_noop_content_change_in_local_mode() -> None:
-    """
-    Test that document modification events are ignored when content hasn't actually changed in local mode.
-    This test verifies that when a document is marked as modified but the content remains the same
-    as the last saved content, and the application is in local mode (not homebase sync mode), the
-    dirty flag should not be set and the dirty indicator should not be updated.
-    The test creates a dummy MainWindow instance with:
-    - Homebase sync disabled (local mode)
-    - Editor content matching the last saved content
-    - Modified flag set to True on the editor
-    It then triggers the _on_document_modified handler and asserts that:
-    - The dirty flag remains False (no-op change detected)
-    - The update counter remains 0 (dirty indicator not updated)
-    """
+def test_on_document_modified_uses_qt_modified_flag_in_local_mode() -> None:
     class _Dummy:
         _suspend_dirty_tracking = False
         _dirty_flag = False
@@ -315,11 +302,11 @@ def test_on_document_modified_ignores_noop_content_change_in_local_mode() -> Non
 
     dummy = _Dummy()
     MainWindow._on_document_modified(dummy, True)
-    assert dummy._dirty_flag is False
-    assert dummy.updated == 0
+    assert dummy._dirty_flag is True
+    assert dummy.updated == 1
 
 
-def test_on_editor_text_changed_marks_dirty_when_content_differs() -> None:
+def test_on_editor_text_changed_skips_content_diff_without_qt_modified_flag() -> None:
     class _Timer:
         def __init__(self) -> None:
             self.starts = 0
@@ -352,8 +339,8 @@ def test_on_editor_text_changed_marks_dirty_when_content_differs() -> None:
     dummy = _Dummy()
     MainWindow._on_editor_text_changed(dummy)
     assert dummy.autosave_timer.starts == 1
-    assert dummy._dirty_flag is True
-    assert dummy.updated == 1
+    assert dummy._dirty_flag is False
+    assert dummy.updated == 0
 
 
 def test_poll_homebase_status_does_not_reload_pending_page_when_auto_reload_blocked() -> None:

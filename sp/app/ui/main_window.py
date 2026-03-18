@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import json
 import os
+import queue
 import shutil
 import socket
 import platform
@@ -15,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile 
+import threading
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -1786,6 +1788,12 @@ class MainWindow(QMainWindow):
         self._local_fs_ui_quiet_timer: Optional[QTimer] = QTimer(self)
         self._local_fs_ui_quiet_timer.setSingleShot(True)
         self._local_fs_ui_quiet_timer.timeout.connect(self._on_local_fs_ui_quiet_timeout)
+        self._local_fs_refresh_result_queue: queue.Queue[tuple[int, str, dict[str, Any]]] = queue.Queue()
+        self._local_fs_refresh_result_timer: Optional[QTimer] = QTimer(self)
+        self._local_fs_refresh_result_timer.setInterval(50)
+        self._local_fs_refresh_result_timer.timeout.connect(self._drain_local_fs_refresh_results)
+        self._local_fs_refresh_generation: int = 0
+        self._recent_self_saved_paths: dict[str, float] = {}
         self._homebase_fs_sync_quiet_timer: Optional[QTimer] = QTimer(self)
         self._homebase_fs_sync_quiet_timer.setSingleShot(True)
         self._homebase_fs_sync_quiet_timer.timeout.connect(self._on_homebase_fs_sync_quiet_timeout)
@@ -2274,6 +2282,8 @@ class MainWindow(QMainWindow):
         self._mode_window: Optional[ModeWindow] = None
         self._detached_ai_chat_panel: Optional[AIChatPanel] = None
         self._detached_ai_chat_window: Optional[QMainWindow] = None
+        self._detached_task_panels: list[TaskPanel] = []
+        self._detached_calendar_panels: list[CalendarPanel] = []
         self._apply_read_only_state()
 
         # Geometry save timer (debounce frequent resize/splitter move events)
@@ -4665,6 +4675,9 @@ class MainWindow(QMainWindow):
         self,
         changed_paths: list[str],
         removed_paths: list[str],
+        *,
+        refresh_ui: bool = True,
+        current_path: Optional[str] = None,
     ) -> dict[str, Any]:
         result = {
             "indexed_paths": [],
@@ -4709,12 +4722,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        current_path = str(self.current_path or "").strip()
+        active_path = str(current_path if current_path is not None else self.current_path or "").strip()
         result["indexed_paths"] = indexed_paths
         result["removed_paths"] = removed_index_paths
-        result["current_page_changed"] = current_path in indexed_paths
-        result["current_page_removed"] = current_path in removed_index_paths
-        if indexed_paths or removed_index_paths:
+        result["current_page_changed"] = active_path in indexed_paths
+        result["current_page_removed"] = active_path in removed_index_paths
+        if refresh_ui and (indexed_paths or removed_index_paths):
             try:
                 self.right_panel.refresh_tasks()
             except Exception:
@@ -4724,6 +4737,135 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         return result
+
+    def _mark_recent_self_saved_path(self, path: Optional[str]) -> None:
+        normalized = self._normalize_editor_path(str(path or "").strip()) if path else None
+        if not normalized:
+            return
+        self._recent_self_saved_paths[normalized] = time.monotonic() + 5.0
+
+    def _prune_recent_self_saved_paths(self) -> None:
+        if not self._recent_self_saved_paths:
+            return
+        now = time.monotonic()
+        stale = [path for path, expires_at in self._recent_self_saved_paths.items() if expires_at <= now]
+        for path in stale:
+            self._recent_self_saved_paths.pop(path, None)
+
+    def _normalize_local_watch_path(self, changed_path: Optional[str]) -> Optional[str]:
+        if not changed_path or not self.vault_root:
+            return None
+        try:
+            candidate = Path(changed_path).resolve()
+            root = Path(self.vault_root).resolve()
+            rel = candidate.relative_to(root)
+        except Exception:
+            return None
+        if candidate.name == "AGENTS.md" or ".stillpoint" in candidate.parts:
+            return None
+        if candidate.is_dir():
+            return None
+        suffixes = {suffix.lower() for suffix in PAGE_SUFFIXES}
+        if candidate.suffix.lower() not in suffixes:
+            return None
+        if candidate.suffix.lower() == LEGACY_SUFFIX.lower() and candidate.with_suffix(PAGE_SUFFIX).exists():
+            return None
+        return "/" + rel.as_posix()
+
+    def _compute_local_fs_refresh_payload(
+        self,
+        *,
+        current_path: Optional[str],
+        recent_self_saved_paths: dict[str, float],
+    ) -> dict[str, Any]:
+        result = {
+            "indexed_paths": [],
+            "removed_paths": [],
+            "structure_changed": False,
+            "current_page_changed": False,
+            "current_page_removed": False,
+            "snapshot": {},
+        }
+        if self._remote_mode or not self.vault_root:
+            return result
+        root = Path(self.vault_root)
+        current_snapshot = self._snapshot_local_page_state(root)
+        previous_snapshot = dict(self._local_fs_page_snapshot)
+        result["snapshot"] = current_snapshot
+        if not previous_snapshot:
+            return result
+        changed_paths = [
+            path for path, meta in current_snapshot.items()
+            if previous_snapshot.get(path) != meta
+        ]
+        removed_paths = [path for path in previous_snapshot.keys() if path not in current_snapshot]
+        now = time.monotonic()
+        filtered_changed_paths = [
+            path for path in changed_paths
+            if recent_self_saved_paths.get(path, 0.0) <= now
+        ]
+        reconcile = self._apply_incremental_page_index_changes(
+            filtered_changed_paths,
+            removed_paths,
+            refresh_ui=False,
+            current_path=current_path,
+        )
+        reconcile["structure_changed"] = bool(
+            any(path not in previous_snapshot for path in filtered_changed_paths) or removed_paths
+        )
+        reconcile["snapshot"] = current_snapshot
+        return reconcile
+
+    def _drain_local_fs_refresh_results(self) -> None:
+        saw_results = False
+        while True:
+            try:
+                generation, reason, reconcile = self._local_fs_refresh_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            saw_results = True
+            if generation != self._local_fs_refresh_generation:
+                continue
+            self._prune_recent_self_saved_paths()
+            self._local_fs_page_snapshot = dict(reconcile.get("snapshot") or {})
+            indexed_paths = list(reconcile.get("indexed_paths") or [])
+            removed_paths = list(reconcile.get("removed_paths") or [])
+            structure_changed = bool(reconcile.get("structure_changed"))
+            current_page_changed = bool(reconcile.get("current_page_changed"))
+            try:
+                self._ensure_config_active_vault_context()
+                if structure_changed:
+                    config.bump_tree_version()
+            except Exception:
+                pass
+            if structure_changed:
+                _log_homebase_client(f"filesystem quiet timer fired; deferring tree refresh (reason={reason})")
+                self.statusBar().showMessage("Filesystem quiet; vault tree refresh queued.", 2500)
+                self._schedule_homebase_tree_refresh_on_ui_activity(reason)
+            elif indexed_paths or removed_paths:
+                self.statusBar().showMessage("Filesystem quiet; updated vault index.", 2500)
+            if indexed_paths or removed_paths:
+                try:
+                    self.right_panel.refresh_tasks()
+                except Exception:
+                    pass
+                try:
+                    self.right_panel.refresh_links(self.current_path)
+                except Exception:
+                    pass
+                self._refresh_detached_task_panels()
+                self._refresh_detached_calendar_panels()
+                self._refresh_detached_link_panels(self.current_path)
+            if current_page_changed and self.current_path and self._is_editor_idle_for_remote_reload():
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
+        if saw_results and self._local_fs_refresh_result_timer:
+            self._local_fs_refresh_result_timer.stop()
 
     def _reconcile_local_filesystem_index(self) -> dict[str, Any]:
         result = {
@@ -4801,7 +4943,7 @@ class MainWindow(QMainWindow):
         self._refresh_homebase_watch_paths()
 
     def _on_homebase_fs_changed(self, path: str) -> None:
-        self._schedule_local_filesystem_ui_refresh("filesystem change")
+        self._schedule_local_filesystem_ui_refresh("filesystem change", changed_path=path)
         if self._is_homebase_mode_enabled() and self._homebase_sync_engine:
             self._mark_homebase_unsynced_local_change()
             if self._homebase_fs_sync_quiet_timer:
@@ -5289,8 +5431,12 @@ class MainWindow(QMainWindow):
         self._update_homebase_status_badge(status)
         self._update_homebase_sync_action_state()
 
-    def _schedule_local_filesystem_ui_refresh(self, reason: str) -> None:
+    def _schedule_local_filesystem_ui_refresh(self, reason: str, changed_path: Optional[str] = None) -> None:
         if self._remote_mode or not self.vault_root:
+            return
+        self._prune_recent_self_saved_paths()
+        normalized_changed_path = self._normalize_local_watch_path(changed_path)
+        if normalized_changed_path and normalized_changed_path in self._recent_self_saved_paths:
             return
         quiet_seconds = 10
         try:
@@ -5305,31 +5451,21 @@ class MainWindow(QMainWindow):
         if self._remote_mode or not self.vault_root:
             return
         reason = self._homebase_tree_refresh_reason or "filesystem quiet period"
-        reconcile = self._reconcile_local_filesystem_index()
-        indexed_paths = list(reconcile.get("indexed_paths") or [])
-        removed_paths = list(reconcile.get("removed_paths") or [])
-        structure_changed = bool(reconcile.get("structure_changed"))
-        current_page_changed = bool(reconcile.get("current_page_changed"))
-        try:
-            self._ensure_config_active_vault_context()
-            if structure_changed:
-                config.bump_tree_version()
-        except Exception:
-            pass
-        if structure_changed:
-            _log_homebase_client(f"filesystem quiet timer fired; refreshing tree (reason={reason})")
-            self.statusBar().showMessage("Filesystem quiet; refreshing vault tree...", 2500)
-            self._refresh_tree()
-        elif indexed_paths or removed_paths:
-            self.statusBar().showMessage("Filesystem quiet; updated vault index.", 2500)
-        if current_page_changed and self.current_path and self._is_editor_idle_for_remote_reload():
-            self._open_file(
-                self.current_path,
-                add_to_history=False,
-                force=True,
-                restore_history_cursor=True,
-                sync_calendar=False,
+        current_generation = self._local_fs_refresh_generation + 1
+        self._local_fs_refresh_generation = current_generation
+        recent_self_saved_paths = dict(self._recent_self_saved_paths)
+        current_path = self.current_path
+
+        def _worker() -> None:
+            reconcile = self._compute_local_fs_refresh_payload(
+                current_path=current_path,
+                recent_self_saved_paths=recent_self_saved_paths,
             )
+            self._local_fs_refresh_result_queue.put((current_generation, reason, reconcile))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        if self._local_fs_refresh_result_timer:
+            self._local_fs_refresh_result_timer.start()
 
     def _on_homebase_fs_sync_quiet_timeout(self) -> None:
         if not self._is_homebase_mode_enabled() or not self._homebase_sync_engine:
@@ -5346,14 +5482,14 @@ class MainWindow(QMainWindow):
         if self._remote_mode or not self.vault_root:
             return
         self._homebase_tree_refresh_reason = str(reason or "").strip() or "homebase sync"
+        self._homebase_tree_refresh_pending = True
         try:
             self._ensure_config_active_vault_context()
             config.bump_tree_version()
             config.bump_sync_revision()
         except Exception:
             pass
-        self.statusBar().showMessage("Local changes synced; refreshing vault tree...", 2500)
-        self._refresh_tree()
+        self.statusBar().showMessage("Vault tree refresh queued until next UI activity...", 2500)
 
     def _flush_pending_homebase_tree_refresh(self) -> None:
         if not self._homebase_tree_refresh_pending:
@@ -7945,6 +8081,7 @@ class MainWindow(QMainWindow):
         self._tree_cache.clear()
         self._tree_path_version.clear()
         self._populate_vault_tree()
+        self.right_panel.sync_visible_panels()
         if self._is_homebase_mode_enabled():
             self._trigger_homebase_sync_now("tree refresh")
 
@@ -10177,10 +10314,14 @@ class MainWindow(QMainWindow):
         content_changed = previous_saved_content is None or content != previous_saved_content
         if content_changed or was_virtual:
             self._mark_homebase_unsynced_local_change()
+            self._mark_recent_self_saved_path(path)
         if config.has_active_vault():
             indexer.index_page(path, content)
             self.right_panel.refresh_tasks()
             self.right_panel.refresh_links(path)
+            self._refresh_detached_task_panels()
+            self._refresh_detached_calendar_panels()
+            self._refresh_detached_link_panels(path)
         self._last_saved_content = content
         self._update_page_revision(path, resp_payload)
         try:
@@ -12951,12 +13092,33 @@ class MainWindow(QMainWindow):
             return
         if not path or not config.has_active_vault():
             for panel in list(self._detached_link_panels):
-                panel.set_page(None)
+                if panel.window().isVisible():
+                    panel.set_page(None)
             return
         norm = self._normalize_editor_path(path)
         for panel in list(self._detached_link_panels):
             try:
-                panel.set_page(norm)
+                if panel.window().isVisible():
+                    panel.set_page(norm)
+            except Exception:
+                pass
+
+    def _refresh_detached_task_panels(self) -> None:
+        for panel in list(getattr(self, "_detached_task_panels", [])):
+            try:
+                if panel.window().isVisible():
+                    panel.refresh()
+            except Exception:
+                pass
+
+    def _refresh_detached_calendar_panels(self) -> None:
+        for panel in list(getattr(self, "_detached_calendar_panels", [])):
+            try:
+                if not panel.window().isVisible():
+                    continue
+                if self.current_path:
+                    panel.set_current_page(self.current_path)
+                panel.refresh()
             except Exception:
                 pass
 
@@ -12969,6 +13131,22 @@ class MainWindow(QMainWindow):
         window.destroyed.connect(
             lambda: self._detached_panels.remove(window) if window in self._detached_panels else None
         )
+
+    def _install_detached_panel_refresh_hook(self, window: QMainWindow, callback: Callable[[], None]) -> None:
+        class _DetachedRefreshHook(QObject):
+            def __init__(self, target: QMainWindow, refresh_cb: Callable[[], None]) -> None:
+                super().__init__(target)
+                self._target = target
+                self._refresh_cb = refresh_cb
+
+            def eventFilter(self, obj, event):
+                if obj is self._target and event.type() in (QEvent.Show, QEvent.WindowActivate, QEvent.FocusIn):
+                    QTimer.singleShot(0, self._refresh_cb)
+                return False
+
+        hook = _DetachedRefreshHook(window, callback)
+        window.installEventFilter(hook)
+        window._detached_refresh_hook = hook  # type: ignore[attr-defined]
     
     def _prepare_top_level_window(self, window: QMainWindow) -> None:
         """Ensure detached windows are true top-level (Alt+Tab visible)."""
@@ -13009,6 +13187,9 @@ class MainWindow(QMainWindow):
         self._apply_geometry_persistence(window, "task_panel_window")
         window.show()
         self._register_detached_panel(window)
+        self._detached_task_panels.append(panel)
+        window.destroyed.connect(lambda: self._detached_task_panels.remove(panel) if panel in self._detached_task_panels else None)
+        self._install_detached_panel_refresh_hook(window, panel.refresh)
     
     def _open_calendar_panel_window(self) -> None:
         if not self._feature_calendar_enabled:
@@ -13058,6 +13239,15 @@ class MainWindow(QMainWindow):
         self._apply_geometry_persistence(window, "calendar_panel_window")
         window.show()
         self._register_detached_panel(window)
+        self._detached_calendar_panels.append(panel)
+        window.destroyed.connect(lambda: self._detached_calendar_panels.remove(panel) if panel in self._detached_calendar_panels else None)
+        self._install_detached_panel_refresh_hook(
+            window,
+            lambda p=panel: (
+                p.set_current_page(self.current_path) if self.current_path else None,
+                p.refresh(),
+            ),
+        )
 
     def _open_link_panel_window(self) -> None:
         if not self._feature_link_navigator_enabled:
@@ -13086,6 +13276,10 @@ class MainWindow(QMainWindow):
         self._register_detached_panel(window)
         self._detached_link_panels.append(panel)
         window.destroyed.connect(lambda: self._remove_detached_link_panel(panel))
+        self._install_detached_panel_refresh_hook(
+            window,
+            lambda p=panel: p.set_page(self._normalize_editor_path(self.current_path)) if self.current_path else p.set_page(None),
+        )
 
     def _open_ai_chat_window(self, *, detached_only: bool = False) -> None:
         if not config.load_enable_ai_chats():
@@ -13779,6 +13973,10 @@ class MainWindow(QMainWindow):
             self.right_panel_container.setMaximumWidth(16777215)
             width = getattr(self, "_saved_right_width", 360)
             self.editor_split.setSizes([max(1, total - width), max(0, width)])
+            try:
+                self.right_panel.sync_visible_panels()
+            except Exception:
+                pass
         self._update_sidebar_toggle_icons()
 
     def _toggle_left_panel(self) -> None:
@@ -18536,11 +18734,9 @@ class MainWindow(QMainWindow):
                 self._update_homebase_status_badge(status)
 
     def _dirty_state_from_editor(self, *, default: bool) -> bool:
-        """Compute dirty state from markdown content vs last saved snapshot."""
+        """Compute dirty state without serializing markdown on each edit."""
         try:
-            current_content = self.editor.to_markdown()
-            if self._last_saved_content is not None:
-                return current_content != self._last_saved_content
+            return bool(self.editor.document().isModified())
         except Exception:
             return bool(default)
         return bool(default)

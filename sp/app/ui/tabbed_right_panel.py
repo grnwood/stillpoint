@@ -68,10 +68,17 @@ class TabbedRightPanel(QWidget):
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
         self._http_client = http_client
         self._remote_mode = False
+        self._current_page_path: Optional[Path] = None
+        self._current_relative_path: Optional[str] = None
+        self._pending_task_refresh: bool = False
         self._pending_calendar_path: Optional[str] = None
         self._pending_calendar_date: Optional[tuple[int, int, int]] = None
         self._pending_calendar_vault_root: Optional[str] = None
         self._pending_calendar_refresh: bool = False
+        self._pending_attachments_refresh: bool = False
+        self._pending_link_refresh: bool = False
+        self._pending_link_page: Optional[str] = None
+        self._pending_ai_page: Optional[str] = None
         self._vault_accent_color: Optional[str] = None
         self._calendar_sync_timer = QTimer(self)
         self._calendar_sync_timer.setSingleShot(True)
@@ -144,7 +151,11 @@ class TabbedRightPanel(QWidget):
     def refresh_tasks(self) -> None:
         """Refresh the task panel."""
         if self.task_panel:
-            self.task_panel.refresh()
+            if self._is_panel_currently_visible(self.task_panel):
+                self.task_panel.refresh()
+                self._pending_task_refresh = False
+            else:
+                self._pending_task_refresh = True
     
     def clear_tasks(self) -> None:
         """Clear the task panel."""
@@ -202,12 +213,20 @@ class TabbedRightPanel(QWidget):
     
     def set_current_page(self, page_path, relative_path=None, *, sync_calendar: bool = True) -> bool:
         """Update panels with the current page."""
-        t0 = time.perf_counter()
-        self.attachments_panel.set_page(page_path)
-        t1 = time.perf_counter()
+        self._current_page_path = page_path
+        self._current_relative_path = relative_path
+        if self._is_panel_currently_visible(self.attachments_panel):
+            self.attachments_panel.set_page(page_path)
+            self._pending_attachments_refresh = False
+        else:
+            self._pending_attachments_refresh = True
         if self.link_panel:
-            self.link_panel.set_page(relative_path)
-        t2 = time.perf_counter()
+            self._pending_link_page = relative_path
+            if self._is_panel_currently_visible(self.link_panel):
+                self.link_panel.set_page(relative_path)
+                self._pending_link_refresh = False
+            else:
+                self._pending_link_refresh = True
         try:
             if sync_calendar and self.calendar_panel and relative_path:
                 if self._is_calendar_tab_active():
@@ -217,8 +236,11 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
         if self.ai_chat_panel:
-            self.ai_chat_panel.set_current_page(relative_path)
-        t3 = time.perf_counter()
+            if self._is_panel_currently_visible(self.ai_chat_panel):
+                self.ai_chat_panel.set_current_page(relative_path)
+                self._pending_ai_page = None
+            else:
+                self._pending_ai_page = relative_path
         self._update_attachments_tab_label()
         if self.ai_chat_panel and hasattr(self.ai_chat_panel, "has_chat_for_path"):
             return self.ai_chat_panel.has_chat_for_path(relative_path)
@@ -273,13 +295,19 @@ class TabbedRightPanel(QWidget):
     
     def refresh_attachments(self) -> None:
         """Refresh the attachments panel."""
-        self.attachments_panel.refresh()
-        self._update_attachments_tab_label()
+        if self._is_panel_currently_visible(self.attachments_panel):
+            self.attachments_panel.refresh()
+            self._pending_attachments_refresh = False
+            self._update_attachments_tab_label()
+        else:
+            self._pending_attachments_refresh = True
 
     def refresh_links(self, page_path=None) -> None:
         """Refresh the link navigator for the given page (or current)."""
         if not self.link_panel:
             return
+        if page_path is not None:
+            self._pending_link_page = page_path
         try:
             win = self.window()
             if getattr(win, "_mode_window_pending", False) or getattr(win, "_mode_window", None):
@@ -287,7 +315,11 @@ class TabbedRightPanel(QWidget):
                 return
         except Exception:
             pass
-        self.link_panel.refresh(page_path)
+        if self._is_panel_currently_visible(self.link_panel):
+            self.link_panel.refresh(page_path if page_path is not None else self._current_relative_path)
+            self._pending_link_refresh = False
+        else:
+            self._pending_link_refresh = True
 
     def focus_link_tab(self, page_path=None) -> None:
         """Switch to the Link Navigator tab and optionally set its page."""
@@ -329,6 +361,7 @@ class TabbedRightPanel(QWidget):
 
     def _focus_current_tab(self) -> None:
         """Ensure the active tab gains focus when selected."""
+        self._sync_visible_panels()
         widget = self.tabs.currentWidget()
         if widget:
             if self.calendar_panel and widget == self.calendar_panel:
@@ -414,6 +447,32 @@ class TabbedRightPanel(QWidget):
             self.calendar_panel.ensure_splitter_visible()
         except Exception:
             pass
+
+    def _is_panel_currently_visible(self, panel: Optional[QWidget]) -> bool:
+        return bool(panel) and self.isVisible() and self.tabs.currentWidget() == panel
+
+    def _sync_visible_panels(self) -> None:
+        current = self.tabs.currentWidget()
+        if current == self.attachments_panel and (
+            self._pending_attachments_refresh or self.attachments_panel.current_page_path != self._current_page_path
+        ):
+            self.attachments_panel.set_page(self._current_page_path)
+            self._pending_attachments_refresh = False
+            self._update_attachments_tab_label()
+        if self.task_panel and current == self.task_panel and self._pending_task_refresh:
+            self.task_panel.refresh()
+            self._pending_task_refresh = False
+        if self.link_panel and current == self.link_panel and (
+            self._pending_link_refresh or self._pending_link_page != self.link_panel.current_page
+        ):
+            self.link_panel.set_page(self._pending_link_page if self._pending_link_page is not None else self._current_relative_path)
+            self._pending_link_refresh = False
+        if self.ai_chat_panel and current == self.ai_chat_panel and self._pending_ai_page is not None:
+            self.ai_chat_panel.set_current_page(self._pending_ai_page)
+            self._pending_ai_page = None
+
+    def sync_visible_panels(self) -> None:
+        self._sync_visible_panels()
 
     def focus_ai_chat_input(self) -> None:
         if not self.ai_chat_panel or self.ai_chat_index is None:
