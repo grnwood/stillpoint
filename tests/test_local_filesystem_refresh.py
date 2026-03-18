@@ -241,3 +241,48 @@ def test_local_fs_quiet_timeout_reloads_current_page_after_incremental_index(mon
     assert args[0] == "/PageA/PageA.md"
     assert kwargs["add_to_history"] is False
     assert kwargs["force"] is True
+
+
+def test_homebase_fs_change_suppresses_status_for_recent_self_save(tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "PageA"
+    page_dir.mkdir(parents=True, exist_ok=True)
+
+    class _Dummy:
+        _remote_mode = False
+        _homebase_sync_engine = None
+
+        def __init__(self) -> None:
+            self.vault_root = str(vault_root)
+            self.status = _DummyStatusBar()
+            self._homebase_watch_refresh_timer = _DummyTimer()
+            self._recent_self_saved_paths = {"/PageA/PageA.md": 10_000.0}
+            self.calls: list[str] = []
+
+        def _prune_recent_self_saved_paths(self) -> None:
+            return None
+
+        def _normalize_local_watch_path(self, changed_path: str | None) -> str | None:
+            return MainWindow._normalize_local_watch_path(self, changed_path)
+
+        def _should_suppress_local_fs_change(self, changed_path: str | None) -> bool:
+            return MainWindow._should_suppress_local_fs_change(self, changed_path)
+
+        def _schedule_local_filesystem_ui_refresh(self, reason: str, changed_path: str | None = None) -> None:
+            self.calls.append(f"schedule:{reason}:{changed_path}")
+
+        def _is_homebase_mode_enabled(self) -> bool:
+            return False
+
+        def _update_homebase_status_badge(self, status) -> None:
+            self.calls.append("badge")
+
+        def statusBar(self) -> _DummyStatusBar:
+            return self.status
+
+    dummy = _Dummy()
+    MainWindow._on_homebase_fs_changed(dummy, str(page_dir))
+
+    assert dummy.calls == []
+    assert dummy.status.messages == []
+    assert dummy._homebase_watch_refresh_timer.started == 1

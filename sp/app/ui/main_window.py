@@ -4772,6 +4772,32 @@ class MainWindow(QMainWindow):
             return None
         return "/" + rel.as_posix()
 
+    def _should_suppress_local_fs_change(self, changed_path: Optional[str]) -> bool:
+        self._prune_recent_self_saved_paths()
+        if not changed_path or not self.vault_root or not self._recent_self_saved_paths:
+            return False
+        normalized_changed_path = self._normalize_local_watch_path(changed_path)
+        if normalized_changed_path:
+            return normalized_changed_path in self._recent_self_saved_paths
+        try:
+            candidate = Path(changed_path).resolve()
+            root = Path(self.vault_root).resolve()
+            rel = candidate.relative_to(root)
+        except Exception:
+            return False
+        if not candidate.is_dir():
+            return False
+        rel_text = rel.as_posix()
+        dir_prefix = "/" if rel_text in ("", ".") else "/" + rel_text.strip("/")
+        if dir_prefix != "/":
+            dir_prefix = dir_prefix.rstrip("/") + "/"
+        for saved_path in self._recent_self_saved_paths:
+            if dir_prefix == "/":
+                return True
+            if saved_path.startswith(dir_prefix):
+                return True
+        return False
+
     def _compute_local_fs_refresh_payload(
         self,
         *,
@@ -4943,6 +4969,10 @@ class MainWindow(QMainWindow):
         self._refresh_homebase_watch_paths()
 
     def _on_homebase_fs_changed(self, path: str) -> None:
+        if self._should_suppress_local_fs_change(path):
+            if self._homebase_watch_refresh_timer:
+                self._homebase_watch_refresh_timer.start()
+            return
         self._schedule_local_filesystem_ui_refresh("filesystem change", changed_path=path)
         if self._is_homebase_mode_enabled() and self._homebase_sync_engine:
             self._mark_homebase_unsynced_local_change()

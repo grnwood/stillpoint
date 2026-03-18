@@ -144,6 +144,15 @@ def test_keep_local_resolution_removes_conflict_and_requests_sync(tmp_path, monk
         def _open_file(self, *args, **kwargs) -> None:
             self.open_calls.append((args, kwargs))
 
+        def _apply_homebase_conflict_resolution(self, entry, resolved_text: str, *, resolution: str, applied_mtime=None) -> bool:
+            return MainWindow._apply_homebase_conflict_resolution(
+                self,
+                entry,
+                resolved_text,
+                resolution=resolution,
+                applied_mtime=applied_mtime,
+            )
+
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
     local_file = vault_root / "Page.md"
