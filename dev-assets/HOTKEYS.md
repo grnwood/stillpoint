@@ -24,6 +24,7 @@ Editor Basics
 - `Ctrl+N`: New page (inline create).
 - `Ctrl+D`: Insert date.
 - `Ctrl+J`: Jump to page.
+- `Ctrl+Alt+D`: Jump to journal date (calendar popup).
 - `Ctrl+Alt+J`: Jump to bookmarked pages (bookmark-filtered picker).
 - `Ctrl+L`: Insert link.
 - `Ctrl+Shift+L`: Copy current page link.
@@ -53,6 +54,7 @@ ToC / Headings
 Right Panel
 -----------
 - Tabs: Tasks, Calendar, Attachments, Link Navigator, AI Chat (if enabled).
+- Calendar keyboard flow: arrow keys move day by day, `Enter` opens the selected day and focuses the editor, and `Ctrl+Enter` opens the day while keeping focus in Calendar. In vi mode, `h/j/k/l` move by day or week, `Shift` with arrows or vi keys extends a multi-day selection, `t` jumps to today, `/` moves into headings/subpages, and `Esc` returns from those lists to the calendar. From the main editor, `Ctrl+Alt+D` opens a compact date-jump popup so you can pick a journal day without leaving the page.
 - Context menus and Vault menu let you open Tasks/Links/AI in separate windows.
 
 Bookmarks

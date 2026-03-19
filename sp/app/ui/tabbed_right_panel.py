@@ -366,6 +366,11 @@ class TabbedRightPanel(QWidget):
         if widget:
             if self.calendar_panel and widget == self.calendar_panel:
                 self._calendar_sync_timer.start()
+                try:
+                    self.calendar_panel.calendar.setFocus(Qt.OtherFocusReason)
+                except Exception:
+                    widget.setFocus(Qt.OtherFocusReason)
+                return
             # For task panel, focus the search box specifically
             if self.task_panel and widget == self.task_panel:
                 if hasattr(widget, "focus_search"):

@@ -294,6 +294,11 @@ class CalendarPanel(QWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.timeout.connect(self._refresh_now)
         self._last_refresh_signature: Optional[tuple] = None
+        self._selection_detail_timer = QTimer(self)
+        self._selection_detail_timer.setSingleShot(True)
+        self._selection_detail_timer.timeout.connect(self._refresh_pending_selection_details)
+        self._pending_selection_detail_date: Optional[QDate] = None
+        self._pending_selection_detail_path: Optional[str] = None
         # The calendar tab no longer displays the journal navigator tree.
         # Keep the widget for compatibility, but skip expensive model rebuilds.
         self._journal_tree_enabled = False
@@ -301,6 +306,10 @@ class CalendarPanel(QWidget):
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        try:
+            self.calendar.setDateEditEnabled(False)
+        except Exception:
+            pass
         # Determine light vs dark mode
         palette = QApplication.palette()
         is_light = palette.color(QPalette.Window).lightness() > 128
@@ -527,6 +536,7 @@ class CalendarPanel(QWidget):
         self.subpage_list = InsightDragList()
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
+        self.subpage_list.installEventFilter(self)
         self.subpage_list.setDragEnabled(True)
         self.subpage_list.setAlternatingRowColors(True)
         self.subpage_list.setStyleSheet(
@@ -546,6 +556,7 @@ class CalendarPanel(QWidget):
         self.headings_list = InsightDragList()
         self.headings_list.itemActivated.connect(self._open_insight_link)
         self.headings_list.itemClicked.connect(self._open_insight_link)
+        self.headings_list.installEventFilter(self)
         self.headings_list.setDragEnabled(True)
         self.headings_list.setAlternatingRowColors(True)
         self.headings_list.setStyleSheet(
@@ -1087,6 +1098,130 @@ class CalendarPanel(QWidget):
     def schedule_refresh(self, delay_ms: int = 0) -> None:
         self._refresh_timer.start(max(0, int(delay_ms)))
 
+    def _schedule_selection_detail_refresh(
+        self,
+        date: Optional[QDate] = None,
+        *,
+        current_path: Optional[str] = None,
+        delay_ms: int = 0,
+    ) -> None:
+        if date and date.isValid():
+            self._pending_selection_detail_date = QDate(date)
+        else:
+            self._pending_selection_detail_date = QDate(self.calendar.selectedDate())
+        if current_path is not None:
+            self._pending_selection_detail_path = current_path
+        self._selection_detail_timer.start(max(0, int(delay_ms)))
+
+    def _refresh_pending_selection_details(self) -> None:
+        date = self._pending_selection_detail_date or self.calendar.selectedDate()
+        current_path = self._pending_selection_detail_path
+        self._pending_selection_detail_date = None
+        self._pending_selection_detail_path = None
+        self._apply_multi_selection_formats()
+        if self._journal_tree_enabled and date and date.isValid():
+            self._expand_to_date(date)
+            self._update_day_listing(date)
+        self._update_insights_for_selection(current_path)
+        self._update_today_visibility()
+        self._sync_aux_calendars()
+
+    def _move_calendar_selection(self, offset_days: int, *, extend_range: bool = False) -> bool:
+        current = self.calendar.selectedDate()
+        if not current or not current.isValid():
+            return False
+        target = current.addDays(int(offset_days))
+        if not target or not target.isValid() or target == current:
+            return False
+        self.calendar.setSelectedDate(target)
+        if extend_range:
+            anchor = self._selection_anchor if self._selection_anchor and self._selection_anchor.isValid() else current
+            self._set_range_selection(anchor, target)
+        else:
+            self._set_single_selection(target)
+        self._schedule_selection_detail_refresh(target)
+        return True
+
+    def _jump_calendar_to_today(self) -> bool:
+        today = QDate.currentDate()
+        if not today or not today.isValid():
+            return False
+        if self.calendar.selectedDate() == today and self.multi_selected_dates == {today}:
+            return False
+        self.calendar.setSelectedDate(today)
+        self._set_single_selection(today)
+        self._schedule_selection_detail_refresh(today)
+        return True
+
+    def _insight_target_lists(self) -> list[QListWidget]:
+        targets: list[QListWidget] = []
+        if getattr(self, "headings_list", None) and self.headings_list.isVisible():
+            targets.append(self.headings_list)
+        if getattr(self, "subpage_list", None):
+            targets.append(self.subpage_list)
+        return [widget for widget in targets if widget is not None]
+
+    def _ensure_insight_current_item(self, widget: Optional[QListWidget]) -> bool:
+        if not widget or not widget.isVisible() or widget.count() <= 0:
+            return False
+        current = widget.currentItem()
+        if current is None:
+            widget.setCurrentRow(0)
+            current = widget.currentItem()
+        if current is not None:
+            widget.scrollToItem(current)
+            return True
+        return False
+
+    def focus_insight_area(self) -> bool:
+        for widget in self._insight_target_lists():
+            if self._ensure_insight_current_item(widget):
+                widget.setFocus(Qt.OtherFocusReason)
+                return True
+        return False
+
+    def focus_calendar_input(self) -> bool:
+        target = self.calendar_view if self.calendar_view and Shiboken.isValid(self.calendar_view) else None
+        if target is None:
+            target = self.calendar
+        try:
+            target.setFocus(Qt.OtherFocusReason)
+            return True
+        except Exception:
+            return False
+
+    def _switch_insight_column(self, widget: QListWidget, direction: int) -> bool:
+        targets = self._insight_target_lists()
+        if widget not in targets:
+            return False
+        if len(targets) <= 1:
+            return False
+        index = targets.index(widget)
+        next_index = index + (1 if direction > 0 else -1)
+        if next_index < 0 or next_index >= len(targets):
+            return False
+        target = targets[next_index]
+        if not self._ensure_insight_current_item(target):
+            return False
+        source_row = widget.currentRow()
+        if source_row >= 0 and source_row < target.count():
+            target.setCurrentRow(source_row)
+        target.setFocus(Qt.OtherFocusReason)
+        return True
+
+    def _move_insight_row(self, widget: QListWidget, delta: int) -> bool:
+        if not self._ensure_insight_current_item(widget):
+            return False
+        row = widget.currentRow()
+        target_row = max(0, min(widget.count() - 1, row + delta))
+        if target_row == row:
+            return False
+        widget.setCurrentRow(target_row)
+        current = widget.currentItem()
+        if current is not None:
+            widget.scrollToItem(current)
+        return True
+
     def _refresh_signature(self) -> tuple:
         selected_dates = tuple(sorted(d.toJulianDay() for d in self.multi_selected_dates if d and d.isValid()))
         selected = self.calendar.selectedDate()
@@ -1142,13 +1277,7 @@ class CalendarPanel(QWidget):
         try:
             self.calendar.setSelectedDate(target)
             self._set_single_selection(target)
-            self._update_calendar_dates(year, month)
-            if self._journal_tree_enabled:
-                self._expand_to_date(target)
-                self._update_day_listing(target)
-            self._apply_multi_selection_formats()
-            self._update_insights_for_selection()
-            self._update_today_visibility()
+            self._schedule_selection_detail_refresh(target)
         finally:
             self._suppress_task_filter_sync = False
 
@@ -1157,7 +1286,7 @@ class CalendarPanel(QWidget):
         # If a multi-day filter is active, do not change the calendar selection
         if len(self.multi_selected_dates) > 1:
             # only update insight selection highlight
-            self._update_insights_for_selection(rel_path)
+            self._schedule_selection_detail_refresh(current_path=rel_path)
             return
         if not rel_path or "Journal" not in rel_path:
             return
@@ -1184,8 +1313,7 @@ class CalendarPanel(QWidget):
             # Defer selection to ensure day listing is populated
             from PySide6.QtCore import QTimer
             self._single_shot_ui(10, lambda: self._select_subpage_item(y, m, d, sub_name, rel_path))
-        # Update insights list selection
-        self._update_insights_for_selection(rel_path)
+        self._schedule_selection_detail_refresh(QDate(y, m, d), current_path=rel_path)
 
     def _adjust_font_size(self, delta: int) -> None:
         """Adjust panel font size (Ctrl +/-) in tabs or popup windows."""
@@ -2104,11 +2232,7 @@ class CalendarPanel(QWidget):
 
     def _on_month_changed(self, year: int, month: int) -> None:
         self._update_calendar_dates(year, month)
-        if self._journal_tree_enabled:
-            self._update_day_listing(self.calendar.selectedDate())
-        self._apply_multi_selection_formats()
-        self._sync_aux_calendars()
-        self._update_insights_for_selection()
+        self._schedule_selection_detail_refresh(self.calendar.selectedDate())
         if not self._suppress_task_filter_sync:
             try:
                 if self._task_date_filter_setter:
@@ -2146,67 +2270,14 @@ class CalendarPanel(QWidget):
             # Shift+Click: select range from anchor to this date
             anchor = self._selection_anchor if self._selection_anchor and self._selection_anchor.isValid() else date
             self._set_range_selection(anchor, date)
-            print(f"[CALENDAR] _on_date_clicked Shift+Click: Range {anchor.toString('yyyy-MM-dd')} -> {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
             self._pending_shift_click = False
         else:
             # Regular click: select only this date (clear previous selection)
             self._set_single_selection(date)
-            print(f"[CALENDAR] _on_date_clicked Click: Selected only {date.toString('yyyy-MM-dd')}")
-        
-        self._apply_multi_selection_formats()
-        if self._journal_tree_enabled:
-            self._expand_to_date(date)
-            self._update_day_listing(date)
-        self._update_insights_for_selection()
-        self._update_today_visibility()
-        self._sync_aux_calendars()
-        self._debug_log_calendar_resolution(date)
+
         if not is_shift:
             self.dateActivated.emit(date.year(), date.month(), date.day())
-
-    def _debug_log_calendar_resolution(self, clicked_date: QDate) -> None:
-        view = getattr(self, "calendar_view", None)
-        if not view or not Shiboken.isValid(view):
-            print("[CALENDAR_DEBUG] calendar_view missing/invalid")
-            return
-        model = view.model()
-        if model is None:
-            print("[CALENDAR_DEBUG] calendar model missing")
-            return
-        current = view.currentIndex()
-        selected = self.calendar.selectedDate()
-        print(
-            "[CALENDAR_DEBUG] click="
-            f"{clicked_date.toString('yyyy-MM-dd')} "
-            f"calendar.selected={selected.toString('yyyy-MM-dd')} "
-            f"view.current=({current.row()},{current.column()}) "
-            f"yearShown={self.calendar.yearShown()} monthShown={self.calendar.monthShown()}"
-        )
-        target_day = clicked_date.day()
-        rows = model.rowCount()
-        cols = model.columnCount()
-        for r in range(rows):
-            for c in range(cols):
-                idx = model.index(r, c)
-                disp = idx.data(int(Qt.ItemDataRole.DisplayRole))
-                if disp != target_day:
-                    continue
-                resolved, role = self.calendar_delegate._date_for_index_with_role(idx)
-                is_selected = any(
-                    d.isValid()
-                    and resolved.isValid()
-                    and d.year() == resolved.year()
-                    and d.month() == resolved.month()
-                    and d.day() == resolved.day()
-                    for d in self.multi_selected_dates
-                )
-                print(
-                    "[CALENDAR_DEBUG] cell "
-                    f"r={r} c={c} display={disp} "
-                    f"resolved={resolved.toString('yyyy-MM-dd') if resolved.isValid() else 'INVALID'} "
-                    f"role={role} "
-                    f"in_multi={is_selected}"
-                )
+        self._schedule_selection_detail_refresh(date)
 
     def _selected_dates_for_tasks(self) -> list[QDate]:
         if self.multi_selected_dates:
@@ -2453,8 +2524,13 @@ class CalendarPanel(QWidget):
 
     def _attach_calendar_view(self) -> None:
         """Find and attach to the internal calendar view for mouse tracking."""
-        if self.calendar_view and Shiboken.isValid(self.calendar_view) and self.calendar_view.viewport():
-            self.calendar_view.viewport().removeEventFilter(self)
+        if self.calendar_view and Shiboken.isValid(self.calendar_view):
+            try:
+                self.calendar_view.removeEventFilter(self)
+            except Exception:
+                pass
+            if self.calendar_view.viewport():
+                self.calendar_view.viewport().removeEventFilter(self)
 
         view = (
             self.calendar.findChild(QTableView, "qt_calendar_calendarview")
@@ -2463,6 +2539,8 @@ class CalendarPanel(QWidget):
         self.calendar_view = view
         if self.calendar_view and Shiboken.isValid(self.calendar_view) and self.calendar_view.viewport():
             self.calendar_view.setSelectionMode(QAbstractItemView.NoSelection)
+            self.calendar_view.setFocusPolicy(Qt.StrongFocus)
+            self.calendar_view.installEventFilter(self)
             self.calendar_view.viewport().installEventFilter(self)
             self.calendar_view.viewport().setMouseTracking(True)
             # Install the custom delegate for multi-selection highlighting
@@ -2599,12 +2677,98 @@ class CalendarPanel(QWidget):
                     self._open_task_item(current)
                     event.accept()
                     return True
-        # Handle calendar widget events to detect shift-click
-        if obj is self.calendar:
-            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+        if obj in (getattr(self, "headings_list", None), getattr(self, "subpage_list", None)) and event.type() == QEvent.KeyPress:
+            list_widget = obj
+            if event.key() == Qt.Key_Escape:
+                if self.focus_calendar_input():
+                    event.accept()
+                    return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                current = list_widget.currentItem() if list_widget else None
+                if current and current.data(PATH_ROLE):
+                    if event.modifiers() & Qt.ControlModifier:
+                        self._mark_activation_source("keyboard_keep_panel")
+                    else:
+                        self._mark_activation_source("keyboard")
+                    self._open_insight_link(current)
+                    event.accept()
+                    return True
+            key_map = {
+                Qt.Key_Left: ("column", -1),
+                Qt.Key_Right: ("column", 1),
+                Qt.Key_Up: ("row", -1),
+                Qt.Key_Down: ("row", 1),
+            }
+            if self._is_vi_mode() and not event.modifiers():
+                key_map.update(
+                    {
+                        Qt.Key_H: ("column", -1),
+                        Qt.Key_L: ("column", 1),
+                        Qt.Key_K: ("row", -1),
+                        Qt.Key_J: ("row", 1),
+                    }
+                )
+            if event.key() in key_map:
+                kind, value = key_map[event.key()]
+                handled = False
+                if kind == "column":
+                    handled = self._switch_insight_column(list_widget, value)
+                else:
+                    handled = self._move_insight_row(list_widget, value)
+                if handled:
+                    event.accept()
+                    return True
+        # Handle calendar widget and its internal view consistently.
+        if obj in (
+            self.calendar,
+            self.calendar_view,
+            self.calendar_view.viewport() if self.calendar_view and Shiboken.isValid(self.calendar_view) and self.calendar_view.viewport() else None,
+        ):
+            if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                selected = self.calendar.selectedDate()
+                if selected and selected.isValid():
+                    if event.modifiers() & Qt.ControlModifier:
+                        self._mark_activation_source("keyboard_keep_panel")
+                    else:
+                        self._mark_activation_source("keyboard")
+                    self.dateActivated.emit(selected.year(), selected.month(), selected.day())
+                    event.accept()
+                    return True
+            if event.type() == QEvent.KeyPress:
+                if event.key() == Qt.Key_Slash and not event.modifiers():
+                    if self.focus_insight_area():
+                        event.accept()
+                        return True
+                if event.key() == Qt.Key_T and not event.modifiers():
+                    self._jump_calendar_to_today()
+                    event.accept()
+                    return True
+                offsets = {
+                    Qt.Key_Left: -1,
+                    Qt.Key_Right: 1,
+                    Qt.Key_Up: -7,
+                    Qt.Key_Down: 7,
+                }
+                modifiers = event.modifiers()
+                if self._is_vi_mode() and not (modifiers & ~(Qt.ShiftModifier)):
+                    offsets.update(
+                        {
+                            Qt.Key_H: -1,
+                            Qt.Key_L: 1,
+                            Qt.Key_K: -7,
+                            Qt.Key_J: 7,
+                        }
+                    )
+                if event.key() in offsets:
+                    self._move_calendar_selection(
+                        offsets[event.key()],
+                        extend_range=bool(modifiers & Qt.ShiftModifier),
+                    )
+                    event.accept()
+                    return True
+            if obj is self.calendar and event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 if event.modifiers() & Qt.ShiftModifier:
                     self._pending_shift_click = True
-                    print(f"[CALENDAR] Shift key detected on calendar click")
                 else:
                     self._pending_shift_click = False
         
@@ -2622,20 +2786,15 @@ class CalendarPanel(QWidget):
                         # Shift+Click: select range from anchor to this date
                         anchor = self._selection_anchor if self._selection_anchor and self._selection_anchor.isValid() else date
                         self._set_range_selection(anchor, date)
-                        print(f"[CALENDAR] Viewport Shift+Click: Range {anchor.toString('yyyy-MM-dd')} -> {date.toString('yyyy-MM-dd')}, total selected: {len(self.multi_selected_dates)}")
                     else:
                         # Regular click: select only this date (clear previous selection)
                         self._set_single_selection(date)
-                        print(f"[CALENDAR] Viewport Click: Selected only {date.toString('yyyy-MM-dd')}")
                     
                     self.calendar.setSelectedDate(date)
                     self._suppress_next_click = True
-                    self._apply_multi_selection_formats()
-                    self._update_day_listing(date)
-                    self._update_insights_for_selection()
-                    self._debug_log_calendar_resolution(date)
                     if not is_shift:
                         self.dateActivated.emit(date.year(), date.month(), date.day())
+                    self._schedule_selection_detail_refresh(date)
                     return True
             # Double-click: open/create day's page and remove any multi-day filter
             if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
@@ -2647,9 +2806,7 @@ class CalendarPanel(QWidget):
                         self.calendar.setSelectedDate(date)
                         if hasattr(self, "filter_btn"):
                             self.filter_btn.setVisible(False)
-                        self._apply_multi_selection_formats()
-                        self._update_day_listing(date)
-                        self._update_insights_for_selection()
+                        self._schedule_selection_detail_refresh(date)
                     except Exception:
                         pass
                     # Ensure day page exists and open it

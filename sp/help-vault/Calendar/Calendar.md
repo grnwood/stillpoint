@@ -30,10 +30,14 @@ Common date format in tasks/journal context:
 
 ## Creating Dated Notes
 - Open today quickly with `Alt+D`.
+- Open the date-jump popup with `Ctrl+Alt+D` from the main editor.
 - Open or create entries for specific dates from the calendar.
 - Add notes, tasks, links, and subpages for that day.
 - Use the Tasks tab to schedule quickly: click date cells to set/update start and due dates.
 - Filter tasks by range and context so planning stays focused on the selected dates.
+
+## Keyboard Navigation
+Calendar works well without the mouse. Use arrow keys to move the selected day, then press `Enter` to open that journal page and focus the editor, or `Ctrl+Enter` to open it while staying in Calendar. In vi mode, `h/j/k/l` provide the same movement, `Shift` with arrows or vi keys extends a multi-day range, `t` jumps to today, `/` moves focus into the headings and subpages lists, and `Esc` returns focus to the calendar grid. If you already know the target date, press `Ctrl+Alt+D` from the main editor to pop open a compact calendar and jump straight there.
 
 ## Journaling
 Use the calendar for daily journaling:

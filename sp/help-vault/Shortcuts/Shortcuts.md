@@ -7,6 +7,7 @@ These shortcuts will speed up your workflow:
 - `Ctrl+S`: Save the current page
 - `Ctrl+N`: Create a new page
 - `Ctrl+J`: Open a page (jump to page)
+- `Ctrl+Alt+D`: Open the journal date jump popup
 - `Ctrl+Alt+J`: Open bookmarked pages picker
 - `Ctrl+Shift+S`: Save all open pages
 
@@ -33,6 +34,13 @@ These shortcuts will speed up your workflow:
 - `Ctrl+L`: Insert link
 - `Ctrl+Shift+L`: Insert link to new page
 
+### Calendar
+- `Alt+D`: Open today's journal page
+- `Ctrl+Alt+D`: Open the jump-to-journal-date calendar popup
+- In the Calendar tab, arrow keys move the selected day and `Enter` opens that day in the editor
+- `Ctrl+Enter` opens the selected day but keeps focus in the Calendar panel
+- In vi mode, `h/j/k/l` also navigate the calendar, `Shift` plus arrows or vi keys extends a date range, `t` jumps to today, `/` moves into headings and subpages, and `Esc` returns focus to the calendar grid
+
 ### Tasks
 - `F12`: Toggle task completion
 - `Ctrl+\`: Focus tasks search
@@ -44,7 +52,6 @@ These shortcuts will speed up your workflow:
 - `F11`: Toggle fullscreen
 
 ### Special
-- `Alt+D`: Open today's journal page
 - `Ctrl+.`: Open preferences
 - `Ctrl+Shift+F`: Search across all pages
 

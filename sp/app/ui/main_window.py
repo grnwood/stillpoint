@@ -860,7 +860,7 @@ from .new_page_dialog import NewPageDialog
 from .folder_template_dialog import FolderTemplateDialog
 from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
-from .date_insert_dialog import DateInsertDialog
+from .date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
 from .open_vault_dialog import OpenVaultDialog
 from .vault_preferences_dialog import VaultPreferencesDialog
 from .quick_capture_overlay import QuickCaptureOverlay
@@ -2636,6 +2636,10 @@ class MainWindow(QMainWindow):
         jump_action.setToolTip("Jump to a page (Ctrl+J)")
         jump_action.triggered.connect(self._jump_to_page)
         go_menu.addAction(jump_action)
+        jump_date_action = QAction("Jump To Journal Date… (Ctrl+Alt+D)", self)
+        jump_date_action.setToolTip("Open a journal date picker (Ctrl+Alt+D)")
+        jump_date_action.triggered.connect(self._jump_to_journal_date)
+        go_menu.addAction(jump_date_action)
         jump_bookmark_action = QAction("Jump To Bookmark… (Ctrl+Alt+J)", self)
         jump_bookmark_action.setToolTip("Jump to a bookmarked page (Ctrl+Alt+J)")
         jump_bookmark_action.triggered.connect(self._jump_to_bookmark)
@@ -3130,6 +3134,9 @@ class MainWindow(QMainWindow):
         zoom_out.activated.connect(lambda: self._adjust_font_size(-1))
         jump_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
         jump_shortcut.activated.connect(self._jump_to_page)
+        jump_date_shortcut = QShortcut(QKeySequence("Ctrl+Alt+D"), self)
+        jump_date_shortcut.setContext(Qt.ApplicationShortcut)
+        jump_date_shortcut.activated.connect(self._jump_to_journal_date)
         jump_bookmark_shortcut = QShortcut(QKeySequence("Ctrl+Alt+J"), self)
         jump_bookmark_shortcut.setContext(Qt.ApplicationShortcut)
         jump_bookmark_shortcut.activated.connect(self._jump_to_bookmark)
@@ -12007,6 +12014,25 @@ class MainWindow(QMainWindow):
                 restore_cursor.insertText(text)
                 self.editor.setTextCursor(restore_cursor)
                 self.statusBar().showMessage(f"Inserted date: {text}", 3000)
+
+    def _jump_to_journal_date(self) -> None:
+        """Show a compact calendar popup and open the selected journal day."""
+        if not self.vault_root:
+            self._alert("Select a vault before jumping to journal dates.")
+            return
+        cursor_rect = self.editor.cursorRect()
+        anchor = self.editor.viewport().mapToGlobal(cursor_rect.bottomRight() + QPoint(0, 4))
+        dlg = JournalDateJumpDialog(
+            self,
+            anchor_pos=anchor,
+            use_vi_keys=bool(getattr(self, "_vi_enabled", False)),
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = dlg.selected_qdate()
+        if not selected or not selected.isValid():
+            return
+        self._open_journal_date(selected.year(), selected.month(), selected.day())
         
 
     def _copy_current_page_link(self) -> None:
@@ -13099,6 +13125,16 @@ class MainWindow(QMainWindow):
         """Open a page from the Calendar tab without changing tabs."""
         if not path:
             return
+        focused_widget = self.focusWidget()
+        activation_source = None
+        sender = self.sender()
+        try:
+            if hasattr(sender, "consume_activation_source"):
+                activation_source = sender.consume_activation_source()
+            if activation_source is None and hasattr(sender, "calendar_panel") and hasattr(sender.calendar_panel, "consume_activation_source"):
+                activation_source = sender.calendar_panel.consume_activation_source()
+        except Exception:
+            activation_source = None
         # Handle possible anchor fragment in calendar links
         base, anchor = self._split_link_anchor(path)
         norm = self._normalize_editor_path(base)
@@ -13109,12 +13145,54 @@ class MainWindow(QMainWindow):
             self._scroll_to_anchor_slug(slug)
         except Exception:
             pass
-        # Keep the Calendar tab active and return focus to its tree
+        # Keep the Calendar tab active and restore focus according to activation mode.
         try:
             self.right_panel.tabs.setCurrentWidget(self.right_panel.calendar_panel)
-            self.right_panel.calendar_panel.journal_tree.setFocus(Qt.OtherFocusReason)
         except Exception:
             pass
+        if activation_source == "keyboard_keep_panel":
+            target_focus_widget = None
+            if sender is not None:
+                try:
+                    if hasattr(sender, "calendar_panel") and getattr(sender.calendar_panel, "headings_list", None) and sender.calendar_panel.headings_list.hasFocus():
+                        target_focus_widget = sender.calendar_panel.headings_list
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and hasattr(sender, "calendar_panel") and getattr(sender.calendar_panel, "subpage_list", None) and sender.calendar_panel.subpage_list.hasFocus():
+                        target_focus_widget = sender.calendar_panel.subpage_list
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and getattr(sender, "headings_list", None) and sender.headings_list.hasFocus():
+                        target_focus_widget = sender.headings_list
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and getattr(sender, "subpage_list", None) and sender.subpage_list.hasFocus():
+                        target_focus_widget = sender.subpage_list
+                except Exception:
+                    pass
+            if target_focus_widget is None:
+                target_focus_widget = focused_widget
+
+            def _restore_panel_focus() -> None:
+                try:
+                    if target_focus_widget is not None:
+                        target_focus_widget.setFocus(Qt.OtherFocusReason)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _restore_panel_focus)
+        elif activation_source == "keyboard":
+            try:
+                self._exit_vi_insert_on_activate()
+            except Exception:
+                pass
+            try:
+                self.editor.setFocus(Qt.OtherFocusReason)
+            except Exception:
+                pass
 
     def _refresh_detached_link_panels(self, path: Optional[str]) -> None:
         """Keep detached Link Navigator windows in sync with the current page."""
@@ -14146,6 +14224,16 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             self._alert("Select a vault before creating journal entries.")
             return
+        focused_widget = self.focusWidget()
+        activation_source = None
+        sender = self.sender()
+        try:
+            if hasattr(sender, "consume_activation_source"):
+                activation_source = sender.consume_activation_source()
+            if activation_source is None and hasattr(sender, "calendar_panel") and hasattr(sender.calendar_panel, "consume_activation_source"):
+                activation_source = sender.calendar_panel.consume_activation_source()
+        except Exception:
+            activation_source = None
         
         # Format paths: Journal/YYYY/MM/DD/DD.txt
         month_str = f"{month:02d}"
@@ -14162,13 +14250,41 @@ class MainWindow(QMainWindow):
         if file_exists:
             # File exists, open it normally
             self._pending_selection = rel_path
-            self._populate_vault_tree()
-            self._open_file(rel_path)
+            self._open_file(rel_path, sync_calendar=False)
         else:
             # File doesn't exist yet - open virtual page
             self._open_virtual_journal_page(rel_path, year, month, day)
         
-        self.editor.setFocus()
+        if activation_source == "keyboard_keep_panel":
+            target_focus_widget = None
+            if sender is not None:
+                try:
+                    if hasattr(sender, "calendar_panel") and getattr(sender.calendar_panel, "calendar", None):
+                        target_focus_widget = sender.calendar_panel.calendar
+                except Exception:
+                    pass
+                try:
+                    if target_focus_widget is None and getattr(sender, "calendar", None):
+                        target_focus_widget = sender.calendar
+                except Exception:
+                    pass
+            if target_focus_widget is None:
+                target_focus_widget = focused_widget
+
+            def _restore_calendar_focus() -> None:
+                try:
+                    if target_focus_widget is not None:
+                        target_focus_widget.setFocus(Qt.OtherFocusReason)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _restore_calendar_focus)
+        else:
+            try:
+                self._exit_vi_insert_on_activate()
+            except Exception:
+                pass
+            self.editor.setFocus()
         self._apply_focus_borders()
     
     def _open_virtual_journal_page(self, rel_path: str, year: int, month: int, day: int) -> None:
@@ -14923,10 +15039,10 @@ class MainWindow(QMainWindow):
             for i in range(self.right_panel.tabs.count()):
                 if self.right_panel.tabs.widget(i) == self.right_panel.calendar_panel:
                     self.right_panel.tabs.setCurrentIndex(i)
-                    try:
-                        self.right_panel.calendar_panel.calendar.setFocus(Qt.ShortcutFocusReason)
-                    except Exception:
-                        pass
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.right_panel.calendar_panel.calendar.setFocus(Qt.ShortcutFocusReason)
+                    )
                     break
         except Exception:
             pass

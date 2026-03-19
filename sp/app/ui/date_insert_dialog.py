@@ -9,6 +9,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QDate, QPoint, QEvent
 from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCalendarWidget,
     QCheckBox,
     QDialog,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QPushButton,
     QMessageBox,
+    QTableView,
 )
 
 WEEKDAY_MAP = {
@@ -438,5 +440,146 @@ class DateInsertDialog(QDialog):
                     return True
             if key in (Qt.Key_Return, Qt.Key_Enter) and self._accept_on_enter:
                 self._try_accept()
+                return True
+        return super().eventFilter(obj, event)
+
+
+class JournalDateJumpDialog(QDialog):
+    """Compact popup for jumping the editor to a journal date."""
+
+    def __init__(self, parent=None, anchor_pos=None, *, use_vi_keys: bool = False) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Jump To Journal Date")
+        self.setModal(True)
+        self.resize(300, 280)
+        self._use_vi_keys = use_vi_keys
+        self._calendar_view: QTableView | None = None
+
+        layout = QVBoxLayout(self)
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        try:
+            self.calendar.setDateEditEnabled(False)
+        except Exception:
+            pass
+        self.calendar.setFocusPolicy(Qt.StrongFocus)
+        self.calendar.installEventFilter(self)
+        self.calendar.clicked.connect(self._accept_from_calendar)
+        self.calendar.activated.connect(self._accept_from_calendar)
+        layout.addWidget(self.calendar, 1)
+
+        hint = QLabel("Arrows or vi keys move. Enter or click opens the day. Esc closes.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._attach_calendar_view()
+        self.calendar.setSelectedDate(QDate.currentDate())
+        self.calendar.setFocus(Qt.OtherFocusReason)
+
+        if anchor_pos is not None:
+            self.adjustSize()
+            self.move(self._clamp_to_screen(anchor_pos))
+
+    def _clamp_to_screen(self, pos: QPoint) -> QPoint:
+        screen = QGuiApplication.screenAt(pos)
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return pos
+        geom = screen.availableGeometry()
+        size = self.sizeHint()
+        max_x = geom.right() - size.width() + 1
+        max_y = geom.bottom() - size.height() + 1
+        x = min(max(pos.x(), geom.left()), max_x)
+        y = min(max(pos.y(), geom.top()), max_y)
+        return QPoint(x, y)
+
+    def selected_qdate(self) -> QDate:
+        return QDate(self.calendar.selectedDate())
+
+    def _attach_calendar_view(self) -> None:
+        if self._calendar_view is not None:
+            try:
+                self._calendar_view.removeEventFilter(self)
+            except Exception:
+                pass
+            try:
+                if self._calendar_view.viewport():
+                    self._calendar_view.viewport().removeEventFilter(self)
+            except Exception:
+                pass
+        view = (
+            self.calendar.findChild(QTableView, "qt_calendar_calendarview")
+            or next(iter(self.calendar.findChildren(QTableView)), None)
+        )
+        self._calendar_view = view
+        if self._calendar_view is not None:
+            try:
+                self._calendar_view.setSelectionMode(QAbstractItemView.NoSelection)
+                self._calendar_view.setFocusPolicy(Qt.StrongFocus)
+                self._calendar_view.installEventFilter(self)
+                if self._calendar_view.viewport():
+                    self._calendar_view.viewport().installEventFilter(self)
+            except Exception:
+                pass
+
+    def _move_selection(self, delta_days: int) -> bool:
+        current = self.calendar.selectedDate()
+        if not current or not current.isValid():
+            current = QDate.currentDate()
+        target = current.addDays(int(delta_days))
+        if not target or not target.isValid() or target == current:
+            return False
+        self.calendar.setSelectedDate(target)
+        return True
+
+    def _jump_to_today(self) -> bool:
+        today = QDate.currentDate()
+        if not today or not today.isValid():
+            return False
+        if self.calendar.selectedDate() == today:
+            return False
+        self.calendar.setSelectedDate(today)
+        return True
+
+    def _accept_from_calendar(self, qd: QDate) -> None:
+        if qd and qd.isValid():
+            self.calendar.setSelectedDate(qd)
+        self.accept()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj in (
+            self.calendar,
+            self._calendar_view,
+            self._calendar_view.viewport() if self._calendar_view and self._calendar_view.viewport() else None,
+        ) and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self.reject()
+                return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.accept()
+                return True
+            if event.key() == Qt.Key_T and not event.modifiers():
+                self._jump_to_today()
+                return True
+            offsets = {
+                Qt.Key_Left: -1,
+                Qt.Key_Right: 1,
+                Qt.Key_Up: -7,
+                Qt.Key_Down: 7,
+            }
+            if self._use_vi_keys and not event.modifiers():
+                offsets.update(
+                    {
+                        Qt.Key_H: -1,
+                        Qt.Key_L: 1,
+                        Qt.Key_K: -7,
+                        Qt.Key_J: 7,
+                    }
+                )
+            if event.key() in offsets:
+                self._move_selection(offsets[event.key()])
                 return True
         return super().eventFilter(obj, event)
