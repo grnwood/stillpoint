@@ -1480,6 +1480,254 @@ class NavTreeDelegate(QStyledItemDelegate):
         _log_sorting(f"[TREE DRAG] Drag completed with result={result}")
 
 
+class QuickVaultPicker(QWidget):
+    pageChosen = Signal(str)
+
+    def __init__(self, host: "MainWindow", parent=None) -> None:
+        super().__init__(parent or host, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self._host = host
+        self._signals_connected = False
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        selected_bg = theme_value(
+            "main_window.picker_popup.list_selected_bg",
+            "rgba(90,161,255,80)",
+        )
+        accent = getattr(self._host, "_vault_accent_color", None)
+        if accent:
+            selected_bg = self._host._selection_bg_for_accent(accent)
+        self.setStyleSheet(
+            "QWidget { background: "
+            f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLabel { border: none; font-weight: bold; }"
+            "QTreeView { background: transparent; color: "
+            f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }"
+            "QTreeView::item { padding: 4px 6px; }"
+            "QTreeView::item:selected { background: "
+            f"{selected_bg}; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        self._label = QLabel("Vault index", self)
+        layout.addWidget(self._label)
+        self.tree = QTreeView(self)
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(12)
+        self.tree.setItemDelegate(NavTreeDelegate(self.tree))
+        self.tree.setExpandsOnDoubleClick(False)
+        self.tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tree.setRootIsDecorated(True)
+        self.tree.doubleClicked.connect(lambda idx: self._activate_index(idx))
+        layout.addWidget(self.tree, 1)
+
+    def sync_from_host(self) -> None:
+        self.tree.setModel(self._host.tree_model)
+        self._disconnect_tree_state_signals()
+        self.tree.expanded.connect(self._on_index_expanded)
+        self.tree.collapsed.connect(self._on_index_collapsed)
+        self._signals_connected = True
+        self.tree.viewport().installEventFilter(self)
+        self.tree.installEventFilter(self)
+
+    def open_at(self, global_pos=None, prefer_above: bool = False) -> None:
+        self.sync_from_host()
+        self._expand_visible_state()
+        current_path = self._host.current_path
+        if current_path:
+            try:
+                self._host._ensure_tree_path_loaded(current_path)
+            except Exception:
+                pass
+            idx = self._index_for_path(current_path)
+            if idx.isValid():
+                self._expand_ancestors(idx)
+                self.tree.setCurrentIndex(idx)
+                self.tree.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        editor_rect = self._host.editor.rect()
+        top_left = self._host.editor.mapToGlobal(editor_rect.topLeft())
+        popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
+        popup_height = max(260, int(editor_rect.height() * 0.65))
+        screen = QApplication.primaryScreen().availableGeometry()
+        center = self._host.editor.mapToGlobal(editor_rect.center())
+        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
+        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        self.resize(popup_width, popup_height)
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.tree.setFocus(Qt.OtherFocusReason)
+
+    def _disconnect_tree_state_signals(self) -> None:
+        if not self._signals_connected:
+            return
+        self.tree.expanded.disconnect(self._on_index_expanded)
+        self.tree.collapsed.disconnect(self._on_index_collapsed)
+        self._signals_connected = False
+
+    def _expand_visible_state(self) -> None:
+        for path in getattr(self._host, "_expanded_paths", set()):
+            idx = self._index_for_path(path)
+            if idx.isValid():
+                self.tree.expand(idx)
+
+    def _expand_ancestors(self, index: QModelIndex) -> None:
+        parent = index.parent()
+        while parent.isValid():
+            self.tree.expand(parent)
+            parent = parent.parent()
+
+    def _index_for_path(self, target: Optional[str]) -> QModelIndex:
+        if not target:
+            return QModelIndex()
+        item = self._host._find_item(self._host.tree_model.invisibleRootItem(), target)
+        return item.index() if item else QModelIndex()
+
+    def _activate_index(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        open_target = index.data(OPEN_ROLE)
+        target = open_target or index.data(PATH_ROLE)
+        if not target:
+            return
+        if bool(index.data(TYPE_ROLE)) and not open_target:
+            return
+        self.pageChosen.emit(str(target))
+        self.hide()
+
+    def _move_selection(self, delta: int) -> None:
+        indexes = self._gather_visible_indexes()
+        if not indexes:
+            return
+        current = self.tree.currentIndex()
+        try:
+            pos = indexes.index(current)
+        except ValueError:
+            pos = 0
+        pos = max(0, min(len(indexes) - 1, pos + delta))
+        target = indexes[pos]
+        if target.isValid():
+            self.tree.setCurrentIndex(target)
+            self.tree.scrollTo(target, QAbstractItemView.PositionAtCenter)
+
+    def _gather_visible_indexes(self) -> list[QModelIndex]:
+        model = self.tree.model()
+        if model is None:
+            return []
+        flat: list[QModelIndex] = []
+
+        def recurse(parent_index: QModelIndex) -> None:
+            rows = model.rowCount(parent_index)
+            for row in range(rows):
+                idx = model.index(row, 0, parent_index)
+                if not idx.isValid():
+                    continue
+                if not (idx.data(PATH_ROLE) or idx.data(OPEN_ROLE)):
+                    continue
+                flat.append(idx)
+                if self.tree.isExpanded(idx):
+                    recurse(idx)
+
+        recurse(QModelIndex())
+        return flat
+
+    def _move_right(self) -> None:
+        idx = self.tree.currentIndex()
+        if not idx.isValid():
+            return
+        model = self.tree.model()
+        if model is None:
+            return
+        if bool(idx.data(TYPE_ROLE)):
+            if model.rowCount(idx) > 0:
+                if not self.tree.isExpanded(idx):
+                    self.tree.expand(idx)
+                    self._on_index_expanded(idx)
+                else:
+                    child = model.index(0, 0, idx)
+                    if child.isValid():
+                        self.tree.setCurrentIndex(child)
+                        self.tree.scrollTo(child, QAbstractItemView.PositionAtCenter)
+
+    def _move_left(self) -> None:
+        idx = self.tree.currentIndex()
+        if not idx.isValid():
+            return
+        if self.tree.isExpanded(idx):
+            self.tree.collapse(idx)
+            return
+        parent = idx.parent()
+        if parent.isValid():
+            self.tree.setCurrentIndex(parent)
+            self.tree.scrollTo(parent, QAbstractItemView.PositionAtCenter)
+
+    def _collapse_all(self) -> None:
+        self.tree.collapseAll()
+        model = self.tree.model()
+        if model is None:
+            return
+        top = model.index(0, 0)
+        if top.isValid():
+            self.tree.setCurrentIndex(top)
+            self.tree.scrollTo(top, QAbstractItemView.PositionAtCenter)
+
+    def _on_index_expanded(self, index: QModelIndex) -> None:
+        item = self._host.tree_model.itemFromIndex(index)
+        if not item:
+            return
+        path = self._host._normalize_tree_path(item.data(PATH_ROLE))
+        if path:
+            self._host._load_children_for_path(item, path)
+
+    def _on_index_collapsed(self, index: QModelIndex) -> None:
+        return None
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj in (self.tree, self.tree.viewport()) and event.type() == QEvent.KeyPress:
+            key = event.key()
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if key == Qt.Key_Escape:
+                self.hide()
+                return True
+            if key in (Qt.Key_Backslash, 0x5C) and mods == Qt.NoModifier:
+                self._collapse_all()
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self._activate_index(self.tree.currentIndex())
+                return True
+            if mods in (Qt.NoModifier, Qt.ControlModifier | Qt.ShiftModifier):
+                if key in (Qt.Key_J, Qt.Key_Down):
+                    self._move_selection(1)
+                    return True
+                if key in (Qt.Key_K, Qt.Key_Up):
+                    self._move_selection(-1)
+                    return True
+                if key in (Qt.Key_L, Qt.Key_Right):
+                    self._move_right()
+                    return True
+                if key in (Qt.Key_M, Qt.Key_H, Qt.Key_Left):
+                    self._move_left()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def hideEvent(self, event):  # type: ignore[override]
+        self._disconnect_tree_state_signals()
+        try:
+            self.tree.viewport().removeEventFilter(self)
+        except Exception:
+            pass
+        try:
+            self.tree.removeEventFilter(self)
+        except Exception:
+            pass
+        super().hideEvent(event)
+
+
 class MenuCommandBar(QWidget):
     """Popup command bar for menu actions."""
 
@@ -1850,6 +2098,7 @@ class MainWindow(QMainWindow):
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
+        self._quick_vault_picker: Optional[QuickVaultPicker] = None
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
         self._hierarchy_last_child_by_parent: dict[str, str] = {}
@@ -2103,6 +2352,7 @@ class MainWindow(QMainWindow):
         self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.editor.aiActionRequested.connect(self._handle_ai_action)
         self.editor.headingPickerRequested.connect(self._show_heading_picker_popup)
+        self.editor.vaultPickerRequested.connect(self._show_quick_vault_picker)
         self.editor.bookmarkPickerRequested.connect(self._jump_to_bookmark)
         self.editor.linkActivated.connect(self._open_link_in_context)
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
@@ -3175,6 +3425,9 @@ class MainWindow(QMainWindow):
         heading_popup = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
         heading_popup.setContext(Qt.WindowShortcut)
         heading_popup.activated.connect(lambda: self._cycle_popup("heading", reverse=False))
+        vault_popup = QShortcut(QKeySequence("Ctrl+Alt+V"), self)
+        vault_popup.setContext(Qt.ApplicationShortcut)
+        vault_popup.activated.connect(self._show_quick_vault_picker)
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         new_page_shortcut.activated.connect(lambda: self._show_new_page_dialog(insert_link_in_editor=False))
         journal_shortcut = QShortcut(QKeySequence("Alt+D"), self)
@@ -4386,13 +4639,24 @@ class MainWindow(QMainWindow):
         user_root = Path.home() / ".stillpoint" / "help-vault"
         user_root.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use existing user copy exactly as-is.
-        if user_root.exists():
+        src_version = self._help_vault_version(src)
+        user_version = self._help_vault_version(user_root) if user_root.exists() else -1
+        if user_root.exists() and user_version >= src_version:
             return user_root
 
-        # First-time seed: raw copy the bundled help vault, including its settings.
+        if user_root.exists():
+            shutil.rmtree(user_root)
         shutil.copytree(src, user_root)
         return user_root
+
+    @staticmethod
+    def _help_vault_version(root: Path) -> int:
+        """Return embedded help-vault version or -1 when missing/invalid."""
+        try:
+            version_path = root / ".stillpoint" / "help_vault_version.txt"
+            return int(version_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            return -1
 
     def _open_help_documentation(self) -> None:
         """Open the built-in help vault in a new StillPoint window."""
@@ -9512,6 +9776,40 @@ class MainWindow(QMainWindow):
         popup.raise_()
         filter_edit.setFocus()
         self._heading_picker = popup
+
+    def _show_quick_vault_picker(self, global_pos=None, prefer_above: bool = False) -> None:
+        """Show a transient vault-index picker centered near the editor cursor."""
+        if not getattr(self, "tree_model", None):
+            return
+        if global_pos is None:
+            cursor_rect = self.editor.cursorRect()
+            viewport = self.editor.viewport()
+            try:
+                prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+            except Exception:
+                prefer_above = False
+            global_pos = viewport.mapToGlobal(cursor_rect.bottomLeft())
+        picker = self._quick_vault_picker
+        if picker is None:
+            picker = QuickVaultPicker(self, self)
+            picker.pageChosen.connect(self._activate_quick_vault_picker_target)
+            self._quick_vault_picker = picker
+        picker.open_at(global_pos, prefer_above=prefer_above)
+
+    def _activate_quick_vault_picker_target(self, target: str) -> None:
+        selected = str(target or "").strip()
+        if not selected:
+            return
+        self._exit_vi_insert_on_activate()
+        self._open_file(selected, add_to_history=True, force=True, restore_history_cursor=True)
+        QTimer.singleShot(0, self._refocus_editor_after_picker)
+
+    def _refocus_editor_after_picker(self) -> None:
+        try:
+            if getattr(self, "editor", None):
+                self.editor.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
 
     def _save_panel_visibility(self) -> None:
         """Persist current left/right panel visibility to config."""

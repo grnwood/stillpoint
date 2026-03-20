@@ -166,3 +166,32 @@ def test_vi_f_opens_bookmark_picker_signal(qapp: QApplication) -> None:
 
     assert fired == [True]
     editor.close()
+
+
+def test_vi_v_opens_vault_picker_signal(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("Example")
+    editor.set_vi_mode_enabled(True)
+
+    fired: list[tuple[object, bool]] = []
+    editor.vaultPickerRequested.connect(lambda point, prefer_above: fired.append((point, prefer_above)))
+
+    QTest.keyClick(editor, Qt.Key_V)
+
+    assert len(fired) == 1
+    editor.close()
+
+
+def test_non_vi_ctrl_alt_v_opens_vault_picker_signal(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("Example")
+
+    fired: list[tuple[object, bool]] = []
+    editor.vaultPickerRequested.connect(lambda point, prefer_above: fired.append((point, prefer_above)))
+
+    QTest.keyClick(editor, Qt.Key_V, Qt.ControlModifier | Qt.AltModifier)
+
+    assert len(fired) == 1
+    editor.close()

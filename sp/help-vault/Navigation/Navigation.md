@@ -27,6 +27,7 @@ The left sidebar shows your vault structure.
 ## Quick Switchers
 - `Ctrl+Tab`: cycle through recent pages so you can jump back to something you were just working on.
 - `Ctrl+Shift+Tab` or `Ctrl+Alt+T`: open/cycle page headings so you can jump to a section in the current page.
+- `Ctrl+Alt+V`: open the quick vault picker so you can browse the current vault tree in an overlay without leaving the editor.
 - These are great when you want to stay in the editor and move without touching the mouse.
 
 Recent pages (`Ctrl+Tab`):
@@ -34,6 +35,13 @@ Recent pages (`Ctrl+Tab`):
 
 Topics/headings (`Ctrl+Shift+Tab` or `Ctrl+Alt+T`):
 ![paste_image_002](./paste_image_002.png)
+
+Quick vault picker (`Ctrl+Alt+V`):
+- Opens the current vault tree centered over the editor.
+- Matches the same filtered tree view you see in the main navigator.
+- Highlights the current page.
+- Use `j/k` or arrow keys to move, `l` to expand, `m` to collapse, `\` to collapse the entire popup tree back to the top, and `Enter` to open the selected page.
+- In VI mode, press `v` from normal mode to open it.
 
 ## Keyboard-First Flow
 You do not need to memorize everything at once. A strong starter flow is:

@@ -1531,6 +1531,7 @@ class MarkdownEditor(QTextEdit):
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
+    vaultPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     bookmarkPickerRequested = Signal()  # Request bookmark quick picker
     pageTagInserted = Signal(str)  # Emits tag when a new page tag is inserted
     LIST_INDENT_UNIT = "  "
@@ -4535,6 +4536,18 @@ class MarkdownEditor(QTextEdit):
             self.headingPickerRequested.emit(global_point, prefer_above)
             event.accept()
             return
+        if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() == Qt.Key_V:
+            cursor_rect = self.cursorRect()
+            viewport = self.viewport()
+            prefer_above = False
+            try:
+                prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+            except Exception:
+                prefer_above = False
+            global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+            self.vaultPickerRequested.emit(global_point, prefer_above)
+            event.accept()
+            return
         # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_B:
@@ -6928,6 +6941,17 @@ class MarkdownEditor(QTextEdit):
                 prefer_above = False
             global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
             self.headingPickerRequested.emit(global_point, prefer_above)
+            return True
+        if key == Qt.Key_V and not shift:
+            cursor_rect = self.cursorRect()
+            viewport = self.viewport()
+            prefer_above = False
+            try:
+                prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+            except Exception:
+                prefer_above = False
+            global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+            self.vaultPickerRequested.emit(global_point, prefer_above)
             return True
         if key == Qt.Key_Z and not shift:
             self._start_vi_prefix("z")

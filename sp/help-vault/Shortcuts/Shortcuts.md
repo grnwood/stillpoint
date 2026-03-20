@@ -9,6 +9,7 @@ These shortcuts will speed up your workflow:
 - `Ctrl+J`: Open a page (jump to page)
 - `Ctrl+Alt+D`: Open the journal date jump popup
 - `Ctrl+Alt+J`: Open bookmarked pages picker
+- `Ctrl+Alt+V`: Open the quick vault picker (`\` inside it collapses the whole popup tree back to the top)
 - `Ctrl+Shift+S`: Save all open pages
 
 ### Editing
@@ -80,6 +81,7 @@ If VI mode is enabled:
 - `*`: Find word under cursor (forward)
 - `#`: Find word under cursor (backward)
 - `t`: Open heading picker
+- `v`: Open quick vault picker (`\` inside it collapses the whole popup tree back to the top)
 - `f`: Open bookmark picker
 - `c`: Copy selection or current line
 - `x`: Cut selection or current character
