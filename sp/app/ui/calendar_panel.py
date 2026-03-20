@@ -1153,6 +1153,22 @@ class CalendarPanel(QWidget):
         self._schedule_selection_detail_refresh(today)
         return True
 
+    def _clear_multi_day_filter_selection(self) -> bool:
+        if len(self.multi_selected_dates) <= 1:
+            return False
+        current = self.calendar.selectedDate()
+        if not current or not current.isValid():
+            current = QDate.currentDate()
+        if not current or not current.isValid():
+            return False
+        self._set_single_selection(current)
+        try:
+            self.filter_btn.setVisible(False)
+        except Exception:
+            pass
+        self._schedule_selection_detail_refresh(current)
+        return True
+
     def _insight_target_lists(self) -> list[QListWidget]:
         targets: list[QListWidget] = []
         if getattr(self, "headings_list", None) and self.headings_list.isVisible():
@@ -2666,6 +2682,9 @@ class CalendarPanel(QWidget):
         task_list = getattr(self, "tasks_due_list", None)
         task_viewport = task_list.viewport() if task_list else None
         if obj in (task_list, task_viewport) and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape and self._clear_multi_day_filter_selection():
+                event.accept()
+                return True
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 current = self.tasks_due_list.currentItem()
                 if current and current.data(0, PATH_ROLE):
@@ -2680,7 +2699,11 @@ class CalendarPanel(QWidget):
         if obj in (getattr(self, "headings_list", None), getattr(self, "subpage_list", None)) and event.type() == QEvent.KeyPress:
             list_widget = obj
             if event.key() == Qt.Key_Escape:
+                cleared = self._clear_multi_day_filter_selection()
                 if self.focus_calendar_input():
+                    event.accept()
+                    return True
+                if cleared:
                     event.accept()
                     return True
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -2739,6 +2762,9 @@ class CalendarPanel(QWidget):
                     if self.focus_insight_area():
                         event.accept()
                         return True
+                if event.key() == Qt.Key_Escape and self._clear_multi_day_filter_selection():
+                    event.accept()
+                    return True
                 if event.key() == Qt.Key_T and not event.modifiers():
                     self._jump_calendar_to_today()
                     event.accept()

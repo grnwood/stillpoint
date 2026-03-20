@@ -3933,6 +3933,142 @@ class MarkdownEditor(QTextEdit):
             ("Clear Formatting", QKeySequence("Ctrl+9"), self._clear_inline_formatting, "Restore selection to plain text"),
         ]
 
+    def _blocks_for_cursor(self, cursor: QTextCursor) -> list:
+        """Return the blocks touched by the provided cursor selection."""
+        if not cursor.hasSelection():
+            block = cursor.block()
+            return [block] if block.isValid() else []
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        doc = self.document()
+        start_block = doc.findBlock(start)
+        end_block = doc.findBlock(max(start, end - 1))
+        if not start_block.isValid() or not end_block.isValid():
+            return []
+        blocks = []
+        block = start_block
+        while block.isValid():
+            blocks.append(block)
+            if block == end_block:
+                break
+            block = block.next()
+        return blocks
+
+    def _block_is_heading_text(self, text: str) -> bool:
+        stripped = text.lstrip(" \t")
+        if not stripped:
+            return False
+        if heading_level_from_char(stripped[0]):
+            return True
+        return bool(HEADING_MARK_PATTERN.match(text))
+
+    def _selection_contains_heading(self, cursor: QTextCursor) -> bool:
+        """Return True when any touched block is a heading line."""
+        for block in self._blocks_for_cursor(cursor):
+            if block.isValid() and self._block_is_heading_text(block.text()):
+                return True
+        return False
+
+    def _selection_contains_rendered_link(self, cursor: QTextCursor) -> bool:
+        """Return True when the selection overlaps any rendered link."""
+        if not cursor.hasSelection():
+            return False
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        if end <= start:
+            return False
+        for match in WIKI_LINK_DISPLAY_PATTERN.finditer(self.toPlainText()):
+            if end <= match.start() or start >= match.end():
+                continue
+            return True
+        return False
+
+    def _selection_covers_full_blocks(self, cursor: QTextCursor, blocks: list) -> bool:
+        """Return True when the selection spans complete block text for all touched blocks."""
+        if not cursor.hasSelection() or not blocks:
+            return False
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        first_block = blocks[0]
+        last_block = blocks[-1]
+        expected_start = first_block.position()
+        expected_end = last_block.position() + len(last_block.text())
+        if len(blocks) == 1 and start == expected_start and LINK_SENTINEL in first_block.text():
+            return True
+        return start == expected_start and max(expected_start, expected_end - 1) <= end <= expected_end
+
+    def _storage_links_to_plain_text(self, text: str) -> str:
+        """Replace stored links with their visible text."""
+        if not text:
+            return ""
+
+        def _wiki_repl(match: re.Match[str]) -> str:
+            link = (match.group("link") or "").strip()
+            label = (match.group("label") or "").strip()
+            return label or link
+
+        text = WIKI_LINK_STORAGE_PATTERN.sub(_wiki_repl, text)
+        text = re.sub(
+            r"(?<!!)\[(?P<label>(?:\\.|[^\]\\])*)\]\((?P<link>[^)]+)\)",
+            lambda m: (m.group("label") or "").strip() or (m.group("link") or "").strip(),
+            text,
+        )
+        return text
+
+    def _strip_inline_markdown_wrappers(self, text: str) -> str:
+        """Remove common inline markdown markers while preserving visible text."""
+        if not text:
+            return ""
+        cleaned = text
+        patterns = [
+            (r"\*\*\*(.+?)\*\*\*", r"\1"),
+            (r"\*\*(.+?)\*\*", r"\1"),
+            (r"(?<!\*)\*(.+?)\*(?!\*)", r"\1"),
+            (r"~~(.+?)~~", r"\1"),
+            (r"==(.+?)==", r"\1"),
+            (r"`(.+?)`", r"\1"),
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for pattern, replacement in patterns:
+                updated = re.sub(pattern, replacement, cleaned, flags=re.DOTALL)
+                if updated != cleaned:
+                    cleaned = updated
+                    changed = True
+        return cleaned
+
+    def _plain_text_from_storage(self, text: str) -> str:
+        """Return visible plain text from markdown storage text."""
+        cleaned = self._storage_links_to_plain_text(text)
+        cleaned = self._strip_inline_markdown_wrappers(cleaned)
+        return cleaned
+
+    def _transform_markdown_selection_text(self, text: str, prefix: str, suffix: str) -> str:
+        """Toggle markdown wrappers on plain storage text."""
+        prefix_len = len(prefix)
+        suffix_len = len(suffix)
+        lines = text.split("\n")
+        if len(lines) > 1:
+            def line_wrapped(line: str) -> bool:
+                return len(line) >= prefix_len + suffix_len and line.startswith(prefix) and line.endswith(suffix)
+
+            non_empty_lines = [line for line in lines if line]
+            all_wrapped = bool(non_empty_lines) and all(line_wrapped(line) for line in non_empty_lines)
+            if all_wrapped:
+                return "\n".join(
+                    line[prefix_len : len(line) - suffix_len] if line and line_wrapped(line) else line
+                    for line in lines
+                )
+            return "\n".join(
+                f"{prefix}{line}{suffix}" if line else line
+                for line in lines
+            )
+
+        if len(text) >= prefix_len + suffix_len and text.startswith(prefix) and text.endswith(suffix):
+            return text[prefix_len : len(text) - suffix_len]
+        return f"{prefix}{text}{suffix}"
+
     def _toggle_markdown_format(self, prefix: str, suffix: str = None) -> None:
         """Toggle markdown formatting around selected text or word at cursor.
         
@@ -3952,110 +4088,53 @@ class MarkdownEditor(QTextEdit):
         selected_text = cursor.selectedText()
         if not selected_text:
             return
-        selected = selected_text.replace("\u2029", "\n")
-        prefix_len = len(prefix)
-        suffix_len = len(suffix)
-
-        # Multi-line selection: apply/remove per line
-        lines = selected.split("\n")
-        if len(lines) > 1:
-            def line_wrapped(line: str) -> bool:
-                return len(line) >= prefix_len + suffix_len and line.startswith(prefix) and line.endswith(suffix)
-
-            non_empty_lines = [ln for ln in lines if ln]
-            all_wrapped = bool(non_empty_lines) and all(line_wrapped(line) for line in non_empty_lines)
-            new_lines: list[str] = []
-            if all_wrapped:
-                for line in lines:
-                    if line and line_wrapped(line):
-                        new_lines.append(line[prefix_len : len(line) - suffix_len])
-                    else:
-                        new_lines.append(line)
-            else:
-                for line in lines:
-                    if not line:
-                        new_lines.append(line)
-                    else:
-                        new_lines.append(f"{prefix}{line}{suffix}")
-            new_text = "\n".join(new_lines)
-            start = cursor.selectionStart()
-            cursor.beginEditBlock()
-            cursor.insertText(new_text)
-            cursor.endEditBlock()
-            new_cursor = self.textCursor()
-            new_cursor.setPosition(start)
-            new_cursor.setPosition(start + len(new_text), QTextCursor.KeepAnchor)
-            self.setTextCursor(new_cursor)
+        adjusted_cursor = self._expanded_selection_for_overlapping_links(cursor)
+        blocks = self._blocks_for_cursor(adjusted_cursor)
+        if self._selection_contains_heading(adjusted_cursor):
             return
-
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
-        doc_text = self.toPlainText()
-
-        already_wrapped = False
-        if start >= prefix_len and end + suffix_len <= len(doc_text):
-            before = doc_text[start - prefix_len : start]
-            after = doc_text[end : end + suffix_len]
-            if before == prefix and after == suffix:
-                already_wrapped = True
-
-        cursor.beginEditBlock()
-
-        if already_wrapped:
-            cursor.setPosition(end)
-            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, suffix_len)
-            cursor.removeSelectedText()
-
-            cursor.setPosition(start - prefix_len)
-            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, prefix_len)
-            cursor.removeSelectedText()
-
-            cursor.setPosition(start - prefix_len)
-            cursor.setPosition(start - prefix_len + len(selected_text), QTextCursor.KeepAnchor)
+        if self._selection_contains_rendered_link(adjusted_cursor):
+            return
+        full_block_selection = self._selection_covers_full_blocks(adjusted_cursor, blocks)
+        if full_block_selection:
+            markdown_lines = self.to_markdown().replace("\r\n", "\n").split("\n")
+            selected_storage = "\n".join(
+                markdown_lines[block.blockNumber()]
+                if block.blockNumber() < len(markdown_lines)
+                else self._from_display(block.text())
+                for block in blocks
+            )
         else:
-            cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.KeepAnchor)
-            wrapped_text = f"{prefix}{selected_text}{suffix}"
-            cursor.insertText(wrapped_text)
-
-            cursor.setPosition(start + prefix_len)
-            cursor.setPosition(start + prefix_len + len(selected_text), QTextCursor.KeepAnchor)
-
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
+            selected_display = adjusted_cursor.selectedText().replace("\u2029", "\n")
+            selected_storage = self._from_display(selected_display)
+        if not selected_storage:
+            return
+        new_storage = self._transform_markdown_selection_text(selected_storage, prefix, suffix)
+        new_display = self._to_display(new_storage)
+        if full_block_selection:
+            replace_start = blocks[0].position()
+            last_block = blocks[-1]
+            replace_end = last_block.position() + len(last_block.text())
+            replace_cursor = QTextCursor(self.document())
+            replace_cursor.setPosition(replace_start)
+            replace_cursor.setPosition(replace_end, QTextCursor.KeepAnchor)
+            start = replace_start
+        else:
+            replace_cursor = adjusted_cursor
+            start = adjusted_cursor.selectionStart()
+        replace_cursor.beginEditBlock()
+        replace_cursor.insertText(new_display)
+        replace_cursor.endEditBlock()
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(start)
+        new_cursor.setPosition(start + len(new_display), QTextCursor.KeepAnchor)
+        self.setTextCursor(new_cursor)
     
     def _toggle_bold(self) -> None:
         """Toggle bold formatting (**text**)."""
-        cursor = self.textCursor()
-        selected = cursor.selectedText()
-        
-        # Check if already italic with * - if so, upgrade to bold+italic
-        if selected and len(selected) >= 2:
-            if selected[0] == '*' and selected[-1] == '*' and not (selected.startswith('**') or selected.startswith('***')):
-                # Already italic with *, upgrade to ***
-                cursor.beginEditBlock()
-                new_text = f"**{selected}*"
-                cursor.insertText(new_text)
-                cursor.endEditBlock()
-                return
-        
         self._toggle_markdown_format('**')
     
     def _toggle_italic(self) -> None:
         """Toggle italic formatting (*text*)."""
-        cursor = self.textCursor()
-        selected = cursor.selectedText()
-        
-        # Check if already bold with ** - if so, upgrade to bold+italic
-        if selected and len(selected) >= 4:
-            if selected.startswith('**') and selected.endswith('**'):
-                # Already bold, upgrade to ***
-                cursor.beginEditBlock()
-                new_text = f"*{selected}*"
-                cursor.insertText(new_text)
-                cursor.endEditBlock()
-                return
-        
         self._toggle_markdown_format('*')
     
     def _toggle_strikethrough(self) -> None:
@@ -4091,8 +4170,9 @@ class MarkdownEditor(QTextEdit):
         block = cursor.block()
         if not block.isValid():
             return
-        text = block.text()
-        indent, content = self._strip_heading(text)
+        storage_text = self._from_display(block.text())
+        indent, content = self._strip_heading(storage_text)
+        content = self._plain_text_from_storage(content)
         sentinel = heading_sentinel(level)
         new_line = f"{indent}{sentinel}{content}"
         cursor.beginEditBlock()
@@ -4311,6 +4391,7 @@ class MarkdownEditor(QTextEdit):
         has_task = False
         has_bullet = False
         has_dash = False
+        has_heading = False
         for block in blocks:
             text = block.text()
             kind, _, _ = self._list_line_info(text)
@@ -4320,12 +4401,17 @@ class MarkdownEditor(QTextEdit):
                 has_bullet = True
             elif kind == "dash":
                 has_dash = True
-        if not (has_task or has_bullet or has_dash):
+            if self._block_is_heading_text(text):
+                has_heading = True
+        if not (has_task or has_bullet or has_dash or has_heading):
             return False
 
         if has_task:
             target = "bullet"
             strip_tags = True
+        elif has_heading:
+            target = "heading_clear"
+            strip_tags = False
         else:
             target = "clear"
             strip_tags = False
@@ -4334,13 +4420,19 @@ class MarkdownEditor(QTextEdit):
         cursor.beginEditBlock()
         for block in blocks:
             text = block.text()
-            indent, content = self._split_list_content(text)
-            if strip_tags:
-                content = self._strip_task_tags(content)
-            if target == "bullet":
-                new_line = f"{indent}• {content}" if content else f"{indent}• "
-            else:
+            if target == "heading_clear":
+                storage_text = self._from_display(text)
+                indent, content = self._strip_heading(storage_text)
+                content = self._plain_text_from_storage(content)
                 new_line = indent + content
+            else:
+                indent, content = self._split_list_content(text)
+                if strip_tags:
+                    content = self._strip_task_tags(content)
+                if target == "bullet":
+                    new_line = f"{indent}• {content}" if content else f"{indent}• "
+                else:
+                    new_line = indent + content
             line_cursor = QTextCursor(block)
             line_cursor.select(QTextCursor.LineUnderCursor)
             line_cursor.insertText(new_line)
@@ -4650,7 +4742,7 @@ class MarkdownEditor(QTextEdit):
         if not (meaningful_modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) and (
             event.text() or event.key() in (Qt.Key_Backspace, Qt.Key_Delete)
         ):
-            if event.key() not in (Qt.Key_Return, Qt.Key_Enter):
+            if event.key() not in (Qt.Key_Return, Qt.Key_Enter) and not cursor.hasSelection():
                 self._prepare_heading_edit_on_input(cursor)
         # Ctrl+E: edit link under cursor
         if event.key() == Qt.Key_E and event.modifiers() == Qt.ControlModifier:
@@ -4730,6 +4822,10 @@ class MarkdownEditor(QTextEdit):
             if self._handle_vi_escape():
                 event.accept()
                 return
+            if self.textCursor().hasSelection() and not self._read_only_mode:
+                if self._apply_escape_selection_transform():
+                    event.accept()
+                    return
             if self._handle_escape_clear_empty_line():
                 event.accept()
                 return
@@ -5527,12 +5623,23 @@ class MarkdownEditor(QTextEdit):
         """Return selected content normalized to storage markdown format."""
         if not cursor.hasSelection():
             return None
-        selected_link_markdown = self._selected_display_link_markdown(cursor)
+        blocks = self._blocks_for_cursor(cursor)
+        if self._selection_covers_full_blocks(cursor, blocks):
+            markdown_lines = self.to_markdown().replace("\r\n", "\n").split("\n")
+            selected = "\n".join(
+                markdown_lines[block.blockNumber()]
+                if block.blockNumber() < len(markdown_lines)
+                else self._from_display(block.text())
+                for block in blocks
+            )
+            return selected or None
+        adjusted_cursor = self._expanded_selection_for_overlapping_links(cursor)
+        selected_link_markdown = self._selected_display_link_markdown(adjusted_cursor)
         if selected_link_markdown:
             return selected_link_markdown
-        text = self._vi_selection_as_markdown(cursor)
+        text = self._vi_selection_as_markdown(adjusted_cursor)
         if text is None:
-            text = cursor.selection().toPlainText()
+            text = adjusted_cursor.selection().toPlainText()
         if not text:
             return None
         normalized = text.replace("\u2029", "\n")
@@ -5610,6 +5717,48 @@ class MarkdownEditor(QTextEdit):
             link = raw_link[:-1] if (not label and raw_link.endswith("|")) else raw_link
             return f"[{link}|{label}]"
         return None
+
+    def _expanded_selection_for_overlapping_links(self, cursor: QTextCursor) -> QTextCursor:
+        """Expand a surrounding-text selection to include full rendered links it overlaps."""
+        if not cursor.hasSelection():
+            return QTextCursor(cursor)
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        if end <= start:
+            return QTextCursor(cursor)
+        text = self.toPlainText()
+        adjusted_start = start
+        adjusted_end = end
+        expanded = False
+        for match in WIKI_LINK_DISPLAY_PATTERN.finditer(text):
+            raw_link = match.group("link")
+            label = match.group("label")
+            link_start = match.start()
+            link_end = match.end()
+            if end <= link_start or start >= link_end:
+                continue
+            link_part_start = match.start("link")
+            link_part_end = match.end("link")
+            label_part_start = match.start("label")
+            label_part_end = match.end("label")
+            if label:
+                visible_start = label_part_start
+                visible_end = label_part_end
+            else:
+                visible_start = link_part_start
+                visible_end = link_part_end
+                if raw_link.endswith("|") and visible_end > visible_start:
+                    visible_end -= 1
+            if start < visible_start or end > visible_end:
+                adjusted_start = min(adjusted_start, link_start)
+                adjusted_end = max(adjusted_end, link_end)
+                expanded = True
+        if not expanded:
+            return QTextCursor(cursor)
+        adjusted_cursor = QTextCursor(self.document())
+        adjusted_cursor.setPosition(adjusted_start)
+        adjusted_cursor.setPosition(adjusted_end, QTextCursor.KeepAnchor)
+        return adjusted_cursor
 
     def _copy_selection_to_clipboard(self) -> None:
         markdown_text = self._selection_as_markdown_for_clipboard()

@@ -8,7 +8,7 @@ Preferences let you shape StillPoint to your workflow: what features are on, how
 
 ## Global vs Vault Preferences
 - Global preferences apply across all vaults.
-- Vault preferences override a few feature toggles for one specific vault.
+- Vault preferences override selected settings for one specific vault, including accent color, feature/AI toggles, and read-only access.
 - Open vault preferences from `Vault -> Vault Preferences`.
 
 ## General
@@ -121,16 +121,22 @@ You may also see options for:
 These control default content and how links are maintained during page moves/renames.
 
 ## Vault Preferences (Per-Vault Overrides)
-Vault Preferences use three states:
+Vault Preferences combine direct per-vault settings with three-state overrides.
+
+Three-state overrides use:
 - **Checked**: Force enabled for this vault.
 - **Unchecked**: Force disabled for this vault.
 - **Dash/partial**: Use global default.
 
-Available per-vault overrides:
+Available vault-specific settings:
+- **Vault Accent**: Sets an accent color for the current vault, or uses the theme default.
+- **Force read-only mode for this vault**: Opens the current vault without taking a write lock.
+
+Available three-state overrides:
 - **Tasks**: Overrides whether task features are enabled in this vault.
 - **Calendar**: Overrides whether calendar features are enabled in this vault.
 - **Link Navigator**: Overrides whether link graph/navigation tools are enabled in this vault.
 - **Page Tags**: Overrides whether tag features are enabled in this vault.
 - **AI Chats**: Overrides whether AI chat is enabled in this vault.
 
-Use **Use Global Defaults** to reset all per-vault overrides back to global behavior.
+Use **Use Global Defaults** to reset the accent color and three-state overrides back to global behavior.

@@ -215,6 +215,55 @@ def test_calendar_shift_vi_keys_extend_multi_day_selection(qtbot, monkeypatch) -
     assert panel.multi_selected_dates == expected
 
 
+def test_calendar_escape_clears_multi_day_selection(qtbot) -> None:
+    panel = CalendarPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+
+    start = QDate(2026, 3, 10)
+    end = QDate(2026, 3, 12)
+    panel.calendar.setSelectedDate(end)
+    panel._set_range_selection(start, end)
+    panel.filter_btn.setVisible(True)
+    panel.calendar.setFocus(Qt.OtherFocusReason)
+    QTest.qWait(20)
+
+    QTest.keyClick(panel.calendar, Qt.Key_Escape)
+    QTest.qWait(20)
+
+    assert panel.calendar.selectedDate() == end
+    assert panel.multi_selected_dates == {end}
+    assert not panel.filter_btn.isVisible()
+
+
+def test_calendar_headings_escape_clears_multi_day_selection_and_returns_focus(qtbot) -> None:
+    panel = CalendarPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+    panel._attach_calendar_view()
+
+    heading = QListWidgetItem("Heading 1")
+    heading.setData(PATH_ROLE, "/Journal/2026/03/10/10.md#heading-1")
+    panel.headings_list.addItem(heading)
+
+    start = QDate(2026, 3, 10)
+    end = QDate(2026, 3, 12)
+    panel.calendar.setSelectedDate(end)
+    panel._set_range_selection(start, end)
+    panel.filter_btn.setVisible(True)
+    panel.headings_list.setCurrentRow(0)
+    panel.headings_list.setFocus(Qt.OtherFocusReason)
+    QTest.qWait(20)
+
+    QTest.keyClick(panel.headings_list, Qt.Key_Escape)
+    QTest.qWait(20)
+
+    target = panel.calendar_view or panel.calendar
+    assert target.hasFocus()
+    assert panel.multi_selected_dates == {end}
+    assert not panel.filter_btn.isVisible()
+
+
 def test_calendar_t_key_jumps_to_today_from_internal_view(qtbot) -> None:
     panel = CalendarPanel()
     qtbot.addWidget(panel)
@@ -484,10 +533,11 @@ def test_jump_to_journal_date_opens_selected_day(main_window, monkeypatch) -> No
     captured: dict[str, object] = {}
 
     class _DialogStub:
-        def __init__(self, parent, *, anchor_pos, use_vi_keys):
+        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color):
             captured["parent"] = parent
             captured["anchor_pos"] = anchor_pos
             captured["use_vi_keys"] = use_vi_keys
+            captured["vault_accent_color"] = vault_accent_color
 
         def exec(self):
             return QDialog.Accepted
@@ -505,12 +555,13 @@ def test_jump_to_journal_date_opens_selected_day(main_window, monkeypatch) -> No
     assert captured["parent"] is main_window
     assert captured["anchor_pos"] is not None
     assert captured["use_vi_keys"] is True
+    assert captured["vault_accent_color"] == getattr(main_window, "_vault_accent_color", None)
     assert opened == [(2026, 3, 12)]
 
 
 def test_jump_to_journal_date_ignores_cancel(main_window, monkeypatch) -> None:
     class _DialogStub:
-        def __init__(self, parent, *, anchor_pos, use_vi_keys):
+        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color):
             pass
 
         def exec(self):

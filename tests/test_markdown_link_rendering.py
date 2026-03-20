@@ -229,6 +229,107 @@ def test_editing_rendered_heading_stays_heading_until_line_exit(editor, qapp):
     assert heading_level_from_char(stripped[0]) == 1
 
 
+def test_inline_formatting_does_not_apply_to_heading_lines(editor, qapp):
+    editor.set_markdown("# Heading")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_bold()
+
+    assert editor.to_markdown().strip() == "# Heading"
+
+
+def test_toggle_bold_on_already_bold_line_removes_wrapper(editor, qapp):
+    editor.set_markdown("**Bold line**")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_bold()
+
+    assert editor.to_markdown().strip() == "Bold line"
+
+
+def test_toggle_bold_on_link_line_round_trips_without_corruption(editor, qapp):
+    original = "Go to [https://example.com/task/123|Task 123]"
+    editor.set_markdown(original)
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_bold()
+    assert editor.to_markdown().strip() == original
+
+
+def test_toggle_bold_on_visible_selection_overlapping_link_preserves_link(editor, qapp):
+    original = "this line has a [:Link Navigator|Link Navigator] on it."
+    editor.set_markdown(original)
+    qapp.processEvents()
+
+    block = editor.document().firstBlock()
+    visible_selection = "this line has a Link Navigator on it."
+    cursor = editor.textCursor()
+    cursor.setPosition(block.position())
+    cursor.setPosition(block.position() + len(visible_selection), QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_bold()
+
+    assert editor.to_markdown().strip() == original
+
+
+def test_heading_shortcut_flattens_links_to_plain_text(editor, qapp):
+    editor.set_markdown("Go to [https://example.com/task/123|Task 123]")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    editor.setTextCursor(cursor)
+
+    editor._apply_heading_level(1)
+
+    assert editor.to_markdown().strip() == "# Go to Task 123"
+
+
+def test_heading_shortcut_on_selected_link_line_flattens_to_label(editor, qapp):
+    editor.set_markdown("Go to [https://example.com/task/123|Task 123]")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    editor._apply_heading_level(1)
+
+    assert editor.to_markdown().strip() == "# Go to Task 123"
+
+
+def test_escape_on_selected_heading_clears_to_plain_text(editor, qapp):
+    editor.set_markdown("# Heading")
+    qapp.processEvents()
+
+    cursor = editor.textCursor()
+    cursor.setPosition(editor.document().firstBlock().position())
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+    qapp.processEvents()
+
+    assert editor.to_markdown().strip() == "Heading"
+
+
 def test_paste_teams_jira_artifact_links_stabilizes_markdown(editor):
     url_282 = "https://redacted.example/browse/OMSFCC-282"
     url_286 = "https://redacted.example/browse/OMSFCC-286"
@@ -634,6 +735,61 @@ def test_copy_line_under_cursor_preserves_internal_link_markdown(editor):
     assert mime.hasFormat("application/x-stillpoint-markdown")
     md_payload = bytes(mime.data("application/x-stillpoint-markdown")).decode("utf-8")
     assert md_payload == original
+
+
+def test_copy_and_paste_line_under_cursor_preserves_link_target_and_label(editor):
+    original = "Go to [:pickles:even_bigger_diggus|even bigger diggus]"
+    editor.set_markdown(original)
+
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.Start)
+    cursor.select(QTextCursor.LineUnderCursor)
+    editor.setTextCursor(cursor)
+
+    editor.copy()
+
+    target = MarkdownEditor()
+    target.show()
+    try:
+        mime = QGuiApplication.clipboard().mimeData()
+        paste_mime = QMimeData()
+        paste_mime.setText(mime.text())
+        if mime.hasFormat("application/x-stillpoint-markdown"):
+            paste_mime.setData("application/x-stillpoint-markdown", mime.data("application/x-stillpoint-markdown"))
+        target.insertFromMimeData(paste_mime)
+        assert target.to_markdown().strip() == original
+    finally:
+        target.close()
+
+
+def test_copy_selection_overlapping_rendered_link_preserves_target_and_label(editor):
+    original = "this line has a [:Link Navigator|Link Navigator] on it."
+    editor.set_markdown(original)
+
+    block = editor.document().firstBlock()
+    visible_selection = "this line has a Link Navigator"
+    cursor = editor.textCursor()
+    cursor.setPosition(block.position())
+    cursor.setPosition(block.position() + len(visible_selection), QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    editor.copy()
+
+    mime = QGuiApplication.clipboard().mimeData()
+    assert mime.hasFormat("application/x-stillpoint-markdown")
+    md_payload = bytes(mime.data("application/x-stillpoint-markdown")).decode("utf-8")
+    assert md_payload == original
+
+    target = MarkdownEditor()
+    target.show()
+    try:
+        paste_mime = QMimeData()
+        paste_mime.setText(mime.text())
+        paste_mime.setData("application/x-stillpoint-markdown", mime.data("application/x-stillpoint-markdown"))
+        target.insertFromMimeData(paste_mime)
+        assert target.to_markdown().strip() == original
+    finally:
+        target.close()
 
 
 def test_vi_selected_text_or_line_preserves_internal_link_markdown(editor):

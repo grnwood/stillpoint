@@ -12402,6 +12402,7 @@ class MainWindow(QMainWindow):
             allow_nav_keys=True,
             use_vi_keys=bool(getattr(self, "_vi_enabled", False)),
             keep_edit_focus=True,
+            vault_accent_color=getattr(self, "_vault_accent_color", None),
         )
         result = dlg.exec()
         # Restore cursor/selection to where the user triggered the dialog
@@ -12433,6 +12434,7 @@ class MainWindow(QMainWindow):
             self,
             anchor_pos=anchor,
             use_vi_keys=bool(getattr(self, "_vi_enabled", False)),
+            vault_accent_color=getattr(self, "_vault_accent_color", None),
         )
         if dlg.exec() != QDialog.Accepted:
             return

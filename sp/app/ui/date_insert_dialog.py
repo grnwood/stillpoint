@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QDate, QPoint, QEvent
-from PySide6.QtGui import QGuiApplication, QCursor
+from PySide6.QtGui import QColor, QGuiApplication, QCursor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCalendarWidget,
     QCheckBox,
     QDialog,
@@ -25,6 +26,9 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
+from .task_style import contrast_text_color
+from .theme import theme_value
+
 WEEKDAY_MAP = {
     "mon": 0, "monday": 0,
     "tue": 1, "tues": 1, "tuesday": 1,
@@ -34,6 +38,129 @@ WEEKDAY_MAP = {
     "sat": 5, "saturday": 5,
     "sun": 6, "sunday": 6,
 }
+
+
+def _resolve_vault_accent_color(accent_hex: Optional[str]) -> Optional[str]:
+    candidate = (accent_hex or "").strip()
+    if candidate.startswith("#"):
+        return candidate
+    try:
+        loaded = (config.load_vault_accent_color() or "").strip()
+    except Exception:
+        loaded = ""
+    return loaded if loaded.startswith("#") else None
+
+
+def _calendar_selection_colors(accent_hex: Optional[str]) -> tuple[QColor, QColor]:
+    default_bg = QColor(theme_value("calendar_panel.calendar.selected_bg", "#2D7FF9"))
+    default_text = QColor(theme_value("calendar_panel.calendar.selected_text", "#FFFFFF"))
+    accent = _resolve_vault_accent_color(accent_hex)
+    if accent:
+        accent_color = QColor(accent)
+        if accent_color.isValid():
+            return accent_color, contrast_text_color(accent_color)
+    return default_bg, default_text
+
+
+def _calendar_chrome_colors(palette: QPalette) -> tuple[str, str, str]:
+    is_light = palette.color(QPalette.Window).lightness() > 128
+    alt_bg = palette.color(QPalette.AlternateBase)
+    text_fg = palette.color(QPalette.Text)
+    grid_color = (
+        theme_value("calendar_panel.calendar.grid_light", "#DDDDDD")
+        if is_light
+        else theme_value("calendar_panel.calendar.grid_dark", "#555555")
+    )
+    default_header_bg = (
+        theme_value("calendar_panel.calendar.header_dark", "#3A3A3A")
+        if not is_light
+        else theme_value("calendar_panel.calendar.header_light", "#F5F5F5")
+    )
+    if alt_bg.isValid():
+        alt_lightness = alt_bg.lightness()
+        if (not is_light and alt_lightness > 140) or (is_light and alt_lightness > 245):
+            header_bg = default_header_bg
+        else:
+            header_bg = alt_bg.name()
+    else:
+        header_bg = default_header_bg
+    nav_text = text_fg.name() if text_fg.isValid() else (
+        theme_value("calendar_panel.calendar.nav_text_dark", "#E6E6E6")
+        if not is_light
+        else theme_value("calendar_panel.calendar.nav_text_light", "#1F1F1F")
+    )
+    return str(grid_color), str(header_bg), str(nav_text)
+
+
+def _calendar_stylesheet(calendar: QCalendarWidget, accent_hex: Optional[str]) -> str:
+    selected_bg, selected_text = _calendar_selection_colors(accent_hex)
+    palette = calendar.palette() if calendar is not None else QApplication.palette()
+    grid_color, header_bg, nav_text = _calendar_chrome_colors(palette)
+    return f"""
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{
+            background-color: {header_bg};
+            color: {nav_text};
+        }}
+        QCalendarWidget QWidget {{
+            alternate-background-color: palette(base);
+        }}
+        QCalendarWidget QToolButton {{
+            padding: 6px 8px;
+            font-weight: bold;
+            border-radius: 4px;
+            background-color: {header_bg};
+            color: {nav_text};
+        }}
+        QCalendarWidget QToolButton:hover {{
+            background-color: {selected_bg.name()};
+            color: {selected_text.name()};
+        }}
+        QCalendarWidget QMenu {{
+            background-color: palette(base);
+        }}
+        QCalendarWidget QSpinBox {{
+            border-radius: 4px;
+            padding: 4px;
+            color: {nav_text};
+            background-color: {header_bg};
+        }}
+        QCalendarWidget QTableView {{
+            selection-background-color: {selected_bg.name()};
+            selection-color: {selected_text.name()};
+            gridline-color: {grid_color};
+            border-radius: 6px;
+        }}
+        QCalendarWidget QTableView::item {{
+            border: 1px solid {grid_color};
+            padding: 6px;
+            border-radius: 4px;
+        }}
+        QCalendarWidget QTableView::item:selected {{
+            background-color: {selected_bg.name()};
+            color: {selected_text.name()};
+            font-weight: 600;
+            border: 1px solid {selected_bg.name()};
+        }}
+    """
+
+
+def _apply_calendar_style(calendar: QCalendarWidget, accent_hex: Optional[str]) -> tuple[QColor, QColor]:
+    selected_bg, selected_text = _calendar_selection_colors(accent_hex)
+    calendar.setStyleSheet(_calendar_stylesheet(calendar, accent_hex))
+    return selected_bg, selected_text
+
+
+def _calendar_required_dialog_width(dialog: QDialog, calendar: QCalendarWidget, default_width: int) -> int:
+    dialog.ensurePolished()
+    calendar.ensurePolished()
+    layout = dialog.layout()
+    left_margin = right_margin = 0
+    if layout is not None:
+        margins = layout.contentsMargins()
+        left_margin = margins.left()
+        right_margin = margins.right()
+    calendar_width = max(calendar.minimumSizeHint().width(), calendar.sizeHint().width())
+    return max(int(default_width), int(calendar_width + left_margin + right_margin))
 
 
 def _next_weekday(from_date: date, target_weekday: int) -> date:
@@ -213,6 +340,7 @@ class DateInsertDialog(QDialog):
         allow_nav_keys: bool = True,
         use_vi_keys: bool = False,
         keep_edit_focus: bool = True,
+        vault_accent_color: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Insert Date")
@@ -226,11 +354,16 @@ class DateInsertDialog(QDialog):
         self._allow_nav_keys = allow_nav_keys
         self._use_vi_keys = use_vi_keys
         self._keep_edit_focus = keep_edit_focus
+        self._vault_accent_color = _resolve_vault_accent_color(vault_accent_color)
 
         layout = QVBoxLayout(self)
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
+        self._calendar_selected_bg, self._calendar_selected_text = _apply_calendar_style(
+            self.calendar,
+            self._vault_accent_color,
+        )
         layout.addWidget(self.calendar, 1)
 
         form = QFormLayout()
@@ -293,6 +426,8 @@ class DateInsertDialog(QDialog):
         self.weekdays_only.toggled.connect(self._on_constraints_changed)
         self.date_edit.installEventFilter(self)
 
+        self._apply_initial_geometry(default_width=320, default_height=360)
+
         # Initialize with today
         today = date.today()
         self._apply_date(today)
@@ -302,6 +437,12 @@ class DateInsertDialog(QDialog):
         if anchor_pos is not None:
             self.adjustSize()
             self.move(self._clamp_to_screen(anchor_pos))
+
+    def _apply_initial_geometry(self, *, default_width: int, default_height: int) -> None:
+        required_width = _calendar_required_dialog_width(self, self.calendar, default_width)
+        required_height = max(int(default_height), int(self.sizeHint().height()))
+        self.setMinimumWidth(required_width)
+        self.resize(required_width, required_height)
 
     def _clamp_to_screen(self, pos: QPoint) -> QPoint:
         screen = QGuiApplication.screenAt(pos)
@@ -447,17 +588,29 @@ class DateInsertDialog(QDialog):
 class JournalDateJumpDialog(QDialog):
     """Compact popup for jumping the editor to a journal date."""
 
-    def __init__(self, parent=None, anchor_pos=None, *, use_vi_keys: bool = False) -> None:
+    def __init__(
+        self,
+        parent=None,
+        anchor_pos=None,
+        *,
+        use_vi_keys: bool = False,
+        vault_accent_color: Optional[str] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Jump To Journal Date")
         self.setModal(True)
         self.resize(300, 280)
         self._use_vi_keys = use_vi_keys
         self._calendar_view: QTableView | None = None
+        self._vault_accent_color = _resolve_vault_accent_color(vault_accent_color)
 
         layout = QVBoxLayout(self)
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
+        self._calendar_selected_bg, self._calendar_selected_text = _apply_calendar_style(
+            self.calendar,
+            self._vault_accent_color,
+        )
         try:
             self.calendar.setDateEditEnabled(False)
         except Exception:
@@ -472,6 +625,8 @@ class JournalDateJumpDialog(QDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        self._apply_initial_geometry(default_width=300, default_height=280)
+
         self._attach_calendar_view()
         self.calendar.setSelectedDate(QDate.currentDate())
         self.calendar.setFocus(Qt.OtherFocusReason)
@@ -479,6 +634,12 @@ class JournalDateJumpDialog(QDialog):
         if anchor_pos is not None:
             self.adjustSize()
             self.move(self._clamp_to_screen(anchor_pos))
+
+    def _apply_initial_geometry(self, *, default_width: int, default_height: int) -> None:
+        required_width = _calendar_required_dialog_width(self, self.calendar, default_width)
+        required_height = max(int(default_height), int(self.sizeHint().height()))
+        self.setMinimumWidth(required_width)
+        self.resize(required_width, required_height)
 
     def _clamp_to_screen(self, pos: QPoint) -> QPoint:
         screen = QGuiApplication.screenAt(pos)
