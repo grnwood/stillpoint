@@ -217,13 +217,18 @@ def main_window(qtbot, monkeypatch, tmp_path):
 
     class _WindowHttpClient:
         def post(self, path, json=None):
-            if path != "/api/file/read":
-                raise AssertionError(f"Unexpected POST path: {path}")
-            page_path = str((json or {}).get("path") or "")
-            return _TestHttpResponse(
-                payload={"content": page_map.get(page_path, ""), "rev": 1, "mtime_ns": 1},
-                url=f"http://localhost{path}",
-            )
+            if path == "/api/file/read":
+                page_path = str((json or {}).get("path") or "")
+                return _TestHttpResponse(
+                    payload={"content": page_map.get(page_path, ""), "rev": 1, "mtime_ns": 1},
+                    url=f"http://localhost{path}",
+                )
+            if path == "/api/tree/reorder":
+                return _TestHttpResponse(
+                    payload={"ok": True, "version": 2},
+                    url=f"http://localhost{path}",
+                )
+            raise AssertionError(f"Unexpected POST path: {path}")
 
         def get(self, path, params=None):
             if path == "/api/vault/tree":

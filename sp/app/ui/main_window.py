@@ -2094,6 +2094,10 @@ class MainWindow(QMainWindow):
         self._nav_filter_path: Optional[str] = None
         self._full_tree_data: list[dict] = []
         self._skip_next_selection_open: bool = False
+        self._pending_tree_open_path: Optional[str] = None
+        self._pending_tree_open_focus_target: Optional[str] = None
+        self._pending_tree_open_retry_armed: bool = False
+        self._vault_switch_in_progress: bool = False
         self._history_popup: Optional[QWidget] = None
         self._history_popup_label: Optional[QLabel] = None
         self._history_popup_list: Optional[QListWidget] = None
@@ -8134,6 +8138,7 @@ class MainWindow(QMainWindow):
 
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
+        self._vault_switch_in_progress = True
         try:
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
@@ -8305,18 +8310,7 @@ class MainWindow(QMainWindow):
                 self.font_size = config.load_global_editor_font_size(self.font_size)
                 self.editor.set_font_point_size(self.font_size)
                 self._refresh_editor_context(None)
-                self._suspend_dirty_tracking = True
-                try:
-                    self.editor.set_markdown("")
-                finally:
-                    self._suspend_dirty_tracking = False
-                    self._dirty_flag = False
-                self._vi_initial_page_loaded = False
-                if self._vi_enabled:
-                    self._vi_enable_pending = True
-                    self.editor.set_vi_mode_enabled(False)
-                self.current_path = None
-                self.right_panel.set_current_page(None, None)
+                self._prepare_vault_switch_ui_reset()
                 self.statusBar().showMessage(f"Vault: {self.vault_root}")
                 self._update_window_title()
                 self._apply_vault_accent_visuals()
@@ -8347,6 +8341,7 @@ class MainWindow(QMainWindow):
                 
                 return True
         finally:
+            self._vault_switch_in_progress = False
             try:
                 self.editor._pop_paint_block()
             except Exception:
@@ -10332,13 +10327,116 @@ class MainWindow(QMainWindow):
             self._debug("Tree selection skipped: already editing this path.")
             return
         try:
-            self._open_file(open_target)
-            if restore_tree_focus:
-                self.tree_view.setFocus(Qt.OtherFocusReason)
-                self._apply_focus_borders()
+            self._request_tree_open(open_target, focus_target="tree" if restore_tree_focus else None)
         except Exception as exc:
             self._debug(f"Tree selection crash while opening {open_target!r}: {exc!r}")
             raise
+
+    def _tree_open_blocked(self) -> bool:
+        if self._vault_switch_in_progress:
+            return True
+        editor = getattr(self, "editor", None)
+        if editor is None:
+            return False
+        try:
+            return not editor.is_ready_for_page_switch()
+        except Exception:
+            return True
+
+    def _pending_tree_open_delay_ms(self) -> int:
+        editor = getattr(self, "editor", None)
+        if editor is None:
+            return 25
+        try:
+            until = float(getattr(editor, "_post_load_paint_guard_until", 0.0) or 0.0)
+        except Exception:
+            until = 0.0
+        if until > 0.0:
+            remaining = max(0.0, until - time.perf_counter())
+            if remaining > 0.0:
+                return max(10, int(remaining * 1000.0) + 5)
+        return 25
+
+    def _apply_tree_open_focus_target(self, focus_target: Optional[str]) -> None:
+        if focus_target == "editor":
+            self._focus_editor()
+            return
+        if focus_target == "tree":
+            try:
+                self.tree_view.setFocus(Qt.OtherFocusReason)
+                self._apply_focus_borders()
+            except Exception:
+                pass
+
+    def _arm_pending_tree_open(self) -> None:
+        if self._pending_tree_open_retry_armed or not self._pending_tree_open_path:
+            return
+        self._pending_tree_open_retry_armed = True
+        QTimer.singleShot(self._pending_tree_open_delay_ms(), self._drain_pending_tree_open)
+
+    def _drain_pending_tree_open(self) -> None:
+        self._pending_tree_open_retry_armed = False
+        target = self._pending_tree_open_path
+        if not target:
+            return
+        if self._tree_open_blocked():
+            self._arm_pending_tree_open()
+            return
+        focus_target = self._pending_tree_open_focus_target
+        self._pending_tree_open_path = None
+        self._pending_tree_open_focus_target = None
+        if target != self.current_path:
+            self._open_file(target)
+        self._apply_tree_open_focus_target(focus_target)
+
+    def _request_tree_open(self, target: str, *, focus_target: Optional[str] = None) -> None:
+        if not target:
+            return
+        if self._vault_switch_in_progress:
+            return
+        if self._tree_open_blocked():
+            self._pending_tree_open_path = target
+            self._pending_tree_open_focus_target = focus_target
+            self._arm_pending_tree_open()
+            return
+        self._pending_tree_open_path = None
+        self._pending_tree_open_focus_target = None
+        if target != self.current_path:
+            self._open_file(target)
+        self._apply_tree_open_focus_target(focus_target)
+
+    def _clear_pending_tree_open(self) -> None:
+        self._pending_tree_open_path = None
+        self._pending_tree_open_focus_target = None
+        self._pending_tree_open_retry_armed = False
+
+    def _prepare_vault_switch_ui_reset(self) -> None:
+        self._clear_pending_tree_open()
+        self._pending_selection = None
+        self._skip_next_selection_open = True
+        selection_model = self.tree_view.selectionModel()
+        if selection_model:
+            blocker = QSignalBlocker(selection_model)
+            try:
+                self.tree_view.clearSelection()
+                self.tree_view.setCurrentIndex(QModelIndex())
+            finally:
+                del blocker
+        self._suspend_dirty_tracking = True
+        try:
+            try:
+                self.editor.unload_for_delete()
+            except Exception:
+                self.editor.set_markdown("")
+        finally:
+            self._suspend_dirty_tracking = False
+            self._dirty_flag = False
+        self._vi_initial_page_loaded = False
+        if self._vi_enabled:
+            self._vi_enable_pending = True
+            self.editor.set_vi_mode_enabled(False)
+        self.current_path = None
+        self.right_panel.set_current_page(None, None)
 
     def _open_file(
         self,
@@ -10352,6 +10450,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if path:
             path = self._normalize_root_page_path(path)
+        self._clear_pending_tree_open()
         if not path or (path == self.current_path and not force):
             return
         if getattr(self, "_mode_window_pending", False) or getattr(self, "_mode_window", None):
@@ -15239,8 +15338,7 @@ class MainWindow(QMainWindow):
         if target:
             if target != self.current_path:
                 self._skip_next_selection_open = True
-                self._open_file(target)
-            self._focus_editor()
+            self._request_tree_open(target, focus_target="editor")
 
     def _focus_editor(self) -> None:
         self.editor.setFocus()
@@ -16852,16 +16950,122 @@ class MainWindow(QMainWindow):
             return
         
         self._handle_move_response(dest_path, resp.json(), progress)
+
+    def _reorder_logical_parent_path(self, parent_path: str, page_order: list[str]) -> str:
+        """Resolve the real parent path for reorder requests in filtered views."""
+        normalized_parent = (parent_path or "/").strip() or "/"
+        if normalized_parent != "/" or not page_order:
+            return normalized_parent
+        inferred_parent = self._tree_parent_for_order(page_order)
+        if inferred_parent:
+            return inferred_parent
+        filter_path = getattr(self, "_nav_filter_path", None)
+        if not filter_path or filter_path == "/":
+            return normalized_parent
+        folder_path = self._file_path_to_folder(str(page_order[0]))
+        if folder_path == filter_path:
+            return filter_path
+        return normalized_parent
+
+    def _tree_parent_for_order(self, page_order: list[str]) -> Optional[str]:
+        """Return the tree parent whose direct children contain the reordered subset."""
+        target_paths = {str(path) for path in page_order if path}
+        if not target_paths:
+            return None
+
+        def walk(nodes: list[dict]) -> Optional[str]:
+            for node in nodes:
+                path = self._normalize_tree_path(node.get("path"))
+                children = node.get("children") or []
+                child_paths = {
+                    str(child.get("open_path") or child.get("path"))
+                    for child in children
+                    if child.get("open_path") or child.get("path")
+                }
+                if target_paths.issubset(child_paths):
+                    return path
+                found = walk(children)
+                if found is not None:
+                    return found
+            return None
+
+        tree_nodes = getattr(self, "_full_tree_data", None) or []
+        return walk(tree_nodes)
+
+    def _ordered_child_paths_for_parent(self, parent_path: str) -> list[str]:
+        """Return the full ordered child list for a parent path."""
+        normalized_parent = (parent_path or "/").strip() or "/"
+
+        def walk(nodes: list[dict]) -> Optional[list[str]]:
+            for node in nodes:
+                path = self._normalize_tree_path(node.get("path"))
+                children = node.get("children") or []
+                if normalized_parent == "/" and path == "/":
+                    ordered: list[str] = []
+                    seen: set[str] = set()
+                    for child in children:
+                        child_path = child.get("open_path") or child.get("path")
+                        if child_path and child_path not in seen:
+                            ordered.append(str(child_path))
+                            seen.add(str(child_path))
+                    return ordered
+                if path == normalized_parent:
+                    ordered = []
+                    seen = set()
+                    for child in children:
+                        child_path = child.get("open_path") or child.get("path")
+                        if child_path and child_path not in seen:
+                            ordered.append(str(child_path))
+                            seen.add(str(child_path))
+                    return ordered
+                found = walk(children)
+                if found is not None:
+                    return found
+            return None
+
+        tree_nodes = getattr(self, "_full_tree_data", None) or []
+        return walk(tree_nodes) or []
+
+    def _merge_filtered_reorder(self, parent_path: str, page_order: list[str]) -> list[str]:
+        """Merge a reordered visible subset back into the full sibling order."""
+        reordered_subset = [str(path) for path in page_order if path]
+        if not reordered_subset:
+            return []
+        full_order = self._ordered_child_paths_for_parent(parent_path)
+        if not full_order:
+            return reordered_subset
+        subset_set = set(reordered_subset)
+        full_subset = [path for path in full_order if path in subset_set]
+        if not full_subset:
+            return full_order
+        if len(full_subset) == len(full_order):
+            return reordered_subset
+        replacement_iter = iter(reordered_subset)
+        merged: list[str] = []
+        for path in full_order:
+            if path in subset_set:
+                merged.append(next(replacement_iter, path))
+            else:
+                merged.append(path)
+        return merged
     
     def _on_tree_reorder_requested(self, parent_path: str, page_order: list) -> None:
         """Handle reordering pages within the same parent."""
-        print(f"[UI] _on_tree_reorder_requested called: parent={parent_path}, count={len(page_order)}")
+        logical_parent_path = self._reorder_logical_parent_path(parent_path, page_order)
+        merged_page_order = self._merge_filtered_reorder(logical_parent_path, page_order)
+        print(
+            f"[UI] _on_tree_reorder_requested called: parent={parent_path}, "
+            f"logical_parent={logical_parent_path}, count={len(merged_page_order)}"
+        )
         if not self._ensure_writable("reorder pages"):
             self.statusBar().clearMessage()
             return
         try:
-            print(f"[UI] Posting reorder to API: parent={parent_path}")
-            resp = self.http.post("/api/tree/reorder", json={"parent_path": parent_path, "page_order": page_order})
+            print(f"[UI] Posting reorder to API: parent={logical_parent_path}")
+            resp = self.http.post(
+                "/api/tree/reorder",
+                json={"parent_path": logical_parent_path, "page_order": merged_page_order},
+            )
             resp.raise_for_status()
             data = resp.json()
             print(f"[UI] Reorder API response: {data}")

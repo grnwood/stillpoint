@@ -276,6 +276,71 @@ class TestTreeExpansionPreservation:
         assert main_window.tree_view.isExpanded(refreshed_idx)
 
 
+class TestFilteredTreeReorder:
+    def test_filtered_reorder_uses_logical_parent_and_full_order(self, main_window, monkeypatch):
+        main_window._test_tree_state[:] = [
+            {
+                "name": "PageA",
+                "path": "/PageA",
+                "open_path": "/PageA/PageA.md",
+                "children": [
+                    {
+                        "name": "Child1",
+                        "path": "/PageA/Child1",
+                        "open_path": "/PageA/Child1/Child1.md",
+                        "children": [],
+                    },
+                    {
+                        "name": "Child2",
+                        "path": "/PageA/Child2",
+                        "open_path": "/PageA/Child2/Child2.md",
+                        "children": [],
+                    },
+                    {
+                        "name": "Other",
+                        "path": "/PageA/Other",
+                        "open_path": "/PageA/Other/Other.md",
+                        "children": [],
+                    },
+                ],
+            }
+        ]
+        main_window._populate_vault_tree()
+        QApplication.processEvents()
+
+        main_window._set_nav_filter("/PageA/Child1/Child1.md")
+        QApplication.processEvents()
+
+        posted: list[dict] = []
+        original_post = main_window.http.post
+
+        def fake_post(path, json=None):
+            if path == "/api/tree/reorder":
+                posted.append(dict(json or {}))
+            return original_post(path, json=json)
+
+        monkeypatch.setattr(main_window.http, "post", fake_post)
+
+        main_window._on_tree_reorder_requested(
+            "/",
+            [
+                "/PageA/Child2/Child2.md",
+                "/PageA/Child1/Child1.md",
+            ],
+        )
+
+        assert posted == [
+            {
+                "parent_path": "/PageA",
+                "page_order": [
+                    "/PageA/Child2/Child2.md",
+                    "/PageA/Child1/Child1.md",
+                    "/PageA/Other/Other.md",
+                ],
+            }
+        ]
+
+
 class TestTreeCollapseRestore:
     """Test collapse/expand interactions."""
     

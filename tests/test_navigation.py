@@ -261,5 +261,81 @@ class TestCursorPositionMemory:
         assert restored_pos >= 8
 
 
+class TestTreeClickGuard:
+    def test_tree_clicks_queue_latest_target_until_editor_ready(self, main_window, monkeypatch):
+        root = main_window.tree_model.invisibleRootItem()
+        first_index = main_window.tree_model.indexFromItem(root.child(0))
+        second_index = main_window.tree_model.indexFromItem(root.child(1))
+
+        readiness = iter([False, False, True])
+        monkeypatch.setattr(main_window.editor, "is_ready_for_page_switch", lambda: next(readiness))
+        monkeypatch.setattr(main_window, "_arm_pending_tree_open", lambda: None)
+
+        opened: list[str] = []
+        monkeypatch.setattr(
+            main_window,
+            "_open_file",
+            lambda path, *args, **kwargs: (opened.append(path), setattr(main_window, "current_path", path)),
+        )
+
+        main_window._on_tree_row_clicked(first_index)
+        main_window._on_tree_row_clicked(second_index)
+
+        assert opened == []
+        assert main_window._pending_tree_open_path == "/PageB/PageB.md"
+
+        main_window._drain_pending_tree_open()
+
+        assert opened == ["/PageB/PageB.md"]
+        assert main_window._pending_tree_open_path is None
+
+    def test_tree_open_requests_are_dropped_during_vault_switch(self, main_window, monkeypatch):
+        opened: list[str] = []
+        monkeypatch.setattr(
+            main_window,
+            "_open_file",
+            lambda path, *args, **kwargs: opened.append(path),
+        )
+
+        main_window._vault_switch_in_progress = True
+        main_window._request_tree_open("/PageA/PageA.md", focus_target="editor")
+
+        assert opened == []
+        assert main_window._pending_tree_open_path is None
+        assert main_window._pending_tree_open_focus_target is None
+
+    def test_prepare_vault_switch_ui_reset_clears_pending_state(self, main_window, monkeypatch):
+        root = main_window.tree_model.invisibleRootItem()
+        first_index = main_window.tree_model.indexFromItem(root.child(0))
+        main_window.tree_view.setCurrentIndex(first_index)
+        main_window.current_path = "/PageA/PageA.md"
+        main_window._pending_tree_open_path = "/PageB/PageB.md"
+        main_window._pending_tree_open_focus_target = "editor"
+        main_window._pending_tree_open_retry_armed = True
+        main_window._pending_selection = "/PageC/PageC.md"
+
+        unloaded: list[str] = []
+        monkeypatch.setattr(main_window.editor, "unload_for_delete", lambda: unloaded.append("ok"))
+
+        current_pages: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            main_window.right_panel,
+            "set_current_page",
+            lambda path, title: current_pages.append((path, title)),
+        )
+
+        main_window._prepare_vault_switch_ui_reset()
+
+        assert unloaded == ["ok"]
+        assert main_window.current_path is None
+        assert main_window._pending_tree_open_path is None
+        assert main_window._pending_tree_open_focus_target is None
+        assert main_window._pending_tree_open_retry_armed is False
+        assert main_window._pending_selection is None
+        assert main_window._skip_next_selection_open is True
+        assert not main_window.tree_view.currentIndex().isValid()
+        assert current_pages == [(None, None)]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

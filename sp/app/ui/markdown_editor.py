@@ -1876,6 +1876,18 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         )
 
+    def is_ready_for_page_switch(self) -> bool:
+        if not self._editor_alive or not self._document_alive or not self._viewport_alive:
+            return False
+        if self._load_in_flight_token != 0:
+            return False
+        if self._mutations_blocked():
+            return False
+        until = self._post_load_paint_guard_until
+        if until > 0.0 and time.perf_counter() < until:
+            return False
+        return True
+
     def current_load_token(self) -> int:
         return int(self._load_generation)
 
