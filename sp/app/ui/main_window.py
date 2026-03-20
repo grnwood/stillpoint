@@ -1547,8 +1547,10 @@ class QuickVaultPicker(QWidget):
             idx = self._index_for_path(current_path)
             if idx.isValid():
                 self._expand_ancestors(idx)
+                idx = self._index_for_path(current_path)
+            if idx.isValid():
                 self.tree.setCurrentIndex(idx)
-                self.tree.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+                self.tree.scrollTo(self.tree.currentIndex(), QAbstractItemView.PositionAtCenter)
         editor_rect = self._host.editor.rect()
         top_left = self._host.editor.mapToGlobal(editor_rect.topLeft())
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
@@ -9781,6 +9783,19 @@ class MainWindow(QMainWindow):
         """Show a transient vault-index picker centered near the editor cursor."""
         if not getattr(self, "tree_model", None):
             return
+        picker = self._quick_vault_picker
+        if picker is not None:
+            try:
+                if picker.isVisible():
+                    return
+                picker.close()
+                picker.deleteLater()
+            except Exception:
+                pass
+            self._quick_vault_picker = None
+        picker = QuickVaultPicker(self, self)
+        picker.pageChosen.connect(self._activate_quick_vault_picker_target)
+        self._quick_vault_picker = picker
         if global_pos is None:
             cursor_rect = self.editor.cursorRect()
             viewport = self.editor.viewport()
@@ -9789,11 +9804,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 prefer_above = False
             global_pos = viewport.mapToGlobal(cursor_rect.bottomLeft())
-        picker = self._quick_vault_picker
-        if picker is None:
-            picker = QuickVaultPicker(self, self)
-            picker.pageChosen.connect(self._activate_quick_vault_picker_target)
-            self._quick_vault_picker = picker
         picker.open_at(global_pos, prefer_above=prefer_above)
 
     def _activate_quick_vault_picker_target(self, target: str) -> None:
