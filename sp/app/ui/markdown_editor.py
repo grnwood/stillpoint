@@ -1601,6 +1601,7 @@ class MarkdownEditor(QTextEdit):
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
         self._move_text_callback: Optional[Callable[[str, str], bool]] = None
+        self._move_page_callback: Optional[Callable[[], None]] = None
         self._persisted_undo_callback: Optional[Callable[[], bool]] = None
         self._persisted_redo_callback: Optional[Callable[[], bool]] = None
         self._suppress_link_scan: bool = False
@@ -2227,6 +2228,10 @@ class MarkdownEditor(QTextEdit):
     def set_move_text_callback(self, callback: Optional[Callable[[str, str], bool]]) -> None:
         """Provide a handler that appends markdown text to a target page path."""
         self._move_text_callback = callback
+
+    def set_move_page_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        """Provide a handler that moves the current page."""
+        self._move_page_callback = callback
 
     def set_persisted_undo_callback(self, callback: Optional[Callable[[], bool]]) -> None:
         """Provide a fallback undo handler when the in-memory Qt undo stack is empty."""
@@ -5266,9 +5271,14 @@ class MarkdownEditor(QTextEdit):
                 terminal_action = nav_sub.addAction("Open Terminal Here")
                 terminal_action.triggered.connect(self._open_terminal_here)
 
-                move_action = menu.addAction("Move Text…")
-                move_action.setEnabled(self.textCursor().hasSelection())
-                move_action.triggered.connect(self._move_text_via_jump_dialog)
+                move_sub = menu.addMenu("Move")
+                move_text_action = move_sub.addAction("Move Text…")
+                move_text_action.setEnabled(self.textCursor().hasSelection())
+                move_text_action.triggered.connect(self._move_text_via_jump_dialog)
+                move_page_action = move_sub.addAction("Move Page…")
+                move_page_action.setEnabled(bool(self._move_page_callback and self._current_path))
+                if self._move_page_callback:
+                    move_page_action.triggered.connect(self._move_page_callback)
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
             self._suppress_focus_lost_once = False
@@ -5348,9 +5358,14 @@ class MarkdownEditor(QTextEdit):
             terminal_action = nav_sub.addAction("Open Terminal Here")
             terminal_action.triggered.connect(self._open_terminal_here)
 
-            move_action = menu.addAction("Move Text…")
-            move_action.setEnabled(self.textCursor().hasSelection())
-            move_action.triggered.connect(self._move_text_via_jump_dialog)
+            move_sub = menu.addMenu("Move")
+            move_text_action = move_sub.addAction("Move Text…")
+            move_text_action.setEnabled(self.textCursor().hasSelection())
+            move_text_action.triggered.connect(self._move_text_via_jump_dialog)
+            move_page_action = move_sub.addAction("Move Page…")
+            move_page_action.setEnabled(bool(self._move_page_callback and self._current_path))
+            if self._move_page_callback:
+                move_page_action.triggered.connect(self._move_page_callback)
 
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
@@ -7186,8 +7201,10 @@ class MarkdownEditor(QTextEdit):
                 return _block_vi_edit()
             if cursor.hasSelection():
                 self._move_text_via_jump_dialog()
+            elif self._move_page_callback and self._current_path:
+                self._move_page_callback()
             else:
-                self._status_message("Select text to move.")
+                self._status_message("No page move available.")
             return True
 
         if key == Qt.Key_I and not shift:

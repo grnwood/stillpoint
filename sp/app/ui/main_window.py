@@ -2364,6 +2364,7 @@ class MainWindow(QMainWindow):
         self.editor.set_open_in_window_callback(self._open_page_editor_window)
         self.editor.set_filter_nav_callback(self._set_nav_filter)
         self.editor.set_move_text_callback(self._append_text_to_page_from_editor)
+        self.editor.set_move_page_callback(self._move_current_page_dialog)
         self.editor.set_persisted_undo_callback(self._persisted_undo_fallback)
         self.editor.set_persisted_redo_callback(self._persisted_redo_fallback)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
@@ -2885,7 +2886,7 @@ class MainWindow(QMainWindow):
             go_menu.addAction(link_action)
 
         ai_action = QAction("AI Chat", self)
-        ai_action.triggered.connect(self._open_ai_chat_window)
+        ai_action.triggered.connect(self._focus_current_ai_chat)
         go_menu.addAction(ai_action)
 
         jump_action = QAction("Jump To Page… (Ctrl+J)", self)
@@ -9434,6 +9435,10 @@ class MainWindow(QMainWindow):
             "QListWidget::item { padding: 4px 6px; }"
             "QListWidget::item:selected { background: "
             f"{selected_bg}; }}"
+            "QListWidget::item:selected:active { background: "
+            f"{selected_bg}; }}"
+            "QListWidget::item:selected:!active { background: "
+            f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -9614,6 +9619,7 @@ class MainWindow(QMainWindow):
             "border: 1px solid "
             f"{theme_value('main_window.picker_popup.border', '#666666')}; "
             "border-radius: 6px; }"
+            "QLabel { border: none; font-weight: bold; }"
             "QLineEdit { border: 1px solid "
             f"{theme_value('main_window.picker_popup.input_border', '#777777')}; "
             "border-radius: 4px; padding: 4px 6px; }"
@@ -9625,11 +9631,13 @@ class MainWindow(QMainWindow):
             f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(6)
+        title = QLabel("Headings", popup)
         filter_edit = QLineEdit(popup)
         filter_edit.setPlaceholderText("Filter headings…")
         list_widget = QListWidget(popup)
+        layout.addWidget(title)
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
 
@@ -9755,19 +9763,14 @@ class MainWindow(QMainWindow):
         list_widget.installEventFilter(filt)
         populate("")
 
-        # Position near cursor, above or below based on preference and space
-        popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
+        editor_rect = self.editor.rect()
+        popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
+        popup_height = max(260, int(editor_rect.height() * 0.65))
         screen = QApplication.primaryScreen().availableGeometry()
-        size = popup.size()
-        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
-        if prefer_above:
-            y = global_pos.y() - size.height() - 8
-            if y < screen.y():
-                y = global_pos.y() + 12
-        else:
-            y = global_pos.y() + 12
-            if y + size.height() > screen.y() + screen.height():
-                y = global_pos.y() - size.height() - 8
+        center = self.editor.mapToGlobal(editor_rect.center())
+        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
+        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        popup.resize(popup_width, popup_height)
         popup.move(x, y)
         popup.show()
         popup.raise_()
@@ -13824,6 +13827,7 @@ class MainWindow(QMainWindow):
             
             # Focus the AI Chat tab
             self.right_panel.focus_ai_chat(self.current_path)
+            self.right_panel.focus_ai_chat_input()
             return
         
         # No tabbed or detached window - create a new detached window
@@ -16898,6 +16902,16 @@ class MainWindow(QMainWindow):
             return
         
         self._handle_move_response(dest_path, resp.json(), progress)
+
+    def _move_current_page_dialog(self) -> None:
+        """Move the page currently open in the editor using the standard move dialog."""
+        current_path = str(self.current_path or "").strip()
+        if not current_path:
+            return
+        folder_path = self._file_path_to_folder(current_path)
+        if not folder_path:
+            return
+        self._move_path_dialog(folder_path, self._parent_path(self.tree_view.currentIndex()))
 
     def _on_tree_move_requested(self, from_path: str, dest_path: str) -> None:
         if from_path == dest_path:

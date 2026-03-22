@@ -72,6 +72,13 @@ Example:
 - `Ctrl+H` to replace text
 - In VI mode, use `/` for quick in-page search and replace
 
+## Moving Content
+- Right-click in the editor and use `Move -> Move Text…` to move selected text to another page.
+- Right-click in the editor and use `Move -> Move Page…` to move the current page with the standard move-page dialog.
+- In VI mode, `m` keeps the same mental model:
+  - With a selection, it moves the selected text.
+  - With no selection, it opens the move-page dialog for the current page.
+
 ## Printing
 - Printing is powerful: print a page to the browser for clean output/PDF export, or print page-tree views for structured sharing.
 - Use `File -> Print`, `Ctrl+P`, or right-click menus.

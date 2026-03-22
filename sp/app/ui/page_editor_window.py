@@ -863,6 +863,7 @@ class PageEditorWindow(QMainWindow):
             "border: 1px solid "
             f"{theme_value('page_editor_window.picker_popup.border', '#666666')}; "
             "border-radius: 6px; }"
+            "QLabel { border: none; font-weight: bold; }"
             "QLineEdit { border: 1px solid "
             f"{theme_value('page_editor_window.picker_popup.input_border', '#777777')}; "
             "border-radius: 4px; padding: 4px 6px; }"
@@ -872,13 +873,19 @@ class PageEditorWindow(QMainWindow):
             "QListWidget::item { padding: 4px 6px; }"
             "QListWidget::item:selected { background: "
             f"{selected_bg}; }}"
+            "QListWidget::item:selected:active { background: "
+            f"{selected_bg}; }}"
+            "QListWidget::item:selected:!active { background: "
+            f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(6)
+        title = QLabel("Headings", popup)
         filter_edit = QLineEdit(popup)
         filter_edit.setPlaceholderText("Filter headings…")
         list_widget = QListWidget(popup)
+        layout.addWidget(title)
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
 
@@ -1001,19 +1008,14 @@ class PageEditorWindow(QMainWindow):
         list_widget.installEventFilter(filt)
         populate("")
 
-        # Position near cursor, above or below based on preference and space
-        popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
+        editor_rect = self.editor.rect()
+        popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
+        popup_height = max(260, int(editor_rect.height() * 0.65))
         screen = QApplication.primaryScreen().availableGeometry()
-        size = popup.size()
-        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
-        if prefer_above:
-            y = global_pos.y() - size.height() - 8
-            if y < screen.y():
-                y = global_pos.y() + 12
-        else:
-            y = global_pos.y() + 12
-            if y + size.height() > screen.y() + screen.height():
-                y = global_pos.y() - size.height() - 8
+        center = self.editor.mapToGlobal(editor_rect.center())
+        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
+        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        popup.resize(popup_width, popup_height)
         popup.move(x, y)
         popup.show()
         popup.raise_()

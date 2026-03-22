@@ -195,3 +195,19 @@ def test_non_vi_ctrl_alt_v_opens_vault_picker_signal(qapp: QApplication) -> None
 
     assert len(fired) == 1
     editor.close()
+
+
+def test_vi_m_without_selection_uses_move_page_callback(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("Example")
+    editor.set_vi_mode_enabled(True)
+    editor._current_path = "/PageA/PageA.md"
+
+    fired: list[bool] = []
+    editor.set_move_page_callback(lambda: fired.append(True))
+
+    QTest.keyClick(editor, Qt.Key_M)
+
+    assert fired == [True]
+    editor.close()
