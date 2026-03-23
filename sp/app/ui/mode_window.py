@@ -214,6 +214,16 @@ class ModeWindow(QMainWindow):
         self._heading_popup: Optional[QWidget] = None
         self._heading_popup_label: Optional[QLabel] = None
         self._heading_popup_list: Optional[QListWidget] = None
+        self._base_doc_was_modified = False
+        self._base_markdown_on_open = ""
+        try:
+            self._base_doc_was_modified = bool(self._base_editor.document().isModified())
+        except Exception:
+            self._base_doc_was_modified = False
+        try:
+            self._base_markdown_on_open = self._base_editor.to_markdown()
+        except Exception:
+            self._base_markdown_on_open = ""
         try:
             # Suppress link scanning in both overlay and base editors during startup.
             self.editor._suppress_link_scan = True
@@ -1502,8 +1512,19 @@ class ModeWindow(QMainWindow):
         try:
             if not self._read_only:
                 overlay_markdown = self.editor.to_markdown()
-                if overlay_markdown != getattr(self, "_overlay_initial_markdown", ""):
+                overlay_changed = overlay_markdown != getattr(self, "_overlay_initial_markdown", "")
+                base_changed_during_overlay = overlay_markdown != getattr(self, "_base_markdown_on_open", "")
+                if overlay_changed or base_changed_during_overlay:
                     self._base_editor.set_markdown(overlay_markdown)
+                    try:
+                        self._base_editor.document().setModified(True)
+                    except Exception:
+                        pass
+                elif getattr(self, "_base_doc_was_modified", False):
+                    try:
+                        self._base_editor.document().setModified(True)
+                    except Exception:
+                        pass
         except Exception:
             pass
         self._pending_close = False

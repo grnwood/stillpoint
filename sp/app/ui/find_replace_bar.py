@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, QEvent, QObject
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,23 +24,7 @@ class FindReplaceBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setVisible(False)
-        self.setStyleSheet(
-            "QWidget {"
-            "  background: palette(base);"
-            "  border-top: 1px solid #555;"
-            "}"
-            "QLineEdit {"
-            "  border: 1px solid #777;"
-            "  border-radius: 4px;"
-            "  padding: 4px 6px;"
-            "}"
-            "QLineEdit:focus {"
-            "  border: 1px solid #5aa1ff;"
-            "}"
-            "QPushButton {"
-            "  padding: 4px 8px;"
-            "}"
-        )
+        self.setObjectName("findReplaceBar")
         self._pending_backwards: Optional[bool] = None
         self._last_backwards: bool = False
         layout = QVBoxLayout(self)
@@ -93,6 +78,76 @@ class FindReplaceBar(QWidget):
         self.replace_edit.installEventFilter(self)
         self.setFocusPolicy(Qt.NoFocus)
         self._set_replace_mode(False)
+        self._apply_theme_palette()
+
+    def _resolve_palette(self) -> QPalette:
+        parent = self.parentWidget()
+        sources = (
+            parent,
+            getattr(parent, "editor", None),
+            self,
+        )
+        for source in sources:
+            if source is None:
+                continue
+            palette_getter = getattr(source, "find_replace_bar_palette", None)
+            if callable(palette_getter):
+                try:
+                    palette = palette_getter()
+                except Exception:
+                    continue
+                if isinstance(palette, QPalette):
+                    return QPalette(palette)
+            try:
+                palette = source.palette()
+            except Exception:
+                continue
+            if isinstance(palette, QPalette):
+                return QPalette(palette)
+        return QPalette(self.palette())
+
+    def _apply_theme_palette(self) -> None:
+        palette = self._resolve_palette()
+        self.setPalette(palette)
+        self.query_edit.setPalette(palette)
+        self.replace_edit.setPalette(palette)
+        self.setStyleSheet(
+            "#findReplaceBar {"
+            "  background: palette(base);"
+            "  color: palette(text);"
+            "  border-top: 1px solid palette(mid);"
+            "}"
+            "#findReplaceBar QLabel {"
+            "  color: palette(text);"
+            "  background: transparent;"
+            "  border: none;"
+            "}"
+            "#findReplaceBar QCheckBox {"
+            "  color: palette(text);"
+            "}"
+            "#findReplaceBar QLineEdit {"
+            "  background: palette(base);"
+            "  color: palette(text);"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 4px;"
+            "  padding: 4px 6px;"
+            "  selection-background-color: palette(highlight);"
+            "  selection-color: palette(highlighted-text);"
+            "}"
+            "#findReplaceBar QLineEdit:focus {"
+            "  border: 1px solid palette(highlight);"
+            "}"
+            "#findReplaceBar QPushButton {"
+            "  background: palette(button);"
+            "  color: palette(button-text);"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 4px;"
+            "  padding: 4px 8px;"
+            "}"
+            "#findReplaceBar QPushButton:hover {"
+            "  background: palette(alternate-base);"
+            "}"
+        )
 
     def _emit_find(self, backwards: Optional[bool] = None) -> None:
         direction: bool
@@ -114,6 +169,7 @@ class FindReplaceBar(QWidget):
         self.replaceAllRequested.emit(self.query_edit.text(), self.replace_edit.text(), self.case_checkbox.isChecked())
 
     def show_bar(self, *, replace: bool, query: str, backwards: bool) -> None:
+        self._apply_theme_palette()
         self._set_replace_mode(replace)
         self._pending_backwards = backwards
         self._last_backwards = backwards

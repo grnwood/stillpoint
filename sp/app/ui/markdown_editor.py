@@ -1744,15 +1744,30 @@ class MarkdownEditor(QTextEdit):
         if bg is None and text is None and selection_bg is None and selection_text is None:
             return
         pal = self.palette()
+        base_color = pal.color(QPalette.Base)
+        text_color = pal.color(QPalette.Text)
         if bg is not None:
-            pal.setColor(QPalette.Base, theme_color("markdown_editor.base.bg", bg))
+            base_color = theme_color("markdown_editor.base.bg", bg)
+            pal.setColor(QPalette.Window, base_color)
+            pal.setColor(QPalette.Base, base_color)
+            pal.setColor(QPalette.AlternateBase, base_color.lighter(112) if base_color.lightness() < 128 else base_color.darker(104))
+            pal.setColor(QPalette.Button, base_color)
         if text is not None:
-            pal.setColor(QPalette.Text, theme_color("markdown_editor.base.text", text))
+            text_color = theme_color("markdown_editor.base.text", text)
+            pal.setColor(QPalette.WindowText, text_color)
+            pal.setColor(QPalette.Text, text_color)
+            pal.setColor(QPalette.ButtonText, text_color)
         if selection_bg is not None:
             pal.setColor(QPalette.Highlight, theme_color("markdown_editor.base.selection_bg", selection_bg))
         if selection_text is not None:
             pal.setColor(QPalette.HighlightedText, theme_color("markdown_editor.base.selection_text", selection_text))
+        border_color = QColor(base_color)
+        border_color = border_color.lighter(170) if border_color.lightness() < 128 else border_color.darker(135)
+        pal.setColor(QPalette.Mid, border_color)
         self.setPalette(pal)
+
+    def find_replace_bar_palette(self) -> QPalette:
+        return QPalette(self.palette())
 
     def refresh_theme_styling(self) -> None:
         self._apply_theme_palette()

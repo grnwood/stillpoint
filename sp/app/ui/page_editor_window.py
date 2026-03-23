@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional
+import re
 import traceback
 import httpx
 
@@ -35,16 +36,24 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QSize
 
+from .find_replace_bar import FindReplaceBar
 from .markdown_editor import MarkdownEditor
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
+from sp.logging_flags import log_enabled
 from .theme import theme_color, theme_value
 from sp.server.adapters.files import PAGE_SUFFIXES
 
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+_PAGE_EDITOR_DEBUG = log_enabled("ui_state")
+
+
+def _page_editor_log(message: str) -> None:
+    if _PAGE_EDITOR_DEBUG:
+        print(message)
 
 
 def _load_one_shot_prompt() -> str:
@@ -132,7 +141,20 @@ class PageEditorWindow(QMainWindow):
         self.editor.focusLost.connect(lambda: self._save_current_file(auto=True, reason="focus lost"))
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
-        self.setCentralWidget(self.editor)
+        self.editor.findBarRequested.connect(self._on_editor_find_requested)
+        self._find_bar = FindReplaceBar(self)
+        self._find_bar.findNextRequested.connect(self._on_find_next_requested)
+        self._find_bar.replaceRequested.connect(self._on_replace_requested)
+        self._find_bar.replaceAllRequested.connect(self._on_replace_all_requested)
+        self._find_bar.closed.connect(lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
+
+        editor_host = QWidget(self)
+        editor_layout = QVBoxLayout(editor_host)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
+        editor_layout.addWidget(self.editor, 1)
+        editor_layout.addWidget(self._find_bar)
+        self.setCentralWidget(editor_host)
         self._apply_theme_palette()
         
         # Vi mode state
@@ -202,7 +224,9 @@ class PageEditorWindow(QMainWindow):
         heading_action = QAction("Show Heading Picker", self)
         heading_action.setShortcut(QKeySequence("Ctrl+Shift+Tab"))
         heading_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        heading_action.triggered.connect(lambda: (print("[PageEditor] Heading action triggered"), self._cycle_popup("heading", reverse=False)))
+        heading_action.triggered.connect(
+            lambda: (_page_editor_log("[PageEditor] Heading action triggered"), self._cycle_popup("heading", reverse=False))
+        )
         self.addAction(heading_action)
 
         link_action = QAction("Insert Link…", self)
@@ -216,9 +240,18 @@ class PageEditorWindow(QMainWindow):
         date_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         date_action.triggered.connect(self._insert_date)
         self.addAction(date_action)
+
+        self._find_shortcut = QShortcut(QKeySequence.Find, self.editor)
+        self._find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._find_shortcut.activated.connect(lambda: self._show_find_bar(replace=False, backwards=False))
+
+        self._replace_shortcut = QShortcut(QKeySequence("Ctrl+H"), self.editor)
+        self._replace_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._replace_shortcut.activated.connect(lambda: self._show_find_bar(replace=True, backwards=False))
         
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
+        self.editor.installEventFilter(self)
 
     def _api_post(self, path: str, payload: dict) -> httpx.Response:
         """POST with one remote re-auth retry on 401."""
@@ -234,13 +267,85 @@ class PageEditorWindow(QMainWindow):
         if bg is None and text is None:
             return
         pal = self.palette()
+        base_color = pal.color(QPalette.Base)
+        text_color = pal.color(QPalette.Text)
         if bg is not None:
-            pal.setColor(QPalette.Window, theme_color("page_editor_window.base.bg", bg))
-            pal.setColor(QPalette.Base, theme_color("page_editor_window.base.bg", bg))
+            base_color = theme_color("page_editor_window.base.bg", bg)
+            pal.setColor(QPalette.Window, base_color)
+            pal.setColor(QPalette.Base, base_color)
+            pal.setColor(QPalette.AlternateBase, base_color.lighter(112) if base_color.lightness() < 128 else base_color.darker(104))
+            pal.setColor(QPalette.Button, base_color)
         if text is not None:
-            pal.setColor(QPalette.WindowText, theme_color("page_editor_window.base.text", text))
-            pal.setColor(QPalette.Text, theme_color("page_editor_window.base.text", text))
+            text_color = theme_color("page_editor_window.base.text", text)
+            pal.setColor(QPalette.WindowText, text_color)
+            pal.setColor(QPalette.Text, text_color)
+            pal.setColor(QPalette.ButtonText, text_color)
+        border_color = QColor(base_color)
+        border_color = border_color.lighter(170) if border_color.lightness() < 128 else border_color.darker(135)
+        pal.setColor(QPalette.Mid, border_color)
         self.setPalette(pal)
+
+    def find_replace_bar_palette(self) -> QPalette:
+        editor = getattr(self, "editor", None)
+        if editor is not None:
+            palette_getter = getattr(editor, "find_replace_bar_palette", None)
+            if callable(palette_getter):
+                try:
+                    palette = palette_getter()
+                except Exception:
+                    palette = None
+                if isinstance(palette, QPalette):
+                    return QPalette(palette)
+        return QPalette(self.palette())
+
+    def _selected_text_for_search(self) -> str:
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            return cursor.selectedText().replace("\u2029", "\n")
+        return ""
+
+    def _sanitize_find_query(self, text: Optional[str]) -> str:
+        if not text:
+            return ""
+        cleaned = text.replace("\u2029", "\n")
+        try:
+            cleaned = re.sub(r"[\x00-\x1F\x7F]", "", cleaned)
+            cleaned = re.sub(r"[\uE000-\uF8FF]", "", cleaned)
+        except Exception:
+            pass
+        return cleaned.strip()
+
+    def _show_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
+        query = seed if seed is not None else self._selected_text_for_search()
+        query = self._sanitize_find_query(query)
+        if not query:
+            query = self.editor.last_search_query()
+        query = self._sanitize_find_query(query)
+        self._find_bar.show_bar(replace=replace, query=query or "", backwards=backwards)
+
+    def _on_editor_find_requested(self, replace_mode: bool, backwards: bool, seed_query: str) -> None:
+        self._show_find_bar(replace=replace_mode, backwards=backwards, seed=seed_query)
+
+    def _on_find_next_requested(self, query: str, backwards: bool, case_sensitive: bool) -> None:
+        search_query = query.strip() or self.editor.last_search_query() or self._selected_text_for_search()
+        search_query = self._sanitize_find_query(search_query)
+        if not search_query:
+            self.statusBar().showMessage("Enter text to find.", 2000)
+            self._find_bar.focus_query()
+            return
+        self._find_bar.query_edit.setText(search_query)
+        self.editor.search_find_next(search_query, backwards=backwards, wrap=True, case_sensitive=case_sensitive)
+
+    def _on_replace_requested(self, replacement: str) -> None:
+        self.editor.search_replace_current(replacement)
+
+    def _on_replace_all_requested(self, query: str, replacement: str, case_sensitive: bool) -> None:
+        search_query = query.strip() or self.editor.last_search_query()
+        if not search_query:
+            self.statusBar().showMessage("Enter text to find.", 2000)
+            self._find_bar.focus_query()
+            return
+        self.editor.search_replace_all(search_query, replacement, case_sensitive=case_sensitive)
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date."""
@@ -411,7 +516,7 @@ class PageEditorWindow(QMainWindow):
         tracer = PageLoadLogger(self._source_path) if PAGE_LOGGING_ENABLED else None
         if tracer:
             tracer.mark("api read start")
-        print(f"[StillPoint Popup] Read request path={self._source_path}")
+        _page_editor_log(f"[StillPoint Popup] Read request path={self._source_path}")
         try:
             resp = self._api_post("/api/file/read", {"path": self._source_path})
             resp.raise_for_status()
@@ -483,24 +588,26 @@ class PageEditorWindow(QMainWindow):
             rel = Path(self._source_path.lstrip("/"))
             if len(rel.parts) == 1 and rel.suffix.lower() in PAGE_SUFFIXES:
                 trace = "".join(traceback.format_stack(limit=12))
-                print(f"[StillPoint Popup] Invalid root write requested path={self._source_path} reason={reason_label}\n{trace}")
+                _page_editor_log(
+                    f"[StillPoint Popup] Invalid root write requested path={self._source_path} reason={reason_label}\n{trace}"
+                )
         except Exception:
             pass
-        print(
+        _page_editor_log(
             f"[StillPoint Popup] Write request reason={reason_label} mode={mode} path={self._source_path} "
             f"bytes={payload_bytes}"
         )
         try:
             resp = self._api_post("/api/file/write", payload)
             resp.raise_for_status()
-            print(f"[StillPoint Popup] Write OK {self._source_path} status={resp.status_code}")
+            _page_editor_log(f"[StillPoint Popup] Write OK {self._source_path} status={resp.status_code}")
         except httpx.HTTPError as exc:
             try:
                 body = exc.response.text if exc.response else str(exc)
                 status = exc.response.status_code if exc.response else "n/a"
-                print(f"[StillPoint Popup] Write FAILED {self._source_path} status={status} body={body}")
+                _page_editor_log(f"[StillPoint Popup] Write FAILED {self._source_path} status={status} body={body}")
             except Exception:
-                print(f"[StillPoint Popup] Write FAILED {self._source_path}: {exc}")
+                _page_editor_log(f"[StillPoint Popup] Write FAILED {self._source_path}: {exc}")
             if not auto:
                 QMessageBox.critical(self, "Save Failed", f"Failed to save: {exc}")
             return
@@ -523,7 +630,7 @@ class PageEditorWindow(QMainWindow):
         if not self._source_path:
             self.statusBar().showMessage("No page to reload", 2000)
             return
-        print(f"[StillPoint Popup] Reload request path={self._source_path}")
+        _page_editor_log(f"[StillPoint Popup] Reload request path={self._source_path}")
         if self._is_dirty():
             self._save_current_file(auto=True, reason="reload")
         self._load_content()
@@ -809,7 +916,7 @@ class PageEditorWindow(QMainWindow):
     def _on_headings_changed(self, headings: list[dict]) -> None:
         """Store headings when editor parses them."""
         self._toc_headings = list(headings or [])
-        print(f"[PageEditor] Headings changed: {len(self._toc_headings)} headings")
+        _page_editor_log(f"[PageEditor] Headings changed: {len(self._toc_headings)} headings")
         self._update_title()
 
     def _first_h1_title(self) -> Optional[str]:
@@ -829,14 +936,14 @@ class PageEditorWindow(QMainWindow):
 
     def _handle_heading_picker_request(self, global_point, prefer_above: bool) -> None:
         """Handle Ctrl+Alt+T heading picker request from editor - show filterable picker."""
-        print(f"[PageEditor] _handle_heading_picker_request called")
+        _page_editor_log("[PageEditor] _handle_heading_picker_request called")
         self._show_filterable_heading_picker(global_point, prefer_above)
 
     def _show_filterable_heading_picker(self, global_pos, prefer_above: bool = False) -> None:
         """Show a filterable heading picker near the cursor (vi 't')."""
         headings = self._toc_headings or []
         if not headings:
-            print("[PageEditor] No headings to show")
+            _page_editor_log("[PageEditor] No headings to show")
             return
         selected_bg = theme_value(
             "page_editor_window.picker_popup.list_selected_bg",
@@ -1021,7 +1128,7 @@ class PageEditorWindow(QMainWindow):
         popup.raise_()
         filter_edit.setFocus()
         self._heading_picker = popup
-        print(f"[PageEditor] Filterable picker shown with {list_widget.count()} headings")
+        _page_editor_log(f"[PageEditor] Filterable picker shown with {list_widget.count()} headings")
 
     def _heading_popup_candidates(self) -> list[dict]:
         """Return headings for current page (excluding horizontal rules)."""
@@ -1062,10 +1169,10 @@ class PageEditorWindow(QMainWindow):
 
     def _show_heading_popup(self) -> None:
         """Display the heading popup with current items and selection."""
-        print(f"[PageEditor] _show_heading_popup called")
+        _page_editor_log("[PageEditor] _show_heading_popup called")
         self._ensure_heading_popup()
         if not self._heading_popup or not self._heading_popup_label or not self._heading_popup_list:
-            print("[PageEditor] Popup widgets not initialized properly")
+            _page_editor_log("[PageEditor] Popup widgets not initialized properly")
             return
         self._heading_popup_list.clear()
         if self._popup_mode == "heading":
@@ -1094,18 +1201,18 @@ class PageEditorWindow(QMainWindow):
         self._heading_popup.show()
         self._heading_popup.raise_()
         self._heading_popup_list.setFocus()
-        print(f"[PageEditor] Popup shown and focused")
+        _page_editor_log("[PageEditor] Popup shown and focused")
 
     def _cycle_popup(self, mode: str, reverse: bool = False) -> None:
         """Cycle through heading popup items."""
-        print(f"[PageEditor] _cycle_popup called, mode={mode}")
+        _page_editor_log(f"[PageEditor] _cycle_popup called, mode={mode}")
         if mode == "heading":
             items = self._heading_popup_candidates()
-            print(f"[PageEditor] Found {len(items)} heading candidates")
+            _page_editor_log(f"[PageEditor] Found {len(items)} heading candidates")
         else:
             return
         if not items:
-            print("[PageEditor] No items to show, returning")
+            _page_editor_log("[PageEditor] No items to show, returning")
             return
         if self._popup_mode != mode:
             self._popup_items = items
@@ -1122,14 +1229,19 @@ class PageEditorWindow(QMainWindow):
 
     def _activate_heading_popup_selection(self) -> None:
         """Navigate to selected heading and hide popup."""
-        print(f"[PageEditor] _activate_heading_popup_selection called")
+        _page_editor_log("[PageEditor] _activate_heading_popup_selection called")
         if not self._popup_items or self._popup_index < 0 or not self._popup_mode:
-            print(f"[PageEditor] Invalid state: items={len(self._popup_items) if self._popup_items else 0}, index={self._popup_index}, mode={self._popup_mode}")
+            _page_editor_log(
+                f"[PageEditor] Invalid state: items={len(self._popup_items) if self._popup_items else 0}, "
+                f"index={self._popup_index}, mode={self._popup_mode}"
+            )
             self._hide_heading_popup()
             return
         target = self._popup_items[self._popup_index]
         mode = self._popup_mode
-        print(f"[PageEditor] Navigating to heading: {target.get('title', 'unknown')} at line {target.get('line', '?')}")
+        _page_editor_log(
+            f"[PageEditor] Navigating to heading: {target.get('title', 'unknown')} at line {target.get('line', '?')}"
+        )
         self._hide_heading_popup()
         if mode == "heading" and target:
             try:
@@ -1144,14 +1256,14 @@ class PageEditorWindow(QMainWindow):
                 block = self.editor.document().findBlockByNumber(max(0, line - 1))
                 if block.isValid():
                     pos = block.position()
-            print(f"[PageEditor] Setting cursor to position {pos}")
+            _page_editor_log(f"[PageEditor] Setting cursor to position {pos}")
             cursor = self.editor.textCursor()
             cursor.setPosition(max(0, pos))
             self.editor.setTextCursor(cursor)
             self.editor.ensureCursorVisible()
             self._flash_heading(cursor)
             self.editor.setFocus()
-            print(f"[PageEditor] Navigation complete")
+            _page_editor_log("[PageEditor] Navigation complete")
 
     def _hide_heading_popup(self) -> None:
         """Hide the heading popup and reset state."""
@@ -1390,7 +1502,15 @@ class PageEditorWindow(QMainWindow):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Handle Ctrl key release to activate heading popup selection."""
+        if event.type() == QEvent.ShortcutOverride:
+            if obj is self.editor and event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
+                event.accept()
+                return True
         if event.type() == QEvent.KeyPress:
+            if obj is self.editor and event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
+                self._show_find_bar(replace=True, backwards=False)
+                event.accept()
+                return True
             if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
                 if event.modifiers() & Qt.ShiftModifier:
                     reverse = event.key() == Qt.Key_Backtab
