@@ -2,6 +2,7 @@
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFormLayout
 
 from sp.app.ui.insert_link_dialog import InsertLinkDialog
 
@@ -16,6 +17,15 @@ def patch_dialog_config(monkeypatch):
 def test_dialog_creation(qapp):
     dialog = InsertLinkDialog()
     assert dialog.windowTitle() == "Insert Link"
+    dialog.close()
+
+
+def test_dialog_uses_expanding_left_aligned_form_layout(qapp):
+    dialog = InsertLinkDialog()
+
+    assert dialog.form_layout.fieldGrowthPolicy() == QFormLayout.AllNonFixedFieldsGrow
+    assert dialog.form_layout.formAlignment() == (Qt.AlignLeft | Qt.AlignTop)
+
     dialog.close()
 
 

@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
@@ -155,6 +155,38 @@ def test_pasting_png_mime_bytes_without_has_image_still_embeds_image(editor, tmp
     markdown = editor.to_markdown()
     assert "paste_image_001.png" in markdown
     assert "{width=" not in markdown
+
+
+def test_pasting_local_image_url_prefers_file_over_clipboard_icon(editor, tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "Playpage"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    editor.set_context(str(vault_root), "/Playpage/Playpage.md")
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_markdown_image_max_width", lambda: 900)
+
+    source_path = page_dir / "finder-copy-source.png"
+    source_image = QImage(21, 13, QImage.Format_ARGB32)
+    source_image.fill(0xFFCC3311)
+    assert source_image.save(str(source_path), "PNG")
+
+    icon_image = QImage(64, 64, QImage.Format_ARGB32)
+    icon_image.fill(0xFF1177CC)
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(source_path))])
+    mime.setImageData(icon_image)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "paste_image_001.png" in markdown
+
+    pasted_path = page_dir / "paste_image_001.png"
+    assert pasted_path.exists()
+
+    pasted_image = QImage(str(pasted_path))
+    assert not pasted_image.isNull()
+    assert pasted_image.size() == source_image.size()
+    assert pasted_image.pixelColor(0, 0) == source_image.pixelColor(0, 0)
 
 
 def test_pasting_image_leaves_cursor_on_next_line(editor, tmp_path, monkeypatch):

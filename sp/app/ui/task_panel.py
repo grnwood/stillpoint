@@ -47,7 +47,7 @@ from markdown import markdown as render_markdown
 from sp.app import config
 from sp.app import indexer
 from sp.logging_flags import log_enabled
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
 from .date_insert_dialog import DateInsertDialog
@@ -2928,6 +2928,7 @@ class TaskPanel(QWidget):
 
     def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
         menu = QMenu(self)
+        apply_menu_theme(menu, self.task_tree)
         for label in ("Today", "Tomorrow", "Yesterday"):
             act = menu.addAction(label)
             act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
@@ -3276,6 +3277,7 @@ class TaskPanel(QWidget):
         any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
         any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
         menu = QMenu(self)
+        apply_menu_theme(menu, self.task_tree)
         if any_open:
             menu.addAction("Mark Complete").triggered.connect(
                 lambda: self._set_tasks_completed(targets, True)

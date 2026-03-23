@@ -25,6 +25,7 @@ These shortcuts will speed up your workflow:
 ### Navigation
 - `Alt+Left`: Go back
 - `Alt+Right`: Go forward
+- On macOS: `Cmd+[` goes back and `Cmd+]` goes forward
 - `Alt+Home`: Go to home page
 - `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
 - `Enter` (file nav selected): Open selected page and focus editor
@@ -94,6 +95,7 @@ If VI mode is enabled:
 - `m`: Move selected text to another location, or move the current page when nothing is selected
 - `Ctrl+Shift+L`: Copy link or heading (also stores it for `p`)
 - `Alt+h/j/k/l`: History navigation (back/forward/down/up)
+- On macOS, prefer `Cmd+[` / `Cmd+]` for back/forward outside vi mode because `Option+Left/Right` is reserved for word-wise cursor movement
 - With a selection: `-`, `*`, `>` apply list or quote styles
 - While file nav is focused: `j/k` move down/up, `h/l` collapse/expand
 

@@ -40,6 +40,13 @@ Homebase supports account auth and user management APIs.
 - Encryption passphrase stays local on client devices.
 - Auth tokens control access, but tokens are not your encryption key.
 
+## Passphrase Storage
+- By default, StillPoint does not store your Homebase encryption passphrase on disk.
+- During Homebase setup or `Reset Encryption Passphrase`, you can opt into `Store passphrase on this device`.
+- Only enable that option if you trust the device. The passphrase is then stored in the vault's local StillPoint config.
+- Passwords are still not stored. You authenticate once, then StillPoint reuses Homebase access and refresh tokens.
+- StillPoint also writes non-secret Homebase recovery metadata into the vault under `.stillpoint/homebase.json` so re-adding the vault later can prefill the server URL, SSL mode, vault ID, and vault name.
+
 ## Practical Takeaway
 - Use a **Local Vault** when you only need files on one machine.
 - Use a **Homebase Vault** when you want sync, offline-first behavior, and a stronger local-first trust boundary.
@@ -71,8 +78,9 @@ This makes Homebase a strong fit for:
 ### Homebase Vault
 1. Create/connect a Homebase vault profile.
 2. Authenticate to Homebase.
-3. Let local sync engine pull/push changes.
-4. Use sync status and conflict tools from the Homebase UI.
+3. Decide whether to keep the encryption passphrase session-only or store it on this trusted device.
+4. Let local sync engine pull/push changes.
+5. Use sync status and conflict tools from the Homebase UI.
 
 ## Operational Tips
 - Back up your local vault and Homebase server data regularly.

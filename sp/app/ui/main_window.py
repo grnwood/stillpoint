@@ -121,7 +121,7 @@ from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE
 from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -2041,6 +2041,9 @@ class MainWindow(QMainWindow):
         self._homebase_user_can_write: bool = True
         self._homebase_user_info_loaded: bool = False
         self._homebase_user_info_refreshing: bool = False
+        self._homebase_session_passphrases: dict[str, str] = {}
+        self._homebase_passphrase_prompt_in_progress: bool = False
+        self._homebase_passphrase_prompted_vaults: set[str] = set()
         self._homebase_sync_engine: Optional[HomebaseSyncEngine] = None
         self._homebase_status_poll_timer: Optional[QTimer] = None
         self._homebase_fs_watcher: Optional[QFileSystemWatcher] = None
@@ -2981,6 +2984,7 @@ class MainWindow(QMainWindow):
             go_menu,
             help_menu,
         ]
+        self._apply_menu_bar_theme_styles()
 
         self._register_shortcuts()
         self._setup_quick_capture_shortcut(show_error=False)
@@ -3454,8 +3458,11 @@ class MainWindow(QMainWindow):
         task_cycle.setContext(Qt.ApplicationShortcut)
         task_cycle.activated.connect(self.editor.toggle_task_state)
         # Navigation shortcuts
+        is_macos = platform.system() == "Darwin"
         nav_back = QShortcut(QKeySequence("Alt+Left"), self)
         nav_forward = QShortcut(QKeySequence("Alt+Right"), self)
+        nav_back_mac = QShortcut(QKeySequence("Meta+["), self) if is_macos else None
+        nav_forward_mac = QShortcut(QKeySequence("Meta+]"), self) if is_macos else None
         nav_up = QShortcut(QKeySequence("Alt+Up"), self)
         nav_down = QShortcut(QKeySequence("Alt+Down"), self)
         nav_pg_up = QShortcut(QKeySequence("Alt+PgUp"), self)
@@ -3487,6 +3494,12 @@ class MainWindow(QMainWindow):
         command_bar_universal.activated.connect(self._show_command_bar)
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
+        if nav_back_mac is not None:
+            nav_back_mac.setContext(Qt.ApplicationShortcut)
+            nav_back_mac.activated.connect(self._navigate_history_back)
+        if nav_forward_mac is not None:
+            nav_forward_mac.setContext(Qt.ApplicationShortcut)
+            nav_forward_mac.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._on_nav_up_shortcut)
         nav_down.activated.connect(self._on_nav_down_shortcut)
         nav_pg_up.activated.connect(lambda: self._on_nav_page_shortcut(-1))
@@ -3810,6 +3823,22 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(100, self._auto_load_initial_file)
                     return True
                 return self._select_vault(startup=True)
+            if kind == "homebase":
+                profile = self._homebase_profile_for_id(path or default_vault)
+                if profile:
+                    local_path = str(profile.get("path") or "").strip()
+                    profile_server = str(profile.get("server_url") or "").strip()
+                    verify_ssl = bool(profile.get("verify_ssl", True))
+                    if profile_server:
+                        self._switch_api_base(profile_server, is_remote=True, verify_tls=verify_ssl)
+                    if local_path and self._set_vault(local_path, vault_name=profile.get("name")):
+                        self._apply_homebase_profile(profile)
+                        self._update_user_management_ui()
+                        self._restore_recent_history()
+                        QTimer.singleShot(100, self._auto_load_initial_file)
+                        QTimer.singleShot(500, self._maybe_prompt_crash_report)
+                        return True
+                return self._select_vault(startup=True)
         if default_vault:
             if self._set_vault(default_vault):
                 QTimer.singleShot(100, self._auto_load_initial_file)
@@ -4093,6 +4122,8 @@ class MainWindow(QMainWindow):
             if len(parts) == 3:
                 _, server_url, path = parts
                 return "remote", server_url, path
+        if value.startswith("homebase::"):
+            return "homebase", None, value
         return "local", None, value
 
     def _encode_remote_ref(self, server_url: str, path: str) -> str:
@@ -4455,6 +4486,18 @@ class MainWindow(QMainWindow):
             return None
         return None
 
+    def _homebase_profile_for_id(self, profile_id: Optional[str]) -> Optional[dict]:
+        target = str(profile_id or "").strip()
+        if not target:
+            return None
+        try:
+            for profile in config.load_homebase_vault_profiles():
+                if str(profile.get("id") or "").strip() == target:
+                    return profile
+        except Exception:
+            return None
+        return None
+
     def _apply_homebase_profile(self, profile: dict) -> None:
         try:
             profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
@@ -4462,6 +4505,8 @@ class MainWindow(QMainWindow):
             profile_vault_id = str(profile.get("vault_id") or "").strip()
             profile_access = str(profile.get("access_token") or "").strip()
             profile_refresh = str(profile.get("refresh_token") or "").strip()
+            profile_passphrase = str(profile.get("passphrase") or "")
+            profile_store_passphrase = bool(profile.get("store_passphrase", False))
             _log_homebase_client(
                 "apply profile: "
                 f"path={profile_path or '<none>'} "
@@ -4472,6 +4517,8 @@ class MainWindow(QMainWindow):
                 f"refresh={_token_state(profile_refresh)}"
             )
             self._ensure_config_active_vault_context()
+            if profile_passphrase:
+                self._remember_homebase_passphrase(profile_passphrase, profile_path)
             config.save_vault_remote_mode("homebase_remote")
             config.save_homebase_remote_url(profile_server)
             config.save_homebase_verify_ssl(bool(profile.get("verify_ssl", True)))
@@ -4479,11 +4526,22 @@ class MainWindow(QMainWindow):
             config.save_homebase_username(str(profile.get("username") or "").strip())
             config.save_homebase_auth_token(profile_access)
             config.save_homebase_refresh_token(profile_refresh)
-            config.save_homebase_passphrase(str(profile.get("passphrase") or ""))
+            config.save_homebase_store_passphrase(profile_store_passphrase)
+            if profile_store_passphrase:
+                if profile_passphrase:
+                    config.save_homebase_passphrase(profile_passphrase)
+                else:
+                    persisted = config.load_homebase_passphrase().strip()
+                    if persisted:
+                        self._remember_homebase_passphrase(persisted, profile_path)
+            else:
+                config.save_homebase_passphrase("")
             config.save_homebase_auto_sync(bool(profile.get("auto_sync", True)))
             config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
             config.save_homebase_push_debounce_seconds(int(profile.get("push_debounce_seconds", 3)))
             config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 6)))
+            if profile_path:
+                config.save_homebase_vault_metadata(profile_path, profile)
             self._homebase_user_info_loaded = False
             self._configure_homebase_sync_for_vault()
             self._apply_remote_mode_ui()
@@ -5631,7 +5689,7 @@ class MainWindow(QMainWindow):
             return
         try:
             remote_url = config.load_homebase_remote_url().strip()
-            passphrase = config.load_homebase_passphrase()
+            passphrase = self._load_homebase_session_passphrase()
             auth_token = config.load_homebase_auth_token().strip()
             refresh_token = config.load_homebase_refresh_token().strip()
             vault_id = config.load_homebase_vault_id() or config.ensure_homebase_vault_id()
@@ -5648,6 +5706,8 @@ class MainWindow(QMainWindow):
                 f"refresh={_token_state(refresh_token)} "
                 f"local_ui_token={_token_state(local_ui_token)}"
             )
+            if remote_url and vault_id and not passphrase:
+                passphrase = self._maybe_prompt_missing_homebase_passphrase()
             if not remote_url or not passphrase:
                 _log_homebase_client(
                     "sync config invalid: missing "
@@ -5656,7 +5716,10 @@ class MainWindow(QMainWindow):
                     f"{'passphrase' if not passphrase else ''}"
                 )
                 self._update_homebase_status_badge(
-                    HomebaseSyncStatus(state="error", summary="Homebase not configured")
+                    HomebaseSyncStatus(
+                        state="error",
+                        summary="Homebase passphrase required" if remote_url and not passphrase else "Homebase not configured",
+                    )
                 )
                 return
             cfg = HomebaseSyncConfig(
@@ -6437,31 +6500,130 @@ class MainWindow(QMainWindow):
         if updated:
             config.save_homebase_vault_profiles(profiles)
 
-    def _persist_homebase_passphrase_to_profile(self, passphrase: str) -> None:
-        if not self.vault_root:
+    def _homebase_passphrase_session_key(self, local_path: Optional[str] = None) -> str:
+        return self._normalize_vault_path(str(local_path or self.vault_root or ""))
+
+    def _remember_homebase_passphrase(self, passphrase: str, local_path: Optional[str] = None) -> None:
+        key = self._homebase_passphrase_session_key(local_path)
+        if not key:
             return
-        current_path = self._normalize_vault_path(self.vault_root)
-        if not current_path:
-            return
-        current_server = config.load_homebase_remote_url().strip()
-        current_vault_id = (config.load_homebase_vault_id() or "").strip()
-        profiles = config.load_homebase_vault_profiles()
-        updated = False
-        for profile in profiles:
-            if not isinstance(profile, dict):
-                continue
-            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
-            if profile_path != current_path:
-                continue
-            if current_server and str(profile.get("server_url") or "").strip() != current_server:
-                continue
-            if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
-                continue
-            profile["passphrase"] = str(passphrase or "")
-            updated = True
-            break
-        if updated:
-            config.save_homebase_vault_profiles(profiles)
+        cleaned = str(passphrase or "")
+        if cleaned:
+            self._homebase_session_passphrases[key] = cleaned
+        else:
+            self._homebase_session_passphrases.pop(key, None)
+
+    def _load_homebase_session_passphrase(self, local_path: Optional[str] = None) -> str:
+        key = self._homebase_passphrase_session_key(local_path)
+        if key:
+            cached = str(self._homebase_session_passphrases.get(key) or "")
+            if cached:
+                return cached
+        try:
+            self._ensure_config_active_vault_context()
+            if config.load_homebase_store_passphrase():
+                persisted = config.load_homebase_passphrase().strip()
+                if persisted and key:
+                    self._homebase_session_passphrases[key] = persisted
+                return persisted
+        except Exception:
+            pass
+        legacy = ""
+        try:
+            self._ensure_config_active_vault_context()
+            legacy = config.load_homebase_passphrase().strip()
+        except Exception:
+            legacy = ""
+        if legacy and key:
+            self._homebase_session_passphrases[key] = legacy
+            try:
+                if not config.load_homebase_store_passphrase():
+                    config.save_homebase_passphrase("")
+            except Exception:
+                pass
+        return legacy
+
+    def _prompt_homebase_passphrase_settings(
+        self,
+        *,
+        current_passphrase: str = "",
+        store_on_device: bool = False,
+        parent_dialog=None,
+    ) -> tuple[Optional[str], bool, bool]:
+        dialog = QDialog(parent_dialog or self)
+        dialog.setWindowTitle("Homebase Passphrase")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        passphrase_edit = QLineEdit()
+        passphrase_edit.setEchoMode(QLineEdit.Password)
+        passphrase_edit.setText(current_passphrase)
+        form.addRow("Encryption Passphrase:", passphrase_edit)
+
+        store_checkbox = QCheckBox("Store passphrase on this device")
+        store_checkbox.setChecked(bool(store_on_device))
+        form.addRow("", store_checkbox)
+
+        warning = QLabel(
+            "Only enable this if you trust this device. The passphrase will be stored in this vault's local StillPoint config."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #666;")
+        form.addRow("", warning)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None, bool(store_checkbox.isChecked()), False
+        return passphrase_edit.text(), bool(store_checkbox.isChecked()), True
+
+    def _maybe_prompt_missing_homebase_passphrase(self, parent_dialog=None, *, force: bool = False) -> str:
+        if not self.vault_root or self._homebase_passphrase_prompt_in_progress:
+            return ""
+        vault_key = self._homebase_passphrase_session_key()
+        if not force and vault_key and vault_key in self._homebase_passphrase_prompted_vaults:
+            return ""
+        try:
+            self._ensure_config_active_vault_context()
+            store_enabled = config.load_homebase_store_passphrase()
+        except Exception:
+            store_enabled = False
+        self._homebase_passphrase_prompt_in_progress = True
+        try:
+            new_passphrase, store_on_device, ok = self._prompt_homebase_passphrase_settings(
+                current_passphrase="",
+                store_on_device=store_enabled,
+                parent_dialog=parent_dialog,
+            )
+        finally:
+            self._homebase_passphrase_prompt_in_progress = False
+        if not ok:
+            if vault_key:
+                self._homebase_passphrase_prompted_vaults.add(vault_key)
+            self.statusBar().showMessage("Homebase passphrase is required for sync.", 5000)
+            return ""
+        cleaned = str(new_passphrase or "").strip()
+        if not cleaned:
+            if vault_key:
+                self._homebase_passphrase_prompted_vaults.add(vault_key)
+            self.statusBar().showMessage("Homebase passphrase is required for sync.", 5000)
+            return ""
+        self._remember_homebase_passphrase(cleaned)
+        try:
+            self._ensure_config_active_vault_context()
+            config.save_homebase_store_passphrase(store_on_device)
+            config.save_homebase_passphrase(cleaned if store_on_device else "")
+        except Exception:
+            pass
+        if vault_key:
+            self._homebase_passphrase_prompted_vaults.discard(vault_key)
+        return cleaned
 
     def _schedule_homebase_sync(self, reason: str) -> None:
         if self._homebase_sync_engine:
@@ -6503,7 +6665,7 @@ class MainWindow(QMainWindow):
             self._shutdown_homebase_sync()
             self._ensure_config_active_vault_context()
             remote_url = config.load_homebase_remote_url().strip()
-            passphrase = config.load_homebase_passphrase()
+            passphrase = self._load_homebase_session_passphrase()
             if not remote_url or not passphrase:
                 QMessageBox.warning(self, "Homebase", "Homebase is not configured for this vault.")
                 return
@@ -6616,6 +6778,22 @@ class MainWindow(QMainWindow):
             return
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
         if not status:
+            try:
+                self._ensure_config_active_vault_context()
+                remote_url = config.load_homebase_remote_url().strip()
+            except Exception:
+                remote_url = ""
+            if remote_url and not self._load_homebase_session_passphrase():
+                provided = self._maybe_prompt_missing_homebase_passphrase(parent_dialog=self, force=True)
+                if provided:
+                    self._configure_homebase_sync_for_vault()
+                    return
+                QMessageBox.information(
+                    self,
+                    "Homebase Sync",
+                    "Homebase passphrase is required for this vault.",
+                )
+                return
             QMessageBox.information(
                 self,
                 "Homebase Sync",
@@ -6797,13 +6975,12 @@ class MainWindow(QMainWindow):
             return
         try:
             self._ensure_config_active_vault_context()
-            current = config.load_homebase_passphrase().strip()
-            new_passphrase, ok = QInputDialog.getText(
-                parent_dialog or self,
-                "Reset Encryption Passphrase",
-                "Encryption Passphrase:",
-                QLineEdit.Password,
-                current,
+            current = self._load_homebase_session_passphrase()
+            store_enabled = config.load_homebase_store_passphrase()
+            new_passphrase, store_on_device, ok = self._prompt_homebase_passphrase_settings(
+                current_passphrase=current,
+                store_on_device=store_enabled,
+                parent_dialog=parent_dialog,
             )
             if not ok:
                 return
@@ -6815,8 +6992,9 @@ class MainWindow(QMainWindow):
                     "Encryption passphrase cannot be empty.",
                 )
                 return
-            config.save_homebase_passphrase(cleaned)
-            self._persist_homebase_passphrase_to_profile(cleaned)
+            self._remember_homebase_passphrase(cleaned)
+            config.save_homebase_store_passphrase(store_on_device)
+            config.save_homebase_passphrase(cleaned if store_on_device else "")
             self._configure_homebase_sync_for_vault()
             if self._homebase_sync_engine:
                 try:
@@ -8155,6 +8333,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self._apply_menu_bar_theme_styles()
+        except Exception:
+            pass
+        try:
             self._refresh_theme_sensitive_controls()
         except Exception:
             pass
@@ -8243,6 +8425,47 @@ class MainWindow(QMainWindow):
             self.right_panel.tabs.setStyleSheet(tab_style)
         except Exception:
             pass
+
+    def _apply_menu_theme_recursive(self, menu: Optional[QMenu]) -> None:
+        if menu is None:
+            return
+        apply_menu_theme(menu, self.menuBar())
+        for action in menu.actions():
+            child_menu = action.menu()
+            if child_menu is not None:
+                self._apply_menu_theme_recursive(child_menu)
+
+    def _apply_menu_bar_theme_styles(self) -> None:
+        menu_bar = self.menuBar()
+        palette = QApplication.palette()
+        base_bg = palette.color(QPalette.Base).name()
+        alt_bg = palette.color(QPalette.AlternateBase).name()
+        text_fg = palette.color(QPalette.Text).name()
+        selected_bg = palette.color(QPalette.Highlight).name()
+        selected_fg = palette.color(QPalette.HighlightedText).name()
+        border = palette.color(QPalette.Mid).name()
+        menu_bar.setStyleSheet(
+            "QMenuBar {"
+            f" background: {base_bg};"
+            f" color: {text_fg};"
+            f" border-bottom: 1px solid {border};"
+            " }"
+            "QMenuBar::item {"
+            " background: transparent;"
+            f" color: {text_fg};"
+            " padding: 6px 10px;"
+            " }"
+            "QMenuBar::item:selected {"
+            f" background: {alt_bg};"
+            f" color: {text_fg};"
+            " }"
+            "QMenuBar::item:pressed {"
+            f" background: {selected_bg};"
+            f" color: {selected_fg};"
+            " }"
+        )
+        for menu in getattr(self, "_menu_roots", []):
+            self._apply_menu_theme_recursive(menu)
 
     def _mode_button_style(self) -> str:
         app_palette = QApplication.palette()

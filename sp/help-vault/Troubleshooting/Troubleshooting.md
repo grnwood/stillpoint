@@ -82,8 +82,10 @@ Try these first:
 1. Verify the Homebase server URL and credentials.
 2. Use `Vault -> Homebase -> Login - Authenticate to Homebase`.
 3. Confirm the vault is configured for Homebase sync.
-4. Check network access and server availability.
-5. If needed, use `Vault -> Homebase -> Sync Now`.
+4. If sync reports that Homebase is not configured, check whether the encryption passphrase is missing for this session.
+5. If you want the passphrase to survive restarts, use `Reset Encryption Passphrase` and enable `Store passphrase on this device` only on a trusted device.
+6. Check network access and server availability.
+7. If needed, use `Vault -> Homebase -> Sync Now`.
 
 ## Files Created in Terminal or by an Agent Do Not Appear
 - **Symptom**: Files exist in the vault folder but the tree has not updated yet.

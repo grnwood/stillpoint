@@ -80,7 +80,7 @@ from .jump_dialog import JumpToPageDialog
 from sp.app import config
 from sp.app import indexer
 from sp.logging_flags import log_enabled
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 
 
 logger = logging.getLogger(__name__)
@@ -247,7 +247,9 @@ WIKI_LINK_DUPLICATE_TAIL_PATTERN = re.compile(
     r"\[(?P<link>(?:\\.|[^\]|])*)\|(?P<label>(?:\\.|[^\]])*)\](?P<tail>[^\s\]]+)\|\s*(?P=label)\]"
 )
 
-LINK_SENTINEL = "\uE100"
+# Use an invisible separator rather than a private-use glyph so link delimiters
+# do not render as tofu boxes on platforms like macOS during selection/highlight.
+LINK_SENTINEL = "\u2063"
 # Display pattern for rendered links (sentinel + link + sentinel + label + sentinel)
 WIKI_LINK_DISPLAY_PATTERN = re.compile(
     rf"{LINK_SENTINEL}(?P<link>[^{LINK_SENTINEL}\n]+){LINK_SENTINEL}(?P<label>[^{LINK_SENTINEL}\n]*){LINK_SENTINEL}"
@@ -3497,6 +3499,9 @@ class MarkdownEditor(QTextEdit):
     def _image_from_mime_data(self, source: Optional[QMimeData]) -> Optional[QImage]:
         if source is None:
             return None
+        image_from_urls = self._image_from_local_urls(source)
+        if image_from_urls is not None:
+            return image_from_urls
         if source.hasImage():
             try:
                 image = source.imageData()
@@ -3537,6 +3542,11 @@ class MarkdownEditor(QTextEdit):
                     return image
             except Exception:
                 continue
+        return self._image_from_local_urls(source)
+
+    def _image_from_local_urls(self, source: Optional[QMimeData]) -> Optional[QImage]:
+        if source is None or not source.hasUrls():
+            return None
         if source.hasUrls():
             try:
                 for url in source.urls():
@@ -3716,9 +3726,10 @@ class MarkdownEditor(QTextEdit):
 
     def _normalize_external_link(self, link: str) -> str:
         """Preserve full external links while stripping whitespace and hidden sentinels."""
-        text = self._strip_problematic_control_chars(link or "").strip()
+        text = (link or "").strip()
         if LINK_SENTINEL in text:
             text = text.split(LINK_SENTINEL, 1)[0]
+        text = self._strip_problematic_control_chars(text).strip()
         # Guard against leaked wiki delimiter when copying/pasting displayed [url|] links.
         if text.startswith(("http://", "https://")) and text.endswith("|"):
             text = text.rstrip("|")
@@ -5224,6 +5235,14 @@ class MarkdownEditor(QTextEdit):
         else:
             self._clear_task_tag_suggest_state()
 
+    def createStandardContextMenu(self, *args, **kwargs):  # type: ignore[override]
+        menu = super().createStandardContextMenu(*args, **kwargs)
+        try:
+            apply_menu_theme(menu, self)
+        except Exception:
+            pass
+        return menu
+
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()
         if self._context_menu_selection:
@@ -5261,6 +5280,7 @@ class MarkdownEditor(QTextEdit):
             _, fmt = image_hit
             image_name = fmt.name()
             menu = QMenu(self)
+            apply_menu_theme(menu, self)
             # Nav arrows first
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
@@ -5298,6 +5318,7 @@ class MarkdownEditor(QTextEdit):
         plain_link = self._link_under_cursor(click_cursor)
         if md_link or plain_link:
             menu = QMenu(self)
+            apply_menu_theme(menu, self)
             # Nav arrows first
             nav_action = self._build_nav_context_row(menu)
             if nav_action:
@@ -5410,6 +5431,7 @@ class MarkdownEditor(QTextEdit):
             except Exception:
                 pass
             menu = QMenu(self)
+            apply_menu_theme(menu, self)
             # Nav arrows first
             nav_action = self._build_nav_context_row(menu)
             if nav_action:

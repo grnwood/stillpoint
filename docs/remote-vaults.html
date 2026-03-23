@@ -160,6 +160,11 @@
             <p>Authenticate, pair the vault, and let sync handle multi-device continuity.</p>
           </div>
         </div>
+        <div class="card" style="margin-top: 1.25rem;">
+          <h3>Passphrase trust choice</h3>
+          <p>StillPoint does not store your Homebase encryption passphrase by default. You can opt into storing it on a trusted device, but passwords are still not stored.</p>
+          <p>After first login, StillPoint can reuse Homebase access and refresh tokens. It also writes non-secret recovery metadata into the vault under <code>.stillpoint/homebase.json</code> so the server URL, SSL mode, vault ID, and vault name can be rediscovered later.</p>
+        </div>
       </section>
 
       <footer class="site-footer">

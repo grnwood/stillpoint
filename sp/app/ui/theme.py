@@ -6,7 +6,7 @@ from typing import Any
 
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from sp.app import config
 
@@ -99,6 +99,80 @@ def reload_theme() -> None:
     global _THEME_CACHE, _THEME_CACHE_PATH
     _THEME_CACHE = None
     _THEME_CACHE_PATH = None
+
+
+def _resolved_palette(source: Any = None) -> QPalette:
+    if source is not None:
+        try:
+            palette = source.palette()
+            if isinstance(palette, QPalette):
+                return QPalette(palette)
+        except Exception:
+            pass
+    app = QApplication.instance()
+    if app is not None:
+        return QPalette(app.palette())
+    return QPalette()
+
+
+def apply_menu_theme(menu: QMenu, palette_source: Any = None) -> None:
+    palette = _resolved_palette(palette_source if palette_source is not None else menu.parentWidget())
+    menu.setPalette(palette)
+
+    bg = str(theme_value("context_menu.bg", palette.color(QPalette.ColorRole.Window).name()))
+    text = str(theme_value("context_menu.text", palette.color(QPalette.ColorRole.Text).name()))
+    border = str(theme_value("context_menu.border", palette.color(QPalette.ColorRole.Mid).name()))
+    separator = str(theme_value("context_menu.separator", palette.color(QPalette.ColorRole.Midlight).name()))
+    selection_bg = str(theme_value("context_menu.selection_bg", palette.color(QPalette.ColorRole.Highlight).name()))
+    selection_text = str(
+        theme_value("context_menu.selection_text", palette.color(QPalette.ColorRole.HighlightedText).name())
+    )
+    disabled_text = str(
+        theme_value(
+            "context_menu.disabled_text",
+            palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text).name(),
+        )
+    )
+    section_text = str(theme_value("context_menu.section_text", disabled_text))
+    section_border = str(theme_value("context_menu.section_border", separator))
+
+    menu.setStyleSheet(
+        "QMenu {"
+        f" background: {bg};"
+        f" color: {text};"
+        f" border: 1px solid {border};"
+        " padding: 4px 0px;"
+        " }"
+        "QMenu::item {"
+        " background: transparent;"
+        f" color: {text};"
+        " padding: 6px 22px 6px 22px;"
+        " margin: 1px 6px;"
+        " border-radius: 4px;"
+        " }"
+        "QMenu::item:selected {"
+        f" background: {selection_bg};"
+        f" color: {selection_text};"
+        " }"
+        "QMenu::item:disabled {"
+        f" color: {disabled_text};"
+        " background: transparent;"
+        " }"
+        "QMenu::separator {"
+        " height: 1px;"
+        f" background: {separator};"
+        " margin: 6px 12px;"
+        " }"
+        "QMenu::section {"
+        f" color: {section_text};"
+        " font-size: 9px;"
+        " letter-spacing: 1px;"
+        " padding: 8px 16px 4px 16px;"
+        f" border-top: 1px solid {section_border};"
+        " text-align: center;"
+        " text-transform: uppercase;"
+        " }"
+    )
 
 
 def apply_qt_palette(app: QApplication) -> None:

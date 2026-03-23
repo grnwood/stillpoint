@@ -189,6 +189,13 @@ class AddHomebaseVaultDialog(QDialog):
         self.passphrase_edit.setEchoMode(QLineEdit.Password)
         self.passphrase_edit.setPlaceholderText("Shared encryption passphrase")
         form.addRow("Encryption Passphrase:", self.passphrase_edit)
+        self.store_passphrase_checkbox = QCheckBox("Store passphrase on this device")
+        self.store_passphrase_checkbox.setChecked(False)
+        form.addRow("", self.store_passphrase_checkbox)
+        trust_warning = QLabel("Only enable this if you trust this device. The passphrase will be stored in the vault's local StillPoint config.")
+        trust_warning.setWordWrap(True)
+        trust_warning.setStyleSheet("color: #666;")
+        form.addRow("", trust_warning)
 
         layout.addLayout(form)
 
@@ -204,6 +211,26 @@ class AddHomebaseVaultDialog(QDialog):
             self.local_path_edit.setText(directory)
             if not self.name_edit.text().strip():
                 self.name_edit.setText(Path(directory).name)
+            self._apply_detected_homebase_metadata(config.load_homebase_vault_metadata(directory))
+
+    def _apply_detected_homebase_metadata(self, metadata: Optional[dict[str, object]]) -> None:
+        if not metadata:
+            return
+        server_url = str(metadata.get("server_url") or "").strip()
+        vault_id = str(metadata.get("vault_id") or "").strip()
+        vault_name = str(metadata.get("vault_name") or "").strip()
+        if server_url:
+            self.server_url_edit.setText(server_url)
+        self.ignore_invalid_ssl_checkbox.setChecked(not bool(metadata.get("verify_ssl", True)))
+        connect_index = self.mode_combo.findData("connect")
+        if connect_index >= 0:
+            self.mode_combo.setCurrentIndex(connect_index)
+        if vault_id:
+            self.vault_id_edit.setText(vault_id)
+        if vault_name and not self.name_edit.text().strip():
+            self.name_edit.setText(vault_name)
+        if vault_name and not self.vault_name_edit.text().strip():
+            self.vault_name_edit.setText(vault_name)
 
     def _update_mode(self) -> None:
         create_mode = self.mode_combo.currentData() == "create"
@@ -296,6 +323,14 @@ class AddHomebaseVaultDialog(QDialog):
         if not local_root.exists() or not local_root.is_dir():
             QMessageBox.warning(self, "Folder Not Found", "Choose an existing local vault folder.")
             return
+        detected_metadata = config.load_homebase_vault_metadata(local_root)
+        if detected_metadata:
+            server_url = str(detected_metadata.get("server_url") or server_url).strip().rstrip("/")
+            verify_ssl = bool(detected_metadata.get("verify_ssl", True))
+            mode = "connect"
+            detected_vault_id = str(detected_metadata.get("vault_id") or "").strip()
+            if detected_vault_id:
+                self.vault_id_edit.setText(detected_vault_id)
         headers: dict[str, str] = {}
         payload: dict[str, str] = {"username": username, "password": password}
         if mode == "create":
@@ -334,7 +369,8 @@ class AddHomebaseVaultDialog(QDialog):
         if not vault_id or not access_token:
             QMessageBox.critical(self, "Homebase Setup Failed", "Server did not return a valid token payload.")
             return
-        display_name = self.name_edit.text().strip() or local_root.name
+        detected_name = str((detected_metadata or {}).get("vault_name") or "").strip()
+        display_name = self.name_edit.text().strip() or detected_name or local_root.name
         self._result = {
             "id": f"homebase::{server_url}::{vault_id}::{local_path}",
             "kind": "homebase",
@@ -347,6 +383,7 @@ class AddHomebaseVaultDialog(QDialog):
             "access_token": access_token,
             "refresh_token": refresh_token,
             "passphrase": passphrase,
+            "store_passphrase": bool(self.store_passphrase_checkbox.isChecked()),
             "auto_sync": True,
             "interval_seconds": 60,
             "push_debounce_seconds": 3,
@@ -422,6 +459,14 @@ class OpenVaultDialog(QDialog):
         self._homebase_vaults_enabled = config.load_feature_homebase_vaults_enabled()
         self._vault_row_icon_cache: dict[tuple[str, str], Optional[QPixmap]] = {}
         self._vault_row_icon_px = 24
+        self._transient_homebase_profiles: dict[str, dict[str, str]] = {}
+        self.remote_list_widget = None
+        self.remote_vaults: list[dict[str, str]] = []
+        self.remote_status_entries: list[dict[str, str]] = []
+        self._on_load_remote = None
+        self._remote_loaded = False
+        self._remote_loading = False
+        self._remote_worker: Optional[RemoteVaultLoadWorker] = None
 
         layout = QVBoxLayout(self)
         intro_row = QHBoxLayout()
@@ -491,7 +536,13 @@ class OpenVaultDialog(QDialog):
         open_new_btn.clicked.connect(self._accept_new_window)
         layout.addWidget(self.button_box)
 
-        self._refresh_local_list(select_path=current_vault or self.default_vault, select_id=self._select_id)
+        initial_select_path = current_vault
+        initial_select_id = self._select_id
+        if not initial_select_id and self.default_vault and self.default_vault.startswith("homebase::"):
+            initial_select_id = self.default_vault
+        elif not initial_select_path and self.default_vault and not self.default_vault.startswith("homebase::"):
+            initial_select_path = self.default_vault
+        self._refresh_local_list(select_path=initial_select_path, select_id=initial_select_id)
 
     def selected_vault(self) -> Optional[dict[str, str]]:
         return self._selected
@@ -566,8 +617,25 @@ class OpenVaultDialog(QDialog):
         for profile in self.homebase_vaults:
             entry = dict(profile)
             entry.setdefault("kind", "homebase")
+            profile_id = str(entry.get("id") or "").strip()
+            if profile_id and profile_id in self._transient_homebase_profiles:
+                entry.update(self._transient_homebase_profiles[profile_id])
             entries.append(entry)
         return entries
+
+    def _remember_transient_homebase_profile(self, profile: Optional[dict[str, str]]) -> None:
+        if not profile:
+            return
+        profile_id = str(profile.get("id") or "").strip()
+        if not profile_id:
+            return
+        transient: dict[str, str] = {}
+        for key in ("passphrase",):
+            value = profile.get(key)
+            if isinstance(value, str) and value:
+                transient[key] = value
+        if transient:
+            self._transient_homebase_profiles[profile_id] = transient
 
     def _refresh_local_list(self, select_path: Optional[str] = None, select_id: Optional[str] = None) -> None:
         self._populate_list(
@@ -589,10 +657,11 @@ class OpenVaultDialog(QDialog):
         self.default_combo.blockSignals(True)
         self.default_combo.clear()
         self.default_combo.addItem("No default", None)
-        for vault in self.local_vaults:
+        for vault in self._combined_local_vault_entries():
             if self._is_help_vault_path(vault.get("path")):
                 continue
-            self.default_combo.addItem(vault["name"], vault["path"])
+            default_key = str(vault.get("id") or vault.get("path") or "").strip() or None
+            self.default_combo.addItem(vault["name"], default_key)
         idx = self.default_combo.findData(self.default_vault)
         if idx != -1:
             self.default_combo.setCurrentIndex(idx)
@@ -1056,11 +1125,39 @@ class OpenVaultDialog(QDialog):
         result = dlg.selected_vault()
         if not result:
             return
+        detected_metadata = config.load_homebase_vault_metadata(result["path"])
+        if detected_metadata:
+            profile = self._configure_homebase_vault_from_local_metadata(result, detected_metadata)
+            if not profile:
+                return
+            self._remember_transient_homebase_profile(profile)
+            profile_path = str(profile.get("path") or "").strip()
+            if profile_path:
+                config.delete_known_vault(profile_path)
+                config.save_homebase_vault_metadata(profile_path, profile)
+            config.upsert_homebase_vault_profile(profile)
+            self.homebase_vaults = config.load_homebase_vault_profiles()
+            self._refresh_local_list(select_id=profile.get("id"))
+            return
         self._seed_new_vault(Path(result["path"]))
         self.local_vaults = [v for v in self.local_vaults if v.get("path") != result["path"]]
         self.local_vaults.insert(0, result)
         config.remember_vault(result["path"], result["name"])
         self._refresh_local_list(select_path=result["path"])
+
+    def _configure_homebase_vault_from_local_metadata(
+        self,
+        vault: dict[str, str],
+        metadata: dict[str, object],
+    ) -> Optional[dict[str, str]]:
+        dlg = AddHomebaseVaultDialog(self)
+        dlg.local_path_edit.setText(str(vault.get("path") or ""))
+        if vault.get("name"):
+            dlg.name_edit.setText(str(vault.get("name") or ""))
+        dlg._apply_detected_homebase_metadata(metadata)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.selected_profile()
 
     def _add_remote(self) -> None:
         return
@@ -1074,10 +1171,12 @@ class OpenVaultDialog(QDialog):
         profile = dlg.selected_profile()
         if not profile:
             return
+        self._remember_transient_homebase_profile(profile)
         config.upsert_homebase_vault_profile(profile)
         profile_path = str(profile.get("path") or "").strip()
         if profile_path:
             config.delete_known_vault(profile_path)
+            config.save_homebase_vault_metadata(profile_path, profile)
         self.homebase_vaults = config.load_homebase_vault_profiles()
         self._refresh_local_list(select_id=profile.get("id"))
 
@@ -1093,7 +1192,11 @@ class OpenVaultDialog(QDialog):
         if vault.get("kind") == "homebase":
             profile_id = str(vault.get("id") or "").strip()
             if profile_id:
+                self._transient_homebase_profiles.pop(profile_id, None)
                 config.delete_homebase_vault_profile(profile_id)
+                if self.default_vault == profile_id:
+                    self.default_vault = None
+                    config.save_default_vault(None)
             self.homebase_vaults = config.load_homebase_vault_profiles()
             combined = self._combined_local_vault_entries()
             next_selection = combined[0].get("id") if combined else None

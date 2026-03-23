@@ -33,7 +33,7 @@ from PySide6.QtGui import QDesktopServices
 from sp.app.mermaid_renderer import MermaidRenderer
 from sp.app import config
 from sp.logging_flags import log_enabled
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 
@@ -1359,6 +1359,7 @@ class MermaidEditorWindow(QMainWindow):
 
     def _show_export_menu(self) -> None:
         menu = QMenu(self)
+        apply_menu_theme(menu, self)
 
         export_svg = menu.addAction("Export as SVG...")
         export_svg.triggered.connect(self._export_svg)
@@ -1378,6 +1379,7 @@ class MermaidEditorWindow(QMainWindow):
 
     def _show_preview_context_menu(self, pos) -> None:
         menu = QMenu(self)
+        apply_menu_theme(menu, self)
         copy_svg = menu.addAction("Copy SVG")
         copy_svg.triggered.connect(self._copy_svg)
         copy_png = menu.addAction("Copy PNG")

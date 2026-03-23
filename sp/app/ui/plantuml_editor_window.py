@@ -36,7 +36,7 @@ from sp.app.plantuml_renderer import PlantUMLRenderer, RenderResult
 from .ai_chat_panel import ApiWorker, ServerManager
 from sp.app import config
 from sp.logging_flags import log_enabled
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 
 _LOGGING = log_enabled("diagrams")
 
@@ -110,6 +110,14 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+
+    def createStandardContextMenu(self, *args, **kwargs):  # type: ignore[override]
+        menu = super().createStandardContextMenu(*args, **kwargs)
+        try:
+            apply_menu_theme(menu, self)
+        except Exception:
+            pass
+        return menu
 
 
 class ViPlainTextEdit(PlainTextEditWithLineNumbers):
@@ -493,6 +501,14 @@ class ChatLineEdit(QLineEdit):
         super().__init__()
         self._history = history_ref
         self._history_index: int | None = None
+
+    def createStandardContextMenu(self):  # type: ignore[override]
+        menu = super().createStandardContextMenu()
+        try:
+            apply_menu_theme(menu, self)
+        except Exception:
+            pass
+        return menu
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
@@ -2205,6 +2221,7 @@ B --> A: response
     def _show_export_menu(self) -> None:
         """Show export options menu."""
         menu = QMenu(self)
+        apply_menu_theme(menu, self)
         
         export_svg = menu.addAction("Export as SVG...")
         export_svg.triggered.connect(self._export_svg)
@@ -2225,6 +2242,7 @@ B --> A: response
     def _show_preview_context_menu(self, pos) -> None:
         """Show right-click menu on preview with copy options."""
         menu = QMenu(self)
+        apply_menu_theme(menu, self)
         copy_svg = menu.addAction("Copy SVG")
         copy_svg.triggered.connect(self._copy_svg)
         copy_png = menu.addAction("Copy PNG")

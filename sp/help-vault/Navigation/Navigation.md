@@ -21,6 +21,7 @@ The left sidebar shows your vault structure.
 - `Ctrl+J`: jump to a page quickly.
 - `Ctrl+Shift+P`: open Command Bar (pages, commands, settings).
 - `Alt+Left` / `Alt+Right`: back/forward in history.
+- On macOS, use `Cmd+[` / `Cmd+]` for back/forward in history.
 - `Alt+Home`: go to your home page.
 - `Alt+PgUp` / `Alt+PgDown`: move selection through the current nav list (open with `Enter` or `Ctrl+Enter`).
 
@@ -48,6 +49,7 @@ You do not need to memorize everything at once. A strong starter flow is:
 - Use `Ctrl+J` to jump directly to pages.
 - Use `Ctrl+Shift+P` for commands instead of hunting in menus.
 - Use `Alt+Left` / `Alt+Right` to move through your recent context.
+- On macOS, use `Cmd+[` / `Cmd+]` for recent-context back/forward and leave `Option+Left/Right` for normal text movement.
 - Use `Alt+Home` when you want a consistent reset point.
 
 As these become habits, navigation feels much faster and more focused.

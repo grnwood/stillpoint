@@ -277,6 +277,51 @@ def _ensure_user_theme_files() -> bool:
     return copied_any
 
 
+def _bundled_user_templates_dir() -> Path | None:
+    """Return the bundled sp/templates directory when available."""
+    rel_path = os.path.join("sp", "templates")
+    for candidate in _resource_candidates(rel_path):
+        path = Path(candidate)
+        if path.exists() and path.is_dir():
+            return path
+    fallback = Path(__file__).resolve().parents[1] / "templates"
+    if fallback.exists() and fallback.is_dir():
+        return fallback
+    return None
+
+
+def _ensure_user_template_files() -> bool:
+    """Ensure ~/.stillpoint/templates is seeded from bundled templates on first run.
+
+    Copies bundled templates only when the user template directory is missing or
+    contains no entries.
+    """
+    template_dir = Path.home() / ".stillpoint" / "templates"
+    try:
+        if template_dir.exists() and any(template_dir.iterdir()):
+            return False
+        template_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+
+    source_dir = _bundled_user_templates_dir()
+    if source_dir is None:
+        return False
+
+    copied_any = False
+    try:
+        for source in source_dir.iterdir():
+            dest = template_dir / source.name
+            if source.is_dir():
+                shutil.copytree(source, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, dest)
+            copied_any = True
+    except Exception:
+        return False
+    return copied_any
+
+
 def _apply_startup_theme_defaults(app: QApplication) -> None:
     """Apply OS-based default theme selection for users without explicit preference."""
     seeded_theme_files = _ensure_user_theme_files()
@@ -844,6 +889,7 @@ def main() -> None:
     _enable_faulthandler_log()
     _sp("Application starting.")
     config.init_settings()
+    _ensure_user_template_files()
     _maybe_use_minimal_fonts()
     # Set Windows App User Model ID before creating QApplication
     _set_windows_app_id()

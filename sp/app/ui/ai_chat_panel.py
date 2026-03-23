@@ -41,7 +41,7 @@ import html
 
 # Use stillpoint_config for global config storage
 from sp.app import config, config as stillpoint_config
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 from sp.ai.manager import AIManager, ContextItem
 from .agent_tool_loop import (
     AgentLoopConfig,
@@ -301,6 +301,36 @@ def _icon_tint_color() -> QColor:
     if bg.lightness() > 128:
         return QColor(0, 0, 0)
     return QColor(255, 255, 255)
+
+
+def _resolved_palette(source: Optional[QtWidgets.QWidget] = None) -> QPalette:
+    if source is not None:
+        try:
+            return QPalette(source.palette())
+        except Exception:
+            pass
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        return QPalette(app.palette())
+    return QPalette()
+
+
+def _palette_hex(role: QPalette.ColorRole, source: Optional[QtWidgets.QWidget] = None) -> str:
+    return _resolved_palette(source).color(role).name()
+
+
+def _chat_surface_defaults(source: Optional[QtWidgets.QWidget] = None) -> dict[str, str]:
+    palette = _resolved_palette(source)
+    return {
+        "base": palette.color(QPalette.ColorRole.Base).name(),
+        "alt": palette.color(QPalette.ColorRole.AlternateBase).name(),
+        "text": palette.color(QPalette.ColorRole.Text).name(),
+        "mid": palette.color(QPalette.ColorRole.Mid).name(),
+        "highlight": palette.color(QPalette.ColorRole.Highlight).name(),
+        "highlighted_text": palette.color(QPalette.ColorRole.HighlightedText).name(),
+        "disabled_text": palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text).name(),
+        "link": palette.color(QPalette.ColorRole.Link).name(),
+    }
 
 
 @dataclass
@@ -2037,15 +2067,16 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
+        chat_colors = _chat_surface_defaults(self)
         self.chat_view.setStyleSheet(
             "QTextBrowser {"
             "  padding: 6px;"
             "  background: "
-            f"{theme_value('ai_chat_panel.chat_view.bg', '#0b0b0b')};"
+            f"{theme_value('ai_chat_panel.chat_view.bg', chat_colors['base'])};"
             "  color: "
-            f"{theme_value('ai_chat_panel.chat_view.text', '#d6f5d6')};"
+            f"{theme_value('ai_chat_panel.chat_view.text', chat_colors['text'])};"
             "  border: 1px solid "
-            f"{theme_value('ai_chat_panel.chat_view.border', '#1f1f1f')};"
+            f"{theme_value('ai_chat_panel.chat_view.border', chat_colors['mid'])};"
             "}"
         )
         self.chat_view.installEventFilter(self)
@@ -2262,6 +2293,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def _on_chat_context_menu(self, pos: QtCore.QPoint) -> None:
         item = self.chat_tree.itemAt(pos)
         menu = QtWidgets.QMenu(self)
+        apply_menu_theme(menu, self.chat_tree)
 
         if not item:
             create_folder = menu.addAction("New Folder")
@@ -2459,20 +2491,21 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _render_messages(self) -> None:
         parts: List[str] = []
-        base_color = theme_value("ai_chat_panel.chat_html.base_bg", "#0b0b0b")
-        text_color = theme_value("ai_chat_panel.chat_html.text", "#d6f5d6")
-        accent = theme_value("ai_chat_panel.chat_html.accent", "#7fd4a7")
+        chat_colors = _chat_surface_defaults(self.chat_view)
+        base_color = theme_value("ai_chat_panel.chat_html.base_bg", chat_colors["base"])
+        text_color = theme_value("ai_chat_panel.chat_html.text", chat_colors["text"])
+        accent = theme_value("ai_chat_panel.chat_html.accent", chat_colors["highlight"])
         code_bg = theme_value(
             "ai_chat_panel.chat_html.code_bg",
-            theme_value("markdown_editor.syntax.code_block_bg", "#2a2a2a"),
+            theme_value("markdown_editor.syntax.code_block_bg", chat_colors["alt"]),
         )
         code_text = theme_value(
             "ai_chat_panel.chat_html.code_text",
-            theme_value("markdown_editor.syntax.code_block_text", "#a3ffab"),
+            theme_value("markdown_editor.syntax.code_block_text", chat_colors["text"]),
         )
         code_border = theme_value(
             "ai_chat_panel.chat_html.code_border",
-            theme_value("ai_chat_panel.chat_html.summary_border", "#2f4f2f"),
+            theme_value("ai_chat_panel.chat_html.summary_border", chat_colors["mid"]),
         )
         parts.append(
             f"<style>body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
@@ -2481,26 +2514,26 @@ class AIChatPanel(QtWidgets.QWidget):
             f".actions {{ text-align:left; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
-            f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', '#f2e7a1')}; background:transparent; }}"
-            f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', '#8fe39b')}; background:transparent; }}"
-            f".app {{ color:{theme_value('ai_chat_panel.chat_html.app', '#a9b7aa')}; background:transparent; "
+            f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', chat_colors['link'])}; background:transparent; }}"
+            f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', chat_colors['text'])}; background:transparent; }}"
+            f".app {{ color:{theme_value('ai_chat_panel.chat_html.app', chat_colors['disabled_text'])}; background:transparent; "
             f"font-size:0.92em; font-style:italic; }}"
-            f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', '#2f4f2f')}; }}"
+            f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', chat_colors['mid'])}; }}"
             f".bubble pre {{ background:{code_bg}; color:{code_text}; border:1px solid {code_border}; "
             f"border-radius:6px; padding:8px; overflow-x:auto; white-space:pre-wrap; }}"
             f".bubble code {{ background:{code_bg}; color:{code_text}; border-radius:4px; padding:0 4px; }}"
             f".bubble pre code {{ border-radius:0; padding:0; background:transparent; color:{code_text}; }}"
-            f".debug {{ color:#888; background:transparent; }}"
+            f".debug {{ color:{chat_colors['disabled_text']}; background:transparent; }}"
             f".debug details {{ margin-top:4px; }}"
             f".debug-toggle {{ cursor:pointer; color:{accent}; text-decoration:underline; display:inline-block; }}"
-            f".debug-title {{ color:#9aa39a; }}"
+            f".debug-title {{ color:{chat_colors['disabled_text']}; }}"
             f".debug-body {{ margin-top:6px; white-space:pre-wrap; }}"
             f".think-toggle {{ margin-top:6px; color:{accent}; text-decoration:none; display:inline-block; }}"
             f".think-active a {{ animation: thinkPulse 1.2s infinite; }}"
             f".think-body {{ margin-top:6px; padding:6px; border:2px solid "
-            f"{theme_value('ai_chat_panel.chat_html.think_border', '#ffffff')};"
-            f" background:rgba(0,0,0,0.35); max-height:7em; overflow:auto; white-space:pre-wrap;"
-            f" color:{theme_value('ai_chat_panel.chat_html.think_text', '#bdbdbd')}; }}"
+            f"{theme_value('ai_chat_panel.chat_html.think_border', chat_colors['highlight'])};"
+            f" background:{theme_value('ai_chat_panel.chat_html.think_bg', chat_colors['alt'])}; max-height:7em; overflow:auto; white-space:pre-wrap;"
+            f" color:{theme_value('ai_chat_panel.chat_html.think_text', chat_colors['text'])}; }}"
             f"@keyframes thinkPulse {{ 0% {{ opacity:0.4; }} 50% {{ opacity:1; }} 100% {{ opacity:0.4; }} }}"
             f".role {{ font-weight:bold; color:{accent}; }}"
             f".app .role {{ font-size:0.95em; }}</style>"
@@ -3415,6 +3448,7 @@ class AIChatPanel(QtWidgets.QWidget):
         cursor = self.chat_view.textCursor()
         if cursor.hasSelection():
             menu = QtWidgets.QMenu(self)
+            apply_menu_theme(menu, self.chat_view)
             copy_sel = menu.addAction("Copy")
             def _copy_selected():
                 try:
@@ -3449,6 +3483,7 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         _, content = self._message_map[msg_id]
         menu = QtWidgets.QMenu(self)
+        apply_menu_theme(menu, self.chat_view)
         copy_act = menu.addAction("Copy Message")
         def _copy_message():
             try:

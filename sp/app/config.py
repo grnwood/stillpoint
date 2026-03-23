@@ -18,6 +18,7 @@ from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suff
 from sp.logging_flags import log_enabled
 
 GLOBAL_CONFIG = Path.home() / ".stillpoint_config.json"
+HOMEBASE_VAULT_METADATA_FILENAME = "homebase.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
@@ -160,6 +161,59 @@ def _read_global_config() -> dict:
         return json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def _homebase_vault_metadata_path(vault_root: str | Path) -> Path:
+    return Path(vault_root) / ".stillpoint" / HOMEBASE_VAULT_METADATA_FILENAME
+
+
+def load_homebase_vault_metadata(vault_root: str | Path) -> Optional[dict[str, Any]]:
+    """Load vault-local Homebase metadata without any secrets."""
+    try:
+        path = _homebase_vault_metadata_path(vault_root)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        server_url = str(payload.get("server_url") or "").strip().rstrip("/")
+        vault_id = str(payload.get("vault_id") or "").strip()
+        if not server_url or not vault_id:
+            return None
+        return {
+            "mode": "connect",
+            "server_url": server_url,
+            "verify_ssl": bool(payload.get("verify_ssl", True)),
+            "vault_id": vault_id,
+            "vault_name": str(payload.get("vault_name") or "").strip(),
+        }
+    except Exception:
+        return None
+
+
+def save_homebase_vault_metadata(vault_root: str | Path, entry: dict[str, Any]) -> bool:
+    """Persist vault-local Homebase metadata without passwords, tokens, or passphrases."""
+    try:
+        root = Path(vault_root)
+        server_url = str(entry.get("server_url") or "").strip().rstrip("/")
+        vault_id = str(entry.get("vault_id") or "").strip()
+        if not server_url or not vault_id:
+            return False
+        path = _homebase_vault_metadata_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "type": "stillpoint-homebase-vault",
+            "version": 1,
+            "mode": "connect",
+            "server_url": server_url,
+            "verify_ssl": bool(entry.get("verify_ssl", True)),
+            "vault_id": vault_id,
+            "vault_name": str(entry.get("name") or entry.get("vault_name") or root.name).strip(),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 def load_non_actionable_task_tags() -> str:
     """Load the configured non-actionable task tags as a space-separated string (default: '@wait @wt @someday')."""
@@ -1574,7 +1628,7 @@ def load_homebase_vault_profiles() -> list[dict[str, Any]]:
         profile["username"] = str(profile.get("username") or "")
         profile["access_token"] = str(profile.get("access_token") or "")
         profile["refresh_token"] = str(profile.get("refresh_token") or "")
-        profile["passphrase"] = str(profile.get("passphrase") or "")
+        profile["store_passphrase"] = bool(profile.get("store_passphrase", False))
         profile["auto_sync"] = bool(profile.get("auto_sync", True))
         profile["interval_seconds"] = int(profile.get("interval_seconds", 60))
         profile["push_debounce_seconds"] = int(profile.get("push_debounce_seconds", 3))
@@ -1607,7 +1661,7 @@ def save_homebase_vault_profiles(entries: list[dict[str, Any]]) -> None:
                 "username": str(raw.get("username") or ""),
                 "access_token": str(raw.get("access_token") or ""),
                 "refresh_token": str(raw.get("refresh_token") or ""),
-                "passphrase": str(raw.get("passphrase") or ""),
+                "store_passphrase": bool(raw.get("store_passphrase", False)),
                 "auto_sync": bool(raw.get("auto_sync", True)),
                 "interval_seconds": int(raw.get("interval_seconds", 60)),
                 "push_debounce_seconds": int(raw.get("push_debounce_seconds", 3)),
@@ -1892,6 +1946,35 @@ def save_homebase_passphrase(passphrase: str) -> None:
         conn.execute(
             "REPLACE INTO kv(key, value) VALUES(?, ?)",
             ("homebase_passphrase", str(passphrase or "")),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_store_passphrase(default: bool = False) -> bool:
+    """Return whether the Homebase passphrase is allowed to persist on this device."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_store_passphrase'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if not row or row[0] is None:
+        return default
+    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_homebase_store_passphrase(enabled: bool) -> None:
+    """Persist whether the Homebase passphrase may be stored on this device."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_store_passphrase", "true" if bool(enabled) else "false"),
         )
         conn.commit()
     except sqlite3.OperationalError:

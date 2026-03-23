@@ -18,6 +18,7 @@ from .attachments_panel import AttachmentsPanel
 from .link_navigator_panel import LinkNavigatorPanel
 from .calendar_panel import CalendarPanel
 from .page_load_logger import PAGE_LOGGING_ENABLED
+from .theme import apply_menu_theme
 
 
 class TabbedRightPanel(QWidget):
@@ -342,6 +343,7 @@ class TabbedRightPanel(QWidget):
             return
         widget = self.tabs.widget(index)
         menu = QMenu(self)
+        apply_menu_theme(menu, bar)
         if self.task_panel and widget == self.task_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openTaskWindowRequested.emit)

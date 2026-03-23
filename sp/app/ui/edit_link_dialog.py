@@ -45,6 +45,9 @@ class EditLinkDialog(QDialog):
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.form_layout = form
 
         # Check if it's an HTTP URL - if so, don't normalize it
         if link_to.startswith(("http://", "https://")):

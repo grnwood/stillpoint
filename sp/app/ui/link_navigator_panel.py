@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.server.adapters.files import strip_page_suffix
 from .path_utils import path_to_colon
+from .theme import apply_menu_theme
 
 
 @dataclass
@@ -672,6 +673,7 @@ class LinkNavigatorPanel(QWidget):
 
     def _open_graph_menu(self, pos) -> None:
         menu = QMenu(self)
+        apply_menu_theme(menu, self.graph_view)
         menu.addAction("Back", self.backRequested.emit)
         menu.addAction("Forward", self.forwardRequested.emit)
         menu.addAction("Home", self.homeRequested.emit)
@@ -681,6 +683,7 @@ class LinkNavigatorPanel(QWidget):
 
     def _open_raw_menu(self, pos) -> None:
         menu = QMenu(self)
+        apply_menu_theme(menu, self.raw_view)
         menu.addAction("Back", self.backRequested.emit)
         menu.addAction("Forward", self.forwardRequested.emit)
         menu.addAction("Home", self.homeRequested.emit)

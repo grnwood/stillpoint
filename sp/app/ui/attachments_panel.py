@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from .page_load_logger import PAGE_LOGGING_ENABLED
+from .theme import apply_menu_theme
 from sp.logging_flags import log_enabled
 
 _DETAILED_LOGGING = log_enabled("attachments_media")
@@ -707,6 +708,7 @@ class AttachmentsPanel(QWidget):
     def _on_attachments_context_menu(self, pos) -> None:
         """Handle right-click context menu on attachments list."""
         menu = QMenu(self)
+        apply_menu_theme(menu, self.attachments_list)
         selected = self.attachments_list.selectedItems()
         
         # Add "Add new PlantUML..." action

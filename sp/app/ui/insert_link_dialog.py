@@ -147,6 +147,9 @@ class InsertLinkDialog(QDialog):
 
         # Form layout for Link to and Link Name fields
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.form_layout = form
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Type to search pages…")
