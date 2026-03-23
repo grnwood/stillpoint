@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import threading
@@ -60,6 +61,13 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
+    # Run a GC collection before encoding to flush any pending reference cycles
+    # (e.g. httpx response objects held in exception tracebacks) so that the GC
+    # is not triggered *during* json.dumps.  Without this, the cyclic GC can be
+    # triggered by the memory allocations inside _make_iterencode and will
+    # finalise objects whose __del__ methods corrupt the encoder's iteration
+    # state, causing a fatal segmentation fault (CPython issue on 3.12+).
+    gc.collect()
     text = json.dumps(payload, indent=2, sort_keys=True)
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
