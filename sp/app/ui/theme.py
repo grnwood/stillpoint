@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtGui import QColor
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication
 
 from sp.app import config
 
@@ -25,7 +27,7 @@ def _theme_dir() -> Path:
 
 
 def _resolve_theme_path() -> Path:
-    theme_name = config.load_theme_preference()
+    theme_name = config.load_effective_theme_preference()
     if not theme_name or theme_name == "default":
         return _default_theme_path()
     candidate = Path(theme_name)
@@ -97,3 +99,23 @@ def reload_theme() -> None:
     global _THEME_CACHE, _THEME_CACHE_PATH
     _THEME_CACHE = None
     _THEME_CACHE_PATH = None
+
+
+def apply_qt_palette(app: QApplication) -> None:
+    """Apply a Qt palette derived from the currently effective StillPoint theme."""
+    base_bg = str(theme_value("markdown_editor.base.bg", "#0b0b0b"))
+    base_text = str(theme_value("markdown_editor.base.text", "#d6f5d6"))
+    selection_bg = str(theme_value("markdown_editor.base.selection_bg", "#2f4c74"))
+    selection_text = str(theme_value("markdown_editor.base.selection_text", "#ffffff"))
+    window_bg = str(theme_value("page_editor_window.base.bg", base_bg))
+    pal = app.palette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(window_bg))
+    pal.setColor(QPalette.ColorRole.Base, QColor(base_bg))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(base_bg))
+    pal.setColor(QPalette.ColorRole.Button, QColor(window_bg))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(base_text))
+    pal.setColor(QPalette.ColorRole.Text, QColor(base_text))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor(base_text))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(selection_bg))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(selection_text))
+    app.setPalette(pal)

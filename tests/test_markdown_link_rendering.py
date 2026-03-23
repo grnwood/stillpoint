@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtCore import QMimeData, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData, Qt
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
@@ -112,6 +112,75 @@ def test_pasting_http_link_preserves_existing_inline_images(editor, tmp_path):
     # Image paths may be normalized to relative paths with ./
     assert ("![Sample](sample.png)" in markdown or "![Sample](./sample.png)" in markdown)
     assert f"[{url}|]" in markdown
+
+
+def test_pasting_large_clipboard_image_applies_markdown_image_width_cap(editor, tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "Playpage"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    editor.set_context(str(vault_root), "/Playpage/Playpage.md")
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_markdown_image_max_width", lambda: 900)
+
+    image = QImage(1600, 800, QImage.Format_ARGB32)
+    image.fill(0xFF00FF00)
+
+    mime = QMimeData()
+    mime.setImageData(image)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "{width=900}" in markdown
+    assert "paste_image_001.png" in markdown
+
+
+def test_pasting_png_mime_bytes_without_has_image_still_embeds_image(editor, tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "Playpage"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    editor.set_context(str(vault_root), "/Playpage/Playpage.md")
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_markdown_image_max_width", lambda: 900)
+
+    image = QImage(48, 32, QImage.Format_ARGB32)
+    image.fill(0xFF0088FF)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    assert buffer.open(QIODevice.WriteOnly)
+    assert image.save(buffer, "PNG")
+    buffer.close()
+
+    mime = QMimeData()
+    mime.setData("image/png", data)
+    editor.insertFromMimeData(mime)
+
+    markdown = editor.to_markdown()
+    assert "paste_image_001.png" in markdown
+    assert "{width=" not in markdown
+
+
+def test_pasting_image_leaves_cursor_on_next_line(editor, tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    page_dir = vault_root / "Playpage"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    editor.set_context(str(vault_root), "/Playpage/Playpage.md")
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_markdown_image_max_width", lambda: 900)
+
+    editor.setPlainText("before\n")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    editor.setTextCursor(cursor)
+
+    image = QImage(48, 32, QImage.Format_ARGB32)
+    image.fill(0xFF44CC88)
+    mime = QMimeData()
+    mime.setImageData(image)
+    editor.insertFromMimeData(mime)
+
+    text = editor.toPlainText()
+    cursor = editor.textCursor()
+    assert text.endswith("\n")
+    assert "\uFFFC\n" in text
+    assert cursor.position() == len(text)
+    assert cursor.block().text() == ""
 
 
 def test_copy_strips_sentinels_for_plain_text_and_preserves_internal_markdown(editor):

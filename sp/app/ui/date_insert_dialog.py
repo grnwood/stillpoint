@@ -159,8 +159,55 @@ def _calendar_required_dialog_width(dialog: QDialog, calendar: QCalendarWidget, 
         margins = layout.contentsMargins()
         left_margin = margins.left()
         right_margin = margins.right()
-    calendar_width = max(calendar.minimumSizeHint().width(), calendar.sizeHint().width())
+    calendar_width = _calendar_required_width(calendar)
     return max(int(default_width), int(calendar_width + left_margin + right_margin))
+
+
+def _calendar_required_width(calendar: QCalendarWidget) -> int:
+    calendar.ensurePolished()
+    base = 0
+    try:
+        fm = calendar.fontMetrics()
+        base = max(base, fm.horizontalAdvance("88") * 7 + 56)
+    except Exception:
+        pass
+    try:
+        base = max(base, int(calendar.minimumSizeHint().width()))
+    except Exception:
+        pass
+    try:
+        base = max(base, int(calendar.sizeHint().width()))
+    except Exception:
+        pass
+    view = (
+        calendar.findChild(QTableView, "qt_calendar_calendarview")
+        or next(iter(calendar.findChildren(QTableView)), None)
+    )
+    if view is not None:
+        try:
+            header = view.horizontalHeader()
+            frame = view.frameWidth() * 2
+            viewport_margins = view.contentsMargins().left() + view.contentsMargins().right()
+            sections = sum(header.sectionSize(i) for i in range(header.count()))
+            base = max(base, int(sections + frame + viewport_margins + 2))
+        except Exception:
+            pass
+    return max(280, int(base))
+
+
+def _enforce_calendar_dialog_width(dialog: QDialog, calendar: QCalendarWidget, default_width: int) -> int:
+    required_calendar_width = _calendar_required_width(calendar)
+    padded_calendar_width = max(required_calendar_width + 24, int(required_calendar_width * 1.10))
+    try:
+        calendar.setMinimumWidth(padded_calendar_width)
+    except Exception:
+        pass
+    required_width = _calendar_required_dialog_width(dialog, calendar, max(default_width, padded_calendar_width))
+    current_height = max(int(dialog.height()), int(dialog.sizeHint().height()))
+    dialog.setMinimumWidth(required_width)
+    if dialog.width() < required_width or dialog.minimumWidth() < required_width:
+        dialog.resize(required_width, current_height)
+    return required_width
 
 
 def _next_weekday(from_date: date, target_weekday: int) -> date:
@@ -439,10 +486,14 @@ class DateInsertDialog(QDialog):
             self.move(self._clamp_to_screen(anchor_pos))
 
     def _apply_initial_geometry(self, *, default_width: int, default_height: int) -> None:
-        required_width = _calendar_required_dialog_width(self, self.calendar, default_width)
+        required_width = _enforce_calendar_dialog_width(self, self.calendar, default_width)
         required_height = max(int(default_height), int(self.sizeHint().height()))
         self.setMinimumWidth(required_width)
         self.resize(required_width, required_height)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        _enforce_calendar_dialog_width(self, self.calendar, 320)
+        super().showEvent(event)
 
     def _clamp_to_screen(self, pos: QPoint) -> QPoint:
         screen = QGuiApplication.screenAt(pos)
@@ -636,10 +687,14 @@ class JournalDateJumpDialog(QDialog):
             self.move(self._clamp_to_screen(anchor_pos))
 
     def _apply_initial_geometry(self, *, default_width: int, default_height: int) -> None:
-        required_width = _calendar_required_dialog_width(self, self.calendar, default_width)
+        required_width = _enforce_calendar_dialog_width(self, self.calendar, default_width)
         required_height = max(int(default_height), int(self.sizeHint().height()))
         self.setMinimumWidth(required_width)
         self.resize(required_width, required_height)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        _enforce_calendar_dialog_width(self, self.calendar, 300)
+        super().showEvent(event)
 
     def _clamp_to_screen(self, pos: QPoint) -> QPoint:
         screen = QGuiApplication.screenAt(pos)

@@ -84,6 +84,7 @@ from .theme import theme_color, theme_value
 
 
 logger = logging.getLogger(__name__)
+MARKDOWN_IMAGE_WIDTH_OPTIONS = (300, 600, 900, 1200, 1500)
 
 
 class SearchEngine:
@@ -725,6 +726,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
     _cache_hits: int = 0
     _cache_misses: int = 0
 
+    @classmethod
+    def clear_persistent_cache(cls) -> None:
+        cls._persistent_block_cache.clear()
+        cls._persistent_cache_order.clear()
+        cls._cache_hits = 0
+        cls._cache_misses = 0
+
     def __init__(self, parent) -> None:  # type: ignore[override]
         super().__init__(parent)
         # Precompile regex patterns (avoid per-block construction)
@@ -738,8 +746,16 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._timing_enabled = False
         self._timing_total = 0.0
         self._timing_blocks = 0
+        app = QApplication.instance()
+        try:
+            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
+        except Exception:
+            base_lightness = 0
+        is_light_palette = base_lightness >= 128
         self.heading_format = QTextCharFormat()
-        self.heading_format.setForeground(theme_color("markdown_editor.syntax.heading", "#6cb4ff"))
+        self.heading_format.setForeground(
+            theme_color("markdown_editor.syntax.heading", "#8b5cf6" if is_light_palette else "#6cb4ff")
+        )
         self.heading_format.setFontWeight(
             QFont.Weight(int(theme_value("markdown_editor.syntax.heading_weight", QFont.Weight.DemiBold)))
         )
@@ -759,10 +775,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._apply_heading_sizes(base_pt)
 
         self.bold_format = QTextCharFormat()
-        self.bold_format.setForeground(theme_color("markdown_editor.syntax.bold", "#ffd479"))
+        self.bold_format.setForeground(theme_color("markdown_editor.syntax.bold", "#92400e" if is_light_palette else "#ffd479"))
 
         self.italic_format = QTextCharFormat()
-        self.italic_format.setForeground(theme_color("markdown_editor.syntax.italic", "#ffa7c4"))
+        self.italic_format.setForeground(theme_color("markdown_editor.syntax.italic", "#9d174d" if is_light_palette else "#ffa7c4"))
 
         mono_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         if mono_font.family():
@@ -770,24 +786,18 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         else:
             mono_family = "Courier New"
         self.code_format = QTextCharFormat()
-        self.code_format.setForeground(theme_color("markdown_editor.syntax.code_text", "#a3ffab"))
-        self.code_format.setBackground(theme_color("markdown_editor.syntax.code_bg", "#2a2a2a"))
+        self.code_format.setForeground(theme_color("markdown_editor.syntax.code_text", "#166534" if is_light_palette else "#a3ffab"))
+        self.code_format.setBackground(theme_color("markdown_editor.syntax.code_bg", "#ecfdf5" if is_light_palette else "#2a2a2a"))
         self.code_format.setFontFamily(mono_family)
         self.code_format.setFontFixedPitch(True)
         self.code_format.setFontStyleHint(QFont.StyleHint.Monospace)
 
         self.quote_format = QTextCharFormat()
-        self.quote_format.setForeground(theme_color("markdown_editor.syntax.quote", "#7fdbff"))
+        self.quote_format.setForeground(theme_color("markdown_editor.syntax.quote", "#0f766e" if is_light_palette else "#7fdbff"))
         self.quote_format.setFontItalic(True)
 
         self.list_format = QTextCharFormat()
-        app = QApplication.instance()
-        try:
-            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
-        except Exception:
-            base_lightness = 0
-        is_light_palette = base_lightness >= 128
-        pref = (config.load_theme_preference() or "").strip().lower()
+        pref = (config.load_effective_theme_preference() or "").strip().lower()
         using_default_dark_theme = pref in {"", "default", "dark-theme", "dark-theme.json", "theme-config", "theme-config.json"}
         if is_light_palette and using_default_dark_theme:
             list_color = "#111827"
@@ -798,26 +808,26 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.list_format.setForeground(QColor(str(list_color)))
 
         self.code_block = QTextCharFormat()
-        self.code_block.setBackground(theme_color("markdown_editor.syntax.code_block_bg", "#2a2a2a"))
-        self.code_block.setForeground(theme_color("markdown_editor.syntax.code_block_text", "#a3ffab"))
+        self.code_block.setBackground(theme_color("markdown_editor.syntax.code_block_bg", "#f3f4f6" if is_light_palette else "#2a2a2a"))
+        self.code_block.setForeground(theme_color("markdown_editor.syntax.code_block_text", "#166534" if is_light_palette else "#a3ffab"))
         self.code_block.setFontFamily(mono_family)
         self.code_block.setFontFixedPitch(True)
         self.code_block.setFontStyleHint(QFont.StyleHint.Monospace)
         
         self.code_fence_format = QTextCharFormat()
-        self.code_fence_format.setForeground(theme_color("markdown_editor.syntax.code_fence", "#555555"))
+        self.code_fence_format.setForeground(theme_color("markdown_editor.syntax.code_fence", "#6b7280" if is_light_palette else "#555555"))
 
         self.tag_format = QTextCharFormat()
-        self.tag_format.setForeground(theme_color("markdown_editor.syntax.tag", "#ffa657"))
+        self.tag_format.setForeground(theme_color("markdown_editor.syntax.tag", "#b45309" if is_light_palette else "#ffa657"))
 
         self.checkbox_format = QTextCharFormat()
-        self.checkbox_format.setForeground(theme_color("markdown_editor.syntax.checkbox", "#c8c8c8"))
+        self.checkbox_format.setForeground(theme_color("markdown_editor.syntax.checkbox", "#374151" if is_light_palette else "#c8c8c8"))
         self.checkbox_format.setFontFamily(
             theme_value("markdown_editor.syntax.checkbox_font", "Segoe UI Symbol")
         )
 
-        self._hr_line_color = theme_color("markdown_editor.syntax.hr_line", "#60656f")
-        self._hr_block_color = theme_color("markdown_editor.syntax.hr_block", "#1e2530")
+        self._hr_line_color = theme_color("markdown_editor.syntax.hr_line", "#9ca3af" if is_light_palette else "#60656f")
+        self._hr_block_color = theme_color("markdown_editor.syntax.hr_block", "#e5e7eb" if is_light_palette else "#1e2530")
         self.hr_format = QTextCharFormat()
         self.hr_format.setForeground(self._hr_line_color)
         self.hr_format.setBackground(QColor(0, 0, 0, 0))
@@ -835,7 +845,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
-        self.strikethrough_format.setForeground(theme_color("markdown_editor.syntax.strikethrough", "#888888"))
+        self.strikethrough_format.setForeground(theme_color("markdown_editor.syntax.strikethrough", "#6b7280" if is_light_palette else "#888888"))
         self.strikethrough_format.setFontStrikeOut(True)
         
         # Highlight format
@@ -845,7 +855,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         
         # Bold+Italic combined format
         self.bold_italic_format = QTextCharFormat()
-        self.bold_italic_format.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#ffb8d1"))
+        self.bold_italic_format.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#7c2d12" if is_light_palette else "#ffb8d1"))
         self.bold_italic_format.setFontWeight(QFont.Weight.Bold)
         self.bold_italic_format.setFontItalic(True)
 
@@ -905,6 +915,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         """Update the Pygments style and rehighlight."""
         self._init_pygments(style_name)
         self._reset_code_block_cache()
+        type(self).clear_persistent_cache()
         try:
             self.rehighlight()
         except Exception:
@@ -1121,6 +1132,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
         t0 = time.perf_counter() if self._timing_enabled else 0.0
+        app = QApplication.instance()
+        try:
+            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
+        except Exception:
+            base_lightness = 0
+        is_light_palette = base_lightness >= 128
 
         block = self.currentBlock()
         block_num = block.blockNumber()
@@ -1318,7 +1335,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     fmt = QTextCharFormat()
                     fmt.setFontWeight(QFont.Weight.Bold)
                     fmt.setFontItalic(True)
-                    fmt.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#ffb8d1"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.bold_italic", "#7c2d12" if is_light_palette else "#ffb8d1"))
                     self.setFormat(start + 3, length - 6, fmt)
                     self.setFormat(start + length - 3, 3, self.hidden_format)
                 
@@ -1330,7 +1347,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     self.setFormat(start, 2, self.hidden_format)
                     fmt = QTextCharFormat()
                     fmt.setFontWeight(QFont.Weight.Bold)
-                    fmt.setForeground(theme_color("markdown_editor.syntax.bold", "#ffd479"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.bold", "#92400e" if is_light_palette else "#ffd479"))
                     self.setFormat(start + 2, length - 4, fmt)
                     self.setFormat(start + length - 2, 2, self.hidden_format)
                     
@@ -1342,7 +1359,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     self.setFormat(start, 1, self.hidden_format)
                     fmt = QTextCharFormat()
                     fmt.setFontItalic(True)
-                    fmt.setForeground(theme_color("markdown_editor.syntax.italic", "#ffa7c4"))
+                    fmt.setForeground(theme_color("markdown_editor.syntax.italic", "#9d174d" if is_light_palette else "#ffa7c4"))
                     self.setFormat(start + 1, length - 2, fmt)
                     self.setFormat(start + length - 1, 1, self.hidden_format)
                     
@@ -1372,7 +1389,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     label_start = pipe_pos + 1
                     label_length = end - label_start - 1  # -1 for closing ]
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#2563eb" if is_light_palette else "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(label_start, label_length, link_fmt)
                     
@@ -1381,7 +1398,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_wiki and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#2563eb" if is_light_palette else "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
                     
@@ -1390,7 +1407,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_wiki and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#2563eb" if is_light_palette else "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
                     
@@ -1403,7 +1420,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                         label_start = start + 1
                         label_length = bracket_end - label_start
                         link_fmt = QTextCharFormat()
-                        link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
+                        link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#2563eb" if is_light_palette else "#4fa3ff"))
                         link_fmt.setFontUnderline(True)
                         self.setFormat(start, 1, self.hidden_format)  # [
                         self.setFormat(label_start, label_length, link_fmt)
@@ -1414,7 +1431,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 inside_wiki = any(ws <= start and end <= we for (ws, we) in wiki_spans)
                 if not inside_display and not inside_display:
                     link_fmt = QTextCharFormat()
-                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#4fa3ff"))
+                    link_fmt.setForeground(theme_color("markdown_editor.syntax.link", "#2563eb" if is_light_palette else "#4fa3ff"))
                     link_fmt.setFontUnderline(True)
                     self.setFormat(start, length, link_fmt)
         
@@ -1736,6 +1753,33 @@ class MarkdownEditor(QTextEdit):
         if selection_text is not None:
             pal.setColor(QPalette.HighlightedText, theme_color("markdown_editor.base.selection_text", selection_text))
         self.setPalette(pal)
+
+    def refresh_theme_styling(self) -> None:
+        self._apply_theme_palette()
+        try:
+            current_doc = self.document()
+            current_highlighter = getattr(self, "highlighter", None)
+            pygments_style = getattr(current_highlighter, "_pygments_style_name", None) or config.load_pygments_style("monokai")
+            if current_highlighter is not None:
+                try:
+                    current_highlighter.setDocument(None)
+                except Exception:
+                    pass
+            MarkdownHighlighter.clear_persistent_cache()
+            self.highlighter = MarkdownHighlighter(current_doc)
+            try:
+                self.highlighter.set_pygments_style(pygments_style)
+            except Exception:
+                pass
+            self._hr_line_color = getattr(
+                self.highlighter, "_hr_line_color", theme_color("markdown_editor.syntax.hr_line", "#60656f")
+            )
+            self._hr_block_color = getattr(
+                self.highlighter, "_hr_block_color", theme_color("markdown_editor.syntax.hr_block", "#1e2530")
+            )
+            self.highlighter.rehighlight()
+        except Exception:
+            pass
 
     def _status_message(self, msg: str, duration: int = 2000) -> None:
         window = self.window()
@@ -3375,21 +3419,22 @@ class MarkdownEditor(QTextEdit):
                 return
 
         # 1) Images → save and embed
-        if source.hasImage() and self._vault_root and self._current_path:
-            image = source.imageData()
-            if isinstance(image, QImage):
+        if self._vault_root and self._current_path:
+            image = self._image_from_mime_data(source)
+            if image is not None:
+                insert_width = self._clamped_image_insert_width(image)
                 self._prepare_image_paste_target()
                 if self._remote_mode:
                     filename = self._next_remote_paste_image_name()
                     payload = self._encode_image_png(image)
                     if filename and payload and self._upload_remote_bytes(filename, payload):
                         self._cache_remote_bytes(filename, payload)
-                        self._insert_image_from_path(filename, alt=Path(filename).stem)
+                        self._insert_image_from_path(filename, alt=Path(filename).stem, width=insert_width)
                         self.imageSaved.emit(filename)
                         return
                 saved = self._save_image(image)
                 if saved:
-                    self._insert_image_from_path(saved.name, alt=saved.stem)
+                    self._insert_image_from_path(saved.name, alt=saved.stem, width=insert_width)
                     self.imageSaved.emit(saved.name)
                     return
 
@@ -3433,6 +3478,64 @@ class MarkdownEditor(QTextEdit):
             self._insert_markdown_text(source.text())
             return
         super().insertFromMimeData(source)
+
+    def _image_from_mime_data(self, source: Optional[QMimeData]) -> Optional[QImage]:
+        if source is None:
+            return None
+        if source.hasImage():
+            try:
+                image = source.imageData()
+            except Exception:
+                image = None
+            if isinstance(image, QImage) and not image.isNull():
+                return image
+        image_formats = {
+            "application/x-qt-image",
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/gif",
+            "image/bmp",
+            "image/webp",
+            "image/tiff",
+            "image/x-tiff",
+            "public.png",
+            "public.jpeg",
+            "public.tiff",
+        }
+        try:
+            formats = [str(fmt).lower() for fmt in source.formats()]
+        except Exception:
+            formats = []
+        for fmt in formats:
+            if fmt not in image_formats and not fmt.startswith("image/") and "tiff" not in fmt:
+                continue
+            try:
+                raw = source.data(fmt)
+            except Exception:
+                raw = None
+            if not raw:
+                continue
+            image = QImage()
+            try:
+                if image.loadFromData(bytes(raw)) and not image.isNull():
+                    return image
+            except Exception:
+                continue
+        if source.hasUrls():
+            try:
+                for url in source.urls():
+                    if not url.isLocalFile():
+                        continue
+                    path = Path(url.toLocalFile())
+                    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}:
+                        continue
+                    image = QImage(str(path))
+                    if not image.isNull():
+                        return image
+            except Exception:
+                pass
+        return None
 
     def _insert_markdown_text(self, text: str) -> None:
         """Insert pasted markdown/plain text and refresh display when link syntax exists."""
@@ -5155,7 +5258,7 @@ class MarkdownEditor(QTextEdit):
             # Then image-specific actions
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
-            for width in (300, 600, 900):
+            for width in MARKDOWN_IMAGE_WIDTH_OPTIONS:
                 action = menu.addAction(f"{width}px")
                 action.triggered.connect(
                     lambda checked=False, w=width, name=image_name: self._resize_image_by_name(name, w)
@@ -9388,11 +9491,37 @@ class MarkdownEditor(QTextEdit):
 
     def _insert_image_from_path(self, raw_path: str, alt: str = "", width: Optional[int] = None) -> None:
         fmt = self._create_image_format(raw_path, alt, str(width) if width else None)
-        if fmt is None:
-            self.insertPlainText(f"![{alt}]({raw_path})")
-            return
         cursor = self.textCursor()
-        cursor.insertImage(fmt)
+        cursor.beginEditBlock()
+        try:
+            if fmt is None:
+                suffix = f"{{width={width}}}" if width else ""
+                cursor.insertText(f"![{alt}]({raw_path}){suffix}")
+            else:
+                cursor.insertImage(fmt)
+            cursor.insertBlock()
+            self.setTextCursor(cursor)
+            self.ensureCursorVisible()
+        finally:
+            cursor.endEditBlock()
+
+    def _markdown_image_max_width(self) -> int:
+        try:
+            return config.load_markdown_image_max_width()
+        except Exception:
+            return 900
+
+    def _clamped_image_insert_width(self, image: QImage) -> Optional[int]:
+        if image.isNull():
+            return None
+        max_width = self._markdown_image_max_width()
+        try:
+            natural_width = int(image.width())
+        except Exception:
+            natural_width = 0
+        if natural_width > max_width > 0:
+            return max_width
+        return None
 
     def _create_image_format(self, raw_path: str, alt: str, width: Optional[str]) -> Optional[QTextImageFormat]:
         resolved = self._resolve_image_path(raw_path)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable, Optional
+import time
 
 from PySide6.QtCore import Qt, QEvent, QPoint, QTimer, Signal, QPropertyAnimation, QSize
 from PySide6.QtGui import (
@@ -40,6 +42,23 @@ from sp.app import config
 from .theme import theme_color, theme_value
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+_MODE_DEBUG_LOG = Path("/tmp/stillpoint_mode_window_debug.log")
+
+
+def _mode_debug_enabled() -> bool:
+    return os.getenv("SP_MODE_DEBUG", "0") in ("1", "true", "True")
+
+
+def _mode_debug_log(label: str, **fields) -> None:
+    if not _mode_debug_enabled():
+        return
+    try:
+        parts = [f"{k}={fields[k]!r}" for k in sorted(fields)]
+        _MODE_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _MODE_DEBUG_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{time.time():.6f} {label} " + " ".join(parts) + "\n")
+    except Exception:
+        pass
 
 
 def _load_one_shot_prompt() -> str:
@@ -304,14 +323,27 @@ class ModeWindow(QMainWindow):
         host_layout.setSpacing(6)
 
         self.editor = MarkdownEditor()
-        # Share the live document so edits stay in sync with the main window.
-        self.editor.setDocument(self._base_editor.document())
-        self.editor.set_context(self._vault_root, self._page_path)
+        self._overlay_initial_markdown = ""
         try:
-            # Detach the overlay highlighter so we don't replace the shared document's highlighter.
-            self.editor.highlighter.setDocument(None)
+            self._overlay_initial_markdown = self._base_editor.to_markdown()
+            self.editor.set_markdown(self._overlay_initial_markdown)
+        except Exception:
+            try:
+                self.editor.setPlainText(self._base_editor.toPlainText())
+            except Exception:
+                pass
+        _mode_debug_log(
+            "overlay_editor_attached",
+            mode=self.mode,
+            doc_len=len(self.editor.toPlainText()),
+            base_doc_len=len(self._base_editor.toPlainText()),
+            same_document=self.editor.document() is self._base_editor.document(),
+        )
+        try:
+            self.editor.refresh_theme_styling()
         except Exception:
             pass
+        self.editor.set_context(self._vault_root, self._page_path)
         # Drop expensive per-editor textChanged handlers on the overlay to avoid re-entrant processing
         try:
             self.editor.textChanged.disconnect(self.editor._enforce_display_symbols)
@@ -368,6 +400,25 @@ class ModeWindow(QMainWindow):
 
         self.setCentralWidget(container)
 
+    @staticmethod
+    def _color_contrast_ratio(fg: QColor, bg: QColor) -> float:
+        def channel(c: float) -> float:
+            c = c / 255.0
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        def luminance(color: QColor) -> float:
+            return (
+                0.2126 * channel(color.red())
+                + 0.7152 * channel(color.green())
+                + 0.0722 * channel(color.blue())
+            )
+
+        l1 = luminance(fg)
+        l2 = luminance(bg)
+        lighter = max(l1, l2)
+        darker = min(l1, l2)
+        return (lighter + 0.05) / (darker + 0.05)
+
     def _build_audience_tools_in_header(self, header: QHBoxLayout) -> None:
         """Add audience mode tools directly to the header bar."""
         def _btn(text: str, tooltip: str, handler):
@@ -375,19 +426,7 @@ class ModeWindow(QMainWindow):
             btn.setText(text)
             btn.setToolTip(tooltip)
             btn.setFocusPolicy(Qt.NoFocus)
-            btn.setStyleSheet(
-                "QToolButton { padding: 4px 8px; color: "
-                f"{theme_value('mode_window.mode_button.text', '#e9eef8')}; background: "
-                f"{theme_value('mode_window.mode_button.bg', 'rgba(40, 56, 74, 0.7)')}; "
-                "border: 1px solid "
-                f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
-                "border-radius: 6px; font-weight: "
-                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; "
-                "} "
-                "QToolButton:hover { background: "
-                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; "
-                "}"
-            )
+            btn.setStyleSheet(self._mode_button_style())
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
             return btn
@@ -402,19 +441,7 @@ class ModeWindow(QMainWindow):
             btn.setText(text)
             btn.setToolTip(tooltip)
             btn.setFocusPolicy(Qt.NoFocus)
-            btn.setStyleSheet(
-                "QToolButton { padding: 4px 8px; color: "
-                f"{theme_value('mode_window.mode_button.text', '#e9eef8')}; background: "
-                f"{theme_value('mode_window.mode_button.bg', 'rgba(40, 56, 74, 0.7)')}; "
-                "border: 1px solid "
-                f"{theme_value('mode_window.mode_button.border', '#3b4555')}; "
-                "border-radius: 6px; font-weight: "
-                f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; "
-                "} "
-                "QToolButton:hover { background: "
-                f"{theme_value('mode_window.mode_button.bg_hover', 'rgba(60, 80, 100, 0.9)')}; "
-                "}"
-            )
+            btn.setStyleSheet(self._mode_button_style())
             btn.clicked.connect(handler)
             header.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
             return btn
@@ -434,16 +461,17 @@ class ModeWindow(QMainWindow):
         btn.setIconSize(QSize(18, 18))
         btn.setToolTip("AI assist (one-shot)")
         btn.setCursor(Qt.PointingHandCursor)
+        palette = QApplication.palette()
         btn.setStyleSheet(
             "QToolButton { padding: 4px 6px; color: "
-            f"{theme_value('mode_window.mode_toggle.text', '#e9eef8')}; background: "
-            f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
+            f"{theme_value('mode_window.mode_toggle.text', palette.color(QPalette.Text).name())}; background: "
+            f"{theme_value('mode_window.mode_toggle.bg', palette.color(QPalette.Button).name())}; "
             "border: 1px solid "
-            f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
+            f"{theme_value('mode_window.mode_toggle.border', palette.color(QPalette.Mid).name())}; "
             "border-radius: 8px; "
             "} "
             "QToolButton:hover { background: "
-            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; "
+            f"{theme_value('mode_window.mode_toggle.bg_hover', palette.color(QPalette.AlternateBase).name())}; "
             "}"
         )
         btn.clicked.connect(self._open_ai_assist)
@@ -460,19 +488,40 @@ class ModeWindow(QMainWindow):
         btn.setIconSize(QSize(16, 16))
         btn.setToolTip(tooltip)
         btn.setCursor(Qt.PointingHandCursor)
+        palette = QApplication.palette()
         btn.setStyleSheet(
             "QToolButton { padding: 4px 6px; color: "
-            f"{theme_value('mode_window.mode_toggle.text', '#e9eef8')}; background: "
-            f"{theme_value('mode_window.mode_toggle.bg', 'rgba(40, 56, 74, 0.35)')}; "
+            f"{theme_value('mode_window.mode_toggle.text', palette.color(QPalette.Text).name())}; background: "
+            f"{theme_value('mode_window.mode_toggle.bg', palette.color(QPalette.Button).name())}; "
             "border: 1px solid "
-            f"{theme_value('mode_window.mode_toggle.border', '#3b4555')}; "
+            f"{theme_value('mode_window.mode_toggle.border', palette.color(QPalette.Mid).name())}; "
             "border-radius: 8px; "
             "} "
             "QToolButton:hover { background: "
-            f"{theme_value('mode_window.mode_toggle.bg_hover', 'rgba(60, 80, 100, 0.7)')}; "
+            f"{theme_value('mode_window.mode_toggle.bg_hover', palette.color(QPalette.AlternateBase).name())}; "
             "}"
         )
         return btn
+
+    def _mode_button_style(self) -> str:
+        palette = QApplication.palette()
+        text_default = palette.color(QPalette.ButtonText).name()
+        bg_default = palette.color(QPalette.Button).name()
+        border_default = palette.color(QPalette.Mid).name()
+        hover_default = palette.color(QPalette.AlternateBase).name()
+        return (
+            "QToolButton { padding: 4px 8px; color: "
+            f"{theme_value('mode_window.mode_button.text', text_default)}; background: "
+            f"{theme_value('mode_window.mode_button.bg', bg_default)}; "
+            "border: 1px solid "
+            f"{theme_value('mode_window.mode_button.border', border_default)}; "
+            "border-radius: 6px; font-weight: "
+            f"{theme_value('mode_window.mode_button.font_weight', 600)}; margin-right: 4px; "
+            "} "
+            "QToolButton:hover { background: "
+            f"{theme_value('mode_window.mode_button.bg_hover', hover_default)}; "
+            "}"
+        )
 
     def _tinted_icon(self, path: Path, size: int = 16) -> Optional[QIcon]:
         try:
@@ -639,22 +688,66 @@ class ModeWindow(QMainWindow):
     # ------------------------------------------------------------------ Behavior
     def _apply_mode_styling(self) -> None:
         base_font: QFont = self._base_editor.font()
-        palette_bg = (
-            theme_value("mode_window.editor.focus_bg", "#0e121a")
+        palette = QApplication.palette()
+        bg_value = (
+            theme_value("mode_window.editor.focus_bg", palette.color(QPalette.Base).name())
             if self.mode == "focus"
-            else theme_value("mode_window.editor.audience_bg", "#0c1017")
+            else theme_value("mode_window.editor.audience_bg", palette.color(QPalette.Base).name())
         )
-        text_color = theme_value("mode_window.editor.text", "#cbd4e6")
+        palette_bg = QColor(str(bg_value))
+        if not palette_bg.isValid():
+            palette_bg = palette.color(QPalette.Base)
+        text_color_value = theme_value("mode_window.editor.text", palette.color(QPalette.Text).name())
+        text_color = QColor(str(text_color_value))
+        if not text_color.isValid() or self._color_contrast_ratio(text_color, palette_bg) < 4.5:
+            text_color = palette.color(QPalette.Text)
+        selection_bg_value = theme_value("mode_window.editor.selection_bg", palette.color(QPalette.Highlight).name())
+        selection_bg = QColor(str(selection_bg_value))
+        if not selection_bg.isValid():
+            selection_bg = palette.color(QPalette.Highlight)
         padding = "28px 40px" if self.mode == "focus" else "38px 72px"
-        line_height_pct = int(self._line_height_scale * 100)
         scaled_size = int(self._base_font_size * self._font_scale)
+        pal = self.editor.palette()
+        pal.setColor(QPalette.Base, palette_bg)
+        pal.setColor(QPalette.Text, text_color)
+        pal.setColor(QPalette.Highlight, selection_bg)
+        self.editor.setPalette(pal)
+        try:
+            viewport = self.editor.viewport()
+            viewport.setPalette(pal)
+            viewport.setAutoFillBackground(True)
+        except Exception:
+            pass
         self.editor.setStyleSheet(
-            f"QTextEdit {{ background: {palette_bg}; color: {text_color}; padding: {padding};"
+            f"QTextEdit {{ background: {palette_bg.name()}; color: {text_color.name()}; padding: {padding};"
             " border: none; selection-background-color: "
-            f"{theme_value('mode_window.editor.selection_bg', '#2f4c74')}; "
-            f"line-height: {line_height_pct}%;"
+            f"{selection_bg.name()}; "
             f" font-family: '{self._base_font_family}'; font-size: {scaled_size}pt; }}"
         )
+        try:
+            sb = self.editor.verticalScrollBar()
+            _mode_debug_log(
+                "apply_mode_styling",
+                mode=self.mode,
+                bg=palette_bg.name(),
+                text=text_color.name(),
+                selection=selection_bg.name(),
+                font_family=self._base_font_family,
+                font_size=scaled_size,
+                doc_len=len(self.editor.toPlainText()),
+                scroll=sb.value() if sb else None,
+                scroll_max=sb.maximum() if sb else None,
+                updates=self.editor.updatesEnabled(),
+                suppress_paint=getattr(self.editor, "_suppress_paint", None),
+                suppress_depth=getattr(self.editor, "_suppress_paint_depth", None),
+                suppress_link_scan=getattr(self.editor, "_suppress_link_scan", None),
+                overlay_transition=getattr(self.editor, "_overlay_transition", None),
+                cursor_blocked=getattr(self.editor, "_cursor_events_blocked", None),
+                load_guard=getattr(type(self.editor), "_LOAD_GUARD_DEPTH", None),
+                cursor_rect=(self.editor.cursorRect().x(), self.editor.cursorRect().y(), self.editor.cursorRect().height()),
+            )
+        except Exception:
+            pass
         self._update_vi_badge(self.editor._vi_insert_mode if hasattr(self.editor, "_vi_insert_mode") else False)
         if self._initial_cursor is not None:
             try:
@@ -804,7 +897,9 @@ class ModeWindow(QMainWindow):
                 )
             )
         )
-        extra.format.setForeground(theme_color("mode_window.cursor_line.text", "#f4f7ff"))
+        extra.format.setForeground(
+            theme_color("mode_window.cursor_line.text", QApplication.palette().color(QPalette.Text).name())
+        )
         extra.format.setBackground(color)
         extra.format.setProperty(self._HIGHLIGHT_KEY, True)
         try:
@@ -1002,6 +1097,8 @@ class ModeWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _position_overlays(self) -> None:
+        if not hasattr(self, "_cursor_halo") or self._cursor_halo is None:
+            return
         if self._cursor_halo.isVisible():
             self._update_cursor_halo()
 
@@ -1402,16 +1499,13 @@ class ModeWindow(QMainWindow):
             event.ignore()
             return
         self._sync_vi_insert_to_base()
-        # Detach overlay editor from the shared document before teardown to avoid
-        # stale pointers while the base editor reloads.
         try:
-            self.editor.setDocument(self._base_editor.document())
+            if not self._read_only:
+                overlay_markdown = self.editor.to_markdown()
+                if overlay_markdown != getattr(self, "_overlay_initial_markdown", ""):
+                    self._base_editor.set_markdown(overlay_markdown)
         except Exception:
-            try:
-                from PySide6.QtGui import QTextDocument
-                self.editor.setDocument(QTextDocument())
-            except Exception:
-                pass
+            pass
         self._pending_close = False
         try:
             pos = 0
@@ -1474,6 +1568,10 @@ class ModeWindow(QMainWindow):
             self._base_editor.updateGeometry()
         except Exception:
             pass
+        try:
+            self._base_editor.refresh_theme_styling()
+        except Exception:
+            pass
         super().closeEvent(event)
         # Flash the main editor cursor line after returning without scrolling.
         QTimer.singleShot(20, lambda: self._flash_cursor_line(self._base_editor))
@@ -1505,16 +1603,47 @@ class ModeWindow(QMainWindow):
             self._base_editor._suppress_link_scan = False
             self.editor._suppress_vi_cursor = False
             self._base_editor._suppress_vi_cursor = False
-            QTimer.singleShot(0, lambda: setattr(self.editor, "_cursor_events_blocked", False))
-            QTimer.singleShot(0, lambda: setattr(self._base_editor, "_cursor_events_blocked", False))
+            self.editor._cursor_events_blocked = False
+            self._base_editor._cursor_events_blocked = False
             QTimer.singleShot(0, lambda: setattr(type(self.editor), "_LOAD_GUARD_DEPTH", max(0, getattr(type(self.editor), "_LOAD_GUARD_DEPTH", 0) - 1)))
             self.editor._overlay_transition = False
             self._base_editor._overlay_transition = False
+            self.editor._suppress_paint = False
+            self.editor._suppress_paint_depth = 0
+            self.editor.setUpdatesEnabled(True)
+            try:
+                self.editor.viewport().update()
+                self.editor.viewport().repaint()
+            except Exception:
+                pass
         except Exception:
             pass
         if self._pending_close:
             self._pending_close = False
             QTimer.singleShot(0, self.close)
+        try:
+            sb = self.editor.verticalScrollBar()
+            viewport = self.editor.viewport()
+            _mode_debug_log(
+                "mark_ready",
+                mode=self.mode,
+                ready=self._ready,
+                doc_len=len(self.editor.toPlainText()),
+                updates=self.editor.updatesEnabled(),
+                suppress_paint=getattr(self.editor, "_suppress_paint", None),
+                suppress_depth=getattr(self.editor, "_suppress_paint_depth", None),
+                suppress_link_scan=getattr(self.editor, "_suppress_link_scan", None),
+                overlay_transition=getattr(self.editor, "_overlay_transition", None),
+                cursor_blocked=getattr(self.editor, "_cursor_events_blocked", None),
+                load_guard=getattr(type(self.editor), "_LOAD_GUARD_DEPTH", None),
+                scroll=sb.value() if sb else None,
+                scroll_max=sb.maximum() if sb else None,
+                viewport_size=(viewport.width(), viewport.height()) if viewport else None,
+                cursor_rect=(self.editor.cursorRect().x(), self.editor.cursorRect().y(), self.editor.cursorRect().height()),
+                stylesheet=self.editor.styleSheet(),
+            )
+        except Exception:
+            pass
         QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
 
     def _update_vi_badge(self, insert_active: bool) -> None:

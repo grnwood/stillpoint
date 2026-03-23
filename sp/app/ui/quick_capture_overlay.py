@@ -48,11 +48,10 @@ class QuickCaptureInput(QTextEdit):
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source) -> None:  # type: ignore[override]
-        if source and source.hasImage():
-            image = source.imageData()
-            if isinstance(image, QImage) and not image.isNull():
-                self.imageAdded.emit(image)
-                return
+        image = self._image_from_mime_data(source)
+        if image is not None:
+            self.imageAdded.emit(image)
+            return
         if source and source.hasUrls():
             handled = False
             for url in source.urls():
@@ -64,6 +63,51 @@ class QuickCaptureInput(QTextEdit):
             if handled:
                 return
         super().insertFromMimeData(source)
+
+    def _image_from_mime_data(self, source) -> Optional[QImage]:
+        if source is None:
+            return None
+        if source.hasImage():
+            try:
+                image = source.imageData()
+            except Exception:
+                image = None
+            if isinstance(image, QImage) and not image.isNull():
+                return image
+        image_formats = {
+            "application/x-qt-image",
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/gif",
+            "image/bmp",
+            "image/webp",
+            "image/tiff",
+            "image/x-tiff",
+            "public.png",
+            "public.jpeg",
+            "public.tiff",
+        }
+        try:
+            formats = [str(fmt).lower() for fmt in source.formats()]
+        except Exception:
+            formats = []
+        for fmt in formats:
+            if fmt not in image_formats and not fmt.startswith("image/") and "tiff" not in fmt:
+                continue
+            try:
+                raw = source.data(fmt)
+            except Exception:
+                raw = None
+            if not raw:
+                continue
+            image = QImage()
+            try:
+                if image.loadFromData(bytes(raw)) and not image.isNull():
+                    return image
+            except Exception:
+                continue
+        return None
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasImage() or event.mimeData().hasUrls():
@@ -78,12 +122,11 @@ class QuickCaptureInput(QTextEdit):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
-        if event.mimeData().hasImage():
-            image = event.mimeData().imageData()
-            if isinstance(image, QImage) and not image.isNull():
-                self.imageAdded.emit(image)
-                event.acceptProposedAction()
-                return
+        image = self._image_from_mime_data(event.mimeData())
+        if image is not None:
+            self.imageAdded.emit(image)
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasUrls():
             handled = False
             for url in event.mimeData().urls():

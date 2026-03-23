@@ -1,5 +1,9 @@
 from sp.app.ui.calendar_panel import CalendarPanel
-from sp.app.ui.date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
+from sp.app.ui.date_insert_dialog import (
+    DateInsertDialog,
+    JournalDateJumpDialog,
+    _enforce_calendar_dialog_width,
+)
 
 
 def _required_dialog_width(dialog) -> int:
@@ -45,6 +49,36 @@ def test_journal_date_jump_dialog_calendar_uses_vault_accent(qtbot) -> None:
 def test_journal_date_jump_dialog_opens_wide_enough_for_calendar(qtbot) -> None:
     dialog = JournalDateJumpDialog(vault_accent_color="#3B82F6")
     qtbot.addWidget(dialog)
+
+    required_width = _required_dialog_width(dialog)
+
+    assert dialog.minimumWidth() >= required_width
+    assert dialog.width() >= required_width
+
+
+def test_date_insert_dialog_reenforces_calendar_width_after_shrink(qtbot) -> None:
+    dialog = DateInsertDialog(vault_accent_color="#10B981")
+    qtbot.addWidget(dialog)
+
+    dialog.setMinimumWidth(0)
+    dialog.calendar.setMinimumWidth(0)
+    dialog.resize(120, dialog.height())
+    _enforce_calendar_dialog_width(dialog, dialog.calendar, 320)
+
+    required_width = _required_dialog_width(dialog)
+
+    assert dialog.minimumWidth() >= required_width
+    assert dialog.width() >= required_width
+
+
+def test_journal_date_jump_dialog_reenforces_calendar_width_after_shrink(qtbot) -> None:
+    dialog = JournalDateJumpDialog(vault_accent_color="#3B82F6")
+    qtbot.addWidget(dialog)
+
+    dialog.setMinimumWidth(0)
+    dialog.calendar.setMinimumWidth(0)
+    dialog.resize(120, dialog.height())
+    _enforce_calendar_dialog_width(dialog, dialog.calendar, 300)
 
     required_width = _required_dialog_width(dialog)
 

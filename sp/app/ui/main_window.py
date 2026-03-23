@@ -122,6 +122,7 @@ from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig
 from .theme import theme_color, theme_value
+from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
@@ -1745,46 +1746,54 @@ class MenuCommandBar(QWidget):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._entries: list[MenuCommandBar.Entry] = []
-        self.setStyleSheet(
-            "background: "
-            f"{theme_value('main_window.menu_command_bar.bg', '#000000')}; "
-            "color: "
-            f"{theme_value('main_window.menu_command_bar.text', '#ffffff')}; "
-            "border-radius: 10px; border: 1px solid "
-            f"{theme_value('main_window.menu_command_bar.border', '#222222')};"
-        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Type a command…")
-        self._search.setStyleSheet(
-            "font-size: "
-            f"{theme_value('main_window.menu_command_bar.search_font_size_px', 18)}px; "
-            "color: "
-            f"{theme_value('main_window.menu_command_bar.search_text', '#ffffff')}; "
-            "background: "
-            f"{theme_value('main_window.menu_command_bar.search_bg', 'rgba(255, 255, 255, 0.08)')}; "
-            "border: 1px solid "
-            f"{theme_value('main_window.menu_command_bar.search_border', 'rgba(255, 255, 255, 0.5)')}; "
-            "padding: 8px; border-radius: 6px;"
-        )
         self._search.textChanged.connect(self._refresh_list)
         layout.addWidget(self._search)
         self._list = QListWidget()
         self._list.setUniformItemSizes(True)
-        self._list.setStyleSheet(
-            "font-size: "
-            f"{theme_value('main_window.menu_command_bar.list_font_size_px', 18)}px; "
-            "color: "
-            f"{theme_value('main_window.menu_command_bar.list_text', '#ffffff')}; "
-            "background: transparent; padding: 4px;"
-        )
         self._list.itemActivated.connect(self._activate_current_item)
         self._list.itemClicked.connect(lambda *_: self._activate_current_item())
         layout.addWidget(self._list)
         self._list.setMinimumHeight(220)
         self._search.installEventFilter(self)
+        self.apply_theme_style()
+
+    def apply_theme_style(self) -> None:
+        app_palette = QApplication.palette()
+        base_bg = app_palette.color(QPalette.Base).name()
+        alt_bg = app_palette.color(QPalette.AlternateBase).name()
+        text_fg = app_palette.color(QPalette.Text).name()
+        border = app_palette.color(QPalette.Mid).name()
+        self.setStyleSheet(
+            "background: "
+            f"{theme_value('main_window.menu_command_bar.bg', base_bg)}; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.text', text_fg)}; "
+            "border-radius: 10px; border: 1px solid "
+            f"{theme_value('main_window.menu_command_bar.border', border)};"
+        )
+        self._search.setStyleSheet(
+            "font-size: "
+            f"{theme_value('main_window.menu_command_bar.search_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.search_text', text_fg)}; "
+            "background: "
+            f"{theme_value('main_window.menu_command_bar.search_bg', alt_bg)}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.menu_command_bar.search_border', border)}; "
+            "padding: 8px; border-radius: 6px;"
+        )
+        self._list.setStyleSheet(
+            "font-size: "
+            f"{theme_value('main_window.menu_command_bar.list_font_size_px', 18)}px; "
+            "color: "
+            f"{theme_value('main_window.menu_command_bar.list_text', text_fg)}; "
+            "background: transparent; padding: 4px;"
+        )
 
     def open(
         self,
@@ -1793,6 +1802,7 @@ class MenuCommandBar(QWidget):
         anchor: Optional[QPoint] = None,
         query: str = "",
     ) -> None:
+        self.apply_theme_style()
         self._entries = [MenuCommandBar.Entry(label, action) for label, action in entries]
         self._search.clear()
         if query:
@@ -2581,6 +2591,7 @@ class MainWindow(QMainWindow):
         
         # Vault tab (tree with header)
         vault_tab = QWidget()
+        self._vault_tab = vault_tab
         vault_layout = QVBoxLayout()
         vault_layout.setContentsMargins(0, 0, 0, 0)
         vault_layout.setSpacing(0)
@@ -3010,15 +3021,7 @@ class MainWindow(QMainWindow):
         self._focus_mode_button.setIconSize(QSize(16, 16))
         self._focus_mode_button.setToolTip("Open in Focus Mode")
         self._focus_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
-        self._focus_mode_button.setStyleSheet(
-            "QToolButton { border: none; padding: 2px 4px; color: "
-            f"{theme_value('main_window.mode_button.text', '#ffffff')}; "
-            "}"
-            "QToolButton:hover { background: "
-            f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
-            "border-radius: 3px; "
-            "}"
-        )
+        self._focus_mode_button.setStyleSheet(self._mode_button_style())
         self._focus_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("focus"))
         self.statusBar().addPermanentWidget(self._focus_mode_button, 0)
 
@@ -3034,15 +3037,7 @@ class MainWindow(QMainWindow):
         self._audience_mode_button.setIconSize(QSize(16, 16))
         self._audience_mode_button.setToolTip("Open in Audience Mode")
         self._audience_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
-        self._audience_mode_button.setStyleSheet(
-            "QToolButton { border: none; padding: 2px 4px; color: "
-            f"{theme_value('main_window.mode_button.text', '#ffffff')}; "
-            "}"
-            "QToolButton:hover { background: "
-            f"{theme_value('main_window.mode_button.hover_bg', '#2a2f36')}; "
-            "border-radius: 3px; "
-            "}"
-        )
+        self._audience_mode_button.setStyleSheet(self._mode_button_style())
         self._audience_mode_button.clicked.connect(lambda checked=False: self._toggle_mode_overlay("audience"))
         self.statusBar().addPermanentWidget(self._audience_mode_button, 0)
 
@@ -3195,6 +3190,7 @@ class MainWindow(QMainWindow):
         home_action.setToolTip("Go to vault home page")
         home_action.triggered.connect(self._go_home)
         self.toolbar.addAction(home_action)
+        self._toolbar_home_action = home_action
 
         self.toolbar.addSeparator()
 
@@ -3221,6 +3217,7 @@ class MainWindow(QMainWindow):
         search_action.setToolTip("Search across vault (Ctrl+Shift+F)")
         search_action.triggered.connect(self._show_search_dialog)
         self.toolbar.addAction(search_action)
+        self._toolbar_search_action = search_action
 
         # Today button (jump to today's journal entry)
         self._toolbar_today_action = QAction("Today", self)
@@ -3257,6 +3254,7 @@ class MainWindow(QMainWindow):
             print_action.setIcon(print_icon)
         print_action.triggered.connect(self._print_current_page)
         self.toolbar.addAction(print_action)
+        self._toolbar_print_action = print_action
 
         # Add bookmark display area with horizontal scroll controls
         self.bookmark_strip = QWidget()
@@ -3317,6 +3315,7 @@ class MainWindow(QMainWindow):
         prefs_action.setIcon(cog_icon if cog_icon else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         prefs_action.triggered.connect(self._open_preferences)
         self.toolbar.addAction(prefs_action)
+        self._toolbar_prefs_action = prefs_action
 
         # Store default style to restore later
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
@@ -8088,6 +8087,11 @@ class MainWindow(QMainWindow):
             return None
 
     def _apply_vault_accent_visuals(self) -> None:
+        try:
+            theme_module.reload_theme()
+        except Exception:
+            pass
+        self._apply_effective_theme_visuals()
         accent = self._current_vault_accent_color()
         self._vault_accent_color = accent
         try:
@@ -8101,6 +8105,222 @@ class MainWindow(QMainWindow):
             pass
         self._update_active_page_chicklets()
         self._apply_focus_borders()
+        try:
+            self._refresh_editor_visual_state_after_activation()
+        except Exception:
+            pass
+
+    def _apply_effective_theme_visuals(self) -> None:
+        app = QApplication.instance()
+        app_palette = None
+        if app is not None:
+            try:
+                theme_module.apply_qt_palette(app)
+                app_palette = app.palette()
+                self.setPalette(app_palette)
+            except Exception:
+                pass
+        if app_palette is not None:
+            for widget in (
+                self,
+                getattr(self, "tree_view", None),
+                getattr(getattr(self, "tree_view", None), "viewport", lambda: None)(),
+                getattr(self, "left_tab_widget", None),
+                getattr(getattr(self, "right_panel", None), "tabs", None),
+                getattr(self, "tree_header_widget", None),
+                getattr(self, "_vault_tab", None),
+                getattr(self, "left_panel_container", None),
+                getattr(self, "right_panel_container", None),
+            ):
+                if widget is None:
+                    continue
+                try:
+                    widget.setPalette(app_palette)
+                    if isinstance(widget, QWidget):
+                        widget.setAutoFillBackground(True)
+                    widget.update()
+                except Exception:
+                    pass
+        try:
+            self.tree_header_widget.setStyleSheet(
+                "background: "
+                f"{theme_value('main_window.tree.header_bg', 'palette(midlight)')}; "
+                "border-bottom: 1px solid "
+                f"{theme_value('main_window.tree.header_border', '#555555')};"
+            )
+        except Exception:
+            pass
+        try:
+            self._apply_tab_widget_theme_styles()
+        except Exception:
+            pass
+        try:
+            self._refresh_theme_sensitive_controls()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_command_bar", None):
+                self._command_bar.apply_theme_style()
+        except Exception:
+            pass
+        try:
+            minibar_style = self._minibar_tab_style()
+            if getattr(self, "_left_minibar_bar", None):
+                self._left_minibar_bar.setStyleSheet(minibar_style)
+            if getattr(self, "_right_minibar_bar", None):
+                self._right_minibar_bar.setStyleSheet(minibar_style)
+        except Exception:
+            pass
+        try:
+            base_bg = QApplication.palette().color(QPalette.Base).name()
+            if getattr(self, "_vault_tab", None):
+                self._vault_tab.setStyleSheet(f"background: {base_bg};")
+        except Exception:
+            pass
+        try:
+            filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
+            filter_active_border = filter_active.name()
+            filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 48)"
+            filter_fill_hover = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 110)"
+            self.toolbar.setStyleSheet(
+                "QToolButton[text=\"+\"] { "
+                "color: "
+                f"{theme_value('main_window.toolbar.bookmark_color', '#4A90E2')}; "
+                "font-size: "
+                f"{theme_value('main_window.toolbar.bookmark_size_pt', 20)}pt; "
+                "font-weight: "
+                f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
+                "}"
+                "QToolButton[navFilterToggle=\"true\"] { "
+                "border: 1px solid transparent; border-radius: 4px; padding: 2px; "
+                "}"
+                "QToolButton[navFilterToggle=\"true\"]:checked { "
+                "border: 1px solid "
+                f"{filter_active_border}; "
+                "background: "
+                f"{filter_fill_soft}; "
+                "}"
+                "QToolButton[navFilterToggle=\"true\"]:checked:hover { "
+                "background: "
+                f"{filter_fill_hover}; "
+                "}"
+            )
+        except Exception:
+            pass
+        try:
+            self._update_active_page_chicklets()
+        except Exception:
+            pass
+        try:
+            self._update_dirty_indicator()
+        except Exception:
+            pass
+        try:
+            self._update_filter_indicator()
+        except Exception:
+            pass
+        try:
+            self._update_vi_badge_visibility()
+        except Exception:
+            pass
+        try:
+            self._update_remote_status_badge()
+        except Exception:
+            pass
+        try:
+            status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+            self._update_homebase_status_badge(status)
+        except Exception:
+            pass
+
+    def _apply_tab_widget_theme_styles(self) -> None:
+        tab_style = self._tab_widget_theme_style()
+        try:
+            self.left_tab_widget.setStyleSheet(tab_style)
+        except Exception:
+            pass
+        try:
+            self.right_panel.tabs.setStyleSheet(tab_style)
+        except Exception:
+            pass
+
+    def _mode_button_style(self) -> str:
+        app_palette = QApplication.palette()
+        text_default = app_palette.color(QPalette.Text).name()
+        hover_default = app_palette.color(QPalette.AlternateBase).name()
+        return (
+            "QToolButton { border: none; padding: 2px 4px; color: "
+            f"{theme_value('main_window.mode_button.text', text_default)}; "
+            "}"
+            "QToolButton:hover { background: "
+            f"{theme_value('main_window.mode_button.hover_bg', hover_default)}; "
+            "border-radius: 3px; "
+            "}"
+        )
+
+    def _refresh_theme_sensitive_controls(self) -> None:
+        icon_color = self._main_icon_color()
+        for button, asset_name in (
+            (getattr(self, "refresh_tree_button", None), "reload.svg"),
+            (getattr(self, "journal_tree_button", None), "calendar-days.svg"),
+            (getattr(self, "collapse_tree_button", None), "collapse.svg"),
+            (getattr(self, "_focus_mode_button", None), "focus-mode.svg"),
+            (getattr(self, "_audience_mode_button", None), "present-mode.svg"),
+        ):
+            if button is None:
+                continue
+            try:
+                icon = self._load_icon(self._find_asset(asset_name), icon_color, size=16)
+                if icon:
+                    button.setIcon(icon)
+            except Exception:
+                pass
+        try:
+            self._focus_mode_button.setStyleSheet(self._mode_button_style())
+        except Exception:
+            pass
+        try:
+            self._audience_mode_button.setStyleSheet(self._mode_button_style())
+        except Exception:
+            pass
+        for action_name, asset_name, size in (
+            ("_toolbar_home_action", "home.svg", 18),
+            ("_toolbar_filter_vault_action", "stack.svg", 18),
+            ("_toolbar_search_action", "binoculars.svg", 18),
+            ("_toolbar_today_action", "calendar-days.svg", 18),
+            ("bookmark_button", "bookmark.svg", 18),
+            ("_toolbar_print_action", "print.svg", 18),
+            ("_toolbar_prefs_action", "cog.svg", 18),
+        ):
+            action = getattr(self, action_name, None)
+            if action is None:
+                continue
+            try:
+                icon = self._load_icon(self._find_asset(asset_name), icon_color, size=size)
+                if icon:
+                    action.setIcon(icon)
+            except Exception:
+                pass
+        try:
+            self._update_sidebar_toggle_icons()
+        except Exception:
+            pass
+
+    def _tab_widget_theme_style(self, pane_border: Optional[str] = None) -> str:
+        app_palette = QApplication.palette()
+        base_bg = app_palette.color(QPalette.Base).name()
+        alt_bg = app_palette.color(QPalette.AlternateBase).name()
+        text_fg = app_palette.color(QPalette.Text).name()
+        selected_bg = app_palette.color(QPalette.Highlight).name()
+        selected_fg = app_palette.color(QPalette.HighlightedText).name()
+        border = pane_border or theme_value("main_window.tree.header_border", "#555555")
+        return (
+            f"QTabWidget::pane {{ border: 1px solid {border}; background: {base_bg}; }}"
+            f"QTabBar::tab {{ background: {base_bg}; color: {text_fg}; "
+            f"border: 1px solid {border}; padding: 6px 10px; margin-right: 2px; }}"
+            f"QTabBar::tab:selected {{ background: {selected_bg}; color: {selected_fg}; }}"
+            f"QTabBar::tab:!selected:hover {{ background: {alt_bg}; }}"
+        )
 
     def _ensure_config_active_vault_context(self) -> None:
         """Make config reads resolve against this window's active vault."""
@@ -11684,12 +11904,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.editor._apply_theme_palette()
-        except Exception:
-            pass
-        try:
-            if getattr(self.editor, "highlighter", None):
-                self.editor.highlighter.rehighlight()
+            self.editor.refresh_theme_styling()
         except Exception:
             pass
         try:
@@ -14192,6 +14407,10 @@ class MainWindow(QMainWindow):
             self._last_cursor_for_mode = int(self.editor.textCursor().position())
         except Exception:
             self._last_cursor_for_mode = 0
+        try:
+            self.editor.refresh_theme_styling()
+        except Exception:
+            pass
         settings = config.load_focus_mode_settings() if normalized == "focus" else config.load_audience_mode_settings()
         try:
             window = ModeWindow(
@@ -14326,15 +14545,7 @@ class MainWindow(QMainWindow):
         bar.setShape(QTabBar.RoundedWest if side == "left" else QTabBar.RoundedEast)
         for label in labels:
             bar.addTab(label)
-        bar.setStyleSheet(
-            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
-            "QTabBar::tab:selected { background: "
-            f"{selected_bg}; "
-            "color: "
-            f"{selected_text}; }}"
-            "QTabBar::tab:!selected { color: "
-            f"{unselected_text}; }}"
-        )
+        bar.setStyleSheet(self._minibar_tab_style())
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -14344,6 +14555,29 @@ class MainWindow(QMainWindow):
         layout.addWidget(bar)
         wrapper.setFixedWidth(self._minibar_width)
         return wrapper, bar, toggle
+
+    def _minibar_tab_style(self) -> str:
+        app = QApplication.instance()
+        try:
+            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
+        except Exception:
+            base_lightness = 0
+        is_light_palette = base_lightness >= 128
+        selected_bg_default = "#eef2f7" if is_light_palette else "#2b2b2b"
+        selected_text_default = "#111827" if is_light_palette else "#ffffff"
+        unselected_text_default = "#4b5563" if is_light_palette else "#c0c0c0"
+        selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
+        selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
+        unselected_text = theme_value("main_window.minibar.unselected_text", unselected_text_default)
+        return (
+            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
+            "QTabBar::tab:selected { background: "
+            f"{selected_bg}; "
+            "color: "
+            f"{selected_text}; }}"
+            "QTabBar::tab:!selected { color: "
+            f"{unselected_text}; }}"
+        )
 
     def _show_right_minibar_context_menu(self, pos: QPoint) -> None:
         bar = self._right_minibar_bar
@@ -15612,7 +15846,7 @@ class MainWindow(QMainWindow):
         )
         app_palette = QApplication.palette()
         editor_palette = self.editor.palette() if getattr(self, "editor", None) else app_palette
-        tree_palette = self.tree_view.palette() if getattr(self, "tree_view", None) else app_palette
+        tree_palette = app_palette
         base_color = editor_palette.color(QPalette.Base).name()
         text_color = editor_palette.color(QPalette.Text).name()
         alternate_base = tree_palette.color(QPalette.AlternateBase).name()
@@ -15653,6 +15887,7 @@ class MainWindow(QMainWindow):
         tree_text_color = tree_palette.color(QPalette.Text).name()
         tree_style = (
             f"QTreeView {{ border: 1px solid transparent; background: {tree_palette.color(QPalette.Base).name()}; color: {tree_text_color}; }}"
+            f"QTreeView::viewport {{ background: {tree_palette.color(QPalette.Base).name()}; }}"
             f"QTreeView::item {{ padding: 2px 6px 2px 2px; border-bottom: 1px solid {tree_item_divider}; }}"
             f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
             f"QTreeView::item:selected:active {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
@@ -15665,8 +15900,8 @@ class MainWindow(QMainWindow):
                 f'QTreeView::branch:has-children:closed {{ image: url("{arrow_closed}"); }}'
                 f'QTreeView::branch:has-children:open {{ image: url("{arrow_open}"); }}'
             )
-        left_style = f"QTabWidget::pane {{ border: 1px solid {focus_border}; border-radius:3px; }}" if left_has else ""
-        right_style = f"QTabWidget::pane {{ border: 1px solid {focus_border}; border-radius:3px; }}" if right_has else ""
+        left_style = self._tab_widget_theme_style(focus_border if left_has else None)
+        right_style = self._tab_widget_theme_style(focus_border if right_has else None)
         # Preserve existing styles by appending (simple approach)
         try:
             self.editor.setStyleSheet(editor_style)
@@ -15677,17 +15912,18 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass  # Widget may have been deleted
         try:
-            if left_style:
-                self.left_tab_widget.setStyleSheet(left_style)
-            else:
-                self.left_tab_widget.setStyleSheet("")
+            viewport = self.tree_view.viewport()
+            viewport.setPalette(tree_palette)
+            viewport.setAutoFillBackground(True)
+            viewport.update()
         except RuntimeError:
             pass  # Widget may have been deleted
         try:
-            if right_style:
-                self.right_panel.tabs.setStyleSheet(right_style)
-            else:
-                self.right_panel.tabs.setStyleSheet("")
+            self.left_tab_widget.setStyleSheet(left_style)
+        except RuntimeError:
+            pass  # Widget may have been deleted
+        try:
+            self.right_panel.tabs.setStyleSheet(right_style)
         except RuntimeError:
             pass  # Widget may have been deleted
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -8,7 +11,9 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from sp.app import config
@@ -35,12 +40,22 @@ class VaultPreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Vault Preferences")
         self.setModal(True)
-        self.resize(680, 560)
-        self.setMinimumSize(620, 500)
+        self.resize(720, 680)
+        self.setMinimumSize(620, 560)
         self._remote_mode = bool(remote_mode)
         self._remote_read_only = bool(remote_read_only)
 
         layout = QVBoxLayout(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget(scroll)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
         note = QLabel(
             "These settings override the global application preferences for this vault.\n"
             "Feature/AI overrides: Checked = Enabled, Unchecked = Disabled, Dash = Use Global.\n"
@@ -48,9 +63,17 @@ class VaultPreferencesDialog(QDialog):
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
-        layout.addWidget(note)
+        content_layout.addWidget(note)
 
-        layout.addWidget(QLabel("<b>Vault Accent</b>"))
+        content_layout.addWidget(QLabel("<b>Theme</b>"))
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Theme Override:"))
+        self.vault_theme_combo = QComboBox()
+        self._populate_theme_options()
+        theme_row.addWidget(self.vault_theme_combo, 1)
+        content_layout.addLayout(theme_row)
+
+        content_layout.addWidget(QLabel("<b>Vault Accent</b>"))
         accent_row = QHBoxLayout()
         accent_row.addWidget(QLabel("Accent Color:"))
         self.vault_accent_combo = QComboBox()
@@ -60,43 +83,43 @@ class VaultPreferencesDialog(QDialog):
         accent_idx = self.vault_accent_combo.findData(current_accent)
         self.vault_accent_combo.setCurrentIndex(accent_idx if accent_idx != -1 else 0)
         accent_row.addWidget(self.vault_accent_combo, 1)
-        layout.addLayout(accent_row)
+        content_layout.addLayout(accent_row)
 
-        layout.addWidget(QLabel("<b>Features</b>"))
+        content_layout.addWidget(QLabel("<b>Features</b>"))
         self.feature_tasks_checkbox = self._make_override_checkbox(
             "Tasks",
             config.load_vault_feature_tasks_override(),
         )
-        layout.addWidget(self.feature_tasks_checkbox)
+        content_layout.addWidget(self.feature_tasks_checkbox)
         self.feature_calendar_checkbox = self._make_override_checkbox(
             "Calendar",
             config.load_vault_feature_calendar_override(),
         )
-        layout.addWidget(self.feature_calendar_checkbox)
+        content_layout.addWidget(self.feature_calendar_checkbox)
         self.feature_link_navigator_checkbox = self._make_override_checkbox(
             "Link Navigator",
             config.load_vault_feature_link_navigator_override(),
         )
-        layout.addWidget(self.feature_link_navigator_checkbox)
+        content_layout.addWidget(self.feature_link_navigator_checkbox)
         self.feature_tags_checkbox = self._make_override_checkbox(
             "Page Tags",
             config.load_vault_feature_tags_override(),
         )
-        layout.addWidget(self.feature_tags_checkbox)
+        content_layout.addWidget(self.feature_tags_checkbox)
         self.feature_remember_cursor_position_checkbox = self._make_override_checkbox(
             "Remember and restore last cursor position",
             config.load_vault_feature_remember_cursor_position_override(),
         )
-        layout.addWidget(self.feature_remember_cursor_position_checkbox)
+        content_layout.addWidget(self.feature_remember_cursor_position_checkbox)
 
-        layout.addWidget(QLabel("<b>AI</b>"))
+        content_layout.addWidget(QLabel("<b>AI</b>"))
         self.ai_chats_checkbox = self._make_override_checkbox(
             "AI Chats",
             config.load_vault_enable_ai_chats_override(),
         )
-        layout.addWidget(self.ai_chats_checkbox)
+        content_layout.addWidget(self.ai_chats_checkbox)
 
-        layout.addWidget(QLabel("<b>Access</b>"))
+        content_layout.addWidget(QLabel("<b>Access</b>"))
         self.force_read_only_checkbox = QCheckBox("Force read-only mode for this vault")
         self.force_read_only_checkbox.setToolTip(
             "Open this vault without taking a lock or allowing writes in this window."
@@ -105,9 +128,9 @@ class VaultPreferencesDialog(QDialog):
             self.force_read_only_checkbox.setChecked(config.load_vault_force_read_only())
         except Exception:
             self.force_read_only_checkbox.setChecked(False)
-        layout.addWidget(self.force_read_only_checkbox)
+        content_layout.addWidget(self.force_read_only_checkbox)
 
-        layout.addStretch(1)
+        content_layout.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         reset_btn = buttons.addButton("Use Global Defaults", QDialogButtonBox.ResetRole)
@@ -143,7 +166,39 @@ class VaultPreferencesDialog(QDialog):
             "ai_chats": self._checkbox_value(self.ai_chats_checkbox),
         }
 
+    @staticmethod
+    def _theme_dir() -> Path:
+        return Path.home() / ".stillpoint" / "themes"
+
+    def _list_theme_files(self) -> list[Path]:
+        theme_dir = self._theme_dir()
+        try:
+            return sorted(
+                [
+                    path
+                    for path in theme_dir.iterdir()
+                    if path.is_file()
+                    and path.suffix.lower() == ".json"
+                    and path.name != "theme-config.json"
+                ],
+                key=lambda p: p.name.lower(),
+            )
+        except Exception:
+            return []
+
+    def _populate_theme_options(self) -> None:
+        self.vault_theme_combo.clear()
+        self.vault_theme_combo.addItem("Use Global Theme", None)
+        for path in self._list_theme_files():
+            self.vault_theme_combo.addItem(path.name, path.name)
+        current = config.load_vault_theme_override()
+        idx = self.vault_theme_combo.findData(current)
+        if idx == -1:
+            idx = 0
+        self.vault_theme_combo.setCurrentIndex(idx)
+
     def _reset_to_global(self) -> None:
+        self.vault_theme_combo.setCurrentIndex(0)
         self.vault_accent_combo.setCurrentIndex(0)
         for checkbox in (
             self.feature_tasks_checkbox,
@@ -157,6 +212,7 @@ class VaultPreferencesDialog(QDialog):
 
     def accept(self) -> None:  # type: ignore[override]
         values = self._collect_values()
+        config.save_vault_theme_override(self.vault_theme_combo.currentData())
         config.save_vault_accent_color(self.vault_accent_combo.currentData() or None)
         config.save_vault_feature_tasks_override(values["tasks"])
         config.save_vault_feature_calendar_override(values["calendar"])

@@ -206,6 +206,26 @@ def save_theme_preference(theme_name: str) -> None:
     _update_global_config({"theme_name": name or "default"})
 
 
+def load_vault_theme_override() -> Optional[str]:
+    """Return per-vault theme override, or None when unset."""
+    value = (_load_vault_kv("vault_theme_override") or "").strip()
+    return value or None
+
+
+def save_vault_theme_override(theme_name: Optional[str]) -> None:
+    """Persist per-vault theme override, or clear when None/empty."""
+    value = str(theme_name or "").strip()
+    _save_vault_kv("vault_theme_override", value or None)
+
+
+def load_effective_theme_preference() -> str:
+    """Return the active theme, preferring any per-vault override when available."""
+    override = load_vault_theme_override()
+    if override:
+        return override
+    return load_theme_preference()
+
+
 def load_vault_accent_color() -> Optional[str]:
     """Return per-vault accent color (hex #RRGGBB), or None when unset."""
     conn = _get_conn()
@@ -825,6 +845,32 @@ def save_default_markdown_font(font: Optional[str]) -> None:
     """Persist preferred Markdown editor font family."""
     value = font.strip() if isinstance(font, str) and font.strip() else None
     _update_global_config({"default_markdown_font": value})
+
+
+def load_markdown_image_max_width(default: int = 900) -> int:
+    """Return preferred max inline attachment image width for the Markdown editor."""
+    payload = _read_global_config()
+    value = payload.get("markdown_image_max_width")
+    allowed = {300, 600, 900, 1200, 1500}
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    if parsed not in allowed:
+        parsed = int(default)
+    return parsed
+
+
+def save_markdown_image_max_width(width: int) -> None:
+    """Persist preferred max inline attachment image width for the Markdown editor."""
+    allowed = {300, 600, 900, 1200, 1500}
+    try:
+        value = int(width)
+    except Exception:
+        value = 900
+    if value not in allowed:
+        value = 900
+    _update_global_config({"markdown_image_max_width": value})
 
 
 def save_vi_mode_enabled(enabled: bool) -> None:
