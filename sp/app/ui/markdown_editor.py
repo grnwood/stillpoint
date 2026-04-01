@@ -1796,6 +1796,14 @@ class MarkdownEditor(QTextEdit):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._teardown_editor()
+        # Mark the editor as no longer alive *before* calling Qt's close/destroy
+        # chain.  On Windows, QTextEdit::paintEvent can be dispatched during the
+        # close sequence (while the document and viewport are in a partially-freed
+        # state), which causes an access violation (fatal crash).  Setting these
+        # flags here ensures paintEvent bails out early for the entire close cycle,
+        # complementing the _on_editor_destroyed signal handler which fires later.
+        self._editor_alive = False
+        self._suppress_paint = True
         super().closeEvent(event)
 
     def _apply_theme_palette(self) -> None:
@@ -2057,8 +2065,13 @@ class MarkdownEditor(QTextEdit):
         if not self._is_current_load_token(load_token):
             return
         if self._post_load_paint_guard_ms <= 0:
-            if sys.platform.startswith("linux"):
-                self._queue_post_load_repaint(load_token)
+            # Even when the time-based guard is disabled, schedule an explicit
+            # deferred repaint so that _post_load_repaint_token is set before
+            # the first paint is allowed.  This mirrors the Linux behaviour and
+            # prevents spurious OS-level paint events (e.g. from a DPI change or
+            # window-expose on Windows) from calling super().paintEvent() before
+            # the document layout has fully settled after a load.
+            self._queue_post_load_repaint(load_token)
             return
         self._post_load_paint_guard_until = time.perf_counter() + (self._post_load_paint_guard_ms / 1000.0)
         self._post_load_repaint_armed = False
@@ -2075,14 +2088,20 @@ class MarkdownEditor(QTextEdit):
             return True
         until = self._post_load_paint_guard_until
         if until <= 0.0:
-            if sys.platform.startswith("linux") and self._post_load_repaint_token != load_token:
+            # Block painting on all platforms until _deferred_post_load_repaint
+            # has fired and set _post_load_repaint_token.  This ensures that the
+            # first post-load paint is always triggered by an explicitly-scheduled
+            # viewport.update(), not by a spurious OS or Qt paint event that can
+            # arrive (on Windows especially) right as the time guard expires and
+            # before the document layout has fully settled.
+            if self._post_load_repaint_token != load_token:
                 self._queue_post_load_repaint(load_token)
                 return True
             return False
         now = time.perf_counter()
         if now >= until:
             self._post_load_paint_guard_until = 0.0
-            if sys.platform.startswith("linux") and self._post_load_repaint_token != load_token:
+            if self._post_load_repaint_token != load_token:
                 self._queue_post_load_repaint(load_token)
                 return True
             self._post_load_repaint_armed = False

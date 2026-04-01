@@ -39,15 +39,76 @@ def test_paint_guard_blocks_during_load_in_flight(monkeypatch, qapp) -> None:
         )
 
         # After the load finishes the guard should clear.  Set _post_load_repaint_token
-        # to match the load token so that the Linux repaint-queuing branch also
+        # to match the load token so that the repaint-queuing branch on all platforms
         # considers the guard satisfied (it waits until a repaint has been scheduled
-        # for the current token before releasing the guard on Linux).
+        # for the current token before releasing the guard).
         editor._load_in_flight_token = 0  # type: ignore[attr-defined]
         editor._post_load_paint_guard_until = 0.0  # type: ignore[attr-defined]
         editor._post_load_repaint_token = editor.current_load_token()  # type: ignore[attr-defined]
         assert editor._post_load_paint_guard_active() is False
     finally:
         editor.close()
+
+
+def test_paint_guard_blocks_until_repaint_token_set_on_all_platforms(monkeypatch, qapp) -> None:
+    """Paint guard must block until _deferred_post_load_repaint fires on all platforms.
+
+    Previously the _post_load_repaint_token check was Linux-only.  On Windows,
+    a spurious OS-level paint event (e.g. from a DPI change, window expose, or
+    theme switch) could arrive right as the time-based guard expired, calling
+    super().paintEvent() before the document layout had fully settled after a
+    load.  The guard now blocks on all platforms until the explicitly-scheduled
+    _deferred_post_load_repaint has fired and set _post_load_repaint_token.
+    """
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    try:
+        editor._load_generation = 7  # type: ignore[attr-defined]
+        editor._load_in_flight_token = 0  # type: ignore[attr-defined]
+        # Simulate the time-based guard having just expired.
+        editor._post_load_paint_guard_until = 0.0  # type: ignore[attr-defined]
+        # _post_load_repaint_token NOT yet updated – deferred repaint hasn't fired.
+        editor._post_load_repaint_token = 0  # type: ignore[attr-defined]
+
+        assert editor._post_load_paint_guard_active() is True, (
+            "_post_load_paint_guard_active() must return True on all platforms "
+            "when the time guard has expired but _deferred_post_load_repaint "
+            "has not yet fired (i.e. _post_load_repaint_token != load_token)"
+        )
+
+        # Once the deferred repaint fires and sets the token, the guard clears.
+        editor._post_load_repaint_token = editor.current_load_token()  # type: ignore[attr-defined]
+        assert editor._post_load_paint_guard_active() is False
+    finally:
+        editor.close()
+
+
+def test_close_event_blocks_paint_before_destruction(qapp) -> None:
+    """closeEvent must mark the editor as not alive before calling super().
+
+    On Windows, QTextEdit::paintEvent can be dispatched by the OS during the
+    Qt close/destroy sequence while the document and viewport are in a
+    partially-freed state, causing an access violation.  After closeEvent has
+    been called, paintEvent should immediately bail out without forwarding to
+    QTextEdit::paintEvent.
+    """
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    editor.set_markdown("# Title\n\nSome content\n")
+    _drain_events(wait_ms=30, rounds=8)
+
+    # Close the editor – this should flip _editor_alive and _suppress_paint.
+    editor.close()
+
+    assert editor._editor_alive is False, (  # type: ignore[attr-defined]
+        "closeEvent must set _editor_alive=False before calling super().closeEvent() "
+        "to prevent paintEvent from forwarding to QTextEdit::paintEvent during "
+        "widget destruction"
+    )
+    assert editor._suppress_paint is True, (  # type: ignore[attr-defined]
+        "closeEvent must set _suppress_paint=True as an additional guard against "
+        "paint events arriving during widget destruction"
+    )
 
 
 def test_set_markdown_repeated_loads_clear_guard_and_remain_paintable(qapp) -> None:
