@@ -6527,7 +6527,7 @@ class MarkdownEditor(QTextEdit):
         return None
 
     def _trigger_history_navigation(self, qt_key: int) -> None:
-        """Simulate Alt+Left/Right to leverage MainWindow history shortcuts."""
+        """Forward Alt-based navigation keys to the main window helpers."""
         # Guard: Don't navigate if no file is loaded (prevents crash on empty editor)
         if not self._current_path:
             return
@@ -6543,11 +6543,11 @@ class MarkdownEditor(QTextEdit):
             if qt_key == Qt.Key_Right and hasattr(window, "_navigate_history_forward"):
                 window._navigate_history_forward()
                 return
-            if qt_key == Qt.Key_Up and hasattr(window, "_navigate_history_back"):
-                window._navigate_history_back()
+            if qt_key == Qt.Key_Up and hasattr(window, "_navigate_hierarchy_up"):
+                window._navigate_hierarchy_up()
                 return
-            if qt_key == Qt.Key_Down and hasattr(window, "_navigate_history_forward"):
-                window._navigate_history_forward()
+            if qt_key == Qt.Key_Down and hasattr(window, "_navigate_hierarchy_down"):
+                window._navigate_hierarchy_down()
                 return
         except Exception:
             pass

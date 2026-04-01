@@ -88,3 +88,47 @@ def test_vi_zb_prefers_link_under_cursor_relations(qapp, monkeypatch) -> None:
 
     assert requested == [":PageB"]
     editor.close()
+
+
+def test_editor_alt_up_routes_to_hierarchy_navigation(monkeypatch, qapp) -> None:
+    editor = MarkdownEditor()
+    editor.set_context("/vault", "/PageA/Child1/Child1.md")
+    _force_initial_paint(editor, qapp)
+
+    calls: list[str] = []
+
+    class StubWindow:
+        def _navigate_hierarchy_up(self) -> None:
+            calls.append("up")
+
+        def _navigate_hierarchy_down(self) -> None:
+            calls.append("down")
+
+    monkeypatch.setattr(editor, "window", lambda: StubWindow())
+
+    editor._trigger_history_navigation(Qt.Key_Up)
+
+    assert calls == ["up"]
+    editor.close()
+
+
+def test_editor_alt_down_routes_to_hierarchy_navigation(monkeypatch, qapp) -> None:
+    editor = MarkdownEditor()
+    editor.set_context("/vault", "/PageA/PageA.md")
+    _force_initial_paint(editor, qapp)
+
+    calls: list[str] = []
+
+    class StubWindow:
+        def _navigate_hierarchy_up(self) -> None:
+            calls.append("up")
+
+        def _navigate_hierarchy_down(self) -> None:
+            calls.append("down")
+
+    monkeypatch.setattr(editor, "window", lambda: StubWindow())
+
+    editor._trigger_history_navigation(Qt.Key_Down)
+
+    assert calls == ["down"]
+    editor.close()
