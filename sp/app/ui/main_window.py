@@ -4833,11 +4833,24 @@ class MainWindow(QMainWindow):
             local_host = ""
         if host and local_host and host.lower() != local_host.lower():
             return False
+        if sys.platform == "win32":
+            # On Windows, os.kill(pid, 0) is unreliable and can cause crashes with
+            # Python 3.13. Use the Win32 API directly to check process existence.
+            try:
+                kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+                PROCESS_QUERY_INFORMATION = 0x0400
+                handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            except (OSError, AttributeError):
+                return False
         try:
             os.kill(pid, 0)  # Does not terminate; raises if not permitted or missing
             return True
         except OSError as exc:
-            # EPERM/EACCES mean the process likely exists but we lack permission (common on Windows)
+            # EPERM/EACCES mean the process likely exists but we lack permission
             if exc.errno in (errno.EPERM, errno.EACCES):
                 return True
             return False
@@ -8125,7 +8138,10 @@ class MainWindow(QMainWindow):
             try:
                 existing = json.loads(lock_path.read_text(encoding="utf-8"))
             except Exception:
-                existing = {"raw": lock_path.read_text(errors="ignore")}
+                try:
+                    existing = {"raw": lock_path.read_text(errors="ignore")}
+                except Exception:
+                    existing = None
         if existing:
             pid = existing.get("pid")
             host = existing.get("host")
