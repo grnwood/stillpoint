@@ -19,6 +19,37 @@ def _drain_events(wait_ms: int = 25, rounds: int = 6) -> None:
         QTest.qWait(wait_ms)
 
 
+def test_paint_guard_blocks_during_load_in_flight(monkeypatch, qapp) -> None:
+    """Paint guard must be active on all platforms while _load_in_flight_token is set.
+
+    Previously the in-flight check was Linux-only, which allowed paintEvent to
+    call super().paintEvent() against a partially-cleared document on Windows,
+    causing an intermittent access violation (faulthandler-detected crash).
+    """
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    try:
+        # Simulate a load in progress by manually setting the in-flight token.
+        editor._load_generation = 5  # type: ignore[attr-defined]
+        editor._load_in_flight_token = 5  # type: ignore[attr-defined]
+
+        assert editor._post_load_paint_guard_active() is True, (
+            "_post_load_paint_guard_active() must return True on all platforms "
+            "while a document load is in flight"
+        )
+
+        # After the load finishes the guard should clear.  Set _post_load_repaint_token
+        # to match the load token so that the Linux repaint-queuing branch also
+        # considers the guard satisfied (it waits until a repaint has been scheduled
+        # for the current token before releasing the guard on Linux).
+        editor._load_in_flight_token = 0  # type: ignore[attr-defined]
+        editor._post_load_paint_guard_until = 0.0  # type: ignore[attr-defined]
+        editor._post_load_repaint_token = editor.current_load_token()  # type: ignore[attr-defined]
+        assert editor._post_load_paint_guard_active() is False
+    finally:
+        editor.close()
+
+
 def test_set_markdown_repeated_loads_clear_guard_and_remain_paintable(qapp) -> None:
     editor = MarkdownEditor()
     _force_initial_paint(editor)
