@@ -58,6 +58,7 @@ from .task_style import (
     priority_brush,
     priority_time_label,
     relative_day_label,
+    TaskSemanticColorDelegate,
 )
 
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
@@ -254,6 +255,7 @@ class TaskPanel(QWidget):
                     border-radius: 13px;
                     padding: 2px;
                     background: transparent;
+                    color: {self._icon_tint_color().name()};
                 }}
                 QToolButton:hover {{
                     border: 1px solid {theme_value('task_panel.toggle.hover_border', '#666666')};
@@ -287,6 +289,7 @@ class TaskPanel(QWidget):
         self._update_actionable_tooltip()
 
         self.task_tree = DebugTaskTree()
+        self.task_tree.setItemDelegate(TaskSemanticColorDelegate(self.task_tree))
         self._show_task_start_column = False
         self._show_task_page_column = False
         self._configure_task_columns(force=True)
@@ -419,6 +422,7 @@ class TaskPanel(QWidget):
         self._ai_toggle_btn.setIconSize(QSize(22, 22))
         self._ai_toggle_btn.toggled.connect(self._toggle_ai_panel)
         header_row.addWidget(self._ai_toggle_btn)
+        self._apply_header_button_styles()
 
         self.task_content = QWidget()
         task_content_layout = QVBoxLayout()
@@ -487,26 +491,39 @@ class TaskPanel(QWidget):
             return bg_hex
         return color.name()
 
-    def _apply_selection_style(self) -> None:
+    def _effective_accent_color(self) -> str:
         accent = (self._vault_accent_color or "").strip()
-        if not accent:
-            self.task_tree.setStyleSheet("")
-            return
-        selected_bg = self._selection_bg_for_accent(accent)
-        selected_text = self._selection_text_for_background(selected_bg)
-        hover_bg = theme_value("task_panel.task_tree.hover_bg", "palette(alternate-base)")
+        if accent.startswith("#"):
+            return accent
+        return QApplication.palette().color(QPalette.Highlight).name()
+
+    def _hover_fill_for_accent(self, accent_hex: str) -> str:
+        color = QColor(accent_hex)
+        if not color.isValid():
+            return theme_value("task_panel.task_tree.hover_bg", "palette(alternate-base)")
+        color.setAlpha(48)
+        return color.name(QColor.HexArgb)
+
+    def _apply_selection_style(self) -> None:
+        accent = self._effective_accent_color()
+        hover_bg = self._hover_fill_for_accent(accent)
         self.task_tree.setStyleSheet(
             f"""
+            QTreeWidget::item {{
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }}
             QTreeWidget::item:selected {{
-                background: {selected_bg};
-                color: {selected_text};
+                background: transparent;
+                border: 1px solid {accent};
             }}
             QTreeWidget::item:selected:active {{
-                background: {selected_bg};
-                color: {selected_text};
+                background: transparent;
+                border: 1px solid {accent};
             }}
             QTreeWidget::item:hover {{
                 background: {hover_bg};
+                border: 1px solid {accent};
             }}
             """
         )
@@ -1008,11 +1025,46 @@ class TaskPanel(QWidget):
             return QIcon()
 
     def _icon_tint_color(self) -> QColor:
+        explicit_dark = theme_value("task_panel.icon.on_dark", None)
+        explicit_light = theme_value("task_panel.icon.on_light", None)
         palette = QApplication.palette()
         bg = palette.color(QPalette.Window)
         if bg.lightness() > 128:
-            return QColor(0, 0, 0)
-        return QColor(255, 255, 255)
+            candidate = QColor(str(explicit_light)) if explicit_light is not None else QColor(0, 0, 0)
+            return candidate if candidate.isValid() else QColor(0, 0, 0)
+        candidate = QColor(str(explicit_dark)) if explicit_dark is not None else QColor(255, 255, 255)
+        return candidate if candidate.isValid() else QColor(255, 255, 255)
+
+    def _apply_header_button_styles(self) -> None:
+        button_color = self._icon_tint_color().name()
+        for btn in (
+            getattr(self, "_date_filter_btn", None),
+            getattr(self, "zoom_out_btn", None),
+            getattr(self, "zoom_in_btn", None),
+            getattr(self, "_print_btn", None),
+            getattr(self, "_ai_toggle_btn", None),
+        ):
+            if btn is None:
+                continue
+            btn.setStyleSheet(
+                f"""
+                QToolButton {{
+                    color: {button_color};
+                    border: 1px solid transparent;
+                    border-radius: 6px;
+                    padding: 2px;
+                    background: transparent;
+                }}
+                QToolButton:hover {{
+                    border: 1px solid {theme_value('task_panel.toggle.hover_border', '#666666')};
+                    background: {theme_value('task_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+                }}
+                QToolButton:checked {{
+                    border: 1px solid {theme_value('task_panel.toggle.active_border', '#4a90e2')};
+                    background: {theme_value('task_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+                }}
+                """
+            )
 
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(24, 24))
@@ -2064,6 +2116,7 @@ class TaskPanel(QWidget):
                         self._refresh_tasks()
                     return True
         if obj in (self.search, self.task_tree) and event.type() == QEvent.KeyPress:
+            mods = event.modifiers() & ~Qt.KeypadModifier
             if obj is self.search and _should_suspend_nav_for_tag(
                 self.search.text(), self.search.cursorPosition(), self._available_tags
             ):
@@ -2071,7 +2124,7 @@ class TaskPanel(QWidget):
             if obj is self.task_tree and event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 current = self.task_tree.currentItem()
                 if current:
-                    keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                    keep_panel = mods == Qt.ShiftModifier
                     if keep_panel:
                         self._mark_activation_source("keyboard_keep_panel")
                     else:
@@ -2112,7 +2165,8 @@ class TaskPanel(QWidget):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             current = self.task_tree.currentItem()
             if current:
-                keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                mods = event.modifiers() & ~Qt.KeypadModifier
+                keep_panel = mods == Qt.ShiftModifier
                 if keep_panel:
                     self._mark_activation_source("keyboard_keep_panel")
                 else:
@@ -2687,16 +2741,18 @@ class TaskPanel(QWidget):
             item.setData(0, Qt.UserRole, task)
             item.setToolTip(1, text)
             due_fg_bg = self._due_colors(task)
-            if due_fg_bg:
-                fg, bg = due_fg_bg
-                if bg:
-                    item.setBackground(due_idx, bg)
-                if fg:
-                    item.setForeground(due_idx, fg)
             pri_brush = self._priority_brush(priority_level)
             if pri_brush:
                 item.setBackground(0, pri_brush["bg"])
                 item.setForeground(0, pri_brush["fg"])
+            if due_fg_bg:
+                fg, bg = due_fg_bg
+                if bg:
+                    item.setBackground(due_idx, bg)
+                    item.setBackground(0, bg)
+                if fg:
+                    item.setForeground(due_idx, fg)
+                    item.setForeground(0, fg)
             if due_overdue:
                 font = item.font(0)
                 font.setUnderline(True)

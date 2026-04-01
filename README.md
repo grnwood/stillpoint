@@ -77,7 +77,7 @@ Key UI features:
 
 - Vault picker, New Vault flow, and multi-window support.
 - Left tree navigator with inline rename, create, and delete.
-- Tree keyboard navigation is selection-first (`Alt+PgUp/PgDn` or arrows), with explicit open on `Enter` (or `Ctrl+Enter` to keep tree focus).
+- Tree keyboard navigation is selection-first (`Alt+PgUp/PgDn` or arrows), with explicit open on `Enter` (or `Shift+Enter` to keep tree focus).
 - Drag and drop to reorder pages within the same folder.
 - Right-click "Move To..." to relocate pages or folders to different parents.
 - History popup (Ctrl+Tab) and heading switcher (Ctrl+Shift+Tab or Ctrl+Alt+T).
@@ -129,7 +129,10 @@ The built-in help vault includes a full shortcuts guide:
 - Help menu: **Help → Keyboard Shortcuts**
 - File in repo: `sp/help-vault/Shortcuts/Shortcuts.md`
 - Developer notes: [Clipboard Behavior Matrix](docs/clipboard-behavior.md)
-- Tasks/Calendar task lists: `Enter` opens and focuses editor; `Ctrl+Enter`/`Shift+Enter` opens and keeps focus in the task list.
+- File nav: `Enter` opens and focuses editor; `Shift+Enter` opens and keeps focus in the tree.
+- Search results: `Enter` opens and focuses editor; `Shift+Enter` opens and keeps focus in results.
+- Tasks and Calendar task lists: `Enter` opens and focuses editor; `Shift+Enter` opens and keeps focus in the list.
+- Calendar day grid and Calendar headings/subpages lists: `Enter` opens and focuses editor; `Shift+Enter` opens and keeps focus in Calendar.
 
 The help vault is copied to `~/.stillpoint/help-vault` on first open. On later opens, StillPoint compares the user copy's help-vault version to the embedded version and refreshes the user copy automatically when the embedded help vault is newer.
 

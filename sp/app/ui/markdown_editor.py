@@ -1569,6 +1569,7 @@ class MarkdownEditor(QTextEdit):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._teardown_done: bool = False
         self._current_path: Optional[str] = None
         self._last_context_menu_global_pos: Optional[QPoint] = None
         self._context_menu_selection: Optional[tuple[int, int]] = None
@@ -1737,6 +1738,65 @@ class MarkdownEditor(QTextEdit):
         viewport = self.viewport()
         if viewport is not None:
             viewport.destroyed.connect(self._on_viewport_destroyed)
+
+    def _teardown_editor(self) -> None:
+        if getattr(self, "_teardown_done", False):
+            return
+        self._teardown_done = True
+        try:
+            viewport = self.viewport()
+        except Exception:
+            viewport = None
+        try:
+            if viewport is not None:
+                viewport.removeEventFilter(self)
+        except Exception:
+            pass
+        for timer_name in (
+            "_heading_timer",
+            "_hr_timer",
+            "_hr_resize_timer",
+            "_camel_refresh_timer",
+            "_vi_activation_timer",
+            "_vi_prefix_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            try:
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
+        for overlay_name in ("_tag_suggest_overlay", "_task_tag_suggest_overlay", "_ai_action_overlay"):
+            overlay = getattr(self, overlay_name, None)
+            try:
+                if overlay is not None:
+                    overlay.hide()
+            except Exception:
+                pass
+            try:
+                if overlay is not None and hasattr(overlay, "deleteLater"):
+                    overlay.deleteLater()
+            except Exception:
+                pass
+            setattr(self, overlay_name, None)
+        shortcut = getattr(self, "_ai_focus_shortcut", None)
+        try:
+            if shortcut is not None:
+                shortcut.setParent(None)
+                shortcut.deleteLater()
+        except Exception:
+            pass
+        self._ai_focus_shortcut = None
+        highlighter = getattr(self, "highlighter", None)
+        try:
+            if highlighter is not None:
+                highlighter.setDocument(None)
+        except Exception:
+            pass
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._teardown_editor()
+        super().closeEvent(event)
 
     def _apply_theme_palette(self) -> None:
         bg = theme_value("markdown_editor.base.bg", None)
@@ -1917,6 +1977,7 @@ class MarkdownEditor(QTextEdit):
         self._push_paint_block()
 
     def _on_editor_destroyed(self) -> None:
+        self._teardown_editor()
         self._editor_alive = False
         self._push_paint_block()
 
@@ -4053,16 +4114,16 @@ class MarkdownEditor(QTextEdit):
             ("Strikethrough", QKeySequence("Ctrl+K"), self._toggle_strikethrough, "Toggle strikethrough (~~text~~)"),
             ("Highlight", QKeySequence("Ctrl+U"), self._toggle_highlight, "Toggle highlight (==text==)"),
             ("Verbatim", QKeySequence("Ctrl+T"), self._toggle_verbatim, "Wrap selection in backticks"),
-            ("Heading 1", QKeySequence("Ctrl+1"), lambda: self._apply_heading_level(1), "Convert line to H1 (#)"),
-            ("Heading 2", QKeySequence("Ctrl+2"), lambda: self._apply_heading_level(2), "Convert line to H2 (##)"),
-            ("Heading 3", QKeySequence("Ctrl+3"), lambda: self._apply_heading_level(3), "Convert line to H3 (###)"),
-            ("Heading 4", QKeySequence("Ctrl+4"), lambda: self._apply_heading_level(4), "Convert line to H4 (####)"),
-            ("Heading 5", QKeySequence("Ctrl+5"), lambda: self._apply_heading_level(5), "Convert line to H5 (#####)"),
+            ("Heading 1", QKeySequence("Ctrl+1"), lambda *_args: self._apply_heading_level(1), "Convert line to H1 (#)"),
+            ("Heading 2", QKeySequence("Ctrl+2"), lambda *_args: self._apply_heading_level(2), "Convert line to H2 (##)"),
+            ("Heading 3", QKeySequence("Ctrl+3"), lambda *_args: self._apply_heading_level(3), "Convert line to H3 (###)"),
+            ("Heading 4", QKeySequence("Ctrl+4"), lambda *_args: self._apply_heading_level(4), "Convert line to H4 (####)"),
+            ("Heading 5", QKeySequence("Ctrl+5"), lambda *_args: self._apply_heading_level(5), "Convert line to H5 (#####)"),
             ("Remove Heading", QKeySequence("Ctrl+7"), self._remove_heading, "Strip heading markers on this line"),
-            ("Bullet List", QKeySequence(), lambda: self._apply_list_style("bullet"), "Turn selection into bullet list"),
-            ("Dash List", QKeySequence(), lambda: self._apply_list_style("dash"), "Turn selection into dash list"),
-            ("Checkbox List", QKeySequence(), lambda: self._apply_list_style("task"), "Turn selection into checkbox list"),
-            ("Clear List", QKeySequence(), lambda: self._apply_list_style("clear"), "Remove list markers from selection"),
+            ("Bullet List", QKeySequence(), lambda *_args: self._apply_list_style("bullet"), "Turn selection into bullet list"),
+            ("Dash List", QKeySequence(), lambda *_args: self._apply_list_style("dash"), "Turn selection into dash list"),
+            ("Checkbox List", QKeySequence(), lambda *_args: self._apply_list_style("task"), "Turn selection into checkbox list"),
+            ("Clear List", QKeySequence(), lambda *_args: self._apply_list_style("clear"), "Remove list markers from selection"),
             ("Blockquote", QKeySequence(), self._apply_blockquote_style, "Prefix selection with > blockquote"),
             ("Clear Formatting", QKeySequence("Ctrl+9"), self._clear_inline_formatting, "Restore selection to plain text"),
         ]
@@ -7960,7 +8021,13 @@ class MarkdownEditor(QTextEdit):
         self.setExtraSelections(existing)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if obj is self.viewport():
+        if getattr(self, "_teardown_done", False):
+            return False
+        try:
+            viewport = self.viewport()
+        except Exception:
+            viewport = None
+        if viewport is not None and obj is viewport:
             if self._cursor_events_blocked or self._display_guard or self._suppress_vi_cursor or self._in_mode_window_transition():
                 return super().eventFilter(obj, event)
             if event.type() in (QEvent.Paint, QEvent.UpdateRequest, QEvent.FocusIn, QEvent.FocusOut):
@@ -9397,7 +9464,7 @@ class MarkdownEditor(QTextEdit):
                 self._render_images_retry_pending = True
                 QTimer.singleShot(
                     0,
-                    lambda text=display_text, at=scheduled_at, tok=load_token: self._retry_render_images(text, at, tok),
+                    lambda *_args, text=display_text, at=scheduled_at, tok=load_token: self._retry_render_images(text, at, tok),
                 )
             return
         self._render_images_retry_pending = False

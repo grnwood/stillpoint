@@ -29,7 +29,9 @@ These shortcuts will speed up your workflow:
 - `Alt+Home`: Go to home page
 - `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
 - `Enter` (file nav selected): Open selected page and focus editor
-- `Ctrl+Enter` (file nav selected): Open selected page and keep focus in file nav
+- `Shift+Enter` (file nav selected): Open selected page and keep focus in file nav
+- `Enter` (search result selected): Open selected result and focus editor
+- `Shift+Enter` (search result selected): Open selected result and keep focus in search results
 - `\` (file nav focused): Collapse the whole tree
 - `Ctrl+Alt+T`: Open heading picker
 - `Ctrl+Shift+P`: Open command bar
@@ -40,14 +42,16 @@ These shortcuts will speed up your workflow:
 - `Alt+D`: Open today's journal page
 - `Ctrl+Alt+D`: Open the jump-to-journal-date calendar popup
 - In the Calendar tab, arrow keys move the selected day and `Enter` opens that day in the editor
-- `Ctrl+Enter` opens the selected day but keeps focus in the Calendar panel
+- `Shift+Enter` opens the selected day but keeps focus in the Calendar panel
+- In the Calendar headings/subpages/pages lists, `Enter` opens the selected item and focuses the editor
+- In the Calendar headings/subpages/pages lists, `Shift+Enter` opens the selected item and keeps focus in Calendar
 - In vi mode, `h/j/k/l` also navigate the calendar, `Shift` plus arrows or vi keys extends a date range, `t` jumps to today, `/` moves into headings and subpages, and `Esc` returns focus to the calendar grid
 
 ### Tasks
 - `F12`: Toggle task completion
 - `Ctrl+\`: Focus tasks search
-- `Enter` (task selected): Open task target and focus editor
-- `Ctrl+Enter` or `Shift+Enter` (task selected): Open task target and keep focus in task list
+- `Enter` (task selected in Tasks or Calendar task list): Open task target and focus editor
+- `Shift+Enter` (task selected in Tasks or Calendar task list): Open task target and keep focus in the task list
 
 ### Panels
 - `Ctrl+Shift+Space`: Cycle focus between panels

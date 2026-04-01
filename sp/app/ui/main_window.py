@@ -31,6 +31,7 @@ from PySide6.QtCore import (
     QEvent,
     QModelIndex,
     QPoint,
+    QDate,
     Qt,
     Signal,
     QTimer,
@@ -1071,7 +1072,7 @@ class InlineNameEdit(QLineEdit):
 
 class VaultTreeView(QTreeView):
     enterActivated = Signal()
-    ctrlEnterActivated = Signal()
+    shiftEnterActivated = Signal()
     arrowNavigated = Signal()
     escapePressed = Signal()
     rowClicked = Signal(QModelIndex)
@@ -1120,11 +1121,8 @@ class VaultTreeView(QTreeView):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.isAutoRepeat():
             event.accept()
             return
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods in (
-            Qt.ControlModifier,
-            Qt.AltModifier,
-        ):
-            self.ctrlEnterActivated.emit()
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
+            self.shiftEnterActivated.emit()
             event.accept()
             return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.NoModifier:
@@ -2065,6 +2063,7 @@ class MainWindow(QMainWindow):
         self._local_fs_page_snapshot: dict[str, tuple[int, int]] = {}
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
+        self._app_state_changed_slot = None
         def _log_request(request):
             request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
@@ -2217,7 +2216,7 @@ class MainWindow(QMainWindow):
         self.tree_view.customContextMenuRequested.connect(self._open_context_menu)
         self.tree_view.selectionModel().currentChanged.connect(self._on_selection_changed)
         self.tree_view.enterActivated.connect(self._focus_editor_from_tree)
-        self.tree_view.ctrlEnterActivated.connect(self._activate_tree_selection_keep_focus)
+        self.tree_view.shiftEnterActivated.connect(self._activate_tree_selection_keep_focus)
         self.tree_view.arrowNavigated.connect(self._mark_tree_arrow_nav)
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
@@ -2346,7 +2345,8 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             try:
-                app.applicationStateChanged.connect(self._on_application_state_changed)
+                self._app_state_changed_slot = self._on_application_state_changed
+                app.applicationStateChanged.connect(self._app_state_changed_slot)
             except Exception:
                 pass
         self.editor.cursorMoved.connect(self._on_editor_cursor_moved)
@@ -2989,6 +2989,7 @@ class MainWindow(QMainWindow):
         self._register_shortcuts()
         self._setup_quick_capture_shortcut(show_error=False)
         self._focus_recent = ["editor", "tree", "left", "right"]
+        self._app_focus_changed_slot = None
         # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
         if app is not None:
@@ -2997,7 +2998,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
-                app.focusChanged.connect(lambda old, now: self._on_focus_changed(now))
+                self._app_focus_changed_slot = lambda _old, now: self._on_focus_changed(now)
+                app.focusChanged.connect(self._app_focus_changed_slot)
             except Exception:
                 pass
         # Apply initial border state
@@ -5900,6 +5902,19 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+    def _format_homebase_sync_local(self, value: Optional[str]) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        dt = self._parse_homebase_sync_ts(text)
+        if dt is None:
+            return text
+        try:
+            local_dt = dt.astimezone()
+            return local_dt.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+        except Exception:
+            return text
+
     def _homebase_status_clears_unsynced_marker(self, status: Optional[HomebaseSyncStatus]) -> bool:
         if not status or not self._homebase_has_unsynced_local_changes:
             return False
@@ -6449,11 +6464,14 @@ class MainWindow(QMainWindow):
             bg = theme_value("main_window.homebase_badge.idle_bg", "#757575")
         else:
             bg = theme_value("main_window.homebase_badge.ready_bg", "#2e7d32")
+        format_sync_local = getattr(self, "_format_homebase_sync_local", None)
+        if not callable(format_sync_local):
+            format_sync_local = lambda value: str(value or "")
         tooltip = status.summary
         if status.last_sync_at:
-            tooltip += f"\nLast sync: {status.last_sync_at}"
+            tooltip += f"\nLast sync: {format_sync_local(status.last_sync_at)}"
         if self._homebase_last_real_sync_at:
-            tooltip += f"\nLast real sync: {self._homebase_last_real_sync_at}"
+            tooltip += f"\nLast real sync: {format_sync_local(self._homebase_last_real_sync_at)}"
         if status.last_error:
             tooltip += f"\nLast error: {status.last_error}"
         self._homebase_status_label.setText(text)
@@ -6495,6 +6513,32 @@ class MainWindow(QMainWindow):
             profile["interval_seconds"] = int(interval_seconds)
             profile["push_debounce_seconds"] = int(push_debounce_seconds)
             profile["max_parallel_transfers"] = int(max_parallel_transfers)
+            updated = True
+            break
+        if updated:
+            config.save_homebase_vault_profiles(profiles)
+
+    def _persist_homebase_passphrase_pref_to_profile(self, store_passphrase: bool) -> None:
+        if not self.vault_root:
+            return
+        current_path = self._normalize_vault_path(self.vault_root)
+        if not current_path:
+            return
+        current_server = config.load_homebase_remote_url().strip()
+        current_vault_id = (config.load_homebase_vault_id() or "").strip()
+        profiles = config.load_homebase_vault_profiles()
+        updated = False
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
+            if profile_path != current_path:
+                continue
+            if current_server and str(profile.get("server_url") or "").strip() != current_server:
+                continue
+            if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
+                continue
+            profile["store_passphrase"] = bool(store_passphrase)
             updated = True
             break
         if updated:
@@ -6619,6 +6663,7 @@ class MainWindow(QMainWindow):
             self._ensure_config_active_vault_context()
             config.save_homebase_store_passphrase(store_on_device)
             config.save_homebase_passphrase(cleaned if store_on_device else "")
+            self._persist_homebase_passphrase_pref_to_profile(store_on_device)
         except Exception:
             pass
         if vault_key:
@@ -6865,7 +6910,9 @@ class MainWindow(QMainWindow):
         row += 1
         if status.last_sync_at:
             info_layout.addWidget(QLabel("Last Sync:"), row, 0, Qt.AlignTop)
-            info_layout.addWidget(QLabel(status.last_sync_at), row, 1)
+            last_sync_label = QLabel(self._format_homebase_sync_local(status.last_sync_at))
+            last_sync_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            info_layout.addWidget(last_sync_label, row, 1)
             row += 1
         if status.last_error:
             info_layout.addWidget(QLabel("Last Error:"), row, 0, Qt.AlignTop)
@@ -6995,6 +7042,7 @@ class MainWindow(QMainWindow):
             self._remember_homebase_passphrase(cleaned)
             config.save_homebase_store_passphrase(store_on_device)
             config.save_homebase_passphrase(cleaned if store_on_device else "")
+            self._persist_homebase_passphrase_pref_to_profile(store_on_device)
             self._configure_homebase_sync_for_vault()
             if self._homebase_sync_engine:
                 try:
@@ -8254,6 +8302,21 @@ class MainWindow(QMainWindow):
         if not color.isValid():
             return accent_hex
         return color.name()
+
+    @staticmethod
+    def _hover_bg_for_accent(accent_hex: str, fallback: str) -> str:
+        color = QColor(accent_hex)
+        if not color.isValid():
+            return fallback
+        color.setAlpha(48)
+        return color.name(QColor.HexArgb)
+
+    def _effective_tree_accent_color(self) -> str:
+        vault_accent = getattr(self, "_vault_accent_color", None)
+        candidate = (vault_accent or "").strip()
+        if candidate.startswith("#"):
+            return candidate
+        return QApplication.palette().color(QPalette.Highlight).name()
 
     def _current_vault_accent_color(self) -> Optional[str]:
         if not self.vault_root:
@@ -11846,55 +11909,7 @@ class MainWindow(QMainWindow):
         if not self.vault_root:
             self._alert("Select a vault before creating journal entries.")
             return
-        # Build day template string from templates/JournalDay.txt with substitution
-        day_template = ""
-        template_cursor_pos = -1
-        try:
-            templates_root = Path(__file__).parent.parent.parent / "templates"
-            preferred_day = config.load_default_journal_template()
-            day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
-            if day_tpl.exists():
-                from datetime import datetime
-                now = datetime.now()
-                raw = day_tpl.read_text(encoding="utf-8")
-                print(f"[Template] Loaded journal template: {day_tpl}")
-                
-                # Use proper template variable processing to handle cursor and all variables
-                vars_map = {
-                    "{{YYYY}}": f"{now:%Y}",
-                    "{{Month}}": now.strftime("%B"),
-                    "{{MM}}": f"{now:%m}",
-                    "{{DOW}}": now.strftime("%A"),
-                    "{{dd}}": f"{now:%d}",
-                    "{{DayDateYear}}": now.strftime("%A %d %B %Y"),
-                }
-                
-                # Process QOTD if template uses it
-                if "{{QOTD}}" in raw:
-                    vars_map["{{QOTD}}"] = self._get_qotd()
-                
-                # Find cursor position in original template
-                if "{{cursor}}" in raw:
-                    template_cursor_pos = raw.find("{{cursor}}")
-                
-                # Replace all variables EXCEPT {{cursor}} first
-                result = raw
-                for k, v in vars_map.items():
-                    if k != "{{cursor}}":
-                        # If this replacement happens before cursor position, adjust cursor_pos
-                        if template_cursor_pos >= 0:
-                            before_cursor = result[:template_cursor_pos]
-                            count = before_cursor.count(k)
-                            if count > 0:
-                                len_diff = len(v) - len(k)
-                                template_cursor_pos += count * len_diff
-                        result = result.replace(k, v)
-                
-                # Remove cursor tag
-                day_template = result.replace("{{cursor}}", "")
-        except Exception as e:
-            print(f"[Template] Error processing journal template: {e}")
-            day_template = ""
+        day_template, template_cursor_pos = self._build_today_journal_template()
 
         try:
             resp = self.http.post("/api/journal/today", json={"template": day_template})
@@ -11925,6 +11940,48 @@ class MainWindow(QMainWindow):
             # Ensure focus returns to editor (tree selection may have taken focus)
             self.editor.setFocus()
             self._apply_focus_borders()
+
+    def _build_today_journal_template(self) -> tuple[str, int]:
+        day_template = ""
+        template_cursor_pos = -1
+        try:
+            preferred_day = config.load_default_journal_template()
+            day_tpl = self._resolve_template_path(preferred_day, fallback="JournalDay")
+            if day_tpl.exists():
+                now = datetime.now()
+                raw = day_tpl.read_text(encoding="utf-8")
+                print(f"[Template] Loaded journal template: {day_tpl}")
+
+                vars_map = {
+                    "{{YYYY}}": f"{now:%Y}",
+                    "{{Month}}": now.strftime("%B"),
+                    "{{MM}}": f"{now:%m}",
+                    "{{DOW}}": now.strftime("%A"),
+                    "{{dd}}": f"{now:%d}",
+                    "{{DayDateYear}}": now.strftime("%A %d %B %Y"),
+                }
+
+                if "{{QOTD}}" in raw:
+                    vars_map["{{QOTD}}"] = self._get_qotd()
+
+                if "{{cursor}}" in raw:
+                    template_cursor_pos = raw.find("{{cursor}}")
+
+                result = raw
+                for k, v in vars_map.items():
+                    if template_cursor_pos >= 0:
+                        before_cursor = result[:template_cursor_pos]
+                        count = before_cursor.count(k)
+                        if count > 0:
+                            template_cursor_pos += count * (len(v) - len(k))
+                    result = result.replace(k, v)
+
+                day_template = result.replace("{{cursor}}", "")
+        except Exception as e:
+            print(f"[Template] Error processing journal template: {e}")
+            day_template = ""
+            template_cursor_pos = -1
+        return day_template, template_cursor_pos
 
     def _apply_journal_templates(self, day_file_path: str, allow_overwrite: bool = True) -> None:
         """Ensure year/month/day journal scaffolding exists and apply templates if allowed.
@@ -12421,7 +12478,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, _maybe_refocus_results)
     
     def _on_search_result_selected_with_editor_focus(self, path: str, line: int, position: int = -1) -> None:
-        """Handle navigation from search results with editor focus (Ctrl+Enter)."""
+        """Handle navigation from search results with editor focus (Enter)."""
         self._open_file(path)
         expected_path = self.current_path
         expected_load_token = self._current_editor_load_token()
@@ -12504,11 +12561,14 @@ class MainWindow(QMainWindow):
         
         cursor = QTextCursor(block)
         cursor.movePosition(QTextCursor.StartOfBlock)
+        cursor.select(QTextCursor.LineUnderCursor)
+        flash_cursor = QTextCursor(block)
+        flash_cursor.movePosition(QTextCursor.StartOfBlock)
         
         _log_search(f"[SearchNav] Setting cursor to block {block.blockNumber()} (search line {line}) and animating")
         # Set the cursor position and scroll with animation and flash
         self.editor.setTextCursor(cursor)
-        self._animate_or_flash_to_cursor(cursor)
+        self._animate_or_flash_to_cursor(flash_cursor)
 
     def _scroll_to_position_with_flash(
         self,
@@ -12529,8 +12589,11 @@ class MainWindow(QMainWindow):
         safe_pos = max(0, min(position, max_pos))
         cursor = QTextCursor(doc)
         cursor.setPosition(safe_pos)
+        cursor.select(QTextCursor.LineUnderCursor)
+        flash_cursor = QTextCursor(doc)
+        flash_cursor.setPosition(safe_pos)
         self.editor.setTextCursor(cursor)
-        self._animate_or_flash_to_cursor(cursor)
+        self._animate_or_flash_to_cursor(flash_cursor)
     
     def _show_search_dialog(self) -> None:
         """Show Ctrl+Shift+F search dialog that populates the search tab."""
@@ -13815,7 +13878,7 @@ class MainWindow(QMainWindow):
         self._goto_line(line, select_line=True)
         
         # Keyboard activation: move focus to editor.
-        # Ctrl+Enter activation keeps focus in the originating task list.
+        # Shift+Enter activation keeps focus in the originating task list.
         if activation_source == "keyboard":
             try:
                 self._exit_vi_insert_on_activate()
@@ -16101,21 +16164,20 @@ class MainWindow(QMainWindow):
             str(down_arrow_path).replace("\\", "/") if down_arrow_path else ""
         )
         tree_item_divider = theme_value("main_window.tree.item_divider", "palette(midlight)")
-        if vault_accent:
-            tree_selected_bg = self._selection_bg_for_accent(vault_accent)
-            tree_selected_text = self._badge_text_for_background(tree_selected_bg)
-        else:
-            tree_selected_bg = tree_palette.color(QPalette.Highlight).name()
-            tree_selected_text = tree_palette.color(QPalette.HighlightedText).name()
+        effective_tree_accent = self._effective_tree_accent_color()
+        tree_selected_bg = self._selection_bg_for_accent(effective_tree_accent)
+        tree_selected_text = self._badge_text_for_background(tree_selected_bg)
+        tree_hover_bg = self._hover_bg_for_accent(effective_tree_accent, alternate_base)
+        tree_hover_border = effective_tree_accent
         tree_text_color = tree_palette.color(QPalette.Text).name()
         tree_style = (
             f"QTreeView {{ border: 1px solid transparent; background: {tree_palette.color(QPalette.Base).name()}; color: {tree_text_color}; }}"
             f"QTreeView::viewport {{ background: {tree_palette.color(QPalette.Base).name()}; }}"
-            f"QTreeView::item {{ padding: 2px 6px 2px 2px; border-bottom: 1px solid {tree_item_divider}; }}"
-            f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
-            f"QTreeView::item:selected:active {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
-            f"QTreeView::item:selected:!active {{ background: {tree_selected_bg}; color: {tree_selected_text}; }}"
-            f"QTreeView::item:hover {{ background: {alternate_base}; }}"
+            f"QTreeView::item {{ padding: 2px 6px 2px 2px; border: 1px solid transparent; border-bottom-color: {tree_item_divider}; border-radius: 6px; }}"
+            f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
+            f"QTreeView::item:selected:active {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
+            f"QTreeView::item:selected:!active {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
+            f"QTreeView::item:hover {{ background: {tree_hover_bg}; border-color: {tree_hover_border}; }}"
             "QTreeView::branch { width: 16px; height: 16px; }"
         )
         if arrow_closed and arrow_open:
@@ -17281,6 +17343,10 @@ class MainWindow(QMainWindow):
     def _move_path_dialog(self, folder_path: str, current_parent: str) -> None:
         if not self._ensure_writable("move pages or folders"):
             return
+        quick_targets: list[tuple[str, str]] = []
+        today_target_path, today_target_label = self._today_journal_move_target()
+        if today_target_path:
+            quick_targets.append((today_target_path, today_target_label))
         implied_target_path = "/"
         implied_target_label = "<Vault Root>"
         filter_path = (self._nav_filter_path or "").strip()
@@ -17298,6 +17364,7 @@ class MainWindow(QMainWindow):
             remote_mode=self._remote_mode,
             implied_target_path=implied_target_path,
             implied_target_label=implied_target_label,
+            quick_targets=quick_targets,
         )
         dlg.setWindowTitle("Move To…")
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -17305,6 +17372,11 @@ class MainWindow(QMainWindow):
         target_path = dlg.selected_path()
         if not target_path:
             return
+        if today_target_path and target_path == today_target_path:
+            ensured_today_target = self._ensure_today_journal_move_target()
+            if not ensured_today_target:
+                return
+            target_path = ensured_today_target
         rewrite_links = dlg.should_rewrite_links()
         parent_clean = self._file_path_to_folder(target_path) or "/"
         if not parent_clean.startswith("/"):
@@ -17371,6 +17443,40 @@ class MainWindow(QMainWindow):
         if not folder_path:
             return
         self._move_path_dialog(folder_path, self._parent_path(self.tree_view.currentIndex()))
+
+    def _today_journal_move_target(self) -> tuple[str | None, str]:
+        if not self.vault_root:
+            return None, "<Today's Journal>"
+        if not bool(getattr(self, "_feature_calendar_enabled", config.load_feature_calendar_enabled())):
+            return None, "<Today's Journal>"
+        today = QDate.currentDate()
+        if not today.isValid():
+            return None, "<Today's Journal>"
+        year = f"{today.year():04d}"
+        month = f"{today.month():02d}"
+        day = f"{today.day():02d}"
+        target_path = f"/Journal/{year}/{month}/{day}/{day}{PAGE_SUFFIX}"
+        label = f"<Today's Journal: {today.toString('ddd MMM d')}>"
+        return target_path, label
+
+    def _ensure_today_journal_move_target(self) -> str | None:
+        today_target_path, _ = self._today_journal_move_target()
+        if not today_target_path:
+            self._alert("Select a vault before moving pages into today's journal.")
+            return None
+        day_template, _ = self._build_today_journal_template()
+        try:
+            resp = self.http.post("/api/journal/today", json={"template": day_template})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to prepare today's journal target")
+            return None
+        payload = resp.json()
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            self._alert("Failed to prepare today's journal target.")
+            return None
+        return path
 
     def _on_tree_move_requested(self, from_path: str, dest_path: str) -> None:
         if from_path == dest_path:
@@ -19972,11 +20078,20 @@ class MainWindow(QMainWindow):
         try:
             app = QApplication.instance()
             if app:
+                try:
+                    app.removeEventFilter(self)
+                except Exception:
+                    pass
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
-                    app.focusChanged.disconnect(self._on_focus_changed)
+                    if self._app_focus_changed_slot is not None:
+                        app.focusChanged.disconnect(self._app_focus_changed_slot)
+                    if self._app_state_changed_slot is not None:
+                        app.applicationStateChanged.disconnect(self._app_state_changed_slot)
         except:
             pass
+        self._app_focus_changed_slot = None
+        self._app_state_changed_slot = None
         
         # Save current file and geometry
         self._save_current_file(auto=True, reason="window close")

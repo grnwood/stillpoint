@@ -255,7 +255,7 @@ class SearchTab(QWidget):
     
     # Signal emitted when user clicks a search result to navigate to that page
     pageNavigationRequested = Signal(str, int, int)  # path, line_number, position
-    # Signal emitted when user wants to navigate and focus editor (Ctrl+Enter)
+    # Signal emitted when user wants to navigate and focus editor (Enter)
     pageNavigationWithEditorFocusRequested = Signal(str, int, int)  # path, line_number, position
     
     def __init__(self, parent=None, http_client: "httpx.Client" = None):
@@ -570,8 +570,18 @@ class SearchTab(QWidget):
     
     def _on_results_key_press(self, event):
         """Handle key press events in results tree."""
-        # Handle Ctrl+Enter to load page and focus editor
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+        mods = event.modifiers() & ~Qt.KeypadModifier
+
+        # Shift+Enter loads page but keeps focus on search results.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
+            current_index = self.results_tree.currentIndex()
+            if current_index.isValid():
+                self._on_result_double_clicked(current_index)
+                event.accept()
+                return
+
+        # Enter loads page and focuses editor.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.NoModifier:
             current_index = self.results_tree.currentIndex()
             if current_index.isValid():
                 path = current_index.data(Qt.UserRole)
@@ -579,14 +589,6 @@ class SearchTab(QWidget):
                 position = current_index.data(Qt.UserRole + 3) or -1
                 if path:
                     self.pageNavigationWithEditorFocusRequested.emit(path, line, position)
-                event.accept()
-                return
-        
-        # Handle regular Enter to load page but keep focus on search results
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            current_index = self.results_tree.currentIndex()
-            if current_index.isValid():
-                self._on_result_double_clicked(current_index)
                 event.accept()
                 return
         

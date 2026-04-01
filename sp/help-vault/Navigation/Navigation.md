@@ -11,11 +11,18 @@ The left sidebar shows your vault structure.
 - Keyboard nav in the tree is selection-first:
   - `Alt+PgUp` / `Alt+PgDown` (or arrow keys while the tree is focused) moves selection only.
   - `Enter` opens the selected page and focuses the editor.
-  - `Ctrl+Enter` opens the selected page and keeps focus in the tree.
+  - `Shift+Enter` opens the selected page and keeps focus in the tree.
   - `\` collapses the full tree.
 - Filtering acts like a project-focused zoom:
   - The app treats that location as your working context.
   - Tasks, jump dialogs, and link pickers follow that filtered scope.
+
+## Search Results
+Search results use the same explicit open behavior as the tree:
+- Arrow keys move the result selection.
+- `Enter` opens the selected result and focuses the editor.
+- `Shift+Enter` opens the selected result and keeps focus in the search results.
+- Double-click opens the result and leaves the matched editor line selected so it is easier to spot.
 
 ## Quick Ways to Move Around
 - `Ctrl+J`: jump to a page quickly.
@@ -23,7 +30,7 @@ The left sidebar shows your vault structure.
 - `Alt+Left` / `Alt+Right`: back/forward in history.
 - On macOS, use `Cmd+[` / `Cmd+]` for back/forward in history.
 - `Alt+Home`: go to your home page.
-- `Alt+PgUp` / `Alt+PgDown`: move selection through the current nav list (open with `Enter` or `Ctrl+Enter`).
+- `Alt+PgUp` / `Alt+PgDown`: move selection through the current nav list (open with `Enter` or `Shift+Enter`).
 
 ## Quick Switchers
 - `Ctrl+Tab`: cycle through recent pages so you can jump back to something you were just working on.
@@ -86,6 +93,7 @@ Find anything in your vault quickly.
 - Search looks in page titles and content.
 - Use quotes for exact phrases: `"project plan"`
 - Results show matching pages with snippets.
+- Keyboard flow in results: `Enter` opens and focuses editor; `Shift+Enter` opens and keeps focus in results.
 
 ## Link Navigator
 Explore connections between pages.

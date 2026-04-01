@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtTest import QTest
+from shiboken6 import Shiboken
 
 from sp.app.ui.markdown_editor import MarkdownEditor
 from sp.app.ui.mode_window import ModeWindow
@@ -36,5 +37,13 @@ def test_mode_window_close_preserves_edited_overlay_buffer_as_dirty(qtbot) -> No
         assert base_editor.to_markdown() == "# Page\n\nEdited in overlay\n"
         assert base_editor.document().isModified() is True
     finally:
-        window.close()
-        base_editor.close()
+        try:
+            if Shiboken.isValid(window):
+                window.close()
+        except Exception:
+            pass
+        try:
+            if Shiboken.isValid(base_editor):
+                base_editor.close()
+        except Exception:
+            pass

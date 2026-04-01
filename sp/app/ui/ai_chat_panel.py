@@ -322,9 +322,11 @@ def _palette_hex(role: QPalette.ColorRole, source: Optional[QtWidgets.QWidget] =
 def _chat_surface_defaults(source: Optional[QtWidgets.QWidget] = None) -> dict[str, str]:
     palette = _resolved_palette(source)
     return {
+        "window": palette.color(QPalette.ColorRole.Window).name(),
         "base": palette.color(QPalette.ColorRole.Base).name(),
         "alt": palette.color(QPalette.ColorRole.AlternateBase).name(),
         "text": palette.color(QPalette.ColorRole.Text).name(),
+        "window_text": palette.color(QPalette.ColorRole.WindowText).name(),
         "mid": palette.color(QPalette.ColorRole.Mid).name(),
         "highlight": palette.color(QPalette.ColorRole.Highlight).name(),
         "highlighted_text": palette.color(QPalette.ColorRole.HighlightedText).name(),
@@ -360,14 +362,27 @@ class QuickChoiceOverlay(QtWidgets.QDialog):
         self.setModal(False)
         self._title_text = title
         self._items: list[str] = []
+        colors = _chat_surface_defaults(parent)
+        card_bg = theme_value("ai_chat_panel.quick_choice.bg", colors["window"])
+        card_border = theme_value("ai_chat_panel.quick_choice.border", colors["mid"])
+        title_color = theme_value("ai_chat_panel.quick_choice.title", colors["text"])
+        input_bg = theme_value("ai_chat_panel.quick_choice.input_bg", colors["base"])
+        input_text = theme_value("ai_chat_panel.quick_choice.input_text", colors["text"])
+        input_border = theme_value("ai_chat_panel.quick_choice.input_border", colors["mid"])
+        list_bg = theme_value("ai_chat_panel.quick_choice.list_bg", colors["base"])
+        list_text = theme_value("ai_chat_panel.quick_choice.list_text", colors["text"])
+        list_border = theme_value("ai_chat_panel.quick_choice.list_border", colors["mid"])
+        selected_bg = theme_value("ai_chat_panel.quick_choice.selected_bg", colors["highlight"])
+        selected_text = theme_value("ai_chat_panel.quick_choice.selected_text", colors["highlighted_text"])
+        hint_color = theme_value("ai_chat_panel.quick_choice.hint", colors["disabled_text"])
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         card = QtWidgets.QFrame(self)
         card.setObjectName("QuickChoiceCard")
         card.setStyleSheet(
             "QFrame#QuickChoiceCard {"
-            "  background: #0b0b0b;"
-            "  border: 1px solid #1f1f1f;"
+            f"  background: {card_bg};"
+            f"  border: 1px solid {card_border};"
             "  border-radius: 8px;"
             "}"
         )
@@ -376,15 +391,15 @@ class QuickChoiceOverlay(QtWidgets.QDialog):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
         title_label = QtWidgets.QLabel(title, card)
-        title_label.setStyleSheet("font-weight: 600; font-size: 11px; color: #9fb7a9;")
+        title_label.setStyleSheet(f"font-weight: 600; font-size: 11px; color: {title_color};")
         layout.addWidget(title_label)
         self.search = QtWidgets.QLineEdit(card)
         self.search.setPlaceholderText(placeholder)
         self.search.setStyleSheet(
             "padding: 6px;"
-            "background: #111;"
-            "color: #d6f5d6;"
-            "border: 1px solid #1f1f1f;"
+            f"background: {input_bg};"
+            f"color: {input_text};"
+            f"border: 1px solid {input_border};"
             "border-radius: 6px;"
             "font-size: 12px;"
         )
@@ -395,21 +410,21 @@ class QuickChoiceOverlay(QtWidgets.QDialog):
         self.list_widget.setFocusPolicy(Qt.NoFocus)
         self.list_widget.setStyleSheet(
             "QListWidget {"
-            "  background: #0d0d0d;"
-            "  color: #d6f5d6;"
-            "  border: 1px solid #1a1a1a;"
+            f"  background: {list_bg};"
+            f"  color: {list_text};"
+            f"  border: 1px solid {list_border};"
             "  border-radius: 6px;"
             "  padding: 4px;"
             "  font-size: 11px;"
             "}"
             "QListWidget::item { padding: 4px; border-radius: 4px; }"
-            "QListWidget::item:selected { background: #1a4d2e; }"
+            f"QListWidget::item:selected {{ background: {selected_bg}; color: {selected_text}; }}"
         )
         self.list_widget.itemActivated.connect(self._accept_current)
         self.list_widget.itemDoubleClicked.connect(self._accept_current)
         layout.addWidget(self.list_widget)
         hint = QtWidgets.QLabel("↑↓ to navigate, Enter to select, Esc to cancel", card)
-        hint.setStyleSheet("color: #7b8f84; font-size: 10px;")
+        hint.setStyleSheet(f"color: {hint_color}; font-size: 10px;")
         layout.addWidget(hint)
         self.resize(420, 300)
 
@@ -1921,6 +1936,7 @@ class AIChatPanel(QtWidgets.QWidget):
             return None
 
     def _build_ui(self) -> None:
+        self.setObjectName("aiChatPanel")
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
@@ -1971,6 +1987,7 @@ class AIChatPanel(QtWidgets.QWidget):
         icon_row.addWidget(self.zoom_in_btn)
         layout.addLayout(icon_row)
         self.server_config_widget = QtWidgets.QWidget()
+        self.server_config_widget.setObjectName("aiChatServerConfig")
         self.server_config_widget.setVisible(False)
         cfg_layout = QtWidgets.QVBoxLayout(self.server_config_widget)
         cfg_layout.setContentsMargins(0, 0, 0, 0)
@@ -2007,6 +2024,7 @@ class AIChatPanel(QtWidgets.QWidget):
         cfg_layout.addLayout(model_row)
         layout.addWidget(self.server_config_widget)
         self.context_bar = QtWidgets.QWidget()
+        self.context_bar.setObjectName("aiChatContextBar")
         context_layout = QtWidgets.QHBoxLayout(self.context_bar)
         context_layout.setContentsMargins(4, 2, 4, 2)
         self.context_refresh_btn = QtWidgets.QToolButton()
@@ -2028,6 +2046,7 @@ class AIChatPanel(QtWidgets.QWidget):
         layout.addWidget(self.context_bar)
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         left_container = QtWidgets.QWidget()
+        left_container.setObjectName("aiChatLeft")
         left_layout = QtWidgets.QVBoxLayout(left_container)
         left_layout.setContentsMargins(4, 4, 4, 4)
         left_layout.setSpacing(4)
@@ -2055,6 +2074,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.splitter.addWidget(left_container)
 
         right_container = QtWidgets.QWidget()
+        right_container.setObjectName("aiChatRight")
         right_layout = QtWidgets.QVBoxLayout(right_container)
         right_layout.setContentsMargins(4, 4, 4, 4)
         right_layout.setSpacing(4)
@@ -2158,6 +2178,71 @@ class AIChatPanel(QtWidgets.QWidget):
         right_layout.addWidget(input_container)
         self.splitter.addWidget(right_container)
         layout.addWidget(self.splitter, 1)
+        self._apply_theme_styles()
+
+    def _apply_theme_styles(self) -> None:
+        colors = _chat_surface_defaults(self)
+        panel_bg = theme_value("ai_chat_panel.panel.bg", colors["window"])
+        panel_text = theme_value("ai_chat_panel.panel.text", colors["window_text"])
+        surface_bg = theme_value("ai_chat_panel.panel.surface_bg", colors["base"])
+        alt_bg = theme_value("ai_chat_panel.panel.alt_bg", colors["alt"])
+        border = theme_value("ai_chat_panel.panel.border", colors["mid"])
+        input_bg = theme_value("ai_chat_panel.panel.input_bg", colors["base"])
+        input_text = theme_value("ai_chat_panel.panel.input_text", colors["text"])
+        highlight = theme_value("ai_chat_panel.panel.selected_bg", colors["highlight"])
+        highlighted_text = theme_value("ai_chat_panel.panel.selected_text", colors["highlighted_text"])
+        disabled_text = theme_value("ai_chat_panel.panel.muted_text", colors["disabled_text"])
+        self.setStyleSheet(
+            f"""
+            QWidget#aiChatPanel {{
+                background: {panel_bg};
+                color: {panel_text};
+            }}
+            QWidget#aiChatLeft,
+            QWidget#aiChatRight,
+            QWidget#aiChatContextBar,
+            QWidget#aiChatServerConfig {{
+                background: {panel_bg};
+                color: {panel_text};
+            }}
+            QTreeWidget {{
+                background: {surface_bg};
+                color: {input_text};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+            QTreeWidget::item:selected {{
+                background: {highlight};
+                color: {highlighted_text};
+            }}
+            QPlainTextEdit,
+            QLineEdit,
+            QComboBox,
+            QListWidget,
+            QTableWidget {{
+                background: {input_bg};
+                color: {input_text};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+            QListWidget::item:selected,
+            QTableWidget::item:selected {{
+                background: {highlight};
+                color: {highlighted_text};
+            }}
+            QHeaderView::section {{
+                background: {alt_bg};
+                color: {panel_text};
+                border: 1px solid {border};
+            }}
+            QLabel {{
+                color: {panel_text};
+            }}
+            QCheckBox {{
+                color: {disabled_text};
+            }}
+            """
+        )
         self._toggle_chat_list(True)
         self._update_context_summary()
         self._apply_font_size()

@@ -59,6 +59,7 @@ from .task_style import (
     priority_brush,
     priority_time_label,
     relative_day_label,
+    TaskSemanticColorDelegate,
 )
 from markdown import markdown as render_markdown
 from .ai_chat_panel import ApiWorker, ServerManager
@@ -641,6 +642,7 @@ class CalendarPanel(QWidget):
         except Exception:
             pass
         self.tasks_due_list = QTreeWidget()
+        self.tasks_due_list.setItemDelegate(TaskSemanticColorDelegate(self.tasks_due_list))
         self._show_task_start_column = False
         self._show_task_page_column = False
         self._configure_task_columns(force=True)
@@ -680,6 +682,7 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.installEventFilter(self)
         self.tasks_due_list.viewport().installEventFilter(self)
         self._apply_task_list_selection_style()
+        self._apply_insight_list_styles()
 
         due_row = QWidget()
         due_row_layout = QHBoxLayout()
@@ -901,9 +904,76 @@ class CalendarPanel(QWidget):
             return QColor(accent_hex)
         return QColor(color)
 
+    def _effective_accent_color(self) -> str:
+        accent = (self._vault_accent_color or "").strip()
+        if accent.startswith("#"):
+            return accent
+        return QApplication.palette().color(QPalette.Highlight).name()
+
+    def _hover_fill_for_accent(self, accent_hex: str, fallback_key: str, fallback: str) -> str:
+        color = QColor(accent_hex)
+        if not color.isValid():
+            return theme_value(fallback_key, fallback)
+        color.setAlpha(48)
+        return color.name(QColor.HexArgb)
+
+    def _apply_insight_list_styles(self) -> None:
+        accent = self._effective_accent_color()
+        hover_bg = self._hover_fill_for_accent(
+            accent,
+            "calendar_panel.list.hover_bg",
+            "palette(alternate-base)",
+        )
+        selected_bg = self._selection_bg_for_accent(accent).name()
+        selected_text = self._selection_text_for_background(self._selection_bg_for_accent(accent)).name()
+        base_bg = theme_value("calendar_panel.list.bg", "palette(base)")
+        text = theme_value("calendar_panel.list.text", "palette(text)")
+        border = theme_value("calendar_panel.list.border", "palette(mid)")
+        for widget, alt_bg in (
+            (getattr(self, "subpage_list", None), theme_value("calendar_panel.list.alt_bg", "palette(alternate-base)")),
+            (getattr(self, "headings_list", None), theme_value("calendar_panel.list.alt_bg_alt", "palette(alternate-base)")),
+            (getattr(self, "recent_list", None), theme_value("calendar_panel.list.alt_bg", "palette(alternate-base)")),
+        ):
+            if widget is None:
+                continue
+            widget.setStyleSheet(
+                f"""
+                QListWidget {{
+                    background: {base_bg};
+                    color: {text};
+                    border: 1px solid {border};
+                    border-radius: 6px;
+                }}
+                QListWidget::item {{
+                    padding: 2px 4px;
+                    background: {base_bg};
+                    border: 1px solid transparent;
+                    border-radius: 6px;
+                }}
+                QListWidget::item:alternate {{
+                    background: {alt_bg};
+                }}
+                QListWidget::item:hover {{
+                    background: {hover_bg};
+                    border: 1px solid {accent};
+                }}
+                QListWidget::item:selected {{
+                    background: {selected_bg};
+                    color: {selected_text};
+                    border: 1px solid {selected_bg};
+                }}
+                """
+            )
+
     def _apply_calendar_stylesheet(self) -> None:
+        accent = self._effective_accent_color()
         selected_bg = self._calendar_selected_bg.name()
         selected_text = self._calendar_selected_text.name()
+        hover_bg = self._hover_fill_for_accent(
+            accent,
+            "calendar_panel.calendar.hover_bg",
+            "palette(alternate-base)",
+        )
         self.calendar.setStyleSheet(
             f"""
             QCalendarWidget QWidget#qt_calendar_navigationbar {{
@@ -943,6 +1013,10 @@ class CalendarPanel(QWidget):
                 border: 1px solid {self._calendar_grid_color};
                 padding: 6px;
                 border-radius: 4px;
+            }}
+            QCalendarWidget QTableView::item:hover {{
+                background-color: {hover_bg};
+                border: 1px solid {accent};
             }}
             QCalendarWidget QTableView::item:selected {{
                 background-color: transparent;
@@ -1004,25 +1078,29 @@ class CalendarPanel(QWidget):
         task_list = getattr(self, "tasks_due_list", None)
         if task_list is None:
             return
-        accent = (self._vault_accent_color or "").strip()
-        if not accent:
-            task_list.setStyleSheet("")
-            return
-        selected_bg = self._selection_bg_for_accent(accent)
-        selected_text = self._selection_text_for_background(selected_bg).name()
-        hover_bg = theme_value("calendar_panel.task_tree.hover_bg", "palette(alternate-base)")
+        accent = self._effective_accent_color()
+        hover_bg = self._hover_fill_for_accent(
+            accent,
+            "calendar_panel.task_tree.hover_bg",
+            "palette(alternate-base)",
+        )
         task_list.setStyleSheet(
             f"""
+            QTreeWidget::item {{
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }}
             QTreeWidget::item:selected {{
-                background: {selected_bg.name()};
-                color: {selected_text};
+                background: transparent;
+                border: 1px solid {accent};
             }}
             QTreeWidget::item:selected:active {{
-                background: {selected_bg.name()};
-                color: {selected_text};
+                background: transparent;
+                border: 1px solid {accent};
             }}
             QTreeWidget::item:hover {{
                 background: {hover_bg};
+                border: 1px solid {accent};
             }}
             """
         )
@@ -1043,6 +1121,7 @@ class CalendarPanel(QWidget):
         self._apply_aux_calendar_styles()
         self._apply_today_button_style()
         self._apply_task_list_selection_style()
+        self._apply_insight_list_styles()
         self._apply_multi_selection_formats()
 
     def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
@@ -2682,13 +2761,14 @@ class CalendarPanel(QWidget):
         task_list = getattr(self, "tasks_due_list", None)
         task_viewport = task_list.viewport() if task_list else None
         if obj in (task_list, task_viewport) and event.type() == QEvent.KeyPress:
+            mods = event.modifiers() & ~Qt.KeypadModifier
             if event.key() == Qt.Key_Escape and self._clear_multi_day_filter_selection():
                 event.accept()
                 return True
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 current = self.tasks_due_list.currentItem()
                 if current and current.data(0, PATH_ROLE):
-                    keep_panel = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                    keep_panel = mods == Qt.ShiftModifier
                     if keep_panel:
                         self._mark_activation_source("keyboard_keep_panel")
                     else:
@@ -2698,6 +2778,7 @@ class CalendarPanel(QWidget):
                     return True
         if obj in (getattr(self, "headings_list", None), getattr(self, "subpage_list", None)) and event.type() == QEvent.KeyPress:
             list_widget = obj
+            mods = event.modifiers() & ~Qt.KeypadModifier
             if event.key() == Qt.Key_Escape:
                 cleared = self._clear_multi_day_filter_selection()
                 if self.focus_calendar_input():
@@ -2709,7 +2790,7 @@ class CalendarPanel(QWidget):
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 current = list_widget.currentItem() if list_widget else None
                 if current and current.data(PATH_ROLE):
-                    if event.modifiers() & Qt.ControlModifier:
+                    if mods == Qt.ShiftModifier:
                         self._mark_activation_source("keyboard_keep_panel")
                     else:
                         self._mark_activation_source("keyboard")
@@ -2748,9 +2829,10 @@ class CalendarPanel(QWidget):
             self.calendar_view.viewport() if self.calendar_view and Shiboken.isValid(self.calendar_view) and self.calendar_view.viewport() else None,
         ):
             if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                mods = event.modifiers() & ~Qt.KeypadModifier
                 selected = self.calendar.selectedDate()
                 if selected and selected.isValid():
-                    if event.modifiers() & Qt.ControlModifier:
+                    if mods == Qt.ShiftModifier:
                         self._mark_activation_source("keyboard_keep_panel")
                     else:
                         self._mark_activation_source("keyboard")
@@ -3212,6 +3294,8 @@ class CalendarPanel(QWidget):
         due_colors = self._due_colors(task.get("due") or "")
         if due_colors:
             fg, bg = due_colors
+            row.setForeground(0, fg)
+            row.setBackground(0, bg)
             row.setForeground(due_idx, fg)
             row.setBackground(due_idx, bg)
         if parent:

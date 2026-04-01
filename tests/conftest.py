@@ -37,6 +37,9 @@ def _flush_qt(app: QApplication, rounds: int = 2) -> None:
 
 @pytest.fixture(scope="session")
 def qapp() -> QApplication:
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
@@ -71,6 +74,8 @@ def qapp() -> QApplication:
                 pass
     except Exception:
         pass
+    if gc_was_enabled:
+        gc.enable()
     gc.collect()
 
 
@@ -95,7 +100,8 @@ def _cleanup_toplevel_widgets(qapp: QApplication):
         except Exception:
             pass
 
-    _flush_qt(qapp, rounds=3)
+    widgets.clear()
+    _flush_qt(qapp, rounds=5)
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +151,8 @@ def qtbot(qapp: QApplication):
                 widget.deleteLater()
         except Exception:
             pass
-    _flush_qt(qapp, rounds=2)
+    bot._widgets.clear()
+    _flush_qt(qapp, rounds=5)
 
 
 class _TestHttpResponse:
@@ -292,4 +299,5 @@ def main_window(qtbot, monkeypatch, tmp_path):
         window.deleteLater()
     except Exception:
         pass
-    _flush_qt(qapp, rounds=1)
+    del window
+    _flush_qt(qapp, rounds=5)

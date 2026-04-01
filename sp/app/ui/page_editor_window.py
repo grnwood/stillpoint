@@ -37,13 +37,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QSize
 
 from .find_replace_bar import FindReplaceBar
-from .markdown_editor import MarkdownEditor
+from .markdown_editor import MarkdownEditor, MARKDOWN_IMAGE_WIDTH_OPTIONS
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
 from sp.logging_flags import log_enabled
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 from sp.server.adapters.files import PAGE_SUFFIXES
 
 
@@ -860,7 +860,35 @@ class PageEditorWindow(QMainWindow):
     def _show_editor_context_menu(self, pos) -> None:
         """Show context menu with Edit operations matching main window."""
         from PySide6.QtWidgets import QMenu
-        
+
+        image_hit = None
+        try:
+            image_hit = self.editor._image_at_position(pos)
+        except Exception:
+            image_hit = None
+        if image_hit:
+            _, fmt = image_hit
+            image_name = fmt.name()
+            menu = QMenu(self)
+            apply_menu_theme(menu, self.editor)
+            for width in MARKDOWN_IMAGE_WIDTH_OPTIONS:
+                action = menu.addAction(f"{width}px")
+                action.triggered.connect(
+                    lambda checked=False, w=width, name=image_name: self.editor._resize_image_by_name(name, w)
+                )
+            menu.addSeparator()
+            reset_action = menu.addAction("Original Size")
+            reset_action.triggered.connect(
+                lambda checked=False, name=image_name: self.editor._resize_image_by_name(name, None)
+            )
+            menu.addSeparator()
+            custom_action = menu.addAction("Custom…")
+            custom_action.triggered.connect(
+                lambda checked=False, name=image_name: self.editor._prompt_image_width_by_name(name)
+            )
+            menu.exec(self.editor.mapToGlobal(pos))
+            return
+
         # Get standard context menu (Undo, Redo, Cut, Copy, Paste, Delete, Select All)
         base_menu = self.editor.createStandardContextMenu()
         

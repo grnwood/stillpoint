@@ -4,7 +4,42 @@ from datetime import date, timedelta
 import math
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
+
+
+class TaskSemanticColorDelegate(QStyledItemDelegate):
+    """Paint semantic task colors directly so selection/theme styles cannot suppress them."""
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        bg_data = index.data(Qt.BackgroundRole)
+        fg_data = index.data(Qt.ForegroundRole)
+        if bg_data is None and fg_data is None:
+            return super().paint(painter, option, index)
+
+        bg = bg_data.color() if hasattr(bg_data, "color") else QColor(bg_data) if bg_data else QColor()
+        fg = fg_data.color() if hasattr(fg_data, "color") else QColor(fg_data) if fg_data else QColor()
+        if not bg.isValid() and not fg.isValid():
+            return super().paint(painter, option, index)
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""
+        opt.backgroundBrush = Qt.NoBrush
+        super().paint(painter, opt, index)
+
+        painter.save()
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        if bg.isValid():
+            painter.fillRect(rect, bg)
+        painter.setPen(fg if fg.isValid() else option.palette.color(option.palette.Text))
+        painter.setFont(option.font)
+        draw_rect = rect.adjusted(4, 0, -4, 0)
+        elided = painter.fontMetrics().elidedText(text, option.textElideMode, max(0, draw_rect.width()))
+        painter.drawText(draw_rect, int(opt.displayAlignment), elided)
+        painter.restore()
 
 
 def relative_day_label(target: date, prefix: str = "") -> str:
@@ -83,11 +118,14 @@ def due_colors_from_due_str(
         return None
     today_dt = date.today()
     if due_dt < today_dt:
-        return QColor("#FFFFFF"), QColor("#CC0000")
+        bg = QColor("#CC0000")
+        return contrast_text_color(bg), bg
     if due_dt == today_dt:
-        return QColor("#3A1D00"), QColor("#F57900")
+        bg = QColor("#F57900")
+        return contrast_text_color(bg), bg
     if include_tomorrow and due_dt == today_dt + timedelta(days=1):
-        return QColor("#444444"), QColor("#FDD835")
+        bg = QColor("#FDD835")
+        return contrast_text_color(bg), bg
     return None
 
 

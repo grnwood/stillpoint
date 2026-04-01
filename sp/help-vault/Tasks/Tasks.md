@@ -41,7 +41,8 @@ The Tasks panel shows all tasks from your vault.
 - Use the search box to filter tasks.
 - While editing, use `Ctrl+\` to jump focus to Tasks quickly.
 - Fast keyboard flow: `Ctrl+\` -> type search text -> arrow keys -> `Enter` to jump and focus editor.
-- Use `Ctrl+Enter` or `Shift+Enter` to jump but keep focus in the task list (Tasks and Calendar task lists).
+- Use `Shift+Enter` to jump but keep focus in the task list.
+- The same `Enter` / `Shift+Enter` behavior applies in both the main Tasks panel and the Calendar tab's task list.
 - Open the Tasks panel in its own window (`View -> Open Task Panel Window`) to keep it on a second monitor.
 
 ## Filtering Tasks

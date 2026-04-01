@@ -37,7 +37,11 @@ Common date format in tasks/journal context:
 - Filter tasks by range and context so planning stays focused on the selected dates.
 
 ## Keyboard Navigation
-Calendar works well without the mouse. Use arrow keys to move the selected day, then press `Enter` to open that journal page and focus the editor, or `Ctrl+Enter` to open it while staying in Calendar. In vi mode, `h/j/k/l` provide the same movement, `Shift` with arrows or vi keys extends a multi-day range, `t` jumps to today, `/` moves focus into the headings and subpages lists, and `Esc` returns focus to the calendar grid. If you already know the target date, press `Ctrl+Alt+D` from the main editor to pop open a compact calendar and jump straight there.
+Calendar works well without the mouse.
+- In the day grid, arrow keys move the selected day, `Enter` opens that journal page and focuses the editor, and `Shift+Enter` opens it while staying in Calendar.
+- In the headings, pages, and subpages lists, `Enter` opens the selected item and focuses the editor, and `Shift+Enter` opens it while keeping focus in Calendar.
+- In vi mode, `h/j/k/l` provide the same movement, `Shift` with arrows or vi keys extends a multi-day range, `t` jumps to today, `/` moves focus into the headings and subpages lists, and `Esc` returns focus to the calendar grid.
+- If you already know the target date, press `Ctrl+Alt+D` from the main editor to pop open a compact calendar and jump straight there.
 
 ## Journaling
 Use the calendar for daily journaling:

@@ -89,6 +89,7 @@ class JumpToPageDialog(QDialog):
         current_page_path: str | None = None,
         implied_target_path: str | None = None,
         implied_target_label: str | None = None,
+        quick_targets: list[tuple[str, str]] | None = None,
         allowed_paths: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -107,6 +108,21 @@ class JumpToPageDialog(QDialog):
         self._show_rewrite_links_checkbox = show_rewrite_links_checkbox
         self._implied_target_path = self._normalize_implied_target_path(implied_target_path)
         self._implied_target_label = implied_target_label.strip() if isinstance(implied_target_label, str) else ""
+        self._quick_targets: list[tuple[str, str]] = []
+        seen_quick_paths: set[str] = set()
+        if self._implied_target_path:
+            self._quick_targets.append(
+                (self._implied_target_path, self._implied_target_label or "<Vault Root>")
+            )
+            seen_quick_paths.add(self._implied_target_path)
+        if quick_targets:
+            for raw_path, raw_label in quick_targets:
+                path = self._normalize_implied_target_path(raw_path)
+                if not path or path in seen_quick_paths:
+                    continue
+                label = raw_label.strip() if isinstance(raw_label, str) and raw_label.strip() else path
+                self._quick_targets.append((path, label))
+                seen_quick_paths.add(path)
         self._allowed_paths: list[str] = []
         if allowed_paths:
             seen: set[str] = set()
@@ -359,14 +375,13 @@ class JumpToPageDialog(QDialog):
                 pages = config.search_pages(term)
         
         self.list_widget.clear()
-        implied_inserted = False
-        if self._implied_target_path:
-            implied_text = self._implied_target_label or "<Vault Root>"
-            implied_item = QListWidgetItem(f"<b>{html.escape(implied_text)}</b>")
-            implied_item.setData(Qt.UserRole, self._implied_target_path)
-            implied_item.setToolTip(implied_text)
-            self.list_widget.addItem(implied_item)
-            implied_inserted = True
+        quick_target_count = 0
+        for quick_path, quick_label in self._quick_targets:
+            quick_item = QListWidgetItem(f"<b>{html.escape(quick_label)}</b>")
+            quick_item.setData(Qt.UserRole, quick_path)
+            quick_item.setToolTip(quick_label)
+            self.list_widget.addItem(quick_item)
+            quick_target_count += 1
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
                 continue
@@ -386,9 +401,9 @@ class JumpToPageDialog(QDialog):
         
         if self.list_widget.count() > 0:
             default_row = 0
-            if implied_inserted and term and self.list_widget.count() > 1:
-                # While searching, prefer the first real result over the implied destination.
-                default_row = 1
+            if quick_target_count and term and self.list_widget.count() > quick_target_count:
+                # While searching, prefer the first real result over pinned destinations.
+                default_row = quick_target_count
             self.list_widget.setCurrentRow(default_row)
         
         # Update title based on whether we have matches
