@@ -4,6 +4,7 @@ import hashlib
 import html
 from pathlib import Path
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -38,6 +39,13 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import PAGE_SUFFIX
+
+
+def _folder_dialog_options() -> QFileDialog.Options:
+    options = QFileDialog.Options()
+    if sys.platform.startswith("linux"):
+        options |= QFileDialog.DontUseNativeDialog
+    return options
 
 
 class AddVaultDialog(QDialog):
@@ -75,7 +83,12 @@ class AddVaultDialog(QDialog):
         layout.addWidget(buttons)
 
     def _browse(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Vault Folder", str(Path.home()))
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Vault Folder",
+            str(Path.home()),
+            options=_folder_dialog_options(),
+        )
         if directory:
             self.path_edit.setText(directory)
             if not self.name_edit.text().strip():
@@ -206,7 +219,12 @@ class AddHomebaseVaultDialog(QDialog):
         self._update_mode()
 
     def _browse_local(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Local Vault Folder", str(Path.home()))
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Local Vault Folder",
+            str(Path.home()),
+            options=_folder_dialog_options(),
+        )
         if directory:
             self.local_path_edit.setText(directory)
             if not self.name_edit.text().strip():

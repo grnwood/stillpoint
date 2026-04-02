@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
 
 
 def test_open_vault_dialog_uses_single_vaults_tab(qtbot, monkeypatch) -> None:
@@ -203,6 +203,30 @@ def test_add_homebase_dialog_prefills_from_detected_metadata(qtbot) -> None:
     assert dlg.vault_id_edit.text() == "vault-123"
     assert dlg.name_edit.text() == "Recovered Vault"
     assert dlg.store_passphrase_checkbox.isChecked() is False
+
+
+def test_linux_vault_folder_picker_uses_non_native_dialog(qtbot, monkeypatch) -> None:
+    from sp.app.ui.open_vault_dialog import AddVaultDialog, AddHomebaseVaultDialog
+
+    calls: list[QFileDialog.Option] = []
+
+    def fake_get_existing_directory(parent, caption, directory, options=QFileDialog.Option(0)) -> str:
+        calls.append(options)
+        return ""
+
+    monkeypatch.setattr("sp.app.ui.open_vault_dialog.sys.platform", "linux")
+    monkeypatch.setattr("sp.app.ui.open_vault_dialog.QFileDialog.getExistingDirectory", fake_get_existing_directory)
+
+    add_vault = AddVaultDialog()
+    qtbot.addWidget(add_vault)
+    add_vault._browse()
+
+    add_homebase = AddHomebaseVaultDialog()
+    qtbot.addWidget(add_homebase)
+    add_homebase._browse_local()
+
+    assert len(calls) == 2
+    assert all(option & QFileDialog.DontUseNativeDialog for option in calls)
 
 
 def test_add_vault_detects_homebase_metadata_and_routes_to_homebase_setup(qtbot, monkeypatch, tmp_path) -> None:
@@ -411,4 +435,3 @@ def test_remove_selected_clears_default_when_homebase_profile_was_default(qtbot,
 
     assert saved_defaults == [None]
     assert dlg.default_vault is None
-
