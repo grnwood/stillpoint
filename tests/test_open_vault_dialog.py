@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
 
 
 def test_open_vault_dialog_uses_single_vaults_tab(qtbot, monkeypatch) -> None:
@@ -205,6 +205,29 @@ def test_add_homebase_dialog_prefills_from_detected_metadata(qtbot) -> None:
     assert dlg.store_passphrase_checkbox.isChecked() is False
 
 
+def test_select_directory_uses_non_native_dialog_on_linux(monkeypatch) -> None:
+    from sp.app.ui import open_vault_dialog as dialog_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(dialog_module.sys, "platform", "linux")
+
+    def fake_get_existing_directory(parent, title, start_dir, options=QFileDialog.Options()):
+        captured["title"] = title
+        captured["start_dir"] = start_dir
+        captured["options"] = options
+        return "/tmp/vault"
+
+    monkeypatch.setattr(dialog_module.QFileDialog, "getExistingDirectory", fake_get_existing_directory)
+
+    selected = dialog_module._select_directory(None, "Select Vault Folder", "/tmp")
+
+    assert selected == "/tmp/vault"
+    assert captured["title"] == "Select Vault Folder"
+    assert captured["start_dir"] == "/tmp"
+    assert int(captured["options"]) & int(QFileDialog.DontUseNativeDialog)
+
+
 def test_add_vault_detects_homebase_metadata_and_routes_to_homebase_setup(qtbot, monkeypatch, tmp_path) -> None:
     from sp.app import config
     from sp.app.ui import open_vault_dialog as dialog_module
@@ -283,6 +306,70 @@ def test_add_vault_detects_homebase_metadata_and_routes_to_homebase_setup(qtbot,
     current = dlg.local_list_widget.currentItem().data(Qt.UserRole)
     assert current["id"] == profile["id"]
     assert current["passphrase"] == "session-passphrase"
+
+
+def test_add_homebase_persists_trusted_passphrase_immediately(qtbot, monkeypatch, tmp_path) -> None:
+    from sp.app import config
+    from sp.app.ui import open_vault_dialog as dialog_module
+
+    vault_root = tmp_path / "HomebaseVault"
+    vault_root.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "id": f"homebase::https://server.example::vault-123::{vault_root}",
+        "kind": "homebase",
+        "name": "Recovered Vault",
+        "path": str(vault_root),
+        "server_url": "https://server.example",
+        "verify_ssl": True,
+        "vault_id": "vault-123",
+        "username": "casey",
+        "access_token": "access-token",
+        "refresh_token": "refresh-token",
+        "passphrase": "trusted-passphrase",
+        "store_passphrase": True,
+    }
+    profiles: list[dict[str, str]] = []
+    pushed_roots: list[str] = []
+    reset_tokens: list[object] = []
+    saved_store_flags: list[bool] = []
+    saved_passphrases: list[str] = []
+
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: list(profiles))
+    monkeypatch.setattr(config, "load_default_vault", lambda: None)
+    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
+    monkeypatch.setattr(config, "delete_known_vault", lambda path: None)
+    monkeypatch.setattr(config, "save_homebase_vault_metadata", lambda path, entry: True)
+    monkeypatch.setattr(config, "push_active_vault_context", lambda root: pushed_roots.append(root) or "token")
+    monkeypatch.setattr(config, "reset_active_vault_context", lambda token: reset_tokens.append(token))
+    monkeypatch.setattr(config, "save_homebase_store_passphrase", lambda value: saved_store_flags.append(value))
+    monkeypatch.setattr(config, "save_homebase_passphrase", lambda value: saved_passphrases.append(value))
+
+    def fake_upsert(entry: dict[str, str]) -> None:
+        profiles[:] = [dict(entry)]
+
+    monkeypatch.setattr(config, "upsert_homebase_vault_profile", fake_upsert)
+
+    class FakeAddHomebaseVaultDialog:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+
+        def exec(self) -> int:
+            return QDialog.Accepted
+
+        def selected_profile(self) -> dict[str, str]:
+            return dict(profile)
+
+    monkeypatch.setattr(dialog_module, "AddHomebaseVaultDialog", FakeAddHomebaseVaultDialog)
+
+    dlg = dialog_module.OpenVaultDialog(vaults=[])
+    qtbot.addWidget(dlg)
+
+    dlg._add_homebase()
+
+    assert pushed_roots == [str(vault_root)]
+    assert saved_store_flags == [True]
+    assert saved_passphrases == ["trusted-passphrase"]
+    assert reset_tokens == ["token"]
 
 
 def test_remove_selected_removes_local_vault_and_clears_default(qtbot, monkeypatch) -> None:
@@ -411,4 +498,3 @@ def test_remove_selected_clears_default_when_homebase_profile_was_default(qtbot,
 
     assert saved_defaults == [None]
     assert dlg.default_vault is None
-

@@ -4,6 +4,7 @@ import hashlib
 import html
 from pathlib import Path
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -38,6 +39,38 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import PAGE_SUFFIX
+
+
+def _select_directory(parent, title: str, start_dir: str) -> str:
+    """Use Qt's non-native directory picker on Linux to avoid blank portal dialogs."""
+    options = QFileDialog.Options()
+    if sys.platform.startswith("linux"):
+        options |= QFileDialog.DontUseNativeDialog
+    return QFileDialog.getExistingDirectory(parent, title, start_dir, options=options)
+
+
+def _persist_homebase_passphrase_settings(profile: Optional[dict[str, str]]) -> None:
+    """Persist passphrase settings into the target vault immediately when trusted."""
+    if not profile:
+        return
+    local_path = str(profile.get("path") or "").strip()
+    if not local_path:
+        return
+    store_passphrase = bool(profile.get("store_passphrase", False))
+    passphrase = str(profile.get("passphrase") or "")
+    token = None
+    try:
+        token = config.push_active_vault_context(local_path)
+        config.save_homebase_store_passphrase(store_passphrase)
+        config.save_homebase_passphrase(passphrase if store_passphrase else "")
+    except Exception:
+        return
+    finally:
+        if token is not None:
+            try:
+                config.reset_active_vault_context(token)
+            except Exception:
+                pass
 
 
 class AddVaultDialog(QDialog):
@@ -75,7 +108,7 @@ class AddVaultDialog(QDialog):
         layout.addWidget(buttons)
 
     def _browse(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Vault Folder", str(Path.home()))
+        directory = _select_directory(self, "Select Vault Folder", str(Path.home()))
         if directory:
             self.path_edit.setText(directory)
             if not self.name_edit.text().strip():
@@ -206,7 +239,7 @@ class AddHomebaseVaultDialog(QDialog):
         self._update_mode()
 
     def _browse_local(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Select Local Vault Folder", str(Path.home()))
+        directory = _select_directory(self, "Select Local Vault Folder", str(Path.home()))
         if directory:
             self.local_path_edit.setText(directory)
             if not self.name_edit.text().strip():
@@ -1131,6 +1164,7 @@ class OpenVaultDialog(QDialog):
             if not profile:
                 return
             self._remember_transient_homebase_profile(profile)
+            _persist_homebase_passphrase_settings(profile)
             profile_path = str(profile.get("path") or "").strip()
             if profile_path:
                 config.delete_known_vault(profile_path)
@@ -1172,6 +1206,7 @@ class OpenVaultDialog(QDialog):
         if not profile:
             return
         self._remember_transient_homebase_profile(profile)
+        _persist_homebase_passphrase_settings(profile)
         config.upsert_homebase_vault_profile(profile)
         profile_path = str(profile.get("path") or "").strip()
         if profile_path:

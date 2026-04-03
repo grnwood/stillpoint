@@ -907,7 +907,7 @@ def save_default_markdown_font(font: Optional[str]) -> None:
     _update_global_config({"default_markdown_font": value})
 
 
-def load_hr_line_height(default: float = 2.0) -> float:
+def load_hr_line_height(default: float = 1.0) -> float:
     """Return preferred horizontal-rule line height in points."""
     payload = _read_global_config()
     raw = payload.get("hr_line_height")
@@ -922,7 +922,7 @@ def save_hr_line_height(height: float) -> None:
     try:
         value = max(0.5, min(float(height), 8.0))
     except Exception:
-        value = 2.0
+        value = 1.0
     _update_global_config({"hr_line_height": value})
 
 
