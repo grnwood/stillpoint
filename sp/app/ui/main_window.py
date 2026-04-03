@@ -3829,10 +3829,7 @@ class MainWindow(QMainWindow):
                 profile = self._homebase_profile_for_id(path or default_vault)
                 if profile:
                     local_path = str(profile.get("path") or "").strip()
-                    profile_server = str(profile.get("server_url") or "").strip()
-                    verify_ssl = bool(profile.get("verify_ssl", True))
-                    if profile_server:
-                        self._switch_api_base(profile_server, is_remote=True, verify_tls=verify_ssl)
+                    self._switch_api_base(self._local_api_base, is_remote=False, verify_tls=True)
                     if local_path and self._set_vault(local_path, vault_name=profile.get("name")):
                         self._apply_homebase_profile(profile)
                         self._update_user_management_ui()

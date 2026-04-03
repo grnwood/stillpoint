@@ -332,16 +332,22 @@ def load_known_vaults() -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     if isinstance(vaults, list):
         for entry in vaults:
-            if not isinstance(entry, dict):
+            if isinstance(entry, str):
+                path = entry
+                entry_name = None
+                last_opened = None
+            elif isinstance(entry, dict):
+                path = entry.get("path")
+                entry_name = entry.get("name")
+                last_opened = entry.get("last_opened_at")
+            else:
                 continue
-            path = entry.get("path")
             if not path:
                 continue
             if _is_help_vault_path(path):
                 continue
-            name = entry.get("name") or Path(path).name
+            name = entry_name or Path(path).name
             row = {"name": str(name), "path": str(path)}
-            last_opened = entry.get("last_opened_at")
             if isinstance(last_opened, str) and last_opened.strip():
                 row["last_opened_at"] = last_opened.strip()
             result.append(row)

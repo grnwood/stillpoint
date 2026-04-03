@@ -87,6 +87,14 @@ logger = logging.getLogger(__name__)
 MARKDOWN_IMAGE_WIDTH_OPTIONS = (300, 600, 900, 1200, 1500)
 
 
+def hr_overlay_disabled() -> bool:
+    """Return whether the custom horizontal-rule overlay should be suppressed."""
+    hr_overlay_env = os.getenv("SP_DISABLE_HR_OVERLAY")
+    if hr_overlay_env is None:
+        return sys.platform.startswith("linux") or sys.platform == "win32"
+    return hr_overlay_env in ("1", "true", "True")
+
+
 class SearchEngine:
     """Lightweight search/replace helper bound to a MarkdownEditor."""
 
@@ -1267,7 +1275,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 self.setFormat(quote_start + idx, remaining_length, self.quote_format)
         
         stripped_hr = text.strip()
-        if stripped_hr == "---" or stripped_hr == "***" or stripped_hr == "___":
+        if stripped_hr in ("---", "***", "___") and not hr_overlay_disabled():
             self.setFormat(0, len(text), self.hr_hidden_format)
         
         # Apply monospace + compact font to table rows last so pipes align
@@ -2222,12 +2230,7 @@ class MarkdownEditor(QTextEdit):
         # Linux and Windows setups (the secondary QPainter created after
         # super().paintEvent() can access a stale viewport on these platforms).
         # Keep it off by default on both, while allowing explicit opt-in.
-        hr_overlay_env = os.getenv("SP_DISABLE_HR_OVERLAY")
-        if hr_overlay_env is None:
-            disable_hr_overlay = sys.platform.startswith("linux") or sys.platform == "win32"
-        else:
-            disable_hr_overlay = hr_overlay_env in ("1", "true", "True")
-        if disable_hr_overlay:
+        if hr_overlay_disabled():
             self._vi_paint_in_progress = True
             try:
                 super().paintEvent(event)

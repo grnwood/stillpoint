@@ -41,7 +41,7 @@ def test_startup_opens_saved_homebase_default(main_window, monkeypatch) -> None:
     monkeypatch.setattr(main_window, "_restore_recent_history", lambda: calls.append(("restore_history", None)))
 
     assert main_window.startup() is True
-    assert ("switch", ("https://server", True, True)) in calls
+    assert ("switch", (main_window._local_api_base, False, True)) in calls
     assert ("set_vault", ("/vaults/hybrid", "Hybrid Vault")) in calls
     assert ("apply_homebase", profile["id"]) in calls
     assert ("update_ui", None) in calls
