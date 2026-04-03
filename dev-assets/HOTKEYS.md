@@ -44,6 +44,7 @@ Tasks / Vi Mode
   - Selection helpers map to Shift+Arrow behavior: `Shift+N` selects down, `Shift+U` selects up, `Shift+;` selects to end-of-line.
   - Insert commands: `i` (before cursor), `a` (after cursor), `o`/`O` (new line below/above). `Esc` returns to navigation mode and clears insert highlighting.
   - Editing clipboard: `c` copies the current selection (or whole line) into the vi buffer, `x` cuts the selection/character into that buffer, `p` pastes from it. `d` deletes the current line, `r` replaces the character under the cursor once, `u` undoes, and `.` repeats the last edit.
+  - `-` on an empty line (cursor at position 0) inserts a horizontal rule (`---`).
   - Standard `Ctrl+` shortcuts (links, jump, formatting, etc.) still work regardless of vi mode.
 
 ToC / Headings

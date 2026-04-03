@@ -907,6 +907,25 @@ def save_default_markdown_font(font: Optional[str]) -> None:
     _update_global_config({"default_markdown_font": value})
 
 
+def load_hr_line_height(default: float = 2.0) -> float:
+    """Return preferred horizontal-rule line height in points."""
+    payload = _read_global_config()
+    raw = payload.get("hr_line_height")
+    try:
+        return max(0.5, min(float(raw), 8.0))
+    except Exception:
+        return max(0.5, min(float(default), 8.0))
+
+
+def save_hr_line_height(height: float) -> None:
+    """Persist preferred horizontal-rule line height in points."""
+    try:
+        value = max(0.5, min(float(height), 8.0))
+    except Exception:
+        value = 2.0
+    _update_global_config({"hr_line_height": value})
+
+
 def load_markdown_image_max_width(default: int = 900) -> int:
     """Return preferred max inline attachment image width for the Markdown editor."""
     payload = _read_global_config()

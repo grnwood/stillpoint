@@ -13864,6 +13864,11 @@ class MainWindow(QMainWindow):
         base_ai_font = max(6, (self.font_size or 14) - 2)
         ai_font_size = config.load_ai_chat_font_size(base_ai_font)
         self.right_panel.set_font_size(ai_font_size)
+        # Refresh HR line height from preferences
+        try:
+            self.editor.apply_hr_line_height()
+        except Exception:
+            pass
 
     def _open_task_from_panel(self, path: str, line: int, *, preserve_calendar_state: bool = False) -> None:
         if log_enabled("ui_state"):

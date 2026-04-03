@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QFont,
     QFontDatabase,
     QImage,
+    QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
     QSyntaxHighlighter,
@@ -842,8 +843,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hr_format.setForeground(self._hr_line_color)
         self.hr_format.setBackground(QColor(0, 0, 0, 0))
         self.hr_hidden_format = QTextCharFormat()
-        self.hr_hidden_format.setForeground(QColor(0, 0, 0, 0))
-        self.hr_hidden_format.setFontPointSize(0.01)
+        # Use the line color as foreground so "---" blends into the
+        # full-width ExtraSelection background painted by _refresh_hr_selections.
+        # The font size controls the visual thickness of the HR band.
+        self._hr_line_height_pt = config.load_hr_line_height()
+        self.hr_hidden_format.setForeground(self._hr_line_color)
+        self.hr_hidden_format.setFontPointSize(self._hr_line_height_pt)
 
         self.table_format = QTextCharFormat()
         self.table_format.setFontFamily(mono_family)
@@ -1275,7 +1280,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 self.setFormat(quote_start + idx, remaining_length, self.quote_format)
         
         stripped_hr = text.strip()
-        if stripped_hr in ("---", "***", "___") and not hr_overlay_disabled():
+        if stripped_hr in ("---", "***", "___"):
             self.setFormat(0, len(text), self.hr_hidden_format)
         
         # Apply monospace + compact font to table rows last so pipes align
@@ -1687,8 +1692,9 @@ class MarkdownEditor(QTextEdit):
         # Qt's SVG image plugin can crash in native paint on some Linux setups.
         # Keep raster inline images enabled and allow opting back in for SVG.
         self._enable_inline_svg = os.getenv("SP_ENABLE_INLINE_SVG", "0") in ("1", "true", "True")
-        if self._hr_live_refresh_enabled:
-            self.textChanged.connect(self._schedule_hr_selections)
+        # Always refresh HR selections on text changes so editing/deleting a
+        # "---" line immediately clears stale background and block margins.
+        self.textChanged.connect(self._schedule_hr_selections)
         # Timer for CamelCase link conversion; explicitly started on key triggers
         self._camel_refresh_timer = QTimer(self)
         self._camel_refresh_timer.setInterval(120)
@@ -2188,7 +2194,12 @@ class MarkdownEditor(QTextEdit):
                 self._saved_updates_enabled = None
 
     def paintEvent(self, event):  # type: ignore[override]
-        """Custom paint to draw horizontal rules as visual lines."""
+        """Custom paint with safety guards for cross-platform stability.
+
+        Horizontal rules are rendered via QTextBlockFormat (FixedHeight line
+        height + FullWidthSelection background) set in _refresh_hr_selections(),
+        so no secondary QPainter overlay is needed here.
+        """
         if self._vi_paint_in_progress:
             return
         if self._post_load_paint_guard_active():
@@ -2226,84 +2237,11 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             return
 
-        # The custom horizontal-rule overlay has triggered paint instability on some
-        # Linux and Windows setups (the secondary QPainter created after
-        # super().paintEvent() can access a stale viewport on these platforms).
-        # Keep it off by default on both, while allowing explicit opt-in.
-        if hr_overlay_disabled():
-            self._vi_paint_in_progress = True
-            try:
-                super().paintEvent(event)
-                if not self._vi_has_painted:
-                    self._vi_has_painted = True
-            finally:
-                self._vi_paint_in_progress = False
-            return
-
         self._vi_paint_in_progress = True
-        painter: Optional[QPainter] = None
         try:
-            if log_enabled("editor_render"):
-                try:
-                    logger.info(
-                        "[MD_PAINT] super.paintEvent begin alive=%s/%s/%s/%s visible=%s updates=%s "
-                        "doc_blocks=%s load_guard=%s suppress=%s depth=%s",
-                        self._editor_alive,
-                        self._document_alive,
-                        self._layout_alive,
-                        self._viewport_alive,
-                        self.isVisible(),
-                        self.updatesEnabled(),
-                        document.blockCount(),
-                        type(self)._LOAD_GUARD_DEPTH,
-                        self._suppress_paint,
-                        self._suppress_paint_depth,
-                    )
-                except Exception:
-                    pass
             super().paintEvent(event)
             if not self._vi_has_painted:
                 self._vi_has_painted = True
-
-            try:
-                if not self._viewport_alive:
-                    try:
-                        viewport.destroyed.connect(self._on_viewport_destroyed)
-                        self._viewport_alive = True
-                    except Exception:
-                        return
-                painter = QPainter(viewport)
-                pen = QPen(self._hr_line_color)
-                pen.setWidth(2)
-                painter.setPen(pen)
-                scroll_bar = self.verticalScrollBar()
-                vsb = scroll_bar.value() if self._is_alive(scroll_bar) else 0
-                block = document.begin()
-                while block.isValid():
-                    if not self._document_alive or not self._editor_alive:
-                        break
-                    if not self._is_alive(document) or not self._is_alive(layout):
-                        break
-                    if block.text().strip() in ("---", "***", "___"):
-                        try:
-                            br = layout.blockBoundingRect(block)
-                        except RuntimeError as exc:
-                            logger.warning("Aborting markdown rule overlay; layout gone: %s", exc)
-                            break
-                        try:
-                            viewport_height = viewport.height()
-                            viewport_width = viewport.width()
-                        except RuntimeError:
-                            break
-                        y = int(br.top() - vsb + br.height() / 2)
-                        if 0 <= y <= viewport_height:
-                            painter.drawLine(0, y, viewport_width, y)
-                    block = block.next()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Skipping Markdown paint overlay due to error: %s", exc, exc_info=True)
-            finally:
-                if painter is not None and painter.isActive():
-                    painter.end()
         finally:
             self._vi_paint_in_progress = False
 
@@ -7502,6 +7440,20 @@ class MarkdownEditor(QTextEdit):
             self._vi_repeat_last_edit()
             return True
 
+        if key == Qt.Key_Minus and not shift:
+            if read_only:
+                return _block_vi_edit()
+            block = cursor.block()
+            rel_pos = cursor.position() - block.position()
+            if rel_pos == 0 and block.text().strip() == "":
+                cursor.movePosition(QTextCursor.StartOfLine)
+                cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+                cursor.insertText("---")
+                self.setTextCursor(cursor)
+                self._vi_last_edit = lambda: self._vi_insert_hr()
+                return True
+            return True
+
         if key in (Qt.Key_Backspace, Qt.Key_Delete, Qt.Key_Return, Qt.Key_Enter):
             if key in (Qt.Key_Return, Qt.Key_Enter):
                 cursor = self.textCursor()
@@ -7812,6 +7764,17 @@ class MarkdownEditor(QTextEdit):
             return
         # Keep vi-mode paste aligned with Ctrl+V behavior.
         self._insert_markdown_text(text)
+
+    def _vi_insert_hr(self) -> None:
+        """Insert a horizontal rule on the current line (vi '-' command)."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        rel_pos = cursor.position() - block.position()
+        if rel_pos == 0 and block.text().strip() == "":
+            cursor.movePosition(QTextCursor.StartOfLine)
+            cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+            cursor.insertText("---")
+            self.setTextCursor(cursor)
 
     def _vi_paste_buffer(self) -> Optional[str]:
         sys_clip = self._clipboard_markdown_payload()
@@ -8197,8 +8160,6 @@ class MarkdownEditor(QTextEdit):
         self._heading_timer.start()
 
     def _schedule_hr_selections(self) -> None:
-        if not self._hr_live_refresh_enabled:
-            return
         if self._mutations_blocked():
             return
         if self._hr_timer.isActive():
@@ -8229,25 +8190,34 @@ class MarkdownEditor(QTextEdit):
             is_hr = block.text().strip() in ("---", "***", "___")
             if is_hr:
                 cursor = QTextCursor(block)
-                cursor.select(QTextCursor.LineUnderCursor)
+                # Do NOT select text — FullWidthSelection only paints across
+                # the entire viewport when the cursor has no active selection.
                 sel = QTextEdit.ExtraSelection()
                 sel.cursor = cursor
                 fmt = sel.format
-                fmt.setBackground(self._hr_block_color)
+                # Use the line color as background; the thin FixedHeight block
+                # renders as a full-width horizontal rule without any custom
+                # paintEvent overlay (avoids QPainter segfaults on Win/Linux).
+                fmt.setBackground(self._hr_line_color)
                 fmt.setProperty(QTextFormat.FullWidthSelection, True)
                 fmt.setProperty(self._HR_EXTRA_KEY, True)
                 selections.append(sel)
                 block_fmt = block.blockFormat()
-                if (
+                needs_update = (
                     int(block_fmt.topMargin()) != self._hr_block_margin_px
                     or int(block_fmt.bottomMargin()) != self._hr_block_margin_px
-                ):
+                )
+                if needs_update:
                     block_fmt.setTopMargin(self._hr_block_margin_px)
                     block_fmt.setBottomMargin(self._hr_block_margin_px)
                     cursor.setBlockFormat(block_fmt)
             else:
                 block_fmt = block.blockFormat()
-                if block_fmt.topMargin() or block_fmt.bottomMargin():
+                needs_clear = (
+                    block_fmt.topMargin()
+                    or block_fmt.bottomMargin()
+                )
+                if needs_clear:
                     cursor = QTextCursor(block)
                     block_fmt.setTopMargin(0)
                     block_fmt.setBottomMargin(0)
@@ -8265,6 +8235,14 @@ class MarkdownEditor(QTextEdit):
             return
         self._hr_refresh_retry_pending = False
         self._refresh_hr_selections(load_token=load_token)
+
+    def apply_hr_line_height(self) -> None:
+        """Reload HR line height from preferences and refresh the display."""
+        pt = config.load_hr_line_height()
+        self.highlighter._hr_line_height_pt = pt
+        self.highlighter.hr_hidden_format.setFontPointSize(pt)
+        self.highlighter.rehighlight()
+        self._refresh_hr_selections()
 
     def _reset_insert_format(self, cursor: QTextCursor) -> None:
         fmt = QTextCharFormat()

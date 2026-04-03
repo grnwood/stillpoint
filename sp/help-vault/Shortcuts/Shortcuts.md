@@ -96,6 +96,7 @@ If VI mode is enabled:
 - `u`: Undo
 - `y`: Redo
 - `.`: Repeat last edit
+- `-`: Insert horizontal rule (`---`) when cursor is at position 0 on an empty line
 - `m`: Move selected text to another location, or move the current page when nothing is selected
 - `Ctrl+Shift+L`: Copy link or heading (also stores it for `p`)
 - `Alt+h/j/k/l`: History navigation (back/forward/down/up)

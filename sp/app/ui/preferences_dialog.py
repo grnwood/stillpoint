@@ -337,6 +337,24 @@ class PreferencesDialog(QDialog):
         row_theme_actions.addWidget(self.open_theme_folder_btn)
         row_theme_actions.addStretch(1)
         appearance_layout.addLayout(row_theme_actions)
+
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.HLine)
+        divider2.setFrameShadow(QFrame.Sunken)
+        appearance_layout.addWidget(divider2)
+
+        appearance_layout.addWidget(QLabel("<b>Editor</b>"))
+        row_hr = QHBoxLayout()
+        row_hr.addWidget(QLabel("Horizontal rule height (pt):"))
+        self.hr_line_height_spin = QDoubleSpinBox()
+        self.hr_line_height_spin.setRange(0.5, 8.0)
+        self.hr_line_height_spin.setSingleStep(0.5)
+        self.hr_line_height_spin.setDecimals(1)
+        self.hr_line_height_spin.setValue(config.load_hr_line_height())
+        row_hr.addWidget(self.hr_line_height_spin)
+        row_hr.addStretch(1)
+        appearance_layout.addLayout(row_hr)
+
         appearance_layout.addStretch(1)
 
         # Modes
@@ -1088,6 +1106,7 @@ class PreferencesDialog(QDialog):
         ai_font = self._font_value(self.ai_chat_font_combo)
         config.save_ai_chat_font_family(ai_font)
         config.save_minimal_font_scan_enabled(self.minimal_font_scan_checkbox.isChecked())
+        config.save_hr_line_height(self.hr_line_height_spin.value())
         config.save_tray_icon_enabled(self.tray_icon_checkbox.isChecked())
         config.save_minimize_to_tray_enabled(self.minimize_to_tray_checkbox.isChecked())
         config.save_feature_tasks_enabled(self.feature_tasks_checkbox.isChecked())
