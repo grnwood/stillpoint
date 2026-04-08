@@ -111,6 +111,53 @@ def test_close_event_blocks_paint_before_destruction(qapp) -> None:
     )
 
 
+def test_editor_paint_suppressed_when_hidden_without_explicit_close(qapp) -> None:
+    """hideEvent must set _suppress_paint=True to guard against late WM_PAINT.
+
+    When a parent window closes, Qt destroys child widgets WITHOUT calling
+    closeEvent on them.  On Windows, the OS can still dispatch WM_PAINT
+    messages to the child during the parent's close/destroy sequence while
+    Qt internal objects are in a partially-freed state – bypassing the
+    closeEvent guards added in v1.1.9h and causing an access violation
+    (faulthandler-detected fatal crash, v1.1.9i).
+
+    Overriding hideEvent gives an earlier suppression point: Qt dispatches
+    QHideEvent to every child widget when the parent is hidden, BEFORE the
+    C++ destructor chain begins.  This test verifies that the flag is set
+    correctly so that any late WM_PAINT arriving after hide is blocked.
+    """
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    editor.set_markdown("# Title\n\nSome content\n")
+    _drain_events(wait_ms=30, rounds=8)
+
+    # Sanity: editor is fully loaded and guard is not active.
+    assert editor._suppress_paint is False, (  # type: ignore[attr-defined]
+        "Precondition failed: _suppress_paint should be False after a settled load"
+    )
+
+    # Hide the editor WITHOUT calling close() – simulates the parent window
+    # hiding/closing without explicitly closing child editors.
+    editor.hide()
+
+    assert editor._suppress_paint is True, (  # type: ignore[attr-defined]
+        "hideEvent must set _suppress_paint=True to block late WM_PAINT messages "
+        "that arrive during/after the parent-window close sequence on Windows "
+        "(v1.1.9i crash: access violation inside super().paintEvent())"
+    )
+
+    # Re-showing the editor must lift the suppression so painting resumes.
+    editor.show()
+    _drain_events(wait_ms=20, rounds=4)
+
+    assert editor._suppress_paint is False, (  # type: ignore[attr-defined]
+        "showEvent must clear _suppress_paint so the editor can paint normally "
+        "after being re-shown (e.g. window restored from tray or unminimised)"
+    )
+
+    editor.close()
+
+
 def test_set_markdown_repeated_loads_clear_guard_and_remain_paintable(qapp) -> None:
     editor = MarkdownEditor()
     _force_initial_paint(editor)

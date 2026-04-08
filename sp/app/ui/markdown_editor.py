@@ -1996,16 +1996,29 @@ class MarkdownEditor(QTextEdit):
 
     def _on_document_destroyed(self) -> None:
         self._document_alive = False
-        self._push_paint_block()
+        # Set suppression directly without calling _push_paint_block() – the
+        # editor's QWidget may also be in the process of destruction at this
+        # point (document is a child of the editor), and calling Qt widget
+        # methods such as setUpdatesEnabled() on a partially-destroyed QWidget
+        # causes an access violation on Windows.
+        self._suppress_paint = True
 
     def _on_editor_destroyed(self) -> None:
         self._teardown_editor()
         self._editor_alive = False
-        self._push_paint_block()
+        # Do NOT call _push_paint_block() here.  When this signal fires the
+        # QWidget base of the editor is already being torn down; invoking
+        # setUpdatesEnabled() or updatesEnabled() on a partially-destroyed
+        # QWidget is undefined behaviour and can itself trigger an access
+        # violation on Windows.  Setting the flag directly is sufficient
+        # because paintEvent checks _suppress_paint before doing anything.
+        self._suppress_paint = True
 
     def _on_viewport_destroyed(self) -> None:
         self._viewport_alive = False
-        self._push_paint_block()
+        # Same rationale as _on_editor_destroyed: avoid Qt method calls on a
+        # possibly-destroyed widget; set the guard flag directly instead.
+        self._suppress_paint = True
 
     def _is_alive(self, obj) -> bool:
         return bool(obj) and Shiboken.isValid(obj)
@@ -2245,7 +2258,32 @@ class MarkdownEditor(QTextEdit):
         finally:
             self._vi_paint_in_progress = False
 
-    def showEvent(self, event):  # type: ignore[override]
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        """Suppress paint whenever the editor is hidden.
+
+        On Windows, the OS can dispatch WM_PAINT messages to a widget during
+        the close/hide sequence even when the widget is being torn down by its
+        parent.  When a parent window closes without explicitly calling
+        closeEvent on child editors, closeEvent is never invoked on those
+        children – so _editor_alive and _suppress_paint are never updated.
+
+        Overriding hideEvent provides an earlier hook: Qt dispatches a
+        QHideEvent to each child widget *before* the parent's destruction
+        sequence begins, giving us a chance to set _suppress_paint=True and
+        prevent any late WM_PAINT from reaching super().paintEvent() while
+        Qt objects are in a partially-freed state.
+        """
+        self._suppress_paint = True
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        # Lift the suppression that was set in hideEvent (or an earlier
+        # closeEvent that was later reverted), but only when no explicit paint
+        # block is active (i.e. no set_markdown / setDocument call is in
+        # progress).  If a paint block *is* active it will be popped by
+        # _pop_paint_block() at the appropriate time.
+        if self._suppress_paint_depth == 0 and self._editor_alive:
+            self._suppress_paint = False
         super().showEvent(event)
         if not self._is_alive(self) or not self._editor_alive:
             return
