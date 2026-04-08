@@ -177,6 +177,49 @@ def test_set_markdown_repeated_loads_clear_guard_and_remain_paintable(qapp) -> N
         editor.close()
 
 
+def test_empty_file_load_does_not_crash_and_remains_paintable(qapp) -> None:
+    """Loading a zero-byte file must not crash paintEvent.
+
+    On Windows (v1.1.9i), loading any file – especially a zero-byte file –
+    could cause the OS to dispatch WM_PAINT while the document was being
+    cleared and repopulated inside set_markdown().  Because the in-flight
+    paint guard was Linux-only in v1.1.9i, paintEvent forwarded the call to
+    super().paintEvent() against a partially-cleared document, resulting in
+    a faulthandler-detected access violation.
+
+    This test simulates the zero-byte scenario reported in the issue:
+    a file with no content (content == '') is loaded after a non-empty page
+    so that document.clear() / setPlainText('') is exercised.  After the load
+    settles the guard must be inactive and painting must not raise an
+    exception.
+    """
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    try:
+        # First load a non-empty page so the document has real content.
+        editor.set_markdown("# Session Notes\n\nSome content here.\n")
+        _drain_events(wait_ms=30, rounds=8)
+
+        # Now load the zero-byte equivalent (empty string).
+        editor.set_markdown("")
+        _drain_events(wait_ms=30, rounds=8)
+
+        # After settling, the in-flight token must be cleared.
+        assert editor._load_in_flight_token == 0, (  # type: ignore[attr-defined]
+            "Loading an empty file must clear _load_in_flight_token when the load finishes"
+        )
+
+        # The post-load paint guard must have been released.
+        assert editor._post_load_paint_guard_active() is False, (
+            "Paint guard must be inactive after an empty-file load has settled"
+        )
+
+        # Explicitly trigger a repaint – must not raise.
+        editor.repaint()
+    finally:
+        editor.close()
+
+
 def test_stale_image_retry_is_ignored_after_next_load(monkeypatch, qapp, tmp_path) -> None:
     vault_root = tmp_path / "vault"
     page_dir = vault_root / "Playpage"
