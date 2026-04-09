@@ -617,6 +617,13 @@ class HomebaseSyncEngine:
             upload_count = 0
             existing_count = 0
             reused_cached_count = 0
+            # Only verify cached objects on the server when the local cache
+            # might be stale — i.e. we have never pushed successfully before,
+            # or the last sync cycle ended in an error.  After a clean push
+            # the objects in the cache are confirmed server-side and HEAD
+            # requests for every unchanged file would be wasteful.
+            needs_cache_verify = not hb.get("last_pushed_checkpoint_id") or int(hb.get("error_count", 0)) > 0
+            verified_missing = 0
             for rel_path, meta in manifest.get("entries", {}).items():
                 if not isinstance(meta, dict):
                     continue
@@ -641,15 +648,17 @@ class HomebaseSyncEngine:
                 if self._is_valid_object_id(cached_object_id):
                     # Entries from pulled_object_cache were just fetched from the
                     # server manifest, so the objects are guaranteed to exist.
-                    # Entries from the local object_cache may reference objects
-                    # that no longer exist on the server (e.g. after a server
-                    # reset).  Verify with a cheap HEAD request so we re-upload
-                    # if the object was lost.  Binary assets like images are
-                    # particularly vulnerable because their content (and
-                    # therefore cached object_id) never changes.
-                    if rel_key not in pulled_object_cache and not client.has_object(cached_object_id):
+                    # For entries from the local object_cache, only verify
+                    # against the server when the cache might be stale (no
+                    # prior successful push, or recovering from errors).
+                    if (
+                        needs_cache_verify
+                        and rel_key not in pulled_object_cache
+                        and not client.has_object(cached_object_id)
+                    ):
                         _log(f"cached object missing on server path={rel_key} object_id={cached_object_id}")
                         cached_object_id = ""
+                        verified_missing += 1
                     else:
                         meta["object_id"] = cached_object_id
                         reused_cached_count += 1
@@ -708,7 +717,8 @@ class HomebaseSyncEngine:
                 return
             _log(
                 f"push publish checkpoint={checkpoint_id} uploaded_objects={upload_count} "
-                f"reused_objects={existing_count} reused_cached={reused_cached_count}"
+                f"reused_objects={existing_count} reused_cached={reused_cached_count} "
+                f"cache_verify={'yes' if needs_cache_verify else 'no'} verified_missing={verified_missing}"
             )
             client.put_manifest(checkpoint_id, manifest_bytes)
             client.put_latest(checkpoint_id)
