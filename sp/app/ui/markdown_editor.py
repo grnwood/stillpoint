@@ -9451,6 +9451,7 @@ class MarkdownEditor(QTextEdit):
         original = img_fmt.property(IMAGE_PROP_ORIGINAL) or img_fmt.name()
         if not isinstance(original, str):  # defensive
             original = str(original)
+        original = self._make_image_path_relative(original)
         original = self._normalize_image_path(original)
         width_prop = int(img_fmt.property(IMAGE_PROP_WIDTH) or 0)
         suffix = f"{{width={width_prop}}}" if width_prop else ""
@@ -9733,12 +9734,51 @@ class MarkdownEditor(QTextEdit):
             rel_path = rel_path[2:]
         return f"/{(base_dir / rel_path).as_posix()}"
 
+    def _make_image_path_relative(self, path: str) -> str:
+        """Convert an absolute image path to a relative one when possible.
+
+        When Qt loses the IMAGE_PROP_ORIGINAL user property (which stores the
+        original relative path), the fallback is the absolute resolved path
+        stored in QTextImageFormat.name().  Writing that absolute path into
+        the markdown makes images non-portable across devices.  This method
+        converts it back to a filename relative to the current page's folder.
+        """
+        if not path:
+            return path
+        path = path.replace("\\", "/")
+        # Already relative — nothing to do.
+        if not (path.startswith("/") or (len(path) >= 3 and path[0].isalpha() and path[1] == ":" and path[2] == "/")):
+            return path
+        # Need the current page's folder to compute a relative path.
+        if not (self._vault_root and self._current_path):
+            return path
+        try:
+            abs_image = Path(path).resolve()
+            page_dir = (self._vault_root / self._current_path.lstrip("/")).resolve().parent
+            rel = abs_image.relative_to(page_dir)
+            return rel.as_posix()
+        except (ValueError, OSError):
+            # Image lives outside the page folder — try vault-relative.
+            try:
+                abs_image = Path(path).resolve()
+                vault = Path(self._vault_root).resolve()
+                rel = abs_image.relative_to(vault)
+                page_rel = Path(self._current_path.lstrip("/")).parent
+                final = os.path.relpath(rel.as_posix(), page_rel.as_posix())
+                return final.replace("\\", "/")
+            except (ValueError, OSError):
+                return path
+
     def _normalize_image_path(self, path: str) -> str:
         path = (path or "").strip()
         path = path.replace("\\", "/")
         while "/./" in path:
             path = path.replace("/./", "/")
         if not path or path.startswith(("http://", "https://", "/", "./", "../")):
+            return path
+        # Detect Windows absolute paths (e.g. "C:/...") so we don't
+        # blindly prepend "./" and create an invalid hybrid path.
+        if len(path) >= 3 and path[0].isalpha() and path[1] == ":" and path[2] == "/":
             return path
         return f"./{path}"
 
@@ -9748,7 +9788,8 @@ class MarkdownEditor(QTextEdit):
 
         def repl(match: re.Match[str]) -> str:
             alt = match.group("alt") or ""
-            path = self._normalize_image_path(match.group("path") or "")
+            path = self._make_image_path_relative(match.group("path") or "")
+            path = self._normalize_image_path(path)
             width = match.group("width") or ""
             suffix = f"{{width={width}}}" if width else ""
             return f"![{alt}]({path}){suffix}"

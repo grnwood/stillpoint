@@ -2,13 +2,17 @@
 
 Covers the scenario where Device A has a page with pasted images:
 the .md file and all image attachments must reach Device B after sync.
+Also covers the image path normalization to always use relative links.
 """
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from sp.sync.crypto import derive_key_from_passphrase, encrypt_bytes, object_id_from_ciphertext
@@ -51,6 +55,13 @@ class FakeClient:
         return self.manifests[manifest_id]
 
     def get_object(self, object_id: str) -> bytes:
+        if object_id not in self.objects:
+            # Simulate a real 404 like HomebaseClient.get_object would raise
+            request = httpx.Request("GET", f"http://fake/objects/{object_id}")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError(
+                f"Object not found: {object_id}", request=request, response=response,
+            )
         return self.objects[object_id]
 
     def has_object(self, object_id: str) -> bool:
@@ -133,6 +144,50 @@ class TestImageSyncPull:
             img_path = vault_b / "Notes" / f"paste_image_{i:03d}.png"
             assert img_path.exists(), f"Image {img_path.name} missing on Device B"
             assert img_path.read_bytes() == data
+
+    def test_pull_continues_after_single_object_download_failure(self, tmp_path):
+        """If one object is missing on the server, the remaining entries
+        should still be downloaded rather than aborting the entire pull."""
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        page = vault_a / "Notes" / "Page.md"
+        page.parent.mkdir(parents=True)
+        page.write_text("# Hello\n![img](paste_image_001.png)\n", encoding="utf-8")
+        (vault_a / "Notes" / "paste_image_001.png").write_bytes(b"IMG1")
+        (vault_a / "Notes" / "paste_image_002.png").write_bytes(b"IMG2")
+
+        cfg_a = _make_cfg(vault_a)
+        engine_a = HomebaseSyncEngine(cfg_a)
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(engine_a, client)
+
+        # Delete one image object from the "server" to simulate data loss.
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+        image1_oid = manifest["entries"]["Notes/paste_image_001.png"]["object_id"]
+        del client.objects[image1_oid]
+
+        # Device B pulls — the missing object should not prevent other files
+        # from being downloaded.
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        applied, pulled_cache = engine_b._apply_remote_checkpoint(
+            client, key, checkpoint_id,
+        )
+
+        # Page.md and paste_image_002 should have been written despite image_001 failing.
+        assert (vault_b / "Notes" / "Page.md").exists()
+        assert (vault_b / "Notes" / "paste_image_002.png").exists()
+        assert (vault_b / "Notes" / "paste_image_002.png").read_bytes() == b"IMG2"
+
+        # paste_image_001 was NOT written (object missing on server).
+        assert not (vault_b / "Notes" / "paste_image_001.png").exists()
+
+        # The missing entry must NOT be in pulled_cache so next sync retries it.
+        assert "Notes/paste_image_001.png" not in pulled_cache
 
 
 class TestCachedObjectVerification:
@@ -265,3 +320,101 @@ class TestCachedObjectVerification:
         new_oid = manifest2["entries"]["paste_image_001.png"]["object_id"]
         assert engine2._is_valid_object_id(new_oid)
         assert client.has_object(new_oid), "Re-uploaded image object not on server"
+
+
+# ---------------------------------------------------------------------------
+# Image path normalization tests
+# ---------------------------------------------------------------------------
+
+class TestImagePathNormalization:
+    """Image links written to .md files must always be relative paths."""
+
+    def test_make_image_path_relative_converts_absolute_in_same_folder(self, qapp, tmp_path):
+        from sp.app.ui.markdown_editor import MarkdownEditor
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Notes").mkdir()
+        (vault / "Notes" / "Page.md").write_text("# test", encoding="utf-8")
+        (vault / "Notes" / "paste_image_001.png").write_bytes(b"PNG")
+
+        ed = MarkdownEditor()
+        try:
+            ed._vault_root = vault
+            ed._current_path = "/Notes/Page.md"
+
+            abs_path = str((vault / "Notes" / "paste_image_001.png").resolve()).replace("\\", "/")
+            result = ed._make_image_path_relative(abs_path)
+            assert result == "paste_image_001.png", f"Expected relative filename, got: {result}"
+        finally:
+            ed.close()
+
+    def test_make_image_path_relative_leaves_relative_untouched(self, qapp, tmp_path):
+        from sp.app.ui.markdown_editor import MarkdownEditor
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+
+        ed = MarkdownEditor()
+        try:
+            ed._vault_root = vault
+            ed._current_path = "/Notes/Page.md"
+
+            assert ed._make_image_path_relative("paste_image_001.png") == "paste_image_001.png"
+            assert ed._make_image_path_relative("./paste_image_001.png") == "./paste_image_001.png"
+        finally:
+            ed.close()
+
+    def test_normalize_image_path_no_dot_slash_on_windows_absolute(self, qapp):
+        from sp.app.ui.markdown_editor import MarkdownEditor
+
+        ed = MarkdownEditor()
+        try:
+            # A Windows absolute path should NOT get "./" prepended
+            result = ed._normalize_image_path("C:/Users/joe/vault/paste_image_001.png")
+            assert not result.startswith("./C:"), f"Absolute path got './' prefix: {result}"
+            assert result == "C:/Users/joe/vault/paste_image_001.png"
+        finally:
+            ed.close()
+
+    def test_normalize_image_path_relative_gets_dot_slash(self, qapp):
+        from sp.app.ui.markdown_editor import MarkdownEditor
+
+        ed = MarkdownEditor()
+        try:
+            result = ed._normalize_image_path("paste_image_001.png")
+            assert result == "./paste_image_001.png"
+        finally:
+            ed.close()
+
+    def test_markdown_from_image_format_uses_relative_path(self, qapp, tmp_path):
+        """When IMAGE_PROP_ORIGINAL is lost and fallback is an absolute path,
+        the serialized markdown must still use a relative path."""
+        from sp.app.ui.markdown_editor import MarkdownEditor, IMAGE_PROP_ALT, IMAGE_PROP_ORIGINAL, IMAGE_PROP_WIDTH
+        from PySide6.QtGui import QTextImageFormat
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Notes").mkdir()
+        img_file = vault / "Notes" / "paste_image_001.png"
+        img_file.write_bytes(b"PNG_DATA")
+
+        ed = MarkdownEditor()
+        try:
+            ed._vault_root = vault
+            ed._current_path = "/Notes/Page.md"
+
+            fmt = QTextImageFormat()
+            abs_path = str(img_file.resolve())
+            fmt.setName(abs_path)  # Qt stores absolute resolved path
+            # Simulate IMAGE_PROP_ORIGINAL being lost (empty string/not set)
+            fmt.setProperty(IMAGE_PROP_ALT, "my image")
+            fmt.setProperty(IMAGE_PROP_WIDTH, 0)
+
+            md = ed._markdown_from_image_format(fmt)
+            # Should contain relative path, not absolute
+            assert "![my image]" in md
+            assert abs_path.replace("\\", "/") not in md, f"Absolute path leaked into markdown: {md}"
+            assert "paste_image_001.png" in md
+        finally:
+            ed.close()

@@ -898,6 +898,7 @@ class HomebaseSyncEngine:
         overwritten = 0
         unchanged = 0
         conflicts = 0
+        download_errors = 0
         cache = local_object_cache or {}
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
@@ -921,7 +922,18 @@ class HomebaseSyncEngine:
                 unchanged += 1
                 skipped_cached += 1
                 continue
-            ciphertext = client.get_object(str(object_id))
+            try:
+                ciphertext = client.get_object(str(object_id))
+            except (httpx.HTTPStatusError, httpx.HTTPError, OSError) as dl_exc:
+                # Don't abort the entire pull for a single missing object.
+                # Remove from pulled_cache so the next sync cycle retries.
+                pulled_cache.pop(rel_key, None)
+                download_errors += 1
+                _log(
+                    f"pull decision=download-error path={rel} "
+                    f"object_id={object_id_text} error={dl_exc}"
+                )
+                continue
             try:
                 plaintext = decrypt_bytes(key, ciphertext)
             except CryptoError as exc:
@@ -990,7 +1002,8 @@ class HomebaseSyncEngine:
         _log(
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
-            f"skipped_cached={skipped_cached} conflicts={conflicts}"
+            f"skipped_cached={skipped_cached} conflicts={conflicts} "
+            f"download_errors={download_errors}"
         )
         return applied_paths, pulled_cache
 
