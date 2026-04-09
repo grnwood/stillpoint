@@ -639,9 +639,21 @@ class HomebaseSyncEngine:
                         except Exception:
                             cached_object_id = ""
                 if self._is_valid_object_id(cached_object_id):
-                    meta["object_id"] = cached_object_id
-                    reused_cached_count += 1
-                    continue
+                    # Entries from pulled_object_cache were just fetched from the
+                    # server manifest, so the objects are guaranteed to exist.
+                    # Entries from the local object_cache may reference objects
+                    # that no longer exist on the server (e.g. after a server
+                    # reset).  Verify with a cheap HEAD request so we re-upload
+                    # if the object was lost.  Binary assets like images are
+                    # particularly vulnerable because their content (and
+                    # therefore cached object_id) never changes.
+                    if rel_key not in pulled_object_cache and not client.has_object(cached_object_id):
+                        _log(f"cached object missing on server path={rel_key} object_id={cached_object_id}")
+                        cached_object_id = ""
+                    else:
+                        meta["object_id"] = cached_object_id
+                        reused_cached_count += 1
+                        continue
                 full = self.cfg.vault_root / rel_path
                 plaintext = read_bytes(full)
                 envelope = encrypt_bytes(key, plaintext)
