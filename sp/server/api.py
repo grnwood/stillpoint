@@ -59,6 +59,7 @@ from sp.server import indexer
 from sp.server import file_ops
 from sp.server import search_index
 from sp.server import homebase_api
+from sp.server import homebase_gc
 from sp.server.adapters import files
 from sp.server.adapters.files import FileAccessError, LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.server.state import vault_state
@@ -71,6 +72,44 @@ from sp.logging_flags import log_enabled
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
+
+
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _homebase_permission_check_disabled() -> bool:
+    return _env_flag_enabled("IGNORE__FILE_PERMISSION_CHECK", default=False)
+
+
+def _raise_for_homebase_permission_faults(vaults_root: Path) -> None:
+    if _homebase_permission_check_disabled():
+        return
+    faults = homebase_api.collect_homebase_auth_file_permission_faults(vaults_root)
+    if not faults:
+        return
+    lines = [
+        "",
+        f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}",
+        f"{_ANSI_BLUE}SECURITY ERROR: Homebase auth file permissions are too open.{_ANSI_RESET}",
+        f"{_ANSI_BLUE}{'=' * 80}{_ANSI_RESET}",
+        f"{_ANSI_BLUE}The server refused to start because these files allow group or other access:{_ANSI_RESET}",
+    ]
+    lines.extend(f"  - {fault}" for fault in faults)
+    lines.extend(
+        [
+            "",
+            "Expected mode: 0600 for auth.json and tokens.json",
+            "To bypass this check temporarily (NOT RECOMMENDED), set IGNORE__FILE_PERMISSION_CHECK=true",
+        ]
+    )
+    message = "\n".join(lines)
+    sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
+    raise RuntimeError("Homebase auth file permission check failed")
 
 
 def _log_api(message: str) -> None:
@@ -1101,6 +1140,7 @@ class ChatPayload(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup checks."""
+    _raise_for_homebase_permission_faults(_ensure_vaults_root())
     # Startup: Verify SERVER_ADMIN_PASSWORD is set unless started by embedded app
     # If started by sp.app.main, it will have set SERVER_ADMIN_PASSWORD
     # If started standalone without password, fail unless STILLPOINT_INSECURE is set
@@ -3975,6 +4015,10 @@ def run_server(
 
     set_vaults_root(resolved_vaults_root)
     vaults_root_path = _ensure_vaults_root()
+    try:
+        _raise_for_homebase_permission_faults(vaults_root_path)
+    except RuntimeError:
+        sys.exit(1)
 
     # Set STILLPOINT_INSECURE environment variable if --insecure flag is used
     # This is checked by the lifespan handler during FastAPI startup
@@ -4047,7 +4091,34 @@ if __name__ == "__main__":
         action="store_true",
         help="Allow server to start without SERVER_ADMIN_PASSWORD (NOT RECOMMENDED for production)",
     )
+    parser.add_argument(
+        "--run-gc",
+        action="store_true",
+        help="Run the Home Base retention janitor instead of starting the API server.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --run-gc, log what would be deleted without removing files.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --run-gc, bypass the janitor interval gate for this invocation.",
+    )
     args = parser.parse_args()
+
+    if (args.dry_run or args.force) and not args.run_gc:
+        parser.error("--dry-run and --force require --run-gc")
+
+    if args.run_gc:
+        raise SystemExit(
+            homebase_gc.run_homebase_gc(
+                vaults_root=args.vaults_root,
+                force=bool(args.force),
+                dry_run=True if args.dry_run else None,
+            )
+        )
 
     run_server(
         host=args.host,

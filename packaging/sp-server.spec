@@ -59,6 +59,11 @@ _datas = [
     (os.path.join(ROOT, "sp", "server", "templates"), "sp/server/templates"),
     (os.path.join(ROOT, "packaging", "server", "run-server.sh"), "."),
     (os.path.join(ROOT, "packaging", "server", "_launch.sh"), "."),
+    (os.path.join(ROOT, "packaging", "server", "stillpoint-server.service"), "."),
+    (os.path.join(ROOT, "packaging", "server", "run-homebase-gc.sh"), "."),
+    (os.path.join(ROOT, "packaging", "server", "homebase-gc.service"), "."),
+    (os.path.join(ROOT, "packaging", "server", "homebase-gc.timer"), "."),
+    (os.path.join(ROOT, ".env.example"), "."),
     (os.path.join(ROOT, "LICENSE"), "."),
     (os.path.join(ROOT, "NOTICE"), "."),
 ]
@@ -111,7 +116,18 @@ coll = COLLECT(
 # Move convenience files to dist root (PyInstaller puts datas under _internal).
 dist_root = os.path.join("dist", "stillpoint-server")
 internal_dir = os.path.join(dist_root, "_internal")
-for filename in ("run-server.sh", "_launch.sh", "stillpoint-server.sh", "LICENSE", "NOTICE"):
+for filename in (
+    "run-server.sh",
+    "_launch.sh",
+    "stillpoint-server.service",
+    "run-homebase-gc.sh",
+    "homebase-gc.service",
+    "homebase-gc.timer",
+    ".env.example",
+    "stillpoint-server.sh",
+    "LICENSE",
+    "NOTICE",
+):
     src = os.path.join(internal_dir, filename)
     dst = os.path.join(dist_root, filename)
     if os.path.exists(src):

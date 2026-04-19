@@ -156,8 +156,27 @@ You can run StillPoint as a standalone server for multi-user or remote access:
 
 ```bash
 export SERVER_ADMIN_PASSWORD="your-secure-password-here"
-export ZIMX_VAULTS_ROOT="/path/to/vaults"
+export STILLPOINT_VAULTS_ROOT="/path/to/vaults"
 python -m sp.server.api --host 0.0.0.0 --port 8000
+```
+
+You can also use the packaged launcher script in [packaging/server/run-server.sh](packaging/server/run-server.sh):
+
+```bash
+cd /opt/stillpoint
+export SERVER_ADMIN_PASSWORD="your-secure-password-here"
+export STILLPOINT_SERVER_HOST="0.0.0.0"
+export STILLPOINT_SERVER_PORT="8000"
+export STILLPOINT_VAULTS_ROOT="/path/to/vaults"
+./packaging/server/run-server.sh
+```
+
+To run the packaged server directly with the real executable launcher used by systemd:
+
+```bash
+cd /opt/stillpoint
+cp .env.example .env
+./packaging/server/_launch.sh
 ```
 
 If you are using the bundled executable, pass `--server` to start the API server:
@@ -172,6 +191,9 @@ export STILLPOINT_VAULTS_ROOT="/path/to/vaults"
 
 - **`SERVER_ADMIN_PASSWORD`**: Required for standalone servers. Protects vault creation and listing operations. Without this, the server will refuse to start unless you use the `--insecure` flag (NOT RECOMMENDED).
 - **`STILLPOINT_VAULTS_ROOT`**: Base directory where all vaults are stored.
+- **`STILLPOINT_SERVER_HOST`**: Host interface for the packaged `run-server.sh` launcher (default: `127.0.0.1`).
+- **`STILLPOINT_SERVER_PORT`**: Port for the packaged `run-server.sh` launcher (default: `8000`).
+- **`STILLPOINT_SERVER_INSECURE`**: Set to `1` to pass `--insecure` through the packaged launcher (NOT RECOMMENDED).
 - **`AUTH_ENABLED`**: Set to `false` to disable per-vault authentication (default: `true`).
 
 **Server Security Model:**
@@ -180,11 +202,116 @@ export STILLPOINT_VAULTS_ROOT="/path/to/vaults"
 2. **Server admin password**: Required for vault creation/listing (protects against unauthorized vault operations)
 3. **Per-vault authentication**: Each vault has its own username/password set during creation or via `/auth/setup`
 
+### Standalone Server systemd Service
+
+The packaged server includes a systemd unit in [packaging/server/stillpoint-server.service](packaging/server/stillpoint-server.service).
+
+Install it like this:
+
+```bash
+cd /opt/stillpoint
+cp .env.example .env
+sudo cp packaging/server/stillpoint-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now stillpoint-server.service
+sudo systemctl status stillpoint-server.service
+sudo journalctl -u stillpoint-server.service -n 50 --no-pager
+```
+
+Useful commands:
+
+```bash
+sudo systemctl restart stillpoint-server.service
+sudo systemctl stop stillpoint-server.service
+sudo systemctl disable stillpoint-server.service
+sudo journalctl -u stillpoint-server.service -f
+```
+
+The service assumes the repo or extracted server bundle lives at `/opt/stillpoint` and reads `/opt/stillpoint/.env` via systemd `EnvironmentFile=` before starting the server launcher in [packaging/server/_launch.sh](packaging/server/_launch.sh).
+
 **Client Setup:**
 
 When adding a remote server in the desktop app:
 - For localhost servers (127.0.0.1): Automatically uses embedded server password
 - For remote servers: Must enter server admin password with option to remember (stored as SHA256 hash)
+
+### Home Base Retention Janitor
+
+Home Base server storage can be kept lean with the retention janitor in [sp/server/homebase_gc.py](sp/server/homebase_gc.py). It prunes old manifests and checkpoint metadata, then deletes object blobs that are no longer reachable from retained manifests.
+
+The janitor is configured from the server environment:
+
+- `STILLPOINT_VAULTS_ROOT`: Base directory where all vaults are stored.
+- `SP_HOMEBASE_GC_KEEP_LATEST`: Always keep the newest N checkpoints.
+- `SP_HOMEBASE_GC_KEEP_ALL_DAYS`: Keep all checkpoints newer than this many days.
+- `SP_HOMEBASE_GC_KEEP_DAILY_DAYS`: After the full-history window, keep one checkpoint per day for this many days.
+- `SP_HOMEBASE_GC_KEEP_WEEKLY_DAYS`: After the daily window, keep one checkpoint per ISO week for this many days.
+- `SP_HOMEBASE_GC_MIN_CHECKPOINTS`: Never retain fewer than this many checkpoints per vault.
+- `SP_HOMEBASE_GC_DRY_RUN`: When `1`, log deletions without removing files.
+- `SP_HOMEBASE_GC_FORCE`: When `1`, bypass the interval gate for the current run.
+- `SP_HOMEBASE_GC_INTERVAL_SECONDS`: Minimum time between janitor runs.
+
+When you build the packaged server bundle, the janitor runs from the same `stillpoint-server` executable via `--run-gc`.
+
+You can run it manually with the bundled executable, the packaged launcher, or the Python entrypoint:
+
+```bash
+cd /opt/stillpoint
+cp .env.example .env
+./stillpoint-server --run-gc --help
+./stillpoint-server --run-gc --dry-run --force
+./stillpoint-server --run-gc --force
+
+./packaging/server/run-homebase-gc.sh --help
+./packaging/server/run-homebase-gc.sh --dry-run --force
+./packaging/server/run-homebase-gc.sh --force
+
+/opt/stillpoint/venv/bin/python -m sp.server.api --run-gc --help
+/opt/stillpoint/venv/bin/python -m sp.server.api --run-gc --dry-run --force
+/opt/stillpoint/venv/bin/python -m sp.server.api --run-gc --force
+```
+
+Current CLI options for the janitor:
+
+- `--dry-run`: Log what would be deleted without removing any files.
+- `--force`: Run immediately and bypass the interval gate for this invocation.
+
+To install it as a systemd timer on the server:
+
+```bash
+cd /opt/stillpoint
+cp .env.example .env
+sudo cp packaging/server/homebase-gc.service /etc/systemd/system/
+sudo cp packaging/server/homebase-gc.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now homebase-gc.timer
+sudo systemctl start homebase-gc.service
+sudo journalctl -u homebase-gc.service -n 50 --no-pager
+```
+
+Useful systemd commands:
+
+```bash
+sudo systemctl status homebase-gc.timer
+sudo systemctl list-timers homebase-gc.timer
+sudo systemctl stop homebase-gc.timer
+sudo systemctl disable homebase-gc.timer
+sudo journalctl -u homebase-gc.service -f
+```
+
+The service assumes the repo lives at `/opt/stillpoint` and reads `/opt/stillpoint/.env` via systemd `EnvironmentFile=`. It runs `stillpoint-server --run-gc`. If your install lives elsewhere, adjust `WorkingDirectory`, `ExecStart`, and `EnvironmentFile` in [packaging/server/homebase-gc.service](packaging/server/homebase-gc.service). The shared example env file is [`.env.example`](.env.example).
+
+Sample journal output:
+
+```text
+[HomebaseGC] vaults_root=/opt/stillpoint/vaults
+[HomebaseGC] retention_policy=keep_latest=50 keep_all_days=7 keep_daily_days=30 keep_weekly_days=90 min_checkpoints=1 dry_run=no interval_s=86400
+[HomebaseGC] vault=example-vault size_before=12.43 GB policy=(keep_latest=50 keep_all_days=7 keep_daily_days=30 keep_weekly_days=90 min_checkpoints=1 dry_run=no interval_s=86400) checkpoints=184 retained=63
+[HomebaseGC] vault=example-vault deleted_manifests=121 deleted_checkpoints=121 deleted_objects=872 saved=3.18 GB size_after=9.25 GB
+[HomebaseGC] vault=example-vault savings_breakdown manifests=14.62 MB checkpoints=38.14 KB objects=3.16 GB
+[HomebaseGC] vault=example-vault deleted=/opt/stillpoint/vaults/homebase/example-vault/manifests/ab/abcdef...
+[HomebaseGC] summary vaults=1 total_before=12.43 GB total_after=9.25 GB total_saved=3.18 GB
+```
 
 ## Print to Browser
 

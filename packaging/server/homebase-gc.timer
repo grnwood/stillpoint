@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Stillpoint Home Base retention janitor on a schedule
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=24h
+Persistent=true
+Unit=homebase-gc.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Stillpoint API server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/stillpoint
+EnvironmentFile=/opt/stillpoint/.env
+ExecStart=/opt/stillpoint/packaging/server/_launch.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

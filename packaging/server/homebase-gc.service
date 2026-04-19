@@ -1,0 +1,14 @@
+[Unit]
+Description=Stillpoint Home Base retention janitor
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/stillpoint
+EnvironmentFile=/opt/stillpoint/.env
+ExecStart=/opt/stillpoint/stillpoint-server --run-gc
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

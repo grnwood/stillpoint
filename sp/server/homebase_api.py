@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +27,8 @@ _ANSI_RED = "\033[91m"
 _ANSI_RESET = "\033[0m"
 _ACCESS_TTL_SECONDS = 3600
 _REFRESH_TTL_SECONDS = 30 * 24 * 3600
+_PRIVATE_AUTH_FILE_MODE = 0o600
+_PRIVATE_AUTH_DIR_MODE = 0o700
 
 
 class HomebaseBootstrapCreatePayload(BaseModel):
@@ -91,13 +95,29 @@ def _utc_now_epoch() -> int:
     return int(time.time())
 
 
-def _write_bytes(path: Path, data: bytes) -> None:
+def _supports_posix_permissions() -> bool:
+    return os.name != "nt"
+
+
+def _chmod_path(path: Path, mode: int) -> None:
+    if not _supports_posix_permissions():
+        return
+    os.chmod(path, mode)
+
+
+def _write_bytes(path: Path, data: bytes, *, file_mode: int | None = None, dir_mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if dir_mode is not None:
+        _chmod_path(path.parent, dir_mode)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()
+    if file_mode is not None:
+        _chmod_path(tmp, file_mode)
     tmp.replace(path)
+    if file_mode is not None:
+        _chmod_path(path, file_mode)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -121,6 +141,38 @@ def _read_json_default(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     _write_bytes(path, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    _write_bytes(
+        path,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        file_mode=_PRIVATE_AUTH_FILE_MODE,
+        dir_mode=_PRIVATE_AUTH_DIR_MODE,
+    )
+
+
+def collect_homebase_auth_file_permission_faults(vaults_root: Path) -> list[str]:
+    if not _supports_posix_permissions():
+        return []
+    homebase_root = Path(vaults_root) / "homebase"
+    if not homebase_root.exists():
+        return []
+    faults: list[str] = []
+    for vault_dir in sorted(homebase_root.iterdir(), key=lambda item: item.name.lower()):
+        if not vault_dir.is_dir():
+            continue
+        auth_dir = vault_dir / "auth"
+        for name in ("auth.json", "tokens.json"):
+            path = auth_dir / name
+            if not path.exists() or not path.is_file():
+                continue
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if mode & 0o077:
+                faults.append(
+                    f"{path}: mode {mode:04o} is too open; expected {_PRIVATE_AUTH_FILE_MODE:04o}"
+                )
+    return faults
 
 
 def _parse_bearer_token(header_value: Optional[str]) -> str:
@@ -224,7 +276,7 @@ def register_homebase_routes(
         payload = _read_json_default(_auth_path(base), {})
         normalized, changed = _normalize_auth_payload(payload)
         if normalized and changed:
-            _write_json(_auth_path(base), normalized)
+            _write_private_json(_auth_path(base), normalized)
         return normalized
 
     def _get_user_record(base: Path, username: str) -> Optional[dict[str, Any]]:
@@ -259,7 +311,7 @@ def register_homebase_routes(
         )
 
     def _save_tokens(base: Path, tokens: dict[str, Any]) -> None:
-        _write_json(_tokens_path(base), tokens)
+        _write_private_json(_tokens_path(base), tokens)
 
     def _cleanup_tokens(tokens: dict[str, Any]) -> None:
         now = _utc_now_epoch()
@@ -392,7 +444,7 @@ def register_homebase_routes(
                 }
             },
         }
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         _write_json(
             _meta_path(base),
             {
@@ -432,7 +484,7 @@ def register_homebase_routes(
         except VerifyMismatchError:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         record["last_login_at"] = _utc_now_iso()
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         tokens = _issue_tokens(base, username)
         _log_server(f"POST /bootstrap/connect vault_id={vault_id} username={username}")
         return {
@@ -535,7 +587,7 @@ def register_homebase_routes(
             "last_login_at": None,
             "last_password_change_at": now,
         }
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         _log_server(f"POST /users vault_id={vault_id} username={username}")
         return {"ok": True}
 
@@ -569,7 +621,7 @@ def register_homebase_routes(
         if payload.password:
             record["password_hash"] = ph.hash(payload.password)
             record["last_password_change_at"] = _utc_now_iso()
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         return {"ok": True}
 
     @app.delete("/v1/homebase/{vault_id}/users/{username}")
@@ -592,7 +644,7 @@ def register_homebase_routes(
         if not remaining_admins:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
         users.pop(username, None)
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         _log_server(f"DELETE /users vault_id={vault_id} username={username}")
         return {"ok": True}
 
@@ -626,7 +678,7 @@ def register_homebase_routes(
             raise HTTPException(status_code=401, detail="Invalid credentials")
         record["password_hash"] = ph.hash(payload.new_password)
         record["last_password_change_at"] = _utc_now_iso()
-        _write_json(_auth_path(base), auth_payload)
+        _write_private_json(_auth_path(base), auth_payload)
         _log_server(f"POST /auth/change vault_id={vault_id} username={username}")
         return {"ok": True}
 
