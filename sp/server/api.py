@@ -85,9 +85,20 @@ def _homebase_permission_check_disabled() -> bool:
     return _env_flag_enabled("IGNORE__FILE_PERMISSION_CHECK", default=False)
 
 
+def _embedded_server_permission_repair_enabled() -> bool:
+    return _env_flag_enabled("STILLPOINT_EMBEDDED_SERVER", default=False)
+
+
 def _raise_for_homebase_permission_faults(vaults_root: Path) -> None:
     if _homebase_permission_check_disabled():
         return
+    if _embedded_server_permission_repair_enabled():
+        repaired = homebase_api.repair_homebase_auth_file_permissions(vaults_root)
+        if repaired:
+            sys.stderr.write("Repaired Homebase auth file permissions for embedded server startup:\n")
+            for item in repaired:
+                sys.stderr.write(f"  - {item}\n")
+            sys.stderr.flush()
     faults = homebase_api.collect_homebase_auth_file_permission_faults(vaults_root)
     if not faults:
         return

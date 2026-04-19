@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QDate, QPoint, QEvent
-from PySide6.QtGui import QColor, QGuiApplication, QCursor, QPalette
+from PySide6.QtGui import QColor, QGuiApplication, QCursor, QPalette, QFont, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QTableView,
 )
 
+from sp.app import config
+from sp.server.adapters.files import PAGE_SUFFIX
 from .task_style import contrast_text_color
 from .theme import theme_value
 
@@ -90,6 +92,40 @@ def _calendar_chrome_colors(palette: QPalette) -> tuple[str, str, str]:
         else theme_value("calendar_panel.calendar.nav_text_light", "#1F1F1F")
     )
     return str(grid_color), str(header_bg), str(nav_text)
+
+
+def journal_day_file_days(vault_root: Optional[str | Path], year: int, month: int) -> set[int]:
+    root = Path(vault_root) if vault_root else None
+    if not root:
+        return set()
+    journal_path = root / "Journal" / str(year) / f"{month:02d}"
+    if not journal_path.exists():
+        return set()
+    days: set[int] = set()
+    try:
+        for day_dir in journal_path.iterdir():
+            if not day_dir.is_dir() or not day_dir.name.isdigit():
+                continue
+            day_num = int(day_dir.name)
+            if 1 <= day_num <= 31 and (day_dir / f"{day_dir.name}{PAGE_SUFFIX}").exists():
+                days.add(day_num)
+    except Exception:
+        return set()
+    return days
+
+
+def journal_day_text_format(calendar: QCalendarWidget) -> QTextCharFormat:
+    fmt = QTextCharFormat()
+    font = QFont()
+    font.setBold(True)
+    font.setWeight(QFont.Black)
+    fmt.setFont(font)
+    palette = calendar.palette() if calendar is not None else QApplication.palette()
+    default_color = palette.color(QPalette.Link).name()
+    color = QColor(theme_value("calendar_panel.journal_day.text", default_color))
+    if color.isValid():
+        fmt.setForeground(color)
+    return fmt
 
 
 def _calendar_stylesheet(calendar: QCalendarWidget, accent_hex: Optional[str]) -> str:
@@ -646,6 +682,7 @@ class JournalDateJumpDialog(QDialog):
         *,
         use_vi_keys: bool = False,
         vault_accent_color: Optional[str] = None,
+        vault_root: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Jump To Journal Date")
@@ -654,6 +691,7 @@ class JournalDateJumpDialog(QDialog):
         self._use_vi_keys = use_vi_keys
         self._calendar_view: QTableView | None = None
         self._vault_accent_color = _resolve_vault_accent_color(vault_accent_color)
+        self._vault_root = vault_root
 
         layout = QVBoxLayout(self)
         self.calendar = QCalendarWidget()
@@ -670,6 +708,7 @@ class JournalDateJumpDialog(QDialog):
         self.calendar.installEventFilter(self)
         self.calendar.clicked.connect(self._accept_from_calendar)
         self.calendar.activated.connect(self._accept_from_calendar)
+        self.calendar.currentPageChanged.connect(self._apply_journal_day_formats)
         layout.addWidget(self.calendar, 1)
 
         hint = QLabel("Arrows or vi keys move. Enter or click opens the day. Esc closes.")
@@ -680,6 +719,7 @@ class JournalDateJumpDialog(QDialog):
 
         self._attach_calendar_view()
         self.calendar.setSelectedDate(QDate.currentDate())
+        self._apply_journal_day_formats(self.calendar.yearShown(), self.calendar.monthShown())
         self.calendar.setFocus(Qt.OtherFocusReason)
 
         if anchor_pos is not None:
@@ -694,7 +734,26 @@ class JournalDateJumpDialog(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         _enforce_calendar_dialog_width(self, self.calendar, 300)
+        self._apply_journal_day_formats(self.calendar.yearShown(), self.calendar.monthShown())
         super().showEvent(event)
+
+    def _apply_journal_day_formats(self, year: int, month: int) -> None:
+        base = QDate(year, month, 1)
+        if not base.isValid():
+            return
+        default_format = QTextCharFormat()
+        journal_format = journal_day_text_format(self.calendar)
+        for month_offset in (-1, 0, 1):
+            check_date = base.addMonths(month_offset)
+            check_year = check_date.year()
+            check_month = check_date.month()
+            day_file_days = journal_day_file_days(self._vault_root, check_year, check_month)
+            for day in range(1, check_date.daysInMonth() + 1):
+                current = QDate(check_year, check_month, day)
+                if day in day_file_days:
+                    self.calendar.setDateTextFormat(current, journal_format)
+                else:
+                    self.calendar.setDateTextFormat(current, default_format)
 
     def _clamp_to_screen(self, pos: QPoint) -> QPoint:
         screen = QGuiApplication.screenAt(pos)

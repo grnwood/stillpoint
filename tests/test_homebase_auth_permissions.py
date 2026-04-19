@@ -95,3 +95,25 @@ def test_run_server_allows_override_for_file_permission_check(tmp_path, monkeypa
     api.run_server(vaults_root=str(tmp_path))
 
     assert called["uvicorn"] is True
+
+
+def test_embedded_server_repairs_open_homebase_auth_files(tmp_path, monkeypatch, capsys) -> None:
+    auth_dir = tmp_path / "homebase" / "vault-one" / "auth"
+    auth_dir.mkdir(parents=True)
+    auth_dir.chmod(0o755)
+    auth_path = auth_dir / "auth.json"
+    tokens_path = auth_dir / "tokens.json"
+    auth_path.write_text("{}", encoding="utf-8")
+    tokens_path.write_text("{}", encoding="utf-8")
+    auth_path.chmod(0o644)
+    tokens_path.chmod(0o640)
+    monkeypatch.setenv("STILLPOINT_EMBEDDED_SERVER", "1")
+    monkeypatch.delenv("IGNORE__FILE_PERMISSION_CHECK", raising=False)
+
+    api._raise_for_homebase_permission_faults(tmp_path)
+
+    assert auth_dir.stat().st_mode & 0o777 == 0o700
+    assert auth_path.stat().st_mode & 0o777 == 0o600
+    assert tokens_path.stat().st_mode & 0o777 == 0o600
+    stderr = capsys.readouterr().err
+    assert "Repaired Homebase auth file permissions" in stderr

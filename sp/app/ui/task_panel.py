@@ -169,6 +169,7 @@ class TaskPanel(QWidget):
         font_size_key: str = "task_font_size_tabbed",
         splitter_key: str = "task_splitter_tabbed",
         header_state_key: str = "task_header_tabbed",
+        sort_state_key: str = "task_sort_tabbed",
     ) -> None:
         super().__init__(parent)
         self._font_size_key = font_size_key
@@ -179,6 +180,7 @@ class TaskPanel(QWidget):
         self._splitter_save_timer.setSingleShot(True)
         self._splitter_save_timer.timeout.connect(self._save_splitter_sizes)
         self._header_state_key = header_state_key
+        self._sort_state_key = sort_state_key
         self._header_save_timer = QTimer(self)
         self._header_save_timer.setInterval(200)
         self._header_save_timer.setSingleShot(True)
@@ -216,6 +218,7 @@ class TaskPanel(QWidget):
         self._ai_progress = None
         self._http_client = None
         self._vector_api = VectorAPIClient(None)
+        self._calendar_feature_enabled = config.load_feature_calendar_enabled()
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks… Esc to clear... enter text or @tag(s)...")
@@ -251,10 +254,10 @@ class TaskPanel(QWidget):
             toggle.setStyleSheet(
                 f"""
                 QToolButton {{
-                    border: 1px solid transparent;
+                    border: 1px solid {theme_value('task_panel.toggle.border', 'transparent')};
                     border-radius: 13px;
                     padding: 2px;
-                    background: transparent;
+                    background: {theme_value('task_panel.toggle.bg', 'transparent')};
                     color: {self._icon_tint_color().name()};
                 }}
                 QToolButton:hover {{
@@ -264,6 +267,10 @@ class TaskPanel(QWidget):
                 QToolButton:checked {{
                     border: 1px solid {theme_value('task_panel.toggle.active_border', '#4a90e2')};
                     background: {theme_value('task_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+                }}
+                QToolButton:disabled {{
+                    border: 1px solid {theme_value('task_panel.toggle.disabled_border', theme_value('task_panel.toggle.border', 'transparent'))};
+                    background: {theme_value('task_panel.toggle.disabled_bg', theme_value('task_panel.toggle.bg', 'transparent'))};
                 }}
                 """
             )
@@ -306,6 +313,16 @@ class TaskPanel(QWidget):
         self.task_tree.setSortingEnabled(True)
         self.sort_column = 0
         self.sort_order = Qt.AscendingOrder
+        saved_sort = config.load_sort_state(self._sort_state_key)
+        if saved_sort:
+            try:
+                self.sort_column = max(0, int(saved_sort.get("column", 0)))
+                default_order = getattr(Qt.AscendingOrder, "value", Qt.AscendingOrder)
+                saved_order = int(saved_sort.get("order", default_order))
+                self.sort_order = Qt.SortOrder(saved_order)
+            except Exception:
+                self.sort_column = 0
+                self.sort_order = Qt.AscendingOrder
         header = self.task_tree.header()
         header.sectionClicked.connect(self._handle_header_click)
         header.setSortIndicator(self.sort_column, self.sort_order)
@@ -413,6 +430,14 @@ class TaskPanel(QWidget):
         self._print_btn.clicked.connect(self._print_visible_tasks)
         header_row.addWidget(self._print_btn)
 
+        self._copy_btn = QToolButton()
+        self._copy_btn.setToolTip("Copy visible tasks as dashed lines")
+        self._copy_btn.setAutoRaise(True)
+        self._copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
+        self._copy_btn.setIconSize(QSize(20, 20))
+        self._copy_btn.clicked.connect(self._copy_visible_tasks)
+        header_row.addWidget(self._copy_btn)
+
         self._ai_toggle_btn = QToolButton()
         self._ai_toggle_btn.setToolTip("Open task AI insights and chat")
         self._ai_toggle_btn.setAutoRaise(True)
@@ -450,7 +475,7 @@ class TaskPanel(QWidget):
         
         self._nav_filter_prefix: Optional[str] = None
         self._nav_filter_enabled = True
-        self._include_journal = True
+        self._include_journal = self._default_include_journal()
         self._visible_tasks: list[dict] = []
         self._tag_source_tasks: Optional[list[dict]] = None
         self._last_keyboard_task_id: Optional[str] = None
@@ -532,6 +557,7 @@ class TaskPanel(QWidget):
         candidate = (color_hex or "").strip()
         self._vault_accent_color = candidate if candidate.startswith("#") else None
         self._apply_selection_style()
+        self.refresh_theme_visuals()
 
     def _format_task_text(self, text: str) -> str:
         """Return plain text with link labels (or URLs) inlined, no markup."""
@@ -605,6 +631,15 @@ class TaskPanel(QWidget):
         self.search.installEventFilter(self)
         self.task_tree.installEventFilter(self)
 
+    def _default_include_journal(self) -> bool:
+        return bool(self._calendar_feature_enabled)
+
+    def set_calendar_feature_enabled(self, enabled: bool) -> None:
+        self._calendar_feature_enabled = bool(enabled)
+        if not self._nav_filter_prefix:
+            self._include_journal = self._default_include_journal()
+        self._update_filter_indicator()
+
     def _on_filter_checkbox_toggled(self, checked: bool) -> None:
         if not self._nav_filter_prefix:
             self.filter_checkbox.blockSignals(True)
@@ -641,11 +676,11 @@ class TaskPanel(QWidget):
             self.filter_checkbox.setChecked(True)
             self.filter_checkbox.blockSignals(False)
             self.journal_checkbox.blockSignals(True)
-            self.journal_checkbox.setChecked(True)
+            self.journal_checkbox.setChecked(self._default_include_journal())
             self.journal_checkbox.blockSignals(False)
             self.journal_checkbox.setEnabled(False)
             self._nav_filter_enabled = True
-            self._include_journal = True
+            self._include_journal = self._default_include_journal()
             return
         display_path = path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
         if self._allow_filter_clear:
@@ -751,6 +786,7 @@ class TaskPanel(QWidget):
             self.zoom_in_btn,
             self.zoom_out_btn,
             self._print_btn,
+            self._copy_btn,
             self._ai_toggle_btn,
             self._ai_title_label,
             self._ai_delete_btn,
@@ -975,6 +1011,41 @@ class TaskPanel(QWidget):
         except Exception:
             return
 
+    def _build_visible_tasks_copy_text(self) -> str:
+        lines: list[str] = []
+        for item, depth, task in self._iter_task_items():
+            if item.isHidden():
+                continue
+            text = self._format_task_text((task.get("text") or "").strip())
+            parts: list[str] = []
+            if text:
+                parts.append(text)
+            priority = "!" * min(max(int(task.get("priority") or 0), 0), 3)
+            if priority:
+                parts.append(priority)
+            due = (task.get("due") or "").strip()
+            if due:
+                parts.append(f"<{due}")
+            starts = (task.get("starts") or task.get("start") or "").strip()
+            if starts:
+                parts.append(f">{starts}")
+            if self._show_task_page_column:
+                path = self._present_path(task.get("path") or "")
+                if path:
+                    parts.append(f":: {path}")
+            line = " ".join(part for part in parts if part).strip()
+            if not line:
+                continue
+            lines.append(f"{'  ' * max(0, depth)}- {line}")
+        return "\n".join(lines)
+
+    def _copy_visible_tasks(self) -> None:
+        try:
+            clipboard = QApplication.clipboard()
+        except Exception:
+            return
+        clipboard.setText(self._build_visible_tasks_copy_text())
+
     def _reset_horizontal_scroll(self) -> None:
         """Force the task list to show the left-most priority column."""
         try:
@@ -996,6 +1067,10 @@ class TaskPanel(QWidget):
         except Exception:
             return
         config.save_header_state(self._header_state_key, state)
+
+    def _save_sort_state(self) -> None:
+        order_value = getattr(self.sort_order, "value", self.sort_order)
+        config.save_sort_state(self._sort_state_key, self.sort_column, order_value)
 
     def _find_asset(self, name: str) -> Optional[Path]:
         candidates = [
@@ -1035,36 +1110,63 @@ class TaskPanel(QWidget):
         candidate = QColor(str(explicit_dark)) if explicit_dark is not None else QColor(255, 255, 255)
         return candidate if candidate.isValid() else QColor(255, 255, 255)
 
+    def _apply_toggle_button_style(self, button: QToolButton, *, radius: int = 13) -> None:
+        button.setStyleSheet(
+            f"""
+            QToolButton {{
+                border: 1px solid {theme_value('task_panel.toggle.border', 'transparent')};
+                border-radius: {radius}px;
+                padding: 2px;
+                background: {theme_value('task_panel.toggle.bg', 'transparent')};
+                color: {self._icon_tint_color().name()};
+            }}
+            QToolButton:hover {{
+                border: 1px solid {theme_value('task_panel.toggle.hover_border', '#666666')};
+                background: {theme_value('task_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+            }}
+            QToolButton:checked {{
+                border: 1px solid {theme_value('task_panel.toggle.active_border', '#4a90e2')};
+                background: {theme_value('task_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
+            QToolButton:disabled {{
+                border: 1px solid {theme_value('task_panel.toggle.disabled_border', theme_value('task_panel.toggle.border', 'transparent'))};
+                background: {theme_value('task_panel.toggle.disabled_bg', theme_value('task_panel.toggle.bg', 'transparent'))};
+            }}
+            """
+        )
+
+    def refresh_theme_visuals(self) -> None:
+        for button, icon_name, size in (
+            (getattr(self, "show_completed", None), "complete-task.svg", QSize(20, 20)),
+            (getattr(self, "show_future", None), "future.svg", QSize(20, 20)),
+            (getattr(self, "show_actionable", None), "actionable.svg", QSize(20, 20)),
+        ):
+            if button is None:
+                continue
+            button.setIcon(self._load_svg_icon(icon_name, size))
+            self._apply_toggle_button_style(button, radius=13)
+        if getattr(self, "_date_filter_btn", None):
+            self._update_date_filter_button()
+        if getattr(self, "_print_btn", None):
+            self._print_btn.setIcon(self._load_svg_icon("print.svg", QSize(20, 20)))
+        if getattr(self, "_copy_btn", None):
+            self._copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
+        if getattr(self, "_ai_toggle_btn", None):
+            self._ai_toggle_btn.setIcon(self._load_ai_icon())
+        self._apply_header_button_styles()
+
     def _apply_header_button_styles(self) -> None:
-        button_color = self._icon_tint_color().name()
         for btn in (
             getattr(self, "_date_filter_btn", None),
             getattr(self, "zoom_out_btn", None),
             getattr(self, "zoom_in_btn", None),
             getattr(self, "_print_btn", None),
+            getattr(self, "_copy_btn", None),
             getattr(self, "_ai_toggle_btn", None),
         ):
             if btn is None:
                 continue
-            btn.setStyleSheet(
-                f"""
-                QToolButton {{
-                    color: {button_color};
-                    border: 1px solid transparent;
-                    border-radius: 6px;
-                    padding: 2px;
-                    background: transparent;
-                }}
-                QToolButton:hover {{
-                    border: 1px solid {theme_value('task_panel.toggle.hover_border', '#666666')};
-                    background: {theme_value('task_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
-                }}
-                QToolButton:checked {{
-                    border: 1px solid {theme_value('task_panel.toggle.active_border', '#4a90e2')};
-                    background: {theme_value('task_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
-                }}
-                """
-            )
+            self._apply_toggle_button_style(btn, radius=6)
 
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(24, 24))
@@ -2810,6 +2912,7 @@ class TaskPanel(QWidget):
             self.sort_order = Qt.AscendingOrder
         self.task_tree.header().setSortIndicator(self.sort_column, self.sort_order)
         self.task_tree.sortItems(self.sort_column, self.sort_order)
+        self._save_sort_state()
 
     def set_active_tags(self, tags: Iterable[str]) -> None:
         self.active_tags = set(tags)
@@ -2817,11 +2920,11 @@ class TaskPanel(QWidget):
 
     def set_navigation_filter(self, prefix: Optional[str], refresh: bool = True) -> None:
         normalized = self._normalize_task_path(prefix) if prefix else None
-        # Default to excluding Journal when a new navigation filter is applied
+        # Default Journal subtree inclusion follows whether Calendar is effectively enabled.
         if normalized and normalized != self._nav_filter_prefix:
-            self._include_journal = False
+            self._include_journal = self._default_include_journal()
         if not normalized:
-            self._include_journal = True
+            self._include_journal = self._default_include_journal()
         self._nav_filter_prefix = normalized
         self._nav_filter_enabled = True
         self._update_filter_indicator()

@@ -2246,6 +2246,7 @@ class MarkdownEditor(QTextEdit):
             self._vi_paint_in_progress = False
 
     def showEvent(self, event):  # type: ignore[override]
+        self._suppress_paint = False
         super().showEvent(event)
         if not self._is_alive(self) or not self._editor_alive:
             return
@@ -2263,6 +2264,10 @@ class MarkdownEditor(QTextEdit):
             # after show(), but vi activation still needs a visible, settled widget.
             self._vi_has_painted = True
             self._schedule_vi_activation()
+
+    def hideEvent(self, event):  # type: ignore[override]
+        self._suppress_paint = True
+        super().hideEvent(event)
 
     def set_context(self, vault_root: Optional[str], relative_path: Optional[str]) -> None:
         self._vault_root = Path(vault_root) if vault_root else None

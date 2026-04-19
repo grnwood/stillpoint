@@ -175,6 +175,33 @@ def collect_homebase_auth_file_permission_faults(vaults_root: Path) -> list[str]
     return faults
 
 
+def repair_homebase_auth_file_permissions(vaults_root: Path) -> list[str]:
+    if not _supports_posix_permissions():
+        return []
+    homebase_root = Path(vaults_root) / "homebase"
+    if not homebase_root.exists():
+        return []
+    repaired: list[str] = []
+    for vault_dir in sorted(homebase_root.iterdir(), key=lambda item: item.name.lower()):
+        if not vault_dir.is_dir():
+            continue
+        auth_dir = vault_dir / "auth"
+        if auth_dir.exists() and auth_dir.is_dir():
+            auth_dir_mode = stat.S_IMODE(auth_dir.stat().st_mode)
+            if auth_dir_mode & 0o077:
+                _chmod_path(auth_dir, _PRIVATE_AUTH_DIR_MODE)
+                repaired.append(f"{auth_dir}: mode {auth_dir_mode:04o} -> {_PRIVATE_AUTH_DIR_MODE:04o}")
+        for name in ("auth.json", "tokens.json"):
+            path = auth_dir / name
+            if not path.exists() or not path.is_file():
+                continue
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if mode & 0o077:
+                _chmod_path(path, _PRIVATE_AUTH_FILE_MODE)
+                repaired.append(f"{path}: mode {mode:04o} -> {_PRIVATE_AUTH_FILE_MODE:04o}")
+    return repaired
+
+
 def _parse_bearer_token(header_value: Optional[str]) -> str:
     raw = (header_value or "").strip()
     if not raw:

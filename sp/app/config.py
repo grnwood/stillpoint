@@ -3282,6 +3282,30 @@ def save_header_state(key: str, state: str) -> None:
     _update_global_config({key: state})
 
 
+def load_sort_state(key: str) -> Optional[dict[str, int]]:
+    """Load a saved sort state from global config."""
+    payload = _read_global_config()
+    state = payload.get(key)
+    if not isinstance(state, dict):
+        return None
+    try:
+        return {
+            "column": int(state.get("column")),
+            "order": int(state.get("order")),
+        }
+    except Exception:
+        return None
+
+
+def save_sort_state(key: str, column: int, order: int) -> None:
+    """Persist a sort state to global config."""
+    try:
+        payload = {"column": int(column), "order": int(order)}
+    except Exception:
+        return
+    _update_global_config({key: payload})
+
+
 def save_cursor_position(path: str, position: int) -> None:
     conn = _get_conn()
     if not conn:

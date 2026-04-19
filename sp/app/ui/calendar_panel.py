@@ -63,7 +63,7 @@ from .task_style import (
 )
 from markdown import markdown as render_markdown
 from .ai_chat_panel import ApiWorker, ServerManager
-from .date_insert_dialog import DateInsertDialog
+from .date_insert_dialog import DateInsertDialog, journal_day_file_days, journal_day_text_format
 
 
 PATH_ROLE = Qt.UserRole + 1
@@ -700,9 +700,9 @@ class CalendarPanel(QWidget):
         self.overdue_checkbox.setStyleSheet(
             f"""
             QToolButton {{
-                border: 1px solid transparent;
+                border: 1px solid {theme_value('calendar_panel.toggle.border', 'transparent')};
                 border-radius: 13px;
-                background: transparent;
+                background: {theme_value('calendar_panel.toggle.bg', 'transparent')};
                 padding: 2px;
             }}
             QToolButton:hover {{
@@ -712,6 +712,10 @@ class CalendarPanel(QWidget):
             QToolButton:checked {{
                 border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
                 background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
+            QToolButton:disabled {{
+                border: 1px solid {theme_value('calendar_panel.toggle.disabled_border', theme_value('calendar_panel.toggle.border', 'transparent'))};
+                background: {theme_value('calendar_panel.toggle.disabled_bg', theme_value('calendar_panel.toggle.bg', 'transparent'))};
             }}
             """
         )
@@ -729,10 +733,10 @@ class CalendarPanel(QWidget):
         self.date_filter_btn.setStyleSheet(
             f"""
             QToolButton {{
-                border: 1px solid transparent;
+                border: 1px solid {theme_value('calendar_panel.toggle.border', 'transparent')};
                 border-radius: 13px;
                 padding: 2px;
-                background: transparent;
+                background: {theme_value('calendar_panel.toggle.bg', 'transparent')};
             }}
             QToolButton:hover {{
                 border: 1px solid {theme_value('calendar_panel.toggle.hover_border', '#666666')};
@@ -741,6 +745,10 @@ class CalendarPanel(QWidget):
             QToolButton:pressed {{
                 border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
                 background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
+            QToolButton:disabled {{
+                border: 1px solid {theme_value('calendar_panel.toggle.disabled_border', theme_value('calendar_panel.toggle.border', 'transparent'))};
+                background: {theme_value('calendar_panel.toggle.disabled_bg', theme_value('calendar_panel.toggle.bg', 'transparent'))};
             }}
             """
         )
@@ -757,9 +765,9 @@ class CalendarPanel(QWidget):
         self.future_checkbox.setStyleSheet(
             f"""
             QToolButton {{
-                border: 1px solid transparent;
+                border: 1px solid {theme_value('calendar_panel.toggle.border', 'transparent')};
                 border-radius: 13px;
-                background: transparent;
+                background: {theme_value('calendar_panel.toggle.bg', 'transparent')};
                 padding: 2px;
             }}
             QToolButton:hover {{
@@ -769,6 +777,10 @@ class CalendarPanel(QWidget):
             QToolButton:checked {{
                 border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
                 background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
+            QToolButton:disabled {{
+                border: 1px solid {theme_value('calendar_panel.toggle.disabled_border', theme_value('calendar_panel.toggle.border', 'transparent'))};
+                background: {theme_value('calendar_panel.toggle.disabled_bg', theme_value('calendar_panel.toggle.bg', 'transparent'))};
             }}
             """
         )
@@ -1123,6 +1135,7 @@ class CalendarPanel(QWidget):
         self._apply_task_list_selection_style()
         self._apply_insight_list_styles()
         self._apply_multi_selection_formats()
+        self.refresh_theme_visuals()
 
     def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
         """Allow parent to provide a date filter opener for the Task panel."""
@@ -2013,6 +2026,45 @@ class CalendarPanel(QWidget):
             return QColor(0, 0, 0)
         return QColor(255, 255, 255)
 
+    def _apply_toggle_button_style(self, button: QToolButton, *, radius: int = 13, pressed_only: bool = False) -> None:
+        pressed_selector = "QToolButton:pressed" if pressed_only else "QToolButton:checked"
+        button.setStyleSheet(
+            f"""
+            QToolButton {{
+                border: 1px solid {theme_value('calendar_panel.toggle.border', 'transparent')};
+                border-radius: {radius}px;
+                background: {theme_value('calendar_panel.toggle.bg', 'transparent')};
+                padding: 2px;
+                color: {self._icon_tint_color().name()};
+            }}
+            QToolButton:hover {{
+                border: 1px solid {theme_value('calendar_panel.toggle.hover_border', '#666666')};
+                background: {theme_value('calendar_panel.toggle.hover_bg', 'rgba(255,255,255,0.06)')};
+            }}
+            {pressed_selector} {{
+                border: 1px solid {theme_value('calendar_panel.toggle.active_border', '#4a90e2')};
+                background: {theme_value('calendar_panel.toggle.active_bg', 'rgba(74,144,226,0.22)')};
+            }}
+            QToolButton:disabled {{
+                border: 1px solid {theme_value('calendar_panel.toggle.disabled_border', theme_value('calendar_panel.toggle.border', 'transparent'))};
+                background: {theme_value('calendar_panel.toggle.disabled_bg', theme_value('calendar_panel.toggle.bg', 'transparent'))};
+            }}
+            """
+        )
+
+    def refresh_theme_visuals(self) -> None:
+        if getattr(self, "overdue_checkbox", None):
+            self.overdue_checkbox.setIcon(self._load_svg_icon("late.svg", QSize(18, 18)))
+            self._apply_toggle_button_style(self.overdue_checkbox, radius=13)
+        if getattr(self, "date_filter_btn", None):
+            self.date_filter_btn.setIcon(self._load_svg_icon("calendar-days.svg", QSize(18, 18)))
+            self._apply_toggle_button_style(self.date_filter_btn, radius=13, pressed_only=True)
+        if getattr(self, "future_checkbox", None):
+            self.future_checkbox.setIcon(self._load_svg_icon("future.svg", QSize(18, 18)))
+            self._apply_toggle_button_style(self.future_checkbox, radius=13)
+        if getattr(self, "_print_btn", None):
+            self._print_btn.setIcon(self._load_svg_icon("print.svg", QSize(20, 20)))
+
     def _load_ai_icon(self) -> QIcon:
         return self._load_svg_icon("ai.svg", QSize(28, 28))
 
@@ -2542,38 +2594,7 @@ class CalendarPanel(QWidget):
         self._update_insights_from_calendar()
 
     def _update_calendar_dates(self, year: Optional[int] = None, month: Optional[int] = None) -> None:
-        """Bold dates with saved journal entries for the visible month."""
-        if not self.vault_root:
-            return
-
-        current = self.calendar.selectedDate()
-        year = year or current.year()
-        month = month or current.month()
-
-        journal_path = Path(self.vault_root) / "Journal" / str(year) / f"{month:02d}"
-        days_in_month = QDate(year, month, 1).daysInMonth()
-
-        default_format = QTextCharFormat()
-        bold_format = QTextCharFormat()
-        bold_font = QFont()
-        bold_font.setBold(True)
-        bold_font.setWeight(QFont.Black)
-        bold_format.setFont(bold_font)
-
-        for day in range(1, days_in_month + 1):
-            self.calendar.setDateTextFormat(QDate(year, month, day), default_format)
-
-        if not journal_path.exists():
-            self._apply_multi_selection_formats()
-            return
-
-        for day_dir in journal_path.iterdir():
-            if not day_dir.is_dir() or not day_dir.name.isdigit():
-                continue
-            day_num = int(day_dir.name)
-            day_file = day_dir / f"{day_dir.name}{PAGE_SUFFIX}"
-            if day_file.exists():
-                self.calendar.setDateTextFormat(QDate(year, month, day_num), bold_format)
+        """Refresh per-day calendar formatting for the visible month."""
         self._apply_multi_selection_formats()
 
     def _apply_multi_selection_formats(self) -> None:
@@ -2582,29 +2603,33 @@ class CalendarPanel(QWidget):
         self.calendar_delegate.multi_selected_dates = self.multi_selected_dates.copy()
 
         text_color = self._calendar_selected_text
+        journal_format = journal_day_text_format(self.calendar)
         
         def apply_for_calendar(cal: QCalendarWidget, *, allow_selection: bool) -> None:
             year = cal.yearShown()
             month = cal.monthShown()
-            default_format = QTextCharFormat()
+            base = QDate(year, month, 1)
+            if not base.isValid():
+                return
             for month_offset in [-1, 0, 1]:
-                check_date = QDate(year, month, 1).addMonths(month_offset)
+                check_date = base.addMonths(month_offset)
                 check_year = check_date.year()
                 check_month = check_date.month()
+                journal_days = journal_day_file_days(self.vault_root, check_year, check_month)
                 days_in_month = check_date.daysInMonth()
                 for day in range(1, days_in_month + 1):
                     day_date = QDate(check_year, check_month, day)
-                    cal.setDateTextFormat(day_date, default_format)
-
-            if allow_selection:
-                today = QDate.currentDate()
-                if today.isValid() and today not in self.multi_selected_dates:
-                    today_format = QTextCharFormat()
-                    today_format.setFontWeight(QFont.Bold)
-                    today_format.setForeground(text_color)
-                    today_format.setUnderlineStyle(QTextCharFormat.SingleUnderline)
-                    today_format.setUnderlineColor(text_color)
-                    cal.setDateTextFormat(today, today_format)
+                    fmt = QTextCharFormat()
+                    if day in journal_days:
+                        fmt.merge(journal_format)
+                    if allow_selection:
+                        today = QDate.currentDate()
+                        if today.isValid() and day_date == today and today not in self.multi_selected_dates:
+                            fmt.setFontWeight(max(fmt.fontWeight(), QFont.Bold))
+                            fmt.setForeground(text_color)
+                            fmt.setUnderlineStyle(QTextCharFormat.SingleUnderline)
+                            fmt.setUnderlineColor(text_color)
+                    cal.setDateTextFormat(day_date, fmt)
 
         apply_for_calendar(self.calendar, allow_selection=True)
         apply_for_calendar(self.prev_calendar, allow_selection=False)

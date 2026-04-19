@@ -18,6 +18,20 @@ def _default_theme_path() -> Path:
     return Path(__file__).resolve().parents[1] / "theme-config.json"
 
 
+def _bundled_theme_path(theme_name: str | None) -> Path:
+    app_dir = Path(__file__).resolve().parents[1]
+    name = (theme_name or "").strip()
+    if not name or name == "default":
+        return _default_theme_path()
+    candidate = Path(name)
+    if candidate.suffix.lower() != ".json":
+        candidate = candidate.with_suffix(".json")
+    bundled = app_dir / candidate.name
+    if bundled.exists():
+        return bundled
+    return _default_theme_path()
+
+
 def default_theme_path() -> Path:
     return _default_theme_path()
 
@@ -62,11 +76,13 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def _load_theme() -> dict[str, Any]:
     global _THEME_CACHE, _THEME_CACHE_PATH
+    theme_name = config.load_effective_theme_preference()
     path = _resolve_theme_path()
     if _THEME_CACHE is not None and _THEME_CACHE_PATH == path:
         return _THEME_CACHE
-    base_theme = _load_json(_default_theme_path())
-    if path == _default_theme_path():
+    base_path = _bundled_theme_path(theme_name)
+    base_theme = _load_json(base_path)
+    if path == base_path:
         _THEME_CACHE = base_theme
         _THEME_CACHE_PATH = path
         return _THEME_CACHE

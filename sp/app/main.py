@@ -668,6 +668,7 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
     # Generate secure password for embedded server
     server_admin_password = secrets.token_urlsafe(32)
     os.environ["SERVER_ADMIN_PASSWORD"] = server_admin_password
+    os.environ["STILLPOINT_EMBEDDED_SERVER"] = "1"
     
     # Import api module AFTER setting password, since FastAPI app is created at import time
     from sp.server import api as api_module

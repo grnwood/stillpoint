@@ -1094,6 +1094,15 @@ class VaultTreeView(QTreeView):
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragDropMode(QAbstractItemView.InternalMove)
 
+    def focusInEvent(self, event):  # type: ignore[override]
+        super().focusInEvent(event)
+        host = self.window()
+        try:
+            if host is not None and hasattr(host, "_flush_deferred_nav_tree_refresh"):
+                host._flush_deferred_nav_tree_refresh()
+        except Exception:
+            pass
+
     def keyPressEvent(self, event):  # type: ignore[override]
         mods = event.modifiers() & ~Qt.KeypadModifier
         vi_nav_enabled = False
@@ -2126,6 +2135,7 @@ class MainWindow(QMainWindow):
         self._homebase_conflict_popup_open: bool = False
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
+        self._deferred_nav_tree_refresh_target: Optional[str] = None
         self._tree_cache: dict[str, list[dict]] = {}
         self._expanded_paths: set[str] = set()
         self._use_lazy_loading: bool = True  # Will be updated on tree load
@@ -5888,6 +5898,20 @@ class MainWindow(QMainWindow):
         _log_homebase_client(f"flushing deferred tree refresh on UI activity: reason={reason}")
         self.statusBar().showMessage("Refreshing vault tree...", 2500)
         self._refresh_tree()
+
+    def _schedule_deferred_nav_tree_refresh(self, target_path: Optional[str]) -> None:
+        if not target_path:
+            return
+        self._deferred_nav_tree_refresh_target = target_path
+        self._pending_selection = target_path
+
+    def _flush_deferred_nav_tree_refresh(self) -> None:
+        target_path = self._deferred_nav_tree_refresh_target
+        if not target_path or self._tree_refresh_in_progress:
+            return
+        self._deferred_nav_tree_refresh_target = None
+        self._pending_selection = target_path
+        self._populate_vault_tree()
 
     def _mark_homebase_unsynced_local_change(self) -> None:
         if not self._is_homebase_mode_enabled():
@@ -10717,7 +10741,7 @@ class MainWindow(QMainWindow):
             if child_path and child_path in self._expanded_paths:
                 self.tree_view.expand(child_index)
 
-    def _ensure_tree_path_loaded(self, target_path: str) -> None:
+    def _ensure_tree_path_loaded(self, target_path: str, *, defer_refresh: bool = False) -> None:
         """Ensure the tree has loaded nodes along the target path.
 
         For lazy-loading vaults this pre-fetches children for every ancestor
@@ -10732,7 +10756,10 @@ class MainWindow(QMainWindow):
                 if getattr(self, "_selection_retry_path", None) != target_path:
                     self._selection_retry_path = target_path
                     self._pending_selection = target_path
-                    self._populate_vault_tree()
+                    if defer_refresh:
+                        self._schedule_deferred_nav_tree_refresh(target_path)
+                    else:
+                        self._populate_vault_tree()
             return
 
         # --- Batch pre-fetch all ancestor segments in one HTTP call ---
@@ -11939,9 +11966,8 @@ class MainWindow(QMainWindow):
                 self._template_cursor_position = template_cursor_pos
             
             if self._show_journal_in_nav:
-                # Repopulate tree so newly created nested year/month/day nodes appear
-                self._pending_selection = path
-                self._populate_vault_tree()
+                # Defer tree rebuild until the navigator is used again.
+                self._schedule_deferred_nav_tree_refresh(path)
             # Apply journal templates (year/month/day) if newly created
             # Skip template application for remote vaults - server handles this
             if not self._remote_mode:
@@ -12952,6 +12978,7 @@ class MainWindow(QMainWindow):
             anchor_pos=anchor,
             use_vi_keys=bool(getattr(self, "_vi_enabled", False)),
             vault_accent_color=getattr(self, "_vault_accent_color", None),
+            vault_root=self.vault_root,
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -18248,6 +18275,7 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             self.statusBar().showMessage("No page to locate", 3000)
             return
+        self._flush_deferred_nav_tree_refresh()
         if self._ensure_journal_visible_for_path(self.current_path):
             return
         self._ensure_tree_path_loaded(self.current_path)
@@ -18289,7 +18317,10 @@ class MainWindow(QMainWindow):
             return
         try:
             # Ensure all parent nodes are loaded so we can select the target
-            self._ensure_tree_path_loaded(self.current_path)
+            self._ensure_tree_path_loaded(
+                self.current_path,
+                defer_refresh=self._is_journal_path(self.current_path),
+            )
             # Select and scroll to the page in the tree
             self._select_tree_path(self.current_path)
             logNav(f"_sync_nav_tree_to_active_page: selected {self.current_path}")

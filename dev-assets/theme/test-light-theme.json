@@ -340,10 +340,14 @@
       "alt_bg_alt": "#f3f4f6"
     },
     "toggle": {
+      "border": "#d1d5db",
+      "bg": "#f8fafc",
       "hover_border": "#cbd5e1",
       "hover_bg": "rgba(37,99,235,0.08)",
       "active_border": "#2563eb",
-      "active_bg": "rgba(37,99,235,0.18)"
+      "active_bg": "rgba(37,99,235,0.18)",
+      "disabled_border": "#e5e7eb",
+      "disabled_bg": "#f8fafc"
     },
     "today": {
       "border": "#2563eb",
@@ -379,10 +383,14 @@
   },
   "task_panel": {
     "toggle": {
+      "border": "#d1d5db",
+      "bg": "#f8fafc",
       "hover_border": "#cbd5e1",
       "hover_bg": "rgba(37,99,235,0.08)",
       "active_border": "#2563eb",
-      "active_bg": "rgba(37,99,235,0.18)"
+      "active_bg": "rgba(37,99,235,0.18)",
+      "disabled_border": "#e5e7eb",
+      "disabled_bg": "#f8fafc"
     },
     "summary_footer": {
       "color": "#6b7280"

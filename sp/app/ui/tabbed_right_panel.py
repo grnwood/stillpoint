@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Signal, QTimer
-from PySide6.QtWidgets import QTabWidget, QWidget, QMenu
+from PySide6.QtWidgets import QApplication, QTabWidget, QWidget, QMenu
 from PySide6.QtCore import Qt
 from sp.app import config
 from sp.logging_flags import log_enabled
@@ -223,7 +223,7 @@ class TabbedRightPanel(QWidget):
             self._pending_attachments_refresh = True
         if self.link_panel:
             self._pending_link_page = relative_path
-            if self._is_panel_currently_visible(self.link_panel):
+            if self._is_link_panel_active():
                 self.link_panel.set_page(relative_path)
                 self._pending_link_refresh = False
             else:
@@ -316,7 +316,7 @@ class TabbedRightPanel(QWidget):
                 return
         except Exception:
             pass
-        if self._is_panel_currently_visible(self.link_panel):
+        if self._is_link_panel_active():
             self.link_panel.refresh(page_path if page_path is not None else self._current_relative_path)
             self._pending_link_refresh = False
         else:
@@ -458,6 +458,12 @@ class TabbedRightPanel(QWidget):
     def _is_panel_currently_visible(self, panel: Optional[QWidget]) -> bool:
         return bool(panel) and self.isVisible() and self.tabs.currentWidget() == panel
 
+    def _is_link_panel_active(self) -> bool:
+        if not self.link_panel or not self._is_panel_currently_visible(self.link_panel):
+            return False
+        focus = QApplication.focusWidget()
+        return focus is not None and (focus == self.link_panel or self.link_panel.isAncestorOf(focus))
+
     def _sync_visible_panels(self) -> None:
         current = self.tabs.currentWidget()
         if current == self.attachments_panel and (
@@ -553,6 +559,8 @@ class TabbedRightPanel(QWidget):
             self._add_link_tab()
         else:
             self._remove_link_tab()
+        if self.task_panel:
+            self.task_panel.set_calendar_feature_enabled(enable_calendar)
 
     def _tab_insert_index(self, after_widget: Optional[QWidget]) -> int:
         if not after_widget:
@@ -578,6 +586,7 @@ class TabbedRightPanel(QWidget):
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)
         self.task_panel.set_remote_mode(self._remote_mode)
+        self.task_panel.set_calendar_feature_enabled(self.calendar_panel is not None)
         self.task_panel.set_vault_accent_color(self._vault_accent_color)
         self._sync_calendar_task_filters()
 
