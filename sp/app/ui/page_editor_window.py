@@ -222,11 +222,9 @@ class PageEditorWindow(QMainWindow):
         # Heading picker shortcuts (window-local to avoid conflicts)
         # Try using QAction instead of QShortcut
         heading_action = QAction("Show Heading Picker", self)
-        heading_action.setShortcut(QKeySequence("Ctrl+Shift+Tab"))
+        heading_action.setShortcut(QKeySequence("Ctrl+Alt+T"))
         heading_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        heading_action.triggered.connect(
-            lambda: (_page_editor_log("[PageEditor] Heading action triggered"), self._cycle_popup("heading", reverse=False))
-        )
+        heading_action.triggered.connect(self._request_heading_picker_popup)
         self.addAction(heading_action)
 
         link_action = QAction("Insert Link…", self)
@@ -967,6 +965,18 @@ class PageEditorWindow(QMainWindow):
         _page_editor_log("[PageEditor] _handle_heading_picker_request called")
         self._show_filterable_heading_picker(global_point, prefer_above)
 
+    def _request_heading_picker_popup(self) -> None:
+        _page_editor_log("[PageEditor] Explicit heading picker shortcut triggered")
+        cursor_rect = self.editor.cursorRect()
+        viewport = self.editor.viewport()
+        prefer_above = False
+        try:
+            prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+        except Exception:
+            prefer_above = False
+        global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+        self._show_filterable_heading_picker(global_point, prefer_above)
+
     def _show_filterable_heading_picker(self, global_pos, prefer_above: bool = False) -> None:
         """Show a filterable heading picker near the cursor (vi 't')."""
         headings = self._toc_headings or []
@@ -1539,11 +1549,6 @@ class PageEditorWindow(QMainWindow):
                 self._show_find_bar(replace=True, backwards=False)
                 event.accept()
                 return True
-            if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
-                if event.modifiers() & Qt.ShiftModifier:
-                    reverse = event.key() == Qt.Key_Backtab
-                    self._cycle_popup("heading", reverse=reverse)
-                    return True
         elif event.type() == QEvent.KeyRelease:
             if event.key() == Qt.Key_Control and self._popup_items:
                 self._activate_heading_popup_selection()

@@ -1,36 +1,31 @@
-﻿# {{FolderName}} - Data Models
+# {{FolderName}} - Data Models
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Model Summary
 {{cursor}}
-
-## Entity Relationship Diagram
-
 
 ## Core Entities
 
 ### Entity 1
-**Table:** `entity_name`
+**Purpose:** 
 
-| Field | Type | Constraints | Description |
-|-------|------|-------------|-------------|
+| Field | Type | Constraints | Meaning |
+|-------|------|-------------|---------|
 | id | integer | PK | |
-| name | string | NOT NULL | |
-| created_at | timestamp | | |
 
-**Relationships:**
-- 
+**Relationships:** 
 
 ### Entity 2
 
 
-## Database Indexes
+## Important State Changes
+- 
 
-
-## Migration Strategy
-
+## Migration / Backfill Notes
+- 
 
 ---
- [:{{FolderPathSlug}}:API-Design|API-Design] | [:{{FolderPathSlug}}:Testing-Strategy|Testing-Strategy] 
+[:{{FolderPathSlug}}:API-Design|API-Design] | [:{{FolderPathSlug}}:Testing-Strategy|Testing-Strategy]

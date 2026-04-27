@@ -20,6 +20,22 @@ def test_quick_vault_picker_highlights_current_page(main_window, qapp) -> None:
     assert current.data(Qt.UserRole + 2) == "/PageA/Child1/Child1.md"
 
 
+def test_quick_vault_picker_highlights_current_page_in_filtered_mode(main_window, qapp) -> None:
+    main_window._nav_filter_path = "/PageA"
+    main_window._populate_vault_tree()
+    main_window._open_file("/PageA/Child1/Child1.md")
+    qapp.processEvents()
+
+    main_window._show_quick_vault_picker()
+    qapp.processEvents()
+
+    picker = main_window._quick_vault_picker
+    assert picker is not None
+    current = picker.tree.currentIndex()
+    assert current.isValid()
+    assert current.data(Qt.UserRole + 2) == "/PageA/Child1/Child1.md"
+
+
 def test_quick_vault_picker_activation_uses_normal_open_path(main_window, monkeypatch, qapp) -> None:
     main_window._open_file("/PageA/PageA.md")
     qapp.processEvents()
@@ -185,6 +201,7 @@ def test_quick_vault_picker_recomputes_index_after_tree_reset(main_window, qapp,
     picker.open_at()
     qapp.processEvents()
 
-    assert selected_validity == [True]
+    assert selected_validity
+    assert all(selected_validity)
     assert picker.tree.currentIndex().isValid()
     picker.close()

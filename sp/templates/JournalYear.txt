@@ -1,3 +1,11 @@
-# Year {{YYYY}}
+# {{YYYY}}
 ---
 
+## Themes for the Year
+{{cursor}}
+
+## Key Objectives
+- 
+
+## Major Milestones
+- 

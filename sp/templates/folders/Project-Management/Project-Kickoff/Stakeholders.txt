@@ -1,34 +1,27 @@
-﻿# {{FolderName}} - Stakeholders
+# {{FolderName}} - Stakeholder Map
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Snapshot
 {{cursor}}
 
-## Stakeholder Matrix
+## Key People
 
-| Name | Role | Interest | Influence | Communication Plan |
-|------|------|----------|-----------|-------------------|
-| | | High/Med/Low | High/Med/Low | |
+| Name | Role | Need from us | Risk / Concern | Update cadence |
+|------|------|---------------|----------------|----------------|
+| | | | | |
 
-## Key Stakeholders
+## Notes
 
 ### Stakeholder 1
-**Name:** 
 **Role:** 
-**Contact:** 
-**Interests:** 
-**Concerns:** 
-**Engagement Strategy:** 
+**What matters to them:** 
+**What we need from them:** 
+**Watch-outs:** 
 
 ### Stakeholder 2
 
-
-## Communication Plan
-**Weekly Updates:** 
-**Monthly Reports:** 
-**Ad-hoc Updates:** 
-
 ---
- [:{{FolderPathSlug}}:Charter|Charter] | [:{{FolderPathSlug}}:Requirements|Requirements] 
+[:{{FolderPathSlug}}:Charter|Charter] | [:{{FolderPathSlug}}:Requirements|Requirements]

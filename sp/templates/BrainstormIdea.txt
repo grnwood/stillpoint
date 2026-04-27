@@ -1,24 +1,24 @@
 # {{PageName}}
-{{DayDateYear}}
+Captured {{DayDateYear}}
 ---
 
-## The Idea
+## Opportunity / Idea
 {{cursor}}
 
-## Initial Thoughts
+## Problem It Might Solve
 
 
-## Potential Applications
+## Why It Could Matter
+
+
+## Risks / Weaknesses
 - 
 
-## Questions to Explore
+## Assumptions
 - 
 
-## Related Ideas
-- 
-
-## Next Steps
+## Smallest Next Test
 - [ ] 
 
-## Tags
-@idea
+## Related Notes
+- 

@@ -2,27 +2,24 @@
 Week of {{DayDateYear}}
 ---
 
+## This Week in One Sentence
 {{cursor}}
 
-## Wins This Week
+## Wins
 - 
 
-## Challenges
+## Slippage / Friction
 - 
 
-## What I Learned
+## Decisions Needed
 - 
 
-## Tasks Completed
+## Carry Forward
 - [ ] 
 
-## Tasks Carried Over
-- [ ] 
-
-## Focus for Next Week
+## Next Week Top 3
 1. 
 2. 
 3. 
 
 ## Notes
-

@@ -1522,6 +1522,25 @@ def save_feature_link_navigator_enabled(enabled: bool) -> None:
     _update_global_config({"feature_link_navigator_enabled": bool(enabled)})
 
 
+def load_global_feature_map_enabled(default: bool = True) -> bool:
+    """Return whether the Mind Map feature is enabled globally."""
+    payload = _read_global_config()
+    val = payload.get("feature_map_enabled")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def load_feature_map_enabled(default: bool = True) -> bool:
+    """Return whether the Mind Map feature is enabled."""
+    return load_global_feature_map_enabled(default=default)
+
+
+def save_feature_map_enabled(enabled: bool) -> None:
+    """Persist preference for enabling the Mind Map feature."""
+    _update_global_config({"feature_map_enabled": bool(enabled)})
+
+
 def load_global_feature_tags_enabled(default: bool = True) -> bool:
     """Return whether the Tags feature is enabled globally."""
     payload = _read_global_config()

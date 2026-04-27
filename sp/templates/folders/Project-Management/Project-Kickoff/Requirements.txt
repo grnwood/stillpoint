@@ -1,52 +1,34 @@
-﻿# {{FolderName}} - Requirements
+# {{FolderName}} - Scope and Requirements
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Working Summary
 {{cursor}}
 
-## Functional Requirements
+## Stakeholder Needs
+- 
 
-### FR-001: 
+## Requirements
+
+### R-001
 **Priority:** High / Medium / Low
 **Description:** 
-**Acceptance Criteria:**
-- [ ] 
-- [ ] 
-
-### FR-002:
-
-
-## Non-Functional Requirements
-
-### Performance
-- 
-
-### Security
-- 
-
-### Scalability
-- 
-
-### Usability
-- 
-
-## User Stories
-
-### As a [user type]
-**I want** [goal]
-**So that** [benefit]
-
-**Acceptance Criteria:**
-- [ ] 
+**Done looks like:**
 - [ ] 
 
-## Requirements Traceability Matrix
+### R-002
 
-| Req ID | Description | Priority | Status | Test Case |
-|--------|-------------|----------|--------|-----------|
-| FR-001 | | High | Draft | |
+
+## Non-Goals
+- 
+
+## Decisions Still Needed
+- 
+
+## Acceptance Notes
+- 
 
 ---
- [:{{FolderPathSlug}}:Stakeholders|Stakeholders] | [:{{FolderPathSlug}}:Timeline|Timeline] 
+[:{{FolderPathSlug}}:Stakeholders|Stakeholders] | [:{{FolderPathSlug}}:Timeline|Timeline]

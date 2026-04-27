@@ -1,0 +1,25 @@
+# {{FolderName}} - Key Questions
+Created {{DayDateYear}}
+---
+
+**Study / Client:** {{FolderName}}
+
+## Decision We Are Informing
+{{cursor}}
+
+## Questions to Answer
+1. 
+2. 
+3. 
+
+## Assumptions to Test
+- 
+
+## Evidence We Need
+- 
+
+## Out of Scope
+- 
+
+---
+[:{{FolderPathSlug}}:Interview-Guide|Interview-Guide] | [:{{FolderPathSlug}}:Recommendations|Recommendations]

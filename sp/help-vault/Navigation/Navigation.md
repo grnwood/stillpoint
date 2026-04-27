@@ -34,14 +34,15 @@ Search results use the same explicit open behavior as the tree:
 
 ## Quick Switchers
 - `Ctrl+Tab`: cycle through recent pages so you can jump back to something you were just working on.
-- `Ctrl+Shift+Tab` or `Ctrl+Alt+T`: open/cycle page headings so you can jump to a section in the current page.
+- `Ctrl+Shift+Tab`: cycle backward through recent pages.
+- `Ctrl+Alt+T`: open page headings so you can jump to a section in the current page.
 - `Ctrl+Alt+V`: open the quick vault picker so you can browse the current vault tree in an overlay without leaving the editor.
 - These are great when you want to stay in the editor and move without touching the mouse.
 
 Recent pages (`Ctrl+Tab`):
 ![paste_image_001](./paste_image_001.png)
 
-Topics/headings (`Ctrl+Shift+Tab` or `Ctrl+Alt+T`):
+Topics/headings (`Ctrl+Alt+T`):
 ![paste_image_002](./paste_image_002.png)
 
 Quick vault picker (`Ctrl+Alt+V`):

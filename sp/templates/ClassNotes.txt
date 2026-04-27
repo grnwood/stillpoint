@@ -1,29 +1,28 @@
 # {{PageName}}
-{{DayDateYear}}
+Session notes from {{DayDateYear}}
 ---
 
-**Instructor:** 
+**Facilitator / Source:** 
 **Topic:** 
+**Context:** Client meeting / Workshop / Training / Internal session
 
+## Main Takeaway
 {{cursor}}
 
-## Key Concepts
+## Key Points
 - 
 
 ## Notes
 
 
-## Important Definitions
-
-
-## Examples
-
+## Decisions / Alignment
+- 
 
 ## Questions
 - 
 
-## Homework / Action Items
+## Follow-ups
 - [ ] 
 
-## Related Material
+## References
 - 

@@ -1546,19 +1546,9 @@ class QuickVaultPicker(QWidget):
     def open_at(self, global_pos=None, prefer_above: bool = False) -> None:
         self.sync_from_host()
         self._expand_visible_state()
-        current_path = self._host.current_path
-        if current_path:
-            try:
-                self._host._ensure_tree_path_loaded(current_path)
-            except Exception:
-                pass
-            idx = self._index_for_path(current_path)
-            if idx.isValid():
-                self._expand_ancestors(idx)
-                idx = self._index_for_path(current_path)
-            if idx.isValid():
-                self.tree.setCurrentIndex(idx)
-                self.tree.scrollTo(self.tree.currentIndex(), QAbstractItemView.PositionAtCenter)
+        target_path = self._host.current_path
+        if target_path:
+            self._select_current_page(target_path)
         editor_rect = self._host.editor.rect()
         top_left = self._host.editor.mapToGlobal(editor_rect.topLeft())
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
@@ -1572,6 +1562,8 @@ class QuickVaultPicker(QWidget):
         self.show()
         self.raise_()
         self.tree.setFocus(Qt.OtherFocusReason)
+        if target_path:
+            QTimer.singleShot(0, lambda path=target_path: self._select_current_page(path))
 
     def _disconnect_tree_state_signals(self) -> None:
         if not self._signals_connected:
@@ -1591,6 +1583,23 @@ class QuickVaultPicker(QWidget):
         while parent.isValid():
             self.tree.expand(parent)
             parent = parent.parent()
+
+    def _select_current_page(self, target_path: Optional[str]) -> None:
+        if not target_path:
+            return
+        try:
+            self._host._ensure_tree_path_loaded(target_path)
+        except Exception:
+            pass
+        idx = self._index_for_path(target_path)
+        if not idx.isValid():
+            return
+        self._expand_ancestors(idx)
+        idx = self._index_for_path(target_path)
+        if not idx.isValid():
+            return
+        self.tree.setCurrentIndex(idx)
+        self.tree.scrollTo(idx, QAbstractItemView.PositionAtCenter)
 
     def _index_for_path(self, target: Optional[str]) -> QModelIndex:
         if not target:
@@ -2151,6 +2160,7 @@ class MainWindow(QMainWindow):
         self._feature_tasks_enabled = config.load_feature_tasks_enabled()
         self._feature_calendar_enabled = config.load_feature_calendar_enabled()
         self._feature_link_navigator_enabled = config.load_feature_link_navigator_enabled()
+        self._feature_map_enabled = config.load_feature_map_enabled()
         self._feature_tags_enabled = config.load_feature_tags_enabled()
         self._feature_remember_cursor_position_enabled = config.load_feature_remember_cursor_position_enabled()
         
@@ -2463,6 +2473,7 @@ class MainWindow(QMainWindow):
             enable_tasks=self._feature_tasks_enabled,
             enable_calendar=self._feature_calendar_enabled,
             enable_link_navigator=self._feature_link_navigator_enabled,
+            enable_map=self._feature_map_enabled,
             enable_ai_chats=config.load_enable_ai_chats(),
             ai_chat_font_size=ai_font_size,
             http_client=self.http,
@@ -2480,6 +2491,7 @@ class MainWindow(QMainWindow):
         self.right_panel.dateActivated.connect(self._open_journal_date)
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
+        self.right_panel.mapHeadingActivated.connect(self._open_heading_from_map)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatPageWritten.connect(self._on_ai_chat_page_written)
         self.right_panel.aiChatResponseCopied.connect(
@@ -2492,6 +2504,7 @@ class MainWindow(QMainWindow):
         self.right_panel.openTaskWindowRequested.connect(self._open_task_panel_window)
         self.right_panel.openCalendarWindowRequested.connect(self._open_calendar_panel_window)
         self.right_panel.openLinkWindowRequested.connect(self._open_link_panel_window)
+        self.right_panel.openMapWindowRequested.connect(self._open_map_panel_window)
         self.right_panel.openAiWindowRequested.connect(lambda: self._open_ai_chat_window(detached_only=True))
         self.right_panel.filterClearRequested.connect(self._clear_nav_filter)
         self.right_panel.remoteRequestObserved.connect(
@@ -2564,6 +2577,7 @@ class MainWindow(QMainWindow):
         self._detached_ai_chat_window: Optional[QMainWindow] = None
         self._detached_task_panels: list[TaskPanel] = []
         self._detached_calendar_panels: list[CalendarPanel] = []
+        self._detached_map_panels: list[QWidget] = []
         self._apply_read_only_state()
 
         # Geometry save timer (debounce frequent resize/splitter move events)
@@ -2822,6 +2836,10 @@ class MainWindow(QMainWindow):
             link_window_action = QAction("Open Link Navigator Window", self)
             link_window_action.triggered.connect(self._open_link_panel_window)
             view_menu.addAction(link_window_action)
+        if self._feature_map_enabled:
+            map_window_action = QAction("Open Map Window", self)
+            map_window_action.triggered.connect(self._open_map_panel_window)
+            view_menu.addAction(map_window_action)
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
@@ -2908,6 +2926,10 @@ class MainWindow(QMainWindow):
             link_action = QAction("Link Navigator", self)
             link_action.triggered.connect(self._focus_link_navigator)
             go_menu.addAction(link_action)
+        if self._feature_map_enabled:
+            map_action = QAction("Map", self)
+            map_action.triggered.connect(self._focus_map_tab)
+            go_menu.addAction(map_action)
 
         ai_action = QAction("AI Chat", self)
         ai_action.triggered.connect(self._focus_current_ai_chat)
@@ -3443,10 +3465,10 @@ class MainWindow(QMainWindow):
         focus_toggle.activated.connect(self._toggle_focus_between_tree_and_editor)
         redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
         redo_shortcut.activated.connect(self.editor._redo_or_status)
-        # Explicit heading popup shortcut (Ctrl+Shift+Tab)
-        heading_popup = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        # Explicit heading popup shortcut for non-vi users
+        heading_popup = QShortcut(QKeySequence("Ctrl+Alt+T"), self)
         heading_popup.setContext(Qt.WindowShortcut)
-        heading_popup.activated.connect(lambda: self._cycle_popup("heading", reverse=False))
+        heading_popup.activated.connect(self._request_heading_picker_popup)
         vault_popup = QShortcut(QKeySequence("Ctrl+Alt+V"), self)
         vault_popup.setContext(Qt.ApplicationShortcut)
         vault_popup.activated.connect(self._show_quick_vault_picker)
@@ -8280,6 +8302,7 @@ class MainWindow(QMainWindow):
         new_tasks = config.load_feature_tasks_enabled()
         new_calendar = config.load_feature_calendar_enabled()
         new_link_navigator = config.load_feature_link_navigator_enabled()
+        new_map = config.load_feature_map_enabled()
         new_tags = config.load_feature_tags_enabled()
         new_remember_cursor_position = config.load_feature_remember_cursor_position_enabled()
         new_ai = config.load_enable_ai_chats()
@@ -8287,17 +8310,20 @@ class MainWindow(QMainWindow):
             new_tasks != self._feature_tasks_enabled
             or new_calendar != self._feature_calendar_enabled
             or new_link_navigator != self._feature_link_navigator_enabled
+            or new_map != self._feature_map_enabled
             or new_tags != self._feature_tags_enabled
         )
         self._feature_tasks_enabled = new_tasks
         self._feature_calendar_enabled = new_calendar
         self._feature_link_navigator_enabled = new_link_navigator
+        self._feature_map_enabled = new_map
         self._feature_tags_enabled = new_tags
         self._feature_remember_cursor_position_enabled = new_remember_cursor_position
         self.right_panel.set_feature_flags(
             enable_tasks=new_tasks,
             enable_calendar=new_calendar,
             enable_link_navigator=new_link_navigator,
+            enable_map=new_map,
         )
         self.right_panel.set_ai_enabled(new_ai)
         self.editor.set_ai_actions_enabled(new_ai)
@@ -10320,6 +10346,19 @@ class MainWindow(QMainWindow):
         filter_edit.setFocus()
         self._heading_picker = popup
 
+    def _request_heading_picker_popup(self) -> None:
+        if not getattr(self, "editor", None):
+            return
+        cursor_rect = self.editor.cursorRect()
+        viewport = self.editor.viewport()
+        prefer_above = False
+        try:
+            prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
+        except Exception:
+            prefer_above = False
+        global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
+        self._show_heading_picker_popup(global_point, prefer_above)
+
     def _show_quick_vault_picker(self, global_pos=None, prefer_above: bool = False) -> None:
         """Show a transient vault-index picker centered near the editor cursor."""
         if not getattr(self, "tree_model", None):
@@ -11230,9 +11269,11 @@ class MainWindow(QMainWindow):
             full_path = Path(self.vault_root) / path.lstrip("/")
             has_chat = self.right_panel.set_current_page(full_path, path, sync_calendar=sync_calendar)
             self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(path))
+            self._refresh_detached_map_panels(path)
         else:
             self.right_panel.set_current_page(None, None, sync_calendar=sync_calendar)
             self.editor.set_ai_chat_available(False)
+            self._refresh_detached_map_panels(None)
         self._mark_initial_page_loaded()
         if tracer:
             tracer.end("ready for edit")
@@ -13037,96 +13078,12 @@ class MainWindow(QMainWindow):
         dlg = NewPageDialog(self, filter_hint=filter_hint)
         if dlg.exec() == QDialog.Accepted:
             page_name = dlg.get_page_name()
-            if not page_name:
-                self.statusBar().showMessage("Page name cannot be empty", 3000)
-                return
-            
-            if "/" in page_name or ":" in page_name:
-                self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
-                return
-
-            # Create the new page path (resolved_parent already determined above)
-            target_path = self._join_paths(resolved_parent, page_name)
-            
-            try:
-                # Create the page folder
-                resp = self.http.post("/api/path/create", json={"path": target_path, "is_dir": True})
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                if exc.response is not None and exc.response.status_code == 409:
-                    existing_file = self._folder_to_file_path(target_path)
-                    colon_existing = path_to_colon(existing_file) if existing_file else None
-                    if insert_link_in_editor and colon_existing and self.current_path:
-                        self.editor.insert_link(colon_existing, surround_with_spaces=True)
-                        cursor = self.editor.textCursor()
-                        text = self.editor.toPlainText()
-                        pos = cursor.position()
-                        if pos >= len(text) or text[pos] != " ":
-                            cursor.insertText(" ")
-                        else:
-                            cursor.setPosition(pos + 1)
-                        self.editor.setTextCursor(cursor)
-                        self.statusBar().showMessage("Page already exists here; inserted link", 4000)
-                        return
-                    if not insert_link_in_editor and existing_file:
-                        self._open_file(existing_file, cursor_at_end=False, force=True)
-                        self.editor.setFocus()
-                        self.statusBar().showMessage("Opened existing page", 3000)
-                        return
-                    self.statusBar().showMessage("Page already exists here", 4000)
-                else:
-                    self._alert_api_error(exc, "Failed to create page")
-                return
-            except httpx.HTTPError as exc:
-                self._alert_api_error(exc, "Failed to create page")
-                return
-            
-            # Get the file path
-            file_path = self._folder_to_file_path(target_path)
-            if not file_path:
-                return
-            
-            # Apply the selected template
-            template_path = dlg.get_template_path()
-            if template_path:
-                self._apply_template_from_path(file_path, page_name, template_path)
-            self._mark_homebase_unsynced_local_change()
-            self._schedule_homebase_sync("page create")
-            
-            # Refresh tree without auto-opening/selecting the new page.
-            saved_pending_selection = self._pending_selection
-            self._pending_selection = None
-            saved_suspend = self._suspend_selection_open
-            self._suspend_selection_open = True
-            try:
-                self._populate_vault_tree()
-            finally:
-                self._suspend_selection_open = saved_suspend
-                self._pending_selection = saved_pending_selection
-
-            # Insert link where the cursor is and keep editing the current page.
-            if insert_link_in_editor and self.current_path:
-                colon_path = path_to_colon(file_path)
-                if colon_path:
-                    self.editor.insert_link(colon_path, surround_with_spaces=True)
-                    cursor = self.editor.textCursor()
-                    text = self.editor.toPlainText()
-                    pos = cursor.position()
-                    if pos >= len(text) or text[pos] != " ":
-                        cursor.insertText(" ")
-                        self.editor.setTextCursor(cursor)
-                    else:
-                        cursor.setPosition(pos + 1)
-                        self.editor.setTextCursor(cursor)
-                    self.statusBar().showMessage("Created page and inserted link", 4000)
-                    return
-                self.statusBar().showMessage("Created page", 3000)
-                return
-
-            # No active page to insert into, or insertion disabled.
-            self.statusBar().showMessage("Created page", 3000)
-            self._open_file(file_path, cursor_at_end=True, force=True)
-            self.editor.setFocus()
+            self._create_new_page(
+                resolved_parent,
+                page_name,
+                template_path=dlg.get_template_path(),
+                insert_link_in_editor=insert_link_in_editor,
+            )
 
     def _show_folder_template_dialog(self, parent_path: str = "/") -> None:
         """Show dialog to create pages from a folder template."""
@@ -13146,10 +13103,187 @@ class MainWindow(QMainWindow):
         if not template_path or not folder_name:
             return
         
-        # Create target folder path
+        self._create_folder_from_template(parent_path, folder_name, template_path)
+
+    def _available_page_templates(self) -> list[tuple[str, str]]:
+        builtin_dir = Path(__file__).parent.parent.parent / "templates"
+        user_dir = Path.home() / ".stillpoint" / "templates"
+        templates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for tpl_dir in (user_dir, builtin_dir):
+            if not tpl_dir.exists():
+                continue
+            for template_file in sorted(tpl_dir.glob("*.txt")):
+                template_name = template_file.stem
+                if template_name in seen:
+                    continue
+                seen.add(template_name)
+                templates.append((template_name, str(template_file)))
+        return templates
+
+    def _available_folder_templates(self) -> dict[str, list[tuple[str, Path]]]:
+        builtin_dir = Path(__file__).parent.parent.parent / "templates" / "folders"
+        user_dir = Path.home() / ".stillpoint" / "templates" / "folders"
+        categories: dict[str, list[tuple[str, Path]]] = {}
+        seen_by_category: dict[str, set[str]] = {}
+        for base_dir in (user_dir, builtin_dir):
+            if not base_dir.exists():
+                continue
+            for category_dir in sorted(base_dir.iterdir()):
+                if not category_dir.is_dir():
+                    continue
+                category_name = category_dir.name
+                categories.setdefault(category_name, [])
+                seen = seen_by_category.setdefault(category_name, set())
+                for template_dir in sorted(category_dir.iterdir()):
+                    if not template_dir.is_dir():
+                        continue
+                    if not list(template_dir.glob("*.txt")):
+                        continue
+                    template_name = template_dir.name
+                    if template_name in seen:
+                        continue
+                    seen.add(template_name)
+                    categories[category_name].append((template_name, template_dir))
+        return categories
+
+    def _validate_new_page_name(self, page_name: str) -> bool:
+        if not page_name:
+            self.statusBar().showMessage("Page name cannot be empty", 3000)
+            return False
+        if "/" in page_name or ":" in page_name:
+            self.statusBar().showMessage("Page name cannot contain '/' or ':'", 3000)
+            return False
+        return True
+
+    def _prompt_and_create_page(
+        self,
+        parent_path: str,
+        *,
+        template_name: Optional[str] = None,
+        template_path: Optional[str] = None,
+        insert_link_in_editor: bool = False,
+    ) -> None:
+        prompt = "Page Name:"
+        if template_name:
+            prompt = f"Page Name for '{template_name}':"
+        page_name, ok = QInputDialog.getText(self, "Create New Page", prompt)
+        if not ok:
+            return
+        self._create_new_page(
+            parent_path,
+            page_name.strip(),
+            template_path=template_path,
+            insert_link_in_editor=insert_link_in_editor,
+        )
+
+    def _create_new_page(
+        self,
+        parent_path: str,
+        page_name: str,
+        *,
+        template_path: Optional[str] = None,
+        insert_link_in_editor: bool = False,
+    ) -> bool:
+        if not self._validate_new_page_name(page_name):
+            return False
+
+        target_path = self._join_paths(parent_path, page_name)
+        try:
+            resp = self.http.post("/api/path/create", json={"path": target_path, "is_dir": True})
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 409:
+                existing_file = self._folder_to_file_path(target_path)
+                colon_existing = path_to_colon(existing_file) if existing_file else None
+                if insert_link_in_editor and colon_existing and self.current_path:
+                    self.editor.insert_link(colon_existing, surround_with_spaces=True)
+                    cursor = self.editor.textCursor()
+                    text = self.editor.toPlainText()
+                    pos = cursor.position()
+                    if pos >= len(text) or text[pos] != " ":
+                        cursor.insertText(" ")
+                    else:
+                        cursor.setPosition(pos + 1)
+                    self.editor.setTextCursor(cursor)
+                    self.statusBar().showMessage("Page already exists here; inserted link", 4000)
+                    return True
+                if not insert_link_in_editor and existing_file:
+                    self._open_file(existing_file, cursor_at_end=False, force=True)
+                    self.editor.setFocus()
+                    self.statusBar().showMessage("Opened existing page", 3000)
+                    return True
+                self.statusBar().showMessage("Page already exists here", 4000)
+            else:
+                self._alert_api_error(exc, "Failed to create page")
+            return False
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to create page")
+            return False
+
+        file_path = self._folder_to_file_path(target_path)
+        if not file_path:
+            return False
+
+        if template_path:
+            self._apply_template_from_path(file_path, page_name, template_path)
+        self._mark_homebase_unsynced_local_change()
+        self._schedule_homebase_sync("page create")
+
+        saved_pending_selection = self._pending_selection
+        self._pending_selection = None
+        saved_suspend = self._suspend_selection_open
+        self._suspend_selection_open = True
+        try:
+            self._populate_vault_tree()
+        finally:
+            self._suspend_selection_open = saved_suspend
+            self._pending_selection = saved_pending_selection
+
+        if insert_link_in_editor and self.current_path:
+            colon_path = path_to_colon(file_path)
+            if colon_path:
+                self.editor.insert_link(colon_path, surround_with_spaces=True)
+                cursor = self.editor.textCursor()
+                text = self.editor.toPlainText()
+                pos = cursor.position()
+                if pos >= len(text) or text[pos] != " ":
+                    cursor.insertText(" ")
+                    self.editor.setTextCursor(cursor)
+                else:
+                    cursor.setPosition(pos + 1)
+                    self.editor.setTextCursor(cursor)
+                self.statusBar().showMessage("Created page and inserted link", 4000)
+                return True
+            self.statusBar().showMessage("Created page", 3000)
+            return True
+
+        self.statusBar().showMessage("Created page", 3000)
+        self._open_file(file_path, cursor_at_end=True, force=True)
+        self.editor.setFocus()
+        return True
+
+    def _prompt_and_create_folder_from_template(self, parent_path: str, template_name: str, template_path: Path) -> None:
+        folder_name, ok = QInputDialog.getText(
+            self,
+            "Create Folder From Template",
+            f"Folder Name for '{template_name}':",
+        )
+        if not ok:
+            return
+        self._create_folder_from_template(parent_path, folder_name.strip(), template_path)
+
+    def _create_folder_from_template(self, parent_path: str, folder_name: str, template_path: Path) -> bool:
+        if not folder_name:
+            self.statusBar().showMessage("Folder name cannot be empty", 3000)
+            return False
+
+        txt_files = sorted(template_path.glob("*.txt"))
+        if not txt_files:
+            self.statusBar().showMessage("No template files found", 3000)
+            return False
+
         target_folder_path = self._join_paths(parent_path, folder_name)
-        
-        # Create the folder
         try:
             resp = self.http.post("/api/path/create", json={"path": target_folder_path, "is_dir": True})
             resp.raise_for_status()
@@ -13158,53 +13292,36 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Folder '{folder_name}' already exists", 4000)
             else:
                 self._alert_api_error(exc, "Failed to create folder")
-            return
+            return False
         except httpx.HTTPError as exc:
             self._alert_api_error(exc, "Failed to create folder")
-            return
-        
-        # Get all .txt files from the template directory
-        txt_files = sorted(template_path.glob("*.txt"))
-        if not txt_files:
-            self.statusBar().showMessage("No template files found", 3000)
-            return
-        
-        # Create each page from the template
+            return False
+
         first_page_file = None
         created_pages = []
-        
         for template_file in txt_files:
             page_name = template_file.stem
             page_folder_path = self._join_paths(target_folder_path, page_name)
-            
-            # Create page folder
             try:
                 resp = self.http.post("/api/path/create", json={"path": page_folder_path, "is_dir": True})
                 resp.raise_for_status()
             except Exception:
                 continue
-            
-            # Get the file path
+
             page_file_path = self._folder_to_file_path(page_folder_path)
             if not page_file_path:
                 continue
-            
-            # Process template with {{FolderName}} variable
             try:
                 template_content = template_file.read_text(encoding="utf-8")
                 print(f"[FolderTemplate] Processing: {template_file.name}")
             except Exception:
                 continue
-            
-            # Process template variables (includes {{FolderName}})
             content, cursor_pos = self._process_folder_template_variables(
                 template_content,
                 target_folder_path,
                 folder_name,
                 page_name,
             )
-            
-            # Write to the new page file
             abs_path = Path(self.vault_root) / page_file_path.lstrip("/")
             try:
                 abs_path.write_text(content, encoding="utf-8")
@@ -13213,24 +13330,27 @@ class MainWindow(QMainWindow):
                     first_page_file = page_file_path
             except Exception:
                 pass
-        
-        # Refresh tree and open first page
+
         self._populate_vault_tree()
-        
         if first_page_file:
             self._pending_selection = first_page_file
             self._open_file(first_page_file)
-        
-        # Show success message
+
         if created_pages:
             self._mark_homebase_unsynced_local_change()
             self._schedule_homebase_sync("page create")
-            self.statusBar().showMessage(
-                f"Created {len(created_pages)} pages in '{folder_name}'",
-                5000
-            )
-        else:
-            self.statusBar().showMessage("No pages were created", 3000)
+            self.statusBar().showMessage(f"Created {len(created_pages)} pages in '{folder_name}'", 5000)
+            return True
+
+        self.statusBar().showMessage("No pages were created", 3000)
+        return False
+
+    def _context_menu_parent_path(self, index: QModelIndex) -> str:
+        if index.isValid():
+            path = index.data(PATH_ROLE)
+            if path and path != FILTER_BANNER:
+                return str(path)
+        return self._nav_filter_path if self._nav_filter_path and self._nav_filter_path != "/" else "/"
 
     def _get_current_parent_path(self) -> str:
         """Get the parent path for creating new pages based on current selection."""
@@ -13976,6 +14096,64 @@ class MainWindow(QMainWindow):
         """Open task target page without altering calendar selection/filter state."""
         self._open_task_from_panel(path, line, preserve_calendar_state=True)
 
+    def _open_heading_from_map(self, path: str, line: int) -> None:
+        if not path or line <= 0:
+            return
+        focused_widget = self.focusWidget()
+        activation_source = None
+        sender = self.sender()
+        try:
+            if hasattr(sender, "consume_activation_source"):
+                activation_source = sender.consume_activation_source()
+        except Exception:
+            activation_source = None
+        path_changed = path != self.current_path
+        if path_changed:
+            self._open_file(path)
+            expected_path = self.current_path
+            expected_load_token = self._current_editor_load_token()
+            QTimer.singleShot(
+                50,
+                lambda ln=line, path_hint=expected_path, load_token=expected_load_token: self._scroll_to_line_with_flash(
+                    ln,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
+        else:
+            self._scroll_to_line_with_flash(line, expected_path=self.current_path, expected_load_token=self._current_editor_load_token())
+
+        if activation_source == "keyboard":
+            def _focus_editor() -> None:
+                try:
+                    self._exit_vi_insert_on_activate()
+                except Exception:
+                    pass
+                try:
+                    self._focus_editor()
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0 if not path_changed else 75, _focus_editor)
+        elif activation_source == "keyboard_keep_panel":
+            target_focus_widget = None
+            if sender is not None:
+                try:
+                    target_focus_widget = getattr(sender, "preview_label", None)
+                except Exception:
+                    target_focus_widget = None
+            if target_focus_widget is None and focused_widget is not None:
+                target_focus_widget = focused_widget
+
+            def _restore_panel_focus() -> None:
+                try:
+                    if target_focus_widget is not None:
+                        target_focus_widget.setFocus(Qt.OtherFocusReason)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _restore_panel_focus)
+
     def _normalize_task_date_paths(self, paths: list[str]) -> set[str]:
         normalized: set[str] = set()
         for raw in paths or []:
@@ -14188,6 +14366,30 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _refresh_detached_map_panels(self, path: Optional[str]) -> None:
+        panels = list(getattr(self, "_detached_map_panels", []))
+        if not panels:
+            return
+        if not path or not config.has_active_vault():
+            for panel in panels:
+                try:
+                    if panel.window().isVisible():
+                        panel.clear_content()
+                except Exception:
+                    pass
+            return
+        try:
+            norm = self._normalize_editor_path(path)
+        except Exception:
+            norm = path
+        text = self._get_editor_text_for_path(norm)
+        for panel in panels:
+            try:
+                if panel.window().isVisible():
+                    panel.set_content(norm, text)
+            except Exception:
+                pass
+
 
     # --- Detached panel windows -------------------------------------------------
 
@@ -14345,6 +14547,36 @@ class MainWindow(QMainWindow):
         self._install_detached_panel_refresh_hook(
             window,
             lambda p=panel: p.set_page(self._normalize_editor_path(self.current_path)) if self.current_path else p.set_page(None),
+        )
+
+    def _open_map_panel_window(self) -> None:
+        if not config.has_active_vault():
+            self._alert("Open a vault first.")
+            return
+        from .map_panel import MapPanel
+
+        panel = MapPanel()
+        panel.headingActivated.connect(self._open_heading_from_map)
+        if self.current_path:
+            panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
+        else:
+            panel.clear_content()
+        window = QMainWindow(None)
+        self._prepare_top_level_window(window)
+        window.setWindowTitle("Map")
+        window.setCentralWidget(panel)
+        window.resize(820, 720)
+        self._apply_geometry_persistence(window, "map_panel_window")
+        window.show()
+        self._register_detached_panel(window)
+        self._detached_map_panels.append(panel)
+        window.destroyed.connect(lambda: self._detached_map_panels.remove(panel) if panel in self._detached_map_panels else None)
+        self._install_detached_panel_refresh_hook(
+            window,
+            lambda p=panel: p.set_content(
+                self._normalize_editor_path(self.current_path),
+                self._get_editor_text_for_path(self.current_path),
+            ) if self.current_path else p.clear_content(),
         )
 
     def _open_ai_chat_window(self, *, detached_only: bool = False) -> None:
@@ -14928,6 +15160,9 @@ class MainWindow(QMainWindow):
         elif self.right_panel.link_panel and widget == self.right_panel.link_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self._open_link_panel_window)
+        elif self.right_panel.map_panel and widget == self.right_panel.map_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self._open_map_panel_window)
         elif widget == self.right_panel.ai_chat_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(lambda: self._open_ai_chat_window(detached_only=True))
@@ -15371,9 +15606,11 @@ class MainWindow(QMainWindow):
             full_path = Path(self.vault_root) / rel_path.lstrip("/")
             has_chat = self.right_panel.set_current_page(full_path, rel_path)
             self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(rel_path))
+            self._refresh_detached_map_panels(rel_path)
         else:
             self.right_panel.set_current_page(None, None)
             self.editor.set_ai_chat_available(False)
+            self._refresh_detached_map_panels(None)
     
     def _apply_journal_templates_for_date(self, day_file_path: str, year: int, month: int, day: int) -> None:
         """Apply journal templates for a specific date."""
@@ -16037,6 +16274,25 @@ class MainWindow(QMainWindow):
             return
         self._apply_navigation_focus("navigator")
 
+    def _focus_map_tab(self) -> None:
+        """Focus Map, preferring a detached window when present."""
+        if not self._feature_map_enabled:
+            return
+        detached = self._focus_detached_panel_window("Map")
+        if detached is not None:
+            try:
+                panel = detached.centralWidget()
+                if panel is not None:
+                    panel.setFocus(Qt.ShortcutFocusReason)
+            except Exception:
+                pass
+            return
+        self._ensure_right_panel_visible()
+        try:
+            self.right_panel.focus_map_tab(self.current_path)
+        except Exception:
+            pass
+
     def _focus_tags_tab(self) -> None:
         """Switch to Tags tab and focus the search bar."""
         if not self._feature_tags_enabled or not self.tags_tab:
@@ -16416,22 +16672,51 @@ class MainWindow(QMainWindow):
         def add_menu_section(title: str) -> None:
             menu.addSection(title)
 
-        if index.isValid():
-            path = index.data(PATH_ROLE) or "/"
-            open_path = index.data(OPEN_ROLE)
-            file_path = open_path or self._folder_to_file_path(path)
-            add_menu_section("Create")
-            page_template_action = menu.addAction("New Page...")
-            page_template_action.triggered.connect(
-                lambda checked=False, p=path: self._show_new_page_dialog(
+        def add_new_page_menu(parent_menu: QMenu, parent_path: str) -> None:
+            new_page_menu = parent_menu.addMenu("New Page")
+            new_page_menu.addAction(
+                "Blank...",
+                lambda checked=False, p=parent_path: self._prompt_and_create_page(p),
+            )
+            choose_action = new_page_menu.addAction("Choose Template…")
+            choose_action.triggered.connect(
+                lambda checked=False, p=parent_path: self._show_new_page_dialog(
                     parent_path=p,
                     insert_link_in_editor=False,
                 )
             )
-            folder_template_action = menu.addAction("New from Folder Template…")
-            folder_template_action.triggered.connect(
-                lambda checked=False, p=path: self._show_folder_template_dialog(p)
+            templates = self._available_page_templates()
+            if templates:
+                from_template_menu = new_page_menu.addMenu("From Template")
+                for template_name, template_path in templates:
+                    from_template_menu.addAction(
+                        template_name,
+                        lambda checked=False, p=parent_path, name=template_name, tpl=template_path:
+                            self._prompt_and_create_page(p, template_name=name, template_path=tpl),
+                    )
+            folder_templates = self._available_folder_templates()
+            if folder_templates:
+                folder_menu = new_page_menu.addMenu("From Template Folder")
+                for category_name in sorted(folder_templates.keys()):
+                    category_menu = folder_menu.addMenu(category_name)
+                    for template_name, template_path in folder_templates[category_name]:
+                        category_menu.addAction(
+                            template_name,
+                            lambda checked=False, p=parent_path, name=template_name, tpl=template_path:
+                                self._prompt_and_create_folder_from_template(p, name, tpl),
+                        )
+            browse_folder_action = new_page_menu.addAction("Browse Folder Templates…")
+            browse_folder_action.triggered.connect(
+                lambda checked=False, p=parent_path: self._show_folder_template_dialog(p)
             )
+
+        if index.isValid():
+            path = index.data(PATH_ROLE) or "/"
+            open_path = index.data(OPEN_ROLE)
+            file_path = open_path or self._folder_to_file_path(path)
+            create_parent = self._context_menu_parent_path(index)
+            add_menu_section("Create")
+            add_new_page_menu(menu, create_parent)
             add_menu_section("Navigation & View")
             if file_path:
                 copy_link_action = menu.addAction("Copy Link to this Location")
@@ -16501,15 +16786,8 @@ class MainWindow(QMainWindow):
                 ai_chat_action = menu.addAction("AI Chat…")
                 ai_chat_action.triggered.connect(lambda checked=False, fp=file_path: self._open_ai_chat_for_path(fp, create=True))
         else:
-            # When clicking empty space, use filtered path if active, otherwise root
-            default_parent = self._nav_filter_path if self._nav_filter_path and self._nav_filter_path != "/" else "/"
-            menu.addAction(
-                "New Page",
-                lambda checked=False, p=default_parent: self._show_new_page_dialog(
-                    parent_path=p,
-                    insert_link_in_editor=False,
-                ),
-            )
+            add_menu_section("Create")
+            add_new_page_menu(menu, self._context_menu_parent_path(index))
         if menu.actions():
             menu.exec(global_pos)
 
@@ -19916,15 +20194,9 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
                 self._show_command_bar()
                 return True
-            if event.key() == Qt.Key_Tab and (event.modifiers() & Qt.ControlModifier):
-                if event.modifiers() & Qt.ShiftModifier:
-                    reverse = event.key() == Qt.Key_Backtab
-                    if self._popup_mode == "history":
-                        self._cycle_popup("history", reverse=True)
-                    else:
-                        self._cycle_popup("heading", reverse=reverse)
-                else:
-                    self._cycle_popup("history", reverse=event.key() == Qt.Key_Backtab)
+            if event.key() in (Qt.Key_Tab, Qt.Key_Backtab) and (event.modifiers() & Qt.ControlModifier):
+                reverse = bool(event.modifiers() & Qt.ShiftModifier) or event.key() == Qt.Key_Backtab
+                self._cycle_popup("history", reverse=reverse)
                 return True
         elif event.type() == QEvent.KeyRelease:
             if event.key() == Qt.Key_Control and self._popup_items:
@@ -20013,6 +20285,11 @@ class MainWindow(QMainWindow):
             return
         if not self.current_path:
             return
+        try:
+            self.right_panel.refresh_map(self.current_path)
+            self._refresh_detached_map_panels(self.current_path)
+        except Exception:
+            pass
         new_state = self._dirty_state_from_editor(default=True)
         if new_state != getattr(self, "_dirty_flag", False):
             self._dirty_flag = new_state

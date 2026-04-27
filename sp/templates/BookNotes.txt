@@ -1,27 +1,29 @@
 # {{PageName}}
-Read {{DayDateYear}}
+Reviewed {{DayDateYear}}
 ---
 
 **Author:** 
-**Genre:** 
-**Status:** Reading / Completed
+**Source Type:** Book / Article / Report / Paper
+**Status:** Inbox / Reading / Synthesized
+**Link:** 
 
+## Why This Matters
 {{cursor}}
 
-## Summary
+## Executive Summary
 
 
-## Key Takeaways
+## Key Points
 - 
 
-## Favorite Quotes
+## Quotes / Evidence
 > 
 
-## My Thoughts
-
-
-## Related Reading
+## Implications for My Work
 - 
 
-## Rating
-/5
+## Open Questions
+- 
+
+## Follow-up
+- [ ] 

@@ -1,54 +1,33 @@
-﻿# {{FolderName}} - Project Charter
+# {{FolderName}} - Engagement Brief
 Created {{DayDateYear}}
 ---
 
-**Project Name:** {{FolderName}}
-**Project Manager:** 
-**Start Date:** 
-**Target Completion:** 
+**Client / Team:** {{FolderName}}
+**Owner:** 
+**Status:** Draft / Active / Closed
 
+## Problem We Are Solving
 {{cursor}}
 
-## Executive Summary
+## Outcome We Need
 
 
-## Business Case
-**Problem Statement:**
+## Scope
+- In:
+- Out:
 
-
-**Proposed Solution:**
-
-
-**Expected Benefits:**
-- 
-
-## Project Objectives
-1. 
-2. 
-3. 
-
-## Key Deliverables
-- [ ] 
+## Deliverables
 - [ ] 
 - [ ] 
 
-## Budget Overview
-**Total Budget:** 
-**Allocation:**
-- Development: 
-- Resources: 
-- Contingency: 
-
-## Constraints & Assumptions
-**Constraints:**
+## Assumptions
 - 
 
-**Assumptions:**
+## Constraints
 - 
 
-## Approval
-**Approved by:** 
-**Date:** 
+## Success Measures
+- 
 
 ---
-Next: [:{{FolderPathSlug}}:Stakeholders|Stakeholders] 
+Next: [:{{FolderPathSlug}}:Stakeholders|Stakeholders]

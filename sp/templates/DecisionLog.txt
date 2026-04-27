@@ -1,11 +1,15 @@
 # {{PageName}}
-**Date:** {{DayDateYear}}
+Decision logged {{DayDateYear}}
 ---
+
+**Status:** Proposed / Approved / Reversed
+**Owner:** 
+**Review Date:** 
 
 ## Decision
 {{cursor}}
 
-## Context / Background
+## Context
 
 
 ## Options Considered
@@ -13,17 +17,16 @@
 2. 
 3. 
 
-## Chosen Option
+## Selected Option
 
 
-## Reasoning
+## Why This Choice
 
 
-## Expected Outcomes
+## Tradeoffs
 - 
 
-## Review Date
+## Follow-up
+- [ ] 
 
-
-## Actual Outcomes (Update Later)
-
+## Outcome Notes

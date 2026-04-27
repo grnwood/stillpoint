@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Signal, QTimer
-from PySide6.QtWidgets import QApplication, QTabWidget, QWidget, QMenu
+from PySide6.QtWidgets import QApplication, QTabWidget, QWidget, QMenu, QVBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Qt
 from sp.app import config
 from sp.logging_flags import log_enabled
@@ -17,6 +17,7 @@ from .task_panel import TaskPanel
 from .attachments_panel import AttachmentsPanel
 from .link_navigator_panel import LinkNavigatorPanel
 from .calendar_panel import CalendarPanel
+from .map_panel import MapPanel
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
 
@@ -30,6 +31,7 @@ class TabbedRightPanel(QWidget):
     linkActivated = Signal(str)  # page path from Link Navigator
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
+    mapHeadingActivated = Signal(str, int)  # path, line from Map tab
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
     aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
@@ -39,6 +41,7 @@ class TabbedRightPanel(QWidget):
     openLinkWindowRequested = Signal()
     openAiWindowRequested = Signal()
     openCalendarWindowRequested = Signal()
+    openMapWindowRequested = Signal()
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
@@ -55,6 +58,7 @@ class TabbedRightPanel(QWidget):
         enable_tasks: bool = True,
         enable_calendar: bool = True,
         enable_link_navigator: bool = True,
+        enable_map: bool = True,
         enable_ai_chats: bool = False,
         ai_chat_font_size: int = 13,
         http_client: Optional[httpx.Client] = None,
@@ -80,7 +84,9 @@ class TabbedRightPanel(QWidget):
         self._pending_link_refresh: bool = False
         self._pending_link_page: Optional[str] = None
         self._pending_ai_page: Optional[str] = None
+        self._pending_map_refresh: bool = False
         self._vault_accent_color: Optional[str] = None
+        self._page_text_provider = None
         self._calendar_sync_timer = QTimer(self)
         self._calendar_sync_timer.setSingleShot(True)
         self._calendar_sync_timer.setInterval(75)
@@ -105,6 +111,10 @@ class TabbedRightPanel(QWidget):
         if enable_link_navigator:
             self._add_link_tab()
 
+        self.map_panel = None
+        if enable_map:
+            self._add_map_tab()
+
         # Create AI Chat tab if enabled
         if enable_ai_chats:
             self._add_ai_chat_tab()
@@ -118,7 +128,6 @@ class TabbedRightPanel(QWidget):
         
         # Forward signals
         # Layout
-        from PySide6.QtWidgets import QVBoxLayout
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tabs)
@@ -202,6 +211,11 @@ class TabbedRightPanel(QWidget):
                 self.calendar_panel.update_calendar_layout()
             except Exception:
                 pass
+        if self.map_panel and self._is_panel_currently_visible(self.map_panel):
+            try:
+                self.map_panel.fit_map()
+            except Exception:
+                pass
     
     def set_calendar_date(self, year: int, month: int, day: int) -> None:
         """Set the calendar to show a specific date."""
@@ -242,6 +256,12 @@ class TabbedRightPanel(QWidget):
                 self._pending_ai_page = None
             else:
                 self._pending_ai_page = relative_path
+        if self.map_panel:
+            if relative_path and self._is_panel_currently_visible(self.map_panel):
+                self._sync_map_tab_state()
+                self._pending_map_refresh = False
+            else:
+                self._pending_map_refresh = True
         self._update_attachments_tab_label()
         if self.ai_chat_panel and hasattr(self.ai_chat_panel, "has_chat_for_path"):
             return self.ai_chat_panel.has_chat_for_path(relative_path)
@@ -249,11 +269,24 @@ class TabbedRightPanel(QWidget):
 
     def set_page_text_provider(self, provider) -> None:
         """Provide calendar panel with live editor text for AI summaries."""
+        self._page_text_provider = provider
         try:
             if self.calendar_panel:
                 self.calendar_panel.set_page_text_provider(provider)
         except Exception:
             pass
+
+    def refresh_map(self, page_path=None) -> None:
+        """Refresh the map tab from the live editor text provider."""
+        if not self.map_panel:
+            return
+        if page_path is not None:
+            self._current_relative_path = page_path
+        if self._is_panel_currently_visible(self.map_panel):
+            self._sync_map_tab_state()
+            self._pending_map_refresh = False
+        else:
+            self._pending_map_refresh = True
 
     def set_calendar_font_size(self, size: int) -> None:
         """Match calendar/journal/insights fonts to the editor."""
@@ -353,6 +386,9 @@ class TabbedRightPanel(QWidget):
         elif self.link_panel and widget == self.link_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openLinkWindowRequested.emit)
+        elif self.map_panel and widget == self.map_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openMapWindowRequested.emit)
         elif widget == self.ai_chat_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openAiWindowRequested.emit)
@@ -480,6 +516,9 @@ class TabbedRightPanel(QWidget):
         ):
             self.link_panel.set_page(self._pending_link_page if self._pending_link_page is not None else self._current_relative_path)
             self._pending_link_refresh = False
+        if self.map_panel and current == self.map_panel and self._pending_map_refresh:
+            self._sync_map_tab_state()
+            self._pending_map_refresh = False
         if self.ai_chat_panel and current == self.ai_chat_panel and self._pending_ai_page is not None:
             self.ai_chat_panel.set_current_page(self._pending_ai_page)
             self._pending_ai_page = None
@@ -546,7 +585,7 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
 
-    def set_feature_flags(self, *, enable_tasks: bool, enable_calendar: bool, enable_link_navigator: bool) -> None:
+    def set_feature_flags(self, *, enable_tasks: bool, enable_calendar: bool, enable_link_navigator: bool, enable_map: bool) -> None:
         if enable_tasks:
             self._add_task_tab()
         else:
@@ -559,6 +598,10 @@ class TabbedRightPanel(QWidget):
             self._add_link_tab()
         else:
             self._remove_link_tab()
+        if enable_map:
+            self._add_map_tab()
+        else:
+            self._remove_map_tab()
         if self.task_panel:
             self.task_panel.set_calendar_feature_enabled(enable_calendar)
 
@@ -658,6 +701,54 @@ class TabbedRightPanel(QWidget):
             self.tabs.removeTab(idx)
         self.link_panel.deleteLater()
         self.link_panel = None
+
+    def _add_map_tab(self) -> None:
+        if self.map_panel:
+            return
+        self.map_panel = MapPanel()
+        self.map_panel.headingActivated.connect(self.mapHeadingActivated)
+        insert_idx = self._tab_insert_index(self.link_panel or self.attachments_panel)
+        self.tabs.insertTab(insert_idx, self.map_panel, "Map")
+
+    def _remove_map_tab(self) -> None:
+        if not self.map_panel:
+            return
+        idx = self.tabs.indexOf(self.map_panel)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        try:
+            self.map_panel.headingActivated.disconnect(self.mapHeadingActivated)
+        except Exception:
+            pass
+        self.map_panel.deleteLater()
+        self.map_panel = None
+
+    def focus_map_tab(self, page_path=None) -> None:
+        if not self.map_panel:
+            return
+        if page_path is not None:
+            self._current_relative_path = page_path
+            self._sync_map_tab_state()
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) == self.map_panel:
+                self.tabs.setCurrentIndex(i)
+                self.map_panel.setFocus(Qt.ShortcutFocusReason)
+                break
+
+    def _sync_map_tab_state(self) -> None:
+        if not self.map_panel:
+            return
+        rel_path = self._current_relative_path
+        if not rel_path:
+            self.map_panel.clear_content()
+            return
+        text = ""
+        if self._page_text_provider:
+            try:
+                text = self._page_text_provider(rel_path) or ""
+            except Exception:
+                text = ""
+        self.map_panel.set_content(rel_path, text)
 
     def _sync_calendar_task_filters(self) -> None:
         if not self.calendar_panel:

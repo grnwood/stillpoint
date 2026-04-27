@@ -1,25 +1,26 @@
 # {{PageName}}
 ---
 
-**Email:** 
-**Phone:** 
 **Organization:** 
 **Role:** 
+**Email:** 
+**Phone:** 
+**Relationship:** Client / Prospect / Partner / Internal
 
+## Why They Matter
 {{cursor}}
 
-## Background
+## Context
 
 
-## Interaction History
+## Recent Interactions
 ### {{DayDateYear}}
-
-
-## Topics of Interest
 - 
 
-## Follow-ups
+## Priorities / Interests
+- 
+
+## Follow-up
 - [ ] 
 
 ## Notes
-

@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QDialogButtonBox,
     QSplitter,
+    QSizePolicy,
+    QWidget,
 )
 
 
@@ -25,7 +27,7 @@ class FolderTemplateDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("New from Folder Template")
-        self.resize(700, 500)
+        self.resize(700, 360)
         
         self.selected_template_path: Optional[Path] = None
         self.folder_name: str = ""
@@ -36,6 +38,8 @@ class FolderTemplateDialog(QDialog):
     def _build_ui(self) -> None:
         """Build the dialog UI with tree widget and preview."""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         
         # Instructions
         instructions = QLabel(
@@ -43,33 +47,40 @@ class FolderTemplateDialog(QDialog):
             "All pages will be created in a new folder with your chosen name."
         )
         instructions.setWordWrap(True)
+        instructions.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(instructions)
         
         # Splitter for tree and preview
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         
         # Left side: Category tree
         tree_container = QVBoxLayout()
+        tree_container.setContentsMargins(0, 0, 0, 0)
+        tree_container.setSpacing(4)
         tree_label = QLabel("Template Categories:")
         tree_container.addWidget(tree_label)
         
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabel("Folder Templates")
+        self.tree.setHeaderHidden(True)
         self.tree.setExpandsOnDoubleClick(True)
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self.tree.setMinimumHeight(220)
         tree_container.addWidget(self.tree)
         
-        from PySide6.QtWidgets import QWidget
         tree_widget = QWidget()
         tree_widget.setLayout(tree_container)
         splitter.addWidget(tree_widget)
         
         # Right side: Preview list
         preview_container = QVBoxLayout()
+        preview_container.setContentsMargins(0, 0, 0, 0)
+        preview_container.setSpacing(4)
         preview_label = QLabel("Will create:")
         preview_container.addWidget(preview_label)
         
         self.preview_list = QListWidget()
+        self.preview_list.setMinimumHeight(220)
         preview_container.addWidget(self.preview_list)
         
         preview_widget = QWidget()
@@ -78,10 +89,13 @@ class FolderTemplateDialog(QDialog):
         
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([430, 230])
         layout.addWidget(splitter)
         
         # Folder name input
         name_layout = QHBoxLayout()
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(8)
         name_layout.addWidget(QLabel("Folder Name:"))
         self.folder_name_input = QLineEdit()
         self.folder_name_input.setPlaceholderText("e.g., MyProject, NewFeature, ChapterOne")

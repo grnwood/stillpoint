@@ -1,51 +1,34 @@
-﻿# {{FolderName}} - API Design
+# {{FolderName}} - API Design
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## API Summary
 {{cursor}}
 
-## Base URL
-```
-https://api.example.com/v1
-```
-
-## Authentication
-
+## Consumers
+- 
 
 ## Endpoints
 
 ### GET /resource
-**Description:** 
-
-**Request:**
-```json
-{
-  
-}
-```
-
-**Response:**
-```json
-{
-  
-}
-```
-
-**Status Codes:**
-- `200 OK` - 
-- `400 Bad Request` - 
-- `404 Not Found` - 
+**Purpose:** 
+**Inputs:** 
+**Outputs:** 
+**Failure modes:** 
 
 ### POST /resource
+**Purpose:** 
+**Inputs:** 
+**Outputs:** 
+**Failure modes:** 
 
+## Contracts to Confirm
+- 
 
-## Error Handling
-
-
-## Rate Limiting
-
+## Security / Auth Notes
+- 
 
 ---
- [:{{FolderPathSlug}}:Architecture|Architecture] | [:{{FolderPathSlug}}:Data-Models|Data-Models] 
+[:{{FolderPathSlug}}:Architecture|Architecture] | [:{{FolderPathSlug}}:Data-Models|Data-Models]

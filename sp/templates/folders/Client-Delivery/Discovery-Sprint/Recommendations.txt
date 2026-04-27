@@ -1,0 +1,27 @@
+# {{FolderName}} - Recommendations
+Created {{DayDateYear}}
+---
+
+**Study / Client:** {{FolderName}}
+
+## Recommendation Summary
+{{cursor}}
+
+## Recommendations
+
+### Recommendation 1
+**What to do:** 
+**Why:** 
+**Effort / impact:** 
+**Dependencies:** 
+
+### Recommendation 2
+
+
+## Sequencing
+- Now:
+- Next:
+- Later:
+
+---
+[:{{FolderPathSlug}}:Findings|Findings] | [:{{FolderPathSlug}}:Next-Steps|Next-Steps]

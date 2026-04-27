@@ -1,31 +1,29 @@
 # {{PageName}}
-{{DayDateYear}}
+Researched {{DayDateYear}}
 ---
 
-**Source:** 
-**Type:** Article / Book / Video / Other
+**Question:** 
+**Source Type:** Interview / Article / Data / Internal note
 **Date:** 
-**URL:** 
+**Link:** 
 
+## What I Needed to Learn
 {{cursor}}
 
 ## Summary
 
 
-## Key Points
+## Findings
 - 
 
-## Quotes & References
+## Evidence / Quotes
 > 
 
-## My Analysis
-
-
-## Related Topics
+## Implications
 - 
 
-## Follow-up Questions
+## Open Questions
 - 
 
-## Tags
-@research
+## Next Step
+- [ ] 

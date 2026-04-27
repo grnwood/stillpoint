@@ -1,39 +1,30 @@
-﻿# {{FolderName}} - Risks
+# {{FolderName}} - Risk Register
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Current Read
 {{cursor}}
 
-## Risk Register
+## Risks
 
-### Risk 1
-**ID:** R-001
-**Category:** Technical / Resource / Schedule / Budget
+### R-001
 **Description:** 
-**Probability:** High / Medium / Low
+**Likelihood:** High / Medium / Low
 **Impact:** High / Medium / Low
-**Risk Score:** [P  I]
-**Mitigation Strategy:** 
-**Contingency Plan:** 
 **Owner:** 
-**Status:** Open / Mitigated / Closed
+**Mitigation:** 
+**Trigger / Early warning:** 
 
-### Risk 2
-
-
-## Risk Matrix
-
-| Risk ID | Description | Probability | Impact | Score | Status |
-|---------|-------------|-------------|--------|-------|--------|
-| R-001 | | Medium | High |  High | Open |
-
-## Risk Response Plan
+### R-002
 
 
-## Lessons Learned
+## Dependencies
+- 
 
+## Open Issues
+- 
 
 ---
- [:{{FolderPathSlug}}:Timeline|Timeline] | [:{{FolderPathSlug}}:Charter|Charter] 
+[:{{FolderPathSlug}}:Timeline|Timeline] | [:{{FolderPathSlug}}:Charter|Charter]

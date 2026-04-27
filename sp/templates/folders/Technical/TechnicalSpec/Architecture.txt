@@ -1,18 +1,17 @@
-﻿# {{FolderName}} - Architecture
+# {{FolderName}} - Architecture
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Architecture Summary
 {{cursor}}
 
-## System Overview
+## Key Components
 
-
-## Components
 ### Component 1
-**Purpose:** 
-**Technology:** 
+**Responsibility:** 
+**Interfaces:** 
 **Dependencies:** 
 
 ### Component 2
@@ -21,20 +20,13 @@ Created {{DayDateYear}}
 ## Data Flow
 
 
-## Deployment Architecture
+## Operational Concerns
+- Reliability:
+- Performance:
+- Security:
 
-
-## Technology Stack
-- **Frontend:** 
-- **Backend:** 
-- **Database:** 
-- **Infrastructure:** 
-
-## Scalability Considerations
-
-
-## Security Considerations
-
+## Open Design Questions
+- 
 
 ---
- [:{{FolderPathSlug}}:Overview|Overview] | [:{{FolderPathSlug}}:API-Design|API-Design] 
+[:{{FolderPathSlug}}:Overview|Overview] | [:{{FolderPathSlug}}:API-Design|API-Design]

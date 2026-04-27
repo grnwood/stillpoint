@@ -1,41 +1,30 @@
-﻿# {{FolderName}} - Testing Strategy
+# {{FolderName}} - Testing Strategy
 Created {{DayDateYear}}
 ---
 
 **Project:** {{FolderName}}
 
+## Confidence Strategy
 {{cursor}}
 
-## Testing Approach
+## Test Layers
+- Unit:
+- Integration:
+- End-to-end:
 
-
-## Unit Testing
-**Scope:** 
-**Tools:** 
-**Coverage Target:** 
-
-## Integration Testing
-**Scope:** 
-**Tools:** 
-
-## End-to-End Testing
-**Scenarios:**
+## High-Risk Scenarios
 - [ ] 
 - [ ] 
 
-## Performance Testing
-**Metrics:**
+## Test Data / Fixtures
 - 
-**Load Testing:** 
 
-## Security Testing
+## Release Checks
+- [ ] 
+- [ ] 
 
-
-## Test Data Strategy
-
-
-## CI/CD Integration
-
+## Known Gaps
+- 
 
 ---
- [:{{FolderPathSlug}}:Data-Models|Data-Models] | [:{{FolderPathSlug}}:Overview|Overview] 
+[:{{FolderPathSlug}}:Data-Models|Data-Models] | [:{{FolderPathSlug}}:Overview|Overview]

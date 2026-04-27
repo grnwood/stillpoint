@@ -1,32 +1,32 @@
 # {{PageName}}
-Created {{DayDateYear}}
+Work item captured {{DayDateYear}}
 ---
 
-{{cursor}}
+**System:** Jira / Linear / GitHub / Other
+**Status:** Todo / In Progress / Blocked / Done
+**Owner:** 
+**Link:** 
 
 ## Summary
+{{cursor}}
+
+## Desired Outcome
 
 
-## Description
-
+## Scope
+- In:
+- Out:
 
 ## Acceptance Criteria
 - [ ] 
 - [ ] 
-- [ ] 
 
-## Technical Notes
-
-
-## Testing Notes
+## Notes
 
 
-## Related Tickets
+## Dependencies / Risks
 - 
 
-## Links & Attachments
-- 
-
-## Comments & Updates
+## Update Log
 ### {{DayDateYear}}
-
+- 

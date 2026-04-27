@@ -1,6 +1,6 @@
 # StillPoint Page Templates
 
-Templates allow you to create consistent, structured pages with automatic variable substitution. StillPoint includes several built-in templates and supports custom templates that you can add yourself.
+Templates allow you to create consistent, structured pages with automatic variable substitution. StillPoint includes several built-in templates and supports custom templates that you can add yourself. The bundled set is aimed at consultants, project leads, researchers, and other information workers who need lightweight working notes rather than heavy boilerplate.
 
 ## How Templates Work
 

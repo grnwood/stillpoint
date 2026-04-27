@@ -2,7 +2,9 @@
 import pytest
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QStandardItem
 
 
 class TestHistoryNavigation:
@@ -130,6 +132,62 @@ class TestHistoryNavigation:
         # History length should not change
         assert len(main_window.page_history) == initial_history_len
         assert main_window.current_path == "/PageA/PageA.md"
+
+    def test_ctrl_tab_cycles_recent_pages_forward(self, main_window, monkeypatch):
+        calls: list[tuple[str, bool]] = []
+
+        monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
+
+        handled = main_window.eventFilter(
+            main_window,
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.ControlModifier),
+        )
+
+        assert handled is True
+        assert calls == [("history", False)]
+
+    def test_ctrl_shift_tab_cycles_recent_pages_backward(self, main_window, monkeypatch):
+        calls: list[tuple[str, bool]] = []
+
+        monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
+
+        handled = main_window.eventFilter(
+            main_window,
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Backtab, Qt.ControlModifier | Qt.ShiftModifier),
+        )
+
+        assert handled is True
+        assert calls == [("history", True)]
+
+    def test_explicit_heading_picker_uses_persistent_popup(self, main_window, monkeypatch):
+        calls: list[tuple[object, bool]] = []
+
+        monkeypatch.setattr(
+            main_window,
+            "_show_heading_picker_popup",
+            lambda global_pos, prefer_above=False: calls.append((global_pos, prefer_above)),
+        )
+
+        main_window._request_heading_picker_popup()
+
+        assert len(calls) == 1
+
+    def test_context_menu_parent_path_uses_filtered_root_for_whitespace(self, main_window):
+        main_window._nav_filter_path = "/PageA"
+        assert main_window._context_menu_parent_path(QModelIndex()) == "/PageA"
+
+    def test_context_menu_parent_path_uses_selected_folder_and_skips_filter_banner(self, main_window):
+        from sp.app.ui.main_window import PATH_ROLE, FILTER_BANNER
+
+        first_index = main_window.tree_model.index(0, 0)
+        assert first_index.isValid()
+        assert main_window._context_menu_parent_path(first_index) == "/PageA"
+
+        banner = QStandardItem("Filtered")
+        banner.setData(FILTER_BANNER, PATH_ROLE)
+        main_window._nav_filter_path = "/PageB"
+        main_window.tree_model.invisibleRootItem().appendRow(banner)
+        assert main_window._context_menu_parent_path(banner.index()) == "/PageB"
 
 
 class TestHierarchyNavigation:

@@ -1,0 +1,24 @@
+# {{FolderName}} - Next Steps
+Created {{DayDateYear}}
+---
+
+**Study / Client:** {{FolderName}}
+
+## Immediate Actions
+{{cursor}}
+
+## Workstreams
+- [ ] 
+- [ ] 
+
+## Owners / Dates
+
+| Action | Owner | Date | Notes |
+|--------|-------|------|-------|
+| | | | |
+
+## Dependencies
+- 
+
+---
+[:{{FolderPathSlug}}:Findings|Findings] | [:{{FolderPathSlug}}:Recommendations|Recommendations]

@@ -1,3 +1,11 @@
-# Month {{Month}}
+# {{Month}} {{YYYY}}
 ---
 
+## Themes
+{{cursor}}
+
+## Important Dates
+- 
+
+## Focus Areas
+- 

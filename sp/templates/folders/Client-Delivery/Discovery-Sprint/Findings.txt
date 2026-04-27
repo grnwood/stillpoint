@@ -1,0 +1,27 @@
+# {{FolderName}} - Findings
+Created {{DayDateYear}}
+---
+
+**Study / Client:** {{FolderName}}
+
+## Headline
+{{cursor}}
+
+## Findings
+
+### Finding 1
+**What we saw:** 
+**Evidence:** 
+**Why it matters:** 
+
+### Finding 2
+
+
+## Themes
+- 
+
+## Risks / Caveats
+- 
+
+---
+[:{{FolderPathSlug}}:Interview-Guide|Interview-Guide] | [:{{FolderPathSlug}}:Recommendations|Recommendations]

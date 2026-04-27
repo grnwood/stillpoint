@@ -1,27 +1,25 @@
 # {{PageName}}
-{{DayDateYear}}
+Retrospective for {{DayDateYear}}
 ---
 
 ## Period
 **From:** 
 **To:** 
 
+## Summary
 {{cursor}}
 
-## What Went Well ✅
+## What Worked
 - 
 
-## What Could Be Improved 🔄
+## What Did Not
 - 
 
-## What We Learned 💡
+## What We Learned
 - 
 
-## Action Items
+## Changes to Make
 - [ ] 
 
-## Appreciation & Shoutouts 🎉
-
-
-## Next Retrospective
-**Date:** 
+## Questions to Carry Forward
+- 

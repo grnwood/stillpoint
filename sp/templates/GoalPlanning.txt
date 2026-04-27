@@ -1,32 +1,32 @@
 # {{PageName}}
-Created {{DayDateYear}}
+Planned {{DayDateYear}}
 ---
 
-## Goal Statement
+## Objective
 {{cursor}}
 
-## Why This Matters
+## Why It Matters
 
 
 ## Success Criteria
 - 
 
-## Action Steps
+## Constraints
+- 
+
+## Milestones
 - [ ] 
 - [ ] 
 - [ ] 
 
-## Timeline
+## Risks / Blockers
+- 
+
+## Review Rhythm
 **Start:** 
 **Target:** 
-**Review Dates:** 
-
-## Potential Obstacles
-- 
-
-## Support & Resources
-- 
+**Check-ins:** 
 
 ## Progress Log
 ### {{DayDateYear}}
-
+- 

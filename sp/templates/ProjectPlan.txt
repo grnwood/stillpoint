@@ -1,26 +1,32 @@
 # {{PageName}}
-Created {{DayDateYear}}
+Planned {{DayDateYear}}
 ---
 
-## Overview
+**Client / Team:** 
+**Owner:** 
+**Status:** Proposed / Active / Paused / Closed
+
+## Objective
 {{cursor}}
 
-## Goals
-- 
+## Scope
+- In:
+- Out:
 
-## Timeline
-**Start Date:** 
-**Target Completion:** 
-
-## Milestones
+## Deliverables
 - [ ] 
 
-## Resources Needed
+## Workplan
+- [ ] 
+- [ ] 
+- [ ] 
+
+## Risks
 - 
 
-## Risks & Mitigation
+## Open Questions
 - 
 
-## Status Updates
+## Update Log
 ### {{DayDateYear}}
-
+- 

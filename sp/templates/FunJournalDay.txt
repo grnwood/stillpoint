@@ -2,10 +2,20 @@
 ---
 {{QOTD}}
 ---
+
+## Focus
 {{cursor}}
-## Today's Plan
----
 
-## Today's Actual
----
+## Top Priorities
+- [ ] 
+- [ ] 
+- [ ] 
 
+## Notes From the Day
+
+
+## Wins
+- 
+
+## Loose Ends
+- [ ] 

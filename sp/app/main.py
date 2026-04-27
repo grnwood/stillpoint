@@ -885,6 +885,11 @@ def main() -> None:
     if args.webserver is not None:
         _run_webserver_mode(args)
         return
+
+    try:
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    except Exception:
+        pass
     
     start_ts = time.time()
     _enable_faulthandler_log()

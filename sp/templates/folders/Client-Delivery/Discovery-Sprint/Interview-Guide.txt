@@ -1,0 +1,25 @@
+# {{FolderName}} - Interview Guide
+Created {{DayDateYear}}
+---
+
+**Study / Client:** {{FolderName}}
+
+## Interview Goal
+{{cursor}}
+
+## Who We Need to Talk To
+- 
+
+## Core Questions
+1. 
+2. 
+3. 
+
+## Follow-up Prompts
+- 
+
+## Notes for the Facilitator
+- 
+
+---
+[:{{FolderPathSlug}}:Key-Questions|Key-Questions] | [:{{FolderPathSlug}}:Findings|Findings]

@@ -1,4 +1,4 @@
-﻿# {{FolderName}} - Overview
+# {{FolderName}} - Overview
 Created {{DayDateYear}}
 ---
 
@@ -6,20 +6,15 @@ Created {{DayDateYear}}
 **Status:** Draft
 **Last Updated:** {{DayDateYear}}
 
+## What This Is
 {{cursor}}
 
-## Purpose
+## Why We Are Doing It
 
 
 ## Scope
-**In Scope:**
-- 
-
-**Out of Scope:**
-- 
-
-## Stakeholders
-- 
+- In:
+- Out:
 
 ## Success Criteria
 - 

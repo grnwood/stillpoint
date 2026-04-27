@@ -1,20 +1,25 @@
 # {{PageName}}
-Date: {{DayDateYear}}
+Meeting held {{DayDateYear}}
 ---
 
-{{cursor}}
+**Purpose:** 
+**Attendees:** 
+**Owner:** 
 
-## Attendees
-- 
+## Outcome We Needed
+{{cursor}}
 
 ## Agenda
 - 
 
-## Discussion
+## Notes
+
+
+## Decisions
 - 
 
 ## Action Items
-- [ ] 
+- [ ] Owner - Task - Due
 
-## Next Meeting
+## Risks / Follow-ups
 - 
