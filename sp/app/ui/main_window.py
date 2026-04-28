@@ -847,7 +847,7 @@ class RemoteVaultSelectDialog(QDialog):
     def create_new(self) -> bool:
         return self._create_new
 
-from .markdown_editor import MarkdownEditor
+from .markdown_editor import HEADING_MAX_LEVEL, MarkdownEditor
 from .tabbed_right_panel import TabbedRightPanel
 from .task_panel import TaskPanel
 from .link_navigator_panel import LinkNavigatorPanel
@@ -2492,6 +2492,7 @@ class MainWindow(QMainWindow):
         self.right_panel.calendarPageActivated.connect(self._open_calendar_page)
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
         self.right_panel.mapHeadingActivated.connect(self._open_heading_from_map)
+        self.right_panel.mapHeadingCreateRequested.connect(self._insert_heading_from_map_request)
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatPageWritten.connect(self._on_ai_chat_page_written)
         self.right_panel.aiChatResponseCopied.connect(
@@ -2930,6 +2931,10 @@ class MainWindow(QMainWindow):
             map_action = QAction("Map", self)
             map_action.triggered.connect(self._focus_map_tab)
             go_menu.addAction(map_action)
+
+        editor_action = QAction("Editor", self)
+        editor_action.triggered.connect(self._focus_editor)
+        go_menu.addAction(editor_action)
 
         ai_action = QAction("AI Chat", self)
         ai_action.triggered.connect(self._focus_current_ai_chat)
@@ -14124,17 +14129,17 @@ class MainWindow(QMainWindow):
             self._scroll_to_line_with_flash(line, expected_path=self.current_path, expected_load_token=self._current_editor_load_token())
 
         if activation_source == "keyboard":
-            def _focus_editor() -> None:
+            def _focus_editor_from_map() -> None:
                 try:
                     self._exit_vi_insert_on_activate()
                 except Exception:
                     pass
                 try:
-                    self._focus_editor()
+                    self.editor.setFocus(Qt.OtherFocusReason)
                 except Exception:
                     pass
 
-            QTimer.singleShot(0 if not path_changed else 75, _focus_editor)
+            QTimer.singleShot(75 if path_changed else 0, _focus_editor_from_map)
         elif activation_source == "keyboard_keep_panel":
             target_focus_widget = None
             if sender is not None:
@@ -14153,6 +14158,95 @@ class MainWindow(QMainWindow):
                     pass
 
             QTimer.singleShot(0, _restore_panel_focus)
+
+    def _insert_heading_from_map_request(self, path: str, after_line: int, level: int, text: str) -> None:
+        heading_text = str(text or "").strip()
+        if not path or not heading_text:
+            return
+        path_changed = path != self.current_path
+        if path_changed:
+            self._open_file(path)
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
+        QTimer.singleShot(
+            50 if path_changed else 0,
+            lambda p=path, ln=after_line, lvl=level, txt=heading_text, path_hint=expected_path, load_token=expected_load_token: self._apply_map_heading_insert(
+                p,
+                ln,
+                lvl,
+                txt,
+                expected_path=path_hint,
+                expected_load_token=load_token,
+            ),
+        )
+
+    def _apply_map_heading_insert(
+        self,
+        path: str,
+        after_line: int,
+        level: int,
+        text: str,
+        *,
+        expected_path: Optional[str],
+        expected_load_token: Optional[int],
+    ) -> None:
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            return
+        if path != self.current_path:
+            return
+        heading_text = str(text or "").strip()
+        if not heading_text:
+            return
+        heading_level = max(1, min(int(level or 1), HEADING_MAX_LEVEL))
+        display_heading = self.editor._to_display(f"{'#' * heading_level} {heading_text}").rstrip("\n")
+        doc = self.editor.document()
+        cursor = QTextCursor(doc)
+        target_line = 1
+        self._suspend_autosave = True
+        try:
+            cursor.beginEditBlock()
+            first_block = doc.firstBlock()
+            if not first_block.isValid() or (doc.blockCount() == 1 and not first_block.text().strip()):
+                cursor.setPosition(0)
+                cursor.insertText(f"{display_heading}\n")
+                target_line = 1
+            elif after_line <= 0:
+                block = first_block
+                while block.isValid() and not block.text().strip():
+                    block = block.next()
+                if not block.isValid():
+                    cursor.setPosition(0)
+                    cursor.insertText(f"{display_heading}\n")
+                    target_line = 1
+                else:
+                    cursor.setPosition(block.position())
+                    cursor.insertText(f"{display_heading}\n")
+                    target_line = block.blockNumber() + 1
+            else:
+                block = doc.findBlockByLineNumber(after_line - 1)
+                if not block.isValid():
+                    block = doc.lastBlock()
+                cursor.setPosition(block.position())
+                cursor.movePosition(QTextCursor.EndOfBlock)
+                cursor.insertText(f"\n{display_heading}")
+                target_line = block.blockNumber() + 2
+            cursor.endEditBlock()
+        finally:
+            self._suspend_autosave = False
+        try:
+            self.editor.document().setModified(True)
+        except Exception:
+            pass
+        scroll_path = self.current_path
+        scroll_token = self._current_editor_load_token()
+        QTimer.singleShot(
+            0,
+            lambda ln=target_line, path_hint=scroll_path, load_token=scroll_token: self._scroll_to_line_with_flash(
+                ln,
+                expected_path=path_hint,
+                expected_load_token=load_token,
+            ),
+        )
 
     def _normalize_task_date_paths(self, paths: list[str]) -> set[str]:
         normalized: set[str] = set()
@@ -14557,6 +14651,7 @@ class MainWindow(QMainWindow):
 
         panel = MapPanel()
         panel.headingActivated.connect(self._open_heading_from_map)
+        panel.headingCreateRequested.connect(self._insert_heading_from_map_request)
         if self.current_path:
             panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
         else:
@@ -16149,7 +16244,15 @@ class MainWindow(QMainWindow):
             self._request_tree_open(target, focus_target="editor")
 
     def _focus_editor(self) -> None:
-        self.editor.setFocus()
+        try:
+            self.raise_()
+        except Exception:
+            pass
+        try:
+            self.activateWindow()
+        except Exception:
+            pass
+        self.editor.setFocus(Qt.ShortcutFocusReason)
 
     def _focus_vault_tab(self) -> None:
         """Switch to Vault tab and focus the tree."""

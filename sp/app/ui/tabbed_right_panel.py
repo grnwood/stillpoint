@@ -32,6 +32,7 @@ class TabbedRightPanel(QWidget):
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
     mapHeadingActivated = Signal(str, int)  # path, line from Map tab
+    mapHeadingCreateRequested = Signal(str, int, int, str)  # path, after_line, level, text
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
     aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
@@ -707,6 +708,7 @@ class TabbedRightPanel(QWidget):
             return
         self.map_panel = MapPanel()
         self.map_panel.headingActivated.connect(self.mapHeadingActivated)
+        self.map_panel.headingCreateRequested.connect(self.mapHeadingCreateRequested)
         insert_idx = self._tab_insert_index(self.link_panel or self.attachments_panel)
         self.tabs.insertTab(insert_idx, self.map_panel, "Map")
 
@@ -718,6 +720,10 @@ class TabbedRightPanel(QWidget):
             self.tabs.removeTab(idx)
         try:
             self.map_panel.headingActivated.disconnect(self.mapHeadingActivated)
+        except Exception:
+            pass
+        try:
+            self.map_panel.headingCreateRequested.disconnect(self.mapHeadingCreateRequested)
         except Exception:
             pass
         self.map_panel.deleteLater()
@@ -734,6 +740,14 @@ class TabbedRightPanel(QWidget):
                 self.tabs.setCurrentIndex(i)
                 self.map_panel.setFocus(Qt.ShortcutFocusReason)
                 break
+
+    def consume_activation_source(self) -> Optional[str]:
+        if self.map_panel and hasattr(self.map_panel, "consume_activation_source"):
+            try:
+                return self.map_panel.consume_activation_source()
+            except Exception:
+                return None
+        return None
 
     def _sync_map_tab_state(self) -> None:
         if not self.map_panel:

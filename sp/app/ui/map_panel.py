@@ -8,8 +8,8 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QSize, Qt, Signal, QMimeData
-from PySide6.QtGui import QColor, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPointF, QSize, Qt, Signal, QMimeData
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,12 +22,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, heading_level_from_char
+from .theme import theme_color, theme_value
 
 
 class ZoomablePreviewLabel(QLabel):
     """Preview label with wheel or gesture zoom and drag-to-pan."""
 
-    zoomRequested = Signal(int)
+    zoomRequested = Signal(int, object)
 
     def __init__(self):
         super().__init__()
@@ -38,11 +39,11 @@ class ZoomablePreviewLabel(QLabel):
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
             delta = event.angleDelta().y()
-            self.zoomRequested.emit(1 if delta > 0 else -1)
+            self.zoomRequested.emit(1 if delta > 0 else -1, QPointF(event.position()))
             event.accept()
             return
         if event.pixelDelta().y() and event.modifiers() == Qt.NoModifier and abs(event.pixelDelta().x()) <= abs(event.pixelDelta().y()) * 0.5:
-            self.zoomRequested.emit(1 if event.pixelDelta().y() > 0 else -1)
+            self.zoomRequested.emit(1 if event.pixelDelta().y() > 0 else -1, QPointF(event.position()))
             event.accept()
             return
         super().wheelEvent(event)
@@ -54,7 +55,7 @@ class ZoomablePreviewLabel(QLabel):
         if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
             value = event.value()
             if value:
-                self.zoomRequested.emit(1 if value > 0 else -1)
+                self.zoomRequested.emit(1 if value > 0 else -1, QPointF(event.position()))
                 event.accept()
                 return True
         return super().event(event)
@@ -110,10 +111,22 @@ class _MindNode:
     y: float = 0.0
 
 
+@dataclass
+class _DraftHeading:
+    node_id: str
+    anchor_node_id: str
+    parent_node_id: str
+    level: int
+    text: str = ""
+    as_child: bool = False
+    restored_scope_depth: Optional[int] = None
+
+
 class MapPanel(QWidget):
     """Native SVG-based mind map panel for markdown headings only."""
 
     headingActivated = Signal(str, int)
+    headingCreateRequested = Signal(str, int, int, str)
 
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
     _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -151,9 +164,11 @@ class MapPanel(QWidget):
         self._max_heading_level: int = 1
         self._scope_expansion_depths: dict[str, int] = {}
         self._selected_node_id: Optional[str] = None
+        self._pending_selected_line: Optional[int] = None
         self._last_activation_source: Optional[str] = None
         self._root_is_page_h1: bool = False
-        self._dark_mode_enabled: bool = False
+        self._draft_heading: Optional[_DraftHeading] = None
+        self._draft_runtime_node: Optional[_MindNode] = None
         self._theme_colors = self._map_theme_colors()
 
         self.setFocusPolicy(Qt.StrongFocus)
@@ -166,52 +181,49 @@ class MapPanel(QWidget):
         toolbar.setContentsMargins(8, 8, 8, 8)
         toolbar.setSpacing(6)
 
+        toolbar.addStretch(1)
+
         self.zoom_out_btn = QPushButton("−")
         self.zoom_out_btn.setToolTip("Zoom out")
-        self.zoom_out_btn.clicked.connect(lambda: self._adjust_zoom(-1))
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_zoom(-1, None))
         toolbar.addWidget(self.zoom_out_btn)
 
         self.zoom_in_btn = QPushButton("+")
         self.zoom_in_btn.setToolTip("Zoom in")
-        self.zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1))
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1, None))
         toolbar.addWidget(self.zoom_in_btn)
 
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.clicked.connect(self.fit_map)
         toolbar.addWidget(self.fit_btn)
 
-        self.theme_toggle_btn = QToolButton()
-        self.theme_toggle_btn.setCheckable(True)
-        self.theme_toggle_btn.setAutoRaise(True)
-        self.theme_toggle_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        icon_path = self._asset_path("dark-light.svg")
-        if icon_path is not None:
-            self.theme_toggle_btn.setIcon(QIcon(str(icon_path)))
-        self.theme_toggle_btn.clicked.connect(self._toggle_dark_mode)
-        toolbar.addWidget(self.theme_toggle_btn)
-
         self.level_label = QLabel("H1")
         self.level_label.setAlignment(Qt.AlignCenter)
         toolbar.addWidget(self.level_label)
 
-        self.expand_all_btn = QPushButton("Expand All")
+        self.expand_all_btn = QToolButton()
+        self.expand_all_btn.setAutoRaise(True)
+        self.expand_all_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.expand_all_btn.setIconSize(QSize(18, 18))
+        self.expand_all_btn.setToolTip("Expand all")
         self.expand_all_btn.clicked.connect(self.expand_all)
         toolbar.addWidget(self.expand_all_btn)
 
-        self.collapse_all_btn = QPushButton("Collapse All")
+        self.collapse_all_btn = QToolButton()
+        self.collapse_all_btn.setAutoRaise(True)
+        self.collapse_all_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.collapse_all_btn.setIconSize(QSize(18, 18))
+        self.collapse_all_btn.setToolTip("Collapse all")
         self.collapse_all_btn.clicked.connect(self.collapse_all)
         toolbar.addWidget(self.collapse_all_btn)
 
-        self.copy_btn = QPushButton("Copy Image")
+        self.copy_btn = QToolButton()
+        self.copy_btn.setAutoRaise(True)
+        self.copy_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.copy_btn.setIconSize(QSize(18, 18))
+        self.copy_btn.setToolTip("Copy image")
         self.copy_btn.clicked.connect(self.copy_image)
         toolbar.addWidget(self.copy_btn)
-
-        toolbar.addStretch(1)
-
-        self.status_label = QLabel("Open a page to view its map.")
-        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.status_label.setStyleSheet("color: #777;")
-        toolbar.addWidget(self.status_label, 1)
         root.addLayout(toolbar)
 
         self.preview_label = ZoomablePreviewLabel()
@@ -222,12 +234,6 @@ class MapPanel(QWidget):
         self.preview_label.installEventFilter(self)
         root.addWidget(self._wrap_scroll_area(), 1)
 
-        self.current_node_label = QLabel("")
-        self.current_node_label.setAlignment(Qt.AlignCenter)
-        self.current_node_label.setStyleSheet("padding: 8px 12px; color: #444; border-top: 1px solid #ddd;")
-        self.current_node_label.setVisible(False)
-        root.addWidget(self.current_node_label)
-
         self._apply_palette_styles()
         self._update_level_controls()
 
@@ -235,76 +241,105 @@ class MapPanel(QWidget):
         super().changeEvent(event)
         if event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
             self._apply_palette_styles()
+            if self._current_page_path:
+                self.refresh()
 
     def _asset_path(self, name: str) -> Optional[Path]:
         path = Path(__file__).resolve().parents[2] / "assets" / name
         return path if path.exists() else None
 
-    def _toggle_dark_mode(self, checked: bool) -> None:
-        self._dark_mode_enabled = bool(checked)
-        self._theme_colors = self._map_theme_colors()
-        self._apply_palette_styles()
-        if self._current_page_path:
-            self.refresh()
+    def _editor_theme_palette(self) -> QPalette:
+        palette = QPalette(QApplication.palette())
+        bg = theme_value("markdown_editor.base.bg", None)
+        text = theme_value("markdown_editor.base.text", None)
+        selection_bg = theme_value("markdown_editor.base.selection_bg", None)
+        selection_text = theme_value("markdown_editor.base.selection_text", None)
+        base_color = palette.color(QPalette.Base)
+        if bg is not None:
+            base_color = theme_color("markdown_editor.base.bg", bg)
+            palette.setColor(QPalette.Window, base_color)
+            palette.setColor(QPalette.Base, base_color)
+            palette.setColor(QPalette.AlternateBase, base_color.lighter(112) if base_color.lightness() < 128 else base_color.darker(104))
+            palette.setColor(QPalette.Button, base_color)
+        if text is not None:
+            text_color = theme_color("markdown_editor.base.text", text)
+            palette.setColor(QPalette.WindowText, text_color)
+            palette.setColor(QPalette.Text, text_color)
+            palette.setColor(QPalette.ButtonText, text_color)
+        if selection_bg is not None:
+            palette.setColor(QPalette.Highlight, theme_color("markdown_editor.base.selection_bg", selection_bg))
+        if selection_text is not None:
+            palette.setColor(QPalette.HighlightedText, theme_color("markdown_editor.base.selection_text", selection_text))
+        border_color = QColor(base_color)
+        border_color = border_color.lighter(170) if border_color.lightness() < 128 else border_color.darker(135)
+        palette.setColor(QPalette.Mid, border_color)
+        return palette
 
     def _map_theme_colors(self) -> dict[str, str]:
-        if not self._dark_mode_enabled:
-            return {
-                "canvas": "#ffffff",
-                "text": "#1f2328",
-                "root_fill": "#f6f8fa",
-                "root_stroke": "#24292f",
-                "branch_pos_fill": "#e7f5ff",
-                "branch_pos_stroke": "#1f6feb",
-                "branch_neg_fill": "#fff3bf",
-                "branch_neg_stroke": "#b26a00",
-                "child_fill": "#ffffff",
-                "child_stroke": "#8c959f",
-                "collapsed_fill": "#fef3c7",
-                "selected_stroke": "#d1242f",
-                "selected_shadow": "rgba(209, 36, 47, 0.18)",
-                "edge_pos": "#1f6feb",
-                "edge_neg": "#b26a00",
-                "indicator_fill": "#4b5563",
-                "indicator_bg": "#ffffff",
-                "indicator_stroke": "#8c959f",
-                "status_text": "#444444",
-                "status_border": "#dddddd",
-                "toggle_tooltip": "Enable dark map mode",
-            }
+        palette = self._editor_theme_palette()
+        base = palette.color(QPalette.Base)
+        text = palette.color(QPalette.Text)
+        border = palette.color(QPalette.Mid)
+        is_light_palette = base.lightness() > 128
         return {
-            "canvas": "#0f172a",
-            "text": "#e5e7eb",
-            "root_fill": "#1f2937",
-            "root_stroke": "#cbd5e1",
-            "branch_pos_fill": "#0f2f4a",
-            "branch_pos_stroke": "#7dd3fc",
-            "branch_neg_fill": "#4a3410",
-            "branch_neg_stroke": "#fbbf24",
-            "child_fill": "#111827",
-            "child_stroke": "#94a3b8",
-            "collapsed_fill": "#3f3114",
-            "selected_stroke": "#f87171",
-            "selected_shadow": "rgba(248, 113, 113, 0.32)",
-            "edge_pos": "#7dd3fc",
-            "edge_neg": "#fbbf24",
-            "indicator_fill": "#e5e7eb",
-            "indicator_bg": "#0b1220",
-            "indicator_stroke": "#475569",
-            "status_text": "#e5e7eb",
-            "status_border": "#475569",
-            "toggle_tooltip": "Enable light map mode",
+            "canvas": base.name(),
+            "text": text.name(),
+            "root_fill": base.lighter(118).name() if not is_light_palette else base.darker(108).name(),
+            "root_stroke": border.lighter(120).name() if not is_light_palette else border.name(),
+            "branch_pos_fill": "#0f2f4a" if not is_light_palette else "#dbeafe",
+            "branch_pos_stroke": "#7dd3fc" if not is_light_palette else "#1f6feb",
+            "branch_neg_fill": "#4a3410" if not is_light_palette else "#fef3c7",
+            "branch_neg_stroke": "#fbbf24" if not is_light_palette else "#b26a00",
+            "child_fill": base.lighter(108).name() if not is_light_palette else base.darker(104).name(),
+            "child_stroke": border.name(),
+            "collapsed_fill": "#3f3114" if not is_light_palette else "#fef3c7",
+            "selected_stroke": "#f87171" if not is_light_palette else "#d1242f",
+            "selected_shadow": "rgba(248, 113, 113, 0.32)" if not is_light_palette else "rgba(209, 36, 47, 0.18)",
+            "edge_pos": "#7dd3fc" if not is_light_palette else "#1f6feb",
+            "edge_neg": "#fbbf24" if not is_light_palette else "#b26a00",
+            "indicator_fill": text.name(),
+            "indicator_bg": base.name(),
+            "indicator_stroke": border.name(),
         }
 
     def _apply_palette_styles(self) -> None:
+        self._theme_colors = self._map_theme_colors()
         colors = self._theme_colors
-        self.theme_toggle_btn.setChecked(self._dark_mode_enabled)
-        self.theme_toggle_btn.setToolTip(colors["toggle_tooltip"])
+        self.expand_all_btn.setIcon(self._load_svg_icon("expand-all.svg", QSize(18, 18)))
+        self.collapse_all_btn.setIcon(self._load_svg_icon("collapse-all.svg", QSize(18, 18)))
+        self.copy_btn.setIcon(self._load_svg_icon("copy-image.svg", QSize(18, 18)))
+        button_color = self._toolbar_icon_color().name()
+        self.zoom_out_btn.setStyleSheet(f"color: {button_color};")
+        self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
+        self.fit_btn.setStyleSheet(f"color: {button_color};")
         self.preview_label.setStyleSheet(f"background: {colors['canvas']};")
         self.scroll_area.setStyleSheet(f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {colors['canvas']}; border: none; }}")
-        self.current_node_label.setStyleSheet(
-            f"padding: 8px 12px; color: {colors['status_text']}; border-top: 1px solid {colors['status_border']};"
-        )
+
+    def _load_svg_icon(self, name: str, size: QSize) -> QIcon:
+        path = self._asset_path(name)
+        if path is None:
+            return QIcon()
+        try:
+            svg_text = path.read_text(encoding="utf-8", errors="replace")
+            if name in {"expand-all.svg", "collapse-all.svg"}:
+                svg_text = re.sub(r"<text\b.*?</text>", "", svg_text, flags=re.DOTALL)
+            renderer = QSvgRenderer()
+            if not renderer.load(svg_text.encode("utf-8")):
+                return QIcon()
+            pixmap = QPixmap(size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), self._toolbar_icon_color())
+            painter.end()
+            return QIcon(pixmap)
+        except Exception:
+            return QIcon()
+
+    def _toolbar_icon_color(self) -> QColor:
+        palette = self._editor_theme_palette()
+        return QColor(0, 0, 0) if palette.color(QPalette.Window).lightness() > 128 else QColor(255, 255, 255)
 
     def _wrap_scroll_area(self) -> QScrollArea:
         self.scroll_area = QScrollArea()
@@ -339,13 +374,14 @@ class MapPanel(QWidget):
         self._max_heading_level = 1
         self._scope_expansion_depths.clear()
         self._selected_node_id = None
+        self._pending_selected_line = None
         self._last_activation_source = None
         self._root_is_page_h1 = False
+        self._draft_heading = None
+        self._draft_runtime_node = None
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Open a page to view its map.")
-        self._set_status("Open a page to view its map.")
         self._update_level_controls()
-        self._update_selected_label()
 
     def refresh(self) -> None:
         if not self._current_page_path:
@@ -392,7 +428,6 @@ class MapPanel(QWidget):
         self._scope_expansion_depths[scope.node_id] = current_depth + 1
         self._update_level_controls()
         self.refresh()
-        self._set_status(f"Expanded children of '{scope.label}'.")
 
     def decrease_heading_level(self) -> None:
         scope = self._selected_scope_node()
@@ -408,7 +443,6 @@ class MapPanel(QWidget):
             self._scope_expansion_depths[scope.node_id] = next_depth
         self._update_level_controls()
         self.refresh()
-        self._set_status(f"Collapsed children of '{scope.label}'.")
 
     def _fit_current_canvas(self) -> None:
         if not self._svg_content or not self._base_size:
@@ -426,7 +460,6 @@ class MapPanel(QWidget):
             return False
         self._set_selected_node(self._latest_root)
         self.fit_map()
-        self._set_status(f"Centered on '{self._latest_root.label}'.")
         return True
 
     def expand_all(self) -> None:
@@ -438,7 +471,6 @@ class MapPanel(QWidget):
             }
         self._collapsed_node_ids.clear()
         self.refresh()
-        self._set_status("Expanded all nodes.")
 
     def collapse_all(self) -> None:
         if not self._latest_root:
@@ -447,11 +479,9 @@ class MapPanel(QWidget):
         self._collapsed_node_ids = set()
         self._set_selected_node(self._latest_root)
         self.refresh()
-        self._set_status("Collapsed all nodes.")
 
     def copy_image(self) -> None:
         if not self._preview_pixmap:
-            self._set_status("Nothing to copy yet.")
             return
         clipboard = QApplication.clipboard()
         buffer = QBuffer()
@@ -462,13 +492,14 @@ class MapPanel(QWidget):
         mime.setData("image/png", png_bytes)
         mime.setImageData(self._preview_pixmap.toImage())
         clipboard.setMimeData(mime)
-        self._set_status("Map image copied to clipboard.")
 
     def _render_current(self, *, reset_zoom: bool, reset_canvas: bool = False) -> None:
         if not self._current_page_path:
             self.clear_content()
             return
         root = self._parse_markdown(self._current_page_path, self._current_markdown)
+        self._draft_runtime_node = None
+        self._apply_draft_node(root)
         self._latest_root = root
         self._max_heading_level = max((node.level for node in self._collect_nodes(root)), default=1)
         valid_scope_ids = {node.node_id for node in self._collect_nodes(root)}
@@ -482,14 +513,30 @@ class MapPanel(QWidget):
         self._svg_content = self._build_map_svg(root, reset_canvas=reset_canvas)
         if reset_zoom:
             self._zoom_factor = 1.0
-        self._set_status("Map updated.")
         self._update_preview(fit=reset_zoom or reset_canvas)
 
-    def _adjust_zoom(self, delta: int) -> None:
+    def _adjust_zoom(self, delta: int, anchor: object = None) -> None:
         if not self._svg_content:
             return
-        self._zoom_factor = max(0.2, min(4.0, self._zoom_factor + (0.1 * delta)))
+        old_zoom = self._zoom_factor
+        new_zoom = max(0.2, min(4.0, self._zoom_factor + (0.1 * delta)))
+        if abs(new_zoom - old_zoom) < 1e-9:
+            return
+        viewport_anchor = None
+        svg_anchor = None
+        if isinstance(anchor, QPointF):
+            mapped_anchor = self.preview_label.mapTo(self.scroll_area.viewport(), anchor.toPoint())
+            viewport_anchor = QPointF(mapped_anchor)
+            svg_anchor = QPointF(anchor.x() / old_zoom, anchor.y() / old_zoom)
+        self._zoom_factor = new_zoom
         self._update_preview(fit=False)
+        if svg_anchor is not None and viewport_anchor is not None:
+            self.scroll_area.horizontalScrollBar().setValue(
+                max(0, int(round(svg_anchor.x() * self._zoom_factor - viewport_anchor.x())))
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                max(0, int(round(svg_anchor.y() * self._zoom_factor - viewport_anchor.y())))
+            )
 
     def _update_preview(self, *, fit: bool) -> None:
         pixmap = self._svg_to_pixmap(self._svg_content)
@@ -497,7 +544,6 @@ class MapPanel(QWidget):
             self.preview_label.setText("Failed to render map.")
             self._preview_pixmap = None
             self._base_size = None
-            self._set_status("Failed to render map.")
             return
         self._base_size = pixmap.size()
         if fit:
@@ -528,24 +574,19 @@ class MapPanel(QWidget):
         painter.end()
         return QPixmap.fromImage(image)
 
-    def _set_status(self, message: str) -> None:
-        self.status_label.setText(message)
-
-    def _update_selected_label(self) -> None:
-        self.current_node_label.setText("")
-
     def _node_is_expanded(self, node: _MindNode) -> bool:
         return self._scope_depth(node) > 0
 
     def _update_level_controls(self) -> None:
-        scope = self._selected_scope_node()
-        base_level = self._scope_base_level(scope)
-        current_level = base_level + (self._scope_depth(scope) if scope else 0)
-        max_level = base_level + (self._max_scope_depth(scope) if scope else 0)
-        level_text = f"H{current_level}"
-        if max_level > current_level:
-            level_text += f" / H{max_level}"
-        self.level_label.setText(level_text)
+        if self._draft_heading is not None:
+            self.level_label.setText(f"H{self._draft_heading.level}")
+            return
+        node = self._selected_node()
+        if node is None:
+            self.level_label.setText("H1")
+            return
+        node_level = node.level if node.level > 0 else 1
+        self.level_label.setText(f"H{node_level}")
 
     def _mark_activation_source(self, source: str) -> None:
         self._last_activation_source = source
@@ -559,28 +600,162 @@ class MapPanel(QWidget):
         visible_nodes = self._visible_nodes(root)
         if not visible_nodes:
             self._selected_node_id = None
-            self._update_selected_label()
+            self._pending_selected_line = None
             self._update_level_controls()
             return
+        if self._pending_selected_line is not None:
+            target = next((node for node in visible_nodes if node.line_number == self._pending_selected_line), None)
+            self._pending_selected_line = None
+            if target is not None:
+                self._selected_node_id = target.node_id
+                self._update_level_controls()
+                return
         visible_ids = {node.node_id for node in visible_nodes}
         if self._selected_node_id in visible_ids:
-            self._update_selected_label()
             self._update_level_controls()
             return
         self._selected_node_id = visible_nodes[0].node_id
-        self._update_selected_label()
         self._update_level_controls()
 
     def _selected_node(self) -> Optional[_MindNode]:
+        if self._draft_runtime_node and self._selected_node_id == self._draft_runtime_node.node_id:
+            return self._draft_runtime_node
         if not self._latest_root or not self._selected_node_id:
             return None
         return next((node for node in self._collect_nodes(self._latest_root) if node.node_id == self._selected_node_id), None)
+
+    def _subtree_end_line(self, node: _MindNode) -> int:
+        lines = [current.line_number for current in self._collect_nodes(node) if current.line_number > 0]
+        return max(lines, default=0)
+
+    def _new_heading_level(self, node: _MindNode, *, as_child: bool) -> int:
+        if as_child:
+            if node.depth == 0:
+                return 2 if self._root_is_page_h1 else 1
+            return min(HEADING_MAX_LEVEL, max(1, node.level + 1))
+        if node.depth == 0:
+            return 1
+        return max(1, node.level)
+
+    def _start_draft_heading(self, *, as_child: bool) -> bool:
+        if self._draft_heading is not None or not self._latest_root:
+            return False
+        anchor = self._selected_node() or self._latest_root
+        if anchor is None:
+            return False
+        parent = anchor if as_child else (self._find_parent(self._latest_root, anchor) or self._latest_root)
+        restored_scope_depth: Optional[int] = None
+        if as_child:
+            current_depth = self._scope_depth(anchor)
+            if current_depth <= 0:
+                restored_scope_depth = current_depth
+                self._scope_expansion_depths[anchor.node_id] = 1
+        self._draft_heading = _DraftHeading(
+            node_id="draft:new-heading",
+            anchor_node_id=anchor.node_id,
+            parent_node_id=parent.node_id,
+            level=self._new_heading_level(anchor, as_child=as_child),
+            as_child=as_child,
+            restored_scope_depth=restored_scope_depth,
+        )
+        self._selected_node_id = self._draft_heading.node_id
+        self.refresh()
+        return True
+
+    def _cancel_draft_heading(self) -> bool:
+        draft = self._draft_heading
+        if draft is None:
+            return False
+        anchor_id = draft.anchor_node_id
+        if draft.as_child and draft.restored_scope_depth is not None:
+            if draft.restored_scope_depth <= 0:
+                self._scope_expansion_depths.pop(anchor_id, None)
+            else:
+                self._scope_expansion_depths[anchor_id] = draft.restored_scope_depth
+        self._draft_heading = None
+        self._draft_runtime_node = None
+        self._selected_node_id = anchor_id
+        self.refresh()
+        return True
+
+    def _commit_draft_heading(self) -> bool:
+        draft = self._draft_heading
+        if draft is None or not self._current_page_path or not self._latest_root:
+            return False
+        heading_text = draft.text.strip()
+        if not heading_text:
+            return self._cancel_draft_heading()
+        anchor = self._node_by_id(draft.anchor_node_id)
+        after_line = self._subtree_end_line(anchor) if anchor is not None else 0
+        anchor_id = draft.anchor_node_id
+        self._current_markdown, inserted_line = self._insert_heading_into_markdown(
+            self._current_markdown,
+            after_line=after_line,
+            level=draft.level,
+            text=heading_text,
+        )
+        if draft.as_child and draft.restored_scope_depth is not None:
+            self._scope_expansion_depths[anchor_id] = max(self._scope_depth(anchor) if anchor else 0, 1)
+        self._draft_heading = None
+        self._draft_runtime_node = None
+        self._pending_selected_line = inserted_line
+        self.headingCreateRequested.emit(self._current_page_path, after_line, draft.level, heading_text)
+        self.refresh()
+        self.preview_label.setFocus(Qt.ShortcutFocusReason)
+        return True
+
+    def _insert_heading_into_markdown(self, markdown_text: str, *, after_line: int, level: int, text: str) -> tuple[str, int]:
+        heading_level = max(1, min(int(level or 1), HEADING_MAX_LEVEL))
+        heading_line = f"{'#' * heading_level} {text.strip()}".rstrip()
+        source = markdown_text or ""
+        lines = source.splitlines()
+        if not lines:
+            return f"{heading_line}\n", 1
+        if after_line <= 0:
+            insert_at = 0
+            while insert_at < len(lines) and not lines[insert_at].strip():
+                insert_at += 1
+        else:
+            insert_at = max(0, min(after_line, len(lines)))
+        lines.insert(insert_at, heading_line)
+        result = "\n".join(lines)
+        if source.endswith("\n") or not result.endswith("\n"):
+            result += "\n"
+        return result, insert_at + 1
+
+    def _handle_draft_keypress(self, event: QKeyEvent) -> bool:
+        draft = self._draft_heading
+        if draft is None:
+            return False
+        key = event.key()
+        mods = event.modifiers()
+        if key == Qt.Key_Escape and not mods:
+            return self._cancel_draft_heading()
+        if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
+            return self._commit_draft_heading()
+        if key == Qt.Key_Backspace and not mods:
+            if draft.text:
+                draft.text = draft.text[:-1]
+                self.refresh()
+            return True
+        if key == Qt.Key_Space and not mods:
+            draft.text += " "
+            self.refresh()
+            return True
+        if key == Qt.Key_Tab:
+            return True
+        if mods in (Qt.NoModifier, Qt.ShiftModifier):
+            text = event.text()
+            if text and text >= " " and text != "\x7f":
+                draft.text += text
+                self.refresh()
+                return True
+        return True
 
     def _set_selected_node(self, node: Optional[_MindNode]) -> bool:
         node_id = node.node_id if node else None
         changed = node_id != self._selected_node_id
         self._selected_node_id = node_id
-        self._update_selected_label()
         self._update_level_controls()
         if changed and self._latest_root is not None:
             self._svg_content = self._build_map_svg(self._latest_root, reset_canvas=False)
@@ -647,7 +822,6 @@ class MapPanel(QWidget):
             return False
         self._mark_activation_source("keyboard_keep_panel" if keep_focus else "keyboard")
         self.headingActivated.emit(self._current_page_path, node.line_number)
-        self._set_status(f"Jumped to '{node.label}'.")
         return True
 
     def _build_map_svg(self, root: _MindNode, *, reset_canvas: bool) -> str:
@@ -707,6 +881,38 @@ class MapPanel(QWidget):
             + "".join(node_parts)
             + "</svg>"
         )
+
+    def _apply_draft_node(self, root: _MindNode) -> None:
+        draft = self._draft_heading
+        if draft is None:
+            return
+        parent = next((node for node in self._collect_nodes(root) if node.node_id == draft.parent_node_id), None)
+        if parent is None:
+            self._draft_heading = None
+            self._selected_node_id = root.node_id
+            return
+        label = draft.text if draft.text else " "
+        node = _MindNode(
+            node_id=draft.node_id,
+            label=label,
+            depth=parent.depth + 1,
+            level=draft.level,
+            line_number=0,
+            side=parent.side if parent.depth > 0 else 1,
+        )
+        self._draft_runtime_node = node
+        if draft.as_child:
+            parent.children.append(node)
+            return
+        anchor = next((child for child in parent.children if child.node_id == draft.anchor_node_id), None)
+        if anchor is None:
+            parent.children.append(node)
+            return
+        try:
+            insert_idx = parent.children.index(anchor) + 1
+        except ValueError:
+            insert_idx = len(parent.children)
+        parent.children.insert(insert_idx, node)
 
     def _parse_markdown(self, page_path: str, markdown_text: str) -> _MindNode:
         title = Path(page_path).stem or "Map"
@@ -871,7 +1077,10 @@ class MapPanel(QWidget):
         self._node_hitboxes[node.node_id] = (x, y, node.width, node.height)
         parts = [f'<rect class="{css}" x="{x:.1f}" y="{y:.1f}" width="{node.width:.1f}" height="{node.height:.1f}" rx="14" ry="14"/>']
         text_y = y + self._BOX_VPAD + 15
-        for line in node.lines:
+        visible_lines = node.lines
+        if self._draft_runtime_node is not None and node.node_id == self._draft_runtime_node.node_id and visible_lines:
+            visible_lines = visible_lines[:-1] + [visible_lines[-1] + "|"]
+        for line in visible_lines:
             tx = node.x + ox
             parts.append(f'<text x="{tx:.1f}" y="{text_y:.1f}" text-anchor="middle" font-size="14">{html.escape(line)}</text>')
             text_y += self._LINE_HEIGHT
@@ -940,6 +1149,8 @@ class MapPanel(QWidget):
         return False
 
     def _node_by_id(self, node_id: str) -> Optional[_MindNode]:
+        if self._draft_runtime_node and self._draft_runtime_node.node_id == node_id:
+            return self._draft_runtime_node
         if not self._latest_root:
             return None
         return next((item for item in self._collect_nodes(self._latest_root) if item.node_id == node_id), None)
@@ -951,10 +1162,8 @@ class MapPanel(QWidget):
         current_depth = self._scope_depth(node)
         if current_depth > 0:
             self._scope_expansion_depths.pop(node.node_id, None)
-            self._set_status(f"Collapsed '{node.label}'.")
         else:
             self._scope_expansion_depths[node.node_id] = 1
-            self._set_status(f"Expanded '{node.label}'.")
         self._update_level_controls()
         self.refresh()
         return True
@@ -969,6 +1178,8 @@ class MapPanel(QWidget):
         return self._toggle_node(node)
 
     def _activate_node_at(self, event: QMouseEvent) -> bool:
+        if self._draft_heading is not None:
+            return False
         svg_pos = self._event_svg_position(event)
         if not svg_pos:
             return False
@@ -978,7 +1189,6 @@ class MapPanel(QWidget):
         self._set_selected_node(node)
         self._mark_activation_source("mouse")
         self.headingActivated.emit(self._current_page_path, node.line_number)
-        self._set_status(f"Jumped to '{node.label}'.")
         return True
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
@@ -987,6 +1197,10 @@ class MapPanel(QWidget):
             return
         key = event.key()
         mods = event.modifiers()
+        if self._draft_heading is not None:
+            if self._handle_draft_keypress(event):
+                event.accept()
+                return
         if key == Qt.Key_Escape and not mods:
             if self._reset_view_to_root():
                 event.accept()
@@ -999,8 +1213,20 @@ class MapPanel(QWidget):
             self.increase_heading_level()
             event.accept()
             return
-        if key in (Qt.Key_Return, Qt.Key_Enter):
-            if self._activate_selected_node(keep_focus=bool(mods & Qt.ShiftModifier)):
+        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
+            if self._activate_selected_node(keep_focus=False):
+                event.accept()
+                return
+        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
+            if self._activate_selected_node(keep_focus=True):
+                event.accept()
+                return
+        if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
+            if self._start_draft_heading(as_child=False):
+                event.accept()
+                return
+        if key == Qt.Key_Insert and not mods:
+            if self._start_draft_heading(as_child=True):
                 event.accept()
                 return
         if key == Qt.Key_Space and not mods:
@@ -1008,6 +1234,12 @@ class MapPanel(QWidget):
             if node and self._toggle_node(node):
                 event.accept()
                 return
+        if key in (Qt.Key_Right, Qt.Key_L) and not mods:
+            node = self._selected_node()
+            if node and node.children and self._scope_depth(node) <= 0:
+                if self._toggle_node(node):
+                    event.accept()
+                    return
         direction = None
         if key == Qt.Key_Left or (key == Qt.Key_H and not mods):
             direction = "left"
@@ -1024,6 +1256,9 @@ class MapPanel(QWidget):
 
     def eventFilter(self, watched, event):  # type: ignore[override]
         if watched is self.preview_label and isinstance(event, QMouseEvent):
+            if self._draft_heading is not None and event.type() == event.Type.MouseButtonPress:
+                event.accept()
+                return True
             if event.type() == event.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self.preview_label.setFocus(Qt.MouseFocusReason)
                 if self._toggle_node_on_double_click(event):
