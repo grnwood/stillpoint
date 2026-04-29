@@ -205,3 +205,74 @@ def test_quick_vault_picker_recomputes_index_after_tree_reset(main_window, qapp,
     assert all(selected_validity)
     assert picker.tree.currentIndex().isValid()
     picker.close()
+
+
+def test_quick_vault_picker_uses_snapshot_model(main_window, qapp) -> None:
+    main_window._show_quick_vault_picker()
+    qapp.processEvents()
+
+    picker = main_window._quick_vault_picker
+    assert picker is not None
+    assert picker.tree.model() is not main_window.tree_model
+
+
+def test_quick_vault_picker_scopes_to_journal_when_hidden(main_window, qapp, monkeypatch) -> None:
+    journal_tree = [
+        {
+            "path": "/",
+            "children": [
+                {
+                    "name": "Journal",
+                    "path": "/Journal",
+                    "open_path": "/Journal/Journal.md",
+                    "children": [
+                        {
+                            "name": "2026",
+                            "path": "/Journal/2026",
+                            "children": [
+                                {
+                                    "name": "04",
+                                    "path": "/Journal/2026/04",
+                                    "children": [
+                                        {
+                                            "name": "29",
+                                            "path": "/Journal/2026/04/29",
+                                            "open_path": "/Journal/2026/04/29/29.md",
+                                            "children": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    original_get = main_window.http.get
+
+    def fake_get(path, params=None):
+        if path == "/api/vault/tree":
+            include_journal = str((params or {}).get("include_journal") or "").lower() == "true"
+            tree_path = (params or {}).get("path")
+            if include_journal and tree_path == "/Journal":
+                from tests.conftest import _TestHttpResponse
+
+                return _TestHttpResponse(payload={"tree": journal_tree, "version": 1}, url=f"http://localhost{path}")
+        return original_get(path, params=params)
+
+    monkeypatch.setattr(main_window.http, "get", fake_get)
+    main_window._show_journal_in_nav = False
+    main_window.current_path = "/Journal/2026/04/29/29.md"
+
+    main_window._show_quick_vault_picker()
+    qapp.processEvents()
+
+    picker = main_window._quick_vault_picker
+    assert picker is not None
+    assert picker._root_path == "/Journal"
+    assert picker._label.text() == "Journal index"
+    current = picker.tree.currentIndex()
+    assert current.isValid()
+    assert current.data(Qt.UserRole + 2) == "/Journal/2026/04/29/29.md"

@@ -1495,6 +1495,8 @@ class QuickVaultPicker(QWidget):
         super().__init__(parent or host, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self._host = host
         self._signals_connected = False
+        self._include_journal = False
+        self._root_path = "/"
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         self._build_ui()
 
@@ -1535,7 +1537,10 @@ class QuickVaultPicker(QWidget):
         layout.addWidget(self.tree, 1)
 
     def sync_from_host(self) -> None:
-        self.tree.setModel(self._host.tree_model)
+        self._root_path = self._picker_root_path()
+        self._include_journal = self._should_include_journal()
+        self._label.setText("Journal index" if self._root_path == "/Journal" else "Vault index")
+        self.tree.setModel(self._build_model_snapshot())
         self._disconnect_tree_state_signals()
         self.tree.expanded.connect(self._on_index_expanded)
         self.tree.collapsed.connect(self._on_index_collapsed)
@@ -1562,8 +1567,6 @@ class QuickVaultPicker(QWidget):
         self.show()
         self.raise_()
         self.tree.setFocus(Qt.OtherFocusReason)
-        if target_path:
-            QTimer.singleShot(0, lambda path=target_path: self._select_current_page(path))
 
     def _disconnect_tree_state_signals(self) -> None:
         if not self._signals_connected:
@@ -1587,10 +1590,7 @@ class QuickVaultPicker(QWidget):
     def _select_current_page(self, target_path: Optional[str]) -> None:
         if not target_path:
             return
-        try:
-            self._host._ensure_tree_path_loaded(target_path)
-        except Exception:
-            pass
+        self._ensure_path_loaded(target_path)
         idx = self._index_for_path(target_path)
         if not idx.isValid():
             return
@@ -1604,8 +1604,138 @@ class QuickVaultPicker(QWidget):
     def _index_for_path(self, target: Optional[str]) -> QModelIndex:
         if not target:
             return QModelIndex()
-        item = self._host._find_item(self._host.tree_model.invisibleRootItem(), target)
+        model = self.tree.model()
+        if model is None:
+            return QModelIndex()
+        item = self._find_item(model.invisibleRootItem(), target)
         return item.index() if item else QModelIndex()
+
+    def _picker_root_path(self) -> str:
+        current_path = getattr(self._host, "current_path", None)
+        if self._host._is_journal_path(current_path):
+            return "/Journal"
+        return self._host._nav_filter_path or "/"
+
+    def _should_include_journal(self) -> bool:
+        if self._root_path == "/Journal":
+            return True
+        return bool(getattr(self._host, "_show_journal_in_nav", False))
+
+    def _build_model_snapshot(self) -> QStandardItemModel:
+        model = QStandardItemModel(self.tree)
+        model.setHorizontalHeaderLabels(["Vault"])
+        try:
+            recursive = "false" if bool(getattr(self._host, "_use_lazy_loading", False)) else "true"
+            resp = self._host.http.get(
+                "/api/vault/tree",
+                params={
+                    "path": self._root_path,
+                    "recursive": recursive,
+                    "include_journal": "true" if self._include_journal else "false",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get("tree", []) or []
+        except Exception:
+            data = []
+
+        if self._root_path != "/":
+            try:
+                data = self._host._filter_tree_data(data, self._root_path)
+            except Exception:
+                pass
+
+        seen_paths: set[str] = set()
+        for node in data:
+            if node.get("path") == "/":
+                for child in node.get("children", []):
+                    if not self._include_journal and self._host._is_journal_node(child.get("name"), child.get("path")):
+                        continue
+                    self._host._add_tree_node(model.invisibleRootItem(), child, seen_paths)
+            else:
+                if not self._include_journal and self._host._is_journal_node(node.get("name"), node.get("path")):
+                    continue
+                self._host._add_tree_node(model.invisibleRootItem(), node, seen_paths)
+        return model
+
+    def _find_item(self, parent: QStandardItem, target: str) -> Optional[QStandardItem]:
+        for row in range(parent.rowCount()):
+            child = parent.child(row)
+            child_path = child.data(PATH_ROLE)
+            child_open = child.data(OPEN_ROLE)
+            if target in (child_path, child_open):
+                return child
+            found = self._find_item(child, target)
+            if found:
+                return found
+        return None
+
+    def _is_placeholder_only(self, item: QStandardItem) -> bool:
+        return item.rowCount() == 1 and not item.child(0).isEnabled()
+
+    def _load_children_for_item(self, item: QStandardItem, path: str) -> None:
+        model = self.tree.model()
+        if model is None:
+            return
+        if not bool(getattr(self._host, "_use_lazy_loading", False)):
+            return
+        if item.rowCount() > 0 and not self._is_placeholder_only(item):
+            return
+        try:
+            resp = self._host.http.get(
+                "/api/vault/tree",
+                params={
+                    "path": path,
+                    "recursive": "false",
+                    "include_journal": "true" if self._include_journal else "false",
+                },
+            )
+            resp.raise_for_status()
+            tree = resp.json().get("tree", []) or []
+        except Exception:
+            return
+        item.removeRows(0, item.rowCount())
+        seen_paths: set[str] = set()
+        children: list[dict] = []
+        for node in tree:
+            node_path = self._host._normalize_tree_path(node.get("path"))
+            if node_path == path:
+                children = node.get("children") or []
+                break
+            if node_path == "/" and path == "/":
+                children = node.get("children") or []
+                break
+        for child in children:
+            if not self._include_journal and self._host._is_journal_node(child.get("name"), child.get("path")):
+                continue
+            self._host._add_tree_node(item, child, seen_paths)
+
+    def _ensure_path_loaded(self, target_path: str) -> None:
+        model = self.tree.model()
+        if model is None or not target_path:
+            return
+        if self._root_path != "/" and not target_path.startswith(self._root_path.rstrip("/") + "/") and target_path != self._root_path:
+            return
+        try:
+            resp = self._host.http.get(
+                "/api/vault/tree/expand-path",
+                params={
+                    "target": target_path,
+                    "include_journal": "true" if self._include_journal else "false",
+                },
+            )
+            resp.raise_for_status()
+            segments = resp.json().get("segments") or {}
+        except Exception:
+            segments = {}
+        for seg_path, _ in segments.items():
+            if self._root_path != "/" and seg_path != self._root_path and not seg_path.startswith(self._root_path.rstrip("/") + "/"):
+                continue
+            index = self._index_for_path(seg_path)
+            if index.isValid():
+                item = model.itemFromIndex(index)
+                if item is not None:
+                    self._load_children_for_item(item, seg_path)
 
     def _activate_index(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -1696,12 +1826,15 @@ class QuickVaultPicker(QWidget):
             self.tree.scrollTo(top, QAbstractItemView.PositionAtCenter)
 
     def _on_index_expanded(self, index: QModelIndex) -> None:
-        item = self._host.tree_model.itemFromIndex(index)
+        model = self.tree.model()
+        if model is None:
+            return
+        item = model.itemFromIndex(index)
         if not item:
             return
-        path = self._host._normalize_tree_path(item.data(PATH_ROLE))
+        path = self._host._normalize_tree_path(item.data(PATH_ROLE) or item.data(OPEN_ROLE))
         if path:
-            self._host._load_children_for_path(item, path)
+            self._load_children_for_item(item, path)
 
     def _on_index_collapsed(self, index: QModelIndex) -> None:
         return None
@@ -16164,6 +16297,10 @@ class MainWindow(QMainWindow):
                 self._apply_navigation_focus(focus_target)
 
     def _adjust_font_size(self, delta: int) -> None:
+        map_panel = getattr(self.right_panel, "map_panel", None)
+        if map_panel and hasattr(map_panel, "contains_focus") and map_panel.contains_focus():
+            if map_panel.zoom_selected_node(delta):
+                return
         new_size = max(6, min(24, self.font_size + delta))
         fw = self.focusWidget()
         ai_focus = False

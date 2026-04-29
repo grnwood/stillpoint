@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QToolButton,
     QVBoxLayout,
@@ -181,22 +180,6 @@ class MapPanel(QWidget):
         toolbar.setContentsMargins(8, 8, 8, 8)
         toolbar.setSpacing(6)
 
-        toolbar.addStretch(1)
-
-        self.zoom_out_btn = QPushButton("−")
-        self.zoom_out_btn.setToolTip("Zoom out")
-        self.zoom_out_btn.clicked.connect(lambda: self._adjust_zoom(-1, None))
-        toolbar.addWidget(self.zoom_out_btn)
-
-        self.zoom_in_btn = QPushButton("+")
-        self.zoom_in_btn.setToolTip("Zoom in")
-        self.zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1, None))
-        toolbar.addWidget(self.zoom_in_btn)
-
-        self.fit_btn = QPushButton("Fit")
-        self.fit_btn.clicked.connect(self.fit_map)
-        toolbar.addWidget(self.fit_btn)
-
         self.level_label = QLabel("H1")
         self.level_label.setAlignment(Qt.AlignCenter)
         toolbar.addWidget(self.level_label)
@@ -224,6 +207,32 @@ class MapPanel(QWidget):
         self.copy_btn.setToolTip("Copy image")
         self.copy_btn.clicked.connect(self.copy_image)
         toolbar.addWidget(self.copy_btn)
+
+        self.fit_btn = QToolButton()
+        self.fit_btn.setAutoRaise(True)
+        self.fit_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.fit_btn.setIconSize(QSize(18, 18))
+        self.fit_btn.setToolTip("Fit map")
+        self.fit_btn.clicked.connect(self.fit_map)
+        toolbar.addWidget(self.fit_btn)
+
+        toolbar.addStretch(1)
+
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setAutoRaise(True)
+        self.zoom_out_btn.setFixedSize(26, 26)
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setToolTip("Zoom out")
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_zoom(-1, None))
+        toolbar.addWidget(self.zoom_out_btn)
+
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setAutoRaise(True)
+        self.zoom_in_btn.setFixedSize(26, 26)
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setToolTip("Zoom in")
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1, None))
+        toolbar.addWidget(self.zoom_in_btn)
         root.addLayout(toolbar)
 
         self.preview_label = ZoomablePreviewLabel()
@@ -308,10 +317,10 @@ class MapPanel(QWidget):
         self.expand_all_btn.setIcon(self._load_svg_icon("expand-all.svg", QSize(18, 18)))
         self.collapse_all_btn.setIcon(self._load_svg_icon("collapse-all.svg", QSize(18, 18)))
         self.copy_btn.setIcon(self._load_svg_icon("copy-image.svg", QSize(18, 18)))
+        self.fit_btn.setIcon(self._load_svg_icon("fit-image.svg", QSize(18, 18)))
         button_color = self._toolbar_icon_color().name()
         self.zoom_out_btn.setStyleSheet(f"color: {button_color};")
         self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
-        self.fit_btn.setStyleSheet(f"color: {button_color};")
         self.preview_label.setStyleSheet(f"background: {colors['canvas']};")
         self.scroll_area.setStyleSheet(f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {colors['canvas']}; border: none; }}")
 
@@ -465,7 +474,7 @@ class MapPanel(QWidget):
     def expand_all(self) -> None:
         if self._latest_root:
             self._scope_expansion_depths = {
-                node.node_id: self._max_scope_depth(node)
+                node.node_id: 1
                 for node in self._collect_nodes(self._latest_root)
                 if node.children
             }
@@ -537,6 +546,27 @@ class MapPanel(QWidget):
             self.scroll_area.verticalScrollBar().setValue(
                 max(0, int(round(svg_anchor.y() * self._zoom_factor - viewport_anchor.y())))
             )
+
+    def _selected_node_zoom_anchor(self) -> Optional[QPointF]:
+        if not self._selected_node_id:
+            return None
+        hitbox = self._node_hitboxes.get(self._selected_node_id)
+        if not hitbox:
+            return None
+        x, y, w, h = hitbox
+        return QPointF((x + (w / 2.0)) * self._zoom_factor, (y + (h / 2.0)) * self._zoom_factor)
+
+    def zoom_selected_node(self, delta: int) -> bool:
+        if not self._svg_content:
+            return False
+        self._adjust_zoom(delta, self._selected_node_zoom_anchor())
+        return True
+
+    def contains_focus(self) -> bool:
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+        return focus_widget is self or focus_widget is self.preview_label or self.isAncestorOf(focus_widget)
 
     def _update_preview(self, *, fit: bool) -> None:
         pixmap = self._svg_to_pixmap(self._svg_content)
@@ -1197,6 +1227,14 @@ class MapPanel(QWidget):
             return
         key = event.key()
         mods = event.modifiers()
+        if key == Qt.Key_J and mods == Qt.AltModifier:
+            if self.zoom_selected_node(1):
+                event.accept()
+                return
+        if key == Qt.Key_K and mods == Qt.AltModifier:
+            if self.zoom_selected_node(-1):
+                event.accept()
+                return
         if self._draft_heading is not None:
             if self._handle_draft_keypress(event):
                 event.accept()
