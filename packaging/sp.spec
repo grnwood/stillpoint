@@ -33,6 +33,7 @@ hidden = (
     + [
         'sp.app.ui.main_window',  # Explicitly ensure main_window is included
         'sp.app.ui.markdown_editor',
+        'sp.app.ui.map_panel',
         'sp.app.ui.page_editor_window',
         'sp.app.ui.plantuml_editor_window',
         'sp.app.ui.preferences_dialog',
