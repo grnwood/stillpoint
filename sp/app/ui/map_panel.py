@@ -8,7 +8,7 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPointF, QSize, Qt, Signal, QMimeData
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPointF, QSize, Qt, Signal, QMimeData, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSplitter,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, heading_level_from_char
+from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
 from .theme import theme_color, theme_value
 
 
@@ -99,7 +100,10 @@ class _MindNode:
     label: str
     depth: int
     level: int
+    heading_text: str = ""
     line_number: int = 0
+    section_end_line: int = 0
+    content_end_line: int = 0
     children: list["_MindNode"] = field(default_factory=list)
     side: int = 1
     lines: list[str] = field(default_factory=list)
@@ -121,11 +125,31 @@ class _DraftHeading:
     restored_scope_depth: Optional[int] = None
 
 
+@dataclass
+class _DetachedSession:
+    root: _MindNode
+    base_text: str
+    selected_node_ids: set[str]
+    anchor_node_id: Optional[str]
+    focus_node_id: Optional[str]
+
+
+@dataclass
+class _NoteSection:
+    start_line: int
+    end_line: int
+    focus_line: int
+    text: str
+
+
 class MapPanel(QWidget):
     """Native SVG-based mind map panel for markdown headings only."""
 
     headingActivated = Signal(str, int)
     headingCreateRequested = Signal(str, int, int, str)
+    headingReorderRequested = Signal(str, str, str, int)
+    headingSectionUpdateRequested = Signal(str, int, int, str, int)
+    statusMessageRequested = Signal(str, int)
 
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
     _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -163,11 +187,22 @@ class MapPanel(QWidget):
         self._max_heading_level: int = 1
         self._scope_expansion_depths: dict[str, int] = {}
         self._selected_node_id: Optional[str] = None
+        self._selected_node_ids: set[str] = set()
+        self._selection_anchor_node_id: Optional[str] = None
         self._pending_selected_line: Optional[int] = None
         self._last_activation_source: Optional[str] = None
         self._root_is_page_h1: bool = False
         self._draft_heading: Optional[_DraftHeading] = None
         self._draft_runtime_node: Optional[_MindNode] = None
+        self._detached_session: Optional[_DetachedSession] = None
+        self._drag_press_node_id: Optional[str] = None
+        self._drag_start_pos: Optional[QPointF] = None
+        self._drag_active: bool = False
+        self._drop_target_node_id: Optional[str] = None
+        self._drop_target_valid: bool = False
+        self._note_panel_visible: bool = False
+        self._note_editor_loading: bool = False
+        self._note_current_section: Optional[_NoteSection] = None
         self._theme_colors = self._map_theme_colors()
 
         self.setFocusPolicy(Qt.StrongFocus)
@@ -218,6 +253,31 @@ class MapPanel(QWidget):
 
         toolbar.addStretch(1)
 
+        self.accept_btn = QToolButton()
+        self.accept_btn.setAutoRaise(True)
+        self.accept_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.accept_btn.setIconSize(QSize(18, 18))
+        self.accept_btn.setToolTip("Accept structural edits")
+        self.accept_btn.clicked.connect(self.commit_detached_changes)
+        toolbar.addWidget(self.accept_btn)
+
+        self.cancel_btn = QToolButton()
+        self.cancel_btn.setAutoRaise(True)
+        self.cancel_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.cancel_btn.setIconSize(QSize(18, 18))
+        self.cancel_btn.setToolTip("Cancel structural edits")
+        self.cancel_btn.clicked.connect(self.cancel_detached_changes)
+        toolbar.addWidget(self.cancel_btn)
+
+        self.note_toggle_btn = QToolButton()
+        self.note_toggle_btn.setAutoRaise(True)
+        self.note_toggle_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.note_toggle_btn.setIconSize(QSize(18, 18))
+        self.note_toggle_btn.setToolTip("Toggle note editor")
+        self.note_toggle_btn.setCheckable(True)
+        self.note_toggle_btn.toggled.connect(self._toggle_note_panel)
+        toolbar.addWidget(self.note_toggle_btn)
+
         self.zoom_out_btn = QToolButton()
         self.zoom_out_btn.setAutoRaise(True)
         self.zoom_out_btn.setFixedSize(26, 26)
@@ -241,10 +301,33 @@ class MapPanel(QWidget):
         self.preview_label.setText("Open a page to view its map.")
         self.preview_label.zoomRequested.connect(self._adjust_zoom)
         self.preview_label.installEventFilter(self)
-        root.addWidget(self._wrap_scroll_area(), 1)
+        self.note_editor = MarkdownEditor()
+        self.note_editor.set_context(None, None)
+        self.note_editor.textChanged.connect(self._schedule_note_section_apply)
+        self._note_apply_timer = QTimer(self)
+        self._note_apply_timer.setSingleShot(True)
+        self._note_apply_timer.setInterval(350)
+        self._note_apply_timer.timeout.connect(self._apply_note_section_edit)
+        self.note_title_label = QLabel("No heading selected")
+        self.note_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        note_layout = QVBoxLayout()
+        note_layout.setContentsMargins(8, 8, 8, 8)
+        note_layout.setSpacing(6)
+        note_layout.addWidget(self.note_title_label)
+        note_layout.addWidget(self.note_editor, 1)
+        self.note_panel = QWidget()
+        self.note_panel.setLayout(note_layout)
+
+        self.content_splitter = QSplitter(Qt.Horizontal)
+        self.content_splitter.addWidget(self._wrap_scroll_area())
+        self.content_splitter.addWidget(self.note_panel)
+        self.content_splitter.setStretchFactor(0, 3)
+        self.content_splitter.setStretchFactor(1, 2)
+        root.addWidget(self.content_splitter, 1)
 
         self._apply_palette_styles()
         self._update_level_controls()
+        self._toggle_note_panel(False)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
@@ -314,17 +397,25 @@ class MapPanel(QWidget):
     def _apply_palette_styles(self) -> None:
         self._theme_colors = self._map_theme_colors()
         colors = self._theme_colors
-        self.expand_all_btn.setIcon(self._load_svg_icon("expand-all.svg", QSize(18, 18)))
-        self.collapse_all_btn.setIcon(self._load_svg_icon("collapse-all.svg", QSize(18, 18)))
-        self.copy_btn.setIcon(self._load_svg_icon("copy-image.svg", QSize(18, 18)))
-        self.fit_btn.setIcon(self._load_svg_icon("fit-image.svg", QSize(18, 18)))
+        mono = self._toolbar_icon_color()
+        accept = QColor("#16a34a")
+        cancel = QColor("#dc2626")
+        self.expand_all_btn.setIcon(self._load_svg_icon("expand-all.svg", QSize(18, 18), tint=mono))
+        self.collapse_all_btn.setIcon(self._load_svg_icon("collapse-all.svg", QSize(18, 18), tint=mono))
+        self.copy_btn.setIcon(self._load_svg_icon("copy-image.svg", QSize(18, 18), tint=mono))
+        self.fit_btn.setIcon(self._load_svg_icon("fit-image.svg", QSize(18, 18), tint=mono))
+        self.accept_btn.setIcon(self._load_svg_icon("accept.svg", QSize(18, 18), tint=accept))
+        self.cancel_btn.setIcon(self._load_svg_icon("cancel.svg", QSize(18, 18), tint=cancel))
+        self.note_toggle_btn.setIcon(self._load_svg_icon("show-note.svg", QSize(18, 18), tint=mono))
         button_color = self._toolbar_icon_color().name()
         self.zoom_out_btn.setStyleSheet(f"color: {button_color};")
         self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
         self.preview_label.setStyleSheet(f"background: {colors['canvas']};")
         self.scroll_area.setStyleSheet(f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {colors['canvas']}; border: none; }}")
+        self.note_panel.setStyleSheet(f"background: {colors['canvas']};")
+        self._update_detached_mode_controls()
 
-    def _load_svg_icon(self, name: str, size: QSize) -> QIcon:
+    def _load_svg_icon(self, name: str, size: QSize, *, tint: Optional[QColor] = None) -> QIcon:
         path = self._asset_path(name)
         if path is None:
             return QIcon()
@@ -339,8 +430,9 @@ class MapPanel(QWidget):
             pixmap.fill(Qt.transparent)
             painter = QPainter(pixmap)
             renderer.render(painter)
-            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), self._toolbar_icon_color())
+            if tint is not None:
+                painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+                painter.fillRect(pixmap.rect(), tint)
             painter.end()
             return QIcon(pixmap)
         except Exception:
@@ -359,12 +451,21 @@ class MapPanel(QWidget):
 
     def set_content(self, page_path: Optional[str], markdown_text: str) -> None:
         is_new_page = page_path != self._current_page_path
+        incoming_text = markdown_text or ""
+        if (
+            not is_new_page
+            and self._detached_session is not None
+            and incoming_text != self._current_markdown
+        ):
+            self._detached_session = None
+            self._clear_drag_state()
         self._current_page_path = page_path
-        self._current_markdown = markdown_text or ""
+        self._current_markdown = incoming_text
         if not page_path:
             self.clear_content()
             return
         if is_new_page:
+            self._detached_session = None
             self._collapsed_node_ids.clear()
             self._canvas_bounds = None
             self._scope_expansion_depths.clear()
@@ -383,14 +484,22 @@ class MapPanel(QWidget):
         self._max_heading_level = 1
         self._scope_expansion_depths.clear()
         self._selected_node_id = None
+        self._selected_node_ids.clear()
+        self._selection_anchor_node_id = None
         self._pending_selected_line = None
         self._last_activation_source = None
         self._root_is_page_h1 = False
         self._draft_heading = None
         self._draft_runtime_node = None
+        self._detached_session = None
+        self._clear_drag_state()
+        self._note_apply_timer.stop()
+        self._note_current_section = None
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Open a page to view its map.")
         self._update_level_controls()
+        self._update_detached_mode_controls()
+        self._load_note_section_for_selection()
 
     def refresh(self) -> None:
         if not self._current_page_path:
@@ -506,9 +615,12 @@ class MapPanel(QWidget):
         if not self._current_page_path:
             self.clear_content()
             return
-        root = self._parse_markdown(self._current_page_path, self._current_markdown)
-        self._draft_runtime_node = None
-        self._apply_draft_node(root)
+        if self._detached_session is not None:
+            root = self._detached_session.root
+        else:
+            root = self._parse_markdown(self._current_page_path, self._current_markdown)
+            self._draft_runtime_node = None
+            self._apply_draft_node(root)
         self._latest_root = root
         self._max_heading_level = max((node.level for node in self._collect_nodes(root)), default=1)
         valid_scope_ids = {node.node_id for node in self._collect_nodes(root)}
@@ -523,6 +635,7 @@ class MapPanel(QWidget):
         if reset_zoom:
             self._zoom_factor = 1.0
         self._update_preview(fit=reset_zoom or reset_canvas)
+        self._update_detached_mode_controls()
 
     def _adjust_zoom(self, delta: int, anchor: object = None) -> None:
         if not self._svg_content:
@@ -561,6 +674,25 @@ class MapPanel(QWidget):
             return False
         self._adjust_zoom(delta, self._selected_node_zoom_anchor())
         return True
+
+    def focus_restore_target(self) -> str:
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is not None:
+            try:
+                if focus_widget is self.note_editor or self.note_editor.isAncestorOf(focus_widget):
+                    return "note"
+            except Exception:
+                pass
+        return "map"
+
+    def restore_selection_focus(self, line_number: int = 0, *, target: str = "map") -> None:
+        if line_number > 0:
+            self._pending_selected_line = int(line_number)
+        self.refresh()
+        if target == "note" and self._note_panel_visible:
+            self.note_editor.setFocus(Qt.OtherFocusReason)
+        else:
+            self.preview_label.setFocus(Qt.OtherFocusReason)
 
     def contains_focus(self) -> bool:
         focus_widget = QApplication.focusWidget()
@@ -630,22 +762,38 @@ class MapPanel(QWidget):
         visible_nodes = self._visible_nodes(root)
         if not visible_nodes:
             self._selected_node_id = None
+            self._selected_node_ids.clear()
+            self._selection_anchor_node_id = None
             self._pending_selected_line = None
             self._update_level_controls()
+            self._load_note_section_for_selection()
             return
         if self._pending_selected_line is not None:
             target = next((node for node in visible_nodes if node.line_number == self._pending_selected_line), None)
             self._pending_selected_line = None
             if target is not None:
                 self._selected_node_id = target.node_id
+                self._selected_node_ids = {target.node_id}
+                self._selection_anchor_node_id = target.node_id
                 self._update_level_controls()
+                self._load_note_section_for_selection()
                 return
         visible_ids = {node.node_id for node in visible_nodes}
         if self._selected_node_id in visible_ids:
+            self._selected_node_ids = {
+                node_id for node_id in self._selected_node_ids
+                if node_id in visible_ids
+            } or ({self._selected_node_id} if self._selected_node_id else set())
+            if self._selection_anchor_node_id not in visible_ids:
+                self._selection_anchor_node_id = self._selected_node_id
             self._update_level_controls()
+            self._load_note_section_for_selection()
             return
         self._selected_node_id = visible_nodes[0].node_id
+        self._selected_node_ids = {self._selected_node_id}
+        self._selection_anchor_node_id = self._selected_node_id
         self._update_level_controls()
+        self._load_note_section_for_selection()
 
     def _selected_node(self) -> Optional[_MindNode]:
         if self._draft_runtime_node and self._selected_node_id == self._draft_runtime_node.node_id:
@@ -786,11 +934,18 @@ class MapPanel(QWidget):
         node_id = node.node_id if node else None
         changed = node_id != self._selected_node_id
         self._selected_node_id = node_id
+        self._selected_node_ids = {node_id} if node_id else set()
+        self._selection_anchor_node_id = node_id
+        if self._detached_session is not None:
+            self._detached_session.selected_node_ids = set(self._selected_node_ids)
+            self._detached_session.anchor_node_id = self._selection_anchor_node_id
+            self._detached_session.focus_node_id = self._selected_node_id
         self._update_level_controls()
         if changed and self._latest_root is not None:
             self._svg_content = self._build_map_svg(self._latest_root, reset_canvas=False)
             self._update_preview(fit=False)
             self._ensure_selected_visible()
+        self._load_note_section_for_selection()
         return changed
 
     def _ensure_selected_visible(self) -> None:
@@ -903,6 +1058,8 @@ class MapPanel(QWidget):
             f".child {{ fill: {self._theme_colors['child_fill']}; stroke: {self._theme_colors['child_stroke']}; stroke-width: 1.5; }}"
             f".collapsed {{ fill: {self._theme_colors['collapsed_fill']}; }}"
             f".selected {{ stroke: {self._theme_colors['selected_stroke']}; stroke-width: 3.5; filter: drop-shadow(0 0 10px {self._theme_colors['selected_shadow']}); }}"
+            f".multi-selected {{ stroke: {self._theme_colors['selected_stroke']}; stroke-width: 2.25; }}"
+            f".drop-target {{ stroke: #16a34a; stroke-width: 3; stroke-dasharray: 8 5; }}"
             f".edge-1 {{ stroke: {self._theme_colors['edge_pos']}; stroke-width: 2.2; fill: none; }}"
             f".edge--1 {{ stroke: {self._theme_colors['edge_neg']}; stroke-width: 2.2; fill: none; }}"
             "</style>"
@@ -927,6 +1084,7 @@ class MapPanel(QWidget):
             label=label,
             depth=parent.depth + 1,
             level=draft.level,
+            heading_text=draft.text,
             line_number=0,
             side=parent.side if parent.depth > 0 else 1,
         )
@@ -946,10 +1104,12 @@ class MapPanel(QWidget):
 
     def _parse_markdown(self, page_path: str, markdown_text: str) -> _MindNode:
         title = Path(page_path).stem or "Map"
-        root = _MindNode(node_id=f"root:{page_path}", label=title, depth=0, level=0)
+        root = _MindNode(node_id=f"root:{page_path}", label=title, depth=0, level=0, heading_text=title)
         heading_stack: list[_MindNode] = [root]
+        ordered_nodes: list[_MindNode] = []
         seq = 0
         self._root_is_page_h1 = False
+        total_lines = len(markdown_text.splitlines())
 
         for line_number, raw_line in enumerate(markdown_text.splitlines(), start=1):
             text = raw_line.rstrip("\n")
@@ -971,6 +1131,7 @@ class MapPanel(QWidget):
             label = self._normalize_label(title_text)
             if level == 1 and line_number == 1:
                 root.label = label
+                root.heading_text = title_text
                 root.line_number = line_number
                 self._root_is_page_h1 = True
                 heading_stack = [root, root]
@@ -986,13 +1147,32 @@ class MapPanel(QWidget):
                 label=label,
                 depth=parent.depth + 1,
                 level=level,
+                heading_text=title_text,
                 line_number=line_number,
             )
             parent.children.append(node)
             heading_stack.append(node)
+            ordered_nodes.append(node)
 
         if not root.children:
-            root.children.append(_MindNode(node_id="empty", label="No headings", depth=1, level=1))
+            root.children.append(_MindNode(node_id="empty", label="No headings", depth=1, level=1, heading_text="No headings"))
+        root.line_number = 1 if total_lines > 0 else 0
+        root.section_end_line = total_lines
+        for index, node in enumerate(ordered_nodes):
+            end_line = total_lines
+            for candidate in ordered_nodes[index + 1:]:
+                if candidate.level <= node.level:
+                    end_line = max(node.line_number, candidate.line_number - 1)
+                    break
+            node.section_end_line = end_line
+        for node in self._collect_nodes(root):
+            if node.line_number <= 0:
+                node.content_end_line = node.section_end_line
+                continue
+            direct_children = [child for child in node.children if child.line_number > 0]
+            first_child_line = min((child.line_number for child in direct_children), default=node.section_end_line + 1)
+            node.content_end_line = min(node.section_end_line, first_child_line - 1)
+        root.content_end_line = root.section_end_line
         return root
 
     def _normalize_label(self, text: str) -> str:
@@ -1104,6 +1284,10 @@ class MapPanel(QWidget):
             css += " collapsed"
         if node.node_id == self._selected_node_id:
             css += " selected"
+        elif node.node_id in self._selected_node_ids:
+            css += " multi-selected"
+        if node.node_id == self._drop_target_node_id and self._drop_target_valid:
+            css += " drop-target"
         self._node_hitboxes[node.node_id] = (x, y, node.width, node.height)
         parts = [f'<rect class="{css}" x="{x:.1f}" y="{y:.1f}" width="{node.width:.1f}" height="{node.height:.1f}" rx="14" ry="14"/>']
         text_y = y + self._BOX_VPAD + 15
@@ -1221,12 +1405,498 @@ class MapPanel(QWidget):
         self.headingActivated.emit(self._current_page_path, node.line_number)
         return True
 
+    def _drop_target_for_node(self, node: Optional[_MindNode]) -> tuple[Optional[_MindNode], bool]:
+        if node is None or node.line_number <= 0:
+            return None, False
+        moved_nodes = [self._node_by_id(node_id) for node_id in self._selected_node_ids]
+        moved_nodes = [candidate for candidate in moved_nodes if candidate is not None]
+        if not moved_nodes:
+            return None, False
+        if any(self._subtree_contains(moved, node) for moved in moved_nodes):
+            return node, False
+        new_level = self._direct_child_level(node)
+        focus = self._selected_node()
+        if focus is None:
+            return node, False
+        delta = new_level - focus.level
+        if any(self._max_subtree_level(moved) + delta > HEADING_MAX_LEVEL for moved in moved_nodes):
+            return node, False
+        return node, True
+
+    def _update_detached_mode_controls(self) -> None:
+        active = self._detached_session is not None
+        self.accept_btn.setVisible(active)
+        self.cancel_btn.setVisible(active)
+
+    def _show_status_message(self, message: str, timeout_ms: int = 3500) -> None:
+        if message:
+            self.statusMessageRequested.emit(message, timeout_ms)
+
+    def _toggle_note_panel(self, checked: bool) -> None:
+        self._note_panel_visible = bool(checked)
+        self.note_toggle_btn.setChecked(self._note_panel_visible)
+        self.note_panel.setVisible(self._note_panel_visible)
+        if self._note_panel_visible:
+            self._load_note_section_for_selection()
+        else:
+            self._note_apply_timer.stop()
+            self._note_current_section = None
+
+    def _clear_drag_state(self) -> None:
+        self._drag_press_node_id = None
+        self._drag_start_pos = None
+        self._drag_active = False
+        self._drop_target_node_id = None
+        self._drop_target_valid = False
+        if getattr(self, "preview_label", None) is not None:
+            self.preview_label.setCursor(Qt.ArrowCursor)
+
+    def _selected_note_section(self) -> Optional[_NoteSection]:
+        node = self._selected_node()
+        if node is None or node.line_number <= 0:
+            return None
+        lines = (self._current_markdown or "").splitlines()
+        if not lines or node.line_number > len(lines):
+            return None
+        end_line = min(node.section_end_line, len(lines))
+        for line_number in range(node.line_number + 1, len(lines) + 1):
+            stripped = lines[line_number - 1].lstrip()
+            level = heading_level_from_char(stripped[0]) if stripped else 0
+            if not level:
+                match = HEADING_MARK_PATTERN.match(lines[line_number - 1])
+                if match:
+                    level = min(len(match.group(2)), HEADING_MAX_LEVEL)
+            if level == 3:
+                end_line = min(end_line, line_number - 1)
+                break
+        if end_line < node.line_number:
+            end_line = node.line_number
+        text = "\n".join(lines[node.line_number - 1:end_line])
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return _NoteSection(
+            start_line=node.line_number,
+            end_line=end_line,
+            focus_line=node.line_number,
+            text=text,
+        )
+
+    def _load_note_section_for_selection(self) -> None:
+        if not self._note_panel_visible:
+            return
+        section = self._selected_note_section()
+        self._note_editor_loading = True
+        try:
+            if section is None:
+                self._note_current_section = None
+                self.note_title_label.setText("No heading selected")
+                self.note_editor.set_context(None, None)
+                self.note_editor.set_markdown("")
+                return
+            try:
+                if (
+                    self._note_current_section is not None
+                    and self._note_current_section.start_line == section.start_line
+                    and self._note_current_section.end_line == section.end_line
+                    and self.note_editor.to_markdown() == section.text
+                ):
+                    self._note_current_section = section
+                    self.note_title_label.setText(self._selected_node().label if self._selected_node() is not None else "Heading")
+                    return
+            except Exception:
+                pass
+            self._note_current_section = section
+            self.note_title_label.setText(self._selected_node().label if self._selected_node() is not None else "Heading")
+            self.note_editor.set_context(None, self._current_page_path)
+            self.note_editor.set_markdown(section.text)
+            try:
+                self.note_editor.document().setModified(False)
+            except Exception:
+                pass
+        finally:
+            self._note_editor_loading = False
+
+    def _schedule_note_section_apply(self) -> None:
+        if self._note_editor_loading or not self._note_panel_visible or self._note_current_section is None:
+            return
+        self._note_apply_timer.start()
+
+    def _apply_note_section_edit(self) -> None:
+        if self._note_editor_loading or self._note_current_section is None or not self._current_page_path:
+            return
+        new_text = self.note_editor.to_markdown()
+        current = self._note_current_section.text
+        if new_text == current:
+            return
+        self._note_current_section = _NoteSection(
+            start_line=self._note_current_section.start_line,
+            end_line=self._note_current_section.end_line,
+            focus_line=self._note_current_section.focus_line,
+            text=new_text,
+        )
+        self.headingSectionUpdateRequested.emit(
+            self._current_page_path,
+            self._note_current_section.start_line,
+            self._note_current_section.end_line,
+            new_text,
+            self._note_current_section.focus_line,
+        )
+
+    def _clone_node_tree(self, node: _MindNode) -> _MindNode:
+        cloned = _MindNode(
+            node_id=node.node_id,
+            label=node.label,
+            depth=node.depth,
+            level=node.level,
+            heading_text=node.heading_text,
+            line_number=node.line_number,
+            section_end_line=node.section_end_line,
+            content_end_line=node.content_end_line,
+            side=node.side,
+        )
+        cloned.children = [self._clone_node_tree(child) for child in node.children]
+        return cloned
+
+    def _sync_detached_selection_state(self) -> None:
+        session = self._detached_session
+        if session is None:
+            return
+        self._latest_root = session.root
+        self._selected_node_ids = set(session.selected_node_ids)
+        self._selection_anchor_node_id = session.anchor_node_id
+        self._selected_node_id = session.focus_node_id
+
+    def _ensure_detached_session(self) -> Optional[_DetachedSession]:
+        if self._detached_session is not None:
+            return self._detached_session
+        if not self._latest_root or not self._current_page_path:
+            return None
+        session = _DetachedSession(
+            root=self._clone_node_tree(self._latest_root),
+            base_text=self._current_markdown,
+            selected_node_ids=set(self._selected_node_ids) or ({self._selected_node_id} if self._selected_node_id else set()),
+            anchor_node_id=self._selection_anchor_node_id or self._selected_node_id,
+            focus_node_id=self._selected_node_id,
+        )
+        self._detached_session = session
+        self._sync_detached_selection_state()
+        self.refresh()
+        return session
+
+    def _selection_siblings_for(self, node: _MindNode) -> tuple[Optional[_MindNode], list[_MindNode]]:
+        if not self._latest_root:
+            return None, []
+        parent = self._find_parent(self._latest_root, node)
+        if parent is None:
+            return None, []
+        siblings = [child for child in parent.children if child.line_number > 0]
+        return parent, siblings
+
+    def _select_range(self, anchor_node: _MindNode, focus_node: _MindNode) -> bool:
+        parent, siblings = self._selection_siblings_for(anchor_node)
+        focus_parent, _ = self._selection_siblings_for(focus_node)
+        if parent is None or focus_parent is None or parent.node_id != focus_parent.node_id:
+            self._show_status_message("Multi-select only supports same-parent siblings.")
+            return False
+        if anchor_node.level != focus_node.level:
+            self._show_status_message("Multi-select only supports headings of the same level.")
+            return False
+        positions = {node.node_id: idx for idx, node in enumerate(siblings)}
+        if anchor_node.node_id not in positions or focus_node.node_id not in positions:
+            return False
+        start = min(positions[anchor_node.node_id], positions[focus_node.node_id])
+        end = max(positions[anchor_node.node_id], positions[focus_node.node_id])
+        self._selected_node_ids = {siblings[idx].node_id for idx in range(start, end + 1)}
+        self._selected_node_id = focus_node.node_id
+        self._selection_anchor_node_id = anchor_node.node_id
+        if self._detached_session is not None:
+            self._detached_session.selected_node_ids = set(self._selected_node_ids)
+            self._detached_session.focus_node_id = self._selected_node_id
+            self._detached_session.anchor_node_id = self._selection_anchor_node_id
+        self.refresh()
+        return True
+
+    def _move_selection_extended(self, direction: str) -> bool:
+        current = self._selected_node()
+        if current is None:
+            return False
+        candidate = self._hierarchy_neighbor(direction)
+        if candidate is None:
+            return False
+        anchor = self._node_by_id(self._selection_anchor_node_id) if self._selection_anchor_node_id else current
+        return self._select_range(anchor or current, candidate)
+
+    def _selected_sibling_block(self) -> tuple[Optional[_MindNode], list[_MindNode], int, int]:
+        focus = self._selected_node()
+        if focus is None:
+            return None, [], -1, -1
+        parent, siblings = self._selection_siblings_for(focus)
+        if parent is None or not siblings:
+            return None, [], -1, -1
+        indexes = [idx for idx, child in enumerate(siblings) if child.node_id in self._selected_node_ids]
+        if not indexes:
+            return parent, siblings, -1, -1
+        start = min(indexes)
+        end = max(indexes)
+        contiguous = all(siblings[idx].node_id in self._selected_node_ids for idx in range(start, end + 1))
+        same_level = len({siblings[idx].level for idx in indexes}) == 1
+        if not contiguous or not same_level:
+            return parent, siblings, -1, -1
+        return parent, siblings, start, end
+
+    def _selected_raw_block(self) -> tuple[Optional[_MindNode], list[_MindNode], int, int]:
+        focus = self._selected_node()
+        if focus is None or not self._latest_root:
+            return None, [], -1, -1
+        parent = self._find_parent(self._latest_root, focus)
+        if parent is None:
+            return None, [], -1, -1
+        children = list(parent.children)
+        indexes = [idx for idx, child in enumerate(children) if child.node_id in self._selected_node_ids]
+        if not indexes:
+            return parent, children, -1, -1
+        start = min(indexes)
+        end = max(indexes)
+        if not all(children[idx].node_id in self._selected_node_ids for idx in range(start, end + 1)):
+            return parent, children, -1, -1
+        return parent, children, start, end
+
+    def _recompute_depths(self, node: _MindNode, depth: int = 0) -> None:
+        node.depth = depth
+        for child in node.children:
+            self._recompute_depths(child, depth + 1)
+
+    def _adjust_subtree_levels(self, node: _MindNode, delta: int) -> None:
+        if node.line_number > 0:
+            node.level = max(1, min(HEADING_MAX_LEVEL, node.level + delta))
+        for child in node.children:
+            self._adjust_subtree_levels(child, delta)
+
+    def _max_subtree_level(self, node: _MindNode) -> int:
+        maximum = node.level if node.line_number > 0 else 0
+        for child in node.children:
+            maximum = max(maximum, self._max_subtree_level(child))
+        return maximum
+
+    def _subtree_contains(self, node: _MindNode, target: _MindNode) -> bool:
+        if node.node_id == target.node_id:
+            return True
+        return any(self._subtree_contains(child, target) for child in node.children)
+
+    def _direct_child_level(self, parent: _MindNode) -> int:
+        return self._new_heading_level(parent, as_child=True)
+
+    def _apply_block_move(
+        self,
+        old_parent: _MindNode,
+        raw_children: list[_MindNode],
+        start: int,
+        end: int,
+        new_parent: _MindNode,
+        insert_at: int,
+        new_level: int,
+    ) -> bool:
+        block = raw_children[start:end + 1]
+        if any(self._subtree_contains(node, new_parent) for node in block):
+            self._show_status_message("Cannot move a heading into itself or its own subtree.")
+            return True
+        delta = new_level - block[0].level
+        if any(self._max_subtree_level(node) + delta > HEADING_MAX_LEVEL for node in block):
+            self._show_status_message("Move would exceed the maximum heading level.")
+            return True
+        old_parent.children = list(raw_children)
+        del old_parent.children[start:end + 1]
+        target_children = old_parent.children if new_parent.node_id == old_parent.node_id else list(new_parent.children)
+        if new_parent.node_id != old_parent.node_id:
+            new_parent.children = target_children
+        insert_at = max(0, min(insert_at, len(target_children)))
+        for node in block:
+            self._adjust_subtree_levels(node, delta)
+        target_children[insert_at:insert_at] = block
+        self._recompute_depths(self._latest_root or new_parent)
+        self._scope_expansion_depths[new_parent.node_id] = max(self._scope_depth(new_parent), 1)
+        if self._detached_session is not None:
+            self._detached_session.selected_node_ids = set(self._selected_node_ids)
+            self._detached_session.anchor_node_id = self._selection_anchor_node_id
+            self._detached_session.focus_node_id = self._selected_node_id
+        self.refresh()
+        return True
+
+    def _move_selected_block(self, step: int) -> bool:
+        session = self._ensure_detached_session()
+        if session is None:
+            return False
+        self._sync_detached_selection_state()
+        parent, raw_siblings, start, end = self._selected_raw_block()
+        if parent is None or start < 0 or end < start:
+            self._show_status_message("Move requires a contiguous selection of same-level sibling headings.")
+            return True
+        if step < 0 and start == 0:
+            return True
+        if step > 0 and end >= len(raw_siblings) - 1:
+            return True
+        insert_at = start - 1 if step < 0 else start + 1
+        return self._apply_block_move(parent, raw_siblings, start, end, parent, insert_at, raw_siblings[start].level)
+
+    def _indent_selected_block(self) -> bool:
+        session = self._ensure_detached_session()
+        if session is None:
+            return False
+        self._sync_detached_selection_state()
+        parent, raw_siblings, start, end = self._selected_raw_block()
+        if parent is None or start <= 0 or end < start:
+            self._show_status_message("Indent requires a previous sibling target.")
+            return True
+        new_parent = raw_siblings[start - 1]
+        new_level = self._direct_child_level(new_parent)
+        insert_at = len(new_parent.children)
+        return self._apply_block_move(parent, raw_siblings, start, end, new_parent, insert_at, new_level)
+
+    def _outdent_selected_block(self) -> bool:
+        session = self._ensure_detached_session()
+        if session is None:
+            return False
+        self._sync_detached_selection_state()
+        parent, raw_siblings, start, end = self._selected_raw_block()
+        if parent is None or start < 0 or end < start or not self._latest_root:
+            self._show_status_message("Outdent requires a nested heading selection.")
+            return True
+        grandparent = self._find_parent(self._latest_root, parent)
+        if grandparent is None or parent.node_id == self._latest_root.node_id:
+            self._show_status_message("Selection is already at the outermost level.")
+            return True
+        gp_children = list(grandparent.children)
+        try:
+            parent_index = next(idx for idx, child in enumerate(gp_children) if child.node_id == parent.node_id)
+        except StopIteration:
+            return False
+        new_level = self._new_heading_level(parent, as_child=False)
+        return self._apply_block_move(parent, raw_siblings, start, end, grandparent, parent_index + 1, new_level)
+
+    def _drop_selected_block_onto(self, target: _MindNode) -> bool:
+        session = self._ensure_detached_session()
+        if session is None:
+            return False
+        self._sync_detached_selection_state()
+        target = self._node_by_id(target.node_id) or target
+        parent, raw_siblings, start, end = self._selected_raw_block()
+        if parent is None or start < 0 or end < start:
+            self._show_status_message("Drag move requires a contiguous heading selection.")
+            return True
+        if target.line_number <= 0:
+            self._show_status_message("Cannot drop onto this node.")
+            return True
+        new_level = self._direct_child_level(target)
+        return self._apply_block_move(parent, raw_siblings, start, end, target, len(target.children), new_level)
+
+    def _handle_multi_select_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
+        if mods != Qt.ShiftModifier:
+            return False
+        direction = None
+        if key in (Qt.Key_Up, Qt.Key_K):
+            direction = "up"
+        elif key in (Qt.Key_Down, Qt.Key_J):
+            direction = "down"
+        elif key in (Qt.Key_Left, Qt.Key_H):
+            direction = "left"
+        elif key in (Qt.Key_Right, Qt.Key_L):
+            direction = "right"
+        if not direction:
+            return False
+        return self._move_selection_extended(direction)
+
+    def _handle_detached_reorder_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
+        if mods != Qt.ControlModifier:
+            return False
+        if key in (Qt.Key_Left, Qt.Key_H):
+            return self._outdent_selected_block()
+        if key in (Qt.Key_Right, Qt.Key_L):
+            return self._indent_selected_block()
+        if key in (Qt.Key_Up, Qt.Key_K):
+            return self._move_selected_block(-1)
+        if key in (Qt.Key_Down, Qt.Key_J):
+            return self._move_selected_block(1)
+        return False
+
+    def _render_subtree_lines(
+        self,
+        node: _MindNode,
+        source_lines: list[str],
+        out_lines: list[str],
+        line_map: dict[str, int],
+    ) -> None:
+        if node.line_number <= 0 or node.section_end_line < node.line_number:
+            return
+        line_map[node.node_id] = len(out_lines) + 1
+        out_lines.append(self._render_heading_line(node))
+        out_lines.extend(source_lines[node.line_number:node.content_end_line])
+        if not node.children:
+            return
+        for index, child in enumerate(node.children):
+            if index > 0 and out_lines and out_lines[-1].strip():
+                out_lines.append("")
+            self._render_subtree_lines(child, source_lines, out_lines, line_map)
+
+    def _render_heading_line(self, node: _MindNode) -> str:
+        heading_text = (node.heading_text or node.label or "Heading").strip() or "Heading"
+        return f"{'#' * max(1, min(HEADING_MAX_LEVEL, node.level))} {heading_text}".rstrip()
+
+    def _rebuild_markdown_from_tree(self, root: _MindNode, markdown_text: str) -> tuple[str, dict[str, int]]:
+        source_lines = markdown_text.splitlines()
+        if not source_lines:
+            return "", {}
+        root_children = [child for child in root.children if child.line_number > 0]
+        if not root_children:
+            return markdown_text, {}
+        line_map: dict[str, int] = {}
+        out_lines: list[str] = []
+        first_child = min(root_children, key=lambda child: child.line_number)
+        out_lines.extend(source_lines[:first_child.line_number - 1])
+        for index, child in enumerate(root.children):
+            if index > 0 and out_lines and out_lines[-1].strip():
+                out_lines.append("")
+            self._render_subtree_lines(child, source_lines, out_lines, line_map)
+        result = "\n".join(out_lines)
+        if markdown_text.endswith("\n") or not result.endswith("\n"):
+            result += "\n"
+        return result, line_map
+
+    def cancel_detached_changes(self) -> bool:
+        if self._detached_session is None:
+            return False
+        self._detached_session = None
+        self._selected_node_ids = {self._selected_node_id} if self._selected_node_id else set()
+        self._selection_anchor_node_id = self._selected_node_id
+        self._clear_drag_state()
+        self.refresh()
+        self.preview_label.setFocus(Qt.ShortcutFocusReason)
+        return True
+
+    def commit_detached_changes(self) -> bool:
+        session = self._detached_session
+        if session is None or not self._current_page_path:
+            return False
+        rebuilt_text, line_map = self._rebuild_markdown_from_tree(session.root, session.base_text)
+        focus_line = int(line_map.get(self._selected_node_id or "", 0))
+        self._current_markdown = rebuilt_text
+        self._pending_selected_line = focus_line or self._pending_selected_line
+        self._detached_session = None
+        self._clear_drag_state()
+        self.headingReorderRequested.emit(self._current_page_path, session.base_text, rebuilt_text, focus_line)
+        self.refresh()
+        self.preview_label.setFocus(Qt.ShortcutFocusReason)
+        return True
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         if event.type() != QEvent.KeyPress:
             event.ignore()
             return
         key = event.key()
         mods = event.modifiers()
+        if key == Qt.Key_Escape and not mods and self._detached_session is not None:
+            if self.cancel_detached_changes():
+                event.accept()
+                return
         if key == Qt.Key_J and mods == Qt.AltModifier:
             if self.zoom_selected_node(1):
                 event.accept()
@@ -1272,6 +1942,12 @@ class MapPanel(QWidget):
             if node and self._toggle_node(node):
                 event.accept()
                 return
+        if self._handle_detached_reorder_keypress(key, mods):
+            event.accept()
+            return
+        if self._handle_multi_select_keypress(key, mods):
+            event.accept()
+            return
         if key in (Qt.Key_Right, Qt.Key_L) and not mods:
             node = self._selected_node()
             if node and node.children and self._scope_depth(node) <= 0:
@@ -1307,7 +1983,56 @@ class MapPanel(QWidget):
                 if self._toggle_node_at(event):
                     event.accept()
                     return True
-                if self._activate_node_at(event):
+                svg_pos = self._event_svg_position(event)
+                node = self._node_at_position(*svg_pos) if svg_pos else None
+                if node is not None:
+                    self._set_selected_node(node)
+                    self._drag_press_node_id = node.node_id
+                    self._drag_start_pos = QPointF(event.position())
+                    self._drag_active = False
+                    event.accept()
+                    return True
+            if event.type() == event.Type.MouseMove and self._drag_press_node_id is not None:
+                if self._drag_start_pos is None:
+                    return True
+                if not self._drag_active:
+                    distance = event.position() - self._drag_start_pos
+                    if abs(distance.x()) + abs(distance.y()) < QApplication.startDragDistance():
+                        event.accept()
+                        return True
+                    if self._ensure_detached_session() is None:
+                        self._clear_drag_state()
+                        return True
+                    self._drag_active = True
+                svg_pos = self._event_svg_position(event)
+                node = self._node_at_position(*svg_pos) if svg_pos else None
+                target, valid = self._drop_target_for_node(node)
+                target_id = target.node_id if target is not None else None
+                changed = target_id != self._drop_target_node_id or valid != self._drop_target_valid
+                self._drop_target_node_id = target_id
+                self._drop_target_valid = valid
+                self.preview_label.setCursor(Qt.DragMoveCursor if valid else Qt.ForbiddenCursor)
+                if changed:
+                    self.refresh()
+                event.accept()
+                return True
+            if event.type() == event.Type.MouseButtonRelease and event.button() == Qt.LeftButton and self._drag_press_node_id is not None:
+                if self._drag_active:
+                    target = self._node_by_id(self._drop_target_node_id) if self._drop_target_node_id else None
+                    if target is not None and self._drop_target_valid:
+                        self._drop_selected_block_onto(target)
+                    self._clear_drag_state()
+                    self.refresh()
+                    event.accept()
+                    return True
+                svg_pos = self._event_svg_position(event)
+                released = self._node_at_position(*svg_pos) if svg_pos else None
+                pressed = self._node_by_id(self._drag_press_node_id)
+                self._clear_drag_state()
+                if released is not None and pressed is not None and released.node_id == pressed.node_id:
+                    if released.line_number > 0 and self._current_page_path:
+                        self._mark_activation_source("mouse")
+                        self.headingActivated.emit(self._current_page_path, released.line_number)
                     event.accept()
                     return True
         if watched is self.preview_label and isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:

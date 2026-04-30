@@ -2626,6 +2626,9 @@ class MainWindow(QMainWindow):
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
         self.right_panel.mapHeadingActivated.connect(self._open_heading_from_map)
         self.right_panel.mapHeadingCreateRequested.connect(self._insert_heading_from_map_request)
+        self.right_panel.mapHeadingReorderRequested.connect(self._reorder_headings_from_map_request)
+        self.right_panel.mapHeadingSectionUpdateRequested.connect(self._update_heading_section_from_map_request)
+        self.right_panel.mapStatusRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatPageWritten.connect(self._on_ai_chat_page_written)
         self.right_panel.aiChatResponseCopied.connect(
@@ -14381,6 +14384,203 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _reorder_headings_from_map_request(self, path: str, base_text: str, new_text: str, focus_line: int) -> None:
+        if not path:
+            return
+        source = self.sender()
+        focus_target = "map"
+        panel = self._map_source_panel(source)
+        if panel is not None:
+            try:
+                if hasattr(panel, "focus_restore_target"):
+                    focus_target = panel.focus_restore_target()
+            except Exception:
+                focus_target = "map"
+        path_changed = path != self.current_path
+        if path_changed:
+            self._open_file(path)
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
+        QTimer.singleShot(
+            50 if path_changed else 0,
+            lambda p=path, before=base_text, after=new_text, line=focus_line, path_hint=expected_path, load_token=expected_load_token, source_obj=source, focus_pref=focus_target: self._apply_map_heading_reorder(
+                p,
+                before,
+                after,
+                line,
+                expected_path=path_hint,
+                expected_load_token=load_token,
+                source=source_obj,
+                focus_target=focus_pref,
+            ),
+        )
+
+    def _apply_map_heading_reorder(
+        self,
+        path: str,
+        base_text: str,
+        new_text: str,
+        focus_line: int,
+        *,
+        expected_path: Optional[str],
+        expected_load_token: Optional[int],
+        source=None,
+        focus_target: str = "map",
+    ) -> None:
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            return
+        if path != self.current_path:
+            return
+        try:
+            current_text = self.editor.toPlainText()
+        except Exception:
+            current_text = ""
+        if current_text != base_text:
+            self.statusBar().showMessage("Map edit cancelled: the page changed while detached editing was active.", 5000)
+            return
+        cursor = QTextCursor(self.editor.document())
+        self._suspend_autosave = True
+        try:
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.Document)
+            cursor.insertText(new_text)
+            cursor.endEditBlock()
+        finally:
+            self._suspend_autosave = False
+        try:
+            self.editor.document().setModified(True)
+        except Exception:
+            pass
+        try:
+            self.right_panel.refresh_map(self.current_path)
+            self._refresh_detached_map_panels(self.current_path)
+        except Exception:
+            pass
+        self._restore_map_source_focus(source, focus_line, target=focus_target)
+        if focus_line > 0:
+            scroll_path = self.current_path
+            scroll_token = self._current_editor_load_token()
+            QTimer.singleShot(
+                0,
+                lambda ln=focus_line, path_hint=scroll_path, load_token=scroll_token: self._scroll_to_line_with_flash(
+                    ln,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
+
+    def _map_source_panel(self, source):
+        if source is None:
+            return None
+        if hasattr(source, "preview_label"):
+            return source
+        try:
+            panel = getattr(source, "map_panel", None)
+            if panel is not None and hasattr(panel, "preview_label"):
+                return panel
+        except Exception:
+            return None
+        return None
+
+    def _restore_map_source_focus(self, source, focus_line: int, *, target: str = "map") -> None:
+        panel = self._map_source_panel(source)
+        if panel is None:
+            return
+        def _restore() -> None:
+            try:
+                if hasattr(panel, "restore_selection_focus"):
+                    panel.restore_selection_focus(focus_line, target=target)
+                else:
+                    fallback_widget = getattr(panel, "preview_label", None)
+                    if fallback_widget is not None:
+                        fallback_widget.setFocus(Qt.OtherFocusReason)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _restore)
+
+    def _update_heading_section_from_map_request(self, path: str, start_line: int, end_line: int, text: str, focus_line: int) -> None:
+        if not path:
+            return
+        source = self.sender()
+        focus_target = "map"
+        panel = self._map_source_panel(source)
+        if panel is not None:
+            try:
+                if hasattr(panel, "focus_restore_target"):
+                    focus_target = panel.focus_restore_target()
+            except Exception:
+                focus_target = "map"
+        path_changed = path != self.current_path
+        if path_changed:
+            self._open_file(path)
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
+        QTimer.singleShot(
+            50 if path_changed else 0,
+            lambda p=path, start=start_line, end=end_line, new_text=text, line=focus_line, path_hint=expected_path, load_token=expected_load_token, source_obj=source, focus_pref=focus_target: self._apply_map_heading_section_update(
+                p,
+                start,
+                end,
+                new_text,
+                line,
+                expected_path=path_hint,
+                expected_load_token=load_token,
+                source=source_obj,
+                focus_target=focus_pref,
+            ),
+        )
+
+    def _apply_map_heading_section_update(
+        self,
+        path: str,
+        start_line: int,
+        end_line: int,
+        new_text: str,
+        focus_line: int,
+        *,
+        expected_path: Optional[str],
+        expected_load_token: Optional[int],
+        source=None,
+        focus_target: str = "map",
+    ) -> None:
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            return
+        if path != self.current_path:
+            return
+        try:
+            lines = self.editor.toPlainText().splitlines()
+        except Exception:
+            lines = []
+        if start_line <= 0 or end_line < start_line or start_line > len(lines):
+            return
+        normalized = (new_text or "").replace("\r\n", "\n")
+        replacement_lines = normalized.splitlines()
+        new_lines = list(lines)
+        new_lines[start_line - 1:end_line] = replacement_lines
+        result = "\n".join(new_lines)
+        if self.editor.toPlainText().endswith("\n") or normalized.endswith("\n") or result:
+            if not result.endswith("\n"):
+                result += "\n"
+        cursor = QTextCursor(self.editor.document())
+        self._suspend_autosave = True
+        try:
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.Document)
+            cursor.insertText(result)
+            cursor.endEditBlock()
+        finally:
+            self._suspend_autosave = False
+        try:
+            self.editor.document().setModified(True)
+        except Exception:
+            pass
+        try:
+            self.right_panel.refresh_map(self.current_path)
+            self._refresh_detached_map_panels(self.current_path)
+        except Exception:
+            pass
+        self._restore_map_source_focus(source, focus_line, target=focus_target)
+
     def _normalize_task_date_paths(self, paths: list[str]) -> set[str]:
         normalized: set[str] = set()
         for raw in paths or []:
@@ -14785,6 +14985,9 @@ class MainWindow(QMainWindow):
         panel = MapPanel()
         panel.headingActivated.connect(self._open_heading_from_map)
         panel.headingCreateRequested.connect(self._insert_heading_from_map_request)
+        panel.headingReorderRequested.connect(self._reorder_headings_from_map_request)
+        panel.headingSectionUpdateRequested.connect(self._update_heading_section_from_map_request)
+        panel.statusMessageRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
         if self.current_path:
             panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
         else:

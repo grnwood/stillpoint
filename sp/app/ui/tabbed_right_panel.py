@@ -33,6 +33,9 @@ class TabbedRightPanel(QWidget):
     calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
     mapHeadingActivated = Signal(str, int)  # path, line from Map tab
     mapHeadingCreateRequested = Signal(str, int, int, str)  # path, after_line, level, text
+    mapHeadingReorderRequested = Signal(str, str, str, int)  # path, base_text, new_text, focus_line
+    mapHeadingSectionUpdateRequested = Signal(str, int, int, str, int)  # path, start_line, end_line, text, focus_line
+    mapStatusRequested = Signal(str, int)  # status text, timeout
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
     aiOverlayRequested = Signal(str, object)  # text, anchor QPoint
@@ -709,6 +712,9 @@ class TabbedRightPanel(QWidget):
         self.map_panel = MapPanel()
         self.map_panel.headingActivated.connect(self.mapHeadingActivated)
         self.map_panel.headingCreateRequested.connect(self.mapHeadingCreateRequested)
+        self.map_panel.headingReorderRequested.connect(self.mapHeadingReorderRequested)
+        self.map_panel.headingSectionUpdateRequested.connect(self.mapHeadingSectionUpdateRequested)
+        self.map_panel.statusMessageRequested.connect(self.mapStatusRequested)
         insert_idx = self._tab_insert_index(self.link_panel or self.attachments_panel)
         self.tabs.insertTab(insert_idx, self.map_panel, "Map")
 
@@ -724,6 +730,18 @@ class TabbedRightPanel(QWidget):
             pass
         try:
             self.map_panel.headingCreateRequested.disconnect(self.mapHeadingCreateRequested)
+        except Exception:
+            pass
+        try:
+            self.map_panel.headingReorderRequested.disconnect(self.mapHeadingReorderRequested)
+        except Exception:
+            pass
+        try:
+            self.map_panel.headingSectionUpdateRequested.disconnect(self.mapHeadingSectionUpdateRequested)
+        except Exception:
+            pass
+        try:
+            self.map_panel.statusMessageRequested.disconnect(self.mapStatusRequested)
         except Exception:
             pass
         self.map_panel.deleteLater()
