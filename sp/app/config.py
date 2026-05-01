@@ -738,6 +738,32 @@ def save_print_auto_pop_browser(enabled: bool) -> None:
     _update_global_config({"print_auto_pop_browser": bool(enabled)})
 
 
+def load_map_note_panel_visible() -> bool:
+    payload = _read_global_config()
+    value = payload.get("map_note_panel_visible")
+    if value is None:
+        return False
+    return bool(value)
+
+
+def save_map_note_panel_visible(visible: bool) -> None:
+    _update_global_config({"map_note_panel_visible": bool(visible)})
+
+
+def load_map_note_font_size_offset() -> int:
+    """Load the font size offset for map note previews. Defaults to 0."""
+    payload = _read_global_config()
+    value = payload.get("map_note_font_size_offset")
+    if value is None:
+        return 0
+    return int(value)
+
+
+def save_map_note_font_size_offset(offset: int) -> None:
+    """Save the font size offset for map note previews."""
+    _update_global_config({"map_note_font_size_offset": int(offset)})
+
+
 def load_vi_block_cursor_enabled() -> bool:
     """Load app-level preference for vi-mode block cursor. Defaults to True on Windows, False elsewhere."""
     if not GLOBAL_CONFIG.exists():

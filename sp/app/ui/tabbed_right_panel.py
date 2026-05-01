@@ -34,7 +34,6 @@ class TabbedRightPanel(QWidget):
     mapHeadingActivated = Signal(str, int)  # path, line from Map tab
     mapHeadingCreateRequested = Signal(str, int, int, str)  # path, after_line, level, text
     mapHeadingReorderRequested = Signal(str, str, str, int)  # path, base_text, new_text, focus_line
-    mapHeadingSectionUpdateRequested = Signal(str, int, int, str, int)  # path, start_line, end_line, text, focus_line
     mapStatusRequested = Signal(str, int)  # status text, timeout
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
     aiChatResponseCopied = Signal(str)  # status text when chat response copied
@@ -291,6 +290,14 @@ class TabbedRightPanel(QWidget):
             self._pending_map_refresh = False
         else:
             self._pending_map_refresh = True
+
+    def defer_map_refresh(self, page_path=None) -> None:
+        """Mark the map tab dirty without refreshing immediately."""
+        if not self.map_panel:
+            return
+        if page_path is not None:
+            self._current_relative_path = page_path
+        self._pending_map_refresh = True
 
     def set_calendar_font_size(self, size: int) -> None:
         """Match calendar/journal/insights fonts to the editor."""
@@ -713,8 +720,8 @@ class TabbedRightPanel(QWidget):
         self.map_panel.headingActivated.connect(self.mapHeadingActivated)
         self.map_panel.headingCreateRequested.connect(self.mapHeadingCreateRequested)
         self.map_panel.headingReorderRequested.connect(self.mapHeadingReorderRequested)
-        self.map_panel.headingSectionUpdateRequested.connect(self.mapHeadingSectionUpdateRequested)
         self.map_panel.statusMessageRequested.connect(self.mapStatusRequested)
+        self.map_panel.focusSyncRequested.connect(self._sync_map_tab_state)
         insert_idx = self._tab_insert_index(self.link_panel or self.attachments_panel)
         self.tabs.insertTab(insert_idx, self.map_panel, "Map")
 
@@ -737,11 +744,11 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
         try:
-            self.map_panel.headingSectionUpdateRequested.disconnect(self.mapHeadingSectionUpdateRequested)
+            self.map_panel.statusMessageRequested.disconnect(self.mapStatusRequested)
         except Exception:
             pass
         try:
-            self.map_panel.statusMessageRequested.disconnect(self.mapStatusRequested)
+            self.map_panel.focusSyncRequested.disconnect(self._sync_map_tab_state)
         except Exception:
             pass
         self.map_panel.deleteLater()

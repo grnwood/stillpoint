@@ -8,21 +8,23 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPointF, QSize, Qt, Signal, QMimeData, QTimer
-from PySide6.QtGui import QColor, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QPointF, QSize, Qt, Signal, QMimeData, QTimer
+from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
-    QSplitter,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from sp.app import config
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
-from .theme import theme_color, theme_value
+from .theme import apply_menu_theme, theme_color, theme_value
 
 
 class ZoomablePreviewLabel(QLabel):
@@ -134,12 +136,126 @@ class _DetachedSession:
     focus_node_id: Optional[str]
 
 
-@dataclass
-class _NoteSection:
-    start_line: int
-    end_line: int
-    focus_line: int
-    text: str
+class _MapContentTooltip(QFrame):
+    pinRequested = Signal()
+    hoverChanged = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+        self.setObjectName("mapContentTooltip")
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._editor = MarkdownEditor(self)
+        self._editor.set_context(None, None)
+        self._editor.set_read_only_mode(True)
+        self._editor.setFocusPolicy(Qt.NoFocus)
+        self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+        layout.addWidget(self._editor)
+        self.resize(520, 320)
+        self.setStyleSheet(
+            "#mapContentTooltip {"
+            "background: #fff7c2;"
+            "border: 1px solid #d2b55b;"
+            "border-radius: 8px;"
+            "}"
+            "#mapContentTooltip QTextEdit {"
+            "background: #fff7c2;"
+            "border: none;"
+            "}"
+        )
+
+    def set_pinned(self, pinned: bool) -> None:
+        pos = self.pos()
+        self.hide()
+        self.setWindowFlag(Qt.Tool, True)
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, not pinned)
+        self.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
+        self._editor.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
+        self.move(pos)
+
+    def set_font_zoom(self, zoom_factor: float) -> None:
+        """Apply zoom factor to the editor font size."""
+        base_font = QApplication.font()
+        zoomed_size = max(8, int(base_font.pointSize() * zoom_factor))
+        font = self._editor.font()
+        font.setPointSize(zoomed_size)
+        self._editor.setFont(font)
+
+    def show_markdown(self, markdown_text: str, page_path: Optional[str], pos: QPoint) -> None:
+        self._editor.set_context(None, page_path)
+        self._editor.set_markdown(markdown_text)
+        try:
+            self._editor.document().setModified(False)
+        except Exception:
+            pass
+        self.move(pos)
+        self.show()
+        self.raise_()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self.pinRequested.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        self.hoverChanged.emit(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self.hoverChanged.emit(False)
+        super().leaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        """Show minimal context menu with only copy actions."""
+        cursor = self._editor.textCursor()
+        if not cursor.hasSelection():
+            event.ignore()
+            return
+        
+        menu = QMenu(self)
+        apply_menu_theme(menu, self._editor)
+        
+        # Add Copy action
+        copy_action = QAction("Copy", menu)
+        copy_action.triggered.connect(self._copy_selection)
+        menu.addAction(copy_action)
+        
+        # Add Copy as Markdown action
+        copy_md_action = QAction("Copy as Markdown", menu)
+        copy_md_action.triggered.connect(self._copy_selection_as_markdown)
+        menu.addAction(copy_md_action)
+        
+        menu.exec(event.globalPos())
+        event.accept()
+    
+    def _copy_selection(self) -> None:
+        """Copy selected text as plain text."""
+        cursor = self._editor.textCursor()
+        if cursor.hasSelection():
+            self._editor.copy()
+    
+    def _copy_selection_as_markdown(self) -> None:
+        """Copy selected text as markdown."""
+        cursor = self._editor.textCursor()
+        if not cursor.hasSelection():
+            return
+        
+        # Get markdown representation
+        selected_text = cursor.selectedText().replace('\u2029', '\n')
+        
+        # Use clipboard to set markdown
+        clipboard = QGuiApplication.clipboard()
+        mime_data = QMimeData()
+        mime_data.setText(selected_text)
+        mime_data.setData("text/markdown", selected_text.encode('utf-8'))
+        clipboard.setMimeData(mime_data)
 
 
 class MapPanel(QWidget):
@@ -148,8 +264,8 @@ class MapPanel(QWidget):
     headingActivated = Signal(str, int)
     headingCreateRequested = Signal(str, int, int, str)
     headingReorderRequested = Signal(str, str, str, int)
-    headingSectionUpdateRequested = Signal(str, int, int, str, int)
     statusMessageRequested = Signal(str, int)
+    focusSyncRequested = Signal()
 
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
     _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -200,9 +316,12 @@ class MapPanel(QWidget):
         self._drag_active: bool = False
         self._drop_target_node_id: Optional[str] = None
         self._drop_target_valid: bool = False
-        self._note_panel_visible: bool = False
-        self._note_editor_loading: bool = False
-        self._note_current_section: Optional[_NoteSection] = None
+        self._content_preview_enabled: bool = False
+        self._hovered_node_id: Optional[str] = None
+        self._hover_global_pos: Optional[QPoint] = None
+        self._tooltip_pinned: bool = False
+        self._tooltip_hovered: bool = False
+        self._note_font_size_offset: int = 0
         self._theme_colors = self._map_theme_colors()
 
         self.setFocusPolicy(Qt.StrongFocus)
@@ -253,13 +372,21 @@ class MapPanel(QWidget):
 
         toolbar.addStretch(1)
 
+        self.detached_modal = QFrame()
+        self.detached_modal.setObjectName("mapDetachedModal")
+        detached_layout = QHBoxLayout(self.detached_modal)
+        detached_layout.setContentsMargins(8, 4, 8, 4)
+        detached_layout.setSpacing(6)
+        self.detached_modal_label = QLabel("Structural edits pending: Enter to accept, Esc to cancel")
+        detached_layout.addWidget(self.detached_modal_label)
+
         self.accept_btn = QToolButton()
         self.accept_btn.setAutoRaise(True)
         self.accept_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.accept_btn.setIconSize(QSize(18, 18))
         self.accept_btn.setToolTip("Accept structural edits")
         self.accept_btn.clicked.connect(self.commit_detached_changes)
-        toolbar.addWidget(self.accept_btn)
+        detached_layout.addWidget(self.accept_btn)
 
         self.cancel_btn = QToolButton()
         self.cancel_btn.setAutoRaise(True)
@@ -267,16 +394,33 @@ class MapPanel(QWidget):
         self.cancel_btn.setIconSize(QSize(18, 18))
         self.cancel_btn.setToolTip("Cancel structural edits")
         self.cancel_btn.clicked.connect(self.cancel_detached_changes)
-        toolbar.addWidget(self.cancel_btn)
+        detached_layout.addWidget(self.cancel_btn)
+        toolbar.addWidget(self.detached_modal)
 
         self.note_toggle_btn = QToolButton()
         self.note_toggle_btn.setAutoRaise(True)
         self.note_toggle_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.note_toggle_btn.setIconSize(QSize(18, 18))
-        self.note_toggle_btn.setToolTip("Toggle note editor")
+        self.note_toggle_btn.setToolTip("Toggle hover content previews")
         self.note_toggle_btn.setCheckable(True)
-        self.note_toggle_btn.toggled.connect(self._toggle_note_panel)
+        self.note_toggle_btn.toggled.connect(self._toggle_content_previews)
         toolbar.addWidget(self.note_toggle_btn)
+
+        self.note_font_smaller_btn = QToolButton()
+        self.note_font_smaller_btn.setAutoRaise(True)
+        self.note_font_smaller_btn.setFixedSize(26, 26)
+        self.note_font_smaller_btn.setText("a-")
+        self.note_font_smaller_btn.setToolTip("Decrease note preview font size")
+        self.note_font_smaller_btn.clicked.connect(self._decrease_note_font_size)
+        toolbar.addWidget(self.note_font_smaller_btn)
+
+        self.note_font_larger_btn = QToolButton()
+        self.note_font_larger_btn.setAutoRaise(True)
+        self.note_font_larger_btn.setFixedSize(26, 26)
+        self.note_font_larger_btn.setText("a+")
+        self.note_font_larger_btn.setToolTip("Increase note preview font size")
+        self.note_font_larger_btn.clicked.connect(self._increase_note_font_size)
+        toolbar.addWidget(self.note_font_larger_btn)
 
         self.zoom_out_btn = QToolButton()
         self.zoom_out_btn.setAutoRaise(True)
@@ -298,36 +442,28 @@ class MapPanel(QWidget):
         self.preview_label = ZoomablePreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setFocusPolicy(Qt.StrongFocus)
+        self.preview_label.setMouseTracking(True)
         self.preview_label.setText("Open a page to view its map.")
         self.preview_label.zoomRequested.connect(self._adjust_zoom)
         self.preview_label.installEventFilter(self)
-        self.note_editor = MarkdownEditor()
-        self.note_editor.set_context(None, None)
-        self.note_editor.textChanged.connect(self._schedule_note_section_apply)
-        self._note_apply_timer = QTimer(self)
-        self._note_apply_timer.setSingleShot(True)
-        self._note_apply_timer.setInterval(350)
-        self._note_apply_timer.timeout.connect(self._apply_note_section_edit)
-        self.note_title_label = QLabel("No heading selected")
-        self.note_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        note_layout = QVBoxLayout()
-        note_layout.setContentsMargins(8, 8, 8, 8)
-        note_layout.setSpacing(6)
-        note_layout.addWidget(self.note_title_label)
-        note_layout.addWidget(self.note_editor, 1)
-        self.note_panel = QWidget()
-        self.note_panel.setLayout(note_layout)
+        self._tooltip_timer = QTimer(self)
+        self._tooltip_timer.setSingleShot(True)
+        self._tooltip_timer.setInterval(600)
+        self._tooltip_timer.timeout.connect(self._show_hover_tooltip)
+        self._tooltip_hide_timer = QTimer(self)
+        self._tooltip_hide_timer.setSingleShot(True)
+        self._tooltip_hide_timer.setInterval(250)
+        self._tooltip_hide_timer.timeout.connect(self._hide_hover_tooltip_if_idle)
+        self._content_tooltip = _MapContentTooltip()
+        self._content_tooltip.pinRequested.connect(self._pin_hover_tooltip)
+        self._content_tooltip.hoverChanged.connect(self._on_tooltip_hover_changed)
 
-        self.content_splitter = QSplitter(Qt.Horizontal)
-        self.content_splitter.addWidget(self._wrap_scroll_area())
-        self.content_splitter.addWidget(self.note_panel)
-        self.content_splitter.setStretchFactor(0, 3)
-        self.content_splitter.setStretchFactor(1, 2)
-        root.addWidget(self.content_splitter, 1)
+        root.addWidget(self._wrap_scroll_area(), 1)
 
         self._apply_palette_styles()
         self._update_level_controls()
-        self._toggle_note_panel(False)
+        self._note_font_size_offset = config.load_map_note_font_size_offset()
+        self._toggle_content_previews(config.load_map_note_panel_visible())
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
@@ -412,7 +548,16 @@ class MapPanel(QWidget):
         self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
         self.preview_label.setStyleSheet(f"background: {colors['canvas']};")
         self.scroll_area.setStyleSheet(f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {colors['canvas']}; border: none; }}")
-        self.note_panel.setStyleSheet(f"background: {colors['canvas']};")
+        modal_border = colors["selected_stroke"]
+        modal_fill = QColor(colors["selected_stroke"])
+        modal_fill.setAlpha(28)
+        self.detached_modal.setStyleSheet(
+            "#mapDetachedModal {"
+            f"border: 1px solid {modal_border};"
+            "border-radius: 6px;"
+            f"background: {modal_fill.name(QColor.HexArgb)};"
+            "}"
+        )
         self._update_detached_mode_controls()
 
     def _load_svg_icon(self, name: str, size: QSize, *, tint: Optional[QColor] = None) -> QIcon:
@@ -450,6 +595,7 @@ class MapPanel(QWidget):
         return self.scroll_area
 
     def set_content(self, page_path: Optional[str], markdown_text: str) -> None:
+        self._cancel_hover_tooltip()
         is_new_page = page_path != self._current_page_path
         incoming_text = markdown_text or ""
         if (
@@ -493,13 +639,11 @@ class MapPanel(QWidget):
         self._draft_runtime_node = None
         self._detached_session = None
         self._clear_drag_state()
-        self._note_apply_timer.stop()
-        self._note_current_section = None
+        self._cancel_hover_tooltip()
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Open a page to view its map.")
         self._update_level_controls()
         self._update_detached_mode_controls()
-        self._load_note_section_for_selection()
 
     def refresh(self) -> None:
         if not self._current_page_path:
@@ -659,6 +803,9 @@ class MapPanel(QWidget):
             self.scroll_area.verticalScrollBar().setValue(
                 max(0, int(round(svg_anchor.y() * self._zoom_factor - viewport_anchor.y())))
             )
+        # Update tooltip font size if visible
+        if self._content_tooltip.isVisible():
+            self._update_tooltip_font_size()
 
     def _selected_node_zoom_anchor(self) -> Optional[QPointF]:
         if not self._selected_node_id:
@@ -676,23 +823,13 @@ class MapPanel(QWidget):
         return True
 
     def focus_restore_target(self) -> str:
-        focus_widget = QApplication.focusWidget()
-        if focus_widget is not None:
-            try:
-                if focus_widget is self.note_editor or self.note_editor.isAncestorOf(focus_widget):
-                    return "note"
-            except Exception:
-                pass
         return "map"
 
     def restore_selection_focus(self, line_number: int = 0, *, target: str = "map") -> None:
         if line_number > 0:
             self._pending_selected_line = int(line_number)
         self.refresh()
-        if target == "note" and self._note_panel_visible:
-            self.note_editor.setFocus(Qt.OtherFocusReason)
-        else:
-            self.preview_label.setFocus(Qt.OtherFocusReason)
+        self.preview_label.setFocus(Qt.OtherFocusReason)
 
     def contains_focus(self) -> bool:
         focus_widget = QApplication.focusWidget()
@@ -706,6 +843,7 @@ class MapPanel(QWidget):
             self.preview_label.setText("Failed to render map.")
             self._preview_pixmap = None
             self._base_size = None
+            self._cancel_hover_tooltip()
             return
         self._base_size = pixmap.size()
         if fit:
@@ -719,7 +857,13 @@ class MapPanel(QWidget):
         )
         self._preview_pixmap = scaled
         self.preview_label.setPixmap(scaled)
-        self.preview_label.resize(scaled.size())
+        
+        # Ensure the label is always larger than viewport to enable panning
+        viewport = self.scroll_area.viewport().size()
+        min_width = max(scaled.width(), viewport.width() + 200)
+        min_height = max(scaled.height(), viewport.height() + 200)
+        self.preview_label.resize(min_width, min_height)
+        
         self.preview_label.setText("")
 
     def _svg_to_pixmap(self, svg_text: str) -> Optional[QPixmap]:
@@ -766,7 +910,6 @@ class MapPanel(QWidget):
             self._selection_anchor_node_id = None
             self._pending_selected_line = None
             self._update_level_controls()
-            self._load_note_section_for_selection()
             return
         if self._pending_selected_line is not None:
             target = next((node for node in visible_nodes if node.line_number == self._pending_selected_line), None)
@@ -776,7 +919,6 @@ class MapPanel(QWidget):
                 self._selected_node_ids = {target.node_id}
                 self._selection_anchor_node_id = target.node_id
                 self._update_level_controls()
-                self._load_note_section_for_selection()
                 return
         visible_ids = {node.node_id for node in visible_nodes}
         if self._selected_node_id in visible_ids:
@@ -787,13 +929,11 @@ class MapPanel(QWidget):
             if self._selection_anchor_node_id not in visible_ids:
                 self._selection_anchor_node_id = self._selected_node_id
             self._update_level_controls()
-            self._load_note_section_for_selection()
             return
         self._selected_node_id = visible_nodes[0].node_id
         self._selected_node_ids = {self._selected_node_id}
         self._selection_anchor_node_id = self._selected_node_id
         self._update_level_controls()
-        self._load_note_section_for_selection()
 
     def _selected_node(self) -> Optional[_MindNode]:
         if self._draft_runtime_node and self._selected_node_id == self._draft_runtime_node.node_id:
@@ -945,7 +1085,6 @@ class MapPanel(QWidget):
             self._svg_content = self._build_map_svg(self._latest_root, reset_canvas=False)
             self._update_preview(fit=False)
             self._ensure_selected_visible()
-        self._load_note_section_for_selection()
         return changed
 
     def _ensure_selected_visible(self) -> None:
@@ -1154,8 +1293,6 @@ class MapPanel(QWidget):
             heading_stack.append(node)
             ordered_nodes.append(node)
 
-        if not root.children:
-            root.children.append(_MindNode(node_id="empty", label="No headings", depth=1, level=1, heading_text="No headings"))
         root.line_number = 1 if total_lines > 0 else 0
         root.section_end_line = total_lines
         for index, node in enumerate(ordered_nodes):
@@ -1425,22 +1562,48 @@ class MapPanel(QWidget):
 
     def _update_detached_mode_controls(self) -> None:
         active = self._detached_session is not None
+        self.detached_modal.setVisible(active)
         self.accept_btn.setVisible(active)
         self.cancel_btn.setVisible(active)
+        self.note_toggle_btn.setEnabled(not active)
+        if active:
+            self._cancel_hover_tooltip()
 
     def _show_status_message(self, message: str, timeout_ms: int = 3500) -> None:
         if message:
             self.statusMessageRequested.emit(message, timeout_ms)
 
-    def _toggle_note_panel(self, checked: bool) -> None:
-        self._note_panel_visible = bool(checked)
-        self.note_toggle_btn.setChecked(self._note_panel_visible)
-        self.note_panel.setVisible(self._note_panel_visible)
-        if self._note_panel_visible:
-            self._load_note_section_for_selection()
-        else:
-            self._note_apply_timer.stop()
-            self._note_current_section = None
+    def _toggle_content_previews(self, checked: bool) -> None:
+        self._content_preview_enabled = bool(checked)
+        was_blocked = self.note_toggle_btn.blockSignals(True)
+        self.note_toggle_btn.setChecked(self._content_preview_enabled)
+        self.note_toggle_btn.blockSignals(was_blocked)
+        config.save_map_note_panel_visible(self._content_preview_enabled)
+        if not self._content_preview_enabled:
+            self._cancel_hover_tooltip()
+
+    def _increase_note_font_size(self) -> None:
+        """Increase the note preview font size offset."""
+        self._note_font_size_offset = min(10, self._note_font_size_offset + 1)
+        config.save_map_note_font_size_offset(self._note_font_size_offset)
+        if self._content_tooltip.isVisible():
+            self._update_tooltip_font_size()
+
+    def _decrease_note_font_size(self) -> None:
+        """Decrease the note preview font size offset."""
+        self._note_font_size_offset = max(-5, self._note_font_size_offset - 1)
+        config.save_map_note_font_size_offset(self._note_font_size_offset)
+        if self._content_tooltip.isVisible():
+            self._update_tooltip_font_size()
+
+    def _update_tooltip_font_size(self) -> None:
+        """Update the tooltip font size based on current zoom and offset."""
+        # Base zoom from map zoom factor, plus user offset in 10% increments
+        zoom = self._zoom_factor + (self._note_font_size_offset * 0.1)
+        self._content_tooltip.set_font_zoom(zoom)
+
+    def flush_pending_changes(self) -> bool:
+        return False
 
     def _clear_drag_state(self) -> None:
         self._drag_press_node_id = None
@@ -1451,96 +1614,102 @@ class MapPanel(QWidget):
         if getattr(self, "preview_label", None) is not None:
             self.preview_label.setCursor(Qt.ArrowCursor)
 
-    def _selected_note_section(self) -> Optional[_NoteSection]:
-        node = self._selected_node()
-        if node is None or node.line_number <= 0:
-            return None
+    def _node_tooltip_markdown(self, node: Optional[_MindNode]) -> str:
+        if node is None:
+            return ""
+        if node.depth == 0:
+            text = self._current_markdown or ""
+            return text if text.endswith("\n") or not text else f"{text}\n"
+        if node.line_number <= 0:
+            return ""
         lines = (self._current_markdown or "").splitlines()
         if not lines or node.line_number > len(lines):
-            return None
-        end_line = min(node.section_end_line, len(lines))
-        for line_number in range(node.line_number + 1, len(lines) + 1):
-            stripped = lines[line_number - 1].lstrip()
-            level = heading_level_from_char(stripped[0]) if stripped else 0
-            if not level:
-                match = HEADING_MARK_PATTERN.match(lines[line_number - 1])
-                if match:
-                    level = min(len(match.group(2)), HEADING_MAX_LEVEL)
-            if level == 3:
-                end_line = min(end_line, line_number - 1)
-                break
-        if end_line < node.line_number:
-            end_line = node.line_number
+            return ""
+        end_line = min(max(node.line_number, node.section_end_line), len(lines))
         text = "\n".join(lines[node.line_number - 1:end_line])
-        if text and not text.endswith("\n"):
-            text += "\n"
-        return _NoteSection(
-            start_line=node.line_number,
-            end_line=end_line,
-            focus_line=node.line_number,
-            text=text,
-        )
+        return text if text.endswith("\n") or not text else f"{text}\n"
 
-    def _load_note_section_for_selection(self) -> None:
-        if not self._note_panel_visible:
-            return
-        section = self._selected_note_section()
-        self._note_editor_loading = True
+    def _cancel_hover_tooltip(self) -> None:
+        self._tooltip_timer.stop()
+        self._tooltip_hide_timer.stop()
+        self._hovered_node_id = None
+        self._hover_global_pos = None
+        self._tooltip_pinned = False
+        self._tooltip_hovered = False
         try:
-            if section is None:
-                self._note_current_section = None
-                self.note_title_label.setText("No heading selected")
-                self.note_editor.set_context(None, None)
-                self.note_editor.set_markdown("")
-                return
-            try:
-                if (
-                    self._note_current_section is not None
-                    and self._note_current_section.start_line == section.start_line
-                    and self._note_current_section.end_line == section.end_line
-                    and self.note_editor.to_markdown() == section.text
-                ):
-                    self._note_current_section = section
-                    self.note_title_label.setText(self._selected_node().label if self._selected_node() is not None else "Heading")
-                    return
-            except Exception:
-                pass
-            self._note_current_section = section
-            self.note_title_label.setText(self._selected_node().label if self._selected_node() is not None else "Heading")
-            self.note_editor.set_context(None, self._current_page_path)
-            self.note_editor.set_markdown(section.text)
-            try:
-                self.note_editor.document().setModified(False)
-            except Exception:
-                pass
-        finally:
-            self._note_editor_loading = False
+            self._content_tooltip.set_pinned(False)
+            self._content_tooltip.hide()
+        except Exception:
+            pass
 
-    def _schedule_note_section_apply(self) -> None:
-        if self._note_editor_loading or not self._note_panel_visible or self._note_current_section is None:
+    def _schedule_hover_tooltip(self, node: Optional[_MindNode], global_pos: QPoint) -> None:
+        if self._tooltip_pinned:
             return
-        self._note_apply_timer.start()
+        if not self._content_preview_enabled or self._detached_session is not None:
+            self._cancel_hover_tooltip()
+            return
+        self._tooltip_hide_timer.stop()
+        node_id = node.node_id if node is not None else None
+        if node_id is None:
+            if self._content_tooltip.isVisible():
+                self._tooltip_hide_timer.start()
+            else:
+                self._cancel_hover_tooltip()
+            return
+        if node_id == self._hovered_node_id and self._content_tooltip.isVisible():
+            return
+        self._hovered_node_id = node_id
+        self._hover_global_pos = QPoint(global_pos)
+        self._tooltip_timer.start()
+        try:
+            self._content_tooltip.hide()
+        except Exception:
+            pass
 
-    def _apply_note_section_edit(self) -> None:
-        if self._note_editor_loading or self._note_current_section is None or not self._current_page_path:
+    def _on_tooltip_hover_changed(self, hovered: bool) -> None:
+        self._tooltip_hovered = bool(hovered)
+        if hovered:
+            self._tooltip_hide_timer.stop()
             return
-        new_text = self.note_editor.to_markdown()
-        current = self._note_current_section.text
-        if new_text == current:
+        if not self._tooltip_pinned and self._content_tooltip.isVisible():
+            self._tooltip_hide_timer.start()
+
+    def _hide_hover_tooltip_if_idle(self) -> None:
+        if self._tooltip_pinned or self._tooltip_hovered:
             return
-        self._note_current_section = _NoteSection(
-            start_line=self._note_current_section.start_line,
-            end_line=self._note_current_section.end_line,
-            focus_line=self._note_current_section.focus_line,
-            text=new_text,
-        )
-        self.headingSectionUpdateRequested.emit(
-            self._current_page_path,
-            self._note_current_section.start_line,
-            self._note_current_section.end_line,
-            new_text,
-            self._note_current_section.focus_line,
-        )
+        try:
+            self._content_tooltip.hide()
+        except Exception:
+            pass
+
+    def _pin_hover_tooltip(self) -> None:
+        if not self._content_tooltip.isVisible():
+            return
+        self._tooltip_timer.stop()
+        self._tooltip_hide_timer.stop()
+        self._tooltip_pinned = True
+        self._content_tooltip.set_pinned(True)
+        try:
+            self._content_tooltip.show()
+            self._content_tooltip.raise_()
+            self._content_tooltip.activateWindow()
+            self._content_tooltip._editor.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
+
+    def _show_hover_tooltip(self) -> None:
+        if not self._content_preview_enabled or self._hovered_node_id is None:
+            return
+        node = self._node_by_id(self._hovered_node_id)
+        text = self._node_tooltip_markdown(node)
+        if not text.strip():
+            return
+        pos = self._hover_global_pos or QCursor.pos()
+        self._tooltip_pinned = False
+        self._tooltip_hovered = False
+        self._content_tooltip.set_pinned(False)
+        self._update_tooltip_font_size()
+        self._content_tooltip.show_markdown(text, self._current_page_path, pos + QPoint(18, 18))
 
     def _clone_node_tree(self, node: _MindNode) -> _MindNode:
         cloned = _MindNode(
@@ -1793,9 +1962,9 @@ class MapPanel(QWidget):
         if mods != Qt.ShiftModifier:
             return False
         direction = None
-        if key in (Qt.Key_Up, Qt.Key_K):
+        if key in (Qt.Key_Up, Qt.Key_U):
             direction = "up"
-        elif key in (Qt.Key_Down, Qt.Key_J):
+        elif key in (Qt.Key_Down, Qt.Key_N):
             direction = "down"
         elif key in (Qt.Key_Left, Qt.Key_H):
             direction = "left"
@@ -1891,10 +2060,15 @@ class MapPanel(QWidget):
         if event.type() != QEvent.KeyPress:
             event.ignore()
             return
+        self._cancel_hover_tooltip()
         key = event.key()
         mods = event.modifiers()
         if key == Qt.Key_Escape and not mods and self._detached_session is not None:
             if self.cancel_detached_changes():
+                event.accept()
+                return
+        if key in (Qt.Key_Return, Qt.Key_Enter) and not mods and self._detached_session is not None:
+            if self.commit_detached_changes():
                 event.accept()
                 return
         if key == Qt.Key_J and mods == Qt.AltModifier:
@@ -1969,16 +2143,33 @@ class MapPanel(QWidget):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched, event):  # type: ignore[override]
+        if watched is self.preview_label and event.type() == QEvent.FocusIn:
+            self.focusSyncRequested.emit()
+        if watched is self.preview_label and event.type() == QEvent.Leave:
+            if not self._tooltip_pinned and self._content_tooltip.isVisible():
+                self._tooltip_hide_timer.start()
+            else:
+                self._cancel_hover_tooltip()
         if watched is self.preview_label and isinstance(event, QMouseEvent):
             if self._draft_heading is not None and event.type() == event.Type.MouseButtonPress:
                 event.accept()
                 return True
+            if event.type() == event.Type.MouseMove and self._drag_press_node_id is None:
+                svg_pos = self._event_svg_position(event)
+                node = self._node_at_position(*svg_pos) if svg_pos else None
+                self._schedule_hover_tooltip(node, event.globalPos())
+            if event.type() == event.Type.MouseButtonPress and self._content_tooltip.isVisible() and not self._tooltip_pinned:
+                self._pin_hover_tooltip()
+                event.accept()
+                return True
             if event.type() == event.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                self._cancel_hover_tooltip()
                 self.preview_label.setFocus(Qt.MouseFocusReason)
                 if self._toggle_node_on_double_click(event):
                     event.accept()
                     return True
             if event.type() == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._cancel_hover_tooltip()
                 self.preview_label.setFocus(Qt.MouseFocusReason)
                 if self._toggle_node_at(event):
                     event.accept()
@@ -1993,6 +2184,7 @@ class MapPanel(QWidget):
                     event.accept()
                     return True
             if event.type() == event.Type.MouseMove and self._drag_press_node_id is not None:
+                self._cancel_hover_tooltip()
                 if self._drag_start_pos is None:
                     return True
                 if not self._drag_active:
@@ -2017,6 +2209,7 @@ class MapPanel(QWidget):
                 event.accept()
                 return True
             if event.type() == event.Type.MouseButtonRelease and event.button() == Qt.LeftButton and self._drag_press_node_id is not None:
+                self._cancel_hover_tooltip()
                 if self._drag_active:
                     target = self._node_by_id(self._drop_target_node_id) if self._drop_target_node_id else None
                     if target is not None and self._drop_target_valid:
@@ -2036,9 +2229,14 @@ class MapPanel(QWidget):
                     event.accept()
                     return True
         if watched is self.preview_label and isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
+            self._cancel_hover_tooltip()
             self.keyPressEvent(event)
             if event.isAccepted():
                 return True
         if watched is self.preview_label and event.type() == QEvent.NativeGesture:
             self.preview_label.setFocus(Qt.OtherFocusReason)
         return super().eventFilter(watched, event)
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        self.focusSyncRequested.emit()

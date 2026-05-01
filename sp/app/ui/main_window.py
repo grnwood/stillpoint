@@ -2307,6 +2307,7 @@ class MainWindow(QMainWindow):
         # Remember cursor positions for history navigation
         # Track last-saved content to detect dirty buffers
         self._last_saved_content: Optional[str] = None
+        self._pending_editor_sync_from_map: dict[str, dict[str, Any]] = {}
         self._undo_cache_path: Optional[Path] = None
         self._undo_cache_pages_limit: int = 20
         self._undo_cache_states_limit: int = 10
@@ -2627,7 +2628,6 @@ class MainWindow(QMainWindow):
         self.right_panel.mapHeadingActivated.connect(self._open_heading_from_map)
         self.right_panel.mapHeadingCreateRequested.connect(self._insert_heading_from_map_request)
         self.right_panel.mapHeadingReorderRequested.connect(self._reorder_headings_from_map_request)
-        self.right_panel.mapHeadingSectionUpdateRequested.connect(self._update_heading_section_from_map_request)
         self.right_panel.mapStatusRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
         self.right_panel.aiChatPageWritten.connect(self._on_ai_chat_page_written)
@@ -11788,6 +11788,12 @@ class MainWindow(QMainWindow):
         if auto and self._read_only:
             # In read-only mode, silently skip autosaves/background saves
             return
+        if self.current_path:
+            if self._editor_has_focus():
+                try:
+                    self._apply_pending_editor_sync_if_needed(self.current_path)
+                except Exception:
+                    pass
         
         # Skip autosave if content hasn't changed
         if auto and not force:
@@ -11802,7 +11808,8 @@ class MainWindow(QMainWindow):
                 pass
             
             # Fallback to content comparison
-            current_content = self.editor.to_markdown()
+            pending_entry = self._pending_map_sync_entry(self.current_path)
+            current_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
             if self._last_saved_content is not None and current_content == self._last_saved_content:
                 self._debug(f"Skipping autosave (reason={reason}): content unchanged")
                 return
@@ -11823,7 +11830,8 @@ class MainWindow(QMainWindow):
         
         # Check if this is a virtual page with unchanged content
         if self.current_path in self.virtual_pages:
-            current_content = self.editor.to_markdown()
+            pending_entry = self._pending_map_sync_entry(self.current_path)
+            current_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
             original_content = self.virtual_page_original_content.get(self.current_path)
             
             # If content hasn't changed from the template, don't save
@@ -11873,7 +11881,8 @@ class MainWindow(QMainWindow):
             if saved_scroll_pos is not None:
                 self.editor.verticalScrollBar().setValue(saved_scroll_pos)
 
-        payload_content = self.editor.to_markdown()
+        pending_entry = self._pending_map_sync_entry(self.current_path)
+        payload_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
         if log_enabled("editor_markdown"):
             print(f"[DEBUG save] to_markdown() returned {len(payload_content)} chars, ends_with_newline={payload_content.endswith('\\n')}, last_20_chars={repr(payload_content[-20:])}")
         
@@ -11907,6 +11916,7 @@ class MainWindow(QMainWindow):
         _restore_editor_view()
         message = "Auto-saved" if auto else "Saved"
         self._finalize_save(self.current_path, payload_content, resp.json(), message)
+        self._mark_pending_editor_sync_saved(self.current_path, payload_content)
         # Refresh any popup editors on the same page
         try:
             for win in list(getattr(self, "_page_windows", [])):
@@ -14431,12 +14441,20 @@ class MainWindow(QMainWindow):
             return
         if path != self.current_path:
             return
-        try:
-            current_text = self.editor.toPlainText()
-        except Exception:
-            current_text = ""
+        pending_entry = self._pending_map_sync_entry(path)
+        if pending_entry is not None:
+            current_text = str(pending_entry.get("content", ""))
+        else:
+            try:
+                current_text = self.editor.toPlainText()
+            except Exception:
+                current_text = ""
         if current_text != base_text:
             self.statusBar().showMessage("Map edit cancelled: the page changed while detached editing was active.", 5000)
+            return
+        if not self._editor_has_focus():
+            self._queue_pending_editor_sync_from_map(path, new_text, focus_line)
+            self._restore_map_source_focus(source, focus_line, target=focus_target)
             return
         cursor = QTextCursor(self.editor.document())
         self._suspend_autosave = True
@@ -14497,89 +14515,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         QTimer.singleShot(0, _restore)
-
-    def _update_heading_section_from_map_request(self, path: str, start_line: int, end_line: int, text: str, focus_line: int) -> None:
-        if not path:
-            return
-        source = self.sender()
-        focus_target = "map"
-        panel = self._map_source_panel(source)
-        if panel is not None:
-            try:
-                if hasattr(panel, "focus_restore_target"):
-                    focus_target = panel.focus_restore_target()
-            except Exception:
-                focus_target = "map"
-        path_changed = path != self.current_path
-        if path_changed:
-            self._open_file(path)
-        expected_path = self.current_path
-        expected_load_token = self._current_editor_load_token()
-        QTimer.singleShot(
-            50 if path_changed else 0,
-            lambda p=path, start=start_line, end=end_line, new_text=text, line=focus_line, path_hint=expected_path, load_token=expected_load_token, source_obj=source, focus_pref=focus_target: self._apply_map_heading_section_update(
-                p,
-                start,
-                end,
-                new_text,
-                line,
-                expected_path=path_hint,
-                expected_load_token=load_token,
-                source=source_obj,
-                focus_target=focus_pref,
-            ),
-        )
-
-    def _apply_map_heading_section_update(
-        self,
-        path: str,
-        start_line: int,
-        end_line: int,
-        new_text: str,
-        focus_line: int,
-        *,
-        expected_path: Optional[str],
-        expected_load_token: Optional[int],
-        source=None,
-        focus_target: str = "map",
-    ) -> None:
-        if not self._editor_load_still_matches(expected_path, expected_load_token):
-            return
-        if path != self.current_path:
-            return
-        try:
-            lines = self.editor.toPlainText().splitlines()
-        except Exception:
-            lines = []
-        if start_line <= 0 or end_line < start_line or start_line > len(lines):
-            return
-        normalized = (new_text or "").replace("\r\n", "\n")
-        replacement_lines = normalized.splitlines()
-        new_lines = list(lines)
-        new_lines[start_line - 1:end_line] = replacement_lines
-        result = "\n".join(new_lines)
-        if self.editor.toPlainText().endswith("\n") or normalized.endswith("\n") or result:
-            if not result.endswith("\n"):
-                result += "\n"
-        cursor = QTextCursor(self.editor.document())
-        self._suspend_autosave = True
-        try:
-            cursor.beginEditBlock()
-            cursor.select(QTextCursor.Document)
-            cursor.insertText(result)
-            cursor.endEditBlock()
-        finally:
-            self._suspend_autosave = False
-        try:
-            self.editor.document().setModified(True)
-        except Exception:
-            pass
-        try:
-            self.right_panel.refresh_map(self.current_path)
-            self._refresh_detached_map_panels(self.current_path)
-        except Exception:
-            pass
-        self._restore_map_source_focus(source, focus_line, target=focus_target)
 
     def _normalize_task_date_paths(self, paths: list[str]) -> set[str]:
         normalized: set[str] = set()
@@ -14817,6 +14752,16 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _defer_detached_map_panel_refresh(self, path: Optional[str]) -> None:
+        panels = list(getattr(self, "_detached_map_panels", []))
+        if not panels:
+            return
+        for panel in panels:
+            try:
+                panel._pending_refresh_path = path  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
 
     # --- Detached panel windows -------------------------------------------------
 
@@ -14986,8 +14931,13 @@ class MainWindow(QMainWindow):
         panel.headingActivated.connect(self._open_heading_from_map)
         panel.headingCreateRequested.connect(self._insert_heading_from_map_request)
         panel.headingReorderRequested.connect(self._reorder_headings_from_map_request)
-        panel.headingSectionUpdateRequested.connect(self._update_heading_section_from_map_request)
         panel.statusMessageRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
+        panel.focusSyncRequested.connect(
+            lambda p=panel: p.set_content(
+                self._normalize_editor_path(self.current_path),
+                self._get_editor_text_for_path(self.current_path),
+            ) if self.current_path else p.clear_content()
+        )
         if self.current_path:
             panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
         else:
@@ -16199,6 +16149,9 @@ class MainWindow(QMainWindow):
             current_norm = self._normalize_editor_path(self.current_path) if self.current_path else None
         except Exception:
             current_norm = self.current_path
+        pending_entry = self._pending_map_sync_entry(target_norm)
+        if pending_entry is not None:
+            return str(pending_entry.get("content", ""))
         if target_norm and current_norm and target_norm == current_norm:
             try:
                 return self.editor.toPlainText()
@@ -16837,10 +16790,75 @@ class MainWindow(QMainWindow):
             return "right"
         return None
 
+    def _editor_has_focus(self) -> bool:
+        focused = self.focusWidget()
+        return bool(focused is self.editor or (self.editor and self.editor.isAncestorOf(focused)))
+
+    def _pending_map_sync_entry(self, path: Optional[str]) -> Optional[dict[str, Any]]:
+        if not path:
+            return None
+        return self._pending_editor_sync_from_map.get(path)
+
+    def _queue_pending_editor_sync_from_map(self, path: str, content: str, focus_line: int) -> None:
+        self._pending_editor_sync_from_map[path] = {
+            "content": content,
+            "focus_line": int(focus_line or 0),
+            "needs_save": True,
+        }
+        self._dirty_flag = True
+        self._update_dirty_indicator()
+        self.autosave_timer.start()
+
+    def _mark_pending_editor_sync_saved(self, path: str, content: str) -> None:
+        entry = self._pending_editor_sync_from_map.get(path)
+        if not entry:
+            return
+        if str(entry.get("content", "")) != content:
+            return
+        entry["needs_save"] = False
+
+    def _apply_pending_editor_sync_if_needed(self, path: Optional[str]) -> None:
+        entry = self._pending_map_sync_entry(path)
+        if not entry or not path or path != self.current_path:
+            return
+        content = str(entry.get("content", ""))
+        focus_line = int(entry.get("focus_line", 0) or 0)
+        needs_save = bool(entry.get("needs_save", False))
+        self._suspend_autosave = True
+        self._suspend_dirty_tracking = True
+        try:
+            self.editor.set_markdown(content)
+        finally:
+            self._suspend_dirty_tracking = False
+            self._suspend_autosave = False
+        try:
+            self.editor.document().setModified(needs_save)
+        except Exception:
+            pass
+        self._dirty_flag = needs_save
+        self._update_dirty_indicator()
+        if focus_line > 0:
+            scroll_path = self.current_path
+            scroll_token = self._current_editor_load_token()
+            QTimer.singleShot(
+                0,
+                lambda ln=focus_line, path_hint=scroll_path, load_token=scroll_token: self._scroll_to_line_with_flash(
+                    ln,
+                    expected_path=path_hint,
+                    expected_load_token=load_token,
+                ),
+            )
+        self._pending_editor_sync_from_map.pop(path, None)
+
     def _on_focus_changed(self, widget: Optional[QWidget]) -> None:
         if getattr(self, '_suppress_focus_borders', False):
             return
         target = self._focus_target_for_widget(widget)
+        if target == "editor":
+            try:
+                self._apply_pending_editor_sync_if_needed(self.current_path)
+            except Exception:
+                pass
         if target:
             if target in self._focus_recent:
                 self._focus_recent = [target] + [t for t in self._focus_recent if t != target]
@@ -20729,8 +20747,12 @@ class MainWindow(QMainWindow):
         if not self.current_path:
             return
         try:
-            self.right_panel.refresh_map(self.current_path)
-            self._refresh_detached_map_panels(self.current_path)
+            if self._editor_has_focus():
+                self.right_panel.defer_map_refresh(self.current_path)
+                self._defer_detached_map_panel_refresh(self.current_path)
+            else:
+                self.right_panel.refresh_map(self.current_path)
+                self._refresh_detached_map_panels(self.current_path)
         except Exception:
             pass
         new_state = self._dirty_state_from_editor(default=True)
