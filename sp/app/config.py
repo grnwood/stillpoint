@@ -742,7 +742,7 @@ def load_map_note_panel_visible() -> bool:
     payload = _read_global_config()
     value = payload.get("map_note_panel_visible")
     if value is None:
-        return False
+        return True
     return bool(value)
 
 

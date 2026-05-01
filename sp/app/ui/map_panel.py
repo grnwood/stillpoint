@@ -151,6 +151,7 @@ class _MapContentTooltip(QFrame):
         self._editor.setFocusPolicy(Qt.NoFocus)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._editor.installEventFilter(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
@@ -158,12 +159,10 @@ class _MapContentTooltip(QFrame):
         self.resize(520, 320)
         self.setStyleSheet(
             "#mapContentTooltip {"
-            "background: #fff7c2;"
-            "border: 1px solid #d2b55b;"
-            "border-radius: 8px;"
+            "border: 2px solid palette(mid);"
+            "border-radius: 6px;"
             "}"
             "#mapContentTooltip QTextEdit {"
-            "background: #fff7c2;"
             "border: none;"
             "}"
         )
@@ -186,16 +185,39 @@ class _MapContentTooltip(QFrame):
         font.setPointSize(zoomed_size)
         self._editor.setFont(font)
 
-    def show_markdown(self, markdown_text: str, page_path: Optional[str], pos: QPoint) -> None:
+    def show_markdown(self, markdown_text: str, page_path: Optional[str], cursor_pos: QPoint) -> None:
         self._editor.set_context(None, page_path)
         self._editor.set_markdown(markdown_text)
         try:
             self._editor.document().setModified(False)
         except Exception:
             pass
-        self.move(pos)
+        self.move(cursor_pos)  # temporary placement so sizeHint() is valid
         self.show()
         self.raise_()
+        # Smart placement: keep the popup fully within the screen.
+        tip_w = self.width()
+        tip_h = self.height()
+        gap = 16
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.screenAt(cursor_pos)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        # Prefer right of cursor, flip left if it would be clipped.
+        if cursor_pos.x() + gap + tip_w <= avail.right():
+            x = cursor_pos.x() + gap
+        else:
+            x = cursor_pos.x() - gap - tip_w
+        # Prefer below cursor, flip above if it would be clipped.
+        if cursor_pos.y() + gap + tip_h <= avail.bottom():
+            y = cursor_pos.y() + gap
+        else:
+            y = cursor_pos.y() - gap - tip_h
+        # Final clamp so we never go off-screen on any edge.
+        x = max(avail.left(), min(x, avail.right() - tip_w))
+        y = max(avail.top(), min(y, avail.bottom() - tip_h))
+        self.move(x, y)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.LeftButton:
@@ -212,50 +234,14 @@ class _MapContentTooltip(QFrame):
         self.hoverChanged.emit(False)
         super().leaveEvent(event)
 
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self._editor and event.type() == QEvent.ContextMenu:
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
-        """Show minimal context menu with only copy actions."""
-        cursor = self._editor.textCursor()
-        if not cursor.hasSelection():
-            event.ignore()
-            return
-        
-        menu = QMenu(self)
-        apply_menu_theme(menu, self._editor)
-        
-        # Add Copy action
-        copy_action = QAction("Copy", menu)
-        copy_action.triggered.connect(self._copy_selection)
-        menu.addAction(copy_action)
-        
-        # Add Copy as Markdown action
-        copy_md_action = QAction("Copy as Markdown", menu)
-        copy_md_action.triggered.connect(self._copy_selection_as_markdown)
-        menu.addAction(copy_md_action)
-        
-        menu.exec(event.globalPos())
         event.accept()
-    
-    def _copy_selection(self) -> None:
-        """Copy selected text as plain text."""
-        cursor = self._editor.textCursor()
-        if cursor.hasSelection():
-            self._editor.copy()
-    
-    def _copy_selection_as_markdown(self) -> None:
-        """Copy selected text as markdown."""
-        cursor = self._editor.textCursor()
-        if not cursor.hasSelection():
-            return
-        
-        # Get markdown representation
-        selected_text = cursor.selectedText().replace('\u2029', '\n')
-        
-        # Use clipboard to set markdown
-        clipboard = QGuiApplication.clipboard()
-        mime_data = QMimeData()
-        mime_data.setText(selected_text)
-        mime_data.setData("text/markdown", selected_text.encode('utf-8'))
-        clipboard.setMimeData(mime_data)
 
 
 class MapPanel(QWidget):
@@ -1709,7 +1695,7 @@ class MapPanel(QWidget):
         self._tooltip_hovered = False
         self._content_tooltip.set_pinned(False)
         self._update_tooltip_font_size()
-        self._content_tooltip.show_markdown(text, self._current_page_path, pos + QPoint(18, 18))
+        self._content_tooltip.show_markdown(text, self._current_page_path, pos)
 
     def _clone_node_tree(self, node: _MindNode) -> _MindNode:
         cloned = _MindNode(
@@ -2096,11 +2082,11 @@ class MapPanel(QWidget):
             event.accept()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
-            if self._activate_selected_node(keep_focus=False):
+            if self._activate_selected_node(keep_focus=True):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
-            if self._activate_selected_node(keep_focus=True):
+            if self._activate_selected_node(keep_focus=False):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
