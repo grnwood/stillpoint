@@ -166,6 +166,7 @@ DailyPlan.md
 - mismatched page filenames
 - writing markdown into arbitrary helper folders
 - scattering attachments without a clear owning page
+- writing new markdonw files without their corresponding folder
 
 If unsure, use this pattern:
 

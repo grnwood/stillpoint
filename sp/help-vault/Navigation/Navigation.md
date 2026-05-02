@@ -2,6 +2,8 @@
 
 StillPoint is designed so you can move quickly once your vault grows. Start with the mouse while learning, then add shortcuts to stay in flow without breaking focus.
 
+For visual structure work, see [:/Mindmap:Mindmap|Mindmap Mode].
+
 ## Vault Tree
 The left sidebar shows your vault structure.
 - Click a page name to open it in the editor.

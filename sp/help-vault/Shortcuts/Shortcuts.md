@@ -59,8 +59,11 @@ These shortcuts will speed up your workflow:
 - `Ctrl+Shift+Space`: Cycle focus between panels
 - `F11`: Toggle fullscreen
 - In the Map tab, `Enter` opens the selected node and focuses the editor; `Shift+Enter` opens it and keeps focus in the Map
-- In the Map tab, `Alt+J` / `Alt+K` zoom in/out around the selected node
+- In the Map tab, `Alt+Up` / `Alt+Down` zoom in/out around the selected node (Map-active scope)
+- In the Map tab, `Alt+J` / `Alt+K` also zoom in/out around the selected node
 - In the Map tab, `Ctrl++` / `Ctrl+-` also zoom the map around the selected node instead of changing editor font size
+- In the Map tab, `Ctrl+Space` opens the selected node note popup (and pages it forward when already open)
+- In an open Map note popup, `Left` / `Right` closes the popup
 
 ### Special
 - `Ctrl+.`: Open preferences

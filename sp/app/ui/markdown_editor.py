@@ -5707,10 +5707,22 @@ class MarkdownEditor(QTextEdit):
             except Exception:
                 pass
 
+    def _request_map_mode(self) -> None:
+        window = self.window()
+        if window and hasattr(window, "_open_map_panel_window"):
+            try:
+                window._open_map_panel_window()
+            except Exception:
+                pass
+
     def _add_view_mode_actions(self, menu: QMenu) -> None:
         if not menu:
             return
         view_sub = menu.addMenu("View...")
+        if config.load_feature_map_enabled():
+            map_action = view_sub.addAction("View in Map Mode")
+            map_action.setToolTip("Open in Mindmap mode")
+            map_action.triggered.connect(lambda checked=False: self._request_map_mode())
         focus_action = view_sub.addAction("Focus Mode")
         focus_action.setToolTip("Open in Focus Mode")
         focus_action.triggered.connect(lambda checked=False: self._request_mode_overlay("focus"))

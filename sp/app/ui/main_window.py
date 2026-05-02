@@ -3189,6 +3189,23 @@ class MainWindow(QMainWindow):
             "padding: 2px 6px; border-radius: 3px;"
         )
 
+        map_icon = self._load_icon(
+            self._find_asset("mindmap.svg"),
+            self._main_icon_color(),
+            size=16,
+        )
+        self._mindmap_mode_button = QToolButton()
+        self._mindmap_mode_button.setAutoRaise(True)
+        if map_icon:
+            self._mindmap_mode_button.setIcon(map_icon)
+        self._mindmap_mode_button.setIconSize(QSize(16, 16))
+        self._mindmap_mode_button.setToolTip("Open in Mindmap mode")
+        self._mindmap_mode_button.setCursor(QCursor(Qt.PointingHandCursor))
+        self._mindmap_mode_button.setStyleSheet(self._mode_button_style())
+        self._mindmap_mode_button.clicked.connect(lambda checked=False: self._open_map_panel_window())
+        self._mindmap_mode_button.setVisible(bool(self._feature_map_enabled))
+        self.statusBar().addPermanentWidget(self._mindmap_mode_button, 0)
+
         focus_icon = self._load_icon(
             self._find_asset("focus-mode.svg"),
             self._main_icon_color(),
@@ -8461,6 +8478,10 @@ class MainWindow(QMainWindow):
         self._feature_map_enabled = new_map
         self._feature_tags_enabled = new_tags
         self._feature_remember_cursor_position_enabled = new_remember_cursor_position
+        try:
+            self._mindmap_mode_button.setVisible(bool(new_map))
+        except Exception:
+            pass
         self.right_panel.set_feature_flags(
             enable_tasks=new_tasks,
             enable_calendar=new_calendar,
@@ -8755,6 +8776,7 @@ class MainWindow(QMainWindow):
             (getattr(self, "refresh_tree_button", None), "reload.svg"),
             (getattr(self, "journal_tree_button", None), "calendar-days.svg"),
             (getattr(self, "collapse_tree_button", None), "collapse.svg"),
+            (getattr(self, "_mindmap_mode_button", None), "mindmap.svg"),
             (getattr(self, "_focus_mode_button", None), "focus-mode.svg"),
             (getattr(self, "_audience_mode_button", None), "present-mode.svg"),
         ):
@@ -8766,6 +8788,10 @@ class MainWindow(QMainWindow):
                     button.setIcon(icon)
             except Exception:
                 pass
+        try:
+            self._mindmap_mode_button.setStyleSheet(self._mode_button_style())
+        except Exception:
+            pass
         try:
             self._focus_mode_button.setStyleSheet(self._mode_button_style())
         except Exception:
