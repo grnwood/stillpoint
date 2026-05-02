@@ -33,6 +33,7 @@ class TabbedRightPanel(QWidget):
     calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
     mapHeadingActivated = Signal(str, int)  # path, line from Map tab
     mapHeadingCreateRequested = Signal(str, int, int, str)  # path, after_line, level, text
+    mapHeadingRenameRequested = Signal(str, int, int, str)  # path, line, level, text
     mapHeadingReorderRequested = Signal(str, str, str, int)  # path, base_text, new_text, focus_line
     mapStatusRequested = Signal(str, int)  # status text, timeout
     aiChatNavigateRequested = Signal(str)  # page path from AI Chat tab
@@ -719,6 +720,7 @@ class TabbedRightPanel(QWidget):
         self.map_panel = MapPanel()
         self.map_panel.headingActivated.connect(self.mapHeadingActivated)
         self.map_panel.headingCreateRequested.connect(self.mapHeadingCreateRequested)
+        self.map_panel.headingRenameRequested.connect(self.mapHeadingRenameRequested)
         self.map_panel.headingReorderRequested.connect(self.mapHeadingReorderRequested)
         self.map_panel.statusMessageRequested.connect(self.mapStatusRequested)
         self.map_panel.focusSyncRequested.connect(self._sync_map_tab_state)
@@ -737,6 +739,10 @@ class TabbedRightPanel(QWidget):
             pass
         try:
             self.map_panel.headingCreateRequested.disconnect(self.mapHeadingCreateRequested)
+        except Exception:
+            pass
+        try:
+            self.map_panel.headingRenameRequested.disconnect(self.mapHeadingRenameRequested)
         except Exception:
             pass
         try:
@@ -765,6 +771,17 @@ class TabbedRightPanel(QWidget):
                 self.tabs.setCurrentIndex(i)
                 self.map_panel.setFocus(Qt.ShortcutFocusReason)
                 break
+
+    def is_map_panel_active(self) -> bool:
+        return bool(self.map_panel) and self._is_panel_currently_visible(self.map_panel)
+
+    def zoom_map_selected_node(self, delta: int) -> bool:
+        if not self.is_map_panel_active() or not self.map_panel:
+            return False
+        try:
+            return bool(self.map_panel.zoom_selected_node(delta))
+        except Exception:
+            return False
 
     def consume_activation_source(self) -> Optional[str]:
         if self.map_panel and hasattr(self.map_panel, "consume_activation_source"):

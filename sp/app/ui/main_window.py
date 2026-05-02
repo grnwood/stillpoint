@@ -2627,6 +2627,7 @@ class MainWindow(QMainWindow):
         self.right_panel.calendarTaskActivated.connect(self._open_task_from_calendar_panel)
         self.right_panel.mapHeadingActivated.connect(self._open_heading_from_map)
         self.right_panel.mapHeadingCreateRequested.connect(self._insert_heading_from_map_request)
+        self.right_panel.mapHeadingRenameRequested.connect(self._rename_heading_from_map_request)
         self.right_panel.mapHeadingReorderRequested.connect(self._reorder_headings_from_map_request)
         self.right_panel.mapStatusRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
         self.right_panel.aiChatNavigateRequested.connect(self._on_ai_chat_navigate)
@@ -14394,6 +14395,85 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _rename_heading_from_map_request(self, path: str, line: int, level: int, text: str) -> None:
+        heading_text = str(text or "").strip()
+        if not path or line <= 0 or not heading_text:
+            return
+        source = self.sender()
+        focus_target = "map"
+        panel = self._map_source_panel(source)
+        if panel is not None:
+            try:
+                if hasattr(panel, "focus_restore_target"):
+                    focus_target = panel.focus_restore_target()
+            except Exception:
+                focus_target = "map"
+        path_changed = path != self.current_path
+        if path_changed:
+            self._open_file(path)
+        expected_path = self.current_path
+        expected_load_token = self._current_editor_load_token()
+        QTimer.singleShot(
+            50 if path_changed else 0,
+            lambda p=path, ln=line, lvl=level, txt=heading_text, path_hint=expected_path, load_token=expected_load_token, source_obj=source, focus_pref=focus_target: self._apply_map_heading_rename(
+                p,
+                ln,
+                lvl,
+                txt,
+                expected_path=path_hint,
+                expected_load_token=load_token,
+                source=source_obj,
+                focus_target=focus_pref,
+            ),
+        )
+
+    def _apply_map_heading_rename(
+        self,
+        path: str,
+        line: int,
+        level: int,
+        text: str,
+        *,
+        expected_path: Optional[str],
+        expected_load_token: Optional[int],
+        source=None,
+        focus_target: str = "map",
+    ) -> None:
+        if not self._editor_load_still_matches(expected_path, expected_load_token):
+            return
+        if path != self.current_path or line <= 0:
+            return
+        heading_text = str(text or "").strip()
+        if not heading_text:
+            return
+        heading_level = max(1, min(int(level or 1), HEADING_MAX_LEVEL))
+        display_heading = self.editor._to_display(f"{'#' * heading_level} {heading_text}").rstrip("\n")
+        block = self.editor.document().findBlockByLineNumber(line - 1)
+        if not block.isValid():
+            return
+        cursor = QTextCursor(self.editor.document())
+        self._suspend_autosave = True
+        try:
+            cursor.beginEditBlock()
+            start = block.position()
+            end = start + max(0, block.length() - 1)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.insertText(display_heading)
+            cursor.endEditBlock()
+        finally:
+            self._suspend_autosave = False
+        try:
+            self.editor.document().setModified(True)
+        except Exception:
+            pass
+        try:
+            self.right_panel.refresh_map(self.current_path)
+            self._refresh_detached_map_panels(self.current_path)
+        except Exception:
+            pass
+        self._restore_map_source_focus(source, line, target=focus_target)
+
     def _reorder_headings_from_map_request(self, path: str, base_text: str, new_text: str, focus_line: int) -> None:
         if not path:
             return
@@ -14930,6 +15010,7 @@ class MainWindow(QMainWindow):
         panel = MapPanel()
         panel.headingActivated.connect(self._open_heading_from_map)
         panel.headingCreateRequested.connect(self._insert_heading_from_map_request)
+        panel.headingRenameRequested.connect(self._rename_heading_from_map_request)
         panel.headingReorderRequested.connect(self._reorder_headings_from_map_request)
         panel.statusMessageRequested.connect(lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms))
         panel.focusSyncRequested.connect(
@@ -19845,11 +19926,21 @@ class MainWindow(QMainWindow):
     def _on_nav_up_shortcut(self) -> None:
         if log_enabled("navigation"):
             print(f"[HIER] Alt+Up activated current={self.current_path!r}")
+        try:
+            if self.right_panel and self.right_panel.zoom_map_selected_node(1):
+                return
+        except Exception:
+            pass
         self._navigate_hierarchy_up()
 
     def _on_nav_down_shortcut(self) -> None:
         if log_enabled("navigation"):
             print(f"[HIER] Alt+Down activated current={self.current_path!r}")
+        try:
+            if self.right_panel and self.right_panel.zoom_map_selected_node(-1):
+                return
+        except Exception:
+            pass
         self._navigate_hierarchy_down()
 
     def _on_nav_page_shortcut(self, delta: int) -> None:

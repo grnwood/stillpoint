@@ -8,14 +8,15 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QPointF, QSize, Qt, Signal, QMimeData, QTimer
-from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap
+from PySide6.QtCore import QBuffer, QEasingCurve, QEvent, QIODevice, QPoint, QPointF, QPropertyAnimation, QSize, Qt, Signal, QMimeData, QTimer
+from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QScrollArea,
     QToolButton,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from sp.app import config
+from sp.logging_flags import log_enabled
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
 from .theme import apply_menu_theme, theme_color, theme_value
 
@@ -138,6 +140,7 @@ class _DetachedSession:
 
 class _MapContentTooltip(QFrame):
     pinRequested = Signal()
+    dismissed = Signal()
     hoverChanged = Signal(bool)
 
     def __init__(self, parent=None) -> None:
@@ -145,6 +148,7 @@ class _MapContentTooltip(QFrame):
         self.setObjectName("mapContentTooltip")
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.NoFocus)
+        self._is_pinned = False
         self._editor = MarkdownEditor(self)
         self._editor.set_context(None, None)
         self._editor.set_read_only_mode(True)
@@ -168,6 +172,12 @@ class _MapContentTooltip(QFrame):
         )
 
     def set_pinned(self, pinned: bool) -> None:
+        if pinned == self._is_pinned:
+            if log_enabled("ui_state"):
+                print(f"[MAP_TOOLTIP] set_pinned noop pinned={pinned} visible={self.isVisible()}")
+            return
+        if log_enabled("ui_state"):
+            print(f"[MAP_TOOLTIP] set_pinned pinned={pinned} visible_before={self.isVisible()}")
         pos = self.pos()
         self.hide()
         self.setWindowFlag(Qt.Tool, True)
@@ -176,6 +186,7 @@ class _MapContentTooltip(QFrame):
         self.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
         self._editor.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
         self.move(pos)
+        self._is_pinned = pinned
 
     def set_font_zoom(self, zoom_factor: float) -> None:
         """Apply zoom factor to the editor font size."""
@@ -185,7 +196,52 @@ class _MapContentTooltip(QFrame):
         font.setPointSize(zoomed_size)
         self._editor.setFont(font)
 
+    def focus_reader(self) -> None:
+        self.setFocus(Qt.OtherFocusReason)
+        self._editor.setFocus(Qt.OtherFocusReason)
+
+    def page_forward(self) -> bool:
+        scrollbar = self._editor.verticalScrollBar()
+        if scrollbar is None:
+            return False
+        old_value = scrollbar.value()
+        step = max(1, scrollbar.pageStep())
+        scrollbar.setValue(min(scrollbar.maximum(), old_value + step))
+        return scrollbar.value() != old_value
+
+    def page_backward(self) -> bool:
+        scrollbar = self._editor.verticalScrollBar()
+        if scrollbar is None:
+            return False
+        old_value = scrollbar.value()
+        step = max(1, scrollbar.pageStep())
+        scrollbar.setValue(max(scrollbar.minimum(), old_value - step))
+        return scrollbar.value() != old_value
+
+    def line_forward(self) -> bool:
+        scrollbar = self._editor.verticalScrollBar()
+        if scrollbar is None:
+            return False
+        old_value = scrollbar.value()
+        step = max(1, scrollbar.singleStep())
+        scrollbar.setValue(min(scrollbar.maximum(), old_value + step))
+        return scrollbar.value() != old_value
+
+    def line_backward(self) -> bool:
+        scrollbar = self._editor.verticalScrollBar()
+        if scrollbar is None:
+            return False
+        old_value = scrollbar.value()
+        step = max(1, scrollbar.singleStep())
+        scrollbar.setValue(max(scrollbar.minimum(), old_value - step))
+        return scrollbar.value() != old_value
+
     def show_markdown(self, markdown_text: str, page_path: Optional[str], cursor_pos: QPoint) -> None:
+        if log_enabled("ui_state"):
+            print(
+                f"[MAP_TOOLTIP] show_markdown len={len(markdown_text or '')} page={page_path!r} "
+                f"cursor=({cursor_pos.x()},{cursor_pos.y()}) pinned={self._is_pinned}"
+            )
         self._editor.set_context(None, page_path)
         self._editor.set_markdown(markdown_text)
         try:
@@ -235,6 +291,24 @@ class _MapContentTooltip(QFrame):
         super().leaveEvent(event)
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self._editor and event.type() == QEvent.KeyPress:
+            try:
+                if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
+                    self.hide()
+                    self.dismissed.emit()
+                    event.accept()
+                    return True
+                if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() == Qt.NoModifier:
+                    self.hide()
+                    self.dismissed.emit()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
+                    self.page_forward()
+                    event.accept()
+                    return True
+            except Exception:
+                pass
         if obj is self._editor and event.type() == QEvent.ContextMenu:
             event.accept()
             return True
@@ -243,12 +317,46 @@ class _MapContentTooltip(QFrame):
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
         event.accept()
 
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
+            self.hide()
+            self.dismissed.emit()
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() == Qt.NoModifier:
+            self.hide()
+            self.dismissed.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
+            self.page_forward()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _InlineNodeRenameEdit(QLineEdit):
+    acceptRequested = Signal()
+    cancelRequested = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.NoModifier:
+            self.acceptRequested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
+            self.cancelRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class MapPanel(QWidget):
     """Native SVG-based mind map panel for markdown headings only."""
 
     headingActivated = Signal(str, int)
     headingCreateRequested = Signal(str, int, int, str)
+    headingRenameRequested = Signal(str, int, int, str)
     headingReorderRequested = Signal(str, str, str, int)
     statusMessageRequested = Signal(str, int)
     focusSyncRequested = Signal()
@@ -263,6 +371,8 @@ class MapPanel(QWidget):
     _H_GAP = 72
     _V_GAP = 20
     _MARGIN = 40
+    _PREVIEW_PAD_X = 520
+    _PREVIEW_PAD_Y = 220
     _INDICATOR_GAP = 8
     _INDICATOR_SIZE = 16
     _INDICATOR_FILL = "#4b5563"
@@ -293,9 +403,11 @@ class MapPanel(QWidget):
         self._selection_anchor_node_id: Optional[str] = None
         self._pending_selected_line: Optional[int] = None
         self._last_activation_source: Optional[str] = None
+        self._filter_node_id: Optional[str] = None
         self._root_is_page_h1: bool = False
         self._draft_heading: Optional[_DraftHeading] = None
         self._draft_runtime_node: Optional[_MindNode] = None
+        self._inline_rename_node_id: Optional[str] = None
         self._detached_session: Optional[_DetachedSession] = None
         self._drag_press_node_id: Optional[str] = None
         self._drag_start_pos: Optional[QPointF] = None
@@ -307,8 +419,10 @@ class MapPanel(QWidget):
         self._hover_global_pos: Optional[QPoint] = None
         self._tooltip_pinned: bool = False
         self._tooltip_hovered: bool = False
+        self._selected_note_popup_active: bool = False
         self._note_font_size_offset: int = 0
         self._theme_colors = self._map_theme_colors()
+        self._scroll_animations: list[QPropertyAnimation] = []
 
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -355,6 +469,29 @@ class MapPanel(QWidget):
         self.fit_btn.setToolTip("Fit map")
         self.fit_btn.clicked.connect(self.fit_map)
         toolbar.addWidget(self.fit_btn)
+
+        self.filter_btn = QToolButton()
+        self.filter_btn.setAutoRaise(True)
+        self.filter_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.filter_btn.setIconSize(QSize(18, 18))
+        self.filter_btn.clicked.connect(self.toggle_selected_filter)
+        toolbar.addWidget(self.filter_btn)
+
+        self.center_btn = QToolButton()
+        self.center_btn.setAutoRaise(True)
+        self.center_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.center_btn.setIconSize(QSize(18, 18))
+        self.center_btn.setToolTip("Center selected node (Alt+C)")
+        self.center_btn.clicked.connect(self.center_selected_node)
+        toolbar.addWidget(self.center_btn)
+
+        self.left_indent_btn = QToolButton()
+        self.left_indent_btn.setAutoRaise(True)
+        self.left_indent_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.left_indent_btn.setIconSize(QSize(18, 18))
+        self.left_indent_btn.setToolTip("Move selected node to left side (Alt+S)")
+        self.left_indent_btn.clicked.connect(self.left_align_selected_node)
+        toolbar.addWidget(self.left_indent_btn)
 
         toolbar.addStretch(1)
 
@@ -442,7 +579,18 @@ class MapPanel(QWidget):
         self._tooltip_hide_timer.timeout.connect(self._hide_hover_tooltip_if_idle)
         self._content_tooltip = _MapContentTooltip()
         self._content_tooltip.pinRequested.connect(self._pin_hover_tooltip)
+        self._content_tooltip.dismissed.connect(self._on_tooltip_dismissed)
         self._content_tooltip.hoverChanged.connect(self._on_tooltip_hover_changed)
+        self._inline_rename_edit = _InlineNodeRenameEdit(self.preview_label)
+        self._inline_rename_edit.hide()
+        self._inline_rename_edit.acceptRequested.connect(self._commit_inline_rename)
+        self._inline_rename_edit.cancelRequested.connect(self._cancel_inline_rename)
+        self._filter_on_shortcut = QShortcut(QKeySequence("Ctrl+["), self)
+        self._filter_on_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._filter_on_shortcut.activated.connect(self.apply_selected_filter)
+        self._filter_off_shortcut = QShortcut(QKeySequence("Ctrl+]"), self)
+        self._filter_off_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._filter_off_shortcut.activated.connect(self.clear_filter)
 
         root.addWidget(self._wrap_scroll_area(), 1)
 
@@ -526,6 +674,9 @@ class MapPanel(QWidget):
         self.collapse_all_btn.setIcon(self._load_svg_icon("collapse-all.svg", QSize(18, 18), tint=mono))
         self.copy_btn.setIcon(self._load_svg_icon("copy-image.svg", QSize(18, 18), tint=mono))
         self.fit_btn.setIcon(self._load_svg_icon("fit-image.svg", QSize(18, 18), tint=mono))
+        self._update_filter_controls()
+        self.center_btn.setIcon(self._load_svg_icon("center.svg", QSize(18, 18), tint=mono))
+        self.left_indent_btn.setIcon(self._load_svg_icon("left-indent.svg", QSize(18, 18), tint=mono))
         self.accept_btn.setIcon(self._load_svg_icon("accept.svg", QSize(18, 18), tint=accept))
         self.cancel_btn.setIcon(self._load_svg_icon("cancel.svg", QSize(18, 18), tint=cancel))
         self.note_toggle_btn.setIcon(self._load_svg_icon("show-note.svg", QSize(18, 18), tint=mono))
@@ -573,6 +724,18 @@ class MapPanel(QWidget):
         palette = self._editor_theme_palette()
         return QColor(0, 0, 0) if palette.color(QPalette.Window).lightness() > 128 else QColor(255, 255, 255)
 
+    def _filter_active(self) -> bool:
+        return bool(self._filter_node_id)
+
+    def _update_filter_controls(self) -> None:
+        mono = self._toolbar_icon_color()
+        active = self._filter_active()
+        icon_name = "filter-off.svg" if active else "filter.svg"
+        tooltip = "Clear subtree filter (Ctrl+])" if active else "Filter to selected subtree (Ctrl+[)"
+        tint = QColor("#dc2626") if active else mono
+        self.filter_btn.setIcon(self._load_svg_icon(icon_name, QSize(18, 18), tint=tint))
+        self.filter_btn.setToolTip(tooltip)
+
     def _wrap_scroll_area(self) -> QScrollArea:
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
@@ -597,10 +760,13 @@ class MapPanel(QWidget):
             self.clear_content()
             return
         if is_new_page:
+            self._inline_rename_node_id = None
+            self._inline_rename_edit.hide()
             self._detached_session = None
             self._collapsed_node_ids.clear()
             self._canvas_bounds = None
             self._scope_expansion_depths.clear()
+            self._filter_node_id = None
         self._render_current(reset_zoom=is_new_page, reset_canvas=is_new_page)
 
     def clear_content(self) -> None:
@@ -620,9 +786,12 @@ class MapPanel(QWidget):
         self._selection_anchor_node_id = None
         self._pending_selected_line = None
         self._last_activation_source = None
+        self._filter_node_id = None
         self._root_is_page_h1 = False
         self._draft_heading = None
         self._draft_runtime_node = None
+        self._inline_rename_node_id = None
+        self._inline_rename_edit.hide()
         self._detached_session = None
         self._clear_drag_state()
         self._cancel_hover_tooltip()
@@ -630,6 +799,7 @@ class MapPanel(QWidget):
         self.preview_label.setText("Open a page to view its map.")
         self._update_level_controls()
         self._update_detached_mode_controls()
+        self._update_filter_controls()
 
     def refresh(self) -> None:
         if not self._current_page_path:
@@ -643,9 +813,34 @@ class MapPanel(QWidget):
         self._render_current(reset_zoom=False, reset_canvas=True)
 
     def _selected_scope_node(self) -> Optional[_MindNode]:
-        if not self._latest_root:
+        view_root = self._view_root()
+        if not view_root:
             return None
-        return self._selected_node() or self._latest_root
+        selected = self._selected_node()
+        if selected and self._node_is_visible_in_view(selected.node_id):
+            return selected
+        return view_root
+
+    def _view_root(self, root: Optional[_MindNode] = None) -> Optional[_MindNode]:
+        base_root = root or self._latest_root
+        if base_root is None:
+            return None
+        if not self._filter_node_id:
+            return base_root
+        filtered = next((node for node in self._collect_nodes(base_root) if node.node_id == self._filter_node_id), None)
+        if filtered is None and root is None:
+            self._filter_node_id = None
+            self._update_filter_controls()
+            return self._latest_root
+        return filtered or base_root
+
+    def _node_is_visible_in_view(self, node_id: Optional[str]) -> bool:
+        if not node_id:
+            return False
+        view_root = self._view_root()
+        if view_root is None:
+            return False
+        return any(node.node_id == node_id for node in self._collect_nodes(view_root))
 
     def _scope_depth(self, node: _MindNode) -> int:
         return max(0, int(self._scope_expansion_depths.get(node.node_id, 0)))
@@ -703,11 +898,22 @@ class MapPanel(QWidget):
         self._zoom_factor = max(0.2, min(3.0, min(x_ratio, y_ratio)))
         self._update_preview(fit=False)
 
+    def _apply_initial_view(self) -> None:
+        view_root = self._view_root()
+        if view_root is None:
+            return
+        self._set_selected_node(view_root)
+        self._zoom_factor = max(0.2, self._zoom_factor * 0.9)
+        self._update_preview(fit=False)
+        QTimer.singleShot(0, self.left_align_selected_node)
+
     def _reset_view_to_root(self) -> bool:
-        if not self._latest_root:
+        view_root = self._view_root()
+        if not view_root:
             return False
-        self._set_selected_node(self._latest_root)
+        self._set_selected_node(view_root)
         self.fit_map()
+        self.left_align_selected_node()
         return True
 
     def expand_all(self) -> None:
@@ -729,17 +935,64 @@ class MapPanel(QWidget):
         self.refresh()
 
     def copy_image(self) -> None:
-        if not self._preview_pixmap:
+        pixmap = self._cropped_preview_pixmap()
+        if not pixmap:
             return
         clipboard = QApplication.clipboard()
         buffer = QBuffer()
         buffer.open(QIODevice.WriteOnly)
-        self._preview_pixmap.save(buffer, "PNG")
+        pixmap.save(buffer, "PNG")
         png_bytes = bytes(buffer.data())
         mime = QMimeData()
         mime.setData("image/png", png_bytes)
-        mime.setImageData(self._preview_pixmap.toImage())
+        mime.setImageData(pixmap.toImage())
         clipboard.setMimeData(mime)
+
+    def _cropped_preview_pixmap(self) -> Optional[QPixmap]:
+        if not self._preview_pixmap:
+            return None
+        bounds: list[tuple[float, float, float, float]] = list(self._node_hitboxes.values())
+        if not bounds:
+            return self._preview_pixmap
+        bounds.extend(self._indicator_hitboxes.values())
+        min_x = min(x for x, _, _, _ in bounds)
+        min_y = min(y for _, y, _, _ in bounds)
+        max_x = max(x + w for x, _, w, _ in bounds)
+        max_y = max(y + h for _, y, _, h in bounds)
+        pad = max(18, int(round(24 * self._zoom_factor)))
+        left = max(0, int(math.floor(min_x * self._zoom_factor)) - pad)
+        top = max(0, int(math.floor(min_y * self._zoom_factor)) - pad)
+        right = min(self._preview_pixmap.width(), int(math.ceil(max_x * self._zoom_factor)) + pad)
+        bottom = min(self._preview_pixmap.height(), int(math.ceil(max_y * self._zoom_factor)) + pad)
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        return self._preview_pixmap.copy(left, top, width, height)
+
+    def clear_filter(self) -> bool:
+        if not self._filter_node_id:
+            return False
+        self._filter_node_id = None
+        self._update_filter_controls()
+        self.refresh()
+        self.center_selected_node()
+        return True
+
+    def apply_selected_filter(self) -> bool:
+        if self._filter_node_id:
+            return True
+        node = self._selected_node() or self._latest_root
+        if node is None:
+            return False
+        self._filter_node_id = node.node_id
+        self._update_filter_controls()
+        self.refresh()
+        self.center_selected_node()
+        return True
+
+    def toggle_selected_filter(self) -> bool:
+        if self._filter_node_id:
+            return self.clear_filter()
+        return self.apply_selected_filter()
 
     def _render_current(self, *, reset_zoom: bool, reset_canvas: bool = False) -> None:
         if not self._current_page_path:
@@ -759,13 +1012,18 @@ class MapPanel(QWidget):
             for node_id, depth in self._scope_expansion_depths.items()
             if node_id in valid_scope_ids
         }
+        if self._filter_node_id and self._filter_node_id not in valid_scope_ids:
+            self._filter_node_id = None
         self._update_level_controls()
         self._sync_selected_node(root)
         self._svg_content = self._build_map_svg(root, reset_canvas=reset_canvas)
         if reset_zoom:
             self._zoom_factor = 1.0
         self._update_preview(fit=reset_zoom or reset_canvas)
+        if reset_zoom:
+            self._apply_initial_view()
         self._update_detached_mode_controls()
+        self._update_filter_controls()
 
     def _adjust_zoom(self, delta: int, anchor: object = None) -> None:
         if not self._svg_content:
@@ -779,15 +1037,17 @@ class MapPanel(QWidget):
         if isinstance(anchor, QPointF):
             mapped_anchor = self.preview_label.mapTo(self.scroll_area.viewport(), anchor.toPoint())
             viewport_anchor = QPointF(mapped_anchor)
-            svg_anchor = QPointF(anchor.x() / old_zoom, anchor.y() / old_zoom)
+            offset_x, offset_y = self._preview_pixmap_offset()
+            svg_anchor = QPointF((anchor.x() - offset_x) / old_zoom, (anchor.y() - offset_y) / old_zoom)
         self._zoom_factor = new_zoom
         self._update_preview(fit=False)
         if svg_anchor is not None and viewport_anchor is not None:
+            new_offset_x, new_offset_y = self._preview_pixmap_offset()
             self.scroll_area.horizontalScrollBar().setValue(
-                max(0, int(round(svg_anchor.x() * self._zoom_factor - viewport_anchor.x())))
+                max(0, int(round(new_offset_x + (svg_anchor.x() * self._zoom_factor) - viewport_anchor.x())))
             )
             self.scroll_area.verticalScrollBar().setValue(
-                max(0, int(round(svg_anchor.y() * self._zoom_factor - viewport_anchor.y())))
+                max(0, int(round(new_offset_y + (svg_anchor.y() * self._zoom_factor) - viewport_anchor.y())))
             )
         # Update tooltip font size if visible
         if self._content_tooltip.isVisible():
@@ -800,7 +1060,8 @@ class MapPanel(QWidget):
         if not hitbox:
             return None
         x, y, w, h = hitbox
-        return QPointF((x + (w / 2.0)) * self._zoom_factor, (y + (h / 2.0)) * self._zoom_factor)
+        offset_x, offset_y = self._preview_pixmap_offset()
+        return QPointF(offset_x + ((x + (w / 2.0)) * self._zoom_factor), offset_y + ((y + (h / 2.0)) * self._zoom_factor))
 
     def zoom_selected_node(self, delta: int) -> bool:
         if not self._svg_content:
@@ -809,12 +1070,16 @@ class MapPanel(QWidget):
         return True
 
     def focus_restore_target(self) -> str:
-        return "map"
+        return "rename" if self._inline_rename_edit.isVisible() else "map"
 
     def restore_selection_focus(self, line_number: int = 0, *, target: str = "map") -> None:
         if line_number > 0:
             self._pending_selected_line = int(line_number)
         self.refresh()
+        if target == "rename" and self._position_inline_rename_editor():
+            self._inline_rename_edit.setFocus(Qt.OtherFocusReason)
+            self._inline_rename_edit.selectAll()
+            return
         self.preview_label.setFocus(Qt.OtherFocusReason)
 
     def contains_focus(self) -> bool:
@@ -846,11 +1111,14 @@ class MapPanel(QWidget):
         
         # Ensure the label is always larger than viewport to enable panning
         viewport = self.scroll_area.viewport().size()
-        min_width = max(scaled.width(), viewport.width() + 200)
-        min_height = max(scaled.height(), viewport.height() + 200)
+        pad_x = max(self._PREVIEW_PAD_X, viewport.width() // 2)
+        pad_y = max(self._PREVIEW_PAD_Y, viewport.height() // 2)
+        min_width = max(scaled.width() + (pad_x * 2), viewport.width() + 200)
+        min_height = max(scaled.height() + (pad_y * 2), viewport.height() + 200)
         self.preview_label.resize(min_width, min_height)
         
         self.preview_label.setText("")
+        self._position_inline_rename_editor()
 
     def _svg_to_pixmap(self, svg_text: str) -> Optional[QPixmap]:
         renderer = QSvgRenderer()
@@ -889,7 +1157,7 @@ class MapPanel(QWidget):
         return src
 
     def _sync_selected_node(self, root: _MindNode) -> None:
-        visible_nodes = self._visible_nodes(root)
+        visible_nodes = self._visible_nodes(self._view_root(root) or root)
         if not visible_nodes:
             self._selected_node_id = None
             self._selected_node_ids.clear()
@@ -904,6 +1172,8 @@ class MapPanel(QWidget):
                 self._selected_node_id = target.node_id
                 self._selected_node_ids = {target.node_id}
                 self._selection_anchor_node_id = target.node_id
+                if self._inline_rename_node_id and self._inline_rename_node_id != target.node_id:
+                    self._cancel_inline_rename(restore_focus=False)
                 self._update_level_controls()
                 return
         visible_ids = {node.node_id for node in visible_nodes}
@@ -914,11 +1184,15 @@ class MapPanel(QWidget):
             } or ({self._selected_node_id} if self._selected_node_id else set())
             if self._selection_anchor_node_id not in visible_ids:
                 self._selection_anchor_node_id = self._selected_node_id
+            if self._inline_rename_node_id and self._inline_rename_node_id not in visible_ids:
+                self._cancel_inline_rename(restore_focus=False)
             self._update_level_controls()
             return
         self._selected_node_id = visible_nodes[0].node_id
         self._selected_node_ids = {self._selected_node_id}
         self._selection_anchor_node_id = self._selected_node_id
+        if self._inline_rename_node_id and self._inline_rename_node_id != self._selected_node_id:
+            self._cancel_inline_rename(restore_focus=False)
         self._update_level_controls()
 
     def _selected_node(self) -> Optional[_MindNode]:
@@ -1056,9 +1330,106 @@ class MapPanel(QWidget):
                 return True
         return True
 
+    def _replace_heading_in_markdown(self, markdown_text: str, *, line_number: int, level: int, text: str) -> tuple[str, bool]:
+        source = markdown_text or ""
+        lines = source.splitlines()
+        if line_number <= 0 or line_number > len(lines):
+            return source, False
+        heading_level = max(1, min(int(level or 1), HEADING_MAX_LEVEL))
+        lines[line_number - 1] = f"{'#' * heading_level} {text.strip()}".rstrip()
+        result = "\n".join(lines)
+        if source.endswith("\n") or (source and not result.endswith("\n")):
+            result += "\n"
+        return result, True
+
+    def _inline_rename_geometry(self, node: _MindNode) -> Optional[tuple[int, int, int, int]]:
+        if not self._preview_pixmap:
+            return None
+        hitbox = self._node_hitboxes.get(node.node_id)
+        if not hitbox:
+            return None
+        x, y, w, h = hitbox
+        offset_x, offset_y = self._preview_pixmap_offset()
+        left = int(round(offset_x + (x * self._zoom_factor) - 2))
+        top = int(round(offset_y + (y * self._zoom_factor) - 2))
+        width = max(140, int(round(w * self._zoom_factor)) + 4)
+        height = max(26, int(round(h * self._zoom_factor)) + 4)
+        return left, top, width, height
+
+    def _position_inline_rename_editor(self) -> bool:
+        if self._inline_rename_node_id is None:
+            return False
+        node = self._node_by_id(self._inline_rename_node_id)
+        if node is None:
+            return False
+        geometry = self._inline_rename_geometry(node)
+        if geometry is None:
+            return False
+        self._inline_rename_edit.setGeometry(*geometry)
+        return True
+
+    def _start_inline_rename(self) -> bool:
+        if self._draft_heading is not None or self._detached_session is not None:
+            return False
+        node = self._selected_node()
+        if node is None or node.line_number <= 0:
+            return False
+        self._inline_rename_node_id = node.node_id
+        self._inline_rename_edit.setText(node.heading_text or node.label or "")
+        if not self._position_inline_rename_editor():
+            self._inline_rename_node_id = None
+            return False
+        self._inline_rename_edit.show()
+        self._inline_rename_edit.raise_()
+        self._inline_rename_edit.setFocus(Qt.ShortcutFocusReason)
+        self._inline_rename_edit.selectAll()
+        return True
+
+    def _cancel_inline_rename(self, *, restore_focus: bool = True) -> bool:
+        if self._inline_rename_node_id is None and not self._inline_rename_edit.isVisible():
+            return False
+        self._inline_rename_node_id = None
+        self._inline_rename_edit.hide()
+        if restore_focus:
+            self.preview_label.setFocus(Qt.OtherFocusReason)
+        return True
+
+    def _commit_inline_rename(self) -> bool:
+        node = self._selected_node()
+        if (
+            node is None
+            or self._inline_rename_node_id != node.node_id
+            or node.line_number <= 0
+            or not self._current_page_path
+        ):
+            return self._cancel_inline_rename()
+        heading_text = self._inline_rename_edit.text().strip()
+        if not heading_text:
+            self._show_status_message("Heading text cannot be empty.")
+            self._inline_rename_edit.setFocus(Qt.OtherFocusReason)
+            return False
+        updated_markdown, changed = self._replace_heading_in_markdown(
+            self._current_markdown,
+            line_number=node.line_number,
+            level=node.level,
+            text=heading_text,
+        )
+        if not changed:
+            return self._cancel_inline_rename()
+        self._current_markdown = updated_markdown
+        self._inline_rename_node_id = None
+        self._inline_rename_edit.hide()
+        self._pending_selected_line = node.line_number
+        self.headingRenameRequested.emit(self._current_page_path, node.line_number, node.level, heading_text)
+        self.refresh()
+        self.preview_label.setFocus(Qt.OtherFocusReason)
+        return True
+
     def _set_selected_node(self, node: Optional[_MindNode]) -> bool:
         node_id = node.node_id if node else None
         changed = node_id != self._selected_node_id
+        if changed and self._inline_rename_node_id and self._inline_rename_node_id != node_id:
+            self._cancel_inline_rename(restore_focus=False)
         self._selected_node_id = node_id
         self._selected_node_ids = {node_id} if node_id else set()
         self._selection_anchor_node_id = node_id
@@ -1070,45 +1441,155 @@ class MapPanel(QWidget):
         if changed and self._latest_root is not None:
             self._svg_content = self._build_map_svg(self._latest_root, reset_canvas=False)
             self._update_preview(fit=False)
-            self._ensure_selected_visible()
         return changed
 
-    def _ensure_selected_visible(self) -> None:
+    def _selected_node_center(self) -> Optional[tuple[float, float]]:
         if not self._preview_pixmap or not self._selected_node_id:
-            return
+            return None
         hitbox = self._node_hitboxes.get(self._selected_node_id)
         if not hitbox:
-            return
+            return None
         x, y, w, h = hitbox
-        target_x = int((x + (w / 2)) * self._zoom_factor)
-        target_y = int((y + (h / 2)) * self._zoom_factor)
+        offset_x, offset_y = self._preview_pixmap_offset()
+        return (offset_x + ((x + (w / 2)) * self._zoom_factor), offset_y + ((y + (h / 2)) * self._zoom_factor))
+
+    def _preview_pixmap_offset(self) -> tuple[float, float]:
+        pixmap = self.preview_label.pixmap()
+        if not pixmap:
+            return (0.0, 0.0)
+        label_size = self.preview_label.size()
+        pm_size = pixmap.size()
+        return (
+            max(0.0, (label_size.width() - pm_size.width()) / 2),
+            max(0.0, (label_size.height() - pm_size.height()) / 2),
+        )
+
+    def _animate_scrollbars_to(self, desired_x: int, desired_y: int) -> bool:
+        hbar = self.scroll_area.horizontalScrollBar()
+        vbar = self.scroll_area.verticalScrollBar()
+        target_h = max(hbar.minimum(), min(desired_x, hbar.maximum()))
+        target_v = max(vbar.minimum(), min(desired_y, vbar.maximum()))
+        if target_h == hbar.value() and target_v == vbar.value():
+            return False
+        self._scroll_animations.clear()
+        for bar, end_value in (
+            (hbar, target_h),
+            (vbar, target_v),
+        ):
+            animation = QPropertyAnimation(bar, b"value", self)
+            animation.setDuration(220)
+            animation.setEasingCurve(QEasingCurve.InOutCubic)
+            animation.setStartValue(bar.value())
+            animation.setEndValue(end_value)
+            animation.start()
+            self._scroll_animations.append(animation)
+        return True
+
+    def _animate_scroll_to_selected(self, *, viewport_fraction_x: float, viewport_fraction_y: float) -> bool:
+        center = self._selected_node_center()
+        if center is None:
+            return False
+        target_x, target_y = center
         viewport = self.scroll_area.viewport().size()
-        self.scroll_area.horizontalScrollBar().setValue(max(0, target_x - (viewport.width() // 2)))
-        self.scroll_area.verticalScrollBar().setValue(max(0, target_y - (viewport.height() // 2)))
+        desired_x = int(round(target_x - (viewport.width() * viewport_fraction_x)))
+        desired_y = int(round(target_y - (viewport.height() * viewport_fraction_y)))
+        return self._animate_scrollbars_to(desired_x, desired_y)
+
+    def center_selected_node(self) -> bool:
+        return self._animate_scroll_to_selected(viewport_fraction_x=0.5, viewport_fraction_y=0.5)
+
+    def left_align_selected_node(self) -> bool:
+        return self._animate_scroll_to_selected(viewport_fraction_x=0.14, viewport_fraction_y=0.5)
+
+    def _scroll_selected_into_view(self, *, padding: int = 36) -> bool:
+        if not self._preview_pixmap or not self._selected_node_id:
+            return False
+        hitbox = self._node_hitboxes.get(self._selected_node_id)
+        if not hitbox:
+            return False
+        offset_x, offset_y = self._preview_pixmap_offset()
+        x, y, w, h = hitbox
+        left = offset_x + (x * self._zoom_factor)
+        top = offset_y + (y * self._zoom_factor)
+        right = offset_x + ((x + w) * self._zoom_factor)
+        bottom = offset_y + ((y + h) * self._zoom_factor)
+        hbar = self.scroll_area.horizontalScrollBar()
+        vbar = self.scroll_area.verticalScrollBar()
+        viewport = self.scroll_area.viewport().size()
+        desired_x = hbar.value()
+        desired_y = vbar.value()
+        viewport_left = hbar.value()
+        viewport_top = vbar.value()
+        viewport_right = viewport_left + viewport.width()
+        viewport_bottom = viewport_top + viewport.height()
+        if left < viewport_left + padding:
+            desired_x = int(round(left - padding))
+        elif right > viewport_right - padding:
+            desired_x = int(round(right + padding - viewport.width()))
+        if top < viewport_top + padding:
+            desired_y = int(round(top - padding))
+        elif bottom > viewport_bottom - padding:
+            desired_y = int(round(bottom + padding - viewport.height()))
+        return self._animate_scrollbars_to(desired_x, desired_y)
 
     def _node_sort_key(self, node: _MindNode) -> tuple[float, float, str]:
         return (node.y, node.x, node.node_id)
 
     def _visible_siblings(self, node: _MindNode) -> list[_MindNode]:
-        if not self._latest_root:
+        view_root = self._view_root()
+        if not view_root:
             return []
-        parent = self._find_parent(self._latest_root, node)
+        parent = self._find_parent(view_root, node)
         if parent is None:
             return [node]
         return self._visible_children(parent)
 
+    def _vertical_navigation_candidates(self, node: _MindNode) -> list[_MindNode]:
+        view_root = self._view_root()
+        if not view_root:
+            return []
+        return [
+            candidate
+            for candidate in self._visible_nodes(view_root)
+            if candidate.node_id != node.node_id
+            and candidate.depth == node.depth
+            and candidate.side == node.side
+            and candidate.line_number > 0
+        ]
+
     def _hierarchy_neighbor(self, direction: str) -> Optional[_MindNode]:
-        if not self._latest_root:
+        view_root = self._view_root()
+        if not view_root:
             return None
-        current = self._selected_node() or self._latest_root
+        current = self._selected_node() or view_root
         if direction == "left":
-            parent = self._find_parent(self._latest_root, current)
+            parent = self._find_parent(view_root, current)
             return parent
         if direction == "right":
             children = self._visible_children(current)
             if not children:
                 return None
             return min(children, key=self._node_sort_key)
+        if direction in {"up", "down"}:
+            candidates = self._vertical_navigation_candidates(current)
+            if not candidates:
+                return None
+            if direction == "up":
+                directional = [node for node in candidates if node.y < current.y]
+            else:
+                directional = [node for node in candidates if node.y > current.y]
+            if not directional:
+                return None
+            return min(
+                directional,
+                key=lambda node: (
+                    abs(node.y - current.y),
+                    abs(node.x - current.x),
+                    node.y,
+                    node.x,
+                    node.node_id,
+                ),
+            )
         siblings = self._visible_siblings(current)
         if len(siblings) <= 1:
             return None
@@ -1119,11 +1600,61 @@ class MapPanel(QWidget):
         step = -1 if direction == "up" else 1
         return siblings[(index + step) % len(siblings)]
 
+    def _visual_horizontal_neighbor(self, direction: str) -> Optional[_MindNode]:
+        view_root = self._view_root()
+        if not view_root:
+            return None
+        current = self._selected_node() or view_root
+        if direction == "right":
+            children = [child for child in self._visible_children(current) if child.line_number > 0]
+            if not children:
+                return None
+            return min(
+                children,
+                key=lambda node: (
+                    abs(node.y - current.y),
+                    node.x - current.x,
+                    abs(node.x - current.x) + abs(node.y - current.y),
+                    node.y,
+                    node.node_id,
+                ),
+            )
+        candidates = [
+            node
+            for node in self._visible_nodes(view_root)
+            if node.node_id != current.node_id and node.line_number > 0
+        ]
+        if not candidates:
+            return None
+        if direction == "left":
+            directional = [node for node in candidates if node.x < current.x]
+            if not directional:
+                return None
+            return min(
+                directional,
+                key=lambda node: (
+                    abs(node.y - current.y),
+                    current.x - node.x,
+                    abs(node.x - current.x) + abs(node.y - current.y),
+                    node.y,
+                    node.node_id,
+                ),
+            )
+        return None
+
+    def _visual_neighbor(self, direction: str) -> Optional[_MindNode]:
+        if direction in {"left", "right"}:
+            node = self._visual_horizontal_neighbor(direction)
+            if node is not None:
+                return node
+        return self._hierarchy_neighbor(direction)
+
     def _move_selection(self, direction: str) -> bool:
-        node = self._hierarchy_neighbor(direction)
+        node = self._visual_neighbor(direction)
         if not node:
             return False
         self._set_selected_node(node)
+        self._scroll_selected_into_view()
         return True
 
     def _activate_selected_node(self, *, keep_focus: bool) -> bool:
@@ -1138,15 +1669,16 @@ class MapPanel(QWidget):
         self._theme_colors = self._map_theme_colors()
         self._node_hitboxes.clear()
         self._indicator_hitboxes.clear()
-        self._measure_tree(root)
-        self._assign_sides(root)
-        root.x = 0.0
-        root.y = 0.0
-        self._layout_children(root, root.children, 1)
+        view_root = self._view_root(root) or root
+        self._measure_tree(view_root)
+        self._assign_sides(view_root)
+        view_root.x = 0.0
+        view_root.y = 0.0
+        self._layout_children(view_root, view_root.children, 1)
 
-        visible_nodes = self._visible_nodes(root)
+        visible_nodes = self._visible_nodes(view_root)
         if not visible_nodes:
-            visible_nodes = [root]
+            visible_nodes = [view_root]
         min_x, max_x, min_y, max_y = self._bounds_for_nodes(visible_nodes)
         if reset_canvas or self._canvas_bounds is None:
             self._canvas_bounds = (min_x, max_x, min_y, max_y)
@@ -1167,11 +1699,11 @@ class MapPanel(QWidget):
         line_parts: list[str] = []
         node_parts: list[str] = []
         for node in visible_nodes:
-            if node is not root:
-                parent = self._find_parent(root, node)
+            if node is not view_root:
+                parent = self._find_parent(view_root, node)
                 if parent:
                     line_parts.append(self._render_edge(parent, node, offset_x, offset_y))
-            node_parts.append(self._render_node(node, offset_x, offset_y))
+            node_parts.append(self._render_node(node, offset_x, offset_y, is_view_root=node is view_root))
 
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
@@ -1399,10 +1931,10 @@ class MapPanel(QWidget):
         css = f"edge-{child.side}"
         return f'<path class="{css}" d="M {sx:.1f} {sy:.1f} C {c1x:.1f} {sy:.1f}, {c2x:.1f} {ey:.1f}, {ex:.1f} {ey:.1f}"/>'
 
-    def _render_node(self, node: _MindNode, ox: float, oy: float) -> str:
+    def _render_node(self, node: _MindNode, ox: float, oy: float, *, is_view_root: bool = False) -> str:
         x = node.x + ox - (node.width / 2)
         y = node.y + oy - (node.height / 2)
-        css = "root" if node.depth == 0 else ("branch-1" if node.depth == 1 and node.side > 0 else "branch--1" if node.depth == 1 else "child")
+        css = "root" if is_view_root or node.depth == 0 else ("branch-1" if node.depth == 1 and node.side > 0 else "branch--1" if node.depth == 1 else "child")
         if node.node_id in self._collapsed_node_ids:
             css += " collapsed"
         if node.node_id == self._selected_node_id:
@@ -1450,10 +1982,8 @@ class MapPanel(QWidget):
         pixmap = self.preview_label.pixmap()
         if not pixmap:
             return None
-        label_size = self.preview_label.size()
         pm_size = pixmap.size()
-        offset_x = max(0.0, (label_size.width() - pm_size.width()) / 2)
-        offset_y = max(0.0, (label_size.height() - pm_size.height()) / 2)
+        offset_x, offset_y = self._preview_pixmap_offset()
         px = event.position().x() - offset_x
         py = event.position().y() - offset_y
         if not (0 <= px <= pm_size.width() and 0 <= py <= pm_size.height()):
@@ -1583,10 +2113,30 @@ class MapPanel(QWidget):
             self._update_tooltip_font_size()
 
     def _update_tooltip_font_size(self) -> None:
-        """Update the tooltip font size based on current zoom and offset."""
-        # Base zoom from map zoom factor, plus user offset in 10% increments
-        zoom = self._zoom_factor + (self._note_font_size_offset * 0.1)
+        """Update the tooltip font size based on note font preference only."""
+        # Keep note text size independent from map canvas zoom.
+        zoom = 1.0 + (self._note_font_size_offset * 0.1)
         self._content_tooltip.set_font_zoom(zoom)
+
+    def _tooltip_debug_log(self, event: str, **fields) -> None:
+        if not log_enabled("ui_state"):
+            return
+        try:
+            focus = QApplication.focusWidget()
+            focus_name = focus.__class__.__name__ if focus else "None"
+            parts = [
+                f"event={event}",
+                f"visible={self._content_tooltip.isVisible()}",
+                f"pinned={self._tooltip_pinned}",
+                f"hovered={self._tooltip_hovered}",
+                f"selected_popup={self._selected_note_popup_active}",
+                f"focus={focus_name}",
+            ]
+            for key, value in fields.items():
+                parts.append(f"{key}={value!r}")
+            print("[MAP_TOOLTIP] " + " ".join(parts))
+        except Exception:
+            pass
 
     def flush_pending_changes(self) -> bool:
         return False
@@ -1616,19 +2166,28 @@ class MapPanel(QWidget):
         return text if text.endswith("\n") or not text else f"{text}\n"
 
     def _cancel_hover_tooltip(self) -> None:
+        self._tooltip_debug_log("cancel_hover_tooltip:start")
         self._tooltip_timer.stop()
         self._tooltip_hide_timer.stop()
         self._hovered_node_id = None
         self._hover_global_pos = None
         self._tooltip_pinned = False
         self._tooltip_hovered = False
+        self._selected_note_popup_active = False
         try:
             self._content_tooltip.set_pinned(False)
             self._content_tooltip.hide()
         except Exception:
             pass
+        self._tooltip_debug_log("cancel_hover_tooltip:end")
 
     def _schedule_hover_tooltip(self, node: Optional[_MindNode], global_pos: QPoint) -> None:
+        self._tooltip_debug_log(
+            "schedule_hover_tooltip",
+            node_id=(node.node_id if node is not None else None),
+            x=global_pos.x(),
+            y=global_pos.y(),
+        )
         if self._tooltip_pinned:
             return
         if not self._content_preview_enabled or self._detached_session is not None:
@@ -1668,12 +2227,24 @@ class MapPanel(QWidget):
         except Exception:
             pass
 
+    def _on_tooltip_dismissed(self) -> None:
+        self._tooltip_debug_log("tooltip_dismissed:start")
+        self._tooltip_timer.stop()
+        self._tooltip_hide_timer.stop()
+        self._tooltip_pinned = False
+        self._tooltip_hovered = False
+        self._selected_note_popup_active = False
+        self.preview_label.setFocus(Qt.OtherFocusReason)
+        self._tooltip_debug_log("tooltip_dismissed:end")
+
     def _pin_hover_tooltip(self) -> None:
         if not self._content_tooltip.isVisible():
             return
+        self._tooltip_debug_log("pin_hover_tooltip:start")
         self._tooltip_timer.stop()
         self._tooltip_hide_timer.stop()
         self._tooltip_pinned = True
+        self._selected_note_popup_active = False
         self._content_tooltip.set_pinned(True)
         try:
             self._content_tooltip.show()
@@ -1682,8 +2253,10 @@ class MapPanel(QWidget):
             self._content_tooltip._editor.setFocus(Qt.OtherFocusReason)
         except Exception:
             pass
+        self._tooltip_debug_log("pin_hover_tooltip:end")
 
     def _show_hover_tooltip(self) -> None:
+        self._tooltip_debug_log("show_hover_tooltip:start", hovered_node=self._hovered_node_id)
         if not self._content_preview_enabled or self._hovered_node_id is None:
             return
         node = self._node_by_id(self._hovered_node_id)
@@ -1693,9 +2266,96 @@ class MapPanel(QWidget):
         pos = self._hover_global_pos or QCursor.pos()
         self._tooltip_pinned = False
         self._tooltip_hovered = False
+        self._selected_note_popup_active = False
         self._content_tooltip.set_pinned(False)
         self._update_tooltip_font_size()
         self._content_tooltip.show_markdown(text, self._current_page_path, pos)
+        self._tooltip_debug_log("show_hover_tooltip:end", text_len=len(text))
+
+    def _selected_node_popup_anchor(self) -> QPoint:
+        node = self._selected_node()
+        if node is None:
+            return QCursor.pos()
+        hitbox = self._node_hitboxes.get(node.node_id)
+        if not hitbox:
+            return QCursor.pos()
+        x, y, w, h = hitbox
+        offset_x, offset_y = self._preview_pixmap_offset()
+        local_point = QPoint(
+            int(round(offset_x + ((x + (w / 2.0)) * self._zoom_factor))),
+            int(round(offset_y + ((y + h) * self._zoom_factor))),
+        )
+        return self.preview_label.mapToGlobal(local_point)
+
+    def _show_selected_node_note_popup(self) -> bool:
+        self._tooltip_debug_log("show_selected_popup:start")
+        node = self._selected_node()
+        if node is None:
+            return False
+        text = self._node_tooltip_markdown(node)
+        if not text.strip():
+            return False
+        self._tooltip_timer.stop()
+        self._tooltip_hide_timer.stop()
+        self._tooltip_pinned = True
+        self._tooltip_hovered = False
+        self._selected_note_popup_active = True
+        self._content_tooltip.set_pinned(True)
+        self._update_tooltip_font_size()
+        self._content_tooltip.show_markdown(text, self._current_page_path, self._selected_node_popup_anchor())
+        try:
+            self._content_tooltip.raise_()
+            self._content_tooltip.activateWindow()
+        except Exception:
+            pass
+        QTimer.singleShot(0, self._content_tooltip.focus_reader)
+        self._tooltip_debug_log("show_selected_popup:end", node_id=node.node_id, text_len=len(text))
+        return True
+
+    def _page_selected_node_note_popup(self) -> bool:
+        self._tooltip_debug_log("page_selected_popup:start")
+        if not (self._selected_note_popup_active and self._content_tooltip.isVisible()):
+            self._tooltip_debug_log("page_selected_popup:skip")
+            return False
+        try:
+            self._content_tooltip.raise_()
+            self._content_tooltip.activateWindow()
+        except Exception:
+            pass
+        self._content_tooltip.focus_reader()
+        self._content_tooltip.page_forward()
+        self._tooltip_debug_log("page_selected_popup:end")
+        return True
+
+    def _handle_selected_note_popup_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
+        if not (self._selected_note_popup_active and self._content_tooltip.isVisible()):
+            return False
+        self._tooltip_debug_log("selected_popup_keypress", key=int(key), mods=int(mods))
+        if key == Qt.Key_Escape and mods == Qt.NoModifier:
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return True
+        if key in (Qt.Key_Left, Qt.Key_Right) and mods == Qt.NoModifier:
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return True
+        if key == Qt.Key_Space and mods == Qt.ControlModifier:
+            self._tooltip_debug_log("selected_popup_keypress:ctrl_space")
+            self._content_tooltip.page_forward()
+            return True
+        if key in (Qt.Key_PageDown, Qt.Key_Space) and mods == Qt.NoModifier:
+            self._content_tooltip.page_forward()
+            return True
+        if key == Qt.Key_PageUp and mods == Qt.NoModifier:
+            self._content_tooltip.page_backward()
+            return True
+        if key in (Qt.Key_Down, Qt.Key_J) and mods == Qt.NoModifier:
+            self._content_tooltip.line_forward()
+            return True
+        if key in (Qt.Key_Up, Qt.Key_K) and mods == Qt.NoModifier:
+            self._content_tooltip.line_backward()
+            return True
+        return False
 
     def _clone_node_tree(self, node: _MindNode) -> _MindNode:
         cloned = _MindNode(
@@ -2046,9 +2706,13 @@ class MapPanel(QWidget):
         if event.type() != QEvent.KeyPress:
             event.ignore()
             return
-        self._cancel_hover_tooltip()
+        if self._content_tooltip.isVisible() and not self._tooltip_pinned:
+            self._cancel_hover_tooltip()
         key = event.key()
         mods = event.modifiers()
+        if self._handle_selected_note_popup_keypress(key, mods):
+            event.accept()
+            return
         if key == Qt.Key_Escape and not mods and self._detached_session is not None:
             if self.cancel_detached_changes():
                 event.accept()
@@ -2065,11 +2729,35 @@ class MapPanel(QWidget):
             if self.zoom_selected_node(-1):
                 event.accept()
                 return
+        if key == Qt.Key_Down and mods == Qt.AltModifier:
+            if self.zoom_selected_node(-1):
+                event.accept()
+                return
+        if key == Qt.Key_Up and mods == Qt.AltModifier:
+            if self.zoom_selected_node(1):
+                event.accept()
+                return
+        if key == Qt.Key_C and mods == Qt.AltModifier:
+            if self.center_selected_node():
+                event.accept()
+                return
+        if key == Qt.Key_S and mods == Qt.AltModifier:
+            if self.left_align_selected_node():
+                event.accept()
+                return
         if self._draft_heading is not None:
             if self._handle_draft_keypress(event):
                 event.accept()
                 return
         if key == Qt.Key_Escape and not mods:
+            if self._cancel_inline_rename():
+                event.accept()
+                return
+            if self._content_tooltip.isVisible():
+                self._content_tooltip.hide()
+                self._on_tooltip_dismissed()
+                event.accept()
+                return
             if self._reset_view_to_root():
                 event.accept()
                 return
@@ -2097,9 +2785,14 @@ class MapPanel(QWidget):
             if self._start_draft_heading(as_child=True):
                 event.accept()
                 return
+        if key == Qt.Key_Space and mods == Qt.ControlModifier:
+            self._tooltip_debug_log("keypress:ctrl_space")
+            if self._page_selected_node_note_popup() or self._show_selected_node_note_popup():
+                self._tooltip_debug_log("keypress:ctrl_space:handled")
+                event.accept()
+                return
         if key == Qt.Key_Space and not mods:
-            node = self._selected_node()
-            if node and self._toggle_node(node):
+            if self._start_inline_rename():
                 event.accept()
                 return
         if self._handle_detached_reorder_keypress(key, mods):
@@ -2132,7 +2825,11 @@ class MapPanel(QWidget):
         if watched is self.preview_label and event.type() == QEvent.FocusIn:
             self.focusSyncRequested.emit()
         if watched is self.preview_label and event.type() == QEvent.Leave:
-            if not self._tooltip_pinned and self._content_tooltip.isVisible():
+            # Keep keyboard-open selected-note popup stable when focus leaves preview.
+            if self._tooltip_pinned or self._selected_note_popup_active:
+                self._tooltip_debug_log("preview_leave:keep_pinned_popup")
+                return False
+            if self._content_tooltip.isVisible():
                 self._tooltip_hide_timer.start()
             else:
                 self._cancel_hover_tooltip()
@@ -2140,6 +2837,8 @@ class MapPanel(QWidget):
             if self._draft_heading is not None and event.type() == event.Type.MouseButtonPress:
                 event.accept()
                 return True
+            if self._inline_rename_edit.isVisible() and event.type() == event.Type.MouseButtonPress:
+                self._cancel_inline_rename()
             if event.type() == event.Type.MouseMove and self._drag_press_node_id is None:
                 svg_pos = self._event_svg_position(event)
                 node = self._node_at_position(*svg_pos) if svg_pos else None
