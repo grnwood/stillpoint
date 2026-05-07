@@ -200,6 +200,34 @@ class _MapContentTooltip(QFrame):
         self.setFocus(Qt.OtherFocusReason)
         self._editor.setFocus(Qt.OtherFocusReason)
 
+    def _dismiss_and_forward_key(self, event) -> bool:
+        self.hide()
+        self.dismissed.emit()
+        parent = self.parentWidget()
+        if parent is not None:
+            handled = False
+            handler = getattr(parent, "_handle_navigation_key", None)
+            if callable(handler):
+                handled = bool(handler(event.key(), event.modifiers()))
+            if not handled:
+                forwarded = QKeyEvent(
+                    event.type(),
+                    event.key(),
+                    event.modifiers(),
+                    event.text(),
+                    event.isAutoRepeat(),
+                    event.count(),
+                )
+                parent.keyPressEvent(forwarded)
+        event.accept()
+        return True
+
+    def _dismiss_key(self, event) -> bool:
+        self.hide()
+        self.dismissed.emit()
+        event.accept()
+        return True
+
     def page_forward(self) -> bool:
         scrollbar = self._editor.verticalScrollBar()
         if scrollbar is None:
@@ -299,8 +327,40 @@ class _MapContentTooltip(QFrame):
                     event.accept()
                     return True
                 if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() == Qt.NoModifier:
-                    self.hide()
-                    self.dismissed.emit()
+                    return self._dismiss_key(event)
+                if (
+                    config.load_vi_mode_enabled()
+                    and event.key() in (Qt.Key_H, Qt.Key_L)
+                    and event.modifiers() == Qt.NoModifier
+                ):
+                    return self._dismiss_key(event)
+                if event.key() in (Qt.Key_Up, Qt.Key_Down) and event.modifiers() == Qt.NoModifier:
+                    if event.key() == Qt.Key_Down:
+                        self.line_forward()
+                    else:
+                        self.line_backward()
+                    event.accept()
+                    return True
+                if (
+                    config.load_vi_mode_enabled()
+                    and event.key() in (Qt.Key_J, Qt.Key_K)
+                    and event.modifiers() == Qt.NoModifier
+                ):
+                    if event.key() == Qt.Key_J:
+                        self.line_forward()
+                    else:
+                        self.line_backward()
+                    event.accept()
+                    return True
+                if (
+                    config.load_vi_mode_enabled()
+                    and event.key() in (Qt.Key_J, Qt.Key_K)
+                    and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                ):
+                    if event.key() == Qt.Key_J:
+                        self.page_forward()
+                    else:
+                        self.page_backward()
                     event.accept()
                     return True
                 if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
@@ -324,8 +384,42 @@ class _MapContentTooltip(QFrame):
             event.accept()
             return
         if event.key() in (Qt.Key_Left, Qt.Key_Right) and event.modifiers() == Qt.NoModifier:
-            self.hide()
-            self.dismissed.emit()
+            if self._dismiss_key(event):
+                return
+        if (
+            config.load_vi_mode_enabled()
+            and event.key() in (Qt.Key_H, Qt.Key_L)
+            and event.modifiers() == Qt.NoModifier
+        ):
+            if self._dismiss_key(event):
+                return
+        if event.key() in (Qt.Key_Up, Qt.Key_Down) and event.modifiers() == Qt.NoModifier:
+            if event.key() == Qt.Key_Down:
+                self.line_forward()
+            else:
+                self.line_backward()
+            event.accept()
+            return
+        if (
+            config.load_vi_mode_enabled()
+            and event.key() in (Qt.Key_J, Qt.Key_K)
+            and event.modifiers() == Qt.NoModifier
+        ):
+            if event.key() == Qt.Key_J:
+                self.line_forward()
+            else:
+                self.line_backward()
+            event.accept()
+            return
+        if (
+            config.load_vi_mode_enabled()
+            and event.key() in (Qt.Key_J, Qt.Key_K)
+            and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+        ):
+            if event.key() == Qt.Key_J:
+                self.page_forward()
+            else:
+                self.page_backward()
             event.accept()
             return
         if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
@@ -585,10 +679,10 @@ class MapPanel(QWidget):
         self._inline_rename_edit.hide()
         self._inline_rename_edit.acceptRequested.connect(self._commit_inline_rename)
         self._inline_rename_edit.cancelRequested.connect(self._cancel_inline_rename)
-        self._filter_on_shortcut = QShortcut(QKeySequence("Ctrl+["), self)
+        self._filter_on_shortcut = QShortcut(QKeySequence("Alt+["), self)
         self._filter_on_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self._filter_on_shortcut.activated.connect(self.apply_selected_filter)
-        self._filter_off_shortcut = QShortcut(QKeySequence("Ctrl+]"), self)
+        self._filter_off_shortcut = QShortcut(QKeySequence("Alt+]"), self)
         self._filter_off_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self._filter_off_shortcut.activated.connect(self.clear_filter)
 
@@ -657,6 +751,8 @@ class MapPanel(QWidget):
             "collapsed_fill": "#3f3114" if not is_light_palette else "#fef3c7",
             "selected_stroke": "#f87171" if not is_light_palette else "#d1242f",
             "selected_shadow": "rgba(248, 113, 113, 0.32)" if not is_light_palette else "rgba(209, 36, 47, 0.18)",
+            "filter_active_stroke": "#dc2626",
+            "filter_active_shadow": "rgba(220, 38, 38, 0.22)",
             "edge_pos": "#7dd3fc" if not is_light_palette else "#1f6feb",
             "edge_neg": "#fbbf24" if not is_light_palette else "#b26a00",
             "indicator_fill": text.name(),
@@ -731,7 +827,7 @@ class MapPanel(QWidget):
         mono = self._toolbar_icon_color()
         active = self._filter_active()
         icon_name = "filter-off.svg" if active else "filter.svg"
-        tooltip = "Clear subtree filter (Ctrl+])" if active else "Filter to selected subtree (Ctrl+[)"
+        tooltip = "Clear subtree filter (Alt+])" if active else "Filter to selected subtree (Alt+[)"
         tint = QColor("#dc2626") if active else mono
         self.filter_btn.setIcon(self._load_svg_icon(icon_name, QSize(18, 18), tint=tint))
         self.filter_btn.setToolTip(tooltip)
@@ -897,6 +993,18 @@ class MapPanel(QWidget):
         y_ratio = max(0.1, (viewport.height() - 16) / max(1, self._base_size.height()))
         self._zoom_factor = max(0.2, min(3.0, min(x_ratio, y_ratio)))
         self._update_preview(fit=False)
+        QTimer.singleShot(0, self._center_fitted_map)
+
+    def _center_fitted_map(self) -> None:
+        viewport = self.scroll_area.viewport().size()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        hbar = self.scroll_area.horizontalScrollBar()
+        vbar = self.scroll_area.verticalScrollBar()
+        desired_x = max(hbar.minimum(), min(int(round((self.preview_label.width() - viewport.width()) / 2)), hbar.maximum()))
+        desired_y = max(vbar.minimum(), min(int(round((self.preview_label.height() - viewport.height()) / 2)), vbar.maximum()))
+        hbar.setValue(desired_x)
+        vbar.setValue(desired_y)
 
     def _apply_initial_view(self) -> None:
         view_root = self._view_root()
@@ -916,6 +1024,18 @@ class MapPanel(QWidget):
         self.left_align_selected_node()
         return True
 
+    def _collapse_entire_map_to_root(self) -> bool:
+        if not self._latest_root:
+            return False
+        root = self._latest_root
+        self._filter_node_id = None
+        self._scope_expansion_depths.clear()
+        self._collapsed_node_ids = {root.node_id} if root.children else set()
+        self._set_selected_node(root)
+        self.refresh()
+        self.center_selected_node()
+        return True
+
     def expand_all(self) -> None:
         if self._latest_root:
             self._scope_expansion_depths = {
@@ -930,7 +1050,7 @@ class MapPanel(QWidget):
         if not self._latest_root:
             return
         self._scope_expansion_depths.clear()
-        self._collapsed_node_ids = set()
+        self._collapsed_node_ids = {self._latest_root.node_id} if self._latest_root.children else set()
         self._set_selected_node(self._latest_root)
         self.refresh()
 
@@ -1649,6 +1769,22 @@ class MapPanel(QWidget):
                 return node
         return self._hierarchy_neighbor(direction)
 
+    def _handle_navigation_key(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
+        if key in (Qt.Key_Right, Qt.Key_L) and not mods:
+            node = self._selected_node()
+            if node and node.children and not self._visible_children(node):
+                return self._toggle_node(node)
+        direction = None
+        if key == Qt.Key_Left or (key == Qt.Key_H and not mods):
+            direction = "left"
+        elif key == Qt.Key_Right or (key == Qt.Key_L and not mods):
+            direction = "right"
+        elif key == Qt.Key_Up or (key == Qt.Key_K and not mods):
+            direction = "up"
+        elif key == Qt.Key_Down or (key == Qt.Key_J and not mods):
+            direction = "down"
+        return bool(direction and self._move_selection(direction))
+
     def _move_selection(self, direction: str) -> bool:
         node = self._visual_neighbor(direction)
         if not node:
@@ -1670,11 +1806,11 @@ class MapPanel(QWidget):
         self._node_hitboxes.clear()
         self._indicator_hitboxes.clear()
         view_root = self._view_root(root) or root
-        self._measure_tree(view_root)
+        self._measure_tree(view_root, 1)
         self._assign_sides(view_root)
         view_root.x = 0.0
         view_root.y = 0.0
-        self._layout_children(view_root, view_root.children, 1)
+        self._layout_children(view_root, 1, 1)
 
         visible_nodes = self._visible_nodes(view_root)
         if not visible_nodes:
@@ -1704,6 +1840,8 @@ class MapPanel(QWidget):
                 if parent:
                     line_parts.append(self._render_edge(parent, node, offset_x, offset_y))
             node_parts.append(self._render_node(node, offset_x, offset_y, is_view_root=node is view_root))
+        selected_stroke = self._theme_colors["filter_active_stroke"] if self._filter_active() else self._theme_colors["selected_stroke"]
+        selected_shadow = self._theme_colors["filter_active_shadow"] if self._filter_active() else self._theme_colors["selected_shadow"]
 
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
@@ -1714,8 +1852,8 @@ class MapPanel(QWidget):
             f".branch--1 {{ fill: {self._theme_colors['branch_neg_fill']}; stroke: {self._theme_colors['branch_neg_stroke']}; stroke-width: 2; }}"
             f".child {{ fill: {self._theme_colors['child_fill']}; stroke: {self._theme_colors['child_stroke']}; stroke-width: 1.5; }}"
             f".collapsed {{ fill: {self._theme_colors['collapsed_fill']}; }}"
-            f".selected {{ stroke: {self._theme_colors['selected_stroke']}; stroke-width: 3.5; filter: drop-shadow(0 0 10px {self._theme_colors['selected_shadow']}); }}"
-            f".multi-selected {{ stroke: {self._theme_colors['selected_stroke']}; stroke-width: 2.25; }}"
+            f".selected {{ stroke: {selected_stroke}; stroke-width: 3.5; filter: drop-shadow(0 0 10px {selected_shadow}); }}"
+            f".multi-selected {{ stroke: {selected_stroke}; stroke-width: 2.25; }}"
             f".drop-target {{ stroke: #16a34a; stroke-width: 3; stroke-dasharray: 8 5; }}"
             f".edge-1 {{ stroke: {self._theme_colors['edge_pos']}; stroke-width: 2.2; fill: none; }}"
             f".edge--1 {{ stroke: {self._theme_colors['edge_neg']}; stroke-width: 2.2; fill: none; }}"
@@ -1838,10 +1976,44 @@ class MapPanel(QWidget):
         label = re.sub(r"[_*~#]+", "", label)
         return label.strip() or "Heading"
 
-    def _visible_children(self, node: _MindNode) -> list[_MindNode]:
+    def _visible_children(self, node: _MindNode, inherited_depth: Optional[int] = None) -> list[_MindNode]:
         if node.node_id in self._collapsed_node_ids:
             return []
+        child_depth = self._visible_child_depth(node, inherited_depth)
+        if child_depth <= 0:
+            return []
         return list(node.children)
+
+    def _visible_child_depth(self, node: _MindNode, inherited_depth: Optional[int] = None) -> int:
+        if node.node_id in self._collapsed_node_ids:
+            return 0
+        if inherited_depth is not None:
+            return max(inherited_depth, self._scope_depth(node))
+        visible_depth = self._visible_depth_in_view(node)
+        if visible_depth is None:
+            return 0
+        return max(visible_depth, self._scope_depth(node))
+
+    def _visible_depth_in_view(self, target: _MindNode) -> Optional[int]:
+        view_root = self._view_root()
+        if view_root is None:
+            return None
+        return self._visible_depth_for_target(view_root, target.node_id, 1)
+
+    def _visible_depth_for_target(self, node: _MindNode, target_id: str, inherited_depth: int) -> Optional[int]:
+        if node.node_id == target_id:
+            return inherited_depth
+        if node.node_id in self._collapsed_node_ids:
+            return None
+        child_depth = max(inherited_depth, self._scope_depth(node))
+        if child_depth <= 0:
+            return None
+        next_depth = max(0, child_depth - 1)
+        for child in node.children:
+            result = self._visible_depth_for_target(child, target_id, next_depth)
+            if result is not None:
+                return result
+        return None
 
     def _visible_nodes(self, node: _MindNode, inherited_depth: int = 0) -> list[_MindNode]:
         nodes = [node]
@@ -1865,16 +2037,17 @@ class MapPanel(QWidget):
         max_y = max(node.y + node.height / 2 for node in nodes) + self._MARGIN
         return min_x, max_x, min_y, max_y
 
-    def _measure_tree(self, node: _MindNode) -> None:
+    def _measure_tree(self, node: _MindNode, inherited_depth: int = 1) -> None:
         metrics = QFontMetrics(QApplication.font())
         lines = textwrap.wrap(node.label, width=self._MAX_TEXT_WIDTH) or [node.label]
         node.lines = lines[:4]
         text_width = max(metrics.horizontalAdvance(line) for line in node.lines) if node.lines else 40
         node.width = float(text_width + (self._BOX_HPAD * 2))
         node.height = float((len(node.lines) * self._LINE_HEIGHT) + (self._BOX_VPAD * 2))
-        visible_children = self._visible_children(node)
+        visible_children = self._visible_children(node, inherited_depth)
+        next_depth = max(0, self._visible_child_depth(node, inherited_depth) - 1)
         for child in visible_children:
-            self._measure_tree(child)
+            self._measure_tree(child, next_depth)
         if not visible_children:
             node.subtree_height = node.height
             return
@@ -1891,9 +2064,11 @@ class MapPanel(QWidget):
         for child in node.children:
             self._propagate_side(child, side)
 
-    def _layout_children(self, parent: _MindNode, children: list[_MindNode], side: int) -> None:
+    def _layout_children(self, parent: _MindNode, side: int, inherited_depth: int = 1) -> None:
+        children = self._visible_children(parent, inherited_depth)
         if not children:
             return
+        next_depth = max(0, self._visible_child_depth(parent, inherited_depth) - 1)
         total_height = sum(child.subtree_height for child in children)
         total_height += self._V_GAP * (len(children) - 1)
         current_top = parent.y - (total_height / 2)
@@ -1901,9 +2076,7 @@ class MapPanel(QWidget):
             child.y = current_top + (child.subtree_height / 2)
             child.x = parent.x + side * ((parent.width / 2) + self._H_GAP + (child.width / 2))
             current_top += child.subtree_height + self._V_GAP
-            visible_grandchildren = self._visible_children(child)
-            if visible_grandchildren:
-                self._layout_children(child, visible_grandchildren, side)
+            self._layout_children(child, side, next_depth)
 
     def _collect_nodes(self, node: _MindNode) -> list[_MindNode]:
         nodes = [node]
@@ -2026,6 +2199,15 @@ class MapPanel(QWidget):
         if not node.children:
             return False
         self._set_selected_node(node)
+        if node.depth == 0:
+            if node.node_id in self._collapsed_node_ids:
+                self._collapsed_node_ids.discard(node.node_id)
+            else:
+                self._collapsed_node_ids.add(node.node_id)
+                self._scope_expansion_depths.clear()
+            self._update_level_controls()
+            self.refresh()
+            return True
         current_depth = self._scope_depth(node)
         if current_depth > 0:
             self._scope_expansion_depths.pop(node.node_id, None)
@@ -2330,14 +2512,52 @@ class MapPanel(QWidget):
     def _handle_selected_note_popup_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
         if not (self._selected_note_popup_active and self._content_tooltip.isVisible()):
             return False
-        self._tooltip_debug_log("selected_popup_keypress", key=int(key), mods=int(mods))
+        self._tooltip_debug_log("selected_popup_keypress", key=int(key), mods=getattr(mods, "value", 0))
         if key == Qt.Key_Escape and mods == Qt.NoModifier:
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return True
+        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier:
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
             return True
         if key in (Qt.Key_Left, Qt.Key_Right) and mods == Qt.NoModifier:
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
+            return True
+        if (
+            config.load_vi_mode_enabled()
+            and key in (Qt.Key_H, Qt.Key_L)
+            and mods == Qt.NoModifier
+        ):
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return True
+        if key in (Qt.Key_Up, Qt.Key_Down) and mods == Qt.NoModifier:
+            if key == Qt.Key_Down:
+                self._content_tooltip.line_forward()
+            else:
+                self._content_tooltip.line_backward()
+            return True
+        if (
+            config.load_vi_mode_enabled()
+            and key in (Qt.Key_J, Qt.Key_K)
+            and mods == Qt.NoModifier
+        ):
+            if key == Qt.Key_J:
+                self._content_tooltip.line_forward()
+            else:
+                self._content_tooltip.line_backward()
+            return True
+        if (
+            config.load_vi_mode_enabled()
+            and key in (Qt.Key_J, Qt.Key_K)
+            and mods == (Qt.ControlModifier | Qt.ShiftModifier)
+        ):
+            if key == Qt.Key_J:
+                self._content_tooltip.page_forward()
+            else:
+                self._content_tooltip.page_backward()
             return True
         if key == Qt.Key_Space and mods == Qt.ControlModifier:
             self._tooltip_debug_log("selected_popup_keypress:ctrl_space")
@@ -2348,12 +2568,6 @@ class MapPanel(QWidget):
             return True
         if key == Qt.Key_PageUp and mods == Qt.NoModifier:
             self._content_tooltip.page_backward()
-            return True
-        if key in (Qt.Key_Down, Qt.Key_J) and mods == Qt.NoModifier:
-            self._content_tooltip.line_forward()
-            return True
-        if key in (Qt.Key_Up, Qt.Key_K) and mods == Qt.NoModifier:
-            self._content_tooltip.line_backward()
             return True
         return False
 
@@ -2745,6 +2959,10 @@ class MapPanel(QWidget):
             if self.left_align_selected_node():
                 event.accept()
                 return
+        if key == Qt.Key_F and not mods:
+            self.fit_map()
+            event.accept()
+            return
         if self._draft_heading is not None:
             if self._handle_draft_keypress(event):
                 event.accept()
@@ -2758,7 +2976,7 @@ class MapPanel(QWidget):
                 self._on_tooltip_dismissed()
                 event.accept()
                 return
-            if self._reset_view_to_root():
+            if self._collapse_entire_map_to_root():
                 event.accept()
                 return
         if key == Qt.Key_PageUp and not mods:
@@ -2769,12 +2987,16 @@ class MapPanel(QWidget):
             self.increase_heading_level()
             event.accept()
             return
+        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier:
+            if self._page_selected_node_note_popup() or self._show_selected_node_note_popup():
+                event.accept()
+                return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
             if self._activate_selected_node(keep_focus=True):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
-            if self._activate_selected_node(keep_focus=False):
+            if self._start_inline_rename():
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
@@ -2785,38 +3007,23 @@ class MapPanel(QWidget):
             if self._start_draft_heading(as_child=True):
                 event.accept()
                 return
-        if key == Qt.Key_Space and mods == Qt.ControlModifier:
-            self._tooltip_debug_log("keypress:ctrl_space")
-            if self._page_selected_node_note_popup() or self._show_selected_node_note_popup():
-                self._tooltip_debug_log("keypress:ctrl_space:handled")
+        if key == Qt.Key_I and mods == Qt.ControlModifier:
+            if self._start_draft_heading(as_child=True):
                 event.accept()
                 return
         if key == Qt.Key_Space and not mods:
-            if self._start_inline_rename():
-                event.accept()
-                return
+            node = self._selected_node()
+            if node and node.children:
+                if self._toggle_node(node):
+                    event.accept()
+                    return
         if self._handle_detached_reorder_keypress(key, mods):
             event.accept()
             return
         if self._handle_multi_select_keypress(key, mods):
             event.accept()
             return
-        if key in (Qt.Key_Right, Qt.Key_L) and not mods:
-            node = self._selected_node()
-            if node and node.children and self._scope_depth(node) <= 0:
-                if self._toggle_node(node):
-                    event.accept()
-                    return
-        direction = None
-        if key == Qt.Key_Left or (key == Qt.Key_H and not mods):
-            direction = "left"
-        elif key == Qt.Key_Right or (key == Qt.Key_L and not mods):
-            direction = "right"
-        elif key == Qt.Key_Up or (key == Qt.Key_K and not mods):
-            direction = "up"
-        elif key == Qt.Key_Down or (key == Qt.Key_J and not mods):
-            direction = "down"
-        if direction and self._move_selection(direction):
+        if self._handle_navigation_key(key, mods):
             event.accept()
             return
         super().keyPressEvent(event)

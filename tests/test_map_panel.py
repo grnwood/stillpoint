@@ -171,6 +171,314 @@ def test_page_without_headings_has_no_placeholder_child(qapp: QApplication) -> N
     assert panel._latest_root.children == []
 
 
+def test_collapsed_branches_do_not_reserve_vertical_space(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content(
+        "/Test.md",
+        "# Root\n\n## One\n\n### One A\n\n### One B\n\n## Two\n",
+    )
+
+    assert panel._latest_root is not None
+    root = panel._latest_root
+    one = _node_by_label(panel, "One")
+    two = _node_by_label(panel, "Two")
+
+    assert [child.label for child in panel._visible_children(root)] == ["One", "Two"]
+    assert panel._visible_children(one) == []
+    collapsed_gap = two.y - one.y
+    collapsed_height = one.subtree_height
+
+    assert collapsed_height == pytest.approx(one.height)
+
+    panel._toggle_node(one)
+
+    one_expanded = _node_by_label(panel, "One")
+    two_expanded = _node_by_label(panel, "Two")
+    expanded_children = panel._visible_children(one_expanded)
+    expanded_gap = two_expanded.y - one_expanded.y
+
+    assert [child.label for child in expanded_children] == ["One A", "One B"]
+    assert one_expanded.subtree_height > one_expanded.height
+    assert expanded_gap > collapsed_gap
+
+
+def test_alt_enter_opens_selected_node_note_popup(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+
+    assert panel._selected_note_popup_active is True
+    assert panel._content_tooltip.isVisible() is True
+
+
+def test_left_key_closes_selected_note_popup(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## One\nbody\n\n### Child\n")
+    one = _node_by_label(panel, "One")
+    panel._set_selected_node(one)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    assert panel._selected_note_popup_active is True
+
+    qapp.sendEvent(panel._content_tooltip._editor, QKeyEvent(QEvent.KeyPress, Qt.Key_Right, Qt.NoModifier))
+    qapp.processEvents()
+
+    assert panel._selected_note_popup_active is False
+    assert panel._content_tooltip.isVisible() is False
+
+
+def test_vi_l_closes_selected_note_popup(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## One\nbody\n\n### Child\n")
+    one = _node_by_label(panel, "One")
+    panel._set_selected_node(one)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    assert panel._selected_note_popup_active is True
+
+    qapp.sendEvent(panel._content_tooltip._editor, QKeyEvent(QEvent.KeyPress, Qt.Key_L, Qt.NoModifier))
+    qapp.processEvents()
+
+    assert panel._selected_note_popup_active is False
+    assert panel._content_tooltip.isVisible() is False
+
+
+def test_alt_enter_toggles_selected_note_popup_closed(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    assert panel._selected_note_popup_active is True
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+
+    assert panel._selected_note_popup_active is False
+    assert panel._content_tooltip.isVisible() is False
+
+
+def test_down_arrow_scrolls_selected_note_popup(qapp: QApplication) -> None:
+    panel = MapPanel()
+    long_body = "\n".join(f"line {idx}" for idx in range(40))
+    panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    scrollbar = panel._content_tooltip._editor.verticalScrollBar()
+    start = scrollbar.value()
+
+    qapp.sendEvent(panel._content_tooltip._editor, QKeyEvent(QEvent.KeyPress, Qt.Key_Down, Qt.NoModifier))
+
+    assert panel._selected_note_popup_active is True
+    assert scrollbar.value() > start
+
+
+def test_vi_j_scrolls_selected_note_popup_by_line(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
+    panel = MapPanel()
+    long_body = "\n".join(f"line {idx}" for idx in range(40))
+    panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    scrollbar = panel._content_tooltip._editor.verticalScrollBar()
+    start = scrollbar.value()
+    step = max(1, scrollbar.singleStep())
+
+    qapp.sendEvent(
+        panel._content_tooltip._editor,
+        QKeyEvent(QEvent.KeyPress, Qt.Key_J, Qt.NoModifier),
+    )
+
+    assert panel._selected_note_popup_active is True
+    assert scrollbar.value() >= start + step
+
+
+def test_ctrl_shift_j_scrolls_selected_note_popup_by_page_in_vi_mode(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
+    panel = MapPanel()
+    long_body = "\n".join(f"line {idx}" for idx in range(40))
+    panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.AltModifier))
+    scrollbar = panel._content_tooltip._editor.verticalScrollBar()
+    start = scrollbar.value()
+    step = max(1, scrollbar.pageStep())
+
+    qapp.sendEvent(
+        panel._content_tooltip._editor,
+        QKeyEvent(QEvent.KeyPress, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier),
+    )
+
+    assert panel._selected_note_popup_active is True
+    assert scrollbar.value() >= start + step
+
+
+def test_ctrl_enter_starts_inline_rename(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.ControlModifier))
+
+    assert panel._inline_rename_node_id == parent.node_id
+    assert panel._inline_rename_edit.text() == "Parent"
+
+
+def test_space_toggles_selected_node(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n\n### Child\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    assert panel._scope_depth(parent) == 0
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+
+    assert panel._scope_depth(parent) == 1
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+
+    assert panel._scope_depth(parent) == 0
+
+
+def test_space_on_root_toggles_h1_visibility(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## One\n\n## Two\n")
+    assert panel._latest_root is not None
+    root = panel._latest_root
+    panel._set_selected_node(root)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+
+    assert root.node_id in panel._collapsed_node_ids
+    assert panel._visible_children(root) == []
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+
+    assert root.node_id not in panel._collapsed_node_ids
+    assert [child.label for child in panel._visible_children(root)] == ["One", "Two"]
+
+
+def test_f_key_calls_fit_map(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n")
+    called: list[bool] = []
+    monkeypatch.setattr(panel, "fit_map", lambda: called.append(True))
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_F, Qt.NoModifier))
+
+    assert called == [True]
+
+
+def test_right_from_expanded_root_moves_into_h1_instead_of_recelling_root(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## One\n\n## Two\n")
+    assert panel._latest_root is not None
+    root = panel._latest_root
+    panel._set_selected_node(root)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+    assert panel._visible_children(root)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Right, Qt.NoModifier))
+
+    visible_h1_ids = {child.node_id for child in panel._visible_children(root)}
+    assert panel._selected_node_id in visible_h1_ids
+    assert root.node_id not in panel._collapsed_node_ids
+
+
+def test_fit_current_canvas_recenters_after_zoomed_in_view(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.resize(900, 700)
+    panel.show()
+    qapp.processEvents()
+    panel.set_content("/Test.md", "# Root\n\n## One\nbody\n\n### Child\nbody\n\n## Two\nbody\n")
+    qapp.processEvents()
+
+    hbar = panel.scroll_area.horizontalScrollBar()
+    vbar = panel.scroll_area.verticalScrollBar()
+    hbar.setValue(hbar.maximum())
+    vbar.setValue(vbar.maximum())
+    panel._zoom_factor = 2.0
+
+    panel.fit_map()
+    qapp.processEvents()
+
+    expected_x = max(hbar.minimum(), min(int(round((panel.preview_label.width() - panel.scroll_area.viewport().width()) / 2)), hbar.maximum()))
+    expected_y = max(vbar.minimum(), min(int(round((panel.preview_label.height() - panel.scroll_area.viewport().height()) / 2)), vbar.maximum()))
+    assert hbar.value() == expected_x
+    assert vbar.value() == expected_y
+
+
+def test_escape_collapses_entire_map_to_root(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n\n### Child\n")
+    parent = _node_by_label(panel, "Parent")
+    assert panel._latest_root is not None
+    root = panel._latest_root
+
+    panel._set_selected_node(parent)
+    panel._toggle_node(parent)
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+
+    assert panel._selected_node_id == root.node_id
+    assert panel._filter_node_id is None
+    assert panel._scope_expansion_depths == {}
+    assert root.node_id in panel._collapsed_node_ids
+    assert panel._visible_children(root) == []
+
+
+def test_filter_shortcuts_use_alt_brackets(qapp: QApplication) -> None:
+    panel = MapPanel()
+
+    assert panel._filter_on_shortcut.key().toString() == "Alt+["
+    assert panel._filter_off_shortcut.key().toString() == "Alt+]"
+
+
+def test_ctrl_i_starts_child_draft_heading(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+
+    panel.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_I, Qt.ControlModifier))
+
+    assert panel._draft_heading is not None
+    assert panel._draft_heading.as_child is True
+
+
+def test_selected_outline_uses_filter_red_when_filter_active(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\n\n### Child\n")
+    parent = _node_by_label(panel, "Parent")
+    panel._set_selected_node(parent)
+    assert panel.apply_selected_filter() is True
+    assert panel._latest_root is not None
+
+    svg = panel._build_map_svg(panel._latest_root, reset_canvas=True)
+
+    assert ".selected { stroke: #dc2626;" in svg
+    assert ".multi-selected { stroke: #dc2626;" in svg
+
+
 def test_content_preview_toggle_state_persists(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,

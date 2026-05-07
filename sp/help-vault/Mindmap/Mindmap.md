@@ -32,3 +32,13 @@ Use the Map tab while editing the page so structure and writing evolve together.
 - Use map filtering when the page gets large.
 - Keep one branch expanded while drafting.
 - Use the map to plan section flow first, then refine details in markdown.
+
+## Keyboard Highlights
+- `f` fits the visible map as tightly as possible in the viewport.
+- `Alt+[` filters to the selected subtree and `Alt+]` clears the filter.
+- `Alt+Enter` toggles the selected node note popup.
+- `Ctrl+Enter` edits the selected node name inline.
+- `Space` folds or unfolds the selected node. On the root/title node, it hides or shows the H1 branches.
+- `Esc` collapses the map back to the root/title node and centers it.
+- In the note popup, `Up` / `Down` scroll by line and `Left` / `Right` close the popup.
+- In VI mode, `j` / `k` scroll the popup by line, `Ctrl+Shift+J` / `Ctrl+Shift+K` scroll by page, and `h` / `l` close the popup.
