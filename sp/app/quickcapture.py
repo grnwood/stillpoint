@@ -12,6 +12,10 @@ import httpx
 from PySide6.QtWidgets import QApplication
 
 from sp.app import config
+from sp.app.quickcapture_common import (
+    QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE,
+    QUICK_CAPTURE_SECTION_TITLE,
+)
 from sp.app.ui.quick_capture_overlay import QuickCaptureOverlay
 from sp.server import search_index
 from sp.server.adapters import files
@@ -125,6 +129,7 @@ def _resolve_attachment_placeholders(text: str, images: Optional[list[dict]] = N
             resolved = resolved.replace(placeholder, image_link)
         else:
             appended.append(f"  {image_link}")
+    resolved = QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE.sub("", resolved)
     return resolved, appended
 
 
@@ -204,7 +209,7 @@ def _persist_attachments(vault_root: Path, page_path: str, attachments: list[dic
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
     if not entry_lines:
         return content
-    section_title = "## Inbox / Captures"
+    section_title = QUICK_CAPTURE_SECTION_TITLE
     lines = content.splitlines()
     header_idx = next((i for i, line in enumerate(lines) if line.strip() == section_title), -1)
     if header_idx == -1:

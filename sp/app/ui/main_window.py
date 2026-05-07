@@ -11816,7 +11816,9 @@ class MainWindow(QMainWindow):
             # In read-only mode, silently skip autosaves/background saves
             return
         if self.current_path:
-            if self._editor_has_focus():
+            editor_has_focus = getattr(self, "_editor_has_focus", None)
+            has_editor_focus = bool(editor_has_focus()) if callable(editor_has_focus) else False
+            if has_editor_focus:
                 try:
                     self._apply_pending_editor_sync_if_needed(self.current_path)
                 except Exception:
@@ -11835,7 +11837,8 @@ class MainWindow(QMainWindow):
                 pass
             
             # Fallback to content comparison
-            pending_entry = self._pending_map_sync_entry(self.current_path)
+            pending_map_sync_entry = getattr(self, "_pending_map_sync_entry", None)
+            pending_entry = pending_map_sync_entry(self.current_path) if callable(pending_map_sync_entry) else None
             current_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
             if self._last_saved_content is not None and current_content == self._last_saved_content:
                 self._debug(f"Skipping autosave (reason={reason}): content unchanged")

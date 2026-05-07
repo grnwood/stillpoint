@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 
+from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
 from sp.app.quickcapture import _build_quick_capture_entry as build_quick_capture_entry
 from sp.app.quickcapture_lite import _build_quick_capture_entry as build_quick_capture_entry_lite
 from sp.app.ui.quick_capture_overlay import QuickCaptureInput
@@ -84,3 +85,19 @@ def test_quick_capture_entry_replaces_attachment_placeholder_in_place() -> None:
 
     assert build_quick_capture_entry("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am", images) == expected
     assert build_quick_capture_entry_lite("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am", images) == expected
+
+
+def test_quick_capture_entry_strips_unresolved_placeholder_tokens() -> None:
+    expected = [
+        "- *2026-05-07: 07:01am*",
+        "  before  after",
+        "",
+        "---",
+    ]
+
+    assert build_quick_capture_entry("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am") == expected
+    assert build_quick_capture_entry_lite("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am") == expected
+
+
+def test_quick_capture_section_title_constant_is_shared() -> None:
+    assert QUICK_CAPTURE_SECTION_TITLE == "## QuickCaptures"

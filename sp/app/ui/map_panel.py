@@ -141,6 +141,7 @@ class _DetachedSession:
 class _MapContentTooltip(QFrame):
     pinRequested = Signal()
     dismissed = Signal()
+    closeRequested = Signal()
     hoverChanged = Signal(bool)
 
     def __init__(self, parent=None) -> None:
@@ -159,7 +160,17 @@ class _MapContentTooltip(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addStretch(1)
+        self._close_btn = QToolButton(self)
+        self._close_btn.setText("Close")
+        self._close_btn.hide()
+        self._close_btn.clicked.connect(self._request_close)
+        header_row.addWidget(self._close_btn)
+        layout.addLayout(header_row)
         layout.addWidget(self._editor)
+        self.closeRequested.connect(self._handle_close_requested)
         self.resize(520, 320)
         self.setStyleSheet(
             "#mapContentTooltip {"
@@ -185,6 +196,7 @@ class _MapContentTooltip(QFrame):
         self.setAttribute(Qt.WA_ShowWithoutActivating, not pinned)
         self.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
         self._editor.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
+        self._close_btn.setVisible(pinned)
         self.move(pos)
         self._is_pinned = pinned
 
@@ -227,6 +239,13 @@ class _MapContentTooltip(QFrame):
         self.dismissed.emit()
         event.accept()
         return True
+
+    def _request_close(self) -> None:
+        self.closeRequested.emit()
+
+    def _handle_close_requested(self) -> None:
+        self.hide()
+        self.dismissed.emit()
 
     def page_forward(self) -> bool:
         scrollbar = self._editor.verticalScrollBar()

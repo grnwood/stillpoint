@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
+
 
 def test_capture_to_files_custom_page_creates_missing_folder(tmp_path: Path, monkeypatch) -> None:
     from sp.app import quickcapture
@@ -15,7 +17,7 @@ def test_capture_to_files_custom_page_creates_missing_folder(tmp_path: Path, mon
     target = tmp_path / "INBOX" / "INBOX.md"
     assert target.exists()
     content = target.read_text(encoding="utf-8")
-    assert "## Inbox / Captures" in content
+    assert QUICK_CAPTURE_SECTION_TITLE in content
     assert "idea one" in content
 
 
@@ -31,7 +33,7 @@ def test_capture_to_files_custom_page_creates_missing_folder_lite(tmp_path: Path
     target = tmp_path / "INBOX" / "INBOX.md"
     assert target.exists()
     content = target.read_text(encoding="utf-8")
-    assert "## Inbox / Captures" in content
+    assert QUICK_CAPTURE_SECTION_TITLE in content
     assert "idea two" in content
 
 

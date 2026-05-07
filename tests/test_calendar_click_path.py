@@ -533,11 +533,12 @@ def test_jump_to_journal_date_opens_selected_day(main_window, monkeypatch) -> No
     captured: dict[str, object] = {}
 
     class _DialogStub:
-        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color):
+        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color, vault_root):
             captured["parent"] = parent
             captured["anchor_pos"] = anchor_pos
             captured["use_vi_keys"] = use_vi_keys
             captured["vault_accent_color"] = vault_accent_color
+            captured["vault_root"] = vault_root
 
         def exec(self):
             return QDialog.Accepted
@@ -556,12 +557,13 @@ def test_jump_to_journal_date_opens_selected_day(main_window, monkeypatch) -> No
     assert captured["anchor_pos"] is not None
     assert captured["use_vi_keys"] is True
     assert captured["vault_accent_color"] == getattr(main_window, "_vault_accent_color", None)
+    assert captured["vault_root"] == main_window.vault_root
     assert opened == [(2026, 3, 12)]
 
 
 def test_jump_to_journal_date_ignores_cancel(main_window, monkeypatch) -> None:
     class _DialogStub:
-        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color):
+        def __init__(self, parent, *, anchor_pos, use_vi_keys, vault_accent_color, vault_root):
             pass
 
         def exec(self):

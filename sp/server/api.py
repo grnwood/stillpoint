@@ -68,6 +68,7 @@ from sp.rag.index import RetrievedChunk
 from sp import VERSION as STILLPOINT_VERSION
 from sp.app import config
 from sp.app import indexer as app_indexer
+from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
 from sp.logging_flags import log_enabled
 
 _ANSI_BLUE = "\033[94m"
@@ -239,7 +240,7 @@ def _build_quick_capture_entry(text: str, timestamp: str) -> list[str]:
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
     if not entry_lines:
         return content
-    section_title = "## Inbox / Captures"
+    section_title = QUICK_CAPTURE_SECTION_TITLE
     lines = content.splitlines()
     header_idx = next((i for i, line in enumerate(lines) if line.strip() == section_title), -1)
     if header_idx == -1:
