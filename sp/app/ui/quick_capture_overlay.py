@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from typing import Callable, Optional
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QKeyEvent, QColor, QImage
+from PySide6.QtGui import QKeyEvent, QColor, QImage, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -28,6 +29,8 @@ class QuickCaptureInput(QTextEdit):
 
     def __init__(self, parent: Optional[QDialog] = None) -> None:
         super().__init__(parent)
+        self._clipboard_image_counter = 0
+        self._image_file_counter = 0
         self.setPlaceholderText("Type a thought or paste images...")
         self.setAcceptRichText(False)
         self.setTabChangesFocus(False)
@@ -35,22 +38,65 @@ class QuickCaptureInput(QTextEdit):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if event.modifiers() & Qt.ShiftModifier:
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            if modifiers == Qt.ControlModifier:
+                event.accept()
+                self.captureRequested.emit()
+                return
+            if modifiers == Qt.NoModifier or modifiers == Qt.ShiftModifier:
                 super().keyPressEvent(event)
                 return
-            event.accept()
-            self.captureRequested.emit()
-            return
         if event.key() == Qt.Key_Escape:
             event.accept()
             self.dismissRequested.emit()
             return
         super().keyPressEvent(event)
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if event.key() == Qt.Key_Space and modifiers == Qt.NoModifier:
+            self._maybe_expand_task_shortcut()
+
+    def _maybe_expand_task_shortcut(self) -> None:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return
+        block = cursor.block()
+        if not block.isValid():
+            return
+        pos_in_block = cursor.position() - block.position()
+        if pos_in_block <= 0:
+            return
+        line_prefix = block.text()[:pos_in_block]
+        match = re.match(r"^(?P<indent>\s*)\((?P<state>[xX*]?)\)\s$", line_prefix)
+        if not match:
+            return
+        symbol = "☑" if (match.group("state") or "").strip().lower() in {"x", "*"} else "☐"
+        replace_cursor = QTextCursor(cursor)
+        replace_cursor.beginEditBlock()
+        replace_cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(line_prefix))
+        replace_cursor.insertText(f"{match.group('indent') or ''}{symbol} ")
+        replace_cursor.endEditBlock()
+        self.setTextCursor(replace_cursor)
+
+    def _insert_attachment_placeholder(self, placeholder: str) -> None:
+        cursor = self.textCursor()
+        cursor.insertText(placeholder)
+        self.setTextCursor(cursor)
+
+    def _next_clipboard_placeholder(self, image: QImage) -> str:
+        self._clipboard_image_counter += 1
+        return f"<clipboard-Image-{self._clipboard_image_counter}-{image.width()}x{image.height()}>"
+
+    def _next_file_placeholder(self, path: Path, image: QImage) -> str:
+        self._image_file_counter += 1
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", path.stem).strip("-") or "image"
+        return f"<file-Image-{self._image_file_counter}-{stem}-{image.width()}x{image.height()}>"
 
     def insertFromMimeData(self, source) -> None:  # type: ignore[override]
         image = self._image_from_mime_data(source)
         if image is not None:
-            self.imageAdded.emit(image)
+            placeholder = self._next_clipboard_placeholder(image)
+            self.imageAdded.emit({"image": image, "placeholder": placeholder})
+            self._insert_attachment_placeholder(placeholder)
             return
         if source and source.hasUrls():
             handled = False
@@ -58,7 +104,12 @@ class QuickCaptureInput(QTextEdit):
                 if url.isLocalFile():
                     path = Path(url.toLocalFile())
                     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
-                        self.imageFileAdded.emit(path)
+                        image = QImage(str(path))
+                        if image.isNull():
+                            continue
+                        placeholder = self._next_file_placeholder(path, image)
+                        self.imageFileAdded.emit({"path": path, "placeholder": placeholder})
+                        self._insert_attachment_placeholder(placeholder)
                         handled = True
             if handled:
                 return
@@ -124,7 +175,9 @@ class QuickCaptureInput(QTextEdit):
     def dropEvent(self, event) -> None:  # type: ignore[override]
         image = self._image_from_mime_data(event.mimeData())
         if image is not None:
-            self.imageAdded.emit(image)
+            placeholder = self._next_clipboard_placeholder(image)
+            self.imageAdded.emit({"image": image, "placeholder": placeholder})
+            self._insert_attachment_placeholder(placeholder)
             event.acceptProposedAction()
             return
         if event.mimeData().hasUrls():
@@ -133,7 +186,12 @@ class QuickCaptureInput(QTextEdit):
                 if url.isLocalFile():
                     path = Path(url.toLocalFile())
                     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
-                        self.imageFileAdded.emit(path)
+                        image = QImage(str(path))
+                        if image.isNull():
+                            continue
+                        placeholder = self._next_file_placeholder(path, image)
+                        self.imageFileAdded.emit({"path": path, "placeholder": placeholder})
+                        self._insert_attachment_placeholder(placeholder)
                         handled = True
             if handled:
                 event.acceptProposedAction()
@@ -222,7 +280,7 @@ class QuickCaptureOverlay(QDialog):
         self.input.imageFileAdded.connect(self._add_image_file)
         layout.addWidget(self.input)
 
-        hint = QLabel("Enter to capture, Esc to dismiss", card)
+        hint = QLabel("Ctrl+Enter to capture, Enter to edit, Esc to dismiss", card)
         hint.setStyleSheet(
             "color: "
             f"{theme_value('quick_capture.hint.color', '#dfe6fa')}; "
@@ -310,7 +368,8 @@ class QuickCaptureOverlay(QDialog):
             return
         self._selected_vault = self.vault_combo.currentData()
 
-    def _add_clipboard_image(self, image: QImage) -> None:
+    def _add_clipboard_image(self, payload) -> None:
+        image = payload.get("image") if isinstance(payload, dict) else payload
         if image.isNull():
             return
         entry = {
@@ -318,11 +377,13 @@ class QuickCaptureOverlay(QDialog):
             "image": image,
             "width": image.width(),
             "height": image.height(),
+            "placeholder": payload.get("placeholder") if isinstance(payload, dict) else None,
         }
         self._attachments.append(entry)
         self._refresh_attachments()
 
-    def _add_image_file(self, path: Path) -> None:
+    def _add_image_file(self, payload) -> None:
+        path = payload.get("path") if isinstance(payload, dict) else payload
         if not path.exists():
             return
         image = QImage(str(path))
@@ -334,6 +395,7 @@ class QuickCaptureOverlay(QDialog):
             "name": path.name,
             "width": image.width(),
             "height": image.height(),
+            "placeholder": payload.get("placeholder") if isinstance(payload, dict) else None,
         }
         self._attachments.append(entry)
         self._refresh_attachments()

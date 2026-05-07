@@ -123,6 +123,7 @@ class WebServer:
         in_fence = False
         fence_marker = ""
         checkbox_re = re.compile(r"^(?P<indent>[ \t]*)(?:(?:[-+*]|\d+\.)[ \t]+)?\[(?P<state>[ xX])\][ \t]+(?P<rest>.*)$")
+        paren_checkbox_re = re.compile(r"^(?P<indent>[ \t]*)\((?P<state>[xX*]?)\)[ \t]*(?P<rest>.*)$")
         dash_re = re.compile(r"^(?P<indent>[ \t]*)-[ \t]+(?P<rest>.*)$")
 
         for line in lines:
@@ -149,6 +150,16 @@ class WebServer:
                 cls = "md-checkbox md-checkbox--checked" if checked else "md-checkbox md-checkbox--unchecked"
                 indent = checkbox_match.group("indent") or ""
                 rest = checkbox_match.group("rest") or ""
+                normalized.append(f'{indent}<span class="{cls}" aria-hidden="true"></span>{rest}')
+                continue
+
+            paren_checkbox_match = paren_checkbox_re.match(line)
+            if paren_checkbox_match:
+                state = (paren_checkbox_match.group("state") or " ").lower()
+                checked = state in {"x", "*"}
+                cls = "md-checkbox md-checkbox--checked" if checked else "md-checkbox md-checkbox--unchecked"
+                indent = paren_checkbox_match.group("indent") or ""
+                rest = paren_checkbox_match.group("rest") or ""
                 normalized.append(f'{indent}<span class="{cls}" aria-hidden="true"></span>{rest}')
                 continue
 

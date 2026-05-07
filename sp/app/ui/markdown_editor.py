@@ -208,11 +208,15 @@ class SearchEngine:
 TAG_PATTERN = QRegularExpression(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TASK_PATTERN = QRegularExpression(
     r"^(?P<indent>\s*)"
-    r"(?:[-*]\s*\[(?P<state>[ xX])\])"
+    r"(?:(?:[-*]\s*\[(?P<state>[ xX])\])|(?:\((?P<paren_state>[xX*]?)\)))"
     r"(?P<body>\s+.*)$"
 )
 TASK_LINE_PATTERN = re.compile(
     r"^(\s*)([-*])\s*\[(?P<state>[ xX])\](\s+)(?P<body>.*)$",
+    re.MULTILINE,
+)
+PAREN_TASK_LINE_PATTERN = re.compile(
+    r"^(\s*)\(\s*(?P<state>[xX*]?)\s*\)(\s+)(?P<body>.*)$",
     re.MULTILINE,
 )
 SYMBOL_TASK_LINE_PATTERN = re.compile(
@@ -3419,11 +3423,14 @@ class MarkdownEditor(QTextEdit):
             # Cursor must be on or immediately after the checkbox symbol
             return rel_pos <= indent_len + 1
         
-        # Check for markdown checkboxes - [ ] or - [x]
+        # Check for markdown checkboxes - [ ] / - [x] / ()
         md_match = re.match(r"^(?P<indent>\s*)(?P<bullet>[-*])\s*\[(?P<state>[ xX])\]", text)
         if md_match:
             # Cursor must be within the checkbox portion: [ ] or [x]
             return md_match.start("state") <= rel_pos <= md_match.end("state")
+        paren_match = re.match(r"^(?P<indent>\s*)\(\s*(?P<state>[xX*]?)\s*\)", text)
+        if paren_match:
+            return paren_match.start() <= rel_pos <= paren_match.end()
         
         return False
 
@@ -3443,17 +3450,30 @@ class MarkdownEditor(QTextEdit):
             return True
 
         md_match = re.match(r"^(?P<indent>\s*)(?P<bullet>[-*])\s*\[(?P<state>[ xX])\]", text)
-        if not md_match:
+        if md_match:
+            if rel_pos is not None and rel_pos > md_match.end():
+                return False
+            state = md_match.group("state") or " "
+            new_state = "x" if state.strip().lower() != "x" else " "
+            pos = block.position() + md_match.start("state")
+            line_cursor = QTextCursor(self.document())
+            line_cursor.setPosition(pos)
+            line_cursor.setPosition(pos + 1, QTextCursor.KeepAnchor)
+            line_cursor.insertText(new_state)
+            return True
+
+        paren_match = re.match(r"^(?P<indent>\s*)\(\s*(?P<state>[xX*]?)\s*\)", text)
+        if not paren_match:
             return False
-        if rel_pos is not None and rel_pos > md_match.end():
+        if rel_pos is not None and rel_pos > paren_match.end():
             return False
-        state = md_match.group("state") or " "
-        new_state = "x" if state.strip().lower() != "x" else " "
-        pos = block.position() + md_match.start("state")
         line_cursor = QTextCursor(self.document())
-        line_cursor.setPosition(pos)
-        line_cursor.setPosition(pos + 1, QTextCursor.KeepAnchor)
-        line_cursor.insertText(new_state)
+        line_cursor.setPosition(block.position())
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        body = text[paren_match.end():].lstrip()
+        state = paren_match.group("state") or " "
+        new_state = "x" if state.strip().lower() != "x" else " "
+        line_cursor.insertText(f"- [{new_state}] {body}".rstrip())
         return True
 
     def toggle_task_state(self) -> None:
@@ -8076,6 +8096,7 @@ class MarkdownEditor(QTextEdit):
             return _format_task_symbol(match.group(1), symbol, match.group("body"))
 
         converted = TASK_LINE_PATTERN.sub(_md_repl, text)
+        converted = PAREN_TASK_LINE_PATTERN.sub(_md_repl, converted)
         converted = SYMBOL_TASK_LINE_PATTERN.sub(_symbol_repl, converted)
         converted = HEADING_MARK_PATTERN.sub(self._encode_heading, converted)
         # Transform wiki-style links: [link|label] → sentinel + link + sentinel + label + sentinel
@@ -8490,6 +8511,7 @@ class MarkdownEditor(QTextEdit):
                 )
 
             line = TASK_LINE_PATTERN.sub(md_repl, line)
+            line = PAREN_TASK_LINE_PATTERN.sub(md_repl, line)
             line = SYMBOL_TASK_LINE_PATTERN.sub(symbol_repl, line)
 
             # 2) Heading marks: #'s → sentinel on this line only (unless actively editing)
@@ -8922,6 +8944,12 @@ class MarkdownEditor(QTextEdit):
             state = m.group("state") or " "
             content = m.group(4) or ""
             return True, indent, state, content
+        m = re.match(r"^(\s*)\(\s*(?P<state>[xX*]?)\s*\)\s*(.*)$", text)
+        if m:
+            indent = m.group(1) or ""
+            state = m.group("state") or " "
+            content = m.group(3) or ""
+            return True, indent, state, content
         return False, "", "", ""
 
     def _handle_task_enter(self, indent: str, content: str) -> bool:
@@ -8964,7 +8992,7 @@ class MarkdownEditor(QTextEdit):
         text = block.text()
         pos_in_block = cursor.position() - block.position()
 
-        marker_match = re.match(r"^(\s*)(?:[☐☑]\s*|[-*]\s*\[[ xX]\]\s*)(.*)$", text)
+        marker_match = re.match(r"^(\s*)(?:[☐☑]\s*|[-*]\s*\[[ xX]\]\s*|\(\s*[xX*]?\s*\)\s*)(.*)$", text)
         if not marker_match:
             return False
         if (marker_match.group(2) or "").strip():

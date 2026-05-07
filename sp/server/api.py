@@ -231,9 +231,9 @@ def _build_quick_capture_entry(text: str, timestamp: str) -> list[str]:
     lines = [line.rstrip() for line in text.splitlines()]
     if not lines:
         return []
-    first = f"- *{timestamp}* - {lines[0].strip()}"
-    rest = [f"  {line}" for line in lines[1:]]
-    return [first] + rest + ["", "---"]
+    first = f"- *{timestamp}*"
+    note_lines = [f"  {line}" for line in lines]
+    return [first] + note_lines + ["", "---"]
 
 
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:

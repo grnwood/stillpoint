@@ -1,4 +1,4 @@
-VERSION='v1.2.0c'
+VERSION='v1.2.0d'
 GITHUB_PROJECT='stillpoint'
 GITHUB_OWNER='grnwood'
 GITHUB_ISSUE_URL="https://github.com/<owner>/<repo>/issues/new?title={title}&body={body}"

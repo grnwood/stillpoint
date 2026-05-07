@@ -85,24 +85,34 @@ def _resolve_custom_page_ref(page_ref: str) -> str:
 
 def _format_image_link(name: str, width: Optional[int]) -> str:
     if width and width > 600:
-        return f"  ![](./{name}){{width=600}}"
-    return f"  ![](./{name})"
+        return f"![](./{name}){{width=600}}"
+    return f"![](./{name})"
 
 
-def _build_quick_capture_entry(text: str, timestamp: str, images: Optional[list[dict]] = None) -> list[str]:
-    lines = [line.rstrip() for line in text.splitlines()]
-    if not lines:
-        return []
-    first = f"- *{timestamp}* - {lines[0].strip()}"
-    rest = [f"  {line}" for line in lines[1:]]
-    image_lines = []
+def _resolve_attachment_placeholders(text: str, images: Optional[list[dict]] = None) -> tuple[str, list[str]]:
+    resolved = text
+    appended: list[str] = []
     for entry in images or []:
         name = entry.get("name")
         if not name:
             continue
-        width = entry.get("width")
-        image_lines.append(_format_image_link(name, width))
-    return [first] + image_lines + rest + ["", "---"]
+        image_link = _format_image_link(name, entry.get("width"))
+        placeholder = str(entry.get("placeholder") or "").strip()
+        if placeholder and placeholder in resolved:
+            resolved = resolved.replace(placeholder, image_link)
+        else:
+            appended.append(f"  {image_link}")
+    return resolved, appended
+
+
+def _build_quick_capture_entry(text: str, timestamp: str, images: Optional[list[dict]] = None) -> list[str]:
+    text, trailing_image_lines = _resolve_attachment_placeholders(text, images)
+    lines = [line.rstrip() for line in text.splitlines()]
+    if not lines:
+        return []
+    first = f"- *{timestamp}*"
+    note_lines = [f"  {line}" for line in lines]
+    return [first] + note_lines + trailing_image_lines + ["", "---"]
 
 
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
