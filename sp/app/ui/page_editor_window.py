@@ -5,6 +5,7 @@ from typing import Callable, Optional
 import re
 import traceback
 import httpx
+import sys
 
 from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint, QSize
 from PySide6.QtGui import (
@@ -228,10 +229,10 @@ class PageEditorWindow(QMainWindow):
         self.addAction(heading_action)
 
         link_action = QAction("Insert Link…", self)
-        link_action.setShortcut(QKeySequence("Ctrl+L"))
-        link_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         link_action.triggered.connect(self._insert_link)
-        self.addAction(link_action)
+        self._insert_link_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.editor)
+        self._insert_link_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._insert_link_shortcut.activated.connect(self._insert_link)
 
         date_action = QAction("Insert Date…", self)
         date_action.setShortcut(QKeySequence("Ctrl+D"))
@@ -983,6 +984,13 @@ class PageEditorWindow(QMainWindow):
         if not headings:
             _page_editor_log("[PageEditor] No headings to show")
             return
+        is_windows = sys.platform.startswith("win")
+        line_edit_padding = "1px 5px" if is_windows else "4px 6px"
+        item_padding = "1px 5px" if is_windows else "4px 6px"
+        layout_margins = (8, 5, 8, 5) if is_windows else (12, 8, 12, 8)
+        layout_spacing = 3 if is_windows else 6
+        hr_height = 1 if is_windows else 3
+        hr_margin = "0 5px" if is_windows else "0 8px"
         selected_bg = theme_value(
             "page_editor_window.picker_popup.list_selected_bg",
             "rgba(90,161,255,80)",
@@ -1011,11 +1019,11 @@ class PageEditorWindow(QMainWindow):
             "QLabel { border: none; font-weight: bold; }"
             "QLineEdit { border: 1px solid "
             f"{theme_value('page_editor_window.picker_popup.input_border', '#777777')}; "
-            "border-radius: 4px; padding: 4px 6px; }"
+            f"border-radius: 4px; padding: {line_edit_padding}; min-height: 0px; }}"
             "QListWidget { background: transparent; color: "
             f"{theme_value('page_editor_window.picker_popup.list_text', '#f5f5f5')}; "
             "border: none; }}"
-            "QListWidget::item { padding: 4px 6px; }"
+            f"QListWidget::item {{ padding: {item_padding}; }}"
             "QListWidget::item:selected { background: "
             f"{selected_bg}; }}"
             "QListWidget::item:selected:active { background: "
@@ -1024,12 +1032,16 @@ class PageEditorWindow(QMainWindow):
             f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(*layout_margins)
+        layout.setSpacing(layout_spacing)
         title = QLabel("Headings", popup)
+        if is_windows:
+            title.setContentsMargins(0, 0, 0, 0)
+            title.setStyleSheet("padding: 0px;")
         filter_edit = QLineEdit(popup)
         filter_edit.setPlaceholderText("Filter headings…")
         list_widget = QListWidget(popup)
+        list_widget.setSpacing(0)
         layout.addWidget(title)
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
@@ -1061,12 +1073,12 @@ class PageEditorWindow(QMainWindow):
                 if pending_hr:
                     item = QListWidgetItem()
                     item.setFlags(Qt.NoItemFlags)
-                    item.setSizeHint(QSize(0, 3))
+                    item.setSizeHint(QSize(0, hr_height))
                     list_widget.addItem(item)
                     line_frame = QFrame()
                     line_frame.setFrameShape(QFrame.HLine)
-                    line_frame.setFixedHeight(3)
-                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: 0 8px;")
+                    line_frame.setFixedHeight(hr_height)
+                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: {hr_margin};")
                     list_widget.setItemWidget(item, line_frame)
                     pending_hr = False
                 title = h.get("title") or "(heading)"
@@ -1556,6 +1568,15 @@ class PageEditorWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        # Mark as closing before save/network work so child editor paintEvent can
+        # bail out during shutdown transitions.
+        self.setProperty("_sp_closing", True)
+        try:
+            if getattr(self, "editor", None):
+                self.editor._suppress_paint = True
+                self.editor._editor_alive = False
+        except Exception:
+            pass
         # Autosave on close if dirty and writable
         self._save_current_file(auto=False, reason="window close")
         self._save_geometry()

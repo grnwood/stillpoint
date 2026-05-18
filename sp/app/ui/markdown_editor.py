@@ -2212,6 +2212,20 @@ class MarkdownEditor(QTextEdit):
             return
         if self._mutations_blocked():
             return
+        # Avoid painting during parent-window shutdown/focus handoff.
+        # On Windows, Qt can dispatch a late paint while the window is closing
+        # and child text/layout objects are mid-teardown.
+        try:
+            host_window = self.window()
+            if host_window is not None:
+                if bool(host_window.property("_sp_closing")):
+                    return
+                if not host_window.isVisible():
+                    return
+            if not self.isVisible():
+                return
+        except Exception:
+            return
         # Guard against paint events firing while underlying Qt objects are
         # being replaced/torn down. Calling into QTextEdit paint in this state
         # can segfault on some platforms.

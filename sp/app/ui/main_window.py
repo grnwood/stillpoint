@@ -2979,6 +2979,10 @@ class MainWindow(QMainWindow):
             lambda checked=False: self._show_new_page_dialog(insert_link_in_editor=False)
         )
         file_menu.addAction(new_page_action)
+        open_page_in_new_editor_action = QAction("Open Page in New Editor", self)
+        open_page_in_new_editor_action.setToolTip("Open the current page in a separate editor window")
+        open_page_in_new_editor_action.triggered.connect(self._open_current_page_in_new_editor)
+        file_menu.addAction(open_page_in_new_editor_action)
         delete_page_action = QAction("Delete Page", self)
         delete_page_action.setToolTip("Delete the current page")
         delete_page_action.triggered.connect(self._delete_current_page_from_menu)
@@ -10576,6 +10580,13 @@ class MainWindow(QMainWindow):
         headings = self._toc_headings or []
         if not headings:
             return
+        is_windows = sys.platform.startswith("win")
+        line_edit_padding = "1px 5px" if is_windows else "4px 6px"
+        item_padding = "1px 5px" if is_windows else "4px 6px"
+        layout_margins = (8, 5, 8, 5) if is_windows else (12, 8, 12, 8)
+        layout_spacing = 3 if is_windows else 6
+        hr_height = 1 if is_windows else 3
+        hr_margin = "0 5px" if is_windows else "0 8px"
         selected_bg = theme_value(
             "main_window.picker_popup.list_selected_bg",
             "rgba(90,161,255,80)",
@@ -10603,21 +10614,25 @@ class MainWindow(QMainWindow):
             "QLabel { border: none; font-weight: bold; }"
             "QLineEdit { border: 1px solid "
             f"{theme_value('main_window.picker_popup.input_border', '#777777')}; "
-            "border-radius: 4px; padding: 4px 6px; }"
+            f"border-radius: 4px; padding: {line_edit_padding}; min-height: 0px; }}"
             "QListWidget { background: transparent; color: "
             f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
             "border: none; }}"
-            "QListWidget::item { padding: 4px 6px; }"
+            f"QListWidget::item {{ padding: {item_padding}; }}"
             "QListWidget::item:selected { background: "
             f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(*layout_margins)
+        layout.setSpacing(layout_spacing)
         title = QLabel("Headings", popup)
+        if is_windows:
+            title.setContentsMargins(0, 0, 0, 0)
+            title.setStyleSheet("padding: 0px;")
         filter_edit = QLineEdit(popup)
         filter_edit.setPlaceholderText("Filter headings…")
         list_widget = QListWidget(popup)
+        list_widget.setSpacing(0)
         layout.addWidget(title)
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
@@ -10649,12 +10664,12 @@ class MainWindow(QMainWindow):
                 if pending_hr:
                     item = QListWidgetItem()
                     item.setFlags(Qt.NoItemFlags)
-                    item.setSizeHint(QSize(0, 3))
+                    item.setSizeHint(QSize(0, hr_height))
                     list_widget.addItem(item)
                     line_frame = QFrame()
                     line_frame.setFrameShape(QFrame.HLine)
-                    line_frame.setFixedHeight(3)
-                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: 0 8px;")
+                    line_frame.setFixedHeight(hr_height)
+                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: {hr_margin};")
                     list_widget.setItemWidget(item, line_frame)
                     pending_hr = False
                 title = h.get("title") or "(heading)"
@@ -18335,6 +18350,13 @@ class MainWindow(QMainWindow):
         self._remember_history_cursor()
         self._open_file(self.current_path, add_to_history=False, force=True, restore_history_cursor=True)
         self.statusBar().showMessage("Reloaded current page", 2000)
+
+    def _open_current_page_in_new_editor(self) -> None:
+        """Open the current page in a separate editor window."""
+        if not self.current_path:
+            self.statusBar().showMessage("No page open", 2000)
+            return
+        self._open_page_editor_window(self.current_path)
 
     def _start_inline_creation(
         self,

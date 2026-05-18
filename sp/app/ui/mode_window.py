@@ -1148,6 +1148,13 @@ class ModeWindow(QMainWindow):
         headings = self._heading_provider() or []
         if not headings:
             return
+        is_windows = os.name == "nt"
+        line_edit_padding = "1px 5px" if is_windows else "4px 6px"
+        item_padding = "1px 5px" if is_windows else "4px 6px"
+        layout_margins = (6, 5, 6, 5) if is_windows else (8, 8, 8, 8)
+        layout_spacing = 3 if is_windows else 6
+        hr_height = 1 if is_windows else 3
+        hr_margin = "0 5px" if is_windows else "0 8px"
         selected_bg = theme_value(
             "mode_window.picker_popup.list_selected_bg",
             "rgba(90,161,255,80)",
@@ -1175,19 +1182,20 @@ class ModeWindow(QMainWindow):
             "border-radius: 6px; }"
             "QLineEdit { border: 1px solid "
             f"{theme_value('mode_window.picker_popup.input_border', '#777777')}; "
-            "border-radius: 4px; padding: 4px 6px; }"
+            f"border-radius: 4px; padding: {line_edit_padding}; min-height: 0px; }}"
             "QListWidget { background: transparent; color: "
             f"{theme_value('mode_window.picker_popup.list_text', '#f5f5f5')}; border: none; }}"
-            "QListWidget::item { padding: 4px 6px; }"
+            f"QListWidget::item {{ padding: {item_padding}; }}"
             "QListWidget::item:selected { background: "
             f"{selected_bg}; }}"
         )
         layout = QVBoxLayout(popup)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(*layout_margins)
+        layout.setSpacing(layout_spacing)
         filter_edit = QLineEdit(popup)
         filter_edit.setPlaceholderText("Filter headings…")
         list_widget = QListWidget(popup)
+        list_widget.setSpacing(0)
         layout.addWidget(filter_edit)
         layout.addWidget(list_widget, 1)
 
@@ -1218,12 +1226,12 @@ class ModeWindow(QMainWindow):
                 if pending_hr:
                     item = QListWidgetItem()
                     item.setFlags(Qt.NoItemFlags)
-                    item.setSizeHint(QSize(0, 3))
+                    item.setSizeHint(QSize(0, hr_height))
                     list_widget.addItem(item)
                     line_frame = QFrame()
                     line_frame.setFrameShape(QFrame.HLine)
-                    line_frame.setFixedHeight(3)
-                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: 0 8px;")
+                    line_frame.setFixedHeight(hr_height)
+                    line_frame.setStyleSheet(f"color: {hr_line_color}; margin: {hr_margin};")
                     list_widget.setItemWidget(item, line_frame)
                     pending_hr = False
                 title = h.get("title") or "(heading)"

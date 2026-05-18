@@ -41,13 +41,23 @@ class ZoomablePreviewLabel(QLabel):
         self.grabGesture(Qt.PinchGesture)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
-        if event.modifiers() & Qt.ControlModifier:
+        # Shift + mouse wheel for horizontal scrolling
+        if event.modifiers() & Qt.ShiftModifier:
             delta = event.angleDelta().y()
+            if delta:
+                parent = self.parent()
+                while parent:
+                    if isinstance(parent, QScrollArea):
+                        parent.horizontalScrollBar().setValue(
+                            parent.horizontalScrollBar().value() - (int(delta / 120) * 40)
+                        )
+                        event.accept()
+                        return
+                    parent = parent.parent()
+        # Mouse wheel controls zoom (Lucidchart style)
+        delta = event.angleDelta().y()
+        if delta:
             self.zoomRequested.emit(1 if delta > 0 else -1, QPointF(event.position()))
-            event.accept()
-            return
-        if event.pixelDelta().y() and event.modifiers() == Qt.NoModifier and abs(event.pixelDelta().x()) <= abs(event.pixelDelta().y()) * 0.5:
-            self.zoomRequested.emit(1 if event.pixelDelta().y() > 0 else -1, QPointF(event.position()))
             event.accept()
             return
         super().wheelEvent(event)
@@ -66,7 +76,8 @@ class ZoomablePreviewLabel(QLabel):
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         pixmap = self.pixmap()
-        if event.button() == Qt.LeftButton and pixmap:
+        # Right-click drag for panning (Lucidchart style)
+        if event.button() == Qt.RightButton and pixmap:
             self.is_panning = True
             self.pan_start_pos = event.globalPos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -89,7 +100,8 @@ class ZoomablePreviewLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.LeftButton and self.is_panning:
+        # Right-click drag for panning (Lucidchart style)
+        if event.button() == Qt.RightButton and self.is_panning:
             self.is_panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
