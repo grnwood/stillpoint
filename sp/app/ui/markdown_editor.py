@@ -6930,6 +6930,14 @@ class MarkdownEditor(QTextEdit):
             anchor_text: Optional heading text to append as anchor when copying current page.
         """
         if link_text:
+            normalized_external = self._normalize_external_link(link_text)
+            if normalized_external.startswith(("http://", "https://")):
+                clipboard = QGuiApplication.clipboard()
+                clipboard.setText(normalized_external)
+                self.linkCopied.emit(normalized_external)
+                # Keep vi clipboard in sync so 'p' in vi mode pastes this link
+                self._vi_clipboard = normalized_external
+                return normalized_external
             # If it's a colon notation link, use it as-is
             if ":" in link_text:
                 colon_path = link_text

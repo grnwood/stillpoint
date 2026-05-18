@@ -199,6 +199,7 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
             self.cfg = cfg
             self.started = False
             self.scheduled: list[str] = []
+            self.synced: list[str] = []
 
         def start(self) -> None:
             self.started = True
@@ -208,6 +209,9 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
 
         def schedule_sync(self, reason: str) -> None:
             self.scheduled.append(reason)
+
+        def sync_now(self, reason: str = "manual") -> None:
+            self.synced.append(reason)
 
         def get_status(self):
             return None
@@ -257,8 +261,43 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
     assert isinstance(main_window._homebase_sync_engine, _DummySyncEngine)
     assert main_window._homebase_sync_engine.started is True
     assert main_window._homebase_sync_engine.cfg.passphrase == "prompted-passphrase"
-    assert main_window._homebase_sync_engine.scheduled == ["vault open"]
+    assert main_window._homebase_sync_engine.scheduled == []
+    assert main_window._homebase_sync_engine.synced == ["vault open"]
     assert saved_store_flags == [False]
     assert saved_passphrases == [""]
     assert main_window._load_homebase_session_passphrase(str(vault_root)) == "prompted-passphrase"
     assert badge_states == ["none"]
+
+
+def test_trigger_homebase_sync_now_reconfigures_engine_before_manual_sync(main_window, monkeypatch, tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir(parents=True, exist_ok=True)
+    sync_reasons: list[str] = []
+
+    class _DummyEngine:
+        def sync_now(self, reason: str = "manual") -> None:
+            sync_reasons.append(reason)
+
+    class _DummyStatusBar:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, int]] = []
+
+        def showMessage(self, text: str, timeout: int = 0) -> None:
+            self.messages.append((text, timeout))
+
+    status_bar = _DummyStatusBar()
+    main_window.vault_root = str(vault_root)
+    main_window._homebase_sync_engine = None
+
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window, "statusBar", lambda: status_bar)
+
+    def _configure() -> None:
+        main_window._homebase_sync_engine = _DummyEngine()
+
+    monkeypatch.setattr(main_window, "_configure_homebase_sync_for_vault", _configure)
+
+    main_window._trigger_homebase_sync_now("badge")
+
+    assert sync_reasons == ["badge"]
+    assert status_bar.messages == [("Homebase sync requested.", 2500)]

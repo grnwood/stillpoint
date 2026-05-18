@@ -796,6 +796,20 @@ def test_copy_as_markdown_multi_paragraph_selection_with_links_preserves_full_se
     assert "\n\n" in copied
 
 
+def test_copy_link_target_keeps_external_urls_plain(editor):
+    copied = editor._copy_link_to_location("https://example.com/path?q=1")
+
+    assert copied == "https://example.com/path?q=1"
+    assert QGuiApplication.clipboard().text() == "https://example.com/path?q=1"
+
+
+def test_copy_link_target_keeps_internal_colon_links(editor):
+    copied = editor._copy_link_to_location(":alpha:page")
+
+    assert copied == ":alpha:page"
+    assert QGuiApplication.clipboard().text() == ":alpha:page"
+
+
 def test_paste_markdown_links_converts_to_wiki_for_clean_label_rendering(editor):
     mime = QMimeData()
     mime.setText("[Duck Duck Go](https://duckduckgo.com)")

@@ -597,7 +597,7 @@ class PreferencesDialog(QDialog):
             QLabel(
                 "<b>Web Research Assistant</b><br>"
                 "Fetches/scrapes URLs or runs a quick web search.<br>"
-                "<i>Example:</i> \"Search the web for ClubGlove history.\""
+                "<i>Example:</i> \"Search the web for todays news on oil prices.\""
             )
         )
         self._agents_box.setVisible(self.enable_ai_agents_checkbox.isChecked())
@@ -1036,7 +1036,7 @@ class PreferencesDialog(QDialog):
             "tools": [
                 {
                     "name": "web.search",
-                    "sample": "search the web for clubglove history",
+                    "sample": "search the web for 'current oil prices'",
                     "settings": "engine=duckduckgo",
                 },
                 {
@@ -1046,12 +1046,12 @@ class PreferencesDialog(QDialog):
                 },
                 {
                     "name": "vault.search",
-                    "sample": "search my vault for SVS references",
+                    "sample": "search my vault for 'TODO' references",
                     "settings": "triggers=search,find references,look for",
                 },
                 {
                     "name": "vault.write",
-                    "sample": "write a new page titled \"SVS Summary\"",
+                    "sample": "write a new page titled \"Daily Summary\"",
                     "settings": "triggers=write,create a page,new page,make a page,add a page",
                 },
                 {
@@ -1464,7 +1464,7 @@ class PreferencesDialog(QDialog):
                 app.setFont(base_font)
             except Exception:
                 pass
-
+ 
     def _build_font_combo(self, default_label: str) -> QComboBox:
         combo = QComboBox()
         combo.setEditable(True)

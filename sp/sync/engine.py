@@ -193,8 +193,6 @@ class HomebaseSyncEngine:
             f"auto_sync={self.cfg.auto_sync} interval={self.cfg.interval_seconds}s "
             f"debounce={self.cfg.push_debounce_seconds}s"
         )
-        if self.cfg.auto_sync:
-            self.schedule_sync("startup")
 
     def stop(self) -> None:
         with self._cv:

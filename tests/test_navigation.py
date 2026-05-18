@@ -1,10 +1,11 @@
 """Tests for page navigation (history and hierarchy)."""
 import pytest
 from pathlib import Path
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSizePolicy
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import QStandardItem
+from sp.app.ui.main_window import MainWindow
 
 
 class TestHistoryNavigation:
@@ -158,6 +159,86 @@ class TestHistoryNavigation:
 
         assert handled is True
         assert calls == [("history", True)]
+
+    def test_recent_history_chicklets_keep_journal_pages_when_nav_hides_journal(self, main_window):
+        main_window._show_journal_in_nav = False
+        main_window.page_history = [
+            "/Projects/Alpha/Alpha.md",
+            "/Journal/2026/05/18/18.md",
+        ]
+
+        main_window._refresh_history_buttons()
+
+        history_paths = [btn.property("history_path") for btn in main_window.history_buttons]
+        assert "/Journal/2026/05/18/18.md" in history_paths
+        assert any(btn.text() == "18-May-26" for btn in main_window.history_buttons)
+
+    def test_recent_history_chicklets_prettify_underscored_page_names(self, main_window):
+        main_window.page_history = ["/Roles_And_Stuff/Roles_And_Stuff.md"]
+
+        main_window._refresh_history_buttons()
+
+        assert [btn.text() for btn in main_window.history_buttons] == ["Roles And Stuff"]
+
+    def test_top_nav_chicklets_include_accent_hover_style(self, main_window):
+        main_window._vault_accent_color = "#3B82F6"
+        main_window.bookmarks = ["/PageA/PageA.md"]
+        main_window.page_history = ["/PageB/PageB.md"]
+
+        main_window._refresh_bookmark_buttons()
+        main_window._refresh_history_buttons()
+
+        bookmark_style = next(iter(main_window.bookmark_buttons.values())).styleSheet()
+        history_style = main_window.history_buttons[0].styleSheet()
+
+        assert "QPushButton:hover" in bookmark_style
+        assert "#3B82F6" in bookmark_style
+        assert "QPushButton:hover" in history_style
+        assert "#3B82F6" in history_style
+
+    def test_recent_history_uses_scroll_arrows_instead_of_button_shrinking(self, main_window):
+        main_window.page_history = [f"/Page{idx}/Page{idx}.md" for idx in range(1, 10)]
+
+        main_window.show()
+        QApplication.processEvents()
+        main_window._refresh_history_buttons()
+        main_window.history_scroll_area.setFixedWidth(120)
+        QApplication.processEvents()
+        main_window._update_history_strip_width()
+        main_window._sync_history_scroll_range()
+        main_window._update_history_scroll_buttons()
+
+        assert main_window.history_scroll_area.horizontalScrollBar().maximum() > 0
+        assert main_window.history_scroll_left.isVisible()
+        assert main_window.history_scroll_right.isVisible()
+        assert all(btn.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed for btn in main_window.history_buttons)
+
+    def test_active_recent_history_chicklet_triggers_scroll_into_view(self, main_window, monkeypatch):
+        main_window.page_history = [
+            f"/LongRecentPage{idx}/LongRecentPage{idx}.md" for idx in range(1, 10)
+        ]
+        main_window.show()
+        QApplication.processEvents()
+        main_window._refresh_history_buttons()
+        main_window.history_scroll_area.setFixedWidth(90)
+        QApplication.processEvents()
+        main_window._update_history_strip_width()
+        main_window._sync_history_scroll_range()
+        main_window._update_history_scroll_buttons()
+
+        visible_calls: list[str] = []
+        original_helper = main_window._ensure_history_button_visible
+
+        def record_visible(btn):
+            visible_calls.append(str(btn.property("history_path") or ""))
+            original_helper(btn)
+
+        monkeypatch.setattr(main_window, "_ensure_history_button_visible", record_visible)
+        main_window.current_path = "/LongRecentPage9/LongRecentPage9.md"
+        MainWindow._update_active_page_chicklets(main_window)
+        QApplication.processEvents()
+
+        assert "/LongRecentPage9/LongRecentPage9.md" in visible_calls
 
     def test_explicit_heading_picker_uses_persistent_popup(self, main_window, monkeypatch):
         calls: list[tuple[object, bool]] = []

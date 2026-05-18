@@ -61,6 +61,10 @@ CHROMA_COLOR = "\033[33m"
 LLM_RESPONSE_COLOR = "\033[32m"
 LOG_RESET = "\033[0m"
 AI_TIMEOUT_SECONDS = 5.0
+CHAT_SUMMARY_TITLE_PROMPT = (
+    "Generate a chat title in 5 or 6 words. Weight the latest messages most heavily. "
+    "Return only the title text with no quotes, no markdown, and no trailing punctuation."
+)
 
 def _color_text(text: str, color: str) -> str:
     return f"{color}{text}{LOG_RESET}"
@@ -1835,6 +1839,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self.messages = []
         self._api_worker = None
         self._condense_worker = None
+        self._title_worker = None
+        self._title_target_session_id: Optional[int] = None
         self._agent_tool_worker = None
         self._agent_placeholder_index: Optional[int] = None
         self._pending_agent_prompt: Optional[str] = None
@@ -1967,9 +1973,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self.server_config_btn.toggled.connect(self._toggle_server_config)
         self.show_chats_btn = QtWidgets.QToolButton()
         self.show_chats_btn.setCheckable(True)
-        self.show_chats_btn.setChecked(True)
+        self.show_chats_btn.setChecked(False)
         self.show_chats_btn.toggled.connect(self._toggle_chat_list)
-        self._update_chat_list_toggle_button(True)
+        self._update_chat_list_toggle_button(False)
         self.zoom_out_btn = QtWidgets.QToolButton()
         self.zoom_out_btn.setText("A-")
         self.zoom_out_btn.setToolTip("Decrease font size")
@@ -2011,7 +2017,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self.prompt_btn.setVisible(False)
         model_row.addWidget(self.prompt_btn)
         self.debug_checkbox = QtWidgets.QCheckBox("Debug")
-        self.debug_checkbox.setChecked(True)
+        self.debug_checkbox.setChecked(False)
         self.debug_checkbox.setToolTip("Show debug traces in chat")
         self.debug_checkbox.setStyleSheet("color: #9a9a9a;")
         model_row.addWidget(self.debug_checkbox)
@@ -2243,7 +2249,7 @@ class AIChatPanel(QtWidgets.QWidget):
             }}
             """
         )
-        self._toggle_chat_list(True)
+        self._toggle_chat_list(False)
         self._update_context_summary()
         self._apply_font_size()
 
@@ -2398,6 +2404,9 @@ class AIChatPanel(QtWidgets.QWidget):
             delete_folder = menu.addAction("Delete Folder")
             delete_folder.triggered.connect(lambda: self._delete_folder(data))
         elif item_type == "chat":
+            generate_summary = menu.addAction("Generate Chat Summary")
+            generate_summary.triggered.connect(lambda: self._request_chat_summary_title(data))
+            menu.addSeparator()
             rename_chat = menu.addAction("Rename Chat")
             rename_chat.triggered.connect(lambda: self._rename_chat(data))
             delete_chat = menu.addAction("Delete Chat")
@@ -2427,12 +2436,14 @@ class AIChatPanel(QtWidgets.QWidget):
         # Do not auto-refresh models on config toggle
 
     def _has_active_operation(self) -> bool:
-        return bool(self._api_worker or self._condense_worker or self._agent_tool_worker)
+        return bool(self._api_worker or self._condense_worker or self._title_worker or self._agent_tool_worker)
 
     def _update_stop_button(self) -> None:
         active = self._has_active_operation()
         if hasattr(self, "stop_btn"):
             self.stop_btn.setVisible(active)
+        if hasattr(self, "send_btn"):
+            self.send_btn.setEnabled(not active)
         if hasattr(self, "chat_tree"):
             self.chat_tree.setEnabled(not active)
         if hasattr(self, "new_chat_btn"):
@@ -3687,6 +3698,11 @@ class AIChatPanel(QtWidgets.QWidget):
                 font.setBold(True)
                 item.setFont(0, font)
                 item.setIcon(0, self._chat_icon)
+                if self._chat_uses_non_default_config(sess):
+                    item.setForeground(
+                        0,
+                        QColor(theme_value("ai_chat_panel.chat_tree.customized_text", "#d08a2f")),
+                    )
                 item.setFlags((item.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
             else:
                 item.setIcon(0, self._folder_icon)
@@ -3719,7 +3735,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 _attach(item, sess["id"])
 
         _attach(None, None)
-        self.chat_tree.expandAll()
+        self.chat_tree.collapseAll()
         self._building_tree = False
         if select_id:
             self._select_chat_by_id(select_id)
@@ -3794,6 +3810,19 @@ class AIChatPanel(QtWidgets.QWidget):
         else:
             self._update_model_status()
         self._bind_ai_conversation()
+
+    def _chat_uses_non_default_config(self, session: Optional[Dict]) -> bool:
+        if not session or session.get("type") != "chat":
+            return False
+        default_server = (self._config_default_server() or "").strip()
+        default_model = (self._config_default_model() or "").strip()
+        session_server = (session.get("last_server") or "").strip()
+        session_model = (session.get("last_model") or "").strip()
+        if default_server and session_server and session_server != default_server:
+            return True
+        if default_model and session_model and session_model != default_model:
+            return True
+        return False
 
     def _apply_session_defaults(self, session: Dict) -> None:
         """Apply stored server/model defaults to UI for a chat session."""
@@ -3916,6 +3945,8 @@ class AIChatPanel(QtWidgets.QWidget):
         if self.current_session_id:
             self.store.update_session_last_server(self.current_session_id, selected_name)
         self._refresh_model_dropdown(initial=False)
+        if self.current_session_id:
+            self._load_chat_tree(select_id=self.current_session_id)
         self.status_label.setText(f"Switched to server: {selected_name}")
         self._update_model_status()
 
@@ -3923,6 +3954,7 @@ class AIChatPanel(QtWidgets.QWidget):
         """Persist chosen model for the current chat."""
         if self.current_session_id:
             self.store.update_session_last_model(self.current_session_id, self.model_combo.currentText())
+            self._load_chat_tree(select_id=self.current_session_id)
         self._update_model_status()
 
     def _slash_command_anchor(self) -> QtCore.QPoint:
@@ -4063,6 +4095,13 @@ class AIChatPanel(QtWidgets.QWidget):
             self._condense_buffer = ""
             self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
             self.condense_btn.setEnabled(True)
+        if self._title_worker:
+            try:
+                self._title_worker.request_cancel()
+            except Exception:
+                pass
+            cancelled = True
+            self._title_target_session_id = None
         if cancelled:
             self._render_messages()
             self._set_status("Cancelled.", "#2ecc71")
@@ -4164,6 +4203,9 @@ class AIChatPanel(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Condense", str(exc))
 
     def _start_send(self, content: str, extra_system: Optional[str] = None) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before sending another prompt.", "#f6c343")
+            return
         content = (content or "").strip()
         if not content:
             return
@@ -4608,6 +4650,118 @@ class AIChatPanel(QtWidgets.QWidget):
         clipped = words[:6]
         title = " ".join(clipped)
         return title[:72]
+
+    def _summary_server_and_model(self, session: Optional[Dict] = None) -> tuple[dict, str]:
+        configured_server = (self._config_default_server() or "").strip()
+        configured_model = (self._config_default_model() or "").strip()
+        server = None
+        if configured_server:
+            server = self.server_manager.get_server(configured_server)
+        if not server:
+            session_server = ((session or {}).get("last_server") or "").strip()
+            if session_server:
+                server = self.server_manager.get_server(session_server)
+        if not server:
+            server = self.current_server or self.server_manager.get_server(self.server_combo.currentText()) or {}
+        models = get_available_models(server)
+        if not models:
+            models = [server.get("default_model") or "gpt-3.5-turbo"]
+        if configured_model:
+            model = configured_model
+        elif server.get("default_model") in models:
+            model = server.get("default_model")
+        else:
+            model = models[0]
+        return server, model
+
+    def _normalize_generated_chat_title(self, text: str) -> Optional[str]:
+        cleaned = self._strip_think_blocks(text or "")
+        cleaned = cleaned.replace("\r", " ").strip()
+        if not cleaned:
+            return None
+        cleaned = cleaned.splitlines()[0].strip()
+        cleaned = cleaned.strip(" \t\"'`")
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = cleaned.rstrip(".,:;!?")
+        words = [word for word in cleaned.split(" ") if word]
+        if not words:
+            return None
+        if len(words) > 6:
+            cleaned = " ".join(words[:6])
+        return cleaned[:72] or None
+
+    def _build_chat_summary_request_messages(self, chat_messages: List[Tuple[str, str]]) -> List[dict]:
+        rows = [(role, (text or "").strip()) for role, text in chat_messages if role in {"user", "assistant"} and (text or "").strip()]
+        if not rows:
+            return []
+        recent_count = min(8, len(rows))
+        earlier_rows = rows[:-recent_count]
+        recent_rows = rows[-recent_count:]
+        sections: List[str] = []
+        if earlier_rows:
+            earlier_lines = [f"{role.title()}: {text}" for role, text in earlier_rows]
+            sections.append("Earlier chat messages:\n" + "\n".join(earlier_lines))
+        recent_lines = [f"{role.title()}: {text}" for role, text in recent_rows]
+        sections.append("Latest chat messages to weight most heavily:\n" + "\n".join(recent_lines))
+        return [
+            {"role": "system", "content": CHAT_SUMMARY_TITLE_PROMPT},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
+
+    def _request_chat_summary_title(self, data: Dict) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before renaming chats.", "#f6c343")
+            return
+        session_id = data.get("id")
+        if not isinstance(session_id, int):
+            return
+        session = self.store.get_session_by_id(session_id)
+        if not session or session.get("type") != "chat":
+            return
+        chat_messages = self.store.get_messages(session_id)
+        request_messages = self._build_chat_summary_request_messages(chat_messages)
+        if not request_messages:
+            self._set_status("Add some chat messages before generating a summary.", "#f6c343")
+            return
+        server, model = self._summary_server_and_model(session)
+        self._title_target_session_id = session_id
+        self._title_worker = ApiWorker(server, request_messages, model, stream=False)
+        self._title_worker.finished.connect(self._handle_chat_summary_title_finished)
+        self._title_worker.failed.connect(self._handle_chat_summary_title_failed)
+        self._title_worker.start()
+        self._set_status(
+            "Generating chat summary...",
+            theme_value("ai_chat_panel.status.warning", "#f6c343"),
+        )
+        self._update_stop_button()
+
+    def _handle_chat_summary_title_finished(self, text: str) -> None:
+        session_id = self._title_target_session_id
+        self._title_worker = None
+        self._title_target_session_id = None
+        title = self._normalize_generated_chat_title(text)
+        if not session_id or not title:
+            self._set_status("Unable to generate a chat summary title.", "#f6c343")
+            self._update_stop_button()
+            return
+        self.store.rename_session(session_id, title, manual=False)
+        select_id = self.current_session_id or session_id
+        self._load_chat_tree(select_id=select_id)
+        self._set_status(
+            f"Renamed chat to '{title}'.",
+            theme_value("ai_chat_panel.status.success", "#2ecc71"),
+        )
+        self._update_stop_button()
+
+    def _handle_chat_summary_title_failed(self, err: str) -> None:
+        self._title_worker = None
+        self._title_target_session_id = None
+        if err == "Cancelled":
+            self._set_status("Cancelled.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
+        else:
+            self._set_status(f"Chat summary failed: {err}")
+            self._notify_status_bar_connection_error(err)
+        self._update_stop_button()
 
     def _handle_condense_chunk(self, chunk: str) -> None:
         if self._cancel_pending_condense:
@@ -5425,9 +5579,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_load_current_page_button()
 
     def open_chat_for_page(self, rel_path: Optional[str]) -> None:
-        """Backward-compatible shim: page-scoped chat removed; opens a new chat."""
-        _ = rel_path
+        """Create a new chat and optionally attach the launching page as context."""
         self._new_chat()
+        if rel_path:
+            self.set_current_page(rel_path)
+            self.ensure_context_page_ref(rel_path, index=True)
     def open_named_chat(self, name: str, folder_path: str = "/") -> None:
         """Open (and create if needed) a stable named chat under the given folder."""
         if self._has_active_operation():

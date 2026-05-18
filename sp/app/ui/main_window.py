@@ -1552,8 +1552,6 @@ class QuickVaultPicker(QWidget):
         self.sync_from_host()
         self._expand_visible_state()
         target_path = self._host.current_path
-        if target_path:
-            self._select_current_page(target_path)
         editor_rect = self._host.editor.rect()
         top_left = self._host.editor.mapToGlobal(editor_rect.topLeft())
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
@@ -1566,6 +1564,8 @@ class QuickVaultPicker(QWidget):
         self.move(x, y)
         self.show()
         self.raise_()
+        if target_path:
+            self._select_current_page(target_path)
         self.tree.setFocus(Qt.OtherFocusReason)
 
     def _disconnect_tree_state_signals(self) -> None:
@@ -2823,20 +2823,59 @@ class MainWindow(QMainWindow):
         history_bar_layout.setSpacing(4)
         
         # Add history buttons container
-        self.history_container = QWidget()
-        self.history_container.setStyleSheet("")  # Clear any inherited styles
-        self.history_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.history_container.setMinimumWidth(0)
-        self.history_layout = QHBoxLayout(self.history_container)
+        self.history_strip = QWidget()
+        self.history_strip.setStyleSheet("")  # Clear any inherited styles
+        self.history_strip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.history_strip.setMinimumWidth(1)
+        self.history_layout = QHBoxLayout(self.history_strip)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_layout.setSpacing(4)
         self.history_layout.setAlignment(Qt.AlignLeft)
+
+        self.history_scroll_area = QScrollArea()
+        self.history_scroll_area.setObjectName("historyScrollArea")
+        self.history_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.history_scroll_area.setWidgetResizable(False)
+        self.history_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.history_scroll_area.setWidget(self.history_strip)
+
+        self.history_scroll_left = QToolButton()
+        self.history_scroll_left.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.history_scroll_left.setAutoRaise(True)
+        self.history_scroll_left.setToolTip("Scroll recent pages left")
+        self.history_scroll_left.clicked.connect(lambda: self._scroll_history(-180))
+
+        self.history_scroll_right = QToolButton()
+        self.history_scroll_right.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.history_scroll_right.setAutoRaise(True)
+        self.history_scroll_right.setToolTip("Scroll recent pages right")
+        self.history_scroll_right.clicked.connect(lambda: self._scroll_history(180))
+
+        self.history_container = QWidget()
+        self.history_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.history_container.setMinimumHeight(self.history_bar.maximumHeight())
+        self.history_container.setMaximumHeight(self.history_bar.maximumHeight())
+        self.history_scroll_area.setMinimumHeight(self.history_bar.maximumHeight())
+        self.history_scroll_area.setMaximumHeight(self.history_bar.maximumHeight())
+        self.history_scroll_left.setFixedHeight(self.history_bar.maximumHeight())
+        self.history_scroll_right.setFixedHeight(self.history_bar.maximumHeight())
+        self.history_strip.setMinimumHeight(self.history_bar.maximumHeight())
+        history_container_layout = QHBoxLayout(self.history_container)
+        history_container_layout.setContentsMargins(0, 0, 0, 0)
+        history_container_layout.setSpacing(2)
+        history_container_layout.addWidget(self.history_scroll_left)
+        history_container_layout.addWidget(self.history_scroll_area, 1)
+        history_container_layout.addWidget(self.history_scroll_right)
+        self.history_container.setLayout(history_container_layout)
         history_bar_layout.addWidget(self.history_container, 1)
         
         # Add spacer to push buttons to the left
         history_spacer = QWidget()
         history_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         history_bar_layout.addWidget(history_spacer)
+        self.history_scroll_area.installEventFilter(self)
 
         # Container (no vi-mode banner)
         container = QWidget()
@@ -3743,9 +3782,10 @@ class MainWindow(QMainWindow):
     def _start_new_ai_chat(self) -> None:
         if not config.load_enable_ai_chats():
             return
+        target_path = self.current_path
         detached = self._active_ai_chat_panel()
         if detached:
-            detached.open_chat_for_page(None)
+            detached.open_chat_for_page(target_path)
             detached.focus_input()
             try:
                 if self._detached_ai_chat_window:
@@ -3757,7 +3797,7 @@ class MainWindow(QMainWindow):
         if not self.right_panel.ai_chat_panel:
             return
         self._ensure_right_panel_visible()
-        self.right_panel.focus_ai_chat(None, create=True)
+        self.right_panel.focus_ai_chat(target_path, create=True)
         self.right_panel.focus_ai_chat_input()
 
     def _clear_command_bar_context(self) -> None:
@@ -5954,7 +5994,7 @@ class MainWindow(QMainWindow):
             self._homebase_status_poll_timer.timeout.connect(self._poll_homebase_status)
             self._homebase_status_poll_timer.start()
             if cfg.auto_sync:
-                self._homebase_sync_engine.schedule_sync("vault open")
+                self._homebase_sync_engine.sync_now("vault open")
             self._poll_homebase_status()
             self._update_homebase_sync_action_state()
             self._refresh_homebase_user_info()
@@ -6895,6 +6935,11 @@ class MainWindow(QMainWindow):
                 pass
 
     def _trigger_homebase_sync_now(self, reason: str = "manual") -> None:
+        if not self._homebase_sync_engine and self.vault_root and self._is_homebase_mode_enabled():
+            try:
+                self._configure_homebase_sync_for_vault()
+            except Exception:
+                pass
         if not self._homebase_sync_engine:
             self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
             return
@@ -9383,6 +9428,103 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_bookmark_scroll_range)
         QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
 
+    def _history_content_width(self) -> int:
+        if not getattr(self, "history_layout", None):
+            return 0
+        spacing = self.history_layout.spacing()
+        total = 0
+        count = 0
+        for btn in self.history_buttons:
+            try:
+                total += btn.sizeHint().width()
+                count += 1
+            except Exception:
+                continue
+        if count > 1:
+            total += spacing * (count - 1)
+        return total
+
+    def _update_history_strip_width(self) -> None:
+        if not getattr(self, "history_strip", None):
+            return
+        try:
+            width = max(1, self._history_content_width())
+            self.history_strip.setMinimumWidth(width)
+            self.history_strip.setMaximumWidth(16777215)
+            height = self.history_bar.maximumHeight()
+            self.history_strip.setFixedHeight(height)
+            self.history_strip.resize(width, height)
+            self.history_strip.updateGeometry()
+        except Exception:
+            pass
+
+    def _sync_history_scroll_range(self) -> None:
+        if not getattr(self, "history_scroll_area", None):
+            return
+        try:
+            bar = self.history_scroll_area.horizontalScrollBar()
+            content_width = self._history_content_width()
+            viewport_width = self.history_scroll_area.viewport().width()
+            max_range = max(0, content_width - viewport_width)
+            bar.setRange(0, max_range)
+            bar.setPageStep(max(0, viewport_width))
+            if bar.value() > max_range:
+                bar.setValue(max_range)
+        except RuntimeError:
+            return
+
+    def _update_history_scroll_buttons(self) -> None:
+        if not getattr(self, "history_scroll_area", None):
+            return
+        try:
+            bar = self.history_scroll_area.horizontalScrollBar()
+            content_width = 0
+            content_width = self.history_strip.sizeHint().width()
+        except Exception:
+            try:
+                content_width = self.history_strip.width()
+            except RuntimeError:
+                return
+        try:
+            available_width = self.history_scroll_area.viewport().width()
+        except Exception:
+            try:
+                available_width = self.history_scroll_area.width()
+            except RuntimeError:
+                return
+        has_overflow = content_width > max(0, available_width)
+        try:
+            self.history_scroll_left.setVisible(has_overflow)
+            self.history_scroll_right.setVisible(has_overflow)
+        except RuntimeError:
+            return
+        if not has_overflow:
+            bar.setValue(0)
+            self.history_scroll_left.setEnabled(False)
+            self.history_scroll_right.setEnabled(False)
+            return
+        self.history_scroll_left.setEnabled(bar.value() > 0)
+        self.history_scroll_right.setEnabled(bar.value() < bar.maximum())
+
+    def _scroll_history(self, delta: int) -> None:
+        try:
+            bar = self.history_scroll_area.horizontalScrollBar()
+        except RuntimeError:
+            return
+        if bar.maximum() <= 0:
+            if not getattr(self, "_history_scroll_retry", False):
+                self._history_scroll_retry = True
+                self._update_history_strip_width()
+                QTimer.singleShot(0, self._sync_history_scroll_range)
+                QTimer.singleShot(0, lambda: self._scroll_history(delta))
+            return
+        self._history_scroll_retry = False
+        step = bar.pageStep()
+        if step <= 0:
+            step = abs(delta)
+        bar.setValue(max(0, min(bar.maximum(), bar.value() + (step if delta > 0 else -step))))
+        self._update_history_scroll_buttons()
+
     def _scroll_bookmarks(self, delta: int) -> None:
         bar = self.bookmark_scroll_area.horizontalScrollBar()
         if bar.maximum() <= 0:
@@ -9425,6 +9567,21 @@ class MainWindow(QMainWindow):
         for path, btn in self.bookmark_buttons.items():
             self._apply_bookmark_button_style(btn, path)
 
+    def _top_nav_hover_style(
+        self,
+        *,
+        hover_fallback: str = "rgba(255,255,255,0.08)",
+        hover_border_fallback: str = "#4A90E2",
+    ) -> str:
+        vault_accent = getattr(self, "_vault_accent_color", None)
+        hover_border = (
+            vault_accent
+            if vault_accent
+            else theme_value("main_window.focus_border.default", hover_border_fallback)
+        )
+        hover_bg = self._hover_bg_for_accent(vault_accent, hover_fallback) if vault_accent else hover_fallback
+        return f"QPushButton:hover {{ border-color: {hover_border}; background: {hover_bg}; }}"
+
     def _apply_bookmark_button_style(self, btn: QPushButton, bookmark_path: str) -> None:
         is_active = bool(self.current_path and bookmark_path == self.current_path)
         is_filtered = self._bookmark_matches_nav_filter(bookmark_path)
@@ -9460,6 +9617,8 @@ class MainWindow(QMainWindow):
         elif is_active:
             style += f" background: {active_bg}; color: {active_text};"
         style += " }"
+        if not is_filtered and not is_active:
+            style += self._top_nav_hover_style()
         btn.setStyleSheet(style)
 
     def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
@@ -9491,15 +9650,77 @@ class MainWindow(QMainWindow):
         if is_active:
             style += f" background: {active_bg}; color: {active_text};"
         style += " }"
+        if not is_active:
+            style += self._top_nav_hover_style()
         btn.setStyleSheet(style)
 
     def _update_active_page_chicklets(self) -> None:
         for path, btn in self.bookmark_buttons.items():
             self._apply_bookmark_button_style(btn, path)
+            if self.current_path and path == self.current_path:
+                self._ensure_bookmark_button_visible(btn)
+                QTimer.singleShot(0, lambda b=btn: self._ensure_bookmark_button_visible(b))
         for btn in self.history_buttons:
             history_path = str(btn.property("history_path") or "")
             if history_path:
                 self._apply_history_button_style(btn, history_path)
+                if self.current_path and history_path == self.current_path:
+                    self._ensure_history_button_visible(btn)
+                    QTimer.singleShot(0, lambda b=btn: self._ensure_history_button_visible(b))
+
+    def _ensure_history_button_visible(self, btn: Optional[QPushButton]) -> None:
+        if btn is None or not getattr(self, "history_scroll_area", None):
+            return
+        try:
+            if getattr(self, "history_layout", None):
+                self.history_layout.activate()
+            if getattr(self, "history_strip", None):
+                self.history_strip.adjustSize()
+            self._sync_history_scroll_range()
+            bar = self.history_scroll_area.horizontalScrollBar()
+            viewport_width = self.history_scroll_area.viewport().width()
+            button_x = btn.geometry().x()
+            button_right = button_x + btn.geometry().width()
+        except RuntimeError:
+            return
+        except Exception:
+            return
+        if viewport_width <= 0:
+            return
+        current_left = bar.value()
+        current_right = current_left + viewport_width
+        margin = 12
+        if button_x - margin < current_left:
+            bar.setValue(max(0, button_x - margin))
+        elif button_right + margin > current_right:
+            bar.setValue(min(bar.maximum(), button_right + margin - viewport_width))
+        self._update_history_scroll_buttons()
+
+    def _ensure_bookmark_button_visible(self, btn: Optional[QPushButton]) -> None:
+        if btn is None or not getattr(self, "bookmark_scroll_area", None):
+            return
+        try:
+            if getattr(self, "bookmark_layout", None):
+                self.bookmark_layout.activate()
+            if getattr(self, "bookmark_strip", None):
+                self.bookmark_strip.adjustSize()
+            self._sync_bookmark_scroll_range()
+            bar = self.bookmark_scroll_area.horizontalScrollBar()
+            viewport_width = self.bookmark_scroll_area.viewport().width()
+            button_x = btn.geometry().x()
+            button_right = button_x + btn.geometry().width()
+        except Exception:
+            return
+        if viewport_width <= 0:
+            return
+        current_left = bar.value()
+        current_right = current_left + viewport_width
+        margin = 12
+        if button_x - margin < current_left:
+            bar.setValue(max(0, button_x - margin))
+        elif button_right + margin > current_right:
+            bar.setValue(min(bar.maximum(), button_right + margin - viewport_width))
+        self._update_bookmark_scroll_buttons()
 
     def _update_bookmark_scroll_buttons(self) -> None:
         if not getattr(self, "bookmark_scroll_area", None):
@@ -9693,15 +9914,20 @@ class MainWindow(QMainWindow):
             self.history_layout.removeWidget(btn)
             btn.deleteLater()
         self.history_buttons.clear()
+        try:
+            self.history_scroll_area.horizontalScrollBar().setValue(0)
+        except Exception:
+            pass
         
         # Get last 25 items from history (most recent last)
         recent_history = self.page_history[-18:] if len(self.page_history) > 18 else self.page_history[:]
 
-        # Remove calendar pages (e.g., /Journal/) from recent history
+        # Keep chicklets aligned to actual recent history, including Journal pages,
+        # even when Journal is hidden in the left navigation.
         filtered_history = [
             p
             for p in recent_history
-            if self._is_history_path_allowed(p) and "/Journal/" not in p and "/journal/" not in p
+            if self._is_history_path_allowed(p)
         ]
 
         # Remove duplicates while preserving order (keep most recent occurrence)
@@ -9715,12 +9941,12 @@ class MainWindow(QMainWindow):
 
         # Add buttons for each history item
         for page_path in unique_history:
-            # Extract page name
-            page_name = Path(page_path).stem
+            page_name = self._history_leaf_label(page_path)
 
             # Create button with border styling
             btn = QPushButton(page_name)
             btn.setProperty("history_path", page_path)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self._apply_history_button_style(btn, page_path)
             btn.setToolTip(path_to_colon(page_path) or page_path)
             btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
@@ -9732,6 +9958,12 @@ class MainWindow(QMainWindow):
 
             # Add to layout
             self.history_layout.addWidget(btn)
+        self._update_history_strip_width()
+        self._sync_history_scroll_range()
+        self._update_history_scroll_buttons()
+        QTimer.singleShot(0, self._update_history_strip_width)
+        QTimer.singleShot(0, self._sync_history_scroll_range)
+        QTimer.singleShot(0, self._update_history_scroll_buttons)
         self._update_active_page_chicklets()
 
     def _open_history_page(self, page_path: str) -> None:
@@ -10771,7 +11003,7 @@ class MainWindow(QMainWindow):
         self._apply_nav_filter_style()
 
     def _add_tree_node(self, parent: QStandardItem, node: dict, seen: Optional[set[str]] = None) -> QStandardItem:
-        item = QStandardItem(node.get("name") or "")
+        item = QStandardItem(self._prettify_page_label(node.get("name") or ""))
         folder_path = node.get("path")
         open_path = node.get("open_path")
         children = node.get("children") or []
@@ -20763,9 +20995,16 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() == QEvent.Resize:
-            if obj in (getattr(self, "bookmark_scroll_area", None), getattr(self, "toolbar", None)):
+            if obj in (
+                getattr(self, "bookmark_scroll_area", None),
+                getattr(self, "history_scroll_area", None),
+                getattr(self, "toolbar", None),
+                getattr(self, "history_bar", None),
+            ):
                 QTimer.singleShot(0, self._sync_bookmark_scroll_range)
                 QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
+                QTimer.singleShot(0, self._sync_history_scroll_range)
+                QTimer.singleShot(0, self._update_history_scroll_buttons)
         if (
             self._homebase_tree_refresh_pending
             and event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.FocusIn)
@@ -21191,10 +21430,17 @@ class MainWindow(QMainWindow):
             parts = [segment for segment in display.split(":") if segment]
             if parts:
                 tail = parts[-1]
-                return tail
+                return self._prettify_page_label(tail)
         normalized = path.lstrip("/")
         leaf = Path(normalized).stem or normalized
-        return leaf
+        return self._prettify_page_label(leaf)
+
+    @staticmethod
+    def _prettify_page_label(label: str) -> str:
+        cleaned = str(label or "").strip()
+        if not cleaned:
+            return ""
+        return cleaned.replace("_", " ")
 
     def _format_journal_history_label(self, path: str) -> Optional[str]:
         try:
@@ -21215,9 +21461,7 @@ class MainWindow(QMainWindow):
             d = int(day_stem)
             from datetime import date
             dt = date(y, m, d)
-            dow = dt.strftime("%a")
-            mon = dt.strftime("%b")
-            return f"{dow} ({d:02d}) - {mon} {y}"
+            return dt.strftime("%d-%b-%y")
         except Exception:
             return None
 

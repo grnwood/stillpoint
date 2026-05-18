@@ -36,6 +36,86 @@ def test_quick_vault_picker_highlights_current_page_in_filtered_mode(main_window
     assert current.data(Qt.UserRole + 2) == "/PageA/Child1/Child1.md"
 
 
+def test_quick_vault_picker_centers_current_page_on_open(main_window, qapp, monkeypatch) -> None:
+    tree_state = [
+        {
+            "name": f"Page{index:02d}",
+            "path": f"/Page{index:02d}",
+            "open_path": f"/Page{index:02d}/Page{index:02d}.md",
+            "children": [],
+        }
+        for index in range(1, 21)
+    ]
+
+    original_get = main_window.http.get
+
+    def fake_get(path, params=None):
+        if path == "/api/vault/tree":
+            from tests.conftest import _TestHttpResponse
+
+            return _TestHttpResponse(
+                payload={"tree": [{"path": "/", "children": [dict(child) for child in tree_state]}], "version": 1},
+                url=f"http://localhost{path}",
+            )
+        if path == "/api/vault/tree/expand-path":
+            from tests.conftest import _TestHttpResponse
+
+            return _TestHttpResponse(
+                payload={"segments": {"/": [dict(child) for child in tree_state]}},
+                url=f"http://localhost{path}",
+            )
+        return original_get(path, params=params)
+
+    monkeypatch.setattr(main_window.http, "get", fake_get)
+    main_window.current_path = "/Page15/Page15.md"
+
+    main_window._show_quick_vault_picker()
+    qapp.processEvents()
+    qapp.processEvents()
+
+    picker = main_window._quick_vault_picker
+    assert picker is not None
+    current = picker.tree.currentIndex()
+    assert current.isValid()
+    rect = picker.tree.visualRect(current)
+    viewport_center_y = picker.tree.viewport().rect().center().y()
+    assert abs(rect.center().y() - viewport_center_y) <= max(24, rect.height())
+
+
+def test_quick_vault_picker_shows_pretty_labels_for_underscored_pages(main_window, qapp, monkeypatch) -> None:
+    tree_state = [
+        {
+            "name": "Roles_And_Stuff",
+            "path": "/Roles_And_Stuff",
+            "open_path": "/Roles_And_Stuff/Roles_And_Stuff.md",
+            "children": [],
+        }
+    ]
+
+    original_get = main_window.http.get
+
+    def fake_get(path, params=None):
+        if path == "/api/vault/tree":
+            from tests.conftest import _TestHttpResponse
+
+            return _TestHttpResponse(
+                payload={"tree": [{"path": "/", "children": [dict(child) for child in tree_state]}], "version": 1},
+                url=f"http://localhost{path}",
+            )
+        return original_get(path, params=params)
+
+    monkeypatch.setattr(main_window.http, "get", fake_get)
+
+    main_window._show_quick_vault_picker()
+    qapp.processEvents()
+
+    picker = main_window._quick_vault_picker
+    assert picker is not None
+    index = picker.tree.model().index(0, 0)
+    assert index.isValid()
+    assert index.data(Qt.DisplayRole) == "Roles And Stuff"
+
+
 def test_quick_vault_picker_activation_uses_normal_open_path(main_window, monkeypatch, qapp) -> None:
     main_window._open_file("/PageA/PageA.md")
     qapp.processEvents()
