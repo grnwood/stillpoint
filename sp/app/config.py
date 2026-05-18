@@ -1700,6 +1700,7 @@ def load_homebase_vault_profiles() -> list[dict[str, Any]]:
         profile["refresh_token"] = str(profile.get("refresh_token") or "")
         profile["store_passphrase"] = bool(profile.get("store_passphrase", False))
         profile["auto_sync"] = bool(profile.get("auto_sync", True))
+        profile["sync_at_startup"] = bool(profile.get("sync_at_startup", True))
         profile["interval_seconds"] = int(profile.get("interval_seconds", 60))
         profile["push_debounce_seconds"] = int(profile.get("push_debounce_seconds", 3))
         profile["max_parallel_transfers"] = int(profile.get("max_parallel_transfers", 6))
@@ -1733,6 +1734,7 @@ def save_homebase_vault_profiles(entries: list[dict[str, Any]]) -> None:
                 "refresh_token": str(raw.get("refresh_token") or ""),
                 "store_passphrase": bool(raw.get("store_passphrase", False)),
                 "auto_sync": bool(raw.get("auto_sync", True)),
+                "sync_at_startup": bool(raw.get("sync_at_startup", True)),
                 "interval_seconds": int(raw.get("interval_seconds", 60)),
                 "push_debounce_seconds": int(raw.get("push_debounce_seconds", 3)),
                 "max_parallel_transfers": int(raw.get("max_parallel_transfers", 6)),
@@ -2103,6 +2105,35 @@ def save_homebase_auto_sync(enabled: bool) -> None:
         conn.execute(
             "REPLACE INTO kv(key, value) VALUES(?, ?)",
             ("homebase_auto_sync", "true" if enabled else "false"),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def load_homebase_sync_at_startup(default: bool = True) -> bool:
+    """Return whether Homebase should sync when the vault opens."""
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'homebase_sync_at_startup'").fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if not row or row[0] is None:
+        return default
+    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_homebase_sync_at_startup(enabled: bool) -> None:
+    """Persist whether Homebase should sync when the vault opens."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute(
+            "REPLACE INTO kv(key, value) VALUES(?, ?)",
+            ("homebase_sync_at_startup", "true" if enabled else "false"),
         )
         conn.commit()
     except sqlite3.OperationalError:

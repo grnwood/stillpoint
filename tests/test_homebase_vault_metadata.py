@@ -62,6 +62,7 @@ def test_save_homebase_vault_profiles_omits_passphrase(monkeypatch, tmp_path) ->
                 "refresh_token": "refresh-token",
                 "passphrase": "secret-passphrase",
                 "store_passphrase": True,
+                "sync_at_startup": False,
             }
         ]
     )
@@ -72,11 +73,13 @@ def test_save_homebase_vault_profiles_omits_passphrase(monkeypatch, tmp_path) ->
     assert stored["access_token"] == "access-token"
     assert stored["refresh_token"] == "refresh-token"
     assert stored["store_passphrase"] is True
+    assert stored["sync_at_startup"] is False
     assert "passphrase" not in stored
 
     loaded = config.load_homebase_vault_profiles()
     assert "passphrase" not in loaded[0]
     assert loaded[0]["store_passphrase"] is True
+    assert loaded[0]["sync_at_startup"] is False
 
 
 def test_apply_homebase_profile_keeps_passphrase_in_session_only(main_window, monkeypatch, tmp_path) -> None:
@@ -97,6 +100,7 @@ def test_apply_homebase_profile_keeps_passphrase_in_session_only(main_window, mo
     monkeypatch.setattr(config, "save_homebase_refresh_token", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_store_passphrase", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_auto_sync", lambda value: None)
+    monkeypatch.setattr(config, "save_homebase_sync_at_startup", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_interval_seconds", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_push_debounce_seconds", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_max_parallel_transfers", lambda value: None)
@@ -122,6 +126,7 @@ def test_apply_homebase_profile_keeps_passphrase_in_session_only(main_window, mo
         "passphrase": "secret-passphrase",
         "store_passphrase": False,
         "auto_sync": True,
+        "sync_at_startup": False,
         "interval_seconds": 60,
         "push_debounce_seconds": 3,
         "max_parallel_transfers": 6,
@@ -155,6 +160,7 @@ def test_apply_homebase_profile_persists_passphrase_when_trusted(main_window, mo
     monkeypatch.setattr(config, "save_homebase_passphrase", lambda value: saved_passphrases.append(value))
     monkeypatch.setattr(config, "load_homebase_passphrase", lambda default="": default)
     monkeypatch.setattr(config, "save_homebase_auto_sync", lambda value: None)
+    monkeypatch.setattr(config, "save_homebase_sync_at_startup", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_interval_seconds", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_push_debounce_seconds", lambda value: None)
     monkeypatch.setattr(config, "save_homebase_max_parallel_transfers", lambda value: None)
@@ -175,6 +181,7 @@ def test_apply_homebase_profile_persists_passphrase_when_trusted(main_window, mo
         "passphrase": "trusted-passphrase",
         "store_passphrase": True,
         "auto_sync": True,
+        "sync_at_startup": True,
         "interval_seconds": 60,
         "push_debounce_seconds": 3,
         "max_parallel_transfers": 6,
@@ -246,6 +253,7 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
     monkeypatch.setattr(config, "save_homebase_passphrase", lambda value: saved_passphrases.append(value))
     monkeypatch.setattr(config, "load_homebase_device_id", lambda default="": "device-123")
     monkeypatch.setattr(config, "load_homebase_auto_sync", lambda default=True: True)
+    monkeypatch.setattr(config, "load_homebase_sync_at_startup", lambda default=True: True)
     monkeypatch.setattr(config, "load_homebase_interval_seconds", lambda default=60: 60)
     monkeypatch.setattr(config, "load_homebase_push_debounce_seconds", lambda default=3: 3)
     monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=6: 6)
@@ -267,6 +275,61 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
     assert saved_passphrases == [""]
     assert main_window._load_homebase_session_passphrase(str(vault_root)) == "prompted-passphrase"
     assert badge_states == ["none"]
+
+
+def test_configure_homebase_sync_skips_startup_sync_when_disabled(main_window, monkeypatch, tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir(parents=True, exist_ok=True)
+
+    class _DummySyncEngine:
+        def __init__(self, cfg) -> None:
+            self.cfg = cfg
+            self.started = False
+            self.synced: list[str] = []
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            return None
+
+        def sync_now(self, reason: str = "manual") -> None:
+            self.synced.append(reason)
+
+        def get_status(self):
+            return None
+
+    monkeypatch.setattr(main_window, "vault_root", str(vault_root))
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window, "_ensure_homebase_watcher", lambda path: None)
+    monkeypatch.setattr(main_window, "_poll_homebase_status", lambda: None)
+    monkeypatch.setattr(main_window, "_refresh_homebase_user_info", lambda: None)
+    monkeypatch.setattr(main_window, "_update_user_management_ui", lambda: None)
+    monkeypatch.setattr(config, "load_homebase_remote_url", lambda default="": "https://server.example")
+    monkeypatch.setattr(config, "load_homebase_auth_token", lambda default="": "access-token")
+    monkeypatch.setattr(config, "load_homebase_refresh_token", lambda default="": "refresh-token")
+    monkeypatch.setattr(config, "load_homebase_vault_id", lambda default="": "vault-123")
+    monkeypatch.setattr(config, "ensure_homebase_vault_id", lambda: "vault-123")
+    monkeypatch.setattr(config, "load_homebase_verify_ssl", lambda default=True: True)
+    monkeypatch.setattr(config, "load_homebase_device_id", lambda default="": "device-123")
+    monkeypatch.setattr(config, "load_homebase_auto_sync", lambda default=True: True)
+    monkeypatch.setattr(config, "load_homebase_sync_at_startup", lambda default=True: False)
+    monkeypatch.setattr(config, "load_homebase_interval_seconds", lambda default=60: 60)
+    monkeypatch.setattr(config, "load_homebase_push_debounce_seconds", lambda default=3: 3)
+    monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=6: 6)
+    monkeypatch.setattr(main_window, "_homebase_local_ui_token_for_url", lambda remote_url: "")
+    monkeypatch.setattr(main_window, "_store_homebase_tokens", lambda access, refresh=None: None)
+    monkeypatch.setattr(main_window, "_load_homebase_session_passphrase", lambda vault_root=None: "prompted-passphrase")
+
+    import sp.app.ui.main_window as main_window_module
+
+    monkeypatch.setattr(main_window_module, "HomebaseSyncEngine", _DummySyncEngine)
+
+    main_window._configure_homebase_sync_for_vault()
+
+    assert isinstance(main_window._homebase_sync_engine, _DummySyncEngine)
+    assert main_window._homebase_sync_engine.started is True
+    assert main_window._homebase_sync_engine.synced == []
 
 
 def test_trigger_homebase_sync_now_reconfigures_engine_before_manual_sync(main_window, monkeypatch, tmp_path) -> None:

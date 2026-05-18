@@ -4767,6 +4767,7 @@ class MainWindow(QMainWindow):
             else:
                 config.save_homebase_passphrase("")
             config.save_homebase_auto_sync(bool(profile.get("auto_sync", True)))
+            config.save_homebase_sync_at_startup(bool(profile.get("sync_at_startup", True)))
             config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
             config.save_homebase_push_debounce_seconds(int(profile.get("push_debounce_seconds", 3)))
             config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 6)))
@@ -5993,7 +5994,7 @@ class MainWindow(QMainWindow):
             self._homebase_status_poll_timer.setInterval(1000)
             self._homebase_status_poll_timer.timeout.connect(self._poll_homebase_status)
             self._homebase_status_poll_timer.start()
-            if cfg.auto_sync:
+            if config.load_homebase_sync_at_startup():
                 self._homebase_sync_engine.sync_now("vault open")
             self._poll_homebase_status()
             self._update_homebase_sync_action_state()
@@ -6741,6 +6742,7 @@ class MainWindow(QMainWindow):
     def _persist_homebase_sync_settings_to_profile(
         self,
         auto_sync: bool,
+        sync_at_startup: bool,
         interval_seconds: int,
         push_debounce_seconds: int,
         max_parallel_transfers: int,
@@ -6765,6 +6767,7 @@ class MainWindow(QMainWindow):
             if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
                 continue
             profile["auto_sync"] = bool(auto_sync)
+            profile["sync_at_startup"] = bool(sync_at_startup)
             profile["interval_seconds"] = int(interval_seconds)
             profile["push_debounce_seconds"] = int(push_debounce_seconds)
             profile["max_parallel_transfers"] = int(max_parallel_transfers)
@@ -7108,11 +7111,13 @@ class MainWindow(QMainWindow):
         try:
             self._ensure_config_active_vault_context()
             auto_sync = bool(config.load_homebase_auto_sync())
+            sync_at_startup = bool(config.load_homebase_sync_at_startup())
             interval_seconds = int(config.load_homebase_interval_seconds())
             push_debounce_seconds = int(config.load_homebase_push_debounce_seconds())
             max_parallel_transfers = int(config.load_homebase_max_parallel_transfers())
         except Exception:
             auto_sync = True
+            sync_at_startup = True
             interval_seconds = 60
             push_debounce_seconds = 3
             max_parallel_transfers = 6
@@ -7193,6 +7198,10 @@ class MainWindow(QMainWindow):
         auto_sync_cb.setChecked(auto_sync)
         settings_layout.addRow("Auto Sync:", auto_sync_cb)
 
+        startup_sync_cb = QCheckBox("Sync at startup")
+        startup_sync_cb.setChecked(sync_at_startup)
+        settings_layout.addRow("Startup Sync:", startup_sync_cb)
+
         interval_spin = QSpinBox()
         interval_spin.setRange(5, 86400)
         interval_spin.setValue(max(5, interval_seconds))
@@ -7242,15 +7251,18 @@ class MainWindow(QMainWindow):
             try:
                 self._ensure_config_active_vault_context()
                 new_auto_sync = bool(auto_sync_cb.isChecked())
+                new_sync_at_startup = bool(startup_sync_cb.isChecked())
                 new_interval = int(interval_spin.value())
                 new_debounce = int(debounce_spin.value())
                 new_parallel = int(max_parallel_spin.value())
                 config.save_homebase_auto_sync(new_auto_sync)
+                config.save_homebase_sync_at_startup(new_sync_at_startup)
                 config.save_homebase_interval_seconds(new_interval)
                 config.save_homebase_push_debounce_seconds(new_debounce)
                 config.save_homebase_max_parallel_transfers(new_parallel)
                 self._persist_homebase_sync_settings_to_profile(
                     auto_sync=new_auto_sync,
+                    sync_at_startup=new_sync_at_startup,
                     interval_seconds=new_interval,
                     push_debounce_seconds=new_debounce,
                     max_parallel_transfers=new_parallel,
