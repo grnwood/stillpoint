@@ -5,14 +5,15 @@ from typing import Callable, Optional
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QKeyEvent, QColor, QImage, QTextCursor
+from PySide6.QtCore import QEvent, QPoint, Qt, Signal
+from PySide6.QtGui import QKeyEvent, QColor, QImage, QMouseEvent, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QTextEdit,
     QVBoxLayout,
     QGraphicsDropShadowEffect,
@@ -211,16 +212,14 @@ class QuickCaptureOverlay(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Quick Capture")
-        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setModal(False)
         self._on_capture = on_capture
         self._subtitle = subtitle
         self._vault_options = vault_options or []
         self._selected_vault = selected_vault
         self._attachments: list[dict] = []
-        self._focus_timer = QTimer(self)
-        self._focus_timer.setInterval(150)
-        self._focus_timer.timeout.connect(self._ensure_input_focus)
+        self._drag_origin: Optional[QPoint] = None
         self._build_ui()
         self.setMinimumWidth(700)
         try:
@@ -259,6 +258,42 @@ class QuickCaptureOverlay(QDialog):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        self.drag_handle = QLabel("Quick Capture", card)
+        self.drag_handle.setObjectName("QuickCaptureDragHandle")
+        self.drag_handle.setCursor(Qt.OpenHandCursor)
+        self.drag_handle.setStyleSheet(
+            "color: "
+            f"{theme_value('quick_capture.title.color', '#dfe6fa')}; "
+            "font-size: "
+            f"{theme_value('quick_capture.title.size_px', 12)}px; "
+            "font-weight: 600; letter-spacing: 0.04em;"
+        )
+        self.drag_handle.installEventFilter(self)
+        header.addWidget(self.drag_handle, 1)
+        dismiss_btn = QPushButton("Cancel", card)
+        dismiss_btn.clicked.connect(self.reject)
+        dismiss_btn.setCursor(Qt.PointingHandCursor)
+        dismiss_btn.setStyleSheet(
+            "QPushButton {"
+            "  color: "
+            f"{theme_value('quick_capture.dismiss.text', '#dfe6fa')};"
+            "  background: transparent;"
+            "  border: 1px solid "
+            f"{theme_value('quick_capture.dismiss.border', 'rgba(255, 255, 255, 0.28)')};"
+            "  border-radius: 6px;"
+            "  padding: 4px 10px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: "
+            f"{theme_value('quick_capture.dismiss.hover_bg', 'rgba(255, 255, 255, 0.08)')};"
+            "}"
+        )
+        header.addWidget(dismiss_btn, 0, Qt.AlignRight)
+        layout.addLayout(header)
 
         self.input = QuickCaptureInput(card)
         self.input.setMinimumHeight(90)
@@ -342,26 +377,29 @@ class QuickCaptureOverlay(QDialog):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
-        self._ensure_input_focus()
-        self._focus_timer.start()
         self._sync_attachment_width()
-
-    def hideEvent(self, event) -> None:  # type: ignore[override]
-        self._focus_timer.stop()
-        super().hideEvent(event)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._sync_attachment_width()
 
-    def _ensure_input_focus(self) -> None:
-        if not self.isVisible():
-            return
-        if self.input.hasFocus():
-            return
-        self.raise_()
-        self.activateWindow()
-        self.input.setFocus()
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self.drag_handle and isinstance(event, QMouseEvent):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self.drag_handle.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return True
+            if event.type() == QEvent.MouseMove and self._drag_origin is not None:
+                self.move(event.globalPosition().toPoint() - self._drag_origin)
+                event.accept()
+                return True
+            if event.type() == QEvent.MouseButtonRelease and self._drag_origin is not None:
+                self._drag_origin = None
+                self.drag_handle.setCursor(Qt.OpenHandCursor)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def _on_vault_changed(self) -> None:
         if not hasattr(self, "vault_combo"):
