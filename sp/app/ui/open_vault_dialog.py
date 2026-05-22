@@ -43,9 +43,9 @@ from sp.server.adapters.files import PAGE_SUFFIX
 
 def _select_directory(parent, title: str, start_dir: str) -> str:
     """Use Qt's non-native directory picker on Linux to avoid blank portal dialogs."""
-    options = 0
+    options = QFileDialog.Option(0)
     if sys.platform.startswith("linux"):
-        options |= getattr(QFileDialog.DontUseNativeDialog, "value", QFileDialog.DontUseNativeDialog)
+        options |= QFileDialog.DontUseNativeDialog
     return QFileDialog.getExistingDirectory(parent, title, start_dir, options=options)
 
 

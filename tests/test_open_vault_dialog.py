@@ -226,7 +226,8 @@ def test_select_directory_uses_non_native_dialog_on_linux(monkeypatch) -> None:
     assert captured["title"] == "Select Vault Folder"
     assert captured["start_dir"] == "/tmp"
     dont_use_native = getattr(QFileDialog.DontUseNativeDialog, "value", QFileDialog.DontUseNativeDialog)
-    assert int(captured["options"]) & int(dont_use_native)
+    options_value = getattr(captured["options"], "value", captured["options"])
+    assert int(options_value) & int(dont_use_native)
 
 
 def test_add_vault_detects_homebase_metadata_and_routes_to_homebase_setup(qtbot, monkeypatch, tmp_path) -> None:
