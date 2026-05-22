@@ -4774,7 +4774,7 @@ class MainWindow(QMainWindow):
             config.save_homebase_sync_at_startup(bool(profile.get("sync_at_startup", True)))
             config.save_homebase_interval_seconds(int(profile.get("interval_seconds", 60)))
             config.save_homebase_push_debounce_seconds(int(profile.get("push_debounce_seconds", 3)))
-            config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 6)))
+            config.save_homebase_max_parallel_transfers(int(profile.get("max_parallel_transfers", 3)))
             if profile_path:
                 config.save_homebase_vault_metadata(profile_path, profile)
             self._homebase_user_info_loaded = False
@@ -7124,7 +7124,7 @@ class MainWindow(QMainWindow):
             sync_at_startup = True
             interval_seconds = 60
             push_debounce_seconds = 3
-            max_parallel_transfers = 6
+            max_parallel_transfers = 3
 
         vault_id = ""
         try:
@@ -7163,7 +7163,9 @@ class MainWindow(QMainWindow):
             row += 1
 
         info_layout.addWidget(QLabel("State:"), row, 0, Qt.AlignTop)
-        info_layout.addWidget(QLabel(status.state), row, 1)
+        state_value = QLabel(status.state)
+        state_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(state_value, row, 1)
         row += 1
         info_layout.addWidget(QLabel("Summary:"), row, 0, Qt.AlignTop)
         summary_label = QLabel(status.summary)
@@ -7172,25 +7174,52 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(summary_label, row, 1)
         row += 1
         info_layout.addWidget(QLabel("Conflicts:"), row, 0, Qt.AlignTop)
-        info_layout.addWidget(QLabel(str(status.conflicts)), row, 1)
+        conflicts_value = QLabel(str(status.conflicts))
+        conflicts_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(conflicts_value, row, 1)
         row += 1
         info_layout.addWidget(QLabel("Pending:"), row, 0, Qt.AlignTop)
-        info_layout.addWidget(QLabel("Yes" if status.pending else "No"), row, 1)
+        pending_value = QLabel("Yes" if status.pending else "No")
+        pending_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(pending_value, row, 1)
         row += 1
-        if status.last_sync_at:
-            info_layout.addWidget(QLabel("Last Sync:"), row, 0, Qt.AlignTop)
-            last_sync_label = QLabel(self._format_homebase_sync_local(status.last_sync_at))
-            last_sync_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            info_layout.addWidget(last_sync_label, row, 1)
-            row += 1
-        if status.last_error:
-            info_layout.addWidget(QLabel("Last Error:"), row, 0, Qt.AlignTop)
-            error_label = QLabel(status.last_error)
-            error_label.setWordWrap(True)
-            error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            info_layout.addWidget(error_label, row, 1)
+        info_layout.addWidget(QLabel("Uploads Remaining:"), row, 0, Qt.AlignTop)
+        uploads_value = QLabel(str(int(getattr(status, "pending_uploads", 0) or 0)))
+        uploads_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(uploads_value, row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Downloads Remaining:"), row, 0, Qt.AlignTop)
+        downloads_value = QLabel(str(int(getattr(status, "pending_downloads", 0) or 0)))
+        downloads_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(downloads_value, row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Last Sync:"), row, 0, Qt.AlignTop)
+        last_sync_label = QLabel(
+            self._format_homebase_sync_local(status.last_sync_at) if status.last_sync_at else "Not yet"
+        )
+        last_sync_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(last_sync_label, row, 1)
+        row += 1
+        info_layout.addWidget(QLabel("Last Error:"), row, 0, Qt.AlignTop)
+        error_label = QLabel(status.last_error or "None")
+        error_label.setWordWrap(True)
+        error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addWidget(error_label, row, 1)
 
         layout.addWidget(info_box)
+
+        transfers_box = QFrame()
+        transfers_box.setFrameShape(QFrame.StyledPanel)
+        transfers_layout = QVBoxLayout(transfers_box)
+        transfers_layout.setContentsMargins(12, 12, 12, 12)
+        transfers_layout.setSpacing(8)
+        transfers_title = QLabel("Transfer workers")
+        transfers_title.setStyleSheet("font-weight: 600;")
+        transfers_layout.addWidget(transfers_title)
+        transfers_list = QListWidget()
+        transfers_list.setAlternatingRowColors(True)
+        transfers_layout.addWidget(transfers_list)
+        layout.addWidget(transfers_box)
 
         settings_box = QFrame()
         settings_box.setFrameShape(QFrame.StyledPanel)
@@ -7236,10 +7265,8 @@ class MainWindow(QMainWindow):
         sync_now_btn = QPushButton("Sync Now")
         reset_auth_btn = QPushButton("Reset Auth")
         reset_passphrase_btn = QPushButton("Reset Encryption Passphrase")
-        conflicts_btn = None
-        if status.conflicts > 0 and self._homebase_sync_engine:
-            conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
-            button_row.addWidget(conflicts_btn)
+        conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
+        button_row.addWidget(conflicts_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
 
@@ -7287,8 +7314,39 @@ class MainWindow(QMainWindow):
         sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
         reset_auth_btn.clicked.connect(self._reset_homebase_auth)
         reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
-        if conflicts_btn is not None:
-            conflicts_btn.clicked.connect(_view_conflicts)
+        conflicts_btn.clicked.connect(_view_conflicts)
+
+        def _refresh_dialog_status() -> None:
+            current = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+            if current is None:
+                current = status
+            state_value.setText(str(current.state or "idle"))
+            summary_label.setText(str(current.summary or "Idle"))
+            conflicts_value.setText(str(int(getattr(current, "conflicts", 0) or 0)))
+            pending_value.setText("Yes" if bool(getattr(current, "pending", False)) else "No")
+            uploads_value.setText(str(int(getattr(current, "pending_uploads", 0) or 0)))
+            downloads_value.setText(str(int(getattr(current, "pending_downloads", 0) or 0)))
+            last_sync_label.setText(
+                self._format_homebase_sync_local(current.last_sync_at) if current.last_sync_at else "Not yet"
+            )
+            error_label.setText(str(current.last_error or "None"))
+            conflicts_btn.setText(f"View Conflicts ({int(getattr(current, 'conflicts', 0) or 0)})")
+            conflicts_btn.setEnabled(bool(self._homebase_sync_engine) and int(getattr(current, "conflicts", 0) or 0) > 0)
+
+            transfers = list(getattr(current, "transfer_workers", []) or [])
+            transfers_list.clear()
+            if transfers:
+                for idx, item in enumerate(transfers, start=1):
+                    transfers_list.addItem(f"Worker {idx}: {item}")
+            else:
+                transfers_list.addItem("No active transfer workers.")
+
+        refresh_timer = QTimer(dialog)
+        refresh_timer.setInterval(250)
+        refresh_timer.timeout.connect(_refresh_dialog_status)
+        refresh_timer.start()
+        dialog.finished.connect(lambda _result: refresh_timer.stop())
+        _refresh_dialog_status()
 
         dialog.exec()
 

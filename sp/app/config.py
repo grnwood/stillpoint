@@ -1703,7 +1703,7 @@ def load_homebase_vault_profiles() -> list[dict[str, Any]]:
         profile["sync_at_startup"] = bool(profile.get("sync_at_startup", True))
         profile["interval_seconds"] = int(profile.get("interval_seconds", 60))
         profile["push_debounce_seconds"] = int(profile.get("push_debounce_seconds", 3))
-        profile["max_parallel_transfers"] = int(profile.get("max_parallel_transfers", 6))
+        profile["max_parallel_transfers"] = int(profile.get("max_parallel_transfers", 3))
         result.append(profile)
     return result
 
@@ -1737,7 +1737,7 @@ def save_homebase_vault_profiles(entries: list[dict[str, Any]]) -> None:
                 "sync_at_startup": bool(raw.get("sync_at_startup", True)),
                 "interval_seconds": int(raw.get("interval_seconds", 60)),
                 "push_debounce_seconds": int(raw.get("push_debounce_seconds", 3)),
-                "max_parallel_transfers": int(raw.get("max_parallel_transfers", 6)),
+                "max_parallel_transfers": int(raw.get("max_parallel_transfers", 3)),
             }
         )
     _update_global_config({"homebase_vaults": sanitized})
@@ -2160,7 +2160,7 @@ def save_homebase_push_debounce_seconds(seconds: int) -> None:
     _save_vault_int_setting("homebase_push_debounce_seconds", max(1, int(seconds)))
 
 
-def load_homebase_max_parallel_transfers(default: int = 6) -> int:
+def load_homebase_max_parallel_transfers(default: int = 3) -> int:
     """Return Homebase transfer concurrency limit."""
     return _load_vault_int_setting("homebase_max_parallel_transfers", default=default, minimum=1)
 

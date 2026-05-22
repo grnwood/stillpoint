@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -145,6 +146,37 @@ class TestImageSyncPull:
             assert img_path.exists(), f"Image {img_path.name} missing on Device B"
             assert img_path.read_bytes() == data
 
+    def test_pull_reports_live_download_worker_state(self, tmp_path):
+        """Pull status should expose remaining downloads and current worker action."""
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        page = vault_a / "Notes" / "Page.md"
+        page.parent.mkdir(parents=True)
+        page.write_text("# Hello\n", encoding="utf-8")
+
+        cfg_a = _make_cfg(vault_a)
+        engine_a = HomebaseSyncEngine(cfg_a)
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        statuses = []
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b, status_callback=statuses.append)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        engine_b._apply_remote_checkpoint(client, key, checkpoint_id)
+
+        assert any(int(getattr(status, "pending_downloads", 0) or 0) > 0 for status in statuses)
+        assert any(
+            any(
+                ("GET " in str(worker_state or "")) or ("WRITE " in str(worker_state or ""))
+                for worker_state in (getattr(status, "transfer_workers", []) or [])
+            )
+            for status in statuses
+        )
+
     def test_pull_continues_after_single_object_download_failure(self, tmp_path):
         """If one object is missing on the server, the remaining entries
         should still be downloaded rather than aborting the entire pull."""
@@ -212,6 +244,61 @@ class TestImageSyncPull:
 
         assert second_oid == first_oid
         assert len(client.objects) == 1
+
+    def test_sync_once_uploads_objects_in_parallel(self, tmp_path, monkeypatch):
+        """Initial uploads should use multiple workers when configured."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        for idx in range(8):
+            (vault / f"Page{idx}.md").write_text(f"content {idx}\n", encoding="utf-8")
+
+        cfg = _make_cfg(vault, max_parallel_transfers=4)
+        seen_statuses = []
+        engine = HomebaseSyncEngine(cfg, status_callback=seen_statuses.append)
+
+        class ParallelClient:
+            def __init__(self) -> None:
+                self.objects: dict[str, bytes] = {}
+                self.manifests: dict[str, bytes] = {}
+                self.latest_checkpoint: str | None = None
+                self.active_heads = 0
+                self.max_active_heads = 0
+                self.lock = threading.Lock()
+
+            def get_latest(self) -> dict:
+                return {}
+
+            def has_object(self, object_id: str) -> bool:
+                with self.lock:
+                    self.active_heads += 1
+                    self.max_active_heads = max(self.max_active_heads, self.active_heads)
+                time.sleep(0.03)
+                with self.lock:
+                    self.active_heads -= 1
+                return object_id in self.objects
+
+            def put_object(self, object_id: str, data: bytes) -> None:
+                self.objects[object_id] = data
+
+            def put_manifest(self, manifest_id: str, data: bytes) -> None:
+                self.manifests[manifest_id] = data
+
+            def put_latest(self, checkpoint_id: str) -> None:
+                self.latest_checkpoint = checkpoint_id
+
+            def close(self) -> None:
+                pass
+
+        client = ParallelClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **kwargs: client)
+
+        engine._sync_once()
+
+        assert client.latest_checkpoint is not None
+        assert len(client.objects) == 8
+        assert client.max_active_heads > 1
+        assert any(int(getattr(status, "pending_uploads", 0) or 0) > 0 for status in seen_statuses)
+        assert any(len(getattr(status, "transfer_workers", []) or []) > 1 for status in seen_statuses)
 
 
 class TestCachedObjectVerification:

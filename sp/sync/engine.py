@@ -7,6 +7,8 @@ import threading
 import time
 import calendar
 import string
+from queue import SimpleQueue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -91,6 +93,7 @@ class HomebaseSyncStatus:
     conflicts: int = 0
     pending_uploads: int = 0
     pending_downloads: int = 0
+    transfer_workers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -107,7 +110,7 @@ class HomebaseSyncConfig:
     auto_sync: bool = True
     interval_seconds: int = 60
     push_debounce_seconds: int = 3
-    max_parallel_transfers: int = 6
+    max_parallel_transfers: int = 3
     token_update_callback: Optional[Callable[[str, str], None]] = None
 
 
@@ -421,6 +424,18 @@ class HomebaseSyncEngine:
             },
         )
 
+    def _set_transfer_workers(self, workers: list[str]) -> None:
+        self._set_status_locked(transfer_workers=list(workers))
+
+    def _update_transfer_worker(self, slot_index: int, message: str) -> None:
+        with self._status_lock:
+            workers = list(getattr(self._status, "transfer_workers", []) or [])
+            while len(workers) <= slot_index:
+                workers.append("Idle")
+            workers[slot_index] = str(message or "").strip() or "Idle"
+            self._status.transfer_workers = workers
+        self._emit_status()
+
     def _emit_status(self) -> None:
         if not self.status_callback:
             return
@@ -502,7 +517,15 @@ class HomebaseSyncEngine:
             if self._ignore_backoff_once:
                 ignore_backoff = True
                 self._ignore_backoff_once = False
-        self._set_status_locked(state="syncing", summary="Syncing...", pending=False, last_error=None)
+        self._set_status_locked(
+            state="syncing",
+            summary="Syncing...",
+            pending=False,
+            last_error=None,
+            transfer_workers=[],
+            pending_uploads=0,
+            pending_downloads=0,
+        )
         _log(f"sync started ignore_backoff={ignore_backoff}")
         state = _read_json(self._state_path, self._default_state())
         hb = state.setdefault("homebase", {})
@@ -521,6 +544,9 @@ class HomebaseSyncEngine:
                         state="offline",
                         summary="Offline (retry backoff)",
                         pending=False,
+                        transfer_workers=[],
+                        pending_uploads=0,
+                        pending_downloads=0,
                     )
                     _log(
                         f"sync deferred by backoff_until={backoff_until} "
@@ -595,6 +621,9 @@ class HomebaseSyncEngine:
                     summary=summary,
                     last_sync_at=last_sync_at,
                     conflicts=conflicts,
+                    transfer_workers=[],
+                    pending_uploads=0,
+                    pending_downloads=0,
                 )
                 _log(
                     f"push skipped (no local changes) "
@@ -622,6 +651,7 @@ class HomebaseSyncEngine:
             # requests for every unchanged file would be wasteful.
             needs_cache_verify = not hb.get("last_pushed_checkpoint_id") or int(hb.get("error_count", 0)) > 0
             verified_missing = 0
+            upload_jobs: list[tuple[str, str, bytes]] = []
             for rel_path, meta in manifest.get("entries", {}).items():
                 if not isinstance(meta, dict):
                     continue
@@ -666,11 +696,62 @@ class HomebaseSyncEngine:
                 envelope = encrypt_bytes(key, plaintext)
                 object_id = object_id_from_ciphertext(envelope)
                 meta["object_id"] = object_id
-                if not client.has_object(object_id):
-                    client.put_object(object_id, envelope)
-                    upload_count += 1
-                else:
-                    existing_count += 1
+                upload_jobs.append((rel_key, object_id, envelope))
+
+            if upload_jobs:
+                max_workers = max(1, int(self.cfg.max_parallel_transfers or 1))
+                worker_count = min(max_workers, len(upload_jobs))
+                available_slots: SimpleQueue[int] = SimpleQueue()
+                for slot_index in range(worker_count):
+                    available_slots.put(slot_index)
+
+                self._set_status_locked(
+                    summary=f"Uploading {len(upload_jobs)} object(s)...",
+                    pending_uploads=len(upload_jobs),
+                    transfer_workers=["Idle"] * worker_count,
+                )
+
+                def _run_upload(rel_key: str, object_id: str, envelope: bytes) -> bool:
+                    slot_index = available_slots.get()
+                    try:
+                        self._update_transfer_worker(slot_index, f"HEAD {rel_key}")
+                        if client.has_object(object_id):
+                            return False
+                        self._update_transfer_worker(slot_index, f"PUT {rel_key}")
+                        client.put_object(object_id, envelope)
+                        return True
+                    finally:
+                        self._update_transfer_worker(slot_index, "Idle")
+                        available_slots.put(slot_index)
+
+                with ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="homebase-put",
+                ) as executor:
+                    future_map = {
+                        executor.submit(_run_upload, rel_key, object_id, envelope): (rel_key, object_id)
+                        for rel_key, object_id, envelope in upload_jobs
+                    }
+                    remaining_uploads = len(upload_jobs)
+                    for future in as_completed(future_map):
+                        uploaded = future.result()
+                        if uploaded:
+                            upload_count += 1
+                        else:
+                            existing_count += 1
+                        remaining_uploads = max(0, remaining_uploads - 1)
+                        self._set_status_locked(
+                            summary=(
+                                f"Uploading {remaining_uploads} object(s) remaining..."
+                                if remaining_uploads
+                                else "Publishing manifest..."
+                            ),
+                            pending_uploads=remaining_uploads,
+                        )
+                _log(
+                    f"object upload phase complete workers={worker_count} "
+                    f"queued={len(upload_jobs)} uploaded={upload_count} existing={existing_count}"
+                )
 
             manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
             checkpoint_id = _manifest_id_bytes(manifest_bytes)
@@ -707,6 +788,7 @@ class HomebaseSyncEngine:
                     conflicts=conflicts,
                     pending_uploads=0,
                     pending_downloads=0,
+                    transfer_workers=[],
                 )
                 _log(
                     "push skipped (object map unchanged)"
@@ -746,6 +828,7 @@ class HomebaseSyncEngine:
                 conflicts=conflicts,
                 pending_uploads=0,
                 pending_downloads=0,
+                transfer_workers=[],
             )
             _log(f"sync complete, uploaded={upload_count}, conflicts={conflicts}")
             if conflicts > 0:
@@ -778,6 +861,9 @@ class HomebaseSyncEngine:
                 state="offline",
                 summary=summary,
                 last_error=str(exc),
+                transfer_workers=[],
+                pending_uploads=0,
+                pending_downloads=0,
             )
             _log(
                 f"sync failed: {exc} "
@@ -800,6 +886,9 @@ class HomebaseSyncEngine:
                 state="offline",
                 summary=summary,
                 last_error=str(exc),
+                transfer_workers=[],
+                pending_uploads=0,
+                pending_downloads=0,
             )
             _log(
                 f"sync failed: {exc} "
@@ -908,6 +997,20 @@ class HomebaseSyncEngine:
         conflicts = 0
         download_errors = 0
         cache = local_object_cache or {}
+        relevant_entries = [
+            (rel, meta)
+            for rel, meta in entries.items()
+            if isinstance(meta, dict)
+            and not str(rel).startswith(".stillpoint/")
+            and meta.get("object_id")
+        ]
+        remaining_downloads = len(relevant_entries)
+        if remaining_downloads:
+            self._set_status_locked(
+                summary=f"Pulling {remaining_downloads} object(s)...",
+                pending_downloads=remaining_downloads,
+                transfer_workers=["Idle"],
+            )
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
                 continue
@@ -929,14 +1032,35 @@ class HomebaseSyncEngine:
             ):
                 unchanged += 1
                 skipped_cached += 1
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
                 continue
             try:
+                self._update_transfer_worker(0, f"GET {rel_key}")
                 ciphertext = client.get_object(str(object_id))
             except (httpx.HTTPStatusError, httpx.HTTPError, OSError) as dl_exc:
                 # Don't abort the entire pull for a single missing object.
                 # Remove from pulled_cache so the next sync cycle retries.
                 pulled_cache.pop(rel_key, None)
                 download_errors += 1
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
                 _log(
                     f"pull decision=download-error path={rel} "
                     f"object_id={object_id_text} error={dl_exc}"
@@ -951,9 +1075,20 @@ class HomebaseSyncEngine:
             downloaded += 1
             remote_mtime = int(meta.get("mtime", 0) or 0)
             if not local_path.exists():
+                self._update_transfer_worker(0, f"WRITE {rel_key}")
                 write_bytes_atomic(local_path, plaintext)
                 written_new += 1
                 applied_paths.append(str(rel))
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
                 _log(
                     f"pull decision=new-file path={rel} remote_mtime={remote_mtime} "
                     f"remote_checkpoint={checkpoint_id} remote_device={remote_device_id}"
@@ -968,9 +1103,20 @@ class HomebaseSyncEngine:
             _, local_mtime = stat_file(local_path)
             local_mtime_i = int(local_mtime)
             if remote_mtime > 0 and remote_mtime >= int(local_mtime):
+                self._update_transfer_worker(0, f"WRITE {rel_key}")
                 write_bytes_atomic(local_path, plaintext)
                 overwritten += 1
                 applied_paths.append(str(rel))
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
                 _log(
                     f"pull decision=overwrite-lww path={rel} local_mtime={local_mtime_i} "
                     f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
@@ -985,9 +1131,20 @@ class HomebaseSyncEngine:
                     f"remote_device={remote_device_id}"
                 )
                 unchanged += 1
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
                 continue
             conflict_rel = conflict_copy_path(rel_key, remote_device_id)
             conflict_path = self.cfg.vault_root / conflict_rel
+            self._update_transfer_worker(0, f"WRITE {conflict_rel}")
             write_bytes_atomic(conflict_path, plaintext)
             applied_paths.append(str(conflict_rel))
             reason = "local_newer_than_remote" if remote_mtime > 0 else "remote_mtime_missing"
@@ -1007,6 +1164,21 @@ class HomebaseSyncEngine:
                 reason=reason,
             )
             conflicts += 1
+            remaining_downloads = max(0, remaining_downloads - 1)
+            self._set_status_locked(
+                summary=(
+                    f"Pulling {remaining_downloads} object(s)..."
+                    if remaining_downloads
+                    else "Applying pulled files..."
+                ),
+                pending_downloads=remaining_downloads,
+                transfer_workers=["Idle"],
+            )
+        self._set_status_locked(
+            pending_downloads=0,
+            transfer_workers=[],
+            summary="Scanning local changes...",
+        )
         _log(
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "

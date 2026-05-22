@@ -129,7 +129,7 @@ def test_apply_homebase_profile_keeps_passphrase_in_session_only(main_window, mo
         "sync_at_startup": False,
         "interval_seconds": 60,
         "push_debounce_seconds": 3,
-        "max_parallel_transfers": 6,
+        "max_parallel_transfers": 3,
     }
 
     main_window._apply_homebase_profile(profile)
@@ -184,7 +184,7 @@ def test_apply_homebase_profile_persists_passphrase_when_trusted(main_window, mo
         "sync_at_startup": True,
         "interval_seconds": 60,
         "push_debounce_seconds": 3,
-        "max_parallel_transfers": 6,
+        "max_parallel_transfers": 3,
     }
 
     main_window._apply_homebase_profile(profile)
@@ -256,7 +256,7 @@ def test_configure_homebase_sync_prompts_for_missing_passphrase(main_window, mon
     monkeypatch.setattr(config, "load_homebase_sync_at_startup", lambda default=True: True)
     monkeypatch.setattr(config, "load_homebase_interval_seconds", lambda default=60: 60)
     monkeypatch.setattr(config, "load_homebase_push_debounce_seconds", lambda default=3: 3)
-    monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=6: 6)
+    monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=3: 3)
     monkeypatch.setattr(main_window, "_homebase_local_ui_token_for_url", lambda remote_url: "")
     monkeypatch.setattr(main_window, "_store_homebase_tokens", lambda access, refresh=None: None)
 
@@ -316,7 +316,7 @@ def test_configure_homebase_sync_skips_startup_sync_when_disabled(main_window, m
     monkeypatch.setattr(config, "load_homebase_sync_at_startup", lambda default=True: False)
     monkeypatch.setattr(config, "load_homebase_interval_seconds", lambda default=60: 60)
     monkeypatch.setattr(config, "load_homebase_push_debounce_seconds", lambda default=3: 3)
-    monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=6: 6)
+    monkeypatch.setattr(config, "load_homebase_max_parallel_transfers", lambda default=3: 3)
     monkeypatch.setattr(main_window, "_homebase_local_ui_token_for_url", lambda remote_url: "")
     monkeypatch.setattr(main_window, "_store_homebase_tokens", lambda access, refresh=None: None)
     monkeypatch.setattr(main_window, "_load_homebase_session_passphrase", lambda vault_root=None: "prompted-passphrase")

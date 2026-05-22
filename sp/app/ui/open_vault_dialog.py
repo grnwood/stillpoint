@@ -420,7 +420,7 @@ class AddHomebaseVaultDialog(QDialog):
             "auto_sync": True,
             "interval_seconds": 60,
             "push_debounce_seconds": 3,
-            "max_parallel_transfers": 6,
+            "max_parallel_transfers": 3,
         }
         super().accept()
 
