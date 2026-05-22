@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from argon2.low_level import Type, hash_secret_raw
 from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
@@ -12,6 +11,7 @@ from nacl.bindings import (
 
 _ENVELOPE_MAGIC = b"SPHB1"
 _KEY_BYTES = 32
+_NONCE_PERSONALIZATION = b"sphb-nonce-v1"
 
 
 def derive_key_from_passphrase(passphrase: str, vault_id: str) -> bytes:
@@ -30,7 +30,16 @@ def derive_key_from_passphrase(passphrase: str, vault_id: str) -> bytes:
 
 
 def encrypt_bytes(key: bytes, plaintext: bytes) -> bytes:
-    nonce = os.urandom(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES)
+    # Use a keyed deterministic nonce so repeated uploads of unchanged files
+    # produce the same ciphertext envelope and therefore the same object id.
+    # This intentionally reveals plaintext equality within a vault, which the
+    # object store already exposes by deduping on object id.
+    nonce = hashlib.blake2b(
+        plaintext,
+        digest_size=crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
+        key=key,
+        person=_NONCE_PERSONALIZATION,
+    ).digest()
     ciphertext = crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, key)
     return _ENVELOPE_MAGIC + nonce + ciphertext
 
@@ -49,4 +58,3 @@ def decrypt_bytes(key: bytes, envelope: bytes) -> bytes:
 
 def object_id_from_ciphertext(ciphertext_envelope: bytes) -> str:
     return hashlib.sha256(ciphertext_envelope).hexdigest()
-

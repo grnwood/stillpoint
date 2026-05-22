@@ -189,6 +189,30 @@ class TestImageSyncPull:
         # The missing entry must NOT be in pulled_cache so next sync retries it.
         assert "Notes/paste_image_001.png" not in pulled_cache
 
+    def test_same_plaintext_retry_reuses_object_id(self, tmp_path):
+        """Retrying an unchanged upload should not mint a second object id."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        page = vault / "Page.md"
+        page.write_text("same content\n", encoding="utf-8")
+
+        cfg = _make_cfg(vault)
+        engine = HomebaseSyncEngine(cfg)
+        client = FakeClient()
+
+        first_checkpoint = _push_via_engine(engine, client)
+        first_manifest = json.loads(client.get_manifest(first_checkpoint))
+        first_oid = first_manifest["entries"]["Page.md"]["object_id"]
+        assert client.has_object(first_oid)
+        assert len(client.objects) == 1
+
+        second_checkpoint = _push_via_engine(engine, client)
+        second_manifest = json.loads(client.get_manifest(second_checkpoint))
+        second_oid = second_manifest["entries"]["Page.md"]["object_id"]
+
+        assert second_oid == first_oid
+        assert len(client.objects) == 1
+
 
 class TestCachedObjectVerification:
     """Cached object_ids must be verified against the server before reuse."""
@@ -318,6 +342,7 @@ class TestCachedObjectVerification:
         assert upload_count >= 1, "Image was not re-uploaded after server lost the object"
         # The new manifest entry should reference an object that exists.
         new_oid = manifest2["entries"]["paste_image_001.png"]["object_id"]
+        assert new_oid == original_oid
         assert engine2._is_valid_object_id(new_oid)
         assert client.has_object(new_oid), "Re-uploaded image object not on server"
 
