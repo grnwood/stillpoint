@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from pathlib import Path
-from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QEvent
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QEvent, QPoint
 from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from sp.app import config
 from .path_utils import path_to_colon
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
 import re
 
@@ -219,8 +220,7 @@ class JumpToPageDialog(QDialog):
         # Restore saved geometry after layout is set up
         if self._geometry_key:
             self._restore_geometry()
-        elif self._anchor_global_pos is not None:
-            self._position_near_anchor()
+        self._center_on_active_screen()
         
         self.search.setFocus()
         self._refresh()
@@ -442,26 +442,27 @@ class JumpToPageDialog(QDialog):
 
     def _position_near_anchor(self) -> None:
         """Position dialog near a global cursor point, clamped to the visible screen."""
-        try:
-            from PySide6.QtGui import QGuiApplication
-        except Exception:
-            return
         anchor = self._anchor_global_pos
         if anchor is None:
             return
         try:
-            screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
-            if not screen:
-                return
-            avail = screen.availableGeometry()
+            avail = popup_available_geometry(anchor=anchor, parent=self.parentWidget() or self)
             # Prefer below-right of the cursor, with a small offset.
-            x = anchor.x() + 12
-            y = anchor.y() + 12
-            w = self.width()
-            h = self.height()
-            x = max(avail.left(), min(x, avail.right() - w))
-            y = max(avail.top(), min(y, avail.bottom() - h))
-            self.move(x, y)
+            desired = QPoint(anchor.x() + 12, anchor.y() + 12)
+            self.move(clamp_popup_top_left(desired, self.size(), avail))
+        except Exception:
+            return
+
+    def _center_on_active_screen(self) -> None:
+        """Center the dialog on the screen of the active parent/anchor."""
+        try:
+            anchor = self._anchor_global_pos
+            avail = popup_available_geometry(anchor=anchor, parent=self.parentWidget() or self)
+            desired = QPoint(
+                avail.center().x() - (self.width() // 2),
+                avail.center().y() - (self.height() // 2),
+            )
+            self.move(clamp_popup_top_left(desired, self.size(), avail))
         except Exception:
             return
     

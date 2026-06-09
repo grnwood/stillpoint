@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .theme import apply_menu_theme, theme_color, theme_value
 
 
@@ -314,11 +315,7 @@ class _MapContentTooltip(QFrame):
         tip_w = self.width()
         tip_h = self.height()
         gap = 16
-        from PySide6.QtGui import QGuiApplication
-        screen = QGuiApplication.screenAt(cursor_pos)
-        if screen is None:
-            screen = QGuiApplication.primaryScreen()
-        avail = screen.availableGeometry()
+        avail = popup_available_geometry(anchor=cursor_pos, parent=self)
         # Prefer right of cursor, flip left if it would be clipped.
         if cursor_pos.x() + gap + tip_w <= avail.right():
             x = cursor_pos.x() + gap
@@ -330,9 +327,7 @@ class _MapContentTooltip(QFrame):
         else:
             y = cursor_pos.y() - gap - tip_h
         # Final clamp so we never go off-screen on any edge.
-        x = max(avail.left(), min(x, avail.right() - tip_w))
-        y = max(avail.top(), min(y, avail.bottom() - tip_h))
-        self.move(x, y)
+        self.move(clamp_popup_top_left(QPoint(x, y), QSize(tip_w, tip_h), avail))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.LeftButton:

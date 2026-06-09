@@ -123,6 +123,7 @@ from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig
 from .theme import apply_menu_theme, theme_color, theme_value
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -1553,15 +1554,14 @@ class QuickVaultPicker(QWidget):
         self._expand_visible_state()
         target_path = self._host.current_path
         editor_rect = self._host.editor.rect()
-        top_left = self._host.editor.mapToGlobal(editor_rect.topLeft())
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
         popup_height = max(260, int(editor_rect.height() * 0.65))
-        screen = QApplication.primaryScreen().availableGeometry()
         center = self._host.editor.mapToGlobal(editor_rect.center())
-        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
-        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        screen_geo = popup_available_geometry(anchor=(global_pos or center), parent=self._host.editor)
+        desired = QPoint(center.x() - popup_width // 2, center.y() - popup_height // 2)
+        top_left = clamp_popup_top_left(desired, QSize(popup_width, popup_height), screen_geo)
         self.resize(popup_width, popup_height)
-        self.move(x, y)
+        self.move(top_left)
         self.show()
         self.raise_()
         if target_path:
@@ -10617,17 +10617,17 @@ class MainWindow(QMainWindow):
 
         editor_rect = self.editor.viewport().rect()
         global_pos = self.editor.viewport().mapToGlobal(self.editor.cursorRect().bottomLeft())
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen_geo = popup_available_geometry(anchor=global_pos, parent=self.editor)
         popup.resize(420, min(360, max(180, list_widget.sizeHintForRow(0) * min(10, max(1, list_widget.count())) + 80)))
         size = popup.size()
-        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
+        x = max(screen_geo.left(), min(global_pos.x(), screen_geo.right() - size.width() + 1))
         y = global_pos.y() + 12
-        if y + size.height() > screen.y() + screen.height():
+        if y + size.height() > screen_geo.bottom() + 1:
             y = global_pos.y() - size.height() - 8
-        if y < screen.y():
+        if y < screen_geo.top():
             top_left = self.editor.viewport().mapToGlobal(editor_rect.topLeft())
             y = top_left.y() + max(16, (editor_rect.height() - size.height()) // 3)
-        popup.move(x, y)
+        popup.move(clamp_popup_top_left(QPoint(x, y), size, screen_geo))
         popup.show()
         popup.raise_()
         filter_edit.setFocus()
@@ -10820,12 +10820,12 @@ class MainWindow(QMainWindow):
         editor_rect = self.editor.rect()
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
         popup_height = max(260, int(editor_rect.height() * 0.65))
-        screen = QApplication.primaryScreen().availableGeometry()
         center = self.editor.mapToGlobal(editor_rect.center())
-        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
-        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        screen_geo = popup_available_geometry(anchor=global_pos, parent=self.editor)
+        desired = QPoint(center.x() - popup_width // 2, center.y() - popup_height // 2)
+        top_left = clamp_popup_top_left(desired, QSize(popup_width, popup_height), screen_geo)
         popup.resize(popup_width, popup_height)
-        popup.move(x, y)
+        popup.move(top_left)
         popup.show()
         popup.raise_()
         filter_edit.setFocus()

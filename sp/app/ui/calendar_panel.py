@@ -64,6 +64,7 @@ from .task_style import (
 from markdown import markdown as render_markdown
 from .ai_chat_panel import ApiWorker, ServerManager
 from .date_insert_dialog import DateInsertDialog, journal_day_file_days, journal_day_text_format
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 
 
 PATH_ROLE = Qt.UserRole + 1
@@ -4046,17 +4047,14 @@ class CalendarPanel(QWidget):
         return QCursor.pos()
 
     def _smart_popup_pos(self, anchor: QPoint, hint: QSize) -> QPoint:
-        screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
-        avail = screen.availableGeometry() if screen else self.geometry()
+        avail = popup_available_geometry(anchor=anchor, parent=self)
         x = anchor.x()
         y = anchor.y()
         if x + hint.width() > avail.right():
             x = anchor.x() - hint.width()
         if y + hint.height() > avail.bottom():
             y = anchor.y() - hint.height()
-        x = max(avail.left(), min(x, avail.right() - hint.width()))
-        y = max(avail.top(), min(y, avail.bottom() - hint.height()))
-        return QPoint(x, y)
+        return clamp_popup_top_left(QPoint(x, y), hint, avail)
 
     def _resolve_quick_date(self, label: str, role: str) -> Optional[str]:
         today = Date.today()

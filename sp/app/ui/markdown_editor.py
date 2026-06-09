@@ -78,6 +78,7 @@ from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.app import config
 from sp.app import indexer
 from sp.logging_flags import log_enabled
@@ -374,14 +375,16 @@ class AIActionOverlay(QWidget):
             geo = parent.rect()
             width = min(max(420, geo.width() - 80), geo.width())
             height = min(280, max(200, geo.height() - 100))
+            center = parent.mapToGlobal(geo.center())
+            target_anchor = anchor or center
+            screen_geo = popup_available_geometry(anchor=target_anchor, parent=parent)
             if anchor:
-                screen_geo = QGuiApplication.primaryScreen().availableGeometry()
-                left = max(screen_geo.left(), min(anchor.x() - width // 2, screen_geo.right() - width))
-                top = max(screen_geo.top(), min(anchor.y() - height // 2, screen_geo.bottom() - height))
+                desired = QPoint(anchor.x() - width // 2, anchor.y() - height // 2)
             else:
-                center = parent.mapToGlobal(geo.center())
-                left = center.x() - width // 2
-                top = center.y() - height // 2
+                desired = QPoint(center.x() - width // 2, center.y() - height // 2)
+            top_left = clamp_popup_top_left(desired, QSize(width, height), screen_geo)
+            left = top_left.x()
+            top = top_left.y()
             self.setGeometry(left, top, width, height)
         self._update_header()
         self.show()
@@ -604,14 +607,16 @@ class TagSuggestOverlay(QWidget):
         if parent:
             width = max(220, min(420, parent.width() // 2))
             height = min(260, max(140, parent.height() // 4))
+            center = parent.mapToGlobal(parent.rect().center())
+            target_anchor = anchor or center
+            screen_geo = popup_available_geometry(anchor=target_anchor, parent=parent)
             if anchor:
-                screen_geo = QGuiApplication.primaryScreen().availableGeometry()
-                left = max(screen_geo.left(), min(anchor.x(), screen_geo.right() - width))
-                top = max(screen_geo.top(), min(anchor.y(), screen_geo.bottom() - height))
+                desired = QPoint(anchor.x(), anchor.y())
             else:
-                center = parent.mapToGlobal(parent.rect().center())
-                left = center.x() - width // 2
-                top = center.y() - height // 2
+                desired = QPoint(center.x() - width // 2, center.y() - height // 2)
+            top_left = clamp_popup_top_left(desired, QSize(width, height), screen_geo)
+            left = top_left.x()
+            top = top_left.y()
             self.setGeometry(left, top, width, height)
         self.show()
         self.raise_()
@@ -3039,15 +3044,8 @@ class MarkdownEditor(QTextEdit):
 
     def _ensure_overlay_visible_on_screen(self, anchor: QPoint) -> QPoint:
         try:
-            from PySide6.QtGui import QGuiApplication
-            screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
-            if not screen:
-                return anchor
-            geo = screen.availableGeometry()
-            margin = 8
-            x = max(geo.left() + margin, min(anchor.x(), geo.right() - margin))
-            y = max(geo.top() + margin, min(anchor.y(), geo.bottom() - margin))
-            return QPoint(x, y)
+            geo = popup_available_geometry(anchor=anchor, parent=self)
+            return clamp_popup_top_left(anchor, QSize(1, 1), geo, margin=8)
         except Exception:
             return anchor
 

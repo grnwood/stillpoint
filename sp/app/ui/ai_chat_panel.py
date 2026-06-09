@@ -53,6 +53,7 @@ from .agent_tool_loop import (
 from .ai_api import build_api_request, build_auth_headers, build_httpx_timeout, compose_url
 from sp.rag.index import RetrievedChunk
 from .path_utils import path_to_colon, ensure_root_colon_link
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.logging_flags import log_enabled
 
@@ -443,12 +444,9 @@ class QuickChoiceOverlay(QtWidgets.QDialog):
             height = min(300, max(180, parent.height() // 3))
             self.resize(width, height)
         try:
-            screen = QtWidgets.QApplication.screenAt(anchor) or QtWidgets.QApplication.primaryScreen()
-            if screen:
-                geo = screen.availableGeometry()
-                left = max(geo.left(), min(anchor.x() - self.width() // 2, geo.right() - self.width()))
-                top = max(geo.top(), min(anchor.y() - self.height() // 2, geo.bottom() - self.height()))
-                self.move(left, top)
+            geo = popup_available_geometry(anchor=anchor, parent=parent or self)
+            desired = QtCore.QPoint(anchor.x() - self.width() // 2, anchor.y() - self.height() // 2)
+            self.move(clamp_popup_top_left(desired, self.size(), geo))
         except Exception:
             pass
         self.show()
@@ -5782,7 +5780,7 @@ class ContextOverlay(QtWidgets.QFrame):
         # Prefer placing above the anchor point so the popup doesn't get
         # obscured at the bottom of the screen. If there's not enough room
         # above, fall back to placing below.
-        screen_geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        screen_geo = popup_available_geometry(anchor=position, parent=parent or self)
         width = self.width()
         height = self.height() or self.sizeHint().height()
         margin = 6
@@ -5955,7 +5953,7 @@ class ContextListPopup(QtWidgets.QFrame):
         self.setFixedWidth(width)
         # Prefer to show above the given position when possible (keeps popup
         # readable when input is at bottom of screen). Otherwise show below.
-        screen_geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        screen_geo = popup_available_geometry(anchor=position, parent=parent or self)
         self.adjustSize()
         height = self.height() or self.sizeHint().height()
         margin = 6

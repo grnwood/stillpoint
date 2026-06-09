@@ -52,6 +52,7 @@ from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
 from .date_insert_dialog import DateInsertDialog
 from .path_utils import colon_to_path, path_to_colon
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .task_style import (
     contrast_text_color,
     due_colors_from_task,
@@ -1215,8 +1216,7 @@ class TaskPanel(QWidget):
         anchor_pos = anchor.mapToGlobal(QPoint(0, anchor.height()))
         anchor_left = anchor.mapToGlobal(QPoint(0, 0)).x()
         anchor_right = anchor.mapToGlobal(QPoint(anchor.width(), 0)).x()
-        screen = QApplication.screenAt(anchor_pos) or QApplication.primaryScreen()
-        avail = screen.availableGeometry() if screen else self.geometry()
+        avail = popup_available_geometry(anchor=anchor_pos, parent=anchor)
         hint = popup.sizeHint()
 
         space_right = avail.right() - anchor_pos.x()
@@ -1227,13 +1227,12 @@ class TaskPanel(QWidget):
             x = anchor_left - hint.width()
         else:
             x = anchor_right - hint.width()
-        x = max(avail.left(), min(x, avail.right() - hint.width()))
+        x = max(avail.left(), min(x, avail.right() - hint.width() + 1))
 
         y = anchor_pos.y()
         if y + hint.height() > avail.bottom():
             y = anchor.mapToGlobal(QPoint(0, 0)).y() - hint.height()
-        y = max(avail.top(), min(y, avail.bottom() - hint.height()))
-        popup.move(x, y)
+        popup.move(clamp_popup_top_left(QPoint(x, y), hint, avail))
 
     def _date_filter_active(self) -> bool:
         if self._date_filter_active_preset == "unscheduled":

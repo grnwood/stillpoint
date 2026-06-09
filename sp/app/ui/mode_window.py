@@ -81,6 +81,7 @@ def _load_one_shot_prompt() -> str:
 from .markdown_editor import MarkdownEditor
 from .date_insert_dialog import DateInsertDialog
 from .find_replace_bar import FindReplaceBar
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 
 
 class _ClickableLabel(QLabel):
@@ -1322,18 +1323,18 @@ class ModeWindow(QMainWindow):
 
         # Position near cursor, above or below based on preference and space
         popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = popup_available_geometry(anchor=global_pos, parent=self.editor)
         size = popup.size()
-        x = max(screen.x(), min(global_pos.x(), screen.x() + screen.width() - size.width()))
+        x = max(screen.left(), min(global_pos.x(), screen.right() - size.width() + 1))
         if prefer_above:
             y = global_pos.y() - size.height() - 8
-            if y < screen.y():
+            if y < screen.top():
                 y = global_pos.y() + 12
         else:
             y = global_pos.y() + 12
-            if y + size.height() > screen.y() + screen.height():
+            if y + size.height() > screen.bottom() + 1:
                 y = global_pos.y() - size.height() - 8
-        popup.move(x, y)
+        popup.move(clamp_popup_top_left(QPoint(x, y), size, screen))
         popup.show()
         popup.raise_()
         filter_edit.setFocus()

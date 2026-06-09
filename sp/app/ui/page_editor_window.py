@@ -45,6 +45,7 @@ from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.server.adapters.files import PAGE_SUFFIXES
 
 
@@ -1168,12 +1169,12 @@ class PageEditorWindow(QMainWindow):
         editor_rect = self.editor.rect()
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
         popup_height = max(260, int(editor_rect.height() * 0.65))
-        screen = QApplication.primaryScreen().availableGeometry()
         center = self.editor.mapToGlobal(editor_rect.center())
-        x = max(screen.x(), min(center.x() - popup_width // 2, screen.right() - popup_width))
-        y = max(screen.y(), min(center.y() - popup_height // 2, screen.bottom() - popup_height))
+        screen = popup_available_geometry(anchor=global_pos, parent=self.editor)
+        desired = QPoint(center.x() - popup_width // 2, center.y() - popup_height // 2)
+        top_left = clamp_popup_top_left(desired, QSize(popup_width, popup_height), screen)
         popup.resize(popup_width, popup_height)
-        popup.move(x, y)
+        popup.move(top_left)
         popup.show()
         popup.raise_()
         filter_edit.setFocus()

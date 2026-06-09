@@ -1,7 +1,7 @@
 """Dialog for inserting links to other pages in colon notation."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QPoint
 from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from sp.app import config
 from .path_utils import path_to_colon, normalize_link_target
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
 import re
 
@@ -219,6 +220,7 @@ class InsertLinkDialog(QDialog):
         
         # Restore saved geometry after layout is set up
         self._restore_geometry()
+        self._center_on_active_screen()
         
         if selected_text:
             self._refresh()
@@ -604,6 +606,24 @@ class InsertLinkDialog(QDialog):
                 print(f"[Dialog] Failed to restore insert link dialog geometry: {e}")
         else:
             print("[Dialog] No saved insert link dialog geometry found")
+
+    def _center_on_active_screen(self) -> None:
+        """Center the dialog on the screen of the active parent."""
+        try:
+            parent = self.parentWidget() or self
+            anchor = None
+            try:
+                anchor = parent.mapToGlobal(parent.rect().center())
+            except Exception:
+                anchor = None
+            avail = popup_available_geometry(anchor=anchor, parent=parent)
+            desired = QPoint(
+                avail.center().x() - (self.width() // 2),
+                avail.center().y() - (self.height() // 2),
+            )
+            self.move(clamp_popup_top_left(desired, self.size(), avail))
+        except Exception:
+            return
     
     def _save_geometry(self) -> None:
         """Save current dialog geometry."""

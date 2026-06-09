@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from sp.app import config
 from .path_utils import path_to_colon, normalize_link_target
+from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
 
 if TYPE_CHECKING:
@@ -360,18 +361,8 @@ class InlineLinkPickerOverlay(QDialog):
         super().showEvent(event)
         if self._anchor is not None:
             try:
-                from PySide6.QtGui import QGuiApplication
-                screen = QGuiApplication.screenAt(self._anchor) or QGuiApplication.primaryScreen()
-                if screen:
-                    geo = screen.availableGeometry()
-                    margin = 8
-                    x = self._anchor.x()
-                    y = self._anchor.y()
-                    x = max(geo.left() + margin, min(x, geo.right() - self.width() - margin))
-                    y = max(geo.top() + margin, min(y, geo.bottom() - self.height() - margin))
-                    self.move(x, y)
-                else:
-                    self.move(self._anchor)
+                geo = popup_available_geometry(anchor=self._anchor, parent=self.parentWidget() or self)
+                self.move(clamp_popup_top_left(self._anchor, self.size(), geo, margin=8))
             except Exception:
                 pass
         self._ensure_search_focus()
