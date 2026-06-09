@@ -12148,8 +12148,20 @@ class MainWindow(QMainWindow):
                 doc_modified = bool(self.editor.document().isModified())
                 dirty_flag = bool(getattr(self, "_dirty_flag", False))
                 if not doc_modified and not dirty_flag:
-                    self._debug(f"Skipping autosave (reason={reason}): document not modified")
-                    return
+                    pending_map_sync_entry = getattr(self, "_pending_map_sync_entry", None)
+                    pending_entry = pending_map_sync_entry(self.current_path) if callable(pending_map_sync_entry) else None
+                    current_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
+                    if self._last_saved_content is not None and current_content != self._last_saved_content:
+                        self._debug(
+                            f"Autosave continuing despite clean flags (reason={reason}): content changed"
+                        )
+                        self._dirty_flag = True
+                        update_dirty_indicator = getattr(self, "_update_dirty_indicator", None)
+                        if callable(update_dirty_indicator):
+                            update_dirty_indicator()
+                    else:
+                        self._debug(f"Skipping autosave (reason={reason}): document not modified")
+                        return
             except Exception:
                 pass
             
@@ -12159,6 +12171,18 @@ class MainWindow(QMainWindow):
             current_content = str(pending_entry.get("content", "")) if pending_entry is not None else self.editor.to_markdown()
             if self._last_saved_content is not None and current_content == self._last_saved_content:
                 self._debug(f"Skipping autosave (reason={reason}): content unchanged")
+                self._dirty_flag = False
+                try:
+                    self.editor.document().setModified(False)
+                except Exception:
+                    pass
+                update_dirty_indicator = getattr(self, "_update_dirty_indicator", None)
+                if callable(update_dirty_indicator):
+                    update_dirty_indicator()
+                try:
+                    self.autosave_timer.stop()
+                except Exception:
+                    pass
                 return
         
         # Autosave should silently skip when read-only; explicit Ctrl+S should warn.
@@ -12457,19 +12481,30 @@ class MainWindow(QMainWindow):
         """Return True if the buffer differs from last saved content."""
         if not self.current_path:
             return False
-        dirty = bool(getattr(self, "_dirty_flag", False))
-        if not dirty:
-            return False
         # Keep dirty state content-based across all vault modes. Qt's modified
         # flag can occasionally flip during load/render churn without real edits.
         try:
             current_content = self.editor.to_markdown()
-            if self._last_saved_content is not None and current_content == self._last_saved_content:
+            if self._last_saved_content is not None:
+                if current_content != self._last_saved_content:
+                    if not getattr(self, "_dirty_flag", False):
+                        self._dirty_flag = True
+                        update_dirty_indicator = getattr(self, "_update_dirty_indicator", None)
+                        if callable(update_dirty_indicator):
+                            update_dirty_indicator()
+                    return True
                 self._dirty_flag = False
+                try:
+                    self.editor.document().setModified(False)
+                except Exception:
+                    pass
+                update_dirty_indicator = getattr(self, "_update_dirty_indicator", None)
+                if callable(update_dirty_indicator):
+                    update_dirty_indicator()
                 return False
         except Exception:
             pass
-        return True
+        return bool(getattr(self, "_dirty_flag", False))
 
     def _save_dirty_page(self, reason: str = "dirty page") -> None:
         """Save the current page if there are unsaved edits."""

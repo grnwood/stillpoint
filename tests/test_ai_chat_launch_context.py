@@ -33,6 +33,7 @@ def test_start_new_ai_chat_uses_current_page_context(main_window, monkeypatch) -
     monkeypatch.setattr(config, "load_enable_ai_chats", lambda: True)
     monkeypatch.setattr(main_window, "_active_ai_chat_panel", lambda: None)
     monkeypatch.setattr(main_window, "_ensure_right_panel_visible", lambda: None)
+    monkeypatch.setattr(main_window.right_panel, "ai_chat_panel", object())
 
     calls: list[tuple[str, object, object]] = []
     monkeypatch.setattr(

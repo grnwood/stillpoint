@@ -164,6 +164,7 @@ class PageEditorWindow(QMainWindow):
         self._vi_insert_active = False
 
         self._last_saved_content: Optional[str] = None
+        self._app_state_changed_slot = None
         self._inline_ai_worker = None
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)
@@ -171,6 +172,13 @@ class PageEditorWindow(QMainWindow):
         self._autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
         self.editor.textChanged.connect(lambda: self._autosave_timer.start())
         self.editor.document().modificationChanged.connect(lambda _: self._update_dirty_indicator())
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                self._app_state_changed_slot = self._on_application_state_changed
+                app.applicationStateChanged.connect(self._app_state_changed_slot)
+            except Exception:
+                pass
         
         # Heading picker state
         self._toc_headings: list[dict] = []
@@ -624,6 +632,17 @@ class PageEditorWindow(QMainWindow):
         except Exception:
             pass
         self._update_dirty_indicator()
+
+    def _on_application_state_changed(self, state) -> None:
+        """Persist detached editor content when the application deactivates."""
+        try:
+            inactive = state == Qt.ApplicationState.ApplicationInactive
+        except Exception:
+            inactive = False
+        if not inactive:
+            return
+        if self._is_dirty():
+            self._save_current_file(auto=True, reason="application deactivated")
 
     def _reload_current_page(self) -> None:
         """Reload the current page from disk."""
@@ -1581,6 +1600,13 @@ class PageEditorWindow(QMainWindow):
         # Autosave on close if dirty and writable
         self._save_current_file(auto=False, reason="window close")
         self._save_geometry()
+        try:
+            app = QApplication.instance()
+            if app and self._app_state_changed_slot is not None:
+                app.applicationStateChanged.disconnect(self._app_state_changed_slot)
+        except Exception:
+            pass
+        self._app_state_changed_slot = None
         try:
             self.http.close()
         except Exception:

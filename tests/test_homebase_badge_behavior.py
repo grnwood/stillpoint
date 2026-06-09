@@ -207,6 +207,40 @@ def test_autosave_does_not_skip_when_dirty_flag_true_even_if_doc_unmodified() ->
     assert dummy.ensure_writable_called is True
 
 
+def test_autosave_does_not_skip_when_clean_flags_hide_changed_content() -> None:
+    class _Dummy:
+        _heading_picker_active = False
+        _merge_dialog_open = False
+        _suspend_autosave = False
+        _read_only = False
+        _dirty_flag = False
+        current_path = "/Journal/2026/03/04/Test.md"
+        _last_saved_content = "old content"
+        editor = _DummyEditor("new content", modified=False)
+        virtual_pages = set()
+        autosave_timer = None
+
+        def __init__(self):
+            self.ensure_writable_called = False
+            self.updated = 0
+
+        def _debug(self, *_args, **_kwargs) -> None:
+            pass
+
+        def _update_dirty_indicator(self) -> None:
+            self.updated += 1
+
+        def _ensure_writable(self, *_args, **_kwargs) -> bool:
+            self.ensure_writable_called = True
+            return False
+
+    dummy = _Dummy()
+    MainWindow._save_current_file(dummy, auto=True, reason="autosave timer")
+    assert dummy.ensure_writable_called is True
+    assert dummy._dirty_flag is True
+    assert dummy.updated == 1
+
+
 def test_force_autosave_can_bypass_suspend_flag() -> None:
     class _Dummy:
         _heading_picker_active = False
@@ -278,6 +312,25 @@ def test_is_editor_dirty_clears_false_positive_for_local_mode() -> None:
     dummy = _Dummy()
     assert MainWindow._is_editor_dirty(dummy) is False
     assert dummy._dirty_flag is False
+
+
+def test_is_editor_dirty_recovers_when_flags_are_clean_but_content_changed() -> None:
+    class _Dummy:
+        current_path = "/Journal/2026/03/04/Test.md"
+        _dirty_flag = False
+        _last_saved_content = "saved content"
+        editor = _DummyEditor("changed content", modified=False)
+
+        def __init__(self) -> None:
+            self.updated = 0
+
+        def _update_dirty_indicator(self) -> None:
+            self.updated += 1
+
+    dummy = _Dummy()
+    assert MainWindow._is_editor_dirty(dummy) is True
+    assert dummy._dirty_flag is True
+    assert dummy.updated == 1
 
 
 def test_on_document_modified_uses_qt_modified_flag_in_local_mode() -> None:
