@@ -28,7 +28,7 @@ class TabbedRightPanel(QWidget):
     # Forward signals from child panels
     taskActivated = Signal(str, int)  # path, line (from TaskPanel)
     dateActivated = Signal(int, int, int)  # year, month, day (from Calendar tab)
-    linkActivated = Signal(str)  # page path from Link Navigator
+    linkActivated = Signal(str, bool)  # page path and whether Link Navigator keeps focus
     calendarPageActivated = Signal(str)  # page path from Calendar tab
     calendarTaskActivated = Signal(str, int)  # path, line from Calendar tab task list
     mapHeadingActivated = Signal(str, int)  # path, line from Map tab
@@ -328,6 +328,8 @@ class TabbedRightPanel(QWidget):
             self.task_panel.set_vault_accent_color(self._vault_accent_color)
         if self.calendar_panel:
             self.calendar_panel.set_vault_accent_color(self._vault_accent_color)
+        if self.link_panel:
+            self.link_panel.set_vault_accent_color(self._vault_accent_color)
 
     def get_ai_font_size(self) -> int:
         """Return current AI chat font size."""
@@ -371,14 +373,25 @@ class TabbedRightPanel(QWidget):
         """Switch to the Link Navigator tab and optionally set its page."""
         if not self.link_panel:
             return
+        target_page = page_path if page_path is not None else self._current_relative_path
         if page_path is not None:
             self.link_panel.set_page(page_path)
         for i in range(self.tabs.count()):
             if self.tabs.widget(i) == self.link_panel:
                 self.tabs.setCurrentIndex(i)
-                # Ensure content is fresh whenever the tab gains focus
-                self.link_panel.refresh(page_path)
+                self.link_panel.refresh(target_page)
+                self._pending_link_refresh = False
+                self._pending_link_page = target_page
+                QTimer.singleShot(0, self._focus_link_graph)
                 break
+
+    def _focus_link_graph(self) -> None:
+        if not self.link_panel:
+            return
+        try:
+            self.link_panel.graph_view.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            self.link_panel.setFocus(Qt.OtherFocusReason)
 
     def _open_tab_context_menu(self, pos) -> None:
         """Offer 'Open in New Window' for select tabs."""
@@ -427,6 +440,11 @@ class TabbedRightPanel(QWidget):
                     widget.focus_search()
                 else:
                     widget.setFocus(Qt.OtherFocusReason)
+            elif self.link_panel and widget == self.link_panel:
+                target_page = self._pending_link_page if self._pending_link_page is not None else self._current_relative_path
+                self.link_panel.refresh(target_page)
+                self._pending_link_refresh = False
+                QTimer.singleShot(0, self._focus_link_graph)
             else:
                 # For other tabs, just set widget focus
                 widget.setFocus(Qt.OtherFocusReason)
@@ -507,10 +525,7 @@ class TabbedRightPanel(QWidget):
         return bool(panel) and self.isVisible() and self.tabs.currentWidget() == panel
 
     def _is_link_panel_active(self) -> bool:
-        if not self.link_panel or not self._is_panel_currently_visible(self.link_panel):
-            return False
-        focus = QApplication.focusWidget()
-        return focus is not None and (focus == self.link_panel or self.link_panel.isAncestorOf(focus))
+        return bool(self.link_panel) and self._is_panel_currently_visible(self.link_panel)
 
     def _sync_visible_panels(self) -> None:
         current = self.tabs.currentWidget()
@@ -704,6 +719,7 @@ class TabbedRightPanel(QWidget):
         self.link_panel.backRequested.connect(self.linkBackRequested)
         self.link_panel.forwardRequested.connect(self.linkForwardRequested)
         self.link_panel.homeRequested.connect(self.linkHomeRequested)
+        self.link_panel.set_vault_accent_color(self._vault_accent_color)
 
     def _remove_link_tab(self) -> None:
         if not self.link_panel:

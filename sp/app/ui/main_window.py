@@ -10592,16 +10592,19 @@ class MainWindow(QMainWindow):
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() in (Qt.Key_Down, Qt.Key_J) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Down and not ev.modifiers():
                         list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
                         return True
-                    if ev.key() in (Qt.Key_Up, Qt.Key_K) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Up and not ev.modifiers():
                         list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), -1))
                         return True
+                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                        if ev.key() == Qt.Key_J:
+                            list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
+                            return True
+                        if ev.key() == Qt.Key_K:
+                            list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), -1))
+                            return True
                     if ev.key() == Qt.Key_Escape:
                         finish_picker()
                         popup.close()
@@ -10792,18 +10795,23 @@ class MainWindow(QMainWindow):
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() in (Qt.Key_Down, Qt.Key_J) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Down and not ev.modifiers():
                         row = self._next_selectable(list_widget.currentRow(), 1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() in (Qt.Key_Up, Qt.Key_K) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Up and not ev.modifiers():
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
+                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                        if ev.key() == Qt.Key_J:
+                            row = self._next_selectable(list_widget.currentRow(), 1)
+                            list_widget.setCurrentRow(row)
+                            return True
+                        if ev.key() == Qt.Key_K:
+                            row = self._next_selectable(list_widget.currentRow(), -1)
+                            list_widget.setCurrentRow(row)
+                            return True
                     if ev.key() == Qt.Key_Escape:
                         finish_picker()
                         popup.close()
@@ -15048,9 +15056,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _open_link_from_panel(self, path: str) -> None:
+    def _open_link_from_panel(self, path: str, keep_focus: bool = False) -> None:
         if not path:
             return
+        sender = self.sender()
         # Support fragment anchors in panel links (e.g. /Journal/2025/.../15.txt#slug)
         base, anchor = self._split_link_anchor(path)
         path = self._normalize_editor_path(base)
@@ -15067,8 +15076,9 @@ class MainWindow(QMainWindow):
                 main_page = self._vault_root_page_path()
                 if main_page:
                     self._open_file(main_page)
-                    self.right_panel.focus_link_tab(main_page)
-                self._apply_navigation_focus("navigator")
+                    self._finish_link_panel_activation(main_page, keep_focus=keep_focus, sender=sender)
+                elif keep_focus:
+                    self._apply_navigation_focus("navigator")
                 return
         self._open_file(path)
         # Scroll to anchor if provided
@@ -15077,8 +15087,19 @@ class MainWindow(QMainWindow):
             self._scroll_to_anchor_slug(slug)
         except Exception:
             pass
-        self.right_panel.focus_link_tab(path)
-        self._apply_navigation_focus("navigator")
+        self._finish_link_panel_activation(path, keep_focus=keep_focus, sender=sender)
+
+    def _finish_link_panel_activation(self, path: str, *, keep_focus: bool, sender=None) -> None:
+        if keep_focus:
+            if isinstance(sender, LinkNavigatorPanel) and sender is not getattr(self.right_panel, "link_panel", None):
+                sender.set_page(path)
+                sender.graph_view.setFocus(Qt.ShortcutFocusReason)
+                return
+            self.right_panel.focus_link_tab(path)
+            self._apply_navigation_focus("navigator")
+            return
+        self.right_panel.refresh_links(path)
+        self._apply_navigation_focus("editor")
 
     def _open_calendar_page(self, path: str) -> None:
         """Open a page from the Calendar tab without changing tabs."""
@@ -15357,6 +15378,10 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         panel = LinkNavigatorPanel()
+        try:
+            panel.set_vault_accent_color(getattr(self, "_vault_accent_color", None))
+        except Exception:
+            pass
         current = self.current_path
         try:
             panel.reload_mode_from_config()
@@ -15381,6 +15406,7 @@ class MainWindow(QMainWindow):
             window,
             lambda p=panel: p.set_page(self._normalize_editor_path(self.current_path)) if self.current_path else p.set_page(None),
         )
+        QTimer.singleShot(0, lambda p=panel: p.graph_view.setFocus(Qt.OtherFocusReason))
 
     def _open_map_panel_window(self) -> None:
         if not config.has_active_vault():
@@ -16948,7 +16974,7 @@ class MainWindow(QMainWindow):
             self.right_panel.focus_link_tab(self.current_path)
             try:
                 if self.right_panel.link_panel:
-                    self.right_panel.link_panel.graph_view.setFocus()
+                    self.right_panel.link_panel.graph_view.setFocus(Qt.ShortcutFocusReason)
             except Exception:
                 pass
         elif focus_target == "editor":
@@ -17126,6 +17152,8 @@ class MainWindow(QMainWindow):
             try:
                 panel = detached.centralWidget()
                 if panel and hasattr(panel, "graph_view"):
+                    if self.current_path and hasattr(panel, "set_page"):
+                        panel.set_page(self._normalize_editor_path(self.current_path))
                     panel.graph_view.setFocus(Qt.ShortcutFocusReason)
             except Exception:
                 pass

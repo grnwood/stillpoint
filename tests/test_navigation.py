@@ -1,10 +1,11 @@
 """Tests for page navigation (history and hierarchy)."""
 import pytest
 from pathlib import Path
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import QStandardItem
+from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow
 
 
@@ -252,6 +253,38 @@ class TestHistoryNavigation:
         main_window._request_heading_picker_popup()
 
         assert len(calls) == 1
+
+    def test_heading_picker_allows_plain_vi_keys_in_filter(self, main_window, qapp):
+        main_window._toc_headings = [
+            {"title": "Alpha", "line": 1, "level": 1, "position": 0},
+            {"title": "Beta", "line": 2, "level": 1, "position": 10},
+            {"title": "Gamma", "line": 3, "level": 1, "position": 20},
+        ]
+
+        main_window._show_heading_picker_popup(main_window.editor.mapToGlobal(main_window.editor.rect().center()))
+        qapp.processEvents()
+
+        popup = main_window._heading_picker
+        assert popup is not None
+        filter_edit = popup.findChild(QLineEdit)
+        list_widget = popup.findChild(QListWidget)
+        assert filter_edit is not None
+        assert list_widget is not None
+
+        QTest.keyClicks(filter_edit, "jklh")
+        assert filter_edit.text() == "jklh"
+
+        filter_edit.clear()
+        qapp.processEvents()
+        assert list_widget.currentRow() == 0
+
+        QTest.keyClick(filter_edit, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+        assert list_widget.currentRow() == 1
+
+        QTest.keyClick(filter_edit, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier)
+        assert list_widget.currentRow() == 0
+
+        popup.close()
 
     def test_context_menu_parent_path_uses_filtered_root_for_whitespace(self, main_window):
         main_window._nav_filter_path = "/PageA"

@@ -1297,18 +1297,23 @@ class ModeWindow(QMainWindow):
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() in (Qt.Key_Down, Qt.Key_J) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Down and not ev.modifiers():
                         row = self._next_selectable(list_widget.currentRow(), 1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() in (Qt.Key_Up, Qt.Key_K) and (
-                        not ev.modifiers() or ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
-                    ):
+                    if ev.key() == Qt.Key_Up and not ev.modifiers():
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
+                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                        if ev.key() == Qt.Key_J:
+                            row = self._next_selectable(list_widget.currentRow(), 1)
+                            list_widget.setCurrentRow(row)
+                            return True
+                        if ev.key() == Qt.Key_K:
+                            row = self._next_selectable(list_widget.currentRow(), -1)
+                            list_widget.setCurrentRow(row)
+                            return True
                     if ev.key() == Qt.Key_Escape:
                         popup.close()
                         if editor_ref:
