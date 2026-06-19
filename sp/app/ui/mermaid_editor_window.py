@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData
+from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -30,7 +30,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDesktopServices
 
-from sp.app.mermaid_renderer import MermaidRenderer
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:
+    QWebEngineView = None  # type: ignore[assignment]
+
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
@@ -94,12 +98,14 @@ class MermaidEditorWindow(QMainWindow):
 
         self.file_path = Path(file_path)
         self._on_save = on_save
-        self.renderer = MermaidRenderer()
+        self._use_web_preview = QWebEngineView is not None
+        self.preview_web = None
         self._vi_enabled: bool = config.load_vi_mode_enabled()
         self._vi_insert_active: bool = False
         self._ai_prompt_history: list[str] = []
         self._ai_chat_enabled: bool = config.load_enable_ai_chats()
         self._auto_render_enabled: bool = config.load_mermaid_auto_render(default=False)
+        self._mermaid_theme: str = config.load_mermaid_render_theme(default="neutral")
         self._editor_dirty: bool = False
         self._last_saved_content: Optional[str] = None
         self.setWindowTitle(f"Mermaid Editor - {self.file_path.name}")
@@ -162,6 +168,22 @@ class MermaidEditorWindow(QMainWindow):
         self.render_btn.setToolTip("Render diagram (Ctrl+S)")
         self.render_btn.clicked.connect(self._render)
         preview_section.addWidget(self.render_btn)
+
+        preview_section.addSpacing(10)
+
+        preview_theme_label = QLabel("Theme:")
+        preview_section.addWidget(preview_theme_label)
+
+        self.preview_theme_combo = QComboBox()
+        self.preview_theme_combo.addItem("Default", "default")
+        self.preview_theme_combo.addItem("Neutral", "neutral")
+        self.preview_theme_combo.addItem("Forest", "forest")
+        self.preview_theme_combo.addItem("Dark", "dark")
+        self.preview_theme_combo.addItem("Base", "base")
+        idx = self.preview_theme_combo.findData(self._mermaid_theme)
+        self.preview_theme_combo.setCurrentIndex(idx if idx >= 0 else self.preview_theme_combo.findData("neutral"))
+        self.preview_theme_combo.currentIndexChanged.connect(self._on_mermaid_theme_changed)
+        preview_section.addWidget(self.preview_theme_combo)
 
         preview_section.addSpacing(10)
 
@@ -277,28 +299,34 @@ class MermaidEditorWindow(QMainWindow):
         preview_layout = QVBoxLayout()
         preview_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.preview_label = ZoomablePreviewLabel()
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(400, 300)
-        self.preview_label.setStyleSheet(
-            "background-color: "
-            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
-            "color: "
-            f"{theme_value('mermaid_editor.preview.text', '#000000')};"
-        )
-        self.preview_label.setWordWrap(True)
-        self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
-        self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
+        if self._use_web_preview:
+            self.preview_web = QWebEngineView(preview_container)
+            self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
+            self.preview_web.installEventFilter(self)
+            preview_layout.addWidget(self.preview_web)
+        else:
+            self.preview_label = ZoomablePreviewLabel()
+            self.preview_label.setAlignment(Qt.AlignCenter)
+            self.preview_label.setMinimumSize(400, 300)
+            self.preview_label.setStyleSheet(
+                "background-color: "
+                f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
+                "color: "
+                f"{theme_value('mermaid_editor.preview.text', '#000000')};"
+            )
+            self.preview_label.setWordWrap(True)
+            self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
+            self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
 
-        self.preview_scroll_area = QScrollArea()
-        self.preview_scroll_area.setWidgetResizable(True)
-        self.preview_scroll_area.setWidget(self.preview_label)
-        self.preview_scroll_area.setStyleSheet(
-            "background-color: "
-            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
-        )
-        preview_layout.addWidget(self.preview_scroll_area)
+            self.preview_scroll_area = QScrollArea()
+            self.preview_scroll_area.setWidgetResizable(True)
+            self.preview_scroll_area.setWidget(self.preview_label)
+            self.preview_scroll_area.setStyleSheet(
+                "background-color: "
+                f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
+            )
+            preview_layout.addWidget(self.preview_scroll_area)
         preview_container.setLayout(preview_layout)
         right_v_splitter.addWidget(preview_container)
 
@@ -337,10 +365,10 @@ class MermaidEditorWindow(QMainWindow):
 
         self._restore_geometry_prefs()
 
-        # Enable mouse panning in preview area
-        self.preview_label.setMouseTracking(True)
-        # Use eventFilter for panning to avoid breaking shortcuts
-        self.preview_label.installEventFilter(self)
+        # Enable legacy panning only for label fallback mode.
+        if not self._use_web_preview:
+            self.preview_label.setMouseTracking(True)
+            self.preview_label.installEventFilter(self)
         self._preview_pan_start = None
         self._preview_pan_origin = None
 
@@ -382,6 +410,7 @@ class MermaidEditorWindow(QMainWindow):
             self.preview_zoom_level = int(config.load_mermaid_preview_zoom(0))
         except Exception:
             self.preview_zoom_level = 0
+        self._last_svg: str = ""
         self.preview_pixmap: Optional[QPixmap] = None
         try:
             base_pt = 11
@@ -434,7 +463,13 @@ class MermaidEditorWindow(QMainWindow):
 
     # --- Preview panning (mouse drag to scroll) using eventFilter ---
     def eventFilter(self, obj, event):
-        if obj is self.preview_label:
+        if self._use_web_preview and self.preview_web is not None and obj is self.preview_web:
+            from PySide6.QtCore import QEvent
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                self._show_preview_context_menu(pos)
+                return True
+        if not self._use_web_preview and obj is self.preview_label:
             from PySide6.QtCore import QEvent
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._preview_pan_start = event.pos()
@@ -1064,8 +1099,19 @@ class MermaidEditorWindow(QMainWindow):
         self._auto_render_enabled = checked
         config.save_mermaid_auto_render(checked)
         self._update_render_status_label()
-        if checked and self._editor_dirty:
-            self.render_timer.start()
+
+    def _on_mermaid_theme_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        value = self.preview_theme_combo.itemData(index)
+        if not isinstance(value, str) or not value:
+            value = "neutral"
+        self._mermaid_theme = value
+        try:
+            config.save_mermaid_render_theme(value)
+        except Exception:
+            pass
+        self._render()
 
     def _update_render_status_label(self) -> None:
         if not hasattr(self, 'render_status_label'):
@@ -1195,71 +1241,19 @@ class MermaidEditorWindow(QMainWindow):
 
         mermaid_text = self.editor.toPlainText()
 
-        try:
-            result = self.renderer.render_png(mermaid_text)
-        except Exception as exc:
-            print(f"[Mermaid Editor] Render exception: {exc}", file=__import__('sys').stdout, flush=True)
-            self._show_preview_error(f"Render exception:\n{exc}")
+        if self._use_web_preview and self.preview_web is not None:
+            self._last_svg = ""
+            html_doc = self._build_mermaid_html(mermaid_text)
+            self.preview_web.setHtml(html_doc, self._web_preview_base_url())
+            self.render_btn.setText("Render OK")
             return
-
-        try:
-            if not self or not hasattr(self, 'preview_label'):
-                return
-            _ = self.preview_label
-        except RuntimeError:
-            return
-
-        try:
-            if result.success and result.png_bytes:
-                pixmap = QPixmap()
-                if pixmap.loadFromData(result.png_bytes, "PNG"):
-                    self.preview_pixmap = pixmap
-                    self._last_svg = ""
-                    self._update_preview_display()
-                    self.render_btn.setText("Render OK")
-                else:
-                    error_msg = "Failed to load PNG output."
-                    self._show_preview_error(error_msg)
-                    self.render_btn.setText("Render Failed")
-            else:
-                error_msg = result.error_message or result.stderr or "Unknown error"
-                error_display = f"Mermaid Error\n\n{error_msg}"
-                if result.stderr and result.stderr != error_msg:
-                    error_display += f"\n\nDetails:\n{result.stderr[:500]}"
-                self._show_preview_error(error_display)
-                self.render_btn.setText("Render Failed")
-        except Exception as exc:
-            print(f"[Mermaid Editor] Render error: {exc}", file=__import__('sys').stdout, flush=True)
-            try:
-                self._show_preview_error(f"Internal error:\n{str(exc)}")
-            except RuntimeError:
-                pass
-            self.render_btn.setText("Render Failed")
-
-    def _svg_to_pixmap(self, svg_content: str) -> Optional[QPixmap]:
-        try:
-            from PySide6.QtSvg import QSvgRenderer
-            from PySide6.QtCore import QByteArray
-
-            svg_bytes = QByteArray(svg_content.encode("utf-8"))
-            renderer = QSvgRenderer(svg_bytes)
-            if not renderer.isValid():
-                return None
-            size = renderer.defaultSize()
-            if not size.isValid():
-                size = QSize(800, 600)
-            pixmap = QPixmap(size)
-            pixmap.fill(Qt.white)
-
-            from PySide6.QtGui import QPainter
-            painter = QPainter(pixmap)
-            renderer.render(painter)
-            painter.end()
-            return pixmap
-        except Exception:
-            return None
+        self._show_preview_error("Mermaid web preview is unavailable. Install/enable Qt WebEngine.")
+        self.render_btn.setText("Render Failed")
 
     def _update_preview_display(self) -> None:
+        if self._use_web_preview:
+            self._apply_web_zoom_level()
+            return
         try:
             if not self or not hasattr(self, 'preview_label') or not self.preview_pixmap:
                 return
@@ -1286,6 +1280,9 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
     def _show_preview_error(self, message: str) -> None:
+        if self._use_web_preview and self.preview_web is not None:
+            self.preview_web.setHtml(self._build_mermaid_html("", error_message=message), self._web_preview_base_url())
+            return
         try:
             if not self or not hasattr(self, "preview_label"):
                 return
@@ -1384,7 +1381,10 @@ class MermaidEditorWindow(QMainWindow):
         copy_svg.triggered.connect(self._copy_svg)
         copy_png = menu.addAction("Copy PNG")
         copy_png.triggered.connect(self._copy_png)
-        menu.exec(self.preview_label.mapToGlobal(pos))
+        if self._use_web_preview and self.preview_web is not None:
+            menu.exec(self.preview_web.mapToGlobal(pos))
+        else:
+            menu.exec(self.preview_label.mapToGlobal(pos))
 
     def _export_svg(self) -> None:
         if not self._ensure_svg():
@@ -1406,7 +1406,12 @@ class MermaidEditorWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export: {exc}")
 
     def _export_png(self) -> None:
-        if not self.preview_pixmap:
+        if self._use_web_preview and self.preview_web is not None:
+            pixmap = self.preview_web.grab()
+        else:
+            pixmap = self.preview_pixmap
+
+        if not pixmap:
             QMessageBox.warning(self, "No Diagram", "Render the diagram first.")
             return
 
@@ -1419,7 +1424,7 @@ class MermaidEditorWindow(QMainWindow):
 
         if file_path:
             try:
-                self.preview_pixmap.save(file_path, "PNG")
+                pixmap.save(file_path, "PNG")
                 QMessageBox.information(self, "Exported", f"Saved to {file_path}")
             except Exception as exc:
                 QMessageBox.critical(self, "Error", f"Failed to export: {exc}")
@@ -1436,34 +1441,232 @@ class MermaidEditorWindow(QMainWindow):
     def _ensure_svg(self) -> bool:
         if hasattr(self, "_last_svg") and self._last_svg:
             return True
-        mermaid_text = self.editor.toPlainText()
-        try:
-            result = self.renderer.render_svg(mermaid_text)
-        except Exception as exc:
-            self._show_preview_error(f"Render exception:\n{exc}")
+        if self._use_web_preview and self.preview_web is not None:
+            svg = self._get_svg_from_web_preview()
+            if svg:
+                self._last_svg = svg
+                return True
+            self._show_preview_error("Mermaid Error\n\nUnable to read SVG from web preview.")
             return False
-        if result.success and result.svg_content:
-            self._last_svg = result.svg_content
-            return True
-        error_msg = result.error_message or result.stderr or "Unknown error"
-        error_display = f"Mermaid Error\n\n{error_msg}"
-        if result.stderr and result.stderr != error_msg:
-            error_display += f"\n\nDetails:\n{result.stderr[:500]}"
-        self._show_preview_error(error_display)
+        self._show_preview_error("Mermaid web preview is unavailable. Install/enable Qt WebEngine.")
         return False
 
     def _copy_png(self) -> None:
-        if not self.preview_pixmap:
+        if self._use_web_preview and self.preview_web is not None:
+            pixmap = self.preview_web.grab()
+        else:
+            pixmap = self.preview_pixmap
+        if not pixmap:
             QMessageBox.warning(self, "No Diagram", "Render the diagram first.")
             return
         clipboard = QApplication.clipboard()
         if clipboard:
             buffer = QBuffer()
             buffer.open(QIODevice.WriteOnly)
-            self.preview_pixmap.save(buffer, "PNG")
+            pixmap.save(buffer, "PNG")
             png_bytes = bytes(buffer.data())
             mime = QMimeData()
             mime.setData("image/png", png_bytes)
-            mime.setImageData(self.preview_pixmap.toImage())
+            mime.setImageData(pixmap.toImage())
             clipboard.setMimeData(mime)
             self.statusBar().showMessage("PNG copied to clipboard", 2000)
+
+    def _apply_web_zoom_level(self) -> None:
+        if not self._use_web_preview or self.preview_web is None:
+            return
+        zoom = max(0.2, min(4.0, 1.0 + (self.preview_zoom_level * 0.1)))
+        script = f"if (window.spSetZoom) window.spSetZoom({zoom});"
+        self.preview_web.page().runJavaScript(script)
+
+    def _get_svg_from_web_preview(self) -> Optional[str]:
+        if not self._use_web_preview or self.preview_web is None:
+            return None
+        loop = QEventLoop(self)
+        holder = {"done": False, "value": None}
+
+        def _callback(value):
+            holder["done"] = True
+            holder["value"] = value
+            loop.quit()
+
+        self.preview_web.page().runJavaScript(
+            "window.spGetSvg ? window.spGetSvg() : '';",
+            _callback,
+        )
+        QTimer.singleShot(1500, loop.quit)
+        loop.exec()
+        value = holder.get("value")
+        if isinstance(value, str) and "<svg" in value:
+            return value
+        return None
+
+    def _build_mermaid_html(self, mermaid_text: str, error_message: str = "") -> str:
+        preview_bg = theme_value('mermaid_editor.preview.bg', '#f8f8f8')
+        preview_text = theme_value('mermaid_editor.preview.text', '#000000')
+        mermaid_theme = json.dumps(self._mermaid_theme)
+        escaped_source = json.dumps(mermaid_text)
+        escaped_error = json.dumps(error_message)
+        initial_zoom = max(0.2, min(4.0, 1.0 + (self.preview_zoom_level * 0.1)))
+        return f"""<!doctype html>
+<html>
+<head>
+    <meta charset=\"utf-8\" />
+    <style>
+        html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; background: {preview_bg}; color: {preview_text}; overflow: hidden; }}
+        #viewport {{ width: 100%; height: 100%; overflow: hidden; cursor: default; user-select: none; }}
+        #diagram-host {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
+        #diagram-host svg {{ max-width: none; max-height: none; transform-origin: 0 0; }}
+        #error {{ font-family: monospace; white-space: pre-wrap; padding: 16px; color: #b00020; }}
+    </style>
+    <script>
+        let viewport = null;
+        let host = null;
+        let errorEl = null;
+        const state = {{ zoom: {initial_zoom}, tx: 0, ty: 0, panning: false, panX: 0, panY: 0 }};
+
+        function currentSvg() {{
+            return host ? host.querySelector('svg') : null;
+        }}
+
+        function applyTransform() {{
+            const svg = currentSvg();
+            if (!svg) return;
+            svg.style.transform = `translate(${{state.tx}}px, ${{state.ty}}px) scale(${{state.zoom}})`;
+        }}
+
+        function zoomAbout(delta, cx, cy) {{
+            const oldZoom = state.zoom;
+            const nextZoom = Math.max(0.2, Math.min(4.0, oldZoom + (0.1 * delta)));
+            if (Math.abs(nextZoom - oldZoom) < 1e-9) return;
+            state.tx = cx - ((cx - state.tx) * (nextZoom / oldZoom));
+            state.ty = cy - ((cy - state.ty) * (nextZoom / oldZoom));
+            state.zoom = nextZoom;
+            applyTransform();
+        }}
+
+        function loadScript(url) {{
+            return new Promise((resolve, reject) => {{
+                const script = document.createElement('script');
+                script.src = url;
+                script.async = true;
+                script.onload = () => resolve(true);
+                script.onerror = () => reject(new Error(`Failed to load script: ${{url}}`));
+                document.head.appendChild(script);
+            }});
+        }}
+
+        async function ensureMermaid() {{
+            if (window.mermaid) return window.mermaid;
+            try {{
+                await loadScript('./vendor/mermaid.min.js');
+            }} catch (_localErr) {{
+                await loadScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js');
+            }}
+            if (!window.mermaid) throw new Error('Mermaid runtime not available.');
+            return window.mermaid;
+        }}
+
+        window.spGetSvg = () => {{
+            const svg = currentSvg();
+            return svg ? svg.outerHTML : '';
+        }};
+
+        window.spSetZoom = (zoom) => {{
+            const next = Math.max(0.2, Math.min(4.0, Number(zoom) || 1.0));
+            if (!viewport || !currentSvg()) return;
+            const rect = viewport.getBoundingClientRect();
+            const cx = rect.width / 2;
+            const cy = rect.height / 2;
+            const old = state.zoom;
+            state.zoom = old;
+            zoomAbout((next - old) / 0.1, cx, cy);
+        }};
+
+        function bindInteractions() {{
+            if (!viewport) return;
+            viewport.addEventListener('wheel', (event) => {{
+                event.preventDefault();
+                const rect = viewport.getBoundingClientRect();
+                const cx = event.clientX - rect.left;
+                const cy = event.clientY - rect.top;
+                zoomAbout(event.deltaY < 0 ? 1 : -1, cx, cy);
+            }}, {{ passive: false }});
+
+            viewport.addEventListener('mousedown', (event) => {{
+                if (event.button !== 2) return;
+                state.panning = true;
+                state.panX = event.clientX;
+                state.panY = event.clientY;
+                viewport.style.cursor = 'grabbing';
+                event.preventDefault();
+            }});
+
+            window.addEventListener('mousemove', (event) => {{
+                if (!state.panning) return;
+                const dx = event.clientX - state.panX;
+                const dy = event.clientY - state.panY;
+                state.panX = event.clientX;
+                state.panY = event.clientY;
+                state.tx += dx;
+                state.ty += dy;
+                applyTransform();
+            }});
+
+            window.addEventListener('mouseup', (event) => {{
+                if (event.button !== 2 || !state.panning) return;
+                state.panning = false;
+                if (viewport) viewport.style.cursor = 'default';
+                event.preventDefault();
+            }});
+
+            viewport.addEventListener('contextmenu', (event) => {{
+                if (state.panning) event.preventDefault();
+            }});
+        }}
+
+        async function renderDiagram() {{
+            const forcedError = {escaped_error};
+            if (forcedError) {{
+                if (errorEl) errorEl.textContent = forcedError;
+                return;
+            }}
+            const source = {escaped_source};
+            if (!source || !source.trim()) {{
+                if (errorEl) errorEl.textContent = 'Enter Mermaid diagram code here...';
+                return;
+            }}
+            try {{
+                const mermaid = await ensureMermaid();
+                mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose', theme: {mermaid_theme} }});
+                const id = `sp-mermaid-${{Date.now()}}`;
+                const rendered = await mermaid.render(id, source);
+                if (host) host.innerHTML = rendered.svg;
+                if (errorEl) errorEl.textContent = '';
+                applyTransform();
+            }} catch (err) {{
+                if (host) host.innerHTML = '';
+                if (errorEl) errorEl.textContent = err && err.message ? err.message : String(err);
+            }}
+        }}
+
+        window.addEventListener('DOMContentLoaded', () => {{
+            viewport = document.getElementById('viewport');
+            host = document.getElementById('diagram-host');
+            errorEl = document.getElementById('error');
+            bindInteractions();
+            renderDiagram();
+        }});
+    </script>
+</head>
+<body>
+    <div id=\"viewport\">
+        <div id=\"diagram-host\"></div>
+        <pre id=\"error\"></pre>
+    </div>
+</body>
+</html>
+"""
+
+    def _web_preview_base_url(self) -> QUrl:
+        assets_dir = Path(__file__).resolve().parents[2] / "assets"
+        return QUrl.fromLocalFile(str(assets_dir) + os.sep)

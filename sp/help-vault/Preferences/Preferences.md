@@ -106,7 +106,7 @@ Note: Feature toggles may require reopening the vault or restarting the app.
 
 ## Mermaid
 - **Enable Mermaid rendering**: Turns Mermaid code blocks into rendered diagrams.
-- **Check Mermaid Install**: Verifies that Mermaid CLI is installed and available.
+- **Built-in renderer**: Mermaid preview uses the app's bundled web renderer.
 - **Editor font**: Font used in the Mermaid editor window.
 - **Editor font size**: Text size used in the Mermaid editor window.
 
