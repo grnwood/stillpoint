@@ -864,7 +864,7 @@ from .folder_template_dialog import FolderTemplateDialog
 from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
 from .date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
-from .open_vault_dialog import OpenVaultDialog
+from .open_vault_dialog import OpenVaultDialog, AddHomebaseVaultDialog, _persist_homebase_passphrase_settings
 from .vault_preferences_dialog import VaultPreferencesDialog
 from .quick_capture_overlay import QuickCaptureOverlay
 from .page_editor_window import PageEditorWindow
@@ -2906,6 +2906,12 @@ class MainWindow(QMainWindow):
         self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
         self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
         vault_menu.addAction(self._action_open_vault_terminal)
+        self._action_convert_vault_to_homebase = QAction("Convert This Vault to Homebase...", self)
+        self._action_convert_vault_to_homebase.setToolTip(
+            "Connect this local vault to Homebase and start syncing it"
+        )
+        self._action_convert_vault_to_homebase.triggered.connect(self._convert_current_vault_to_homebase)
+        vault_menu.addAction(self._action_convert_vault_to_homebase)
         self._action_homebase_sync_now = QAction("Sync Now", self)
         self._action_homebase_sync_now.setToolTip("Run Homebase sync immediately")
         self._action_homebase_sync_now.triggered.connect(
@@ -4801,6 +4807,45 @@ class MainWindow(QMainWindow):
             self._configure_homebase_sync_for_vault()
             self._apply_vault_accent_visuals()
 
+    def _convert_current_vault_to_homebase(self) -> None:
+        if self._remote_mode:
+            self._alert("This action is only available for local vaults.")
+            return
+        if not self.vault_root:
+            self._alert("Open a local vault first.")
+            return
+        if self._is_homebase_mode_enabled():
+            self._show_homebase_sync_summary()
+            return
+        local_path = self._normalize_vault_path(self.vault_root)
+        dlg = AddHomebaseVaultDialog(self)
+        dlg.local_path_edit.setText(local_path)
+        dlg.name_edit.setText(Path(local_path).name)
+        detected_metadata = config.load_homebase_vault_metadata(local_path)
+        if detected_metadata:
+            dlg._apply_detected_homebase_metadata(detected_metadata)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        profile = dlg.selected_profile()
+        if not profile:
+            return
+        _persist_homebase_passphrase_settings(profile)
+        config.upsert_homebase_vault_profile(profile)
+        config.delete_known_vault(local_path)
+        config.save_homebase_vault_metadata(local_path, profile)
+        self._apply_homebase_profile(profile)
+        try:
+            if self.vault_root:
+                config.save_last_vault(self.vault_root)
+        except Exception:
+            pass
+        if self._homebase_sync_engine:
+            try:
+                self._homebase_sync_engine.sync_now("homebase conversion")
+            except Exception:
+                pass
+        self.statusBar().showMessage("Vault converted to Homebase. Initial sync requested.", 5000)
+
     def _reload_vault(self) -> None:
         if not self.vault_root:
             self._alert("Open a vault first.")
@@ -5163,6 +5208,21 @@ class MainWindow(QMainWindow):
                 "Open the current local vault in your system terminal",
             )
         )
+        if hasattr(self, "_action_convert_vault_to_homebase"):
+            can_convert = bool(self.vault_root) and not self._remote_mode and not self._is_homebase_mode_enabled()
+            self._action_convert_vault_to_homebase.setVisible(not self._remote_mode)
+            self._action_convert_vault_to_homebase.setEnabled(can_convert)
+            if can_convert:
+                self._action_convert_vault_to_homebase.setToolTip(
+                    self._action_tooltips.get(
+                        self._action_convert_vault_to_homebase,
+                        "Connect this local vault to Homebase and start syncing it",
+                    )
+                )
+            elif self._is_homebase_mode_enabled():
+                self._action_convert_vault_to_homebase.setToolTip("This vault is already configured for Homebase.")
+            else:
+                self._action_convert_vault_to_homebase.setToolTip("Open a local vault to enable Homebase setup.")
         
         # Reindex actions are now supported for both local and remote vaults
         self._action_rebuild_index.setEnabled(True)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from PySide6.QtWidgets import QDialog
+
 from sp.app import config
 
 
@@ -364,3 +366,104 @@ def test_trigger_homebase_sync_now_reconfigures_engine_before_manual_sync(main_w
 
     assert sync_reasons == ["badge"]
     assert status_bar.messages == [("Homebase sync requested.", 2500)]
+
+
+def test_convert_current_vault_to_homebase_persists_and_applies_profile(main_window, monkeypatch, tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir(parents=True, exist_ok=True)
+    main_window.vault_root = str(vault_root)
+
+    persisted_profiles: list[dict] = []
+    persisted_metadata: list[tuple[str, dict]] = []
+    deleted_known: list[str] = []
+    persisted_passphrase_profiles: list[dict] = []
+    applied_profiles: list[dict] = []
+    sync_reasons: list[str] = []
+    last_vaults: list[str] = []
+
+    class _DummyDialog:
+        def __init__(self, parent=None) -> None:
+            self.local_path_edit = type("Edit", (), {"setText": lambda self, value: None})()
+            self.name_edit = type("Edit", (), {"setText": lambda self, value: None})()
+
+        def _apply_detected_homebase_metadata(self, metadata) -> None:
+            return None
+
+        def exec(self) -> int:
+            return int(QDialog.DialogCode.Accepted)
+
+        def selected_profile(self) -> dict[str, object]:
+            return {
+                "id": f"homebase::https://server.example::vault-123::{vault_root}",
+                "kind": "homebase",
+                "name": "Vault",
+                "path": str(vault_root),
+                "server_url": "https://server.example",
+                "verify_ssl": True,
+                "vault_id": "vault-123",
+                "username": "casey",
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "passphrase": "secret-passphrase",
+                "store_passphrase": False,
+                "auto_sync": True,
+                "sync_at_startup": True,
+                "interval_seconds": 60,
+                "push_debounce_seconds": 3,
+                "max_parallel_transfers": 3,
+            }
+
+    class _DummyEngine:
+        def sync_now(self, reason: str = "manual") -> None:
+            sync_reasons.append(reason)
+
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: False)
+    monkeypatch.setattr(main_window, "_apply_homebase_profile", lambda profile: applied_profiles.append(dict(profile)))
+    monkeypatch.setattr("sp.app.ui.main_window.AddHomebaseVaultDialog", _DummyDialog)
+    monkeypatch.setattr(
+        "sp.app.ui.main_window._persist_homebase_passphrase_settings",
+        lambda profile: persisted_passphrase_profiles.append(dict(profile or {})),
+    )
+    monkeypatch.setattr(config, "load_homebase_vault_metadata", lambda path: None)
+    monkeypatch.setattr(config, "upsert_homebase_vault_profile", lambda profile: persisted_profiles.append(dict(profile)))
+    monkeypatch.setattr(config, "delete_known_vault", lambda path: deleted_known.append(path))
+    monkeypatch.setattr(
+        config,
+        "save_homebase_vault_metadata",
+        lambda path, profile: persisted_metadata.append((str(path), dict(profile))) or True,
+    )
+    monkeypatch.setattr(config, "save_last_vault", lambda path: last_vaults.append(path))
+    main_window._homebase_sync_engine = _DummyEngine()
+
+    main_window._convert_current_vault_to_homebase()
+
+    assert len(persisted_profiles) == 1
+    assert persisted_profiles[0]["path"] == str(vault_root)
+    assert len(persisted_passphrase_profiles) == 1
+    assert persisted_passphrase_profiles[0]["passphrase"] == "secret-passphrase"
+    assert deleted_known == [str(vault_root)]
+    assert persisted_metadata == [(str(vault_root), persisted_profiles[0])]
+    assert len(applied_profiles) == 1
+    assert applied_profiles[0]["vault_id"] == "vault-123"
+    assert sync_reasons == ["homebase conversion"]
+    assert last_vaults == [str(vault_root)]
+
+
+def test_apply_remote_mode_ui_shows_convert_action_only_for_plain_local_vault(main_window, monkeypatch) -> None:
+    main_window.vault_root = "/tmp/example-vault"
+
+    monkeypatch.setattr(main_window, "_update_user_management_ui", lambda: None)
+    monkeypatch.setattr(main_window, "_update_periodic_search_sync_timer", lambda: None)
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: False)
+    main_window._remote_mode = False
+
+    main_window._apply_remote_mode_ui()
+
+    assert main_window._action_convert_vault_to_homebase.isVisible() is True
+    assert main_window._action_convert_vault_to_homebase.isEnabled() is True
+
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: True)
+    main_window._apply_remote_mode_ui()
+
+    assert main_window._action_convert_vault_to_homebase.isVisible() is True
+    assert main_window._action_convert_vault_to_homebase.isEnabled() is False
