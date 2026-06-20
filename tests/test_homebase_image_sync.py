@@ -221,6 +221,58 @@ class TestImageSyncPull:
         # The missing entry must NOT be in pulled_cache so next sync retries it.
         assert "Notes/paste_image_001.png" not in pulled_cache
 
+    def test_sync_once_bootstraps_empty_client_even_when_checkpoint_was_marked_seen(self, tmp_path, monkeypatch):
+        """An empty fresh client must pull the remote vault before publishing anything."""
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        page = vault_a / "Notes" / "Page.md"
+        page.parent.mkdir(parents=True)
+        page.write_text("# Hello\n\nseeded from remote\n", encoding="utf-8")
+
+        cfg_a = _make_cfg(vault_a)
+        engine_a = HomebaseSyncEngine(cfg_a)
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b)
+        engine_b._sync_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            engine_b._state_path,
+            {
+                "schema_version": 1,
+                "vault_id": cfg_b.vault_id,
+                "device_id": cfg_b.device_id,
+                "homebase": {
+                    "last_seen_latest_checkpoint_id": checkpoint_id,
+                    "last_pulled_checkpoint_id": checkpoint_id,
+                    "last_pushed_checkpoint_id": None,
+                    "last_sync_at": None,
+                    "last_error": None,
+                    "error_count": 0,
+                    "backoff_until": None,
+                },
+            },
+        )
+        _write_json(
+            engine_b._scan_path,
+            {"schema_version": 1, "vault_id": cfg_b.vault_id, "entries": {}},
+        )
+        _write_json(
+            engine_b._object_cache_path,
+            {"schema_version": 1, "vault_id": cfg_b.vault_id, "entries": {}},
+        )
+
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **kwargs: client)
+
+        engine_b._sync_once()
+
+        pulled_page = vault_b / "Notes" / "Page.md"
+        assert pulled_page.exists()
+        assert pulled_page.read_text(encoding="utf-8") == "# Hello\n\nseeded from remote\n"
+
     def test_same_plaintext_retry_reuses_object_id(self, tmp_path):
         """Retrying an unchanged upload should not mint a second object id."""
         vault = tmp_path / "vault"

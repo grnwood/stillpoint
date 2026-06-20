@@ -905,6 +905,11 @@ class PageEditorWindow(QMainWindow):
             custom_action.triggered.connect(
                 lambda checked=False, name=image_name: self.editor._prompt_image_width_by_name(name)
             )
+            menu.addSeparator()
+            ocr_action = menu.addAction("OCR Text Extract...")
+            ocr_action.triggered.connect(
+                lambda checked=False, image_pos=image_hit[0].position(): self.editor.request_inline_image_ocr_at_position(image_pos)
+            )
             menu.exec(self.editor.mapToGlobal(pos))
             return
 

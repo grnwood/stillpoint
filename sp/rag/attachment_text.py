@@ -4,16 +4,15 @@ from pathlib import Path
 from typing import Iterable
 
 from docx import Document
-from PIL import Image
-import pytesseract
 from pdfminer.high_level import extract_text as extract_pdf_text
+from sp.app.ocr_utils import ocr_image_file
 from sp.logging_flags import log_enabled
 
 
 def _extract_text_from_image(image_path: Path) -> str:
     try:
-        with Image.open(image_path) as img:
-            return pytesseract.image_to_string(img)
+        result = ocr_image_file(image_path)
+        return result.text
     except Exception as exc:  # pragma: no cover - external tooling
         if log_enabled("rag_vector"):
             print(f"[Chroma] Failed to OCR {image_path}: {exc}")

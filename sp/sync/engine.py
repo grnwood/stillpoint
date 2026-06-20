@@ -83,6 +83,50 @@ def _manifest_id_bytes(manifest_bytes: bytes) -> str:
     return hashlib.sha256(manifest_bytes).hexdigest()
 
 
+def _normalize_material_text(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    lines = [line.rstrip() for line in normalized.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _title_only_markdown_heading(text: str) -> Optional[str]:
+    normalized = _normalize_material_text(text)
+    if not normalized:
+        return None
+    lines = normalized.split("\n")
+    first_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip():
+            first_idx = idx
+            break
+    if first_idx is None:
+        return None
+    first = lines[first_idx].lstrip()
+    if not first.startswith("#"):
+        return None
+    heading = first.lstrip("#").strip()
+    if not heading:
+        return None
+    for line in lines[first_idx + 1 :]:
+        if line.strip():
+            return None
+    return heading
+
+
+def has_material_text_difference(local_text: str, remote_text: str) -> bool:
+    local_normalized = _normalize_material_text(local_text)
+    remote_normalized = _normalize_material_text(remote_text)
+    if local_normalized == remote_normalized:
+        return False
+    local_heading = _title_only_markdown_heading(local_text)
+    remote_heading = _title_only_markdown_heading(remote_text)
+    if local_heading and remote_heading and local_heading == remote_heading:
+        return False
+    return True
+
+
 @dataclass
 class HomebaseSyncStatus:
     state: str = "idle"
@@ -568,10 +612,24 @@ class HomebaseSyncEngine:
             latest = client.get_latest()
             remote_head = latest.get("checkpoint_id")
             local_seen = hb.get("last_seen_latest_checkpoint_id")
-            pulled_remote = bool(remote_head and remote_head != local_seen)
             object_cache = self._load_object_cache()
+            scan_state = _read_json(self._scan_path, {"entries": {}})
+            previous_scan = scan_state.get("entries") if isinstance(scan_state.get("entries"), dict) else {}
+            local_file_count = len(self._iter_sync_files())
+            needs_bootstrap_pull = bool(
+                remote_head
+                and local_file_count == 0
+                and not hb.get("last_pushed_checkpoint_id")
+                and (
+                    not hb.get("last_pulled_checkpoint_id")
+                    or not object_cache
+                    or not previous_scan
+                )
+            )
+            pulled_remote = bool(remote_head and (remote_head != local_seen or needs_bootstrap_pull))
             if pulled_remote:
-                _log(f"pull: remote head changed {local_seen} -> {remote_head}")
+                reason = "bootstrap-empty-local" if needs_bootstrap_pull and remote_head == local_seen else "head-changed"
+                _log(f"pull: remote head changed {local_seen} -> {remote_head} reason={reason}")
                 applied_paths, pulled_object_cache = self._apply_remote_checkpoint(
                     client,
                     key,
@@ -596,8 +654,6 @@ class HomebaseSyncEngine:
                 for rel, meta in manifest.get("entries", {}).items()
                 if isinstance(meta, dict)
             }
-            scan_state = _read_json(self._scan_path, {"entries": {}})
-            previous_scan = scan_state.get("entries") if isinstance(scan_state.get("entries"), dict) else {}
             unchanged_scan = previous_scan == current_scan
             _log(
                 f"scan complete files={len(current_scan)} unchanged_scan={unchanged_scan} "
@@ -1098,6 +1154,31 @@ class HomebaseSyncEngine:
             if bytes_equal(local_bytes, plaintext):
                 unchanged += 1
                 continue
+            if str(rel_key).lower().endswith((".md", ".txt")):
+                try:
+                    local_text = local_bytes.decode("utf-8")
+                    remote_text = plaintext.decode("utf-8")
+                except UnicodeDecodeError:
+                    local_text = ""
+                    remote_text = ""
+                else:
+                    if not has_material_text_difference(local_text, remote_text):
+                        unchanged += 1
+                        remaining_downloads = max(0, remaining_downloads - 1)
+                        self._set_status_locked(
+                            summary=(
+                                f"Pulling {remaining_downloads} object(s)..."
+                                if remaining_downloads
+                                else "Applying pulled files..."
+                            ),
+                            pending_downloads=remaining_downloads,
+                            transfer_workers=["Idle"],
+                        )
+                        _log(
+                            f"pull decision=non-material-text path={rel} remote_checkpoint={checkpoint_id} "
+                            f"remote_device={remote_device_id}"
+                        )
+                        continue
             # Prefer last-writer-wins for normal cross-device edits:
             # if remote mtime is newer-or-equal, replace local contents directly.
             _, local_mtime = stat_file(local_path)

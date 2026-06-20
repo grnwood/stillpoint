@@ -88,6 +88,48 @@ def test_apply_remote_checkpoint_skips_repeating_keep_local_conflict(tmp_path) -
     assert not (vault_root / conflict_rel).exists()
 
 
+def test_apply_remote_checkpoint_ignores_non_material_title_only_markdown_differences(tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    local_file = vault_root / "Page.md"
+    local_file.write_text("# Page\n\n", encoding="utf-8")
+
+    cfg = HomebaseSyncConfig(
+        vault_root=vault_root,
+        vault_id="vault-123",
+        device_id="device-local",
+        remote_url="https://example.invalid",
+        verify_ssl=True,
+        auth_token="token",
+        passphrase="secret",
+    )
+    engine = HomebaseSyncEngine(cfg)
+    key = derive_key_from_passphrase(cfg.passphrase, cfg.vault_id)
+    ciphertext = encrypt_bytes(key, b"# Page\n")
+    object_id = object_id_from_ciphertext(ciphertext)
+    manifest = {
+        "schema_version": 1,
+        "vault_id": cfg.vault_id,
+        "device_id": "device-remote",
+        "entries": {
+            "Page.md": {
+                "object_id": object_id,
+                "mtime": 1,
+                "size": len(b"# Page\n"),
+                "kind": "file",
+            }
+        },
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    client = _FakeClient(manifest_bytes, {object_id: ciphertext})
+    applied_paths, _pulled_cache = engine._apply_remote_checkpoint(client, key, "checkpoint-title-only")
+
+    assert applied_paths == []
+    assert local_file.read_text(encoding="utf-8") == "# Page\n\n"
+    assert engine.list_conflicts() == []
+
+
 def test_keep_local_resolution_removes_conflict_and_requests_sync(tmp_path, monkeypatch) -> None:
     class _DummyStatusBar:
         def __init__(self) -> None:

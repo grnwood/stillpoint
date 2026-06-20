@@ -9,6 +9,7 @@ import itertools
 import shlex
 import hashlib
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
 import httpx
@@ -29,6 +30,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     QSizeF,
+    QThread,
     QTimer,
     QSignalBlocker,
 )
@@ -66,6 +68,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QLabel,
+    QMessageBox,
+    QPushButton,
+    QProgressDialog,
     QToolButton,
     QWidgetAction,
     QSizePolicy,
@@ -81,6 +86,7 @@ from .jump_dialog import JumpToPageDialog
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.app import config
 from sp.app import indexer
+from sp.app.ocr_utils import OCRImageResult, ocr_image_file
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 
@@ -95,6 +101,82 @@ def hr_overlay_disabled() -> bool:
     if hr_overlay_env is None:
         return sys.platform.startswith("linux") or sys.platform == "win32"
     return hr_overlay_env in ("1", "true", "True")
+
+
+class InlineImageOcrWorker(QThread):
+    resultReady = Signal(object)
+
+    def __init__(self, image_path: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._image_path = Path(image_path)
+
+    def run(self) -> None:
+        result = ocr_image_file(self._image_path)
+        self.resultReady.emit(result)
+
+
+@dataclass(slots=True)
+class InlineImageContext:
+    image_position: int
+    raw_path: str
+    resolved_path: Path
+
+
+class InlineImageOcrDialog(QDialog):
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Extracted Text")
+        self.setModal(True)
+        self.resize(720, 520)
+        self._replace_requested = False
+
+        layout = QVBoxLayout(self)
+        self._message_label = QLabel("", self)
+        self._message_label.setWordWrap(True)
+        self._message_label.hide()
+        layout.addWidget(self._message_label)
+
+        self._text_edit = QTextEdit(self)
+        self._text_edit.setReadOnly(True)
+        self._text_edit.setPlainText(text)
+        layout.addWidget(self._text_edit, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.replace_button = QPushButton("Replace Image with Text", self)
+        self.copy_button = QPushButton("Copy to Clipboard", self)
+        self.close_button = QPushButton("Close", self)
+        buttons.addWidget(self.replace_button)
+        buttons.addWidget(self.copy_button)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+
+        self.replace_button.clicked.connect(self._request_replace)
+        self.copy_button.clicked.connect(self._copy_all_text)
+        self.close_button.clicked.connect(self.accept)
+
+    def set_empty_notice(self, message: str) -> None:
+        self._message_label.setText(message)
+        self._message_label.show()
+
+    def set_replace_enabled(self, enabled: bool) -> None:
+        self.replace_button.setEnabled(enabled)
+
+    def replace_requested(self) -> bool:
+        return self._replace_requested
+
+    def _request_replace(self) -> None:
+        self._replace_requested = True
+        self.accept()
+
+    def _copy_all_text(self) -> None:
+        QGuiApplication.clipboard().setText(self._text_edit.toPlainText())
+        parent = self.parentWidget()
+        try:
+            if parent and hasattr(parent, "_status_message"):
+                parent._status_message("OCR text copied to clipboard", 2500)
+        except Exception:
+            pass
 
 
 class SearchEngine:
@@ -1601,6 +1683,9 @@ class MarkdownEditor(QTextEdit):
         # General-purpose focus loss suppression used by popup overlays/dialogs that
         # should not trigger autosave writes (e.g., one-shot prompt overlay).
         self._focus_lost_suppression_depth: int = 0
+        self._inline_ocr_worker: Optional[InlineImageOcrWorker] = None
+        self._inline_ocr_progress: Optional[QProgressDialog] = None
+        self._inline_ocr_context: Optional[InlineImageContext] = None
         self._vault_root: Optional[Path] = None
         self._remote_mode = False
         self._remote_cache_root: Optional[Path] = None
@@ -5378,6 +5463,11 @@ class MarkdownEditor(QTextEdit):
             custom_action = menu.addAction("Custom…")
             custom_action.triggered.connect(
                 lambda checked=False, name=image_name: self._prompt_image_width_by_name(name)
+            )
+            menu.addSeparator()
+            ocr_action = menu.addAction("OCR Text Extract...")
+            ocr_action.triggered.connect(
+                lambda checked=False, image_pos=image_hit[0].position(): self.request_inline_image_ocr_at_position(image_pos)
             )
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
@@ -10012,6 +10102,210 @@ class MarkdownEditor(QTextEdit):
         if not ok:
             return
         self._resize_image_by_name(image_name, width)
+
+    def _show_ocr_error(self, message: str) -> None:
+        self._status_message(message, 4000)
+        self.push_focus_lost_suppression()
+        try:
+            QMessageBox.warning(self.window() or self, "OCR", message)
+        except Exception:
+            pass
+        finally:
+            self.pop_focus_lost_suppression()
+
+    def _resolve_image_path_for_ocr(self, image_name: str) -> Optional[Path]:
+        result = self._find_image_by_name(image_name)
+        if not result:
+            return None
+        _, fmt = result
+        original = fmt.property(IMAGE_PROP_ORIGINAL) or fmt.name()
+        try:
+            resolved = self._resolve_image_path(str(original))
+        except Exception:
+            resolved = None
+        if resolved is None or not resolved.exists():
+            return None
+        return resolved
+
+    def _find_image_by_position(self, image_position: int) -> Optional[tuple[QTextCursor, QTextImageFormat]]:
+        if image_position < 0:
+            return None
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(image_position)
+        fmt = cursor.charFormat()
+        if fmt.isImageFormat():
+            return cursor, fmt.toImageFormat()
+        return None
+
+    def _image_context_for_position(self, image_position: int) -> Optional[InlineImageContext]:
+        result = self._find_image_by_position(image_position)
+        if not result:
+            return None
+        cursor, fmt = result
+        original = fmt.property(IMAGE_PROP_ORIGINAL) or fmt.name()
+        try:
+            resolved = self._resolve_image_path(str(original))
+        except Exception:
+            resolved = None
+        if resolved is None or not resolved.exists():
+            return None
+        return InlineImageContext(
+            image_position=cursor.position(),
+            raw_path=str(original),
+            resolved_path=resolved,
+        )
+
+    def _delete_inline_image_file(self, context: InlineImageContext) -> bool:
+        if self._remote_mode:
+            if not self._http_client:
+                self._show_ocr_error("Could not locate the image file for OCR.")
+                return False
+            virtual_path = self._virtual_image_path(context.raw_path)
+            if not virtual_path:
+                self._show_ocr_error("Could not locate the image file for OCR.")
+                return False
+            try:
+                resp = self._http_client.post("/files/delete", json={"paths": [virtual_path]})
+                if resp.status_code == 401 and self._auth_prompt:
+                    if self._auth_prompt():
+                        resp = self._http_client.post("/files/delete", json={"paths": [virtual_path]})
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                self._show_ocr_error("Failed to delete the image file.")
+                return False
+            try:
+                if context.resolved_path.exists():
+                    context.resolved_path.unlink()
+            except OSError:
+                pass
+            return True
+        try:
+            if context.resolved_path.exists():
+                context.resolved_path.unlink()
+        except OSError:
+            self._show_ocr_error("Failed to delete the image file.")
+            return False
+        if self._vault_root:
+            try:
+                rel = context.resolved_path.resolve().relative_to(self._vault_root.resolve())
+                config.delete_attachment_entry(f"/{rel.as_posix()}")
+            except Exception:
+                pass
+        return True
+
+    def _replace_image_fragment_with_text(self, image_position: int, replacement_text: str) -> bool:
+        result = self._find_image_by_position(image_position)
+        if not result:
+            self._show_ocr_error("Could not find the image in the editor.")
+            return False
+        cursor, _ = result
+        image_pos = cursor.position()
+        edit_cursor = QTextCursor(self.document())
+        edit_cursor.beginEditBlock()
+        edit_cursor.setPosition(image_pos)
+        edit_cursor.setPosition(image_pos + 1, QTextCursor.KeepAnchor)
+        edit_cursor.insertText(replacement_text)
+        edit_cursor.endEditBlock()
+        self.setTextCursor(edit_cursor)
+        self._status_message("Replaced image with OCR text", 3000)
+        return True
+
+    def _replace_inline_image_with_ocr_text(self, result: OCRImageResult) -> None:
+        context = self._inline_ocr_context
+        if context is None:
+            self._show_ocr_error("Could not find the image in the editor.")
+            return
+        if not result.text:
+            self._show_ocr_error("No readable text was detected in this image.")
+            return
+        if not self._delete_inline_image_file(context):
+            return
+        if self._replace_image_fragment_with_text(context.image_position, result.text):
+            self._inline_ocr_context = None
+
+    def _show_inline_image_ocr_result(self, result: OCRImageResult) -> None:
+        dialog = InlineImageOcrDialog(result.text, self)
+        if not result.text:
+            dialog.set_empty_notice("No readable text was detected in this image.")
+        dialog.set_replace_enabled(bool(result.text.strip()) and not self.isReadOnly())
+        self.push_focus_lost_suppression()
+        try:
+            dialog.exec()
+        finally:
+            self.pop_focus_lost_suppression()
+        if dialog.replace_requested():
+            self._replace_inline_image_with_ocr_text(result)
+
+    def _finish_inline_image_ocr(self) -> None:
+        progress = self._inline_ocr_progress
+        self._inline_ocr_progress = None
+        if progress is not None:
+            try:
+                progress.close()
+                progress.deleteLater()
+            except Exception:
+                pass
+            self.pop_focus_lost_suppression()
+        worker = self._inline_ocr_worker
+        self._inline_ocr_worker = None
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.finished.connect(worker.deleteLater)
+                else:
+                    worker.deleteLater()
+            except Exception:
+                pass
+
+    def _handle_inline_image_ocr_result(self, result: object) -> None:
+        self._finish_inline_image_ocr()
+        if not isinstance(result, OCRImageResult):
+            self._inline_ocr_context = None
+            self._show_ocr_error("OCR failed.")
+            return
+        if result.error_code and result.error_code != "ocr_failed":
+            if result.error_code in {"missing_file", "unsupported_format", "tesseract_missing"}:
+                self._inline_ocr_context = None
+                self._show_ocr_error(result.message or "OCR failed.")
+                return
+        if result.error_code == "ocr_failed":
+            self._inline_ocr_context = None
+            self._show_ocr_error(result.message or "OCR failed.")
+            return
+        self._show_inline_image_ocr_result(result)
+
+    def request_inline_image_ocr_by_name(self, image_name: str) -> None:
+        result = self._find_image_by_name(image_name)
+        if not result:
+            self._show_ocr_error("Could not locate the image file for OCR.")
+            return
+        self.request_inline_image_ocr_at_position(result[0].position())
+
+    def request_inline_image_ocr_at_position(self, image_position: int) -> None:
+        if self._inline_ocr_worker is not None and self._inline_ocr_worker.isRunning():
+            self._status_message("OCR is already running...", 3000)
+            return
+        context = self._image_context_for_position(image_position)
+        if context is None:
+            self._inline_ocr_context = None
+            self._show_ocr_error("Could not locate the image file for OCR.")
+            return
+        self._inline_ocr_context = context
+        progress_parent = self.window() if isinstance(self.window(), QWidget) else self
+        progress = QProgressDialog("Extracting text from image...", None, 0, 0, progress_parent)
+        progress.setWindowTitle("OCR")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self.push_focus_lost_suppression()
+        progress.show()
+        self._inline_ocr_progress = progress
+        worker = InlineImageOcrWorker(context.resolved_path, self)
+        worker.resultReady.connect(self._handle_inline_image_ocr_result)
+        self._inline_ocr_worker = worker
+        worker.start()
 
     def set_ai_actions_enabled(self, enabled: bool) -> None:
         """Enable/disable AI actions menu entries."""

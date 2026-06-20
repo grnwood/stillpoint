@@ -121,7 +121,7 @@ from sp.app import config, indexer
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
-from sp.sync.engine import HomebaseSyncConfig
+from sp.sync.engine import HomebaseSyncConfig, has_material_text_difference
 from .theme import apply_menu_theme, theme_color, theme_value
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from . import theme as theme_module
@@ -12045,7 +12045,7 @@ class MainWindow(QMainWindow):
 
     def _accept_noop_conflict(self, path: str, content: str, conflict: dict, auto: bool) -> bool:
         remote_content = conflict.get("current_content", "")
-        if remote_content != content:
+        if has_material_text_difference(content, remote_content):
             return False
         print("[Conflict] 409 received, no changes; accepting remote revision.")
         payload = {
