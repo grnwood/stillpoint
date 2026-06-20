@@ -697,25 +697,12 @@ class PreferencesDialog(QDialog):
         self.mermaid_enable_checkbox.setChecked(config.load_mermaid_enabled())
         mermaid_layout.addWidget(self.mermaid_enable_checkbox)
 
-        mermaid_row = QHBoxLayout()
-        self.mermaid_help_label = QLabel("Install Mermaid CLI: npm install -g @mermaid-js/mermaid-cli")
-        self.mermaid_help_label.setWordWrap(True)
-        mermaid_row.addWidget(self.mermaid_help_label)
-        self.mermaid_copy_btn = QPushButton("Copy")
-        self.mermaid_copy_btn.setToolTip("Copy Mermaid CLI install command to clipboard")
-        self.mermaid_copy_btn.setFixedWidth(50)
-        self.mermaid_copy_btn.clicked.connect(self._copy_mermaid_label)
-        mermaid_row.addWidget(self.mermaid_copy_btn)
-        mermaid_layout.addLayout(mermaid_row)
-
-        mermaid_test_row = QHBoxLayout()
-        self.mermaid_test_btn = QPushButton("Check Mermaid Install")
-        self.mermaid_test_btn.clicked.connect(self._run_mermaid_test)
-        self.mermaid_test_status = QLabel("Not tested")
-        self.mermaid_test_status.setStyleSheet("color: #888;")
-        mermaid_test_row.addWidget(self.mermaid_test_btn)
-        mermaid_test_row.addWidget(self.mermaid_test_status, 1)
-        mermaid_layout.addLayout(mermaid_test_row)
+        mermaid_info_label = QLabel(
+            "Mermaid preview normally uses the built-in web renderer.\n"
+            "On Linux, the safer default preview path uses Mermaid CLI (mmdc) unless SP_ENABLE_MERMAID_WEB_PREVIEW=1 is set."
+        )
+        mermaid_info_label.setWordWrap(True)
+        mermaid_layout.addWidget(mermaid_info_label)
 
         mermaid_font_row = QHBoxLayout()
         mermaid_font_row.addWidget(QLabel("Editor font:"))
@@ -740,23 +727,6 @@ class PreferencesDialog(QDialog):
         mermaid_layout.addLayout(mermaid_font_size_row)
         
         mermaid_layout.addStretch(1)
-    def _copy_mermaid_label(self):
-        # Copy Mermaid label text to clipboard and show status bar message
-        clipboard = QApplication.instance().clipboard()
-        clipboard.setText("npm install -g @mermaid-js/mermaid-cli")
-        # Show 'copied to buffer' in status bar if available
-        parent = self.parent()
-        # Try to find a status bar in parent or grandparent
-        status_bar = None
-        if hasattr(parent, 'statusBar'):
-            status_bar = parent.statusBar()
-        elif parent and hasattr(parent, 'parent') and hasattr(parent.parent(), 'statusBar'):
-            status_bar = parent.parent().statusBar()
-        if status_bar:
-            status_bar.showMessage("copied to buffer", 2000)
-        else:
-            # Fallback: show a temporary message box
-            QMessageBox.information(self, "Copied", "Copied to buffer")
 
         # Templates
         tpl_layout = add_section("Templates")
@@ -1002,20 +972,6 @@ class PreferencesDialog(QDialog):
             self.plantuml_test_status.setStyleSheet("color: #c00;")
             if details:
                 QMessageBox.warning(self, "PlantUML Test", details)
-
-    def _run_mermaid_test(self):
-        from sp.app.mermaid_renderer import MermaidRenderer
-
-        self.mermaid_test_status.setText("Checking…")
-        self.mermaid_test_status.setStyleSheet("color: #888;")
-        renderer = MermaidRenderer()
-        path = renderer.discover_mmdc()
-        if path:
-            self.mermaid_test_status.setText(f"OK ({path})")
-            self.mermaid_test_status.setStyleSheet("color: #2a8f2a;")
-        else:
-            self.mermaid_test_status.setText("Failed: mmdc not found on PATH")
-            self.mermaid_test_status.setStyleSheet("color: #c00;")
 
     def _load_pygments_styles(self) -> None:
         styles = ["monokai"]

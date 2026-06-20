@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray, QBuffer, QIODevice
-from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices
+from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices, QNativeGestureEvent
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -561,7 +561,7 @@ class ChatLineEdit(QLineEdit):
 
 
 class ZoomablePreviewLabel(QLabel):
-    """Custom label that handles Ctrl+MouseWheel for zooming and left-click drag for panning."""
+    """Preview label with map-style wheel zoom and right-click drag panning."""
     
     zoomRequested = Signal(int)  # delta (positive = zoom in, negative = zoom out)
     
@@ -569,30 +569,47 @@ class ZoomablePreviewLabel(QLabel):
         super().__init__()
         self.pan_start_pos = None
         self.is_panning = False
+        self.grabGesture(Qt.PinchGesture)
     
     def wheelEvent(self, event) -> None:
-        """Handle mouse wheel - zoom on Ctrl modifier."""
-        if event.modifiers() & Qt.ControlModifier:
+        """Handle wheel zoom and Shift+wheel horizontal scrolling."""
+        if event.modifiers() & Qt.ShiftModifier:
             delta = event.angleDelta().y()
-            if delta > 0:
-                self.zoomRequested.emit(1)  # Zoom in
-            elif delta < 0:
-                self.zoomRequested.emit(-1)  # Zoom out
+            if delta:
+                parent = self.parent()
+                while parent:
+                    if isinstance(parent, QScrollArea):
+                        parent.horizontalScrollBar().setValue(
+                            parent.horizontalScrollBar().value() - (int(delta / 120) * 40)
+                        )
+                        event.accept()
+                        return
+                    parent = parent.parent()
+        delta = event.angleDelta().y()
+        if delta:
+            self.zoomRequested.emit(1 if delta > 0 else -1)
             event.accept()
-        else:
-            super().wheelEvent(event)
+            return
+        super().wheelEvent(event)
+
+    def event(self, event):  # type: ignore[override]
+        if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
+            value = event.value()
+            if value:
+                self.zoomRequested.emit(1 if value > 0 else -1)
+                event.accept()
+                return True
+        return super().event(event)
     
     def mousePressEvent(self, event) -> None:
-        """Start pan operation on left mouse button."""
+        """Start pan operation on right mouse button."""
         pixmap = self.pixmap()
-        if event.button() == Qt.LeftButton and pixmap:
-            # Allow panning if image is larger than viewport in either dimension
-            if pixmap.width() > self.width() or pixmap.height() > self.height():
-                self.is_panning = True
-                self.pan_start_pos = event.globalPos()
-                self.setCursor(Qt.ClosedHandCursor)
-                event.accept()
-                return
+        if event.button() == Qt.RightButton and pixmap:
+            self.is_panning = True
+            self.pan_start_pos = event.globalPos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event) -> None:
@@ -617,7 +634,7 @@ class ZoomablePreviewLabel(QLabel):
     
     def mouseReleaseEvent(self, event) -> None:
         """End pan operation."""
-        if event.button() == Qt.LeftButton and self.is_panning:
+        if event.button() == Qt.RightButton and self.is_panning:
             self.is_panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)

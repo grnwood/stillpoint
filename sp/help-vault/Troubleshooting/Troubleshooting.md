@@ -65,8 +65,9 @@ Try these first:
 
 ## Mermaid / PlantUML Diagrams Not Rendering
 - **Mermaid checks**:
-1. In Preferences -> Mermaid, click **Check Mermaid Install**.
-2. Install Mermaid CLI if missing: `npm install -g @mermaid-js/mermaid-cli`.
+1. In Preferences -> Mermaid, ensure **Enable Mermaid rendering** is checked.
+2. Open the Mermaid editor and click **Render**.
+3. If the preview is blank, try switching Mermaid **Theme** and render again.
 - **PlantUML checks**:
 1. In Preferences -> PlantUML, set `plantuml.jar` path.
 2. Optionally set a Java path.
