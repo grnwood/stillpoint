@@ -480,6 +480,22 @@ class HomebaseSyncEngine:
             self._status.transfer_workers = workers
         self._emit_status()
 
+    def _claim_pending_upload(self, slot_index: int, rel_key: str) -> None:
+        with self._status_lock:
+            workers = list(getattr(self._status, "transfer_workers", []) or [])
+            while len(workers) <= slot_index:
+                workers.append("Idle")
+            workers[slot_index] = f"HEAD {rel_key}"
+            self._status.transfer_workers = workers
+            pending_uploads = max(0, int(getattr(self._status, "pending_uploads", 0) or 0) - 1)
+            self._status.pending_uploads = pending_uploads
+            self._status.summary = (
+                f"Uploading {pending_uploads} object(s) remaining..."
+                if pending_uploads > 0
+                else "Finishing active uploads..."
+            )
+        self._emit_status()
+
     def _emit_status(self) -> None:
         if not self.status_callback:
             return
@@ -770,7 +786,7 @@ class HomebaseSyncEngine:
                 def _run_upload(rel_key: str, object_id: str, envelope: bytes) -> bool:
                     slot_index = available_slots.get()
                     try:
-                        self._update_transfer_worker(slot_index, f"HEAD {rel_key}")
+                        self._claim_pending_upload(slot_index, rel_key)
                         if client.has_object(object_id):
                             return False
                         self._update_transfer_worker(slot_index, f"PUT {rel_key}")
@@ -788,22 +804,16 @@ class HomebaseSyncEngine:
                         executor.submit(_run_upload, rel_key, object_id, envelope): (rel_key, object_id)
                         for rel_key, object_id, envelope in upload_jobs
                     }
-                    remaining_uploads = len(upload_jobs)
                     for future in as_completed(future_map):
                         uploaded = future.result()
                         if uploaded:
                             upload_count += 1
                         else:
                             existing_count += 1
-                        remaining_uploads = max(0, remaining_uploads - 1)
-                        self._set_status_locked(
-                            summary=(
-                                f"Uploading {remaining_uploads} object(s) remaining..."
-                                if remaining_uploads
-                                else "Publishing manifest..."
-                            ),
-                            pending_uploads=remaining_uploads,
-                        )
+                    self._set_status_locked(
+                        summary="Publishing manifest...",
+                        pending_uploads=0,
+                    )
                 _log(
                     f"object upload phase complete workers={worker_count} "
                     f"queued={len(upload_jobs)} uploaded={upload_count} existing={existing_count}"

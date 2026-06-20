@@ -352,6 +352,70 @@ class TestImageSyncPull:
         assert any(int(getattr(status, "pending_uploads", 0) or 0) > 0 for status in seen_statuses)
         assert any(len(getattr(status, "transfer_workers", []) or []) > 1 for status in seen_statuses)
 
+    def test_sync_once_upload_count_drops_while_workers_are_active(self, tmp_path, monkeypatch):
+        """The visible upload countdown should drop as workers claim jobs, not only on completion."""
+        vault = tmp_path / "vault_countdown"
+        vault.mkdir()
+        for idx in range(4):
+            (vault / f"Page{idx}.md").write_text(f"content {idx}\n", encoding="utf-8")
+
+        cfg = _make_cfg(vault, max_parallel_transfers=2)
+        engine = HomebaseSyncEngine(cfg)
+        started = threading.Event()
+        release = threading.Event()
+        start_count = 0
+        start_lock = threading.Lock()
+
+        class SlowClient:
+            def __init__(self) -> None:
+                self.objects: dict[str, bytes] = {}
+                self.manifests: dict[str, bytes] = {}
+                self.latest_checkpoint: str | None = None
+
+            def get_latest(self) -> dict:
+                return {}
+
+            def has_object(self, object_id: str) -> bool:
+                return object_id in self.objects
+
+            def put_object(self, object_id: str, data: bytes) -> None:
+                nonlocal start_count
+                with start_lock:
+                    start_count += 1
+                    if start_count >= 2:
+                        started.set()
+                release.wait(timeout=5)
+                self.objects[object_id] = data
+
+            def put_manifest(self, manifest_id: str, data: bytes) -> None:
+                self.manifests[manifest_id] = data
+
+            def put_latest(self, checkpoint_id: str) -> None:
+                self.latest_checkpoint = checkpoint_id
+
+            def close(self) -> None:
+                pass
+
+        client = SlowClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **kwargs: client)
+
+        worker = threading.Thread(target=engine._sync_once, daemon=True)
+        worker.start()
+        assert started.wait(timeout=5), "upload workers never became active"
+
+        status = engine.get_status()
+        active_workers = [
+            str(item or "").strip()
+            for item in (getattr(status, "transfer_workers", []) or [])
+            if str(item or "").strip() and str(item or "").strip().lower() != "idle"
+        ]
+        assert len(active_workers) >= 2
+        assert int(getattr(status, "pending_uploads", 0) or 0) == 2
+
+        release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
 
 class TestCachedObjectVerification:
     """Cached object_ids must be verified against the server before reuse."""

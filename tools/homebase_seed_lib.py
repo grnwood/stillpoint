@@ -6,7 +6,7 @@ import stat
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from argon2 import PasswordHasher
 
@@ -16,6 +16,7 @@ from sp.sync.local_fs import iter_files, read_bytes, stat_file
 
 _PRIVATE_AUTH_FILE_MODE = 0o600
 _PRIVATE_AUTH_DIR_MODE = 0o700
+ProgressFn = Callable[[str], None]
 
 
 def utc_now_iso() -> str:
@@ -90,11 +91,28 @@ def iter_seed_files(vault_root: Path) -> list[tuple[str, Path]]:
     return results
 
 
-def build_manifest_and_objects(source_root: Path, vault_id: str, passphrase: str, device_id: str) -> tuple[dict[str, Any], dict[str, bytes]]:
+def _noop_progress(_message: str) -> None:
+    return
+
+
+def build_manifest_and_objects(
+    source_root: Path,
+    vault_id: str,
+    passphrase: str,
+    device_id: str,
+    *,
+    progress: ProgressFn | None = None,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    report = progress or _noop_progress
     key = derive_key_from_passphrase(passphrase, vault_id)
     entries: dict[str, Any] = {}
     objects: dict[str, bytes] = {}
-    for rel, full in iter_seed_files(source_root):
+    seed_files = iter_seed_files(source_root)
+    total = len(seed_files)
+    report(f"Scanning staging folder: {source_root}")
+    report(f"Found {total} file{'s' if total != 1 else ''} to seed")
+    for index, (rel, full) in enumerate(seed_files, start=1):
+        report(f"[{index}/{total}] Encrypting {rel}")
         size, mtime = stat_file(full)
         plaintext = read_bytes(full)
         envelope = encrypt_bytes(key, plaintext)
@@ -133,7 +151,9 @@ def seed_homebase_vault(
     overwrite_latest: bool,
     vault_name: str | None = None,
     dry_run: bool = False,
+    progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
+    report = progress or _noop_progress
     base = vaults_root / "homebase" / vault_id
     if not base.exists():
         raise FileNotFoundError(f"Homebase vault not found: {base}")
@@ -147,7 +167,14 @@ def seed_homebase_vault(
             "Homebase latest checkpoint already exists. Pass --overwrite-latest to replace it."
         )
 
-    manifest, objects = build_manifest_and_objects(source_root, vault_id, passphrase, device_id)
+    report(f"Preparing Homebase seed for vault {vault_id}")
+    manifest, objects = build_manifest_and_objects(
+        source_root,
+        vault_id,
+        passphrase,
+        device_id,
+        progress=report,
+    )
     checkpoint_id, manifest_bytes = _checkpoint_id_for_manifest(manifest)
     current_latest = ""
     if latest_exists:
@@ -168,11 +195,17 @@ def seed_homebase_vault(
         "would_replace_latest": bool(current_latest and current_latest != checkpoint_id),
     }
     if dry_run:
+        report(f"Dry run complete for checkpoint {checkpoint_id}")
         return result
 
-    for object_id, envelope in objects.items():
+    report(f"Writing {len(objects)} encrypted object{'s' if len(objects) != 1 else ''}")
+    object_total = len(objects)
+    for index, (object_id, envelope) in enumerate(objects.items(), start=1):
+        report(f"[{index}/{object_total}] Writing object {object_id}")
         write_bytes(base / "objects" / object_id[:2] / object_id, envelope)
+    report(f"Writing manifest {checkpoint_id}")
     write_bytes(base / "manifests" / checkpoint_id[:2] / checkpoint_id, manifest_bytes)
+    report(f"Writing checkpoint metadata {checkpoint_id}")
     write_json(
         base / "checkpoints" / f"{checkpoint_id}.json",
         {
@@ -185,6 +218,7 @@ def seed_homebase_vault(
             "parent_checkpoint_id": None,
         },
     )
+    report("Updating latest checkpoint pointer")
     write_json(
         latest_path,
         {
@@ -196,6 +230,7 @@ def seed_homebase_vault(
     )
     meta_path = base / "meta.json"
     if vault_name or not meta_path.exists():
+        report("Updating Homebase vault metadata")
         existing_meta: dict[str, Any] = {}
         if meta_path.exists():
             try:
@@ -211,6 +246,7 @@ def seed_homebase_vault(
                 "created_at": str(existing_meta.get("created_at") or utc_now_iso()),
             },
         )
+    report(f"Seed complete: {len(manifest['entries'])} files -> checkpoint {checkpoint_id}")
     return result
 
 
@@ -222,7 +258,9 @@ def create_homebase_vault(
     vault_name: str = "",
     vault_id: str = "",
     force: bool = False,
+    progress: ProgressFn | None = None,
 ) -> dict[str, str]:
+    report = progress or _noop_progress
     cleaned_username = str(username or "").strip()
     if not cleaned_username or not password:
         raise ValueError("username and password are required")
@@ -231,6 +269,8 @@ def create_homebase_vault(
     if base.exists() and any(base.iterdir()) and not force:
         raise RuntimeError(f"Homebase vault already exists and is not empty: {base}")
     base.mkdir(parents=True, exist_ok=True)
+    report(f"Creating Homebase vault {cleaned_vault_id}")
+    report("Hashing admin password")
     ph = PasswordHasher()
     now = utc_now_iso()
     auth_payload = {
@@ -248,7 +288,9 @@ def create_homebase_vault(
             }
         },
     }
+    report("Writing auth/auth.json")
     write_private_json(base / "auth" / "auth.json", auth_payload)
+    report("Writing meta.json")
     write_json(
         base / "meta.json",
         {
@@ -258,6 +300,7 @@ def create_homebase_vault(
             "created_at": now,
         },
     )
+    report(f"Vault created: {cleaned_vault_id}")
     return {
         "vault_id": cleaned_vault_id,
         "vault_base": str(base),

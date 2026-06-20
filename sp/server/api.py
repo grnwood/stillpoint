@@ -70,6 +70,7 @@ from sp.app import config
 from sp.app import indexer as app_indexer
 from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
 from sp.logging_flags import log_enabled
+from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
 
 _ANSI_BLUE = "\033[94m"
 _ANSI_RESET = "\033[0m"
@@ -4109,19 +4110,47 @@ if __name__ == "__main__":
         help="Run the Home Base retention janitor instead of starting the API server.",
     )
     parser.add_argument(
+        "--homebase-seed",
+        action="store_true",
+        help="Seed an existing Homebase vault from a plaintext staging folder on the server.",
+    )
+    parser.add_argument(
+        "--homebase-create-and-seed",
+        action="store_true",
+        help="Create a Homebase vault on the server and seed it from a plaintext staging folder.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="With --run-gc, log what would be deleted without removing files.",
+        help="With --run-gc or Homebase seed/create modes, log what would happen without writing.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="With --run-gc, bypass the janitor interval gate for this invocation.",
+        help="With --run-gc, bypass the janitor interval gate. With --homebase-create-and-seed, allow reusing a non-empty Homebase vault directory.",
+    )
+    parser.add_argument("--source", help="Plaintext staging folder for Homebase seed/create modes.")
+    parser.add_argument("--vault-id", help="Existing or explicit Homebase vault id for Homebase seed/create modes.")
+    parser.add_argument("--username", help="Admin username for --homebase-create-and-seed.")
+    parser.add_argument("--password", help="Admin password for --homebase-create-and-seed.")
+    parser.add_argument("--passphrase", help="Homebase encryption passphrase for seed/create modes.")
+    parser.add_argument("--device-id", default="server-seed", help="Device id recorded in Homebase seeded manifests.")
+    parser.add_argument("--vault-name", default="", help="Optional Homebase vault name for seed/create modes.")
+    parser.add_argument(
+        "--overwrite-latest",
+        action="store_true",
+        help="With --homebase-seed, allow replacing an existing latest checkpoint pointer.",
     )
     args = parser.parse_args()
 
-    if (args.dry_run or args.force) and not args.run_gc:
-        parser.error("--dry-run and --force require --run-gc")
+    selected_modes = sum(
+        1 for enabled in (args.run_gc, args.homebase_seed, args.homebase_create_and_seed) if enabled
+    )
+    if selected_modes > 1:
+        parser.error("choose only one of --run-gc, --homebase-seed, or --homebase-create-and-seed")
+
+    if (args.dry_run or args.force) and not (args.run_gc or args.homebase_create_and_seed or args.homebase_seed):
+        parser.error("--dry-run and --force require --run-gc, --homebase-seed, or --homebase-create-and-seed")
 
     if args.run_gc:
         raise SystemExit(
@@ -4131,6 +4160,89 @@ if __name__ == "__main__":
                 dry_run=True if args.dry_run else None,
             )
         )
+
+    if args.homebase_seed:
+        if not args.vault_id:
+            parser.error("--vault-id is required with --homebase-seed")
+        if not args.source:
+            parser.error("--source is required with --homebase-seed")
+        if not args.passphrase:
+            parser.error("--passphrase is required with --homebase-seed")
+        try:
+            result = seed_homebase_vault(
+                vaults_root=Path(args.vaults_root).expanduser().resolve(),
+                vault_id=str(args.vault_id).strip(),
+                source_root=Path(str(args.source)).expanduser().resolve(),
+                passphrase=args.passphrase,
+                device_id=str(args.device_id or "server-seed").strip() or "server-seed",
+                overwrite_latest=bool(args.overwrite_latest),
+                vault_name=str(args.vault_name or "").strip() or None,
+                dry_run=bool(args.dry_run),
+            )
+        except Exception as exc:
+            print(f"Homebase seed failed: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(
+            json.dumps(
+                result,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(0)
+
+    if args.homebase_create_and_seed:
+        if not args.source:
+            parser.error("--source is required with --homebase-create-and-seed")
+        if not args.username:
+            parser.error("--username is required with --homebase-create-and-seed")
+        if not args.password:
+            parser.error("--password is required with --homebase-create-and-seed")
+        if not args.passphrase:
+            parser.error("--passphrase is required with --homebase-create-and-seed")
+        vaults_root = Path(args.vaults_root).expanduser().resolve()
+        source_root = Path(str(args.source)).expanduser().resolve()
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "vaults_root": str(vaults_root),
+                        "source_root": str(source_root),
+                        "vault_id": str(args.vault_id or "").strip() or "<generated>",
+                        "username": str(args.username).strip(),
+                        "vault_name": str(args.vault_name or "").strip(),
+                        "device_id": str(args.device_id or "server-seed").strip() or "server-seed",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            raise SystemExit(0)
+        try:
+            created = create_homebase_vault(
+                vaults_root=vaults_root,
+                username=str(args.username).strip(),
+                password=args.password,
+                vault_name=str(args.vault_name or "").strip(),
+                vault_id=str(args.vault_id or "").strip(),
+                force=bool(args.force),
+            )
+            seeded = seed_homebase_vault(
+                vaults_root=vaults_root,
+                vault_id=created["vault_id"],
+                source_root=source_root,
+                passphrase=args.passphrase,
+                device_id=str(args.device_id or "server-seed").strip() or "server-seed",
+                overwrite_latest=True,
+                vault_name=str(args.vault_name or "").strip() or None,
+                dry_run=False,
+            )
+        except Exception as exc:
+            print(f"Homebase create+seed failed: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({"created": created, "seeded": seeded}, indent=2, sort_keys=True))
+        raise SystemExit(0)
 
     run_server(
         host=args.host,

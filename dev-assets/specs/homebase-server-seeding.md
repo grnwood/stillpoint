@@ -12,7 +12,7 @@ They let you:
 
 ## Scripts
 
-The scripts live in `tools/`:
+The source files live in `tools/`:
 
 - [tools/homebase-seed-vault.py](/home/grnwood/code/stillpoint/tools/homebase-seed-vault.py)
 - [tools/homebase-create-and-seed-vault.py](/home/grnwood/code/stillpoint/tools/homebase-create-and-seed-vault.py)
@@ -20,6 +20,13 @@ The scripts live in `tools/`:
 Shared logic lives in:
 
 - [tools/homebase_seed_lib.py](/home/grnwood/code/stillpoint/tools/homebase_seed_lib.py)
+
+When you build the server package with [packaging/sp-server.spec](/home/grnwood/code/stillpoint/packaging/sp-server.spec), the server bundle also ships runnable executables in `dist/stillpoint-server/tools/`:
+
+- `homebase-seed-vault`
+- `homebase-create-and-seed-vault`
+
+Those `tools/` entries are launcher wrappers. They invoke the packaged executables that live at the server bundle root so PyInstaller can still resolve its adjacent `_internal/` runtime directory.
 
 ## What the Seeder Does
 
@@ -155,19 +162,46 @@ python3 tools/homebase-create-and-seed-vault.py \
   --dry-run
 ```
 
+## Packaged Server Usage
+
+After building and deploying the server bundle, use the packaged executables in `/opt/stillpoint/app/tools/` instead of the raw `*.py` files.
+
+Seed an existing Homebase vault:
+
+```bash
+/opt/stillpoint/app/tools/homebase-seed-vault \
+  --vaults-root /srv/stillpoint/vaults \
+  --vault-id existing-vault-id \
+  --source /srv/staging/plain-vault \
+  --passphrase 'your-homebase-passphrase' \
+  --overwrite-latest
+```
+
+Create and seed a new Homebase vault:
+
+```bash
+/opt/stillpoint/app/tools/homebase-create-and-seed-vault \
+  --vaults-root /srv/stillpoint/vaults \
+  --source /srv/staging/plain-vault \
+  --username alice \
+  --password 'vault-admin-password' \
+  --passphrase 'your-homebase-passphrase' \
+  --vault-name "Seeded Vault"
+```
+
 ## Recommended Operational Flow
 
 ### Seed a brand new Homebase vault
 
 1. Prepare a plaintext staging folder on the server.
-2. Run `homebase-create-and-seed-vault.py`.
+2. Run `homebase-create-and-seed-vault.py` in source checkouts, or `/opt/stillpoint/app/tools/homebase-create-and-seed-vault` on packaged servers.
 3. Note the returned `vault_id`.
 4. Connect clients to that Homebase vault id using the same passphrase.
 
 ### Replace the snapshot of an existing Homebase vault
 
 1. Prepare or refresh the plaintext staging folder.
-2. Run `homebase-seed-vault.py --overwrite-latest`.
+2. Run `homebase-seed-vault.py --overwrite-latest` in source checkouts, or `/opt/stillpoint/app/tools/homebase-seed-vault --overwrite-latest` on packaged servers.
 3. Clients will see a new latest checkpoint on next sync.
 
 ## Important Notes

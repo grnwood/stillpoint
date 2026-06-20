@@ -9,8 +9,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+INTERNAL_ROOT = PROJECT_ROOT / "_internal"
+if INTERNAL_ROOT.exists() and str(INTERNAL_ROOT) not in sys.path:
+    sys.path.insert(0, str(INTERNAL_ROOT))
 
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
+
+
+def _print_progress(message: str) -> None:
+    print(f"[HomebaseSeed] {message}", file=sys.stderr, flush=True)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             vault_name=str(args.vault_name or "").strip(),
             vault_id=str(args.vault_id or "").strip(),
             force=bool(args.force),
+            progress=_print_progress,
         )
         seeded = seed_homebase_vault(
             vaults_root=vaults_root,
@@ -70,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             overwrite_latest=True,
             vault_name=str(args.vault_name or "").strip() or None,
             dry_run=False,
+            progress=_print_progress,
         )
     except Exception as exc:
         print(f"Homebase create+seed failed: {exc}", file=sys.stderr)
