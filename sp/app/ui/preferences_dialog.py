@@ -698,8 +698,8 @@ class PreferencesDialog(QDialog):
         mermaid_layout.addWidget(self.mermaid_enable_checkbox)
 
         mermaid_info_label = QLabel(
-            "Mermaid preview is rendered by the built-in web renderer.\n"
-            "No external Mermaid CLI install is required."
+            "Mermaid preview normally uses the built-in web renderer.\n"
+            "On Linux, the safer default preview path uses Mermaid CLI (mmdc) unless SP_ENABLE_MERMAID_WEB_PREVIEW=1 is set."
         )
         mermaid_info_label.setWordWrap(True)
         mermaid_layout.addWidget(mermaid_info_label)

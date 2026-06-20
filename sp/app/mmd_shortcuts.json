@@ -70,5 +70,101 @@
     "help": "https://mermaid.ai/open-source/syntax/requirementDiagram.html",
     "simple_mmd": "requirementDiagram\n  requirement capture {\n    id: 1\n    text: Fast inbox capture\n    risk: medium\n    verifymethod: test\n  }",
     "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\"}}}%%\nrequirementDiagram\n  title Requirements (advanced features)\n\n  requirement R1 {\n    id: R1\n    text: Mermaid editor mode\n    risk: low\n    verifymethod: test\n  }\n\n  requirement R2 {\n    id: R2\n    text: Export to SVG/PNG/PDF\n    risk: medium\n    verifymethod: analysis\n  }\n\n  requirement R3 {\n    id: R3\n    text: Offline-first rendering\n    risk: low\n    verifymethod: inspection\n  }\n\n  element UI {\n    type: component\n    docref: \"EditorPane\"\n  }\n\n  element Exporter {\n    type: component\n    docref: \"mmdc pipeline\"\n  }\n\n  R1 - satisfies -> UI\n  R2 - satisfies -> Exporter\n  R3 - satisfies -> UI\n  R2 - traces -> R1"
+  },
+  {
+    "name": "Quadrant Chart",
+    "help": "https://mermaid.ai/open-source/syntax/quadrantChart.html",
+    "simple_mmd": "quadrantChart\n  title Impact vs Effort\n  x-axis Low Effort --> High Effort\n  y-axis Low Impact --> High Impact\n  Quick win: [0.25, 0.75]\n  Strategic bet: [0.78, 0.82]\n  Fill-in task: [0.22, 0.25]",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nquadrantChart\n  title Roadmap Prioritization\n  x-axis Low Effort --> High Effort\n  y-axis Low Value --> High Value\n  quadrant-1 Strategic Bets\n  quadrant-2 Quick Wins\n  quadrant-3 Backlog\n  quadrant-4 Major Initiatives\n  Search improvements: [0.30, 0.82]\n  Mobile polish: [0.42, 0.72]\n  Multi-tenant admin: [0.77, 0.86]\n  Legacy cleanup: [0.68, 0.28]"
+  },
+  {
+    "name": "C4 Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/c4.html",
+    "simple_mmd": "C4Context\n  title System Context\n  Person(user, \"User\")\n  System(app, \"StillPoint\")\n  Rel(user, app, \"Uses\")",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nC4Container\n  title Container View\n  Person(user, \"User\", \"Creates notes and diagrams\")\n  System_Boundary(sp, \"StillPoint\") {\n    Container(ui, \"Desktop App\", \"Electron\", \"Editor and preview\")\n    Container(api, \"Local API\", \"Node.js\", \"Search and sync\")\n    ContainerDb(db, \"Workspace DB\", \"SQLite\", \"Notes, links, cache\")\n  }\n  System_Ext(ai, \"AI Provider\", \"Optional summarization\")\n  Rel(user, ui, \"Writes markdown\")\n  Rel(ui, api, \"Reads/writes content\")\n  Rel(api, db, \"Persists data\")\n  Rel(api, ai, \"Sends selected context\")"
+  },
+  {
+    "name": "ZenUML Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/zenuml.html",
+    "simple_mmd": "zenuml\n  title Login\n  User->App: Enter credentials\n  App->Auth: Validate\n  Auth-->App: Token\n  App-->User: Signed in",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nzenuml\n  title Checkout Authorization\n  Customer->Web: Submit order\n  Web->OMS: Create order\n  OMS->Payment: Authorize payment\n  if(approved) {\n    Payment-->OMS: Auth code\n    OMS->Fulfillment: Release order\n    OMS-->Web: Confirmation\n  } else {\n    Payment-->OMS: Decline\n    OMS-->Web: Payment required\n  }"
+  },
+  {
+    "name": "Sankey Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/sankey.html",
+    "simple_mmd": "sankey-beta\n  Leads,Qualified,45\n  Leads,Unqualified,20\n  Qualified,Won,18\n  Qualified,Lost,27",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nsankey-beta\n  Website,Cart,120\n  Cart,Checkout,80\n  Checkout,Payment Authorized,65\n  Checkout,Payment Failed,15\n  Payment Authorized,Released to Fulfillment,58\n  Payment Authorized,Manual Review,7\n  Manual Review,Released to Fulfillment,5\n  Manual Review,Cancelled,2"
+  },
+  {
+    "name": "XY Chart",
+    "help": "https://mermaid.ai/open-source/syntax/xyChart.html",
+    "simple_mmd": "xychart-beta\n  title \"Orders by Month\"\n  x-axis [Jan, Feb, Mar, Apr]\n  y-axis \"Orders\" 0 --> 100\n  bar [35, 48, 72, 90]",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nxychart-beta\n  title \"Build Health\"\n  x-axis [Mon, Tue, Wed, Thu, Fri]\n  y-axis \"Count\" 0 --> 100\n  bar \"Tests Passed\" [80, 84, 88, 91, 95]\n  line \"Defects\" [18, 15, 11, 8, 5]"
+  },
+  {
+    "name": "Block Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/block.html",
+    "simple_mmd": "block-beta\n  columns 3\n  A[Client] B[API] C[(DB)]\n  A --> B\n  B --> C",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nblock-beta\n  columns 4\n  Web[\"Web UI\"] API[\"Order API\"] OMS[\"OMS\"] WMS[\"WMS\"]\n  space:4\n  Pay[\"Payment\"] Inv[\"Inventory\"] Tax[\"Tax\"] Ship[\"Shipping\"]\n  Web --> API\n  API --> OMS\n  OMS --> WMS\n  OMS --> Pay\n  OMS --> Inv\n  OMS --> Tax\n  OMS --> Ship"
+  },
+  {
+    "name": "Packet Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/packet.html",
+    "simple_mmd": "packet-beta\n  title TCP Packet\n  0-15: \"Source Port\"\n  16-31: \"Destination Port\"\n  32-63: \"Sequence Number\"",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\npacket-beta\n  title API Message Header\n  0-7: \"Version\"\n  8-15: \"Message Type\"\n  16-31: \"Flags\"\n  32-63: \"Correlation ID\"\n  64-95: \"Tenant ID\"\n  96-127: \"Payload Length\""
+  },
+  {
+    "name": "Kanban Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/kanban.html",
+    "simple_mmd": "kanban\n  Todo\n    [Write spec]\n  Doing\n    [Build API]\n  Done\n    [Kickoff]",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nkanban\n  Backlog\n    [Map order fields]\n    [Define hold rules]\n  In Progress\n    [Build order API]\n    [Review inventory flow]\n  Review\n    [Validate payment sequence]\n  Done\n    [Confirm OMS scope]\n    [Publish discovery notes]"
+  },
+  {
+    "name": "Architecture Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/architecture.html",
+    "simple_mmd": "architecture-beta\n  group cloud(cloud)[Cloud]\n  service web(internet)[Web App] in cloud\n  service api(server)[API] in cloud\n  service db(database)[Database] in cloud\n  web:R --> L:api\n  api:R --> L:db",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\narchitecture-beta\n  group client(cloud)[Client]\n  group platform(cloud)[Platform]\n  group data(cloud)[Data]\n\n  service browser(internet)[Browser] in client\n  service gateway(server)[API Gateway] in platform\n  service oms(server)[OMS] in platform\n  service worker(server)[Worker] in platform\n  service orders(database)[Orders DB] in data\n  service events(queue)[Event Bus] in data\n\n  browser:R --> L:gateway\n  gateway:R --> L:oms\n  oms:B --> T:orders\n  oms:R --> L:events\n  events:R --> L:worker"
+  },
+  {
+    "name": "Radar Chart",
+    "help": "https://mermaid.ai/open-source/syntax/radar.html",
+    "simple_mmd": "radar-beta\n  title Skill Coverage\n  axis Design, Build, Test, Deploy\n  curve Team: 4, 5, 3, 4",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nradar-beta\n  title Architecture Readiness\n  axis Scope, Data, Integrations, Security, Operations\n  curve Current: 3, 2, 3, 4, 2\n  curve Target: 5, 4, 5, 5, 4"
+  },
+  {
+    "name": "Event Modeling Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/eventModeling.html",
+    "simple_mmd": "eventModel\n  title Order Event Model\n  command SubmitOrder\n  event OrderSubmitted\n  view OrderSummary",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\neventModel\n  title Checkout Event Model\n  command SubmitOrder\n  event OrderSubmitted\n  view OrderSummary\n  command AuthorizePayment\n  event PaymentAuthorized\n  event PaymentDeclined\n  command ReleaseFulfillment\n  event FulfillmentReleased\n  view FulfillmentQueue"
+  },
+  {
+    "name": "Treemap Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/treemap.html",
+    "simple_mmd": "treemap-beta\n  title Work Breakdown\n  Project\n    Design: 20\n    Build: 50\n    Test: 30",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\ntreemap-beta\n  title Delivery Effort\n  OMS\n    Order Intake: 30\n    Holds: 15\n    Routing: 20\n  Integrations\n    Payment: 15\n    Inventory: 20\n    WMS: 25\n  Data\n    Mapping: 18\n    Migration: 12"
+  },
+  {
+    "name": "Venn Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/venn.html",
+    "simple_mmd": "venn\n  title Capability Overlap\n  \"OMS\": 40\n  \"ERP\": 35\n  \"OMS\" & \"ERP\": 10",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nvenn\n  title System Responsibilities\n  \"OMS\": 55\n  \"ERP\": 45\n  \"WMS\": 35\n  \"OMS\" & \"ERP\": 12\n  \"OMS\" & \"WMS\": 18\n  \"ERP\" & \"WMS\": 6\n  \"OMS\" & \"ERP\" & \"WMS\": 3"
+  },
+  {
+    "name": "Ishikawa Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/ishikawa.html",
+    "simple_mmd": "ishikawa\n  Problem\n    People\n      Training\n    Process\n      Handoffs\n    Systems\n      Latency",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nishikawa\n  Order Delay\n    People\n      Ownership unclear\n      Escalation slow\n    Process\n      Manual review\n      Missing decision rules\n    Systems\n      Inventory lag\n      Payment timeout\n    Data\n      Address mismatch\n      Product setup gap"
+  },
+  {
+    "name": "Wardley Map",
+    "help": "https://mermaid.ai/open-source/syntax/wardley.html",
+    "simple_mmd": "wardley\n  title Product Strategy\n  user Customer\n  Customer -> Online Ordering\n  Online Ordering -> Payment",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\nwardley\n  title Commerce Platform Evolution\n  user Customer\n  Customer -> Checkout\n  Checkout -> Order Management\n  Checkout -> Payment\n  Order Management -> Fulfillment\n  Order Management -> Inventory Promise\n  Fulfillment -> Warehouse\n  evolve Inventory Promise 0.7\n  evolve Payment 0.85\n  evolve Warehouse 0.65"
+  },
+  {
+    "name": "TreeView Diagram",
+    "help": "https://mermaid.ai/open-source/syntax/treeview.html",
+    "simple_mmd": "treeview\n  root\n    docs\n      readme.md\n    src\n      app.ts",
+    "advanced_mmd": "%%{init: {\"theme\":\"base\",\"themeVariables\":{\"fontFamily\":\"ui-sans-serif,system-ui\",\"primaryColor\":\"#F6F8FA\",\"primaryBorderColor\":\"#24292F\",\"lineColor\":\"#57606A\"}}}%%\ntreeview\n  architecture-repo\n    docs\n      decisions\n        KDD-001.md\n      solution-designs\n        order-intake.md\n    diagrams\n      context.puml\n      order-flow.mmd\n    bruno\n      order-api\n        create-order.bru\n    assets\n      exports"
   }
 ]

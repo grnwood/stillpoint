@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
-from PySide6.QtGui import QKeySequence, QShortcut, QPixmap
+from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -36,12 +37,27 @@ except Exception:
     QWebEngineView = None  # type: ignore[assignment]
 
 from sp.app import config
+from sp.app.mermaid_renderer import MermaidRenderer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 
 _LOGGING = log_enabled("diagrams")
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_use_web_preview() -> bool:
+    if QWebEngineView is None:
+        return False
+    if _truthy_env("SP_DISABLE_MERMAID_WEB_PREVIEW"):
+        return False
+    if sys.platform.startswith("linux") and not _truthy_env("SP_ENABLE_MERMAID_WEB_PREVIEW"):
+        return False
+    return True
 
 
 def _generate_error_svg(error_message: str, line_number: int = 0) -> str:
@@ -98,8 +114,9 @@ class MermaidEditorWindow(QMainWindow):
 
         self.file_path = Path(file_path)
         self._on_save = on_save
-        self._use_web_preview = QWebEngineView is not None
+        self._use_web_preview = _should_use_web_preview()
         self.preview_web = None
+        self.renderer = MermaidRenderer()
         self._vi_enabled: bool = config.load_vi_mode_enabled()
         self._vi_insert_active: bool = False
         self._ai_prompt_history: list[str] = []
@@ -1247,8 +1264,72 @@ class MermaidEditorWindow(QMainWindow):
             self.preview_web.setHtml(html_doc, self._web_preview_base_url())
             self.render_btn.setText("Render OK")
             return
-        self._show_preview_error("Mermaid web preview is unavailable. Install/enable Qt WebEngine.")
+        preview_bg = self._preview_background_color()
+        try:
+            result = self.renderer.render_svg(
+                mermaid_text,
+                theme=self._mermaid_theme,
+                background_color=preview_bg,
+            )
+        except Exception as exc:
+            result = None
+            error_svg = _generate_error_svg(f"Mermaid render error\n\n{exc}")
+            self._last_svg = error_svg
+            self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
+            self._update_preview_display()
+            self.render_btn.setText("Render Failed")
+            return
+
+        if result and result.success and result.svg_content:
+            self._last_svg = result.svg_content
+            self.preview_pixmap = self._svg_to_pixmap(result.svg_content, background_color=preview_bg)
+            if self.preview_pixmap:
+                self._update_preview_display()
+                self.render_btn.setText("Render OK")
+                return
+            error_svg = _generate_error_svg("Failed to convert Mermaid SVG to image")
+            self._last_svg = error_svg
+            self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
+            self._update_preview_display()
+            self.render_btn.setText("Render Failed")
+            return
+
+        details = "Mermaid preview is unavailable."
+        if result and result.error_message:
+            details = result.error_message
+        if result and result.stderr and result.stderr != details:
+            details = f"{details}\n\nDetails:\n{result.stderr[:500]}"
+        error_svg = _generate_error_svg(details)
+        self._last_svg = error_svg
+        self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
+        self._update_preview_display()
         self.render_btn.setText("Render Failed")
+
+    def _preview_background_color(self) -> str:
+        value = theme_value("mermaid_editor.preview.bg", "#ffffff")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "#ffffff"
+
+    def _svg_to_pixmap(self, svg_content: str, *, background_color: Optional[str] = None) -> Optional[QPixmap]:
+        try:
+            from PySide6.QtSvg import QSvgRenderer
+
+            renderer = QSvgRenderer(QByteArray(svg_content.encode("utf-8")))
+            if not renderer.isValid():
+                return None
+            size = renderer.defaultSize()
+            if not size.isValid():
+                size = QSize(800, 600)
+            pixmap = QPixmap(size)
+            bg = QColor(background_color or self._preview_background_color())
+            pixmap.fill(bg if bg.isValid() else Qt.white)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            return pixmap
+        except Exception:
+            return None
 
     def _update_preview_display(self) -> None:
         if self._use_web_preview:
@@ -1506,6 +1587,17 @@ class MermaidEditorWindow(QMainWindow):
         mermaid_theme = json.dumps(self._mermaid_theme)
         escaped_source = json.dumps(mermaid_text)
         escaped_error = json.dumps(error_message)
+        error_bg = json.dumps(theme_value("mermaid_editor.error.bg", "#ffffff"))
+        error_title = json.dumps(theme_value("mermaid_editor.error.title", "#cc0000"))
+        error_msg = json.dumps(theme_value("mermaid_editor.error.message", "#333333"))
+        error_box_fill = json.dumps(theme_value("mermaid_editor.error.box_fill", "#ffe6e6"))
+        error_box_stroke = json.dumps(theme_value("mermaid_editor.error.box_stroke", "#ff9999"))
+        error_box_text = json.dumps(theme_value("mermaid_editor.error.box_text", "#333333"))
+        error_font = json.dumps(theme_value("mermaid_editor.error.font_family", "monospace"))
+        error_title_size = int(theme_value("mermaid_editor.error.title_size_px", 24))
+        error_title_weight = json.dumps(theme_value("mermaid_editor.error.title_weight", "bold"))
+        error_box_font_size = int(theme_value("mermaid_editor.error.box_font_size_px", 13))
+        error_box_line_height = float(theme_value("mermaid_editor.error.box_line_height", 1.4))
         initial_zoom = max(0.2, min(4.0, 1.0 + (self.preview_zoom_level * 0.1)))
         return f"""<!doctype html>
 <html>
@@ -1516,16 +1608,57 @@ class MermaidEditorWindow(QMainWindow):
         #viewport {{ width: 100%; height: 100%; overflow: hidden; cursor: default; user-select: none; }}
         #diagram-host {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
         #diagram-host svg {{ max-width: none; max-height: none; transform-origin: 0 0; }}
-        #error {{ font-family: monospace; white-space: pre-wrap; padding: 16px; color: #b00020; }}
     </style>
     <script>
         let viewport = null;
         let host = null;
-        let errorEl = null;
         const state = {{ zoom: {initial_zoom}, tx: 0, ty: 0, panning: false, panX: 0, panY: 0 }};
+        const errorTheme = {{
+            bg: {error_bg},
+            title: {error_title},
+            message: {error_msg},
+            boxFill: {error_box_fill},
+            boxStroke: {error_box_stroke},
+            boxText: {error_box_text},
+            fontFamily: {error_font},
+            titleSize: {error_title_size},
+            titleWeight: {error_title_weight},
+            boxFontSize: {error_box_font_size},
+            boxLineHeight: {error_box_line_height}
+        }};
 
         function currentSvg() {{
             return host ? host.querySelector('svg') : null;
+        }}
+
+        function escapeHtml(value) {{
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }}
+
+        function buildErrorSvg(message, title = 'Mermaid Render Error') {{
+            const safeMessage = escapeHtml(message || 'Unknown Mermaid render error').replace(/\\n/g, '<br/>');
+            return `
+                <svg width="800" height="400" viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="800" height="400" fill="${{errorTheme.bg}}"/>
+                    <defs>
+                        <style type="text/css"><![CDATA[
+                            .error-title {{ font-size: ${{errorTheme.titleSize}}px; font-weight: ${{errorTheme.titleWeight}}; fill: ${{errorTheme.title}}; font-family: ${{errorTheme.fontFamily}}; }}
+                            .error-box {{ fill: ${{errorTheme.boxFill}}; stroke: ${{errorTheme.boxStroke}}; stroke-width: 2; }}
+                        ]]></style>
+                    </defs>
+                    <rect class="error-box" x="20" y="20" width="760" height="360" rx="5" ry="5"/>
+                    <text class="error-title" x="40" y="60">${{escapeHtml(title)}}</text>
+                    <foreignObject x="40" y="90" width="720" height="270">
+                        <div xmlns="http://www.w3.org/1999/xhtml"
+                             style="font-family: ${{errorTheme.fontFamily}}; font-size: ${{errorTheme.boxFontSize}}px; color: ${{errorTheme.boxText}}; white-space: pre-wrap; word-break: break-word; line-height: ${{errorTheme.boxLineHeight}};">
+                            ${{safeMessage}}
+                        </div>
+                    </foreignObject>
+                </svg>
+            `;
         }}
 
         function applyTransform() {{
@@ -1627,12 +1760,20 @@ class MermaidEditorWindow(QMainWindow):
         async function renderDiagram() {{
             const forcedError = {escaped_error};
             if (forcedError) {{
-                if (errorEl) errorEl.textContent = forcedError;
+                if (host) host.innerHTML = buildErrorSvg(forcedError);
+                state.tx = 0;
+                state.ty = 0;
+                state.zoom = {initial_zoom};
+                applyTransform();
                 return;
             }}
             const source = {escaped_source};
             if (!source || !source.trim()) {{
-                if (errorEl) errorEl.textContent = 'Enter Mermaid diagram code here...';
+                if (host) host.innerHTML = buildErrorSvg('Enter Mermaid diagram code here...', 'Mermaid Preview');
+                state.tx = 0;
+                state.ty = 0;
+                state.zoom = {initial_zoom};
+                applyTransform();
                 return;
             }}
             try {{
@@ -1641,18 +1782,19 @@ class MermaidEditorWindow(QMainWindow):
                 const id = `sp-mermaid-${{Date.now()}}`;
                 const rendered = await mermaid.render(id, source);
                 if (host) host.innerHTML = rendered.svg;
-                if (errorEl) errorEl.textContent = '';
                 applyTransform();
             }} catch (err) {{
-                if (host) host.innerHTML = '';
-                if (errorEl) errorEl.textContent = err && err.message ? err.message : String(err);
+                if (host) host.innerHTML = buildErrorSvg(err && err.message ? err.message : String(err));
+                state.tx = 0;
+                state.ty = 0;
+                state.zoom = {initial_zoom};
+                applyTransform();
             }}
         }}
 
         window.addEventListener('DOMContentLoaded', () => {{
             viewport = document.getElementById('viewport');
             host = document.getElementById('diagram-host');
-            errorEl = document.getElementById('error');
             bindInteractions();
             renderDiagram();
         }});
@@ -1661,7 +1803,6 @@ class MermaidEditorWindow(QMainWindow):
 <body>
     <div id=\"viewport\">
         <div id=\"diagram-host\"></div>
-        <pre id=\"error\"></pre>
     </div>
 </body>
 </html>

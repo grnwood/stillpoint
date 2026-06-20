@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -73,11 +74,17 @@ class MermaidRenderer:
             self.discover_mmdc()
         return self._mmdc_path is not None
 
-    def render_svg(self, mermaid_text: str) -> RenderResult:
+    def render_svg(
+        self,
+        mermaid_text: str,
+        *,
+        theme: str = "neutral",
+        background_color: Optional[str] = None,
+    ) -> RenderResult:
         """Render Mermaid diagram to SVG."""
         t0 = time.perf_counter()
 
-        cache_key = self._compute_cache_key(mermaid_text)
+        cache_key = self._compute_cache_key(mermaid_text, theme=theme, background_color=background_color)
         cached_svg = self._read_from_cache(cache_key)
         if cached_svg:
             return RenderResult(
@@ -94,7 +101,11 @@ class MermaidRenderer:
             )
 
         with self._render_lock:
-            result = self._invoke_mmdc_svg(mermaid_text)
+            result = self._invoke_mmdc_svg(
+                mermaid_text,
+                theme=theme,
+                background_color=background_color,
+            )
 
         if result.success and result.svg_content:
             self._write_to_cache(cache_key, result.svg_content)
@@ -102,11 +113,17 @@ class MermaidRenderer:
         result.duration_ms = (time.perf_counter() - t0) * 1000
         return result
 
-    def render_png(self, mermaid_text: str) -> RenderResult:
+    def render_png(
+        self,
+        mermaid_text: str,
+        *,
+        theme: str = "neutral",
+        background_color: Optional[str] = None,
+    ) -> RenderResult:
         """Render Mermaid diagram to PNG."""
         t0 = time.perf_counter()
 
-        cache_key = self._compute_cache_key(mermaid_text)
+        cache_key = self._compute_cache_key(mermaid_text, theme=theme, background_color=background_color)
         cached_png = self._read_png_from_cache(cache_key)
         if cached_png:
             return RenderResult(
@@ -123,7 +140,11 @@ class MermaidRenderer:
             )
 
         with self._render_lock:
-            result = self._invoke_mmdc(mermaid_text)
+            result = self._invoke_mmdc(
+                mermaid_text,
+                theme=theme,
+                background_color=background_color,
+            )
 
         if result.success and result.png_bytes:
             self._write_png_to_cache(cache_key, result.png_bytes)
@@ -136,15 +157,38 @@ class MermaidRenderer:
         sample = "flowchart TD\n  A[Start] --> B[End]\n"
         return self.render_png(sample)
 
-    def _invoke_mmdc(self, mermaid_text: str) -> RenderResult:
+    def _invoke_mmdc(
+        self,
+        mermaid_text: str,
+        *,
+        theme: str = "neutral",
+        background_color: Optional[str] = None,
+    ) -> RenderResult:
         try:
             mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_path = Path(tmpdir) / "diagram.mmd"
                 output_path = Path(tmpdir) / "diagram.png"
+                config_path = Path(tmpdir) / "mermaid-config.json"
+                puppeteer_config_path = Path(tmpdir) / "puppeteer-config.json"
                 input_path.write_text(mermaid_text, encoding="utf-8")
+                effective_theme = self._normalize_theme(theme, background_color)
+                config_path.write_text(
+                    json.dumps({"theme": effective_theme}, ensure_ascii=True),
+                    encoding="utf-8",
+                )
+                self._write_puppeteer_config(puppeteer_config_path)
 
-                cmd = [mmdc_cmd, "-i", str(input_path), "-o", str(output_path), "-t", "neutral"]
+                cmd = [
+                    mmdc_cmd,
+                    "-i", str(input_path),
+                    "-o", str(output_path),
+                    "-t", effective_theme,
+                    "-c", str(config_path),
+                    "-b", background_color or "white",
+                ]
+                if puppeteer_config_path.exists():
+                    cmd.extend(["-p", str(puppeteer_config_path)])
 
                 if log_enabled("diagrams"):
                     print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
@@ -189,15 +233,38 @@ class MermaidRenderer:
                 error_message=f"Render error: {str(exc)}",
             )
 
-    def _invoke_mmdc_svg(self, mermaid_text: str) -> RenderResult:
+    def _invoke_mmdc_svg(
+        self,
+        mermaid_text: str,
+        *,
+        theme: str = "neutral",
+        background_color: Optional[str] = None,
+    ) -> RenderResult:
         try:
             mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_path = Path(tmpdir) / "diagram.mmd"
                 output_path = Path(tmpdir) / "diagram.svg"
+                config_path = Path(tmpdir) / "mermaid-config.json"
+                puppeteer_config_path = Path(tmpdir) / "puppeteer-config.json"
                 input_path.write_text(mermaid_text, encoding="utf-8")
+                effective_theme = self._normalize_theme(theme, background_color)
+                config_path.write_text(
+                    json.dumps({"theme": effective_theme}, ensure_ascii=True),
+                    encoding="utf-8",
+                )
+                self._write_puppeteer_config(puppeteer_config_path)
 
-                cmd = [mmdc_cmd, "-i", str(input_path), "-o", str(output_path)]
+                cmd = [
+                    mmdc_cmd,
+                    "-i", str(input_path),
+                    "-o", str(output_path),
+                    "-t", effective_theme,
+                    "-c", str(config_path),
+                    "-b", background_color or "white",
+                ]
+                if puppeteer_config_path.exists():
+                    cmd.extend(["-p", str(puppeteer_config_path)])
 
                 if log_enabled("diagrams"):
                     print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
@@ -242,9 +309,57 @@ class MermaidRenderer:
                 error_message=f"Render error: {str(exc)}",
             )
 
-    def _compute_cache_key(self, mermaid_text: str) -> str:
-        combined = f"{mermaid_text}|{self._mmdc_path}"
+    def _normalize_theme(self, theme: str, background_color: Optional[str]) -> str:
+        value = (theme or "neutral").strip().lower()
+        if value == "base":
+            if background_color and self._is_dark_color(background_color):
+                return "dark"
+            return "default"
+        if value in {"default", "forest", "dark", "neutral"}:
+            return value
+        return "neutral"
+
+    def _compute_cache_key(
+        self,
+        mermaid_text: str,
+        *,
+        theme: str = "neutral",
+        background_color: Optional[str] = None,
+    ) -> str:
+        combined = f"{mermaid_text}|{self._mmdc_path}|{theme}|{background_color or ''}"
         return hashlib.sha256(combined.encode()).hexdigest()
+
+    @staticmethod
+    def _is_dark_color(value: str) -> bool:
+        text = (value or "").strip()
+        if not text.startswith("#"):
+            return False
+        hex_value = text[1:]
+        if len(hex_value) == 3:
+            hex_value = "".join(ch * 2 for ch in hex_value)
+        if len(hex_value) != 6:
+            return False
+        try:
+            r = int(hex_value[0:2], 16)
+            g = int(hex_value[2:4], 16)
+            b = int(hex_value[4:6], 16)
+        except ValueError:
+            return False
+        luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+        return luminance < 140
+
+    @staticmethod
+    def _write_puppeteer_config(path: Path) -> None:
+        if os.name != "posix":
+            return
+        payload = {
+            "args": [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ]
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
     def _read_from_cache(self, cache_key: str) -> Optional[str]:
         cache_file = self.cache_dir / f"{cache_key}.svg"
