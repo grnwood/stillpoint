@@ -7145,6 +7145,54 @@ class MainWindow(QMainWindow):
             else:
                 reset_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
 
+    def _homebase_activity_snapshot(self, status: Optional[HomebaseSyncStatus]) -> tuple[str, list[str]]:
+        if not status:
+            return "Unavailable", ["No Homebase sync status is available."]
+        summary = str(getattr(status, "summary", "") or "").strip()
+        state = str(getattr(status, "state", "") or "").strip().lower()
+        pending_uploads = int(getattr(status, "pending_uploads", 0) or 0)
+        pending_downloads = int(getattr(status, "pending_downloads", 0) or 0)
+        workers = [
+            str(item or "").strip()
+            for item in (getattr(status, "transfer_workers", []) or [])
+            if str(item or "").strip() and str(item or "").strip().lower() != "idle"
+        ]
+
+        phase = "Idle"
+        if pending_downloads > 0:
+            phase = "Pulling from Homebase"
+        elif pending_uploads > 0:
+            phase = "Uploading to Homebase"
+        elif "scanning local changes" in summary.lower():
+            phase = "Scanning local changes"
+        elif summary.lower().startswith("sync scheduled"):
+            phase = "Sync queued"
+        elif summary.lower().startswith("sync requested"):
+            phase = "Sync requested"
+        elif "retry backoff" in summary.lower():
+            phase = "Waiting to retry"
+        elif state == "offline":
+            phase = "Offline"
+        elif state == "syncing":
+            phase = "Syncing"
+        elif state == "hibernated":
+            phase = "Hibernated"
+        elif state == "idle":
+            phase = "Up to date"
+
+        details: list[str] = []
+        if summary:
+            details.append(summary)
+        if pending_downloads > 0:
+            details.append(f"{pending_downloads} download(s) remaining")
+        if pending_uploads > 0:
+            details.append(f"{pending_uploads} upload(s) remaining")
+        if workers:
+            details.extend(workers)
+        if not details:
+            details.append("No active Homebase work.")
+        return phase, details
+
     def _show_homebase_sync_summary(self) -> None:
         if not self._is_homebase_mode_enabled():
             return
@@ -7195,7 +7243,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync")
         dialog.setModal(True)
-        dialog.resize(560, 420)
+        dialog.resize(620, 560)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -7267,6 +7315,23 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(error_label, row, 1)
 
         layout.addWidget(info_box)
+
+        activity_box = QFrame()
+        activity_box.setFrameShape(QFrame.StyledPanel)
+        activity_layout = QVBoxLayout(activity_box)
+        activity_layout.setContentsMargins(12, 12, 12, 12)
+        activity_layout.setSpacing(8)
+        activity_title = QLabel("Current activity")
+        activity_title.setStyleSheet("font-weight: 600;")
+        activity_layout.addWidget(activity_title)
+        activity_phase_label = QLabel("")
+        activity_phase_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        activity_phase_label.setWordWrap(True)
+        activity_layout.addWidget(activity_phase_label)
+        activity_details = QListWidget()
+        activity_details.setAlternatingRowColors(True)
+        activity_layout.addWidget(activity_details)
+        layout.addWidget(activity_box)
 
         transfers_box = QFrame()
         transfers_box.setFrameShape(QFrame.StyledPanel)
@@ -7392,6 +7457,12 @@ class MainWindow(QMainWindow):
             error_label.setText(str(current.last_error or "None"))
             conflicts_btn.setText(f"View Conflicts ({int(getattr(current, 'conflicts', 0) or 0)})")
             conflicts_btn.setEnabled(bool(self._homebase_sync_engine) and int(getattr(current, "conflicts", 0) or 0) > 0)
+
+            activity_phase, activity_lines = self._homebase_activity_snapshot(current)
+            activity_phase_label.setText(activity_phase)
+            activity_details.clear()
+            for line in activity_lines:
+                activity_details.addItem(line)
 
             transfers = list(getattr(current, "transfer_workers", []) or [])
             transfers_list.clear()
