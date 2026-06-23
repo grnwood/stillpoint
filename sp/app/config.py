@@ -764,22 +764,38 @@ def save_map_note_font_size_offset(offset: int) -> None:
     _update_global_config({"map_note_font_size_offset": int(offset)})
 
 
-def load_vi_block_cursor_enabled() -> bool:
-    """Load app-level preference for vi-mode block cursor. Defaults to True on Windows, False elsewhere."""
+def load_vi_cursor_style() -> str:
+    """Load app-level preference for vi-mode cursor style: 'block' or 'line'."""
     if not GLOBAL_CONFIG.exists():
-        return platform.system() == "Windows"
+        return "block" if platform.system() == "Windows" else "line"
     try:
         payload = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return platform.system() == "Windows"
+        return "block" if platform.system() == "Windows" else "line"
+    style = str(payload.get("vi_cursor_style") or "").strip().lower()
+    if style in {"block", "line"}:
+        return style
     if "vi_block_cursor" in payload:
-        return bool(payload["vi_block_cursor"])
-    return platform.system() == "Windows"
+        return "block" if bool(payload["vi_block_cursor"]) else "line"
+    return "block" if platform.system() == "Windows" else "line"
+
+
+def save_vi_cursor_style(style: str) -> None:
+    """Save app-level preference for vi-mode cursor style."""
+    normalized = str(style or "").strip().lower()
+    if normalized not in {"block", "line"}:
+        normalized = "line"
+    _update_global_config({"vi_cursor_style": normalized, "vi_block_cursor": normalized == "block"})
+
+
+def load_vi_block_cursor_enabled() -> bool:
+    """Backward-compatible wrapper for legacy vi-mode block cursor preference."""
+    return load_vi_cursor_style() == "block"
 
 
 def save_vi_block_cursor_enabled(enabled: bool) -> None:
-    """Save app-level preference for vi-mode block cursor."""
-    _update_global_config({"vi_block_cursor": enabled})
+    """Backward-compatible wrapper for legacy vi-mode block cursor preference."""
+    save_vi_cursor_style("block" if enabled else "line")
 
 
 def load_vi_mode_enabled() -> bool:

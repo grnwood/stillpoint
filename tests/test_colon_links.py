@@ -10,6 +10,7 @@ from sp.app.ui.path_utils import (
     ensure_root_colon_link,
     strip_root_prefix,
     normalize_link_target,
+    should_use_full_target_label,
 )
 
 
@@ -271,6 +272,14 @@ class TestNormalizeLinkTarget:
 
     def test_handles_extra_whitespace(self):
         assert normalize_link_target("  Mixed   Case  ") == "Mixed_Case"
+
+
+class TestAnchoredLinkLabels:
+    def test_anchored_journal_short_label_uses_full_target(self):
+        assert should_use_full_target_label(":Journal:2026:06:23#dk-questions", "23") is True
+
+    def test_non_anchored_journal_short_label_does_not_force_full_target(self):
+        assert should_use_full_target_label(":Journal:2026:06:23", "23") is False
     
     def test_names_with_numbers(self):
         """Names mixing letters and numbers"""

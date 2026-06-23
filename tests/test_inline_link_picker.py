@@ -41,3 +41,37 @@ def test_quick_link_shows_create_option_even_when_exact_page_exists(qapp, monkey
     assert create_payload.get("create") is True
     search_payload = overlay.list_widget.item(1).data(Qt.UserRole)
     assert not isinstance(search_payload, dict)
+
+
+def test_quick_link_preserves_anchor_when_accepting_existing_page(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.inline_link_picker.config.search_pages",
+        lambda *_: [{"path": "/Journal/2026/06/23/23.md"}],
+    )
+    overlay = InlineLinkPickerOverlay(
+        parent=qapp.activeWindow() or None,
+        current_page_path="/Area/Area.md",
+    )
+    overlay.search.setText(":Journal:2026:06:23#dk-questions")
+    overlay._refresh()
+
+    overlay.list_widget.setCurrentRow(1)
+    overlay._accept_current()
+
+    assert overlay.selected_path() == ":Journal:2026:06:23#dk-questions"
+    assert overlay.is_new_page() is False
+
+
+def test_quick_link_preserves_anchor_on_create_target(qapp, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.inline_link_picker.config.search_pages", lambda *_: [])
+    overlay = InlineLinkPickerOverlay(
+        parent=qapp.activeWindow() or None,
+        current_page_path="/Area/Area.md",
+    )
+    overlay.search.setText(":Journal:2026:06:23#dk-questions")
+    overlay._refresh()
+
+    payload = overlay.list_widget.item(0).data(Qt.UserRole)
+
+    assert isinstance(payload, dict)
+    assert payload.get("target") == ":Journal:2026:06:23#dk-questions"

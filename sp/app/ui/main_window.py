@@ -862,7 +862,10 @@ from .insert_link_dialog import InsertLinkDialog
 from .new_page_dialog import NewPageDialog
 from .folder_template_dialog import FolderTemplateDialog
 from .merge_conflict_dialog import MergeConflictDialog
-from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link
+from .path_utils import (
+    colon_to_path, path_to_colon, ensure_root_colon_link,
+    should_use_full_target_label, trace_link_decision,
+)
 from .date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
 from .open_vault_dialog import OpenVaultDialog, AddHomebaseVaultDialog, _persist_homebase_passphrase_settings
 from .vault_preferences_dialog import VaultPreferencesDialog
@@ -13510,6 +13513,13 @@ class MainWindow(QMainWindow):
             # Clean up selected text - remove line breaks and paragraph separators
             # Qt returns paragraph separators as U+2029 which cause line breaks in links
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+        trace_link_decision(
+            "sp/app/ui/main_window.py:_insert_link:selection_state",
+            has_selection=editor_cursor.hasSelection(),
+            selection_range=selection_range,
+            selected_text=selected_text,
+            current_path=self.current_path,
+        )
 
         def _restore_cursor() -> QTextCursor:
             """Restore the cursor/selection captured before opening the dialog."""
@@ -13554,6 +13564,18 @@ class MainWindow(QMainWindow):
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
             should_create_new = dlg.should_create_new_page()
+            requested_anchor = ""
+            if colon_path and "#" in colon_path:
+                _base_target, _anchor = colon_path.split("#", 1)
+                requested_anchor = _anchor.strip()
+            trace_link_decision(
+                "sp/app/ui/main_window.py:_insert_link:dialog_result",
+                colon_path=colon_path,
+                link_name=link_name,
+                selected_text=selected_text,
+                should_create_new=should_create_new,
+                current_path=self.current_path,
+            )
             created_via_insert = False
             if should_create_new and colon_path:
                 resolved_target, created_via_insert = self._ensure_inline_link_target_page(
@@ -13562,6 +13584,8 @@ class MainWindow(QMainWindow):
                 )
                 if resolved_target:
                     colon_path = resolved_target
+                    if requested_anchor and "#" not in colon_path:
+                        colon_path = f"{colon_path}#{requested_anchor}"
             if colon_path:
                 # If there was selected text, replace it with the link
                 if selection_range:
@@ -13574,7 +13598,22 @@ class MainWindow(QMainWindow):
                 
                 # Always set the cursor before inserting the link
                 self.editor.setTextCursor(restore_cursor)
-                label = None if should_create_new else (link_name or selected_text or colon_path)
+                label = link_name or selected_text or colon_path
+                if should_create_new and label:
+                    # The dialog auto-fills link_name with the target for create-new rows.
+                    # Keep custom labels, but treat unchanged target labels as "no label".
+                    if label.strip() == colon_path.strip():
+                        label = None
+                if not should_create_new and should_use_full_target_label(colon_path, label):
+                    label = colon_path
+                trace_link_decision(
+                    "sp/app/ui/main_window.py:_insert_link:before_insert",
+                    colon_path=colon_path,
+                    link_name=link_name,
+                    selected_text=selected_text,
+                    final_label=label,
+                    should_create_new=should_create_new,
+                )
                 self.editor.insert_link(
                     colon_path,
                     label,
@@ -21418,7 +21457,7 @@ class MainWindow(QMainWindow):
 
     def _apply_vi_preferences(self) -> None:
         self._vi_enabled = config.load_vi_mode_enabled()
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         if not self._vi_enabled:
             self._vi_enable_pending = False
             self.editor.set_vi_mode_enabled(False)

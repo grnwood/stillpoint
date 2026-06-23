@@ -78,7 +78,10 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import Shiboken
 from markdown import markdown as render_markdown
-from .path_utils import path_to_colon, colon_to_path, ensure_root_colon_link
+from .path_utils import (
+    path_to_colon, colon_to_path, ensure_root_colon_link,
+    should_use_full_target_label, trace_link_decision,
+)
 from .heading_utils import heading_slug
 from .page_load_logger import PageLoadLogger
 from .ai_actions_data import AI_ACTION_GROUPS
@@ -1659,6 +1662,7 @@ class MarkdownEditor(QTextEdit):
     pageTagInserted = Signal(str)  # Emits tag when a new page tag is inserted
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
+    _VI_LINE_EXTRA_KEY = QTextFormat.UserProperty + 4
     _FLASH_EXTRA_KEY = QTextFormat.UserProperty + 2
     _HR_EXTRA_KEY = QTextFormat.UserProperty + 3
     _LOAD_GUARD_DEPTH = 0  # class-level: block cursor/link work during any markdown load
@@ -1693,7 +1697,12 @@ class MarkdownEditor(QTextEdit):
         self._http_client: Optional[httpx.Client] = None
         self._auth_prompt: Optional[Callable[[], bool]] = None
         self._vi_mode_active: bool = False
-        self._vi_block_cursor_enabled: bool = True  # default on, controlled by preferences
+        self._vi_cursor_style: str = "line"
+        self._vi_default_cursor_width: int = max(1, self.cursorWidth())
+        try:
+            self._vi_block_cursor_width: int = max(2, self.fontMetrics().horizontalAdvance("M"))
+        except Exception:
+            self._vi_block_cursor_width = 8
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
         self._vi_feature_enabled: bool = False
@@ -3438,27 +3447,58 @@ class MarkdownEditor(QTextEdit):
         
         is_http_url = colon_path.startswith(("http://", "https://"))
         target = self._normalize_external_link(colon_path) if is_http_url else ensure_root_colon_link(colon_path)
+        trace_link_decision(
+            "sp/app/ui/markdown_editor.py:insert_link:start",
+            colon_path=colon_path,
+            link_name=link_name,
+            surround_with_spaces=surround_with_spaces,
+            is_http_url=is_http_url,
+            target=target,
+            current_path=self._current_path,
+        )
         
         # Determine the display label
         label = ""
+        explicit_target_label = False
         if link_name and link_name.strip():
             candidate = link_name.strip()
             match_left = candidate.lstrip(":/")
             target_left = target.lstrip(":/")
-            if match_left != target_left:
+            if match_left == target_left:
+                explicit_target_label = True
+                label = target
+            else:
                 label = candidate
+            trace_link_decision(
+                "sp/app/ui/markdown_editor.py:insert_link:candidate_label",
+                candidate=candidate,
+                match_left=match_left,
+                target_left=target_left,
+                explicit_target_label=explicit_target_label,
+                label=label,
+            )
         
         # If no custom label:
         # - external URLs: keep empty label so storage is [url|] (avoids noisy [url|url])
         # - internal links: use short/full label based on preference.
-        if not label:
+        if not label and not explicit_target_label:
             if is_http_url:
                 label = ""
+            elif "#" in target:
+                label = target
             elif config.load_prefer_short_links():
                 trimmed = target.lstrip(":")
                 label = (trimmed.split(":")[-1] if trimmed else target)
             else:
                 label = target
+        trace_link_decision(
+            "sp/app/ui/markdown_editor.py:insert_link:final_label",
+            target=target,
+            link_name=link_name,
+            explicit_target_label=explicit_target_label,
+            final_label=label,
+            prefer_short_links=(False if is_http_url else config.load_prefer_short_links()),
+        )
         
         # Insert directly in display format: sentinel + target + sentinel + label + sentinel
         display_link = f"{LINK_SENTINEL}{target}{LINK_SENTINEL}{label}{LINK_SENTINEL}"
@@ -7005,10 +7045,22 @@ class MarkdownEditor(QTextEdit):
 
                 link_label = ""
                 if raw_label:
-                    match_left = raw_label.lstrip(":/")
-                    target_left = new_to.lstrip(":/") if new_to else ""
-                    if match_left != target_left:
+                    if new_to and new_to.startswith(("http://", "https://")):
+                        match_left = raw_label.lstrip(":/")
+                        target_left = new_to.lstrip(":/")
+                        if match_left != target_left:
+                            link_label = raw_label
+                    else:
                         link_label = raw_label
+                if new_to and should_use_full_target_label(new_to, link_label):
+                    link_label = new_to
+                trace_link_decision(
+                    "sp/app/ui/markdown_editor.py:_edit_link_at_cursor:before_insert",
+                    original_link=link_val,
+                    new_to=new_to,
+                    raw_label=raw_label,
+                    final_link_label=link_label,
+                )
                 tc = QTextCursor(block)
                 tc.setPosition(block.position() + start)
                 tc.setPosition(block.position() + end, QTextCursor.KeepAnchor)
@@ -7034,11 +7086,17 @@ class MarkdownEditor(QTextEdit):
         if link_text:
             normalized_external = self._normalize_external_link(link_text)
             if normalized_external.startswith(("http://", "https://")):
-                clipboard = QGuiApplication.clipboard()
-                clipboard.setText(normalized_external)
+                self._set_clipboard_markdown(normalized_external, include_internal_payload=True, include_text_markdown=True)
                 self.linkCopied.emit(normalized_external)
                 # Keep vi clipboard in sync so 'p' in vi mode pastes this link
                 self._vi_clipboard = normalized_external
+                trace_link_decision(
+                    "sp/app/ui/markdown_editor.py:_copy_link_to_location",
+                    link_text=link_text,
+                    anchor_text=anchor_text,
+                    copied=normalized_external,
+                    mode="external",
+                )
                 return normalized_external
             # If it's a colon notation link, use it as-is
             if ":" in link_text:
@@ -7068,10 +7126,18 @@ class MarkdownEditor(QTextEdit):
                 slugified_anchor = heading_slug(anchor_text)
                 colon_path = f"{colon_path}#{slugified_anchor}"
             clipboard = QGuiApplication.clipboard()
-            clipboard.setText(colon_path)
+            self._set_clipboard_markdown(colon_path, include_internal_payload=True, include_text_markdown=True)
             self.linkCopied.emit(colon_path)
             # Keep vi clipboard in sync so 'p' in vi mode pastes this link
             self._vi_clipboard = colon_path
+            trace_link_decision(
+                "sp/app/ui/markdown_editor.py:_copy_link_to_location",
+                link_text=link_text,
+                anchor_text=anchor_text,
+                current_path=self._current_path,
+                copied=colon_path,
+                mode="internal",
+            )
             return colon_path
         return None
 
@@ -7161,12 +7227,18 @@ class MarkdownEditor(QTextEdit):
             self.linkHovered.emit("")  # Empty string to clear status bar
 
     # --- Vi-mode cursor -------------------------------------------------
-    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
-        """Set whether vi-mode should show a block cursor. Does not affect vi-mode navigation."""
-        self._vi_block_cursor_enabled = enabled
-        # Refresh cursor display if currently in vi-mode
+    def set_vi_cursor_style(self, style: str) -> None:
+        """Set vi navigation cursor style: 'block' or 'line'."""
+        normalized = str(style or "").strip().lower()
+        if normalized not in {"block", "line"}:
+            normalized = "line"
+        self._vi_cursor_style = normalized
         if self._vi_mode_active:
             self._update_vi_cursor()
+
+    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
+        """Backward-compatible wrapper for old boolean vi cursor preference."""
+        self.set_vi_cursor_style("block" if enabled else "line")
 
     def set_vi_mode_enabled(self, enabled: bool) -> None:
         """Globally enable or disable vi-style navigation."""
@@ -8032,14 +8104,13 @@ class MarkdownEditor(QTextEdit):
             self._vi_last_edit()
 
     def set_vi_mode(self, active: bool) -> None:
-        """Enable or disable vi-mode cursor styling (pink block)."""
+        """Enable or disable vi-mode cursor styling."""
         if active and not self._vi_feature_enabled:
             active = False
         if self._vi_mode_active == active:
             return
         self._vi_mode_active = active
-        # Disable cursor blinking while in vi-mode to avoid flicker with overlay (only if block cursor enabled)
-        if active and self._vi_block_cursor_enabled:
+        if active:
             if self._vi_saved_flash_time is None:
                 try:
                     self._vi_saved_flash_time = QGuiApplication.cursorFlashTime()
@@ -8057,6 +8128,7 @@ class MarkdownEditor(QTextEdit):
                     pass
             self._vi_saved_flash_time = None
             self._vi_last_cursor_pos = -1
+        self.setCursorWidth(self._vi_block_cursor_width if active else self._vi_default_cursor_width)
         self._update_vi_cursor()
         # Ensure editor focus when vi mode is toggled and no dialog is open
         if not self._dialog_block_input:
@@ -8071,7 +8143,7 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         ):
             return
-        if not self._vi_mode_active or not self._vi_block_cursor_enabled:
+        if not self._vi_mode_active:
             return
         pos = self.textCursor().position()
         if pos == self._vi_last_cursor_pos:
@@ -8136,34 +8208,63 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         ):
             return
-        if not self._vi_mode_active or not self._vi_block_cursor_enabled:
-            # Clear any vi-mode selection overlay but preserve other selections (e.g., flashes)
-            remaining = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+        if not self._vi_mode_active:
+            remaining = [
+                s for s in self.extraSelections()
+                if s.format.property(self._VI_EXTRA_KEY) is None
+                and s.format.property(self._VI_LINE_EXTRA_KEY) is None
+            ]
             self.setExtraSelections(remaining)
             return
         doc = self.document()
         if doc is None or doc.isEmpty():
             return
         cursor = self.textCursor()
-        # Don't draw block cursor overlay while there's an active selection
         if cursor.hasSelection():
-            remaining = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+            remaining = [
+                s for s in self.extraSelections()
+                if s.format.property(self._VI_EXTRA_KEY) is None
+                and s.format.property(self._VI_LINE_EXTRA_KEY) is None
+            ]
             self.setExtraSelections(remaining)
             return
-        block_cursor = QTextCursor(cursor)
-        if not block_cursor.atEnd():
-            # Select the character under the caret to form a block
-            block_cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+        accent_bg, accent_fg = self._vi_cursor_colors()
+        existing = [
+            s for s in self.extraSelections()
+            if s.format.property(self._VI_EXTRA_KEY) is None
+            and s.format.property(self._VI_LINE_EXTRA_KEY) is None
+        ]
         extra = QTextEdit.ExtraSelection()
-        extra.cursor = block_cursor
-        fmt = extra.format
-        fmt.setBackground(theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff"))
-        fmt.setForeground(theme_color("markdown_editor.vi_block_cursor.text", "#111111"))
-        fmt.setProperty(QTextFormat.FullWidthSelection, False)
-        fmt.setProperty(self._VI_EXTRA_KEY, True)
-        existing = [s for s in self.extraSelections() if s.format.property(self._VI_EXTRA_KEY) is None]
+        if self._vi_cursor_style == "block":
+            block_cursor = QTextCursor(cursor)
+            if not block_cursor.atEnd():
+                block_cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+            extra.cursor = block_cursor
+            fmt = extra.format
+            fmt.setBackground(accent_bg)
+            fmt.setForeground(accent_fg)
+            fmt.setProperty(QTextFormat.FullWidthSelection, False)
+            fmt.setProperty(self._VI_EXTRA_KEY, True)
+        else:
+            line_cursor = QTextCursor(cursor)
+            line_cursor.clearSelection()
+            extra.cursor = line_cursor
+            fmt = extra.format
+            fmt.setBackground(accent_bg)
+            fmt.setForeground(accent_fg)
+            fmt.setProperty(QTextFormat.FullWidthSelection, True)
+            fmt.setProperty(self._VI_LINE_EXTRA_KEY, True)
         existing.append(extra)
         self.setExtraSelections(existing)
+
+    def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
+        accent_value = config.load_vault_accent_color() or theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff").name()
+        accent = QColor(accent_value)
+        if not accent.isValid():
+            accent = QColor("#b259ff")
+        luminance = (0.299 * accent.red()) + (0.587 * accent.green()) + (0.114 * accent.blue())
+        foreground = QColor("#111111" if luminance >= 160 else "#ffffff")
+        return accent, foreground
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if getattr(self, "_teardown_done", False):

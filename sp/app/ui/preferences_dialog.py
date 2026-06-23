@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QKeySequenceEdit,
     QFrame,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QFrame,
@@ -368,12 +369,20 @@ class PreferencesDialog(QDialog):
         self.vi_enable_checkbox.setChecked(config.load_vi_mode_enabled())
         self.vi_enable_checkbox.setToolTip("Turn on vi-style navigation keys in the Markdown editor.")
         modes_layout.addWidget(self.vi_enable_checkbox)
-        self.vi_block_cursor_checkbox = QCheckBox("Use Vi Mode Block Cursor")
-        self.vi_block_cursor_checkbox.setChecked(config.load_vi_block_cursor_enabled())
-        self.vi_block_cursor_checkbox.setToolTip(
-            "Show a colored block cursor when vi-mode is active.\nDisable this if you experience flickering on Linux/Cinnamon."
+        modes_layout.addWidget(QLabel("Vi navigation cursor style:"))
+        self.vi_cursor_block_radio = QRadioButton("Use Vi Mode Block Cursor")
+        self.vi_cursor_line_radio = QRadioButton("Use Vi Mode Line Highlight Cursor")
+        cursor_style = config.load_vi_cursor_style()
+        self.vi_cursor_block_radio.setChecked(cursor_style == "block")
+        self.vi_cursor_line_radio.setChecked(cursor_style != "block")
+        self.vi_cursor_block_radio.setToolTip(
+            "Show an accent-colored block cursor while vi navigation mode is active."
         )
-        modes_layout.addWidget(self.vi_block_cursor_checkbox)
+        self.vi_cursor_line_radio.setToolTip(
+            "Highlight the current line with the vault accent color while vi navigation mode is active."
+        )
+        modes_layout.addWidget(self.vi_cursor_block_radio)
+        modes_layout.addWidget(self.vi_cursor_line_radio)
         vi_divider = QFrame()
         vi_divider.setFrameShape(QFrame.HLine)
         vi_divider.setFrameShadow(QFrame.Sunken)
@@ -1052,7 +1061,7 @@ class PreferencesDialog(QDialog):
         """Save preferences when OK is clicked."""
         config.save_toc_widget_enabled(self.toc_widget_checkbox.isChecked())
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())
-        config.save_vi_block_cursor_enabled(self.vi_block_cursor_checkbox.isChecked())
+        config.save_vi_cursor_style("block" if self.vi_cursor_block_radio.isChecked() else "line")
         app_font = self._font_value(self.application_font_combo)
         config.save_application_font(app_font)
         size_val = self.application_font_size_spin.value()

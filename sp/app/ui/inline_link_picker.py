@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
-from .path_utils import path_to_colon, normalize_link_target
+from .path_utils import path_to_colon, normalize_link_target, ensure_root_colon_link
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
 
@@ -204,7 +204,11 @@ class InlineLinkPickerOverlay(QDialog):
     
     def _on_selection_changed(self, current, previous) -> None:
         if current:
-            self._selected_path = current.data(Qt.UserRole)
+            payload = current.data(Qt.UserRole)
+            if isinstance(payload, dict) and payload.get("create"):
+                self._selected_path = str(payload.get("target") or "")
+            else:
+                self._selected_path = self._apply_current_anchor(str(payload or ""))
     
     def _accept_current(self) -> None:
         current = self.list_widget.currentItem()
@@ -214,7 +218,7 @@ class InlineLinkPickerOverlay(QDialog):
                 self._selected_path = str(payload.get("target") or "")
                 self._is_new_page = True
             else:
-                self._selected_path = str(payload or "")
+                self._selected_path = self._apply_current_anchor(str(payload or ""))
                 self._is_new_page = False
         elif not self._has_matching_pages:
             # Create new page from search term
@@ -226,22 +230,30 @@ class InlineLinkPickerOverlay(QDialog):
     
     def _generate_new_page_path(self, term: str) -> str:
         """Generate a colon-separated path for a new page based on search term."""
-        cleaned = normalize_link_target(term.strip().replace('/', ':')).lstrip(":")
+        raw_term, anchor = self._split_anchor(term)
+        normalized_term = normalize_link_target(raw_term.strip().replace('/', ':'))
+        cleaned = normalized_term.lstrip(":")
         if not cleaned:
             return ""
+        if ":" in cleaned:
+            target = ensure_root_colon_link(normalized_term)
+            return f"{target}{anchor}" if anchor and "#" not in target else target
 
         # If we have a current page, create in that page location (child path).
         if self._current_page_path:
             try:
                 current_colon = path_to_colon(self._current_page_path)
                 if current_colon:
-                    return normalize_link_target(f":{current_colon}:{cleaned}")
-                return normalize_link_target(f":{cleaned}")
+                    target = ensure_root_colon_link(normalize_link_target(f":{current_colon}:{cleaned}"))
+                    return f"{target}{anchor}" if anchor else target
+                target = ensure_root_colon_link(normalize_link_target(f":{cleaned}"))
+                return f"{target}{anchor}" if anchor else target
             except Exception:
                 pass
 
         # Fallback: create at root level
-        return normalize_link_target(f":{cleaned}")
+        target = ensure_root_colon_link(normalize_link_target(f":{cleaned}"))
+        return f"{target}{anchor}" if anchor else target
 
     def _refresh(self) -> None:
         """Refresh the list of matching pages."""
@@ -255,7 +267,12 @@ class InlineLinkPickerOverlay(QDialog):
         # Get matching pages from config
         try:
             # Use search_pages API which returns list of page dicts
-            pages = config.search_pages(term)
+            search_term, anchor = self._split_anchor(term)
+            normalized_term = search_term.lstrip(":")
+            if ":" in normalized_term:
+                normalized_term = normalized_term.replace(":", "/")
+            query = normalized_term or search_term
+            pages = config.search_pages(query)
             term_lower = term.lower()
             matches = []
             
@@ -287,7 +304,8 @@ class InlineLinkPickerOverlay(QDialog):
             
             for page_path, colon_path in matches:
                 # Highlight matching text
-                display_text = html.escape(colon_path)
+                display_target = self._apply_current_anchor(colon_path)
+                display_text = html.escape(display_target)
                 if term_lower in display_text.lower():
                     import re
                     pattern = re.compile(f'({re.escape(term)})', re.IGNORECASE)
@@ -387,6 +405,26 @@ class InlineLinkPickerOverlay(QDialog):
     def selected_path(self) -> str | None:
         """Return the selected colon path."""
         return self._selected_path
+
+    @staticmethod
+    def _split_anchor(target: str) -> tuple[str, str]:
+        text = (target or "").strip()
+        if "#" not in text:
+            return text, ""
+        base, anchor = text.split("#", 1)
+        anchor = anchor.strip()
+        return base.strip(), f"#{anchor}" if anchor else ""
+
+    def _current_anchor(self) -> str:
+        _base, anchor = self._split_anchor(self.search.text())
+        return anchor
+
+    def _apply_current_anchor(self, target: str) -> str:
+        normalized = ensure_root_colon_link(normalize_link_target(target))
+        if "#" in normalized:
+            return normalized
+        anchor = self._current_anchor()
+        return f"{normalized}{anchor}" if anchor else normalized
     
     def is_new_page(self) -> bool:
         """Return whether the selected page is a new page creation."""

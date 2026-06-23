@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray, QBuffer, QIODevice
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices, QNativeGestureEvent
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -39,6 +40,12 @@ from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 
 _LOGGING = log_enabled("diagrams")
+
+
+class BackgroundRenderNotifier(QObject):
+    """Thread-safe notifier used to return render results to the UI thread."""
+
+    finished = Signal(int, object, object)
 
 
 class LineNumberArea(QWidget):
@@ -124,20 +131,28 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
     """PlainTextEdit with a lightweight vi-style navigation mode."""
 
     viInsertModeChanged = Signal(bool)
+    _VI_BLOCK_EXTRA_KEY = int(QTextFormat.UserProperty) + 4100
+    _VI_LINE_EXTRA_KEY = int(QTextFormat.UserProperty) + 4101
 
     def __init__(self):
         super().__init__()
         self._vi_feature_enabled: bool = False
         self._vi_mode_active: bool = False
         self._vi_insert_mode: bool = False
-        self._vi_block_cursor_enabled: bool = False
+        self._vi_cursor_style: str = "line"
         self._pending_d: bool = False
         self._pending_y: bool = False
         self._pending_g: bool = False
         self._vi_clipboard: str = ""
         width = max(1, self.cursorWidth())
         self._default_cursor_width: int = width
+        try:
+            self._vi_block_cursor_width: int = max(2, self.fontMetrics().horizontalAdvance("M"))
+        except Exception:
+            self._vi_block_cursor_width = 8
         self._auto_indent_enabled: bool = True
+        self.cursorPositionChanged.connect(self._update_vi_cursor_highlight)
+        self.textChanged.connect(self._update_vi_cursor_highlight)
 
     def set_vi_mode_enabled(self, enabled: bool) -> None:
         self._vi_feature_enabled = bool(enabled)
@@ -150,19 +165,23 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
             self._vi_insert_mode = False
             self._vi_mode_active = False
             self._apply_cursor_style()
+            self._update_vi_cursor_highlight()
             self.viInsertModeChanged.emit(False)
 
-    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
-        self._vi_block_cursor_enabled = bool(enabled)
+    def set_vi_cursor_style(self, style: str) -> None:
+        normalized = str(style or "").strip().lower()
+        if normalized not in {"block", "line"}:
+            normalized = "line"
+        self._vi_cursor_style = normalized
         self._apply_cursor_style()
+        self._update_vi_cursor_highlight()
+
+    def set_vi_block_cursor_enabled(self, enabled: bool) -> None:
+        self.set_vi_cursor_style("block" if enabled else "line")
 
     def _apply_cursor_style(self) -> None:
-        if self._vi_feature_enabled and self._vi_mode_active and self._vi_block_cursor_enabled:
-            try:
-                block_width = max(2, self.fontMetrics().horizontalAdvance("M"))
-            except Exception:
-                block_width = 8
-            self.setCursorWidth(block_width)
+        if self._vi_feature_enabled and self._vi_mode_active:
+            self.setCursorWidth(self._vi_block_cursor_width)
         else:
             self.setCursorWidth(self._default_cursor_width)
 
@@ -176,6 +195,7 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         self._pending_y = False
         self._pending_g = False
         self._apply_cursor_style()
+        self._update_vi_cursor_highlight()
         if emit_needed:
             self.viInsertModeChanged.emit(False)
 
@@ -188,7 +208,51 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         self._pending_y = False
         self._pending_g = False
         self._apply_cursor_style()
+        self._update_vi_cursor_highlight()
         self.viInsertModeChanged.emit(True)
+
+    def _update_vi_cursor_highlight(self) -> None:
+        """Draw the active vi navigation cursor using either block or line treatment."""
+        existing = [
+            s for s in self.extraSelections()
+            if s.format.property(self._VI_LINE_EXTRA_KEY) is None
+            and s.format.property(self._VI_BLOCK_EXTRA_KEY) is None
+        ]
+        if not self._vi_feature_enabled or not self._vi_mode_active:
+            self.setExtraSelections(existing)
+            return
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            self.setExtraSelections(existing)
+            return
+        bg, fg = self._vi_cursor_colors()
+        extra = QTextEdit.ExtraSelection()
+        if self._vi_cursor_style == "block":
+            block_cursor = QTextCursor(cursor)
+            if not block_cursor.atEnd():
+                block_cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+            extra.cursor = block_cursor
+            extra.format.setBackground(bg)
+            extra.format.setForeground(fg)
+            extra.format.setProperty(QTextFormat.FullWidthSelection, False)
+            extra.format.setProperty(self._VI_BLOCK_EXTRA_KEY, True)
+        else:
+            extra.cursor = cursor
+            extra.format.setBackground(bg)
+            extra.format.setForeground(fg)
+            extra.format.setProperty(QTextFormat.FullWidthSelection, True)
+            extra.format.setProperty(self._VI_LINE_EXTRA_KEY, True)
+        existing.append(extra)
+        self.setExtraSelections(existing)
+
+    def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
+        accent_value = config.load_vault_accent_color() or theme_color("vi_navigation_line.bg", "#2a3950").name()
+        accent = QColor(accent_value)
+        if not accent.isValid():
+            accent = QColor("#2a3950")
+        luminance = (0.299 * accent.red()) + (0.587 * accent.green()) + (0.114 * accent.blue())
+        foreground = QColor("#111111" if luminance >= 160 else "#ffffff")
+        return accent, foreground
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()
@@ -707,6 +771,17 @@ class PlantUMLEditorWindow(QMainWindow):
         # Load auto-render setting (default: False)
         self._auto_render_enabled: bool = config.load_puml_auto_render(default=False)
         self._editor_dirty: bool = False
+        self._last_svg: str = ""
+        self._window_shown = False
+        self._startup_initialized = False
+        self._startup_render_pending = True
+        self._render_in_progress = False
+        self._render_requeued = False
+        self._render_request_token = 0
+        self._closing = False
+        self._editor_change_connected = False
+        self._render_notifier = BackgroundRenderNotifier()
+        self._render_notifier.finished.connect(self._on_background_render_finished)
         self.setWindowTitle(f"PlantUML Editor - {self.file_path.name}")
         self.setGeometry(100, 100, 1400, 800)
         
@@ -932,8 +1007,6 @@ class PlantUMLEditorWindow(QMainWindow):
             right_v_splitter.setSizes([490, 210])
         else:
             self.ai_panel = None
-            # No chat panel, just use preview at full size
-            right_v_splitter.addWidget(preview_container)
             right_v_splitter.setSizes([700])
         right_v_splitter.setCollapsible(0, False)
         right_v_splitter.setCollapsible(1, True)  # Chat can be collapsed
@@ -981,22 +1054,16 @@ class PlantUMLEditorWindow(QMainWindow):
         self._vi_status_label.setObjectName("viStatusLabel")
         self._vi_status_label.setToolTip("Vi insert mode indicator")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self.editor.set_vi_mode_enabled(self._vi_enabled)
         self._update_vi_badge_visibility()
-        
-        # Load file content
-        self._load_file()
         
         # Setup debounce timer for rendering
         self.render_timer = QTimer()
         self.render_timer.setSingleShot(True)
         self.render_timer.setInterval(1000)  # 1 second debounce
         self.render_timer.timeout.connect(self._render)
-        
-        # Now connect editor changes (after timer is created)
-        self.editor.textChanged.connect(self._on_editor_changed)
         
         # Setup Ctrl+S shortcut for save
         QShortcut(QKeySequence.Save, self, self._save_file)
@@ -1026,8 +1093,8 @@ class PlantUMLEditorWindow(QMainWindow):
             self.editor.setFont(font)
         except Exception:
             pass
-        
-        self._render()
+
+        self._set_preview_loading_state("Opening diagram window…")
 
     def _on_vi_insert_state_changed(self, insert_active: bool) -> None:
         self._vi_insert_active = bool(insert_active)
@@ -1080,7 +1147,7 @@ class PlantUMLEditorWindow(QMainWindow):
         """Create a loading overlay widget with spinner."""
         overlay = QWidget(parent)
         overlay.setObjectName("loadingOverlay")
-        overlay_bg = theme_value("plantuml_editor.loading.overlay_bg", "rgba(0, 0, 0, 220)")
+        overlay_bg = theme_value("plantuml_editor.loading.overlay_bg", "rgba(15, 23, 42, 135)")
         label_color = theme_value("plantuml_editor.loading.label_text", "#ffffff")
         label_size = theme_value("plantuml_editor.loading.label_size_px", 16)
         label_weight = theme_value("plantuml_editor.loading.label_weight", "bold")
@@ -1109,9 +1176,9 @@ class PlantUMLEditorWindow(QMainWindow):
         layout.addWidget(self.spinner_label)
         
         # Loading text
-        loading_text = QLabel("Rendering diagram...")
-        loading_text.setAlignment(Qt.AlignCenter)
-        layout.addWidget(loading_text)
+        self.loading_text_label = QLabel("Rendering diagram...")
+        self.loading_text_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.loading_text_label)
         
         # Animation timer for spinner
         self.spinner_timer = QTimer()
@@ -1128,11 +1195,18 @@ class PlantUMLEditorWindow(QMainWindow):
             self.spinner_angle = (self.spinner_angle + 1) % len(spinners)
             self.spinner_label.setText(spinners[self.spinner_angle])
 
-    def _show_loading(self) -> None:
+    def _show_loading(self, message: str = "Rendering diagram...", *, use_overlay: bool = True) -> None:
         """Show the loading overlay with animation."""
         if not hasattr(self, 'loading_overlay'):
             return
         try:
+            if hasattr(self, "spinner_label"):
+                self.spinner_label.setText("⠋")
+            if hasattr(self, "loading_text_label"):
+                self.loading_text_label.setText(message)
+            if not use_overlay:
+                self.spinner_timer.start()
+                return
             # Position overlay to cover the entire parent container
             parent = self.loading_overlay.parent()
             if parent:
@@ -1152,6 +1226,49 @@ class PlantUMLEditorWindow(QMainWindow):
             self.loading_overlay.hide()
         except Exception:
             pass
+
+    def _set_preview_loading_state(self, message: str = "Generating preview…") -> None:
+        """Show a lightweight placeholder while the preview is pending."""
+        try:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(f"{message}\n\nThe window is ready. Rendering continues in the background.")
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._window_shown:
+            self._window_shown = True
+            QTimer.singleShot(0, self._initialize_after_show)
+
+    def _initialize_after_show(self) -> None:
+        """Finish startup only after the window has had a chance to paint once."""
+        if self._closing or self._startup_initialized:
+            return
+        self._startup_initialized = True
+        self._load_file()
+        if not self._editor_change_connected:
+            self.editor.textChanged.connect(self._on_editor_changed)
+            self._editor_change_connected = True
+        self._set_preview_loading_state("Generating preview…")
+        QTimer.singleShot(0, self._render)
+
+    def _run_render_in_background(self, token: int, render_fn: Callable[[], object]) -> None:
+        """Run the blocking renderer off the UI thread and signal completion back."""
+
+        def _worker() -> None:
+            try:
+                result = render_fn()
+                error = None
+            except Exception as exc:  # pragma: no cover - exercised via notifier callback
+                result = None
+                error = exc
+            try:
+                self._render_notifier.finished.emit(token, result, error)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # --- Geometry persistence -------------------------------------------------
     def _restore_geometry_prefs(self) -> None:
@@ -2014,73 +2131,87 @@ B --> A: response
     def _render(self) -> None:
         """Render the PlantUML diagram."""
         self.render_timer.stop()
-        self._editor_dirty = False
-        self._update_render_status_label()
-        
-        # Check if window still exists
+        if self._closing:
+            return
+        if not self._window_shown:
+            self._startup_render_pending = True
+            self._set_preview_loading_state("Generating preview…")
+            return
+        if self._render_in_progress:
+            self._render_requeued = True
+            return
+
         try:
             if not self or not hasattr(self, 'editor'):
                 return
-            test_attr = self.editor  # Test if object is still valid
+            _ = self.editor
         except RuntimeError:
             return
-        
-        # Show loading overlay
-        self._show_loading()
-        
+
+        self._startup_render_pending = False
+        self._render_in_progress = True
+        self._render_requeued = False
+        self._editor_dirty = False
+        self._update_render_status_label()
+        self._render_request_token += 1
+        token = self._render_request_token
+        self.render_btn.setText("Generating…")
+        initial_render = not self._last_svg and self.preview_pixmap is None
+        if initial_render:
+            self._set_preview_loading_state("Generating preview…")
+        self._show_loading("Rendering diagram...", use_overlay=not initial_render)
         puml_text = self.editor.toPlainText()
-        
-        try:
-            result = self.renderer.render_svg(puml_text)
-        except Exception as exc:
-            print(f"[PlantUML Editor] Render exception: {exc}", file=__import__('sys').stdout, flush=True)
-            self._hide_loading()
+        self._run_render_in_background(token, lambda: self.renderer.render_svg(puml_text))
+
+    def _on_background_render_finished(self, token: int, result: object, error: object) -> None:
+        if self._closing or token != self._render_request_token:
             return
-        
-        # Check again after async operation
+
+        self._render_in_progress = False
+
         try:
             if not self or not hasattr(self, 'preview_label'):
                 return
-            test_attr = self.preview_label  # Test if object is still valid
+            _ = self.preview_label
         except RuntimeError:
             return
-        
+
         try:
-            if result.success and result.svg_content:
-                # Store SVG for export/copy
+            if error is not None:
+                print(f"[PlantUML Editor] Render exception: {error}", file=__import__('sys').stdout, flush=True)
+                error_svg = _generate_error_svg(f"PlantUML render error:\n{error}")
+                self._last_svg = error_svg
+                self.preview_pixmap = self._svg_to_pixmap(error_svg)
+                if self.preview_pixmap:
+                    self._update_preview_display()
+                self.render_btn.setText("✗ Render")
+            elif isinstance(result, RenderResult) and result.success and result.svg_content:
                 self._last_svg = result.svg_content
-                
-                # Convert SVG to image for display
                 try:
                     self.preview_pixmap = self._svg_to_pixmap(result.svg_content)
                     if self.preview_pixmap:
                         self._update_preview_display()
                         self.render_btn.setText("✓ Render")
                     else:
-                        # Show error diagram instead of text
                         error_svg = _generate_error_svg("Failed to convert SVG to image")
                         self._last_svg = error_svg
                         self.preview_pixmap = self._svg_to_pixmap(error_svg)
                         if self.preview_pixmap:
                             self._update_preview_display()
                         self.render_btn.setText("✗ Render")
-                    self._hide_loading()
                 except Exception as svg_exc:
                     print(f"[PlantUML Editor] SVG error: {svg_exc}", file=__import__('sys').stdout, flush=True)
-                    # Show error diagram
                     error_svg = _generate_error_svg(f"SVG rendering error:\n{str(svg_exc)}")
                     self._last_svg = error_svg
-                    try:
-                        self.preview_pixmap = self._svg_to_pixmap(error_svg)
-                        if self.preview_pixmap:
-                            self._update_preview_display()
-                    except RuntimeError:
-                        pass
+                    self.preview_pixmap = self._svg_to_pixmap(error_svg)
+                    if self.preview_pixmap:
+                        self._update_preview_display()
                     self.render_btn.setText("✗ Render")
-                    self._hide_loading()
             else:
-                error_msg = result.error_message or result.stderr or "Unknown error"
-                # Extract line number if present (e.g., "line 5: Error description")
+                render_result = result if isinstance(result, RenderResult) else None
+                error_msg = "Unknown error"
+                if render_result is not None:
+                    error_msg = render_result.error_message or render_result.stderr or error_msg
                 line_num = 0
                 try:
                     if "line" in error_msg.lower():
@@ -2090,34 +2221,19 @@ B --> A: response
                             line_num = int(match.group(1))
                 except Exception:
                     pass
-                
-                # Show error diagram with stderr content
                 error_display = f"PlantUML Error\n\n{error_msg}"
-                if result.stderr and result.stderr != error_msg:
-                    error_display += f"\n\nDetails:\n{result.stderr[:500]}"
-                
+                if render_result and render_result.stderr and render_result.stderr != error_msg:
+                    error_display += f"\n\nDetails:\n{render_result.stderr[:500]}"
                 error_svg = _generate_error_svg(error_display, line_num)
                 self._last_svg = error_svg
-                try:
-                    self.preview_pixmap = self._svg_to_pixmap(error_svg)
-                    if self.preview_pixmap:
-                        self._update_preview_display()
-                except RuntimeError:
-                    pass
-                self.render_btn.setText("✗ Render")
-                self._hide_loading()
-        except Exception as exc:
-            print(f"[PlantUML Editor] Render error: {exc}", file=__import__('sys').stdout, flush=True)
-            error_svg = _generate_error_svg(f"Internal error:\n{str(exc)}")
-            self._last_svg = error_svg
-            try:
                 self.preview_pixmap = self._svg_to_pixmap(error_svg)
                 if self.preview_pixmap:
                     self._update_preview_display()
-            except RuntimeError:
-                pass
-            self.render_btn.setText("✗ Render")
+                self.render_btn.setText("✗ Render")
+        finally:
             self._hide_loading()
+            if self._render_requeued and not self._closing:
+                QTimer.singleShot(0, self._render)
 
     def _svg_to_pixmap(self, svg_content: str) -> Optional[QPixmap]:
         """Convert SVG string to QPixmap."""
@@ -2333,7 +2449,21 @@ B --> A: response
         clipboard.setMimeData(mime)
         self.statusBar().showMessage("PNG copied to clipboard", 2000)
 
-    def closeEvent(self, event) -> None:
-        """Save file before closing."""
-        self._save_file()
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Save file and geometry before closing."""
+        self._closing = True
+        try:
+            self.render_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_geom_timer"):
+                self._geom_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._save_file()
+        except Exception:
+            pass
+        self._save_geometry_prefs()
         super().closeEvent(event)

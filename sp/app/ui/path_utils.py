@@ -3,6 +3,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from sp.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
+from sp.logging_flags import log_enabled
+
+
+def trace_link_decision(location: str, **values: object) -> None:
+    """Emit verbose link-decision tracing to stdout for debugging."""
+    if not log_enabled("link_debug"):
+        return
+    details = " ".join(f"{key}={value!r}" for key, value in values.items())
+    print(f"[LINK_DEBUG] {location} {details}".rstrip())
 
 
 def strip_root_prefix(colon_path: str) -> str:
@@ -31,7 +40,15 @@ def ensure_root_colon_link(link: str) -> str:
     if not base:
         return f"#{anchor}" if anchor else ""
     normalized = f":{base.lstrip(':')}"
-    return f"{normalized}#{anchor}" if anchor else normalized
+    result = f"{normalized}#{anchor}" if anchor else normalized
+    trace_link_decision(
+        "sp/app/ui/path_utils.py:ensure_root_colon_link",
+        input=link,
+        base=base,
+        anchor=anchor,
+        result=result,
+    )
+    return result
 
 
 def normalize_link_target(link: str) -> str:
@@ -63,6 +80,66 @@ def normalize_link_target(link: str) -> str:
     result = normalized
     if anchor:
         result = f"{result}#{anchor.strip()}"
+    trace_link_decision(
+        "sp/app/ui/path_utils.py:normalize_link_target",
+        input=link,
+        base=base,
+        anchor=anchor,
+        result=result,
+    )
+    return result
+
+
+def should_use_full_target_label(target: str, label: str | None) -> bool:
+    """Return True when an anchored internal target should keep its full target as label.
+
+    This guards insert/edit flows where a journal-day auto label like ``23`` leaks back in
+    even though the user did not provide a custom label for an anchored link target.
+    """
+    normalized_target = ensure_root_colon_link(normalize_link_target(target or ""))
+    if "#" not in normalized_target:
+        trace_link_decision(
+            "sp/app/ui/path_utils.py:should_use_full_target_label",
+            target=target,
+            label=label,
+            normalized_target=normalized_target,
+            result=False,
+            reason="no_anchor",
+        )
+        return False
+    clean_label = (label or "").strip()
+    if not clean_label:
+        trace_link_decision(
+            "sp/app/ui/path_utils.py:should_use_full_target_label",
+            target=target,
+            label=label,
+            normalized_target=normalized_target,
+            result=True,
+            reason="empty_label",
+        )
+        return True
+    if clean_label == normalized_target:
+        trace_link_decision(
+            "sp/app/ui/path_utils.py:should_use_full_target_label",
+            target=target,
+            label=label,
+            normalized_target=normalized_target,
+            result=True,
+            reason="full_target_match",
+        )
+        return True
+    base = normalized_target.split("#", 1)[0]
+    leaf = base.lstrip(":").split(":")[-1] if base else ""
+    result = clean_label == leaf
+    trace_link_decision(
+        "sp/app/ui/path_utils.py:should_use_full_target_label",
+        target=target,
+        label=label,
+        normalized_target=normalized_target,
+        leaf=leaf,
+        result=result,
+        reason="leaf_match_check",
+    )
     return result
 
 

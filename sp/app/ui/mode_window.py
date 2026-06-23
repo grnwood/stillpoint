@@ -368,7 +368,7 @@ class ModeWindow(QMainWindow):
             pass
         self.editor.set_read_only_mode(read_only)
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         self._sync_vi_insert_from_base()
         # Custom context menu with Edit operations only
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)

@@ -3,6 +3,7 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDialog
 
 from sp.app.ui.markdown_editor import (
     LINK_SENTINEL,
@@ -32,6 +33,70 @@ def test_insert_internal_link_normalizes_to_root_colon(editor):
     editor.setPlainText("")
     editor.insert_link("PageA:PageB", "Custom Label")
     assert "[:PageA:PageB|Custom Label]" in editor.to_markdown()
+
+
+def test_insert_internal_link_preserves_full_target_when_label_matches_target(monkeypatch, qapp):
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: True)
+    editor = MarkdownEditor()
+    editor.setPlainText("")
+
+    editor.insert_link(":Journal:2026:06:23#follow-up", ":Journal:2026:06:23#follow-up")
+
+    assert "[:Journal:2026:06:23#follow-up|:Journal:2026:06:23#follow-up]" in editor.to_markdown()
+    editor.close()
+
+
+def test_insert_internal_link_preserves_full_target_for_unlabeled_anchor(monkeypatch, qapp):
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: True)
+    editor = MarkdownEditor()
+    editor.setPlainText("")
+
+    editor.insert_link(":Journal:2026:06:23#follow-up", None)
+
+    assert "[:Journal:2026:06:23#follow-up|:Journal:2026:06:23#follow-up]" in editor.to_markdown()
+    editor.close()
+
+
+def test_edit_internal_link_preserves_full_target_when_dialog_label_matches_target(monkeypatch, qapp):
+    monkeypatch.setattr("sp.app.ui.markdown_editor.config.load_prefer_short_links", lambda: True)
+
+    class _FakeDialog:
+        def __init__(self, *args, **kwargs):
+            self.search = type("_Search", (), {"setFocus": lambda self: None})()
+
+        def setWindowModality(self, *_args, **_kwargs):
+            return None
+
+        def activateWindow(self):
+            return None
+
+        def raise_(self):
+            return None
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def selected_colon_path(self):
+            return ":Journal:2026:06:23#follow-up"
+
+        def selected_link_name(self):
+            return ":Journal:2026:06:23#follow-up"
+
+    monkeypatch.setattr("sp.app.ui.insert_link_dialog.InsertLinkDialog", _FakeDialog)
+
+    editor = MarkdownEditor()
+    editor.setPlainText("")
+    editor.insert_link(":Journal:2026:06:23#follow-up", None)
+
+    text = editor.toPlainText()
+    cursor = editor.textCursor()
+    cursor.setPosition(text.rindex("23"))
+    editor.setTextCursor(cursor)
+
+    editor._edit_link_at_cursor(cursor)
+
+    assert "[:Journal:2026:06:23#follow-up|:Journal:2026:06:23#follow-up]" in editor.to_markdown()
+    editor.close()
 
 
 def test_insert_external_link_keeps_full_url(editor):

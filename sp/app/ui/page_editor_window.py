@@ -42,6 +42,7 @@ from .markdown_editor import MarkdownEditor, MARKDOWN_IMAGE_WIDTH_OPTIONS
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
+from .path_utils import should_use_full_target_label, trace_link_decision
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
@@ -132,7 +133,7 @@ class PageEditorWindow(QMainWindow):
         self.editor.customContextMenuRequested.connect(self._show_editor_context_menu)
         self.editor.set_context(self.vault_root, self._source_path)
         self.editor.set_font_point_size(self._font_size)
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
         self.editor.set_read_only_mode(self._read_only)
         self.editor.set_ai_shortcuts_enabled(False)
@@ -673,6 +674,13 @@ class PageEditorWindow(QMainWindow):
             selection_range = (editor_cursor.selectionStart(), editor_cursor.selectionEnd())
             selected_text = editor_cursor.selectedText()
             selected_text = selected_text.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
+        trace_link_decision(
+            "sp/app/ui/page_editor_window.py:_insert_link:selection_state",
+            has_selection=editor_cursor.hasSelection(),
+            selection_range=selection_range,
+            selected_text=selected_text,
+            current_path=getattr(self.editor, "_current_path", None),
+        )
 
         def _restore_cursor() -> QTextCursor:
             doc_len = len(self.editor.toPlainText())
@@ -700,6 +708,13 @@ class PageEditorWindow(QMainWindow):
             restore_cursor = _restore_cursor()
             colon_path = dlg.selected_colon_path()
             link_name = dlg.selected_link_name()
+            trace_link_decision(
+                "sp/app/ui/page_editor_window.py:_insert_link:dialog_result",
+                colon_path=colon_path,
+                link_name=link_name,
+                selected_text=selected_text,
+                current_path=getattr(self.editor, "_current_path", None),
+            )
             if colon_path:
                 if selection_range:
                     doc_len = len(self.editor.toPlainText())
@@ -710,6 +725,15 @@ class PageEditorWindow(QMainWindow):
                     restore_cursor.removeSelectedText()
                 self.editor.setTextCursor(restore_cursor)
                 label = link_name or selected_text or colon_path
+                if should_use_full_target_label(colon_path, label):
+                    label = colon_path
+                trace_link_decision(
+                    "sp/app/ui/page_editor_window.py:_insert_link:before_insert",
+                    colon_path=colon_path,
+                    link_name=link_name,
+                    selected_text=selected_text,
+                    final_label=label,
+                )
                 self.editor.insert_link(
                     colon_path,
                     label,

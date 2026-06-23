@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +42,7 @@ from sp.app.mermaid_renderer import MermaidRenderer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
-from .plantuml_editor_window import ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
+from .plantuml_editor_window import BackgroundRenderNotifier, ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 
 _LOGGING = log_enabled("diagrams")
 
@@ -125,6 +126,15 @@ class MermaidEditorWindow(QMainWindow):
         self._mermaid_theme: str = config.load_mermaid_render_theme(default="neutral")
         self._editor_dirty: bool = False
         self._last_saved_content: Optional[str] = None
+        self._last_svg: str = ""
+        self._window_shown = False
+        self._startup_render_pending = True
+        self._render_in_progress = False
+        self._render_requeued = False
+        self._render_request_token = 0
+        self._closing = False
+        self._render_notifier = BackgroundRenderNotifier()
+        self._render_notifier.finished.connect(self._on_background_render_finished)
         self.setWindowTitle(f"Mermaid Editor - {self.file_path.name}")
         self.setGeometry(100, 100, 1400, 800)
 
@@ -320,6 +330,8 @@ class MermaidEditorWindow(QMainWindow):
             self.preview_web = QWebEngineView(preview_container)
             self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
             self.preview_web.installEventFilter(self)
+            self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
+            self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
             preview_layout.addWidget(self.preview_web)
         else:
             self.preview_label = ZoomablePreviewLabel()
@@ -344,6 +356,7 @@ class MermaidEditorWindow(QMainWindow):
                 f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
             )
             preview_layout.addWidget(self.preview_scroll_area)
+        self.loading_overlay = self._create_loading_overlay(preview_container)
         preview_container.setLayout(preview_layout)
         right_v_splitter.addWidget(preview_container)
 
@@ -399,7 +412,7 @@ class MermaidEditorWindow(QMainWindow):
         self._vi_status_label.setObjectName("viStatusLabel")
         self._vi_status_label.setToolTip("Vi insert mode indicator")
         self.statusBar().addPermanentWidget(self._vi_status_label, 0)
-        self.editor.set_vi_block_cursor_enabled(config.load_vi_block_cursor_enabled())
+        self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self.editor.set_vi_mode_enabled(self._vi_enabled)
         self._update_vi_badge_visibility()
@@ -427,7 +440,6 @@ class MermaidEditorWindow(QMainWindow):
             self.preview_zoom_level = int(config.load_mermaid_preview_zoom(0))
         except Exception:
             self.preview_zoom_level = 0
-        self._last_svg: str = ""
         self.preview_pixmap: Optional[QPixmap] = None
         try:
             base_pt = 11
@@ -437,7 +449,115 @@ class MermaidEditorWindow(QMainWindow):
         except Exception:
             pass
 
-        self._render()
+        self._set_preview_loading_state("Generating preview…")
+
+    def _create_loading_overlay(self, parent: QWidget) -> QWidget:
+        overlay = QWidget(parent)
+        overlay.setObjectName("loadingOverlay")
+        overlay_bg = theme_value("mermaid_editor.loading.overlay_bg", "rgba(12, 18, 28, 215)")
+        label_color = theme_value("mermaid_editor.loading.label_text", "#f4f7fb")
+        label_size = theme_value("mermaid_editor.loading.label_size_px", 16)
+        label_weight = theme_value("mermaid_editor.loading.label_weight", "bold")
+        overlay.setStyleSheet(
+            f"""
+            QWidget#loadingOverlay {{
+                background-color: {overlay_bg};
+            }}
+            QLabel {{
+                color: {label_color};
+                font-size: {label_size}px;
+                font-weight: {label_weight};
+            }}
+        """
+        )
+        layout = QVBoxLayout(overlay)
+        layout.setAlignment(Qt.AlignCenter)
+        self.spinner_label = QLabel("⠋")
+        spinner_size = theme_value("mermaid_editor.loading.spinner_size_px", 80)
+        spinner_color = theme_value("mermaid_editor.loading.spinner_color", "#9ad1ff")
+        self.spinner_label.setStyleSheet(f"font-size: {spinner_size}px; color: {spinner_color};")
+        self.spinner_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.spinner_label)
+        self.loading_text_label = QLabel("Generating preview…")
+        self.loading_text_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.loading_text_label)
+        self.spinner_timer = QTimer()
+        self.spinner_timer.setInterval(100)
+        self.spinner_angle = 0
+        self.spinner_timer.timeout.connect(self._animate_spinner)
+        return overlay
+
+    def _animate_spinner(self) -> None:
+        spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        if hasattr(self, 'spinner_label'):
+            self.spinner_angle = (self.spinner_angle + 1) % len(spinners)
+            self.spinner_label.setText(spinners[self.spinner_angle])
+
+    def _show_loading(self, message: str = "Generating preview…") -> None:
+        if not hasattr(self, 'loading_overlay'):
+            return
+        try:
+            if hasattr(self, "loading_text_label"):
+                self.loading_text_label.setText(message)
+            parent = self.loading_overlay.parent()
+            if parent:
+                self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
+            self.loading_overlay.raise_()
+            self.loading_overlay.show()
+            self.spinner_timer.start()
+        except Exception:
+            pass
+
+    def _hide_loading(self) -> None:
+        if not hasattr(self, 'loading_overlay'):
+            return
+        try:
+            self.spinner_timer.stop()
+            self.loading_overlay.hide()
+        except Exception:
+            pass
+
+    def _set_preview_loading_state(self, message: str = "Generating preview…") -> None:
+        if self._use_web_preview and self.preview_web is not None:
+            return
+        try:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(message)
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._window_shown:
+            self._window_shown = True
+            if self._startup_render_pending:
+                QTimer.singleShot(0, self._render)
+
+    def _run_render_in_background(self, token: int, render_fn) -> None:
+        def _worker() -> None:
+            try:
+                result = render_fn()
+                error = None
+            except Exception as exc:  # pragma: no cover - surfaced in callback
+                result = None
+                error = exc
+            try:
+                self._render_notifier.finished.emit(token, result, error)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_web_preview_load_started(self) -> None:
+        self._show_loading("Generating preview…")
+
+    def _on_web_preview_load_finished(self, ok: bool) -> None:
+        self._render_in_progress = False
+        self._hide_loading()
+        self.render_btn.setText("Render OK" if ok else "Render Failed")
+        if self._render_requeued and not self._closing:
+            QTimer.singleShot(0, self._render)
+
     def _restore_geometry_prefs(self) -> None:
         """Restore window and splitter geometry from config."""
         try:
@@ -469,6 +589,10 @@ class MermaidEditorWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._geom_timer.start()
+        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+            parent = self.loading_overlay.parent()
+            if parent:
+                self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
 
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
@@ -1180,6 +1304,10 @@ class MermaidEditorWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_geom_timer"):
             self._geom_timer.start()
+        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+            parent = self.loading_overlay.parent()
+            if parent:
+                self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
 
     def moveEvent(self, event) -> None:  # type: ignore[override]
         super().moveEvent(event)
@@ -1187,9 +1315,14 @@ class MermaidEditorWindow(QMainWindow):
             self._geom_timer.start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._closing = True
         try:
             if self._is_dirty():
                 self._save_file()
+        except Exception:
+            pass
+        try:
+            self.render_timer.stop()
         except Exception:
             pass
         try:
@@ -1246,8 +1379,15 @@ class MermaidEditorWindow(QMainWindow):
 
     def _render(self) -> None:
         self.render_timer.stop()
-        self._editor_dirty = False
-        self._update_render_status_label()
+        if self._closing:
+            return
+        if not self._window_shown:
+            self._startup_render_pending = True
+            self._set_preview_loading_state("Generating preview…")
+            return
+        if self._render_in_progress:
+            self._render_requeued = True
+            return
 
         try:
             if not self or not hasattr(self, 'editor'):
@@ -1256,54 +1396,77 @@ class MermaidEditorWindow(QMainWindow):
         except RuntimeError:
             return
 
+        self._startup_render_pending = False
+        self._render_in_progress = True
+        self._render_requeued = False
+        self._editor_dirty = False
+        self._update_render_status_label()
+        self._render_request_token += 1
+        token = self._render_request_token
         mermaid_text = self.editor.toPlainText()
+        self.render_btn.setText("Generating…")
 
         if self._use_web_preview and self.preview_web is not None:
             self._last_svg = ""
+            self._show_loading("Generating preview…")
             html_doc = self._build_mermaid_html(mermaid_text)
             self.preview_web.setHtml(html_doc, self._web_preview_base_url())
-            self.render_btn.setText("Render OK")
             return
         preview_bg = self._preview_background_color()
-        try:
-            result = self.renderer.render_svg(
+        self._show_loading("Generating preview…")
+        self._run_render_in_background(
+            token,
+            lambda: self.renderer.render_svg(
                 mermaid_text,
                 theme=self._mermaid_theme,
                 background_color=preview_bg,
-            )
-        except Exception as exc:
-            result = None
-            error_svg = _generate_error_svg(f"Mermaid render error\n\n{exc}")
-            self._last_svg = error_svg
-            self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
-            self._update_preview_display()
-            self.render_btn.setText("Render Failed")
+            ),
+        )
+
+    def _on_background_render_finished(self, token: int, result: object, error: object) -> None:
+        if self._closing or token != self._render_request_token:
             return
 
-        if result and result.success and result.svg_content:
-            self._last_svg = result.svg_content
-            self.preview_pixmap = self._svg_to_pixmap(result.svg_content, background_color=preview_bg)
-            if self.preview_pixmap:
+        self._render_in_progress = False
+        preview_bg = self._preview_background_color()
+
+        try:
+            if error is not None:
+                error_svg = _generate_error_svg(f"Mermaid render error\n\n{error}")
+                self._last_svg = error_svg
+                self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
                 self._update_preview_display()
-                self.render_btn.setText("Render OK")
+                self.render_btn.setText("Render Failed")
                 return
-            error_svg = _generate_error_svg("Failed to convert Mermaid SVG to image")
+
+            if result and getattr(result, "success", False) and getattr(result, "svg_content", ""):
+                self._last_svg = result.svg_content
+                self.preview_pixmap = self._svg_to_pixmap(result.svg_content, background_color=preview_bg)
+                if self.preview_pixmap:
+                    self._update_preview_display()
+                    self.render_btn.setText("Render OK")
+                    return
+                error_svg = _generate_error_svg("Failed to convert Mermaid SVG to image")
+                self._last_svg = error_svg
+                self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
+                self._update_preview_display()
+                self.render_btn.setText("Render Failed")
+                return
+
+            details = "Mermaid preview is unavailable."
+            if result and getattr(result, "error_message", ""):
+                details = result.error_message
+            if result and getattr(result, "stderr", "") and result.stderr != details:
+                details = f"{details}\n\nDetails:\n{result.stderr[:500]}"
+            error_svg = _generate_error_svg(details)
             self._last_svg = error_svg
             self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
             self._update_preview_display()
             self.render_btn.setText("Render Failed")
-            return
-
-        details = "Mermaid preview is unavailable."
-        if result and result.error_message:
-            details = result.error_message
-        if result and result.stderr and result.stderr != details:
-            details = f"{details}\n\nDetails:\n{result.stderr[:500]}"
-        error_svg = _generate_error_svg(details)
-        self._last_svg = error_svg
-        self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
-        self._update_preview_display()
-        self.render_btn.setText("Render Failed")
+        finally:
+            self._hide_loading()
+            if self._render_requeued and not self._closing:
+                QTimer.singleShot(0, self._render)
 
     def _preview_background_color(self) -> str:
         value = theme_value("mermaid_editor.preview.bg", "#ffffff")

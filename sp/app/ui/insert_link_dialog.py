@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
-from .path_utils import path_to_colon, normalize_link_target
+from .path_utils import path_to_colon, normalize_link_target, trace_link_decision
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
 import re
@@ -210,11 +210,24 @@ class InsertLinkDialog(QDialog):
         # Apply editing seed data now that widgets are ready
         if initial_label_clean:
             self._seed_link_name(initial_label_clean, mark_as_selection=False)
+            self._link_name_manually_edited = not self._label_matches_default_target(
+                initial_label_clean,
+                normalized_initial_target,
+            )
         if normalized_initial_target is not None:
             self.search.blockSignals(True)
             self.search.setText(normalized_initial_target)
             self.search.blockSignals(False)
             self._on_search_changed()
+        trace_link_decision(
+            "sp/app/ui/insert_link_dialog.py:__init__",
+            current_page_path=current_page_path,
+            initial_link_target=initial_link_target,
+            normalized_initial_target=normalized_initial_target,
+            initial_link_label=initial_link_label,
+            initial_label_clean=initial_label_clean,
+            link_name_manually_edited=self._link_name_manually_edited,
+        )
 
         self.setLayout(layout)
         
@@ -282,6 +295,26 @@ class InsertLinkDialog(QDialog):
         self.link_name.blockSignals(False)
         self._link_name_manually_edited = True
 
+    def _label_matches_default_target(self, label: str, target: str | None) -> bool:
+        if not label or not target:
+            return False
+        clean_label = self._prepare_selected_text(label)
+        clean_target = (target or "").strip()
+        if not clean_label or not clean_target:
+            return False
+        if clean_target.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
+            return clean_label == clean_target
+        normalized_target = normalize_link_target(clean_target)
+        if clean_label == normalized_target:
+            return True
+        if "#" in normalized_target:
+            return False
+        if config.load_prefer_short_links():
+            trimmed = normalized_target.lstrip(":")
+            default_label = trimmed.split(":")[-1] if trimmed else normalized_target
+            return clean_label == default_label
+        return False
+
     def selected_colon_path(self) -> str | None:
         """Return the selected page in colon notation or HTTP URL."""
         if self._create_new_selected and self._create_new_target:
@@ -295,14 +328,30 @@ class InsertLinkDialog(QDialog):
         if self._launched_with_selection and text == self._seeded_text:
             return text or None
         normalized = normalize_link_target(text)
-        return normalized or None
+        result = normalized or None
+        trace_link_decision(
+            "sp/app/ui/insert_link_dialog.py:selected_colon_path",
+            accepted_target=self._accepted_target,
+            create_new_selected=self._create_new_selected,
+            create_new_target=self._create_new_target,
+            search_text=text,
+            result=result,
+        )
+        return result
 
     def selected_link_name(self) -> str | None:
         """Return the display name for the link, or None if empty."""
         name = self.link_name.text().strip()
         # Clean any line breaks or paragraph separators that might have been pasted
         name = name.replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ').strip()
-        return name or None
+        result = name or None
+        trace_link_decision(
+            "sp/app/ui/insert_link_dialog.py:selected_link_name",
+            raw_text=self.link_name.text(),
+            cleaned=result,
+            manually_edited=self._link_name_manually_edited,
+        )
+        return result
 
     def should_create_new_page(self) -> bool:
         """Return True when the selected action is explicit 'create new page'."""
@@ -371,8 +420,16 @@ class InsertLinkDialog(QDialog):
                 # Update link name if not manually edited
                 if not self._link_name_manually_edited:
                     self.link_name.blockSignals(True)
-                    self.link_name.setText(colon_path)
+                    self.link_name.setText(self._accepted_target)
                     self.link_name.blockSignals(False)
+                trace_link_decision(
+                    "sp/app/ui/insert_link_dialog.py:_on_selection_changed",
+                    payload=payload,
+                    colon_path=colon_path,
+                    accepted_target=self._accepted_target,
+                    link_name=self.link_name.text(),
+                    manually_edited=self._link_name_manually_edited,
+                )
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Event filter for link name field."""
@@ -499,6 +556,15 @@ class InsertLinkDialog(QDialog):
         query = normalized_term or search_term
         pages = config.search_pages(query)
         self.list_widget.clear()
+        trace_link_decision(
+            "sp/app/ui/insert_link_dialog.py:_refresh:start",
+            term=term,
+            search_term=search_term,
+            anchor=anchor,
+            normalized_term=normalized_term,
+            query=query,
+            page_count=len(pages) if pages is not None else None,
+        )
         existing_exact = False
         create_target = ""
         create_target_base = ""
@@ -525,6 +591,13 @@ class InsertLinkDialog(QDialog):
             item.setData(Qt.UserRole, rooted_colon)
             item.setToolTip(display_text)
             self.list_widget.addItem(item)
+            trace_link_decision(
+                "sp/app/ui/insert_link_dialog.py:_refresh:item",
+                page_path=page.get("path"),
+                colon_path=colon_path,
+                rooted_colon=rooted_colon,
+                display_text=display_text,
+            )
 
         if term and not term.startswith(("http://", "https://")) and not existing_exact:
             current_location = self._current_page_display()
@@ -538,6 +611,12 @@ class InsertLinkDialog(QDialog):
             )
             create_item.setToolTip(create_text)
             self.list_widget.insertItem(0, create_item)
+            trace_link_decision(
+                "sp/app/ui/insert_link_dialog.py:_refresh:create",
+                term=term,
+                create_target=create_target,
+                current_location=current_location,
+            )
 
         # Keep a deterministic default selection for Enter.
         if self.list_widget.count() > 0:
@@ -589,9 +668,25 @@ class InsertLinkDialog(QDialog):
     def _apply_current_anchor(self, target: str) -> str:
         normalized = normalize_link_target(target)
         if "#" in normalized:
+            trace_link_decision(
+                "sp/app/ui/insert_link_dialog.py:_apply_current_anchor",
+                target=target,
+                normalized=normalized,
+                current_anchor=self._current_anchor(),
+                result=normalized,
+                reason="already_has_anchor",
+            )
             return normalized
         anchor = self._current_anchor()
-        return f"{normalized}{anchor}" if anchor else normalized
+        result = f"{normalized}{anchor}" if anchor else normalized
+        trace_link_decision(
+            "sp/app/ui/insert_link_dialog.py:_apply_current_anchor",
+            target=target,
+            normalized=normalized,
+            current_anchor=anchor,
+            result=result,
+        )
+        return result
     
     def _restore_geometry(self) -> None:
         """Restore saved dialog geometry."""

@@ -210,3 +210,41 @@ def test_anchor_is_preserved_when_accepting_existing_page(qapp, monkeypatch):
     assert dialog.should_create_new_page() is False
     assert dialog.selected_colon_path() == ":Journal:2026:02:17:17#cush-sap"
     dialog.close()
+
+
+def test_anchor_is_preserved_in_auto_label_for_existing_page(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Journal/2026/06/23/23/23.md", "title": "Tuesday, June 23 2026"}],
+    )
+    dialog = InsertLinkDialog(current_page_path="/Projects/Projects.md")
+    dialog.show()
+    dialog.search.setText(":Journal:2026:06:23#dk-questions")
+    qapp.processEvents()
+
+    dialog.list_widget.setCurrentRow(0)
+
+    assert dialog.selected_colon_path() == ":Journal:2026:06:23#dk-questions"
+    assert dialog.selected_link_name() == ":Journal:2026:06:23#dk-questions"
+    dialog.close()
+
+
+def test_editing_auto_short_label_keeps_label_auto_when_target_changes_to_anchor(qapp, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.insert_link_dialog.config.load_prefer_short_links", lambda: True)
+    monkeypatch.setattr(
+        "sp.app.ui.insert_link_dialog.config.search_pages",
+        lambda *_: [{"path": "/Journal/2026/06/23/23/23.md", "title": "Tuesday, June 23 2026"}],
+    )
+    dialog = InsertLinkDialog(
+        current_page_path="/Projects/Projects.md",
+        editing=True,
+        initial_link_target=":Journal:2026:06:23",
+        initial_link_label="23",
+    )
+    dialog.show()
+    dialog.search.setText(":Journal:2026:06:23#dk-questions")
+    qapp.processEvents()
+
+    assert dialog.selected_colon_path() == ":Journal:2026:06:23#dk-questions"
+    assert dialog.selected_link_name() == ":Journal:2026:06:23#dk-questions"
+    dialog.close()

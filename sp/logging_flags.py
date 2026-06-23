@@ -27,6 +27,7 @@ AREA_DEFAULTS: Dict[str, bool] = {
     "diagrams": False,
     "ui_state": False,
     "performance": False,
+    "link_debug": True,
 }
 
 def _is_truthy(value: str | None) -> bool:
