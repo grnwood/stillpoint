@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -32,10 +33,56 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDesktopServices
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except Exception:
-    QWebEngineView = None  # type: ignore[assignment]
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configure_linux_webengine_env() -> None:
+    """Apply conservative Chromium flags for Linux WebEngine preview stability.
+
+    These flags are applied only when Mermaid inline web preview is enabled.
+    They must be set before importing QtWebEngine modules.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+
+    if _env_truthy("SP_DISABLE_MERMAID_WEB_PREVIEW"):
+        return
+
+    inline_pref = False
+    if _env_truthy("SP_ENABLE_MERMAID_WEB_PREVIEW"):
+        inline_pref = True
+    else:
+        cfg_path = Path.home() / ".stillpoint_config.json"
+        if cfg_path.exists():
+            try:
+                payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+                inline_pref = bool(payload.get("mermaid_inline_web_preview", False))
+            except Exception:
+                inline_pref = False
+
+    if not inline_pref:
+        return
+
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+    required_flags = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-features=VizDisplayCompositor",
+    ]
+    existing = (os.getenv("QTWEBENGINE_CHROMIUM_FLAGS") or "").strip()
+    for flag in required_flags:
+        if flag not in existing:
+            existing = f"{existing} {flag}".strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = existing
+
+
+_QWEBENGINE_VIEW_CLASS = None
+_QWEBENGINE_IMPORT_ATTEMPTED = False
 
 from sp.app import config
 from sp.app.mermaid_renderer import MermaidRenderer
@@ -48,15 +95,36 @@ _LOGGING = log_enabled("diagrams")
 
 
 def _truthy_env(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _env_truthy(name)
+
+
+def _load_qwebengine_view_class():
+    """Load QtWebEngine lazily to avoid hard crashes on unsupported Linux setups."""
+    global _QWEBENGINE_VIEW_CLASS, _QWEBENGINE_IMPORT_ATTEMPTED
+    if _QWEBENGINE_IMPORT_ATTEMPTED:
+        return _QWEBENGINE_VIEW_CLASS
+    _QWEBENGINE_IMPORT_ATTEMPTED = True
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # type: ignore
+        _QWEBENGINE_VIEW_CLASS = _QWebEngineView
+    except Exception:
+        _QWEBENGINE_VIEW_CLASS = None
+    return _QWEBENGINE_VIEW_CLASS
+
+
+def _inline_preview_preference_enabled() -> bool:
+    value = config.load_mermaid_inline_web_preview()
+    if _truthy_env("SP_ENABLE_MERMAID_WEB_PREVIEW"):
+        value = True
+    if _truthy_env("SP_DISABLE_MERMAID_WEB_PREVIEW"):
+        value = False
+    return value
 
 
 def _should_use_web_preview() -> bool:
-    if QWebEngineView is None:
+    if not _inline_preview_preference_enabled():
         return False
-    if _truthy_env("SP_DISABLE_MERMAID_WEB_PREVIEW"):
-        return False
-    if sys.platform.startswith("linux") and not _truthy_env("SP_ENABLE_MERMAID_WEB_PREVIEW"):
+    if _load_qwebengine_view_class() is None:
         return False
     return True
 
@@ -115,7 +183,12 @@ class MermaidEditorWindow(QMainWindow):
 
         self.file_path = Path(file_path)
         self._on_save = on_save
+        self._external_browser_preview = (
+            sys.platform.startswith("linux") and not _inline_preview_preference_enabled()
+        )
         self._use_web_preview = _should_use_web_preview()
+        if self._external_browser_preview:
+            self._use_web_preview = False
         self.preview_web = None
         self.renderer = MermaidRenderer()
         self._vi_enabled: bool = config.load_vi_mode_enabled()
@@ -174,6 +247,11 @@ class MermaidEditorWindow(QMainWindow):
         self.auto_render_checkbox.setToolTip("Automatically render diagram on text changes")
         self.auto_render_checkbox.setChecked(self._auto_render_enabled)
         self.auto_render_checkbox.toggled.connect(self._on_auto_render_toggled)
+        if self._external_browser_preview:
+            self.auto_render_checkbox.setChecked(False)
+            self.auto_render_checkbox.setEnabled(False)
+            self.auto_render_checkbox.setToolTip("Disabled in external browser preview mode")
+            self._auto_render_enabled = False
         editor_section.addWidget(self.auto_render_checkbox)
 
         self.render_status_label = QLabel()
@@ -320,60 +398,72 @@ class MermaidEditorWindow(QMainWindow):
         editor_container.setLayout(editor_layout)
         main_h_splitter.addWidget(editor_container)
 
-        right_v_splitter = QSplitter(Qt.Vertical)
+        right_v_splitter = None
+        self.loading_overlay = None
+        if not self._external_browser_preview:
+            right_v_splitter = QSplitter(Qt.Vertical)
 
-        preview_container = QWidget()
-        preview_layout = QVBoxLayout()
-        preview_layout.setContentsMargins(0, 0, 0, 0)
+            preview_container = QWidget()
+            preview_layout = QVBoxLayout()
+            preview_layout.setContentsMargins(0, 0, 0, 0)
 
-        if self._use_web_preview:
-            self.preview_web = QWebEngineView(preview_container)
-            self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
-            self.preview_web.installEventFilter(self)
-            self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
-            self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
-            preview_layout.addWidget(self.preview_web)
-        else:
-            self.preview_label = ZoomablePreviewLabel()
-            self.preview_label.setAlignment(Qt.AlignCenter)
-            self.preview_label.setMinimumSize(400, 300)
-            self.preview_label.setStyleSheet(
-                "background-color: "
-                f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
-                "color: "
-                f"{theme_value('mermaid_editor.preview.text', '#000000')};"
-            )
-            self.preview_label.setWordWrap(True)
-            self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
-            self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
+            if self._use_web_preview:
+                web_view_class = _load_qwebengine_view_class()
+                if web_view_class is None:
+                    self._use_web_preview = False
+                else:
+                    self.preview_web = web_view_class(preview_container)
+            if self._use_web_preview and self.preview_web is not None:
+                self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
+                self.preview_web.installEventFilter(self)
+                self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
+                self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
+                preview_layout.addWidget(self.preview_web)
+            else:
+                self.preview_label = ZoomablePreviewLabel()
+                self.preview_label.setAlignment(Qt.AlignCenter)
+                self.preview_label.setMinimumSize(400, 300)
+                self.preview_label.setStyleSheet(
+                    "background-color: "
+                    f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
+                    "color: "
+                    f"{theme_value('mermaid_editor.preview.text', '#000000')};"
+                )
+                self.preview_label.setWordWrap(True)
+                self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
+                self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+                self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
 
-            self.preview_scroll_area = QScrollArea()
-            self.preview_scroll_area.setWidgetResizable(True)
-            self.preview_scroll_area.setWidget(self.preview_label)
-            self.preview_scroll_area.setStyleSheet(
-                "background-color: "
-                f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
-            )
-            preview_layout.addWidget(self.preview_scroll_area)
-        self.loading_overlay = self._create_loading_overlay(preview_container)
-        preview_container.setLayout(preview_layout)
-        right_v_splitter.addWidget(preview_container)
+                self.preview_scroll_area = QScrollArea()
+                self.preview_scroll_area.setWidgetResizable(True)
+                self.preview_scroll_area.setWidget(self.preview_label)
+                self.preview_scroll_area.setStyleSheet(
+                    "background-color: "
+                    f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
+                )
+                preview_layout.addWidget(self.preview_scroll_area)
+            self.loading_overlay = self._create_loading_overlay(preview_container)
+            preview_container.setLayout(preview_layout)
+            right_v_splitter.addWidget(preview_container)
 
-        if self._ai_chat_enabled:
-            self.ai_panel = self._create_ai_chat_panel()
-            right_v_splitter.addWidget(self.ai_panel)
-            right_v_splitter.setSizes([490, 210])
+            if self._ai_chat_enabled:
+                self.ai_panel = self._create_ai_chat_panel()
+                right_v_splitter.addWidget(self.ai_panel)
+                right_v_splitter.setSizes([490, 210])
+            else:
+                self.ai_panel = None
+                right_v_splitter.setSizes([700])
+            right_v_splitter.setCollapsible(0, False)
+            right_v_splitter.setCollapsible(1, True)
+
+            main_h_splitter.addWidget(right_v_splitter)
+            main_h_splitter.setSizes([400, 600])
+            main_h_splitter.setCollapsible(0, False)
+            main_h_splitter.setCollapsible(1, False)
         else:
             self.ai_panel = None
-            right_v_splitter.setSizes([700])
-        right_v_splitter.setCollapsible(0, False)
-        right_v_splitter.setCollapsible(1, True)
-
-        main_h_splitter.addWidget(right_v_splitter)
-        main_h_splitter.setSizes([400, 600])
-        main_h_splitter.setCollapsible(0, False)
-        main_h_splitter.setCollapsible(1, False)
+            main_h_splitter.setSizes([1000])
+            main_h_splitter.setCollapsible(0, False)
 
         center_layout.addWidget(main_h_splitter)
         center_widget.setLayout(center_layout)
@@ -390,13 +480,13 @@ class MermaidEditorWindow(QMainWindow):
         self._geom_timer.setInterval(500)
         self._geom_timer.timeout.connect(self._save_geometry_prefs)
         self.editor_preview_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
-        if self._ai_chat_enabled:
+        if self._ai_chat_enabled and self._vertical_splitter is not None:
             self._vertical_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
 
         self._restore_geometry_prefs()
 
         # Enable legacy panning only for label fallback mode.
-        if not self._use_web_preview:
+        if (not self._use_web_preview) and (not self._external_browser_preview):
             self.preview_label.setMouseTracking(True)
             self.preview_label.installEventFilter(self)
         self._preview_pan_start = None
@@ -494,6 +584,8 @@ class MermaidEditorWindow(QMainWindow):
             self.spinner_label.setText(spinners[self.spinner_angle])
 
     def _show_loading(self, message: str = "Generating preview…") -> None:
+        if self._external_browser_preview:
+            return
         if not hasattr(self, 'loading_overlay'):
             return
         try:
@@ -509,6 +601,8 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
     def _hide_loading(self) -> None:
+        if self._external_browser_preview:
+            return
         if not hasattr(self, 'loading_overlay'):
             return
         try:
@@ -518,6 +612,8 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
     def _set_preview_loading_state(self, message: str = "Generating preview…") -> None:
+        if self._external_browser_preview:
+            return
         if self._use_web_preview and self.preview_web is not None:
             return
         try:
@@ -530,7 +626,9 @@ class MermaidEditorWindow(QMainWindow):
         super().showEvent(event)
         if not self._window_shown:
             self._window_shown = True
-            if self._startup_render_pending:
+            # In external browser mode don't auto-render on open —
+            # the user triggers preview explicitly via Render button.
+            if self._startup_render_pending and not self._external_browser_preview:
                 QTimer.singleShot(0, self._render)
 
     def _run_render_in_background(self, token: int, render_fn) -> None:
@@ -610,7 +708,7 @@ class MermaidEditorWindow(QMainWindow):
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 self._show_preview_context_menu(pos)
                 return True
-        if not self._use_web_preview and obj is self.preview_label:
+        if (not self._use_web_preview) and hasattr(self, "preview_label") and obj is self.preview_label:
             from PySide6.QtCore import QEvent
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._preview_pan_start = event.pos()
@@ -1270,9 +1368,10 @@ class MermaidEditorWindow(QMainWindow):
         except Exception:
             pass
         try:
-            hstate64 = config.load_mermaid_hsplit_state()
-            if hstate64:
-                self.editor_preview_splitter.restoreState(QByteArray.fromBase64(hstate64.encode("utf-8")))
+            if not self._external_browser_preview:
+                hstate64 = config.load_mermaid_hsplit_state()
+                if hstate64:
+                    self.editor_preview_splitter.restoreState(QByteArray.fromBase64(hstate64.encode("utf-8")))
         except Exception:
             pass
         try:
@@ -1289,8 +1388,9 @@ class MermaidEditorWindow(QMainWindow):
         except Exception:
             pass
         try:
-            h = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
-            config.save_mermaid_hsplit_state(h)
+            if not self._external_browser_preview:
+                h = self.editor_preview_splitter.saveState().toBase64().data().decode("utf-8")
+                config.save_mermaid_hsplit_state(h)
         except Exception:
             pass
         try:
@@ -1304,7 +1404,7 @@ class MermaidEditorWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_geom_timer"):
             self._geom_timer.start()
-        if hasattr(self, 'loading_overlay') and self.loading_overlay.isVisible():
+        if hasattr(self, 'loading_overlay') and self.loading_overlay is not None and self.loading_overlay.isVisible():
             parent = self.loading_overlay.parent()
             if parent:
                 self.loading_overlay.setGeometry(0, 0, parent.width(), parent.height())
@@ -1374,7 +1474,7 @@ class MermaidEditorWindow(QMainWindow):
     def _on_editor_changed(self) -> None:
         self._editor_dirty = True
         self._update_render_status_label()
-        if self._auto_render_enabled:
+        if self._auto_render_enabled and not self._external_browser_preview:
             self.render_timer.start()
 
     def _render(self) -> None:
@@ -1406,6 +1506,13 @@ class MermaidEditorWindow(QMainWindow):
         mermaid_text = self.editor.toPlainText()
         self.render_btn.setText("Generating…")
 
+        if self._external_browser_preview:
+            self._render_in_progress = False
+            self._render_requeued = False
+            self._open_external_browser_preview(mermaid_text)
+            self.render_btn.setText("Opened in Browser")
+            return
+
         if self._use_web_preview and self.preview_web is not None:
             self._last_svg = ""
             self._show_loading("Generating preview…")
@@ -1422,6 +1529,20 @@ class MermaidEditorWindow(QMainWindow):
                 background_color=preview_bg,
             ),
         )
+
+    def _open_external_browser_preview(self, mermaid_text: str) -> None:
+        """Render Mermaid using browser runtime in the system browser."""
+        try:
+            cache_dir = Path.home() / ".stillpoint_cache" / "mermaid_browser_preview"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            html_path = cache_dir / f"preview_{int(time.time() * 1000)}.html"
+            html_doc = self._build_mermaid_html(mermaid_text)
+            html_path.write_text(html_doc, encoding="utf-8")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(html_path)))
+            self.statusBar().showMessage("Opened Mermaid preview in browser", 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Preview Error", f"Failed to open browser preview: {exc}")
+            self.render_btn.setText("Render Failed")
 
     def _on_background_render_finished(self, token: int, result: object, error: object) -> None:
         if self._closing or token != self._render_request_token:
@@ -1442,6 +1563,7 @@ class MermaidEditorWindow(QMainWindow):
             if result and getattr(result, "success", False) and getattr(result, "svg_content", ""):
                 self._last_svg = result.svg_content
                 self.preview_pixmap = self._svg_to_pixmap(result.svg_content, background_color=preview_bg)
+
                 if self.preview_pixmap:
                     self._update_preview_display()
                     self.render_btn.setText("Render OK")
@@ -1650,7 +1772,17 @@ class MermaidEditorWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export: {exc}")
 
     def _export_png(self) -> None:
-        if self._use_web_preview and self.preview_web is not None:
+        if self._external_browser_preview:
+            result = self.renderer.render_png(
+                self.editor.toPlainText(),
+                theme=self._mermaid_theme,
+                background_color=self._preview_background_color(),
+            )
+            pixmap = None
+            if result.success and result.png_bytes:
+                pixmap = QPixmap()
+                pixmap.loadFromData(result.png_bytes, "PNG")
+        elif self._use_web_preview and self.preview_web is not None:
             pixmap = self.preview_web.grab()
         else:
             pixmap = self.preview_pixmap
@@ -1685,6 +1817,17 @@ class MermaidEditorWindow(QMainWindow):
     def _ensure_svg(self) -> bool:
         if hasattr(self, "_last_svg") and self._last_svg:
             return True
+        if self._external_browser_preview:
+            result = self.renderer.render_svg(
+                self.editor.toPlainText(),
+                theme=self._mermaid_theme,
+                background_color=self._preview_background_color(),
+            )
+            if result.success and result.svg_content:
+                self._last_svg = result.svg_content
+                return True
+            self._show_preview_error("Mermaid Error\n\nUnable to generate SVG for export.")
+            return False
         if self._use_web_preview and self.preview_web is not None:
             svg = self._get_svg_from_web_preview()
             if svg:
@@ -1696,7 +1839,17 @@ class MermaidEditorWindow(QMainWindow):
         return False
 
     def _copy_png(self) -> None:
-        if self._use_web_preview and self.preview_web is not None:
+        if self._external_browser_preview:
+            result = self.renderer.render_png(
+                self.editor.toPlainText(),
+                theme=self._mermaid_theme,
+                background_color=self._preview_background_color(),
+            )
+            pixmap = None
+            if result.success and result.png_bytes:
+                pixmap = QPixmap()
+                pixmap.loadFromData(result.png_bytes, "PNG")
+        elif self._use_web_preview and self.preview_web is not None:
             pixmap = self.preview_web.grab()
         else:
             pixmap = self.preview_pixmap
@@ -1762,6 +1915,7 @@ class MermaidEditorWindow(QMainWindow):
         error_box_font_size = int(theme_value("mermaid_editor.error.box_font_size_px", 13))
         error_box_line_height = float(theme_value("mermaid_editor.error.box_line_height", 1.4))
         initial_zoom = max(0.2, min(4.0, 1.0 + (self.preview_zoom_level * 0.1)))
+        local_mermaid_js = json.dumps((Path(__file__).resolve().parents[2] / "assets" / "vendor" / "mermaid.min.js").as_uri())
         return f"""<!doctype html>
 <html>
 <head>
@@ -1854,7 +2008,7 @@ class MermaidEditorWindow(QMainWindow):
         async function ensureMermaid() {{
             if (window.mermaid) return window.mermaid;
             try {{
-                await loadScript('./vendor/mermaid.min.js');
+                await loadScript({local_mermaid_js});
             }} catch (_localErr) {{
                 await loadScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js');
             }}

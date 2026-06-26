@@ -707,11 +707,15 @@ class PreferencesDialog(QDialog):
         mermaid_layout.addWidget(self.mermaid_enable_checkbox)
 
         mermaid_info_label = QLabel(
-            "Mermaid preview normally uses the built-in web renderer.\n"
-            "On Linux, the safer default preview path uses Mermaid CLI (mmdc) unless SP_ENABLE_MERMAID_WEB_PREVIEW=1 is set."
+            "Mermaid can render inline in the editor or in an external browser preview.\n"
+            "Inline preview is enabled by default on Windows. On Linux, turning it off avoids Qt preview issues and opens previews in your system browser."
         )
         mermaid_info_label.setWordWrap(True)
         mermaid_layout.addWidget(mermaid_info_label)
+
+        self.mermaid_inline_preview_checkbox = QCheckBox("Use inline web preview in Mermaid editor")
+        self.mermaid_inline_preview_checkbox.setChecked(config.load_mermaid_inline_web_preview())
+        mermaid_layout.addWidget(self.mermaid_inline_preview_checkbox)
 
         mermaid_font_row = QHBoxLayout()
         mermaid_font_row.addWidget(QLabel("Editor font:"))
@@ -1206,6 +1210,7 @@ class PreferencesDialog(QDialog):
             pass
         try:
             config.save_mermaid_enabled(self.mermaid_enable_checkbox.isChecked())
+            config.save_mermaid_inline_web_preview(self.mermaid_inline_preview_checkbox.isChecked())
             # Save Mermaid editor font preferences
             mermaid_font = self.mermaid_font_combo.currentData()
             config.save_mermaid_editor_font(mermaid_font if mermaid_font else None)

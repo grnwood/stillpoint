@@ -13,15 +13,16 @@ import hashlib
 import logging
 import os
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from sp.logging_flags import log_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,19 @@ class RenderResult:
 
 class MermaidRenderer:
     """Manages Mermaid rendering with caching and async support."""
+
+    _DEFAULT_FONT_STACK = "Arial,Helvetica,'DejaVu Sans','Noto Sans',sans-serif"
+    _LINUX_FONT_FAMILY_REPLACEMENT = "'DejaVu Sans','Noto Sans',Arial,Helvetica,sans-serif"
+    _RENDER_PIPELINE_VERSION = "3"
+    _QTSVG_TEXT_OVERRIDE = (
+        "<style id=\"stillpoint-qtsvg-fixes\">"
+        "#my-svg text,#my-svg tspan,text,tspan{"
+        "fill:#24292F !important;"
+        "stroke:none !important;"
+        "font-family:'DejaVu Sans','Noto Sans',Arial,Helvetica,sans-serif !important;"
+        "}"
+        "</style>"
+    )
 
     def __init__(self, cache_dir: Optional[Path] = None) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".stillpoint_cache" / "mermaid")
@@ -171,10 +185,21 @@ class MermaidRenderer:
                 output_path = Path(tmpdir) / "diagram.png"
                 config_path = Path(tmpdir) / "mermaid-config.json"
                 puppeteer_config_path = Path(tmpdir) / "puppeteer-config.json"
-                input_path.write_text(mermaid_text, encoding="utf-8")
+                prepared_text = self._prepare_mermaid_text(mermaid_text)
+                input_path.write_text(prepared_text, encoding="utf-8")
                 effective_theme = self._normalize_theme(theme, background_color)
+                config_payload = {
+                    "theme": effective_theme,
+                    "themeVariables": {
+                        "fontFamily": self._DEFAULT_FONT_STACK,
+                    },
+                    "flowchart": {
+                        # Avoid foreignObject-based labels that QtSvg may not render.
+                        "htmlLabels": False,
+                    },
+                }
                 config_path.write_text(
-                    json.dumps({"theme": effective_theme}, ensure_ascii=True),
+                    json.dumps(config_payload, ensure_ascii=True),
                     encoding="utf-8",
                 )
                 self._write_puppeteer_config(puppeteer_config_path)
@@ -189,9 +214,6 @@ class MermaidRenderer:
                 ]
                 if puppeteer_config_path.exists():
                     cmd.extend(["-p", str(puppeteer_config_path)])
-
-                if log_enabled("diagrams"):
-                    print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
 
                 result = subprocess.run(
                     cmd,
@@ -247,10 +269,21 @@ class MermaidRenderer:
                 output_path = Path(tmpdir) / "diagram.svg"
                 config_path = Path(tmpdir) / "mermaid-config.json"
                 puppeteer_config_path = Path(tmpdir) / "puppeteer-config.json"
-                input_path.write_text(mermaid_text, encoding="utf-8")
+                prepared_text = self._prepare_mermaid_text(mermaid_text)
+                input_path.write_text(prepared_text, encoding="utf-8")
                 effective_theme = self._normalize_theme(theme, background_color)
+                config_payload = {
+                    "theme": effective_theme,
+                    "themeVariables": {
+                        "fontFamily": self._DEFAULT_FONT_STACK,
+                    },
+                    "flowchart": {
+                        # Avoid foreignObject-based labels that QtSvg may not render.
+                        "htmlLabels": False,
+                    },
+                }
                 config_path.write_text(
-                    json.dumps({"theme": effective_theme}, ensure_ascii=True),
+                    json.dumps(config_payload, ensure_ascii=True),
                     encoding="utf-8",
                 )
                 self._write_puppeteer_config(puppeteer_config_path)
@@ -266,9 +299,6 @@ class MermaidRenderer:
                 if puppeteer_config_path.exists():
                     cmd.extend(["-p", str(puppeteer_config_path)])
 
-                if log_enabled("diagrams"):
-                    print(f"[Mermaid] Command: {' '.join(cmd)}", file=__import__("sys").stdout, flush=True)
-
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -278,6 +308,7 @@ class MermaidRenderer:
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
                 if output_path.exists():
                     svg_content = output_path.read_text(encoding="utf-8", errors="replace")
+                    svg_content = self._normalize_svg_for_qtsvg(svg_content)
                     if "<svg" in svg_content:
                         return RenderResult(success=True, svg_content=svg_content)
 
@@ -326,7 +357,10 @@ class MermaidRenderer:
         theme: str = "neutral",
         background_color: Optional[str] = None,
     ) -> str:
-        combined = f"{mermaid_text}|{self._mmdc_path}|{theme}|{background_color or ''}"
+        combined = (
+            f"{self._RENDER_PIPELINE_VERSION}|{mermaid_text}|{self._mmdc_path}|"
+            f"{theme}|{background_color or ''}"
+        )
         return hashlib.sha256(combined.encode()).hexdigest()
 
     @staticmethod
@@ -347,6 +381,191 @@ class MermaidRenderer:
             return False
         luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
         return luminance < 140
+
+    def _prepare_mermaid_text(self, mermaid_text: str) -> str:
+        """Normalize Mermaid source to improve Linux font fallback in headless Chromium."""
+        if not os.name == "posix":
+            return mermaid_text
+        if not mermaid_text:
+            return mermaid_text
+        return mermaid_text.replace(
+            "ui-sans-serif,system-ui",
+            self._LINUX_FONT_FAMILY_REPLACEMENT,
+        )
+
+    def _normalize_svg_for_qtsvg(self, svg_content: str) -> str:
+        """Normalize Mermaid SVG for QtSvg compatibility in fallback preview mode."""
+        if not svg_content:
+            return svg_content
+
+        normalized = self._inline_class_styles_for_qtsvg(svg_content)
+
+        # QtSvg can render black placeholder boxes for foreignObject-heavy labels.
+        normalized = re.sub(
+            r"<foreignObject\\b[\\s\\S]*?</foreignObject>",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+
+        # Strip CSS features that QtSvg may not parse reliably.
+        normalized = normalized.replace("position:absolute;", "")
+        normalized = re.sub(r"box-shadow:[^;]+;", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"filter:drop-shadow\\([^)]*\\);", "", normalized, flags=re.IGNORECASE)
+
+        # Enforce a known-good text style for labels.
+        if "stillpoint-qtsvg-fixes" not in normalized:
+            if "</svg>" in normalized:
+                normalized = normalized.replace("</svg>", f"{self._QTSVG_TEXT_OVERRIDE}</svg>", 1)
+            else:
+                normalized = normalized + self._QTSVG_TEXT_OVERRIDE
+
+        return normalized
+
+    def _inline_class_styles_for_qtsvg(self, svg_content: str) -> str:
+        """Inline selected Mermaid CSS rules so QtSvg applies diagram styling reliably."""
+        try:
+            ET.register_namespace("", "http://www.w3.org/2000/svg")
+            ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+            root = ET.fromstring(svg_content)
+        except Exception:
+            return svg_content
+
+        style_blocks: list[str] = []
+        for elem in list(root.iter()):
+            if self._local_name(elem.tag) == "style" and elem.text:
+                style_blocks.append(elem.text)
+
+        if not style_blocks:
+            return svg_content
+
+        rules = self._parse_css_rules("\n".join(style_blocks))
+        if not rules:
+            return svg_content
+
+        for elem in root.iter():
+            for rule in rules:
+                if rule["child_tag"] is None and self._matches_rule(elem, rule):
+                    self._apply_decl_map(elem, rule["decl"])
+
+        for parent in root.iter():
+            for rule in rules:
+                child_tag = rule["child_tag"]
+                if child_tag is None:
+                    continue
+                if not self._matches_rule(parent, rule):
+                    continue
+                for child in list(parent):
+                    if self._local_name(child.tag) == child_tag:
+                        self._apply_decl_map(child, rule["decl"])
+
+        try:
+            return ET.tostring(root, encoding="unicode")
+        except Exception:
+            return svg_content
+
+    @staticmethod
+    def _local_name(tag: str) -> str:
+        if "}" in tag:
+            return tag.split("}", 1)[1]
+        return tag
+
+    def _parse_css_rules(self, css_text: str) -> list[dict[str, object]]:
+        allowed = {
+            "fill",
+            "stroke",
+            "stroke-width",
+            "stroke-dasharray",
+            "font-size",
+            "font-weight",
+            "font-family",
+            "text-anchor",
+        }
+        rules: list[dict[str, object]] = []
+        for match in re.finditer(r"([^{}]+)\{([^{}]+)\}", css_text):
+            raw_selector = match.group(1).strip()
+            if raw_selector.startswith("@"):
+                continue
+            raw_decl = match.group(2)
+            decl_map: dict[str, str] = {}
+            for item in raw_decl.split(";"):
+                if ":" not in item:
+                    continue
+                prop, value = item.split(":", 1)
+                prop = prop.strip().lower()
+                if prop not in allowed:
+                    continue
+                clean_value = value.replace("!important", "").strip()
+                if clean_value:
+                    decl_map[prop] = clean_value
+            if not decl_map:
+                continue
+            for selector in [s.strip() for s in raw_selector.split(",") if s.strip()]:
+                parsed = self._parse_selector(selector)
+                if parsed is None:
+                    continue
+                parsed["decl"] = decl_map
+                rules.append(parsed)
+        return rules
+
+    @staticmethod
+    def _parse_selector(selector: str) -> Optional[dict[str, object]]:
+        s = selector.replace("#my-svg", "").strip()
+        if not s or "(" in s:
+            return None
+        s = s.split(":", 1)[0].strip()
+
+        child_tag: Optional[str] = None
+        if ">" in s:
+            left, right = s.split(">", 1)
+            child_tag = right.strip().split(".", 1)[0].strip()
+            s = left.strip()
+
+        parent_tag: Optional[str] = None
+        parent_class: Optional[str] = None
+        if s.startswith("."):
+            parent_class = s[1:].split(".", 1)[0].strip()
+        elif "." in s:
+            parent_tag, klass = s.split(".", 1)
+            parent_tag = parent_tag.strip() or None
+            parent_class = klass.split(".", 1)[0].strip() or None
+        else:
+            parent_tag = s.strip() or None
+
+        if not parent_tag and not parent_class:
+            return None
+
+        return {
+            "parent_tag": parent_tag,
+            "parent_class": parent_class,
+            "child_tag": child_tag,
+        }
+
+    def _matches_rule(self, elem: ET.Element, rule: dict[str, object]) -> bool:
+        parent_tag = rule.get("parent_tag")
+        parent_class = rule.get("parent_class")
+        if parent_tag and self._local_name(elem.tag) != parent_tag:
+            return False
+        if parent_class:
+            classes = set((elem.attrib.get("class") or "").split())
+            if parent_class not in classes:
+                return False
+        return True
+
+    @staticmethod
+    def _apply_decl_map(elem: ET.Element, decl_map: dict[str, str]) -> None:
+        style_map: dict[str, str] = {}
+        style_attr = elem.attrib.get("style")
+        if style_attr:
+            for item in style_attr.split(";"):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    style_map[k.strip().lower()] = v.strip()
+        for prop, value in decl_map.items():
+            style_map[prop] = value
+            elem.set(prop, value)
+        if style_map:
+            elem.set("style", "; ".join(f"{k}: {v}" for k, v in style_map.items()))
 
     @staticmethod
     def _write_puppeteer_config(path: Path) -> None:

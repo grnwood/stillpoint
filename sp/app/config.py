@@ -1163,6 +1163,23 @@ def save_mermaid_enabled(enabled: bool) -> None:
     _update_global_config({"mermaid_enabled": bool(enabled)})
 
 
+def load_mermaid_inline_web_preview() -> bool:
+    """Load Mermaid inline web preview preference.
+
+    Defaults to enabled on Windows, disabled on Linux/macOS.
+    """
+    payload = _read_global_config()
+    value = payload.get("mermaid_inline_web_preview")
+    if value is None:
+        return platform.system().lower().startswith("win")
+    return bool(value)
+
+
+def save_mermaid_inline_web_preview(enabled: bool) -> None:
+    """Persist Mermaid inline web preview preference."""
+    _update_global_config({"mermaid_inline_web_preview": bool(enabled)})
+
+
 def _merge_mode_settings(payload: dict, defaults: dict) -> dict:
     """Merge persisted mode settings with defaults, dropping unexpected keys."""
     merged = defaults.copy()
