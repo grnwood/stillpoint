@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import html
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,8 @@ class MermaidRenderer:
         "}"
         "</style>"
     )
+    _SVG_NS = "http://www.w3.org/2000/svg"
+    _XHTML_NS = "http://www.w3.org/1999/xhtml"
 
     def __init__(self, cache_dir: Optional[Path] = None) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".stillpoint_cache" / "mermaid")
@@ -94,11 +97,17 @@ class MermaidRenderer:
         *,
         theme: str = "neutral",
         background_color: Optional[str] = None,
+        normalize_for_qtsvg: bool = True,
     ) -> RenderResult:
         """Render Mermaid diagram to SVG."""
         t0 = time.perf_counter()
 
-        cache_key = self._compute_cache_key(mermaid_text, theme=theme, background_color=background_color)
+        cache_key = self._compute_cache_key(
+            mermaid_text,
+            theme=theme,
+            background_color=background_color,
+            normalize_for_qtsvg=normalize_for_qtsvg,
+        )
         cached_svg = self._read_from_cache(cache_key)
         if cached_svg:
             return RenderResult(
@@ -119,6 +128,7 @@ class MermaidRenderer:
                 mermaid_text,
                 theme=theme,
                 background_color=background_color,
+                normalize_for_qtsvg=normalize_for_qtsvg,
             )
 
         if result.success and result.svg_content:
@@ -133,11 +143,17 @@ class MermaidRenderer:
         *,
         theme: str = "neutral",
         background_color: Optional[str] = None,
+        scale: float = 1.0,
     ) -> RenderResult:
         """Render Mermaid diagram to PNG."""
         t0 = time.perf_counter()
 
-        cache_key = self._compute_cache_key(mermaid_text, theme=theme, background_color=background_color)
+        cache_key = self._compute_cache_key(
+            mermaid_text,
+            theme=theme,
+            background_color=background_color,
+            scale=scale,
+        )
         cached_png = self._read_png_from_cache(cache_key)
         if cached_png:
             return RenderResult(
@@ -158,6 +174,7 @@ class MermaidRenderer:
                 mermaid_text,
                 theme=theme,
                 background_color=background_color,
+                scale=scale,
             )
 
         if result.success and result.png_bytes:
@@ -177,6 +194,7 @@ class MermaidRenderer:
         *,
         theme: str = "neutral",
         background_color: Optional[str] = None,
+        scale: float = 1.0,
     ) -> RenderResult:
         try:
             mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
@@ -211,6 +229,7 @@ class MermaidRenderer:
                     "-t", effective_theme,
                     "-c", str(config_path),
                     "-b", background_color or "white",
+                    "-s", str(max(1.0, float(scale))),
                 ]
                 if puppeteer_config_path.exists():
                     cmd.extend(["-p", str(puppeteer_config_path)])
@@ -261,6 +280,7 @@ class MermaidRenderer:
         *,
         theme: str = "neutral",
         background_color: Optional[str] = None,
+        normalize_for_qtsvg: bool = True,
     ) -> RenderResult:
         try:
             mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
@@ -308,7 +328,8 @@ class MermaidRenderer:
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
                 if output_path.exists():
                     svg_content = output_path.read_text(encoding="utf-8", errors="replace")
-                    svg_content = self._normalize_svg_for_qtsvg(svg_content)
+                    if normalize_for_qtsvg:
+                        svg_content = self._normalize_svg_for_qtsvg(svg_content)
                     if "<svg" in svg_content:
                         return RenderResult(success=True, svg_content=svg_content)
 
@@ -356,10 +377,12 @@ class MermaidRenderer:
         *,
         theme: str = "neutral",
         background_color: Optional[str] = None,
+        scale: float = 1.0,
+        normalize_for_qtsvg: bool = True,
     ) -> str:
         combined = (
             f"{self._RENDER_PIPELINE_VERSION}|{mermaid_text}|{self._mmdc_path}|"
-            f"{theme}|{background_color or ''}"
+            f"{theme}|{background_color or ''}|{max(1.0, float(scale))}|{int(bool(normalize_for_qtsvg))}"
         )
         return hashlib.sha256(combined.encode()).hexdigest()
 
@@ -421,6 +444,100 @@ class MermaidRenderer:
                 normalized = normalized + self._QTSVG_TEXT_OVERRIDE
 
         return normalized
+
+    def prepare_svg_for_export(self, svg_content: str) -> str:
+        """Convert browser-oriented Mermaid SVG into an editor-friendly standalone SVG."""
+        if not svg_content:
+            return svg_content
+        try:
+            ET.register_namespace("", self._SVG_NS)
+            ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+            root = ET.fromstring(svg_content)
+        except Exception:
+            return svg_content
+
+        changed = False
+        for parent in root.iter():
+            children = list(parent)
+            for index, child in enumerate(children):
+                if self._local_name(child.tag) != "foreignObject":
+                    continue
+                lines = self._extract_foreignobject_lines(child)
+                if not lines:
+                    continue
+                replacement = self._build_svg_text_for_foreignobject(child, lines)
+                if replacement is None:
+                    continue
+                parent.remove(child)
+                parent.insert(index, replacement)
+                changed = True
+
+        if not changed:
+            return svg_content
+        try:
+            return ET.tostring(root, encoding="unicode")
+        except Exception:
+            return svg_content
+
+    def _extract_foreignobject_lines(self, foreign_obj: ET.Element) -> list[str]:
+        lines: list[str] = []
+
+        def _walk(elem: ET.Element, parts: list[str]) -> None:
+            tag = self._local_name(elem.tag)
+            if tag in {"br", "p", "div"} and parts and parts[-1] != "\n":
+                parts.append("\n")
+            text = (elem.text or "").strip()
+            if text:
+                parts.append(text)
+            for child in list(elem):
+                _walk(child, parts)
+                tail = (child.tail or "").strip()
+                if tail:
+                    parts.append(tail)
+                if self._local_name(child.tag) in {"br", "p", "div"} and parts and parts[-1] != "\n":
+                    parts.append("\n")
+
+        parts: list[str] = []
+        _walk(foreign_obj, parts)
+        joined = "".join(parts)
+        for raw_line in joined.splitlines():
+            line = html.unescape(raw_line).strip()
+            if line:
+                lines.append(line)
+        return lines
+
+    def _build_svg_text_for_foreignobject(
+        self,
+        foreign_obj: ET.Element,
+        lines: list[str],
+    ) -> Optional[ET.Element]:
+        try:
+            width = float(foreign_obj.attrib.get("width", "0") or 0)
+            height = float(foreign_obj.attrib.get("height", "0") or 0)
+        except ValueError:
+            return None
+        if width <= 0 or height <= 0:
+            return None
+
+        text_elem = ET.Element(f"{{{self._SVG_NS}}}text")
+        text_elem.set("x", f"{width / 2:.3f}")
+        text_elem.set("y", f"{height / 2:.3f}")
+        text_elem.set("text-anchor", "middle")
+        text_elem.set("dominant-baseline", "middle")
+        text_elem.set("fill", "#24292F")
+        text_elem.set("font-family", "Arial,Helvetica,'DejaVu Sans','Noto Sans',sans-serif")
+        text_elem.set("font-size", "14")
+
+        baseline_offset = (len(lines) - 1) * 0.6
+        for idx, line in enumerate(lines):
+            tspan = ET.SubElement(text_elem, f"{{{self._SVG_NS}}}tspan")
+            tspan.set("x", f"{width / 2:.3f}")
+            if idx == 0:
+                tspan.set("dy", f"{-baseline_offset:.3f}em")
+            else:
+                tspan.set("dy", "1.2em")
+            tspan.text = line
+        return text_elem
 
     def _inline_class_styles_for_qtsvg(self, svg_content: str) -> str:
         """Inline selected Mermaid CSS rules so QtSvg applies diagram styling reliably."""

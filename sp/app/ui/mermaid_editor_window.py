@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+import base64
 from pathlib import Path
 from typing import Optional
 
@@ -105,6 +106,7 @@ def _load_qwebengine_view_class():
         return _QWEBENGINE_VIEW_CLASS
     _QWEBENGINE_IMPORT_ATTEMPTED = True
     try:
+        _configure_linux_webengine_env()
         from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # type: ignore
         _QWEBENGINE_VIEW_CLASS = _QWebEngineView
     except Exception:
@@ -206,6 +208,7 @@ class MermaidEditorWindow(QMainWindow):
         self._render_requeued = False
         self._render_request_token = 0
         self._closing = False
+        self._external_browser_payload_token = 0
         self._render_notifier = BackgroundRenderNotifier()
         self._render_notifier.finished.connect(self._on_background_render_finished)
         self.setWindowTitle(f"Mermaid Editor - {self.file_path.name}")
@@ -1535,14 +1538,74 @@ class MermaidEditorWindow(QMainWindow):
         try:
             cache_dir = Path.home() / ".stillpoint_cache" / "mermaid_browser_preview"
             cache_dir.mkdir(parents=True, exist_ok=True)
-            html_path = cache_dir / f"preview_{int(time.time() * 1000)}.html"
-            html_doc = self._build_mermaid_html(mermaid_text)
+            html_path = cache_dir / "preview.html"
+            payload_path = cache_dir / "preview_payload.js"
+            self._external_browser_payload_token += 1
+            token = self._external_browser_payload_token
+            payload_path.write_text("window.__SP_MERMAID_PAYLOAD__ = {version: 0};\n", encoding="utf-8")
+            html_doc = self._build_mermaid_html(
+                mermaid_text,
+                include_browser_controls=True,
+                payload_js_url=payload_path.as_uri(),
+            )
             html_path.write_text(html_doc, encoding="utf-8")
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(html_path)))
             self.statusBar().showMessage("Opened Mermaid preview in browser", 3000)
+            self._build_external_browser_payload_async(
+                token=token,
+                mermaid_text=mermaid_text,
+                payload_path=payload_path,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Preview Error", f"Failed to open browser preview: {exc}")
             self.render_btn.setText("Render Failed")
+
+    def _external_browser_png_scale(self) -> float:
+        zoom = 1.0 + (self.preview_zoom_level * 0.1)
+        return max(4.0, min(8.0, zoom * 3.0))
+
+    def _build_external_browser_payload_async(self, *, token: int, mermaid_text: str, payload_path: Path) -> None:
+        theme = self._mermaid_theme
+        background = self._preview_background_color()
+        png_scale = self._external_browser_png_scale()
+
+        def _worker() -> None:
+            pre_rendered_svg_text = ""
+            pre_rendered_png_data_url = ""
+
+            svg_result = self.renderer.render_svg(
+                mermaid_text,
+                theme=theme,
+                background_color=background,
+                normalize_for_qtsvg=False,
+            )
+            if svg_result.success and svg_result.svg_content:
+                pre_rendered_svg_text = self.renderer.prepare_svg_for_export(svg_result.svg_content)
+
+            png_result = self.renderer.render_png(
+                mermaid_text,
+                theme=theme,
+                background_color=background,
+                scale=png_scale,
+            )
+            if png_result.success and png_result.png_bytes:
+                encoded_png = base64.b64encode(png_result.png_bytes).decode("ascii")
+                pre_rendered_png_data_url = f"data:image/png;base64,{encoded_png}"
+
+            if token != self._external_browser_payload_token:
+                return
+
+            payload = {
+                "version": token,
+                "svg": pre_rendered_svg_text,
+                "pngDataUrl": pre_rendered_png_data_url,
+            }
+            payload_path.write_text(
+                "window.__SP_MERMAID_PAYLOAD__ = " + json.dumps(payload, ensure_ascii=False) + ";\n",
+                encoding="utf-8",
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_background_render_finished(self, token: int, result: object, error: object) -> None:
         if self._closing or token != self._render_request_token:
@@ -1777,6 +1840,7 @@ class MermaidEditorWindow(QMainWindow):
                 self.editor.toPlainText(),
                 theme=self._mermaid_theme,
                 background_color=self._preview_background_color(),
+                scale=self._external_browser_png_scale(),
             )
             pixmap = None
             if result.success and result.png_bytes:
@@ -1822,6 +1886,7 @@ class MermaidEditorWindow(QMainWindow):
                 self.editor.toPlainText(),
                 theme=self._mermaid_theme,
                 background_color=self._preview_background_color(),
+                normalize_for_qtsvg=False,
             )
             if result.success and result.svg_content:
                 self._last_svg = result.svg_content
@@ -1844,6 +1909,7 @@ class MermaidEditorWindow(QMainWindow):
                 self.editor.toPlainText(),
                 theme=self._mermaid_theme,
                 background_color=self._preview_background_color(),
+                scale=self._external_browser_png_scale(),
             )
             pixmap = None
             if result.success and result.png_bytes:
@@ -1897,12 +1963,21 @@ class MermaidEditorWindow(QMainWindow):
             return value
         return None
 
-    def _build_mermaid_html(self, mermaid_text: str, error_message: str = "") -> str:
+    def _build_mermaid_html(
+        self,
+        mermaid_text: str,
+        error_message: str = "",
+        *,
+        include_browser_controls: bool = False,
+        payload_js_url: str = "",
+    ) -> str:
         preview_bg = theme_value('mermaid_editor.preview.bg', '#f8f8f8')
         preview_text = theme_value('mermaid_editor.preview.text', '#000000')
         mermaid_theme = json.dumps(self._mermaid_theme)
         escaped_source = json.dumps(mermaid_text)
         escaped_error = json.dumps(error_message)
+        controls_enabled = "true" if include_browser_controls else "false"
+        payload_js_url_json = json.dumps(payload_js_url or "")
         error_bg = json.dumps(theme_value("mermaid_editor.error.bg", "#ffffff"))
         error_title = json.dumps(theme_value("mermaid_editor.error.title", "#cc0000"))
         error_msg = json.dumps(theme_value("mermaid_editor.error.message", "#333333"))
@@ -1922,14 +1997,54 @@ class MermaidEditorWindow(QMainWindow):
     <meta charset=\"utf-8\" />
     <style>
         html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; background: {preview_bg}; color: {preview_text}; overflow: hidden; }}
-        #viewport {{ width: 100%; height: 100%; overflow: hidden; cursor: default; user-select: none; }}
+        body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+        #app-shell {{ width: 100%; height: 100%; display: flex; flex-direction: column; }}
+        #browser-controls {{
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(10px);
+            flex: 0 0 auto;
+        }}
+        #browser-controls button {{
+            appearance: none;
+            border: 1px solid rgba(0, 0, 0, 0.18);
+            background: #ffffff;
+            color: #1a1a1a;
+            border-radius: 8px;
+            padding: 7px 12px;
+            font: inherit;
+            cursor: pointer;
+        }}
+        #browser-controls button:hover {{ background: #f3f5f7; }}
+        #browser-controls button:disabled {{ opacity: 0.55; cursor: default; }}
+        #browser-status {{
+            font-size: 13px;
+            color: rgba(0, 0, 0, 0.65);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        #browser-controls .spacer {{ flex: 1 1 auto; }}
+        #viewport {{ width: 100%; flex: 1 1 auto; overflow: hidden; cursor: default; user-select: none; }}
         #diagram-host {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
         #diagram-host svg {{ max-width: none; max-height: none; transform-origin: 0 0; }}
     </style>
     <script>
         let viewport = null;
         let host = null;
+        let browserControls = null;
+        let browserStatus = null;
         const state = {{ zoom: {initial_zoom}, tx: 0, ty: 0, panning: false, panX: 0, panY: 0 }};
+        const includeBrowserControls = {controls_enabled};
+        const payloadJsUrl = {payload_js_url_json};
+        let preRenderedPngDataUrl = '';
+        let preRenderedSvgText = '';
+        let payloadVersion = 0;
+        let payloadPollTimer = null;
         const errorTheme = {{
             bg: {error_bg},
             title: {error_title},
@@ -1946,6 +2061,10 @@ class MermaidEditorWindow(QMainWindow):
 
         function currentSvg() {{
             return host ? host.querySelector('svg') : null;
+        }}
+
+        function setStatus(message) {{
+            if (browserStatus) browserStatus.textContent = message || '';
         }}
 
         function escapeHtml(value) {{
@@ -1984,6 +2103,44 @@ class MermaidEditorWindow(QMainWindow):
             svg.style.transform = `translate(${{state.tx}}px, ${{state.ty}}px) scale(${{state.zoom}})`;
         }}
 
+        function centerSvgAtZoom(zoom) {{
+            const svg = currentSvg();
+            if (!svg || !viewport) return;
+            const rect = viewport.getBoundingClientRect();
+            const bbox = fitSvgToCanvas(svg);
+            state.zoom = Math.max(0.2, Math.min(4.0, zoom));
+            state.tx = Math.round((rect.width - (bbox.width * state.zoom)) / 2);
+            state.ty = Math.round((rect.height - (bbox.height * state.zoom)) / 2);
+            applyTransform();
+        }}
+
+        function fitSvgToCanvas(svg) {{
+            const viewBox = svg.viewBox && svg.viewBox.baseVal
+                ? svg.viewBox.baseVal
+                : null;
+            const width = viewBox && viewBox.width ? viewBox.width : (svg.width && svg.width.baseVal ? svg.width.baseVal.value : 1200);
+            const height = viewBox && viewBox.height ? viewBox.height : (svg.height && svg.height.baseVal ? svg.height.baseVal.value : 800);
+            return {{
+                width: Math.max(1, Math.ceil(width || 1200)),
+                height: Math.max(1, Math.ceil(height || 800)),
+            }};
+        }}
+
+        function fitDiagram() {{
+            const svg = currentSvg();
+            if (!svg || !viewport) return;
+            const rect = viewport.getBoundingClientRect();
+            const bbox = fitSvgToCanvas(svg);
+            const fitZoom = Math.max(
+                0.2,
+                Math.min(
+                    4.0,
+                    Math.min(rect.width / bbox.width, rect.height / bbox.height) * 0.92
+                )
+            );
+            centerSvgAtZoom(fitZoom);
+        }}
+
         function zoomAbout(delta, cx, cy) {{
             const oldZoom = state.zoom;
             const nextZoom = Math.max(0.2, Math.min(4.0, oldZoom + (0.1 * delta)));
@@ -1992,6 +2149,12 @@ class MermaidEditorWindow(QMainWindow):
             state.ty = cy - ((cy - state.ty) * (nextZoom / oldZoom));
             state.zoom = nextZoom;
             applyTransform();
+        }}
+
+        function stepZoom(delta) {{
+            if (!viewport || !currentSvg()) return;
+            const rect = viewport.getBoundingClientRect();
+            zoomAbout(delta, rect.width / 2, rect.height / 2);
         }}
 
         function loadScript(url) {{
@@ -2016,10 +2179,236 @@ class MermaidEditorWindow(QMainWindow):
             return window.mermaid;
         }}
 
-        window.spGetSvg = () => {{
+        function ensureSvgNamespaces(svgText) {{
+            let text = String(svgText || '');
+            if (!text) return text;
+            if (!/xmlns=/.test(text)) {{
+                text = text.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"', 1);
+            }}
+            if (!/xmlns:xlink=/.test(text)) {{
+                text = text.replace('<svg', '<svg xmlns:xlink="http://www.w3.org/1999/xlink"', 1);
+            }}
+            return text;
+        }}
+
+        function getSerializedSvg() {{
+            if (preRenderedSvgText) {{
+                return ensureSvgNamespaces(preRenderedSvgText);
+            }}
             const svg = currentSvg();
-            return svg ? svg.outerHTML : '';
-        }};
+            if (!svg) return '';
+            const clone = svg.cloneNode(true);
+            const styleAttr = clone.getAttribute('style') || '';
+            const keptStyle = styleAttr
+                .split(';')
+                .map((part) => part.trim())
+                .filter((part) => part && !part.startsWith('transform:') && !part.startsWith('max-width:'))
+                .join('; ');
+            if (keptStyle) {{
+                clone.setAttribute('style', keptStyle);
+            }} else {{
+                clone.removeAttribute('style');
+            }}
+            const serializer = new XMLSerializer();
+            let text = serializer.serializeToString(clone);
+            text = ensureSvgNamespaces(text);
+            return text;
+        }}
+
+        window.spGetSvg = () => getSerializedSvg();
+
+        function triggerDownload(url, filename) {{
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        }}
+
+        async function rasterizeSvgToCanvas() {{
+            const svg = currentSvg();
+            const svgText = getSerializedSvg();
+            if (!svg || !svgText) {{
+                throw new Error('No diagram available to export as PNG.');
+            }}
+
+            const size = fitSvgToCanvas(svg);
+            const canvas = document.createElement('canvas');
+            canvas.width = size.width;
+            canvas.height = size.height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) throw new Error('Canvas context unavailable.');
+            ctx.fillStyle = {json.dumps(preview_bg)};
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const img = new Image();
+            const dataUrl = `data:image/svg+xml;charset=utf-8,${{encodeURIComponent(svgText)}}`;
+            await new Promise((resolve, reject) => {{
+                img.onload = () => resolve(true);
+                img.onerror = () => reject(new Error('Failed to rasterize SVG for PNG export.'));
+                img.src = dataUrl;
+            }});
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            return canvas;
+        }}
+
+        async function getPngBlob() {{
+            if (preRenderedPngDataUrl) {{
+                const img = new Image();
+                await new Promise((resolve, reject) => {{
+                    img.onload = () => resolve(true);
+                    img.onerror = () => reject(new Error('Failed to load pre-rendered PNG.'));
+                    img.src = preRenderedPngDataUrl;
+                }});
+                const outputScale = Math.max(1.0, Math.min(4.0, state.zoom));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(img.naturalWidth * outputScale));
+                canvas.height = Math.max(1, Math.round(img.naturalHeight * outputScale));
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {{
+                    throw new Error('Canvas context unavailable.');
+                }}
+                ctx.fillStyle = {json.dumps(preview_bg)};
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+                if (!blob) {{
+                    throw new Error('Failed to prepare PNG blob.');
+                }}
+                return blob;
+            }}
+            const canvas = await rasterizeSvgToCanvas();
+            const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+            if (!blob) {{
+                throw new Error('Failed to prepare PNG blob.');
+            }}
+            return blob;
+        }}
+
+        async function copyTextToClipboard(text) {{
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+                await navigator.clipboard.writeText(text);
+                return true;
+            }}
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            try {{
+                return document.execCommand('copy');
+            }} finally {{
+                textarea.remove();
+            }}
+        }}
+
+        async function exportSvg() {{
+            const svgText = getSerializedSvg();
+            if (!svgText) {{
+                setStatus('No SVG available to save.');
+                return;
+            }}
+            const blob = new Blob([svgText], {{ type: 'image/svg+xml;charset=utf-8' }});
+            const url = URL.createObjectURL(blob);
+            triggerDownload(url, 'diagram.svg');
+            URL.revokeObjectURL(url);
+            setStatus('Saved SVG.');
+        }}
+
+        async function exportPng() {{
+            try {{
+                if (preRenderedPngDataUrl) {{
+                    const blob = await getPngBlob();
+                    const pngUrl = URL.createObjectURL(blob);
+                    triggerDownload(pngUrl, 'diagram.png');
+                    setTimeout(() => URL.revokeObjectURL(pngUrl), 0);
+                    setStatus('Exported PNG.');
+                    return;
+                }}
+                const canvas = await rasterizeSvgToCanvas();
+                const pngUrl = canvas.toDataURL('image/png');
+                triggerDownload(pngUrl, 'diagram.png');
+                setStatus('Exported PNG.');
+            }} catch (err) {{
+                setStatus(err && err.message ? err.message : String(err));
+            }}
+        }}
+
+        async function copySvg() {{
+            const svgText = getSerializedSvg();
+            if (!svgText) {{
+                setStatus('No SVG available to copy.');
+                return;
+            }}
+            try {{
+                const copied = await copyTextToClipboard(svgText);
+                setStatus(copied ? 'Copied SVG to clipboard.' : 'Browser blocked SVG clipboard copy.');
+            }} catch (err) {{
+                setStatus(err && err.message ? err.message : 'Browser blocked SVG clipboard copy.');
+            }}
+        }}
+
+        async function copyPng() {{
+            try {{
+                if (!(navigator.clipboard && window.ClipboardItem)) {{
+                    setStatus('PNG clipboard copy is not available in this browser context.');
+                    return;
+                }}
+                const blob = await getPngBlob();
+                if (!blob) {{
+                    setStatus('Failed to prepare PNG clipboard data.');
+                    return;
+                }}
+                await navigator.clipboard.write([
+                    new ClipboardItem({{ 'image/png': blob }})
+                ]);
+                setStatus('Copied PNG to clipboard.');
+            }} catch (err) {{
+                setStatus(err && err.message ? err.message : 'Browser blocked PNG clipboard copy.');
+            }}
+        }}
+
+        function bindBrowserControls() {{
+            if (!includeBrowserControls || !browserControls) return;
+            browserControls.style.display = 'flex';
+            const zoomOutBtn = document.getElementById('zoom-out-btn');
+            const zoomInBtn = document.getElementById('zoom-in-btn');
+            const fitBtn = document.getElementById('fit-btn');
+            const saveSvgBtn = document.getElementById('save-svg-btn');
+            const exportPngBtn = document.getElementById('export-png-btn');
+            const copySvgBtn = document.getElementById('copy-svg-btn');
+            const copyPngBtn = document.getElementById('copy-png-btn');
+            if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => stepZoom(-1));
+            if (zoomInBtn) zoomInBtn.addEventListener('click', () => stepZoom(1));
+            if (fitBtn) fitBtn.addEventListener('click', () => fitDiagram());
+            if (saveSvgBtn) saveSvgBtn.addEventListener('click', () => void exportSvg());
+            if (exportPngBtn) exportPngBtn.addEventListener('click', () => void exportPng());
+            if (copySvgBtn) copySvgBtn.addEventListener('click', () => void copySvg());
+            if (copyPngBtn) copyPngBtn.addEventListener('click', () => void copyPng());
+            setStatus('Wheel to zoom. Drag to pan. Keys: +, -, 0. Export payloads loading...');
+        }}
+
+        function loadPayloadScript() {{
+            if (!payloadJsUrl) return;
+            const script = document.createElement('script');
+            script.src = `${{payloadJsUrl}}?v=${{Date.now()}}`;
+            script.async = true;
+            script.onload = () => {{
+                const payload = window.__SP_MERMAID_PAYLOAD__;
+                if (!payload || !payload.version || payload.version === payloadVersion) return;
+                payloadVersion = payload.version;
+                preRenderedSvgText = payload.svg || '';
+                preRenderedPngDataUrl = payload.pngDataUrl || '';
+                setStatus('Export payloads ready. Wheel to zoom. Drag to pan. Keys: +, -, 0.');
+            }};
+            script.onerror = () => {{}};
+            document.head.appendChild(script);
+            setTimeout(() => script.remove(), 0);
+        }}
 
         window.spSetZoom = (zoom) => {{
             const next = Math.max(0.2, Math.min(4.0, Number(zoom) || 1.0));
@@ -2043,7 +2432,7 @@ class MermaidEditorWindow(QMainWindow):
             }}, {{ passive: false }});
 
             viewport.addEventListener('mousedown', (event) => {{
-                if (event.button !== 2) return;
+                if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
                 state.panning = true;
                 state.panX = event.clientX;
                 state.panY = event.clientY;
@@ -2063,14 +2452,32 @@ class MermaidEditorWindow(QMainWindow):
             }});
 
             window.addEventListener('mouseup', (event) => {{
-                if (event.button !== 2 || !state.panning) return;
+                if ((event.button !== 0 && event.button !== 1 && event.button !== 2) || !state.panning) return;
                 state.panning = false;
                 if (viewport) viewport.style.cursor = 'default';
                 event.preventDefault();
             }});
 
+            viewport.addEventListener('dragstart', (event) => {{
+                event.preventDefault();
+            }});
+
             viewport.addEventListener('contextmenu', (event) => {{
                 if (state.panning) event.preventDefault();
+            }});
+
+            window.addEventListener('keydown', (event) => {{
+                if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
+                if (event.key === '+' || event.key === '=') {{
+                    stepZoom(1);
+                    event.preventDefault();
+                }} else if (event.key === '-' || event.key === '_') {{
+                    stepZoom(-1);
+                    event.preventDefault();
+                }} else if (event.key === '0') {{
+                    fitDiagram();
+                    event.preventDefault();
+                }}
             }});
         }}
 
@@ -2082,6 +2489,7 @@ class MermaidEditorWindow(QMainWindow):
                 state.ty = 0;
                 state.zoom = {initial_zoom};
                 applyTransform();
+                setStatus('Mermaid render error.');
                 return;
             }}
             const source = {escaped_source};
@@ -2091,35 +2499,63 @@ class MermaidEditorWindow(QMainWindow):
                 state.ty = 0;
                 state.zoom = {initial_zoom};
                 applyTransform();
+                setStatus('No Mermaid source to render.');
                 return;
             }}
             try {{
                 const mermaid = await ensureMermaid();
-                mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose', theme: {mermaid_theme} }});
+                mermaid.initialize({{
+                    startOnLoad: false,
+                    securityLevel: 'loose',
+                    theme: {mermaid_theme},
+                    flowchart: {{ htmlLabels: false }}
+                }});
                 const id = `sp-mermaid-${{Date.now()}}`;
                 const rendered = await mermaid.render(id, source);
                 if (host) host.innerHTML = rendered.svg;
-                applyTransform();
+                fitDiagram();
+                setStatus(includeBrowserControls ? 'Rendered. Wheel to zoom. Drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
             }} catch (err) {{
                 if (host) host.innerHTML = buildErrorSvg(err && err.message ? err.message : String(err));
                 state.tx = 0;
                 state.ty = 0;
                 state.zoom = {initial_zoom};
                 applyTransform();
+                setStatus('Mermaid render error.');
             }}
         }}
 
         window.addEventListener('DOMContentLoaded', () => {{
+            browserControls = document.getElementById('browser-controls');
+            browserStatus = document.getElementById('browser-status');
             viewport = document.getElementById('viewport');
             host = document.getElementById('diagram-host');
+            bindBrowserControls();
             bindInteractions();
+            if (payloadJsUrl) {{
+                loadPayloadScript();
+                payloadPollTimer = window.setInterval(loadPayloadScript, 1500);
+            }}
             renderDiagram();
         }});
     </script>
 </head>
 <body>
-    <div id=\"viewport\">
-        <div id=\"diagram-host\"></div>
+    <div id=\"app-shell\">
+        <div id=\"browser-controls\">
+            <button id=\"zoom-out-btn\" type=\"button\">Zoom -</button>
+            <button id=\"zoom-in-btn\" type=\"button\">Zoom +</button>
+            <button id=\"fit-btn\" type=\"button\">Fit</button>
+            <button id=\"save-svg-btn\" type=\"button\">Save SVG</button>
+            <button id=\"export-png-btn\" type=\"button\">Export PNG</button>
+            <button id=\"copy-svg-btn\" type=\"button\">Copy SVG</button>
+            <button id=\"copy-png-btn\" type=\"button\">Copy PNG</button>
+            <div class=\"spacer\"></div>
+            <div id=\"browser-status\"></div>
+        </div>
+        <div id=\"viewport\">
+            <div id=\"diagram-host\"></div>
+        </div>
     </div>
 </body>
 </html>
