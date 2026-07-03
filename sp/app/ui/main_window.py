@@ -45,7 +45,6 @@ from PySide6.QtCore import (
     QMimeData,
     QSignalBlocker,
     QSize,
-    QFileSystemWatcher,
 )
 from PySide6.QtGui import (
     QAction,
@@ -117,7 +116,7 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
-from sp.app import config, indexer
+from sp.app import config, eventloop_diag, indexer
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
@@ -2198,8 +2197,9 @@ class MainWindow(QMainWindow):
         self._homebase_passphrase_prompted_vaults: set[str] = set()
         self._homebase_sync_engine: Optional[HomebaseSyncEngine] = None
         self._homebase_status_poll_timer: Optional[QTimer] = None
-        self._homebase_fs_watcher: Optional[QFileSystemWatcher] = None
-        self._homebase_watch_refresh_timer: Optional[QTimer] = None
+        self._homebase_fs_watcher = None  # Deprecated: recursive watching was replaced with coarse scans.
+        self._homebase_watch_refresh_timer: Optional[QTimer] = None  # Deprecated compatibility only.
+        self._local_fs_periodic_scan_timer: Optional[QTimer] = None
         self._local_fs_ui_quiet_timer: Optional[QTimer] = QTimer(self)
         self._local_fs_ui_quiet_timer.setSingleShot(True)
         self._local_fs_ui_quiet_timer.timeout.connect(self._on_local_fs_ui_quiet_timeout)
@@ -2208,13 +2208,22 @@ class MainWindow(QMainWindow):
         self._local_fs_refresh_result_timer.setInterval(50)
         self._local_fs_refresh_result_timer.timeout.connect(self._drain_local_fs_refresh_results)
         self._local_fs_refresh_generation: int = 0
+        self._local_fs_refresh_started_at: Optional[float] = None
+        self._local_fs_last_scan_requested_at: float = 0.0
         self._recent_self_saved_paths: dict[str, float] = {}
         self._homebase_fs_sync_quiet_timer: Optional[QTimer] = QTimer(self)
         self._homebase_fs_sync_quiet_timer.setSingleShot(True)
         self._homebase_fs_sync_quiet_timer.timeout.connect(self._on_homebase_fs_sync_quiet_timeout)
-        self._homebase_watched_dirs: set[str] = set()
+        self._homebase_watched_dirs: set[str] = set()  # Deprecated compatibility only.
         self._homebase_watch_root: Optional[Path] = None
         self._local_fs_page_snapshot: dict[str, tuple[int, int]] = {}
+        self._event_loop_awake_count = 0
+        self._event_loop_block_count = 0
+        self._event_loop_rate_window_started_at = time.monotonic()
+        self._event_loop_last_wall_time = time.time()
+        self._event_loop_sleep_timer: Optional[QTimer] = None
+        self._homebase_fs_signal_count = 0
+        self._homebase_fs_signal_window_started_at = time.monotonic()
         # Stable selected remote vault path; may differ from API-reported root.
         self._remote_vault_ref_path: Optional[str] = None
         self._app_state_changed_slot = None
@@ -3387,7 +3396,8 @@ class MainWindow(QMainWindow):
 
     def _setup_eventloop_watchdog(self) -> None:
         """Log when the Qt event loop appears stalled (high timer drift)."""
-        if not PAGE_LOGGING_ENABLED:
+        diag_enabled = eventloop_diag.enabled()
+        if not PAGE_LOGGING_ENABLED and not diag_enabled:
             return
         try:
             self._loop_timer = QElapsedTimer()
@@ -3400,23 +3410,109 @@ class MainWindow(QMainWindow):
             if dispatcher:
                 dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
                 dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
+            if diag_enabled:
+                self._event_loop_sleep_timer = QTimer(self)
+                self._event_loop_sleep_timer.setInterval(1000)
+                self._event_loop_sleep_timer.timeout.connect(self._check_eventloop_resume_gap)
+                self._event_loop_sleep_timer.start()
+                eventloop_diag.log_fd_target("mainwindow event-loop watchdog")
+                self._log_eventloop_timer_state("watchdog started")
         except Exception:
             pass
 
     def _mark_eventloop(self, phase: str) -> None:
-        if not PAGE_LOGGING_ENABLED or not hasattr(self, "_loop_timer"):
+        diag_enabled = eventloop_diag.enabled()
+        if not PAGE_LOGGING_ENABLED and not diag_enabled:
+            return
+        if not hasattr(self, "_loop_timer"):
             return
         elapsed = self._loop_timer.elapsed()
-        #print(f"[PageLoadAndRender] eventloop {phase} dt={elapsed:.1f}ms")
+        if diag_enabled:
+            now = time.monotonic()
+            if phase == "awake":
+                self._event_loop_awake_count += 1
+            elif phase == "aboutToBlock":
+                self._event_loop_block_count += 1
+            window_elapsed = now - self._event_loop_rate_window_started_at
+            if window_elapsed >= 1.0:
+                wake_rate = self._event_loop_awake_count / max(window_elapsed, 0.001)
+                block_rate = self._event_loop_block_count / max(window_elapsed, 0.001)
+                warn_rate = eventloop_diag.env_int("SP_EVENT_LOOP_WAKE_RATE_WARN", 1000)
+                if wake_rate >= warn_rate or block_rate >= warn_rate:
+                    eventloop_diag.log(
+                        "Qt dispatcher high wake rate "
+                        f"awake={self._event_loop_awake_count} aboutToBlock={self._event_loop_block_count} "
+                        f"window={window_elapsed:.2f}s last_dt_ms={elapsed:.1f} "
+                        f"fd{eventloop_diag.configured_fd()}={eventloop_diag.describe_fd(eventloop_diag.configured_fd())}"
+                    )
+                    self._log_eventloop_timer_state("high wake rate")
+                self._event_loop_awake_count = 0
+                self._event_loop_block_count = 0
+                self._event_loop_rate_window_started_at = now
+        if PAGE_LOGGING_ENABLED:
+            #print(f"[PageLoadAndRender] eventloop {phase} dt={elapsed:.1f}ms")
+            pass
         self._loop_timer.restart()
 
     def _check_eventloop_drift(self) -> None:
-        if not PAGE_LOGGING_ENABLED or not hasattr(self, "_loop_timer"):
+        diag_enabled = eventloop_diag.enabled()
+        if not PAGE_LOGGING_ENABLED and not diag_enabled:
+            return
+        if not hasattr(self, "_loop_timer"):
             return
         elapsed = self._loop_timer.elapsed()
         if elapsed > 500:  # 0.5s threshold suggests the loop was blocked
+            if diag_enabled:
+                eventloop_diag.log(f"Qt event-loop drift dt_ms={elapsed:.1f}")
+                eventloop_diag.log_fd_target("after Qt event-loop drift")
             #print(f"[PageLoadAndRender] eventloop drift warning dt={elapsed:.1f}ms (loop stall?)")
             self._loop_timer.restart()
+
+    def _check_eventloop_resume_gap(self) -> None:
+        if not eventloop_diag.enabled():
+            return
+        now = time.time()
+        previous = getattr(self, "_event_loop_last_wall_time", now)
+        self._event_loop_last_wall_time = now
+        gap = now - previous
+        threshold = eventloop_diag.env_float("SP_EVENT_LOOP_RESUME_GAP_SECONDS", 10.0)
+        if gap < threshold:
+            return
+        eventloop_diag.log(f"possible suspend/resume or blocked UI gap_seconds={gap:.2f}")
+        eventloop_diag.log_fd_target("after resume gap")
+        self._log_eventloop_timer_state("after resume gap")
+        self._schedule_local_filesystem_scan("resume gap", force=True)
+
+    def _log_eventloop_timer_state(self, label: str) -> None:
+        if not eventloop_diag.enabled():
+            return
+        timer_names = [
+            ("homebase_status_poll", self._homebase_status_poll_timer),
+            ("local_fs_periodic_scan", self._local_fs_periodic_scan_timer),
+            ("local_fs_ui_quiet", self._local_fs_ui_quiet_timer),
+            ("local_fs_result", self._local_fs_refresh_result_timer),
+            ("homebase_fs_sync_quiet", self._homebase_fs_sync_quiet_timer),
+            ("autosave", getattr(self, "autosave_timer", None)),
+            ("geometry_save", getattr(self, "geometry_save_timer", None)),
+        ]
+        parts: list[str] = []
+        for name, timer in timer_names:
+            if timer is None:
+                continue
+            try:
+                active = timer.isActive()
+            except Exception:
+                active = "?"
+            try:
+                interval = timer.interval()
+            except Exception:
+                interval = "?"
+            try:
+                remaining = timer.remainingTime()
+            except Exception:
+                remaining = "?"
+            parts.append(f"{name}:active={active}:interval={interval}:remaining={remaining}")
+        eventloop_diag.log(f"{label}: timers={' | '.join(parts) if parts else 'none'}")
 
     # --- UI wiring -----------------------------------------------------
     def _build_toolbar(self) -> None:
@@ -5264,6 +5360,18 @@ class MainWindow(QMainWindow):
                 self._local_fs_ui_quiet_timer.stop()
             except Exception:
                 pass
+        if self._local_fs_periodic_scan_timer:
+            try:
+                self._local_fs_periodic_scan_timer.stop()
+            except Exception:
+                pass
+        self._local_fs_periodic_scan_timer = None
+        if self._local_fs_refresh_result_timer:
+            try:
+                self._local_fs_refresh_result_timer.stop()
+            except Exception:
+                pass
+        self._local_fs_refresh_started_at = None
         if self._homebase_fs_sync_quiet_timer:
             try:
                 self._homebase_fs_sync_quiet_timer.stop()
@@ -5275,19 +5383,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._homebase_watch_refresh_timer = None
-        if self._homebase_fs_watcher:
-            try:
-                self._homebase_fs_watcher.directoryChanged.disconnect(self._on_homebase_fs_changed)
-            except Exception:
-                pass
-            try:
-                self._homebase_fs_watcher.fileChanged.disconnect(self._on_homebase_fs_changed)
-            except Exception:
-                pass
-            try:
-                self._homebase_fs_watcher.deleteLater()
-            except Exception:
-                pass
         self._homebase_fs_watcher = None
         self._homebase_watched_dirs.clear()
         self._homebase_watch_root = None
@@ -5389,6 +5484,24 @@ class MainWindow(QMainWindow):
         if not normalized:
             return
         self._recent_self_saved_paths[normalized] = time.monotonic() + 5.0
+        MainWindow._record_local_page_snapshot_for_path(self, normalized)
+
+    def _record_local_page_snapshot_for_path(self, page_path: str) -> None:
+        if self._remote_mode or not self.vault_root:
+            return
+        normalized = self._normalize_editor_path(str(page_path or "").strip())
+        if not normalized:
+            return
+        try:
+            full = Path(self.vault_root) / normalized.lstrip("/")
+            stat = full.stat()
+        except OSError:
+            self._local_fs_page_snapshot.pop(normalized, None)
+            return
+        self._local_fs_page_snapshot[normalized] = (
+            int(getattr(stat, "st_mtime_ns", 0) or 0),
+            int(stat.st_size or 0),
+        )
 
     def _prune_recent_self_saved_paths(self) -> None:
         if not self._recent_self_saved_paths:
@@ -5498,6 +5611,11 @@ class MainWindow(QMainWindow):
             saw_results = True
             if generation != self._local_fs_refresh_generation:
                 continue
+            error = reconcile.get("error") if isinstance(reconcile, dict) else None
+            if error:
+                _log_homebase_client(f"filesystem refresh worker failed (reason={reason}): {error}")
+                eventloop_diag.log(f"filesystem refresh worker failed generation={generation} reason={reason!r} error={error}")
+                continue
             self._prune_recent_self_saved_paths()
             self._local_fs_page_snapshot = dict(reconcile.get("snapshot") or {})
             indexed_paths = list(reconcile.get("indexed_paths") or [])
@@ -5536,8 +5654,46 @@ class MainWindow(QMainWindow):
                     restore_history_cursor=True,
                     sync_calendar=False,
                 )
-        if saw_results and self._local_fs_refresh_result_timer:
-            self._local_fs_refresh_result_timer.stop()
+            is_homebase_enabled = getattr(self, "_is_homebase_mode_enabled", None)
+            homebase_enabled = bool(is_homebase_enabled()) if callable(is_homebase_enabled) else False
+            if (indexed_paths or removed_paths or structure_changed) and homebase_enabled:
+                if self._homebase_sync_engine:
+                    self._mark_homebase_unsynced_local_change()
+                    self._schedule_homebase_sync("local filesystem scan")
+        if saw_results:
+            self._local_fs_refresh_started_at = None
+            if self._local_fs_refresh_result_timer:
+                self._local_fs_refresh_result_timer.stop()
+        else:
+            self._backoff_local_fs_refresh_poll()
+
+    def _backoff_local_fs_refresh_poll(self) -> None:
+        timer = self._local_fs_refresh_result_timer
+        started_at = getattr(self, "_local_fs_refresh_started_at", None)
+        if timer is None or started_at is None:
+            return
+        elapsed = time.monotonic() - started_at
+        next_interval = None
+        if elapsed >= 10.0:
+            next_interval = 1000
+        elif elapsed >= 2.0:
+            next_interval = 250
+        if next_interval is None:
+            return
+        try:
+            current_interval = timer.interval()
+        except Exception:
+            return
+        if current_interval >= next_interval:
+            return
+        try:
+            timer.setInterval(next_interval)
+        except Exception:
+            return
+        eventloop_diag.log(
+            "backed off local filesystem refresh poll "
+            f"elapsed_seconds={elapsed:.2f} interval_ms={next_interval}"
+        )
 
     def _reconcile_local_filesystem_index(self) -> dict[str, Any]:
         result = {
@@ -5569,52 +5725,68 @@ class MainWindow(QMainWindow):
         return result
 
     def _refresh_homebase_watch_paths(self) -> None:
-        root = self._homebase_watch_root
-        watcher = self._homebase_fs_watcher
-        if watcher is None or root is None:
-            return
-        dir_paths: set[str] = set()
-        try:
-            for current_root, dirs, files in os.walk(root):
-                dirs[:] = [d for d in dirs if d != ".stillpoint"]
-                files[:] = [name for name in files if name != "AGENTS.md"]
-                dir_paths.add(str(Path(current_root)))
-        except Exception:
-            dir_paths = {str(root)}
-        try:
-            existing = set(watcher.directories())
-        except Exception:
-            existing = set()
-        remove_paths = sorted(existing - dir_paths)
-        add_paths = sorted(dir_paths - existing)
-        if remove_paths:
-            try:
-                watcher.removePaths(remove_paths)
-            except Exception:
-                pass
-        if add_paths:
-            try:
-                watcher.addPaths(add_paths)
-            except Exception:
-                pass
-        self._homebase_watched_dirs = dir_paths
+        """Compatibility no-op: recursive QFileSystemWatcher use was removed."""
+        return
 
     def _ensure_homebase_watcher(self, vault_root: Path) -> None:
+        """Compatibility wrapper for the local filesystem monitor."""
+        self._ensure_local_filesystem_monitor(vault_root)
+
+    def _ensure_local_filesystem_monitor(self, vault_root: Path) -> None:
         self._shutdown_homebase_watcher()
         self._homebase_watch_root = vault_root
         self._local_fs_page_snapshot = self._snapshot_local_page_state(vault_root)
-        watcher = QFileSystemWatcher(self)
-        watcher.directoryChanged.connect(self._on_homebase_fs_changed)
-        watcher.fileChanged.connect(self._on_homebase_fs_changed)
-        self._homebase_fs_watcher = watcher
-        refresh_timer = QTimer(self)
-        refresh_timer.setSingleShot(True)
-        refresh_timer.setInterval(400)
-        refresh_timer.timeout.connect(self._refresh_homebase_watch_paths)
-        self._homebase_watch_refresh_timer = refresh_timer
-        self._refresh_homebase_watch_paths()
+        self._local_fs_last_scan_requested_at = time.monotonic()
+        scan_timer = QTimer(self)
+        scan_timer.setInterval(self._local_filesystem_scan_interval_ms())
+        scan_timer.timeout.connect(lambda: self._schedule_local_filesystem_scan("periodic local filesystem scan"))
+        scan_timer.start()
+        self._local_fs_periodic_scan_timer = scan_timer
+        eventloop_diag.log(
+            "local filesystem monitor started "
+            f"interval_ms={scan_timer.interval()} snapshot_entries={len(self._local_fs_page_snapshot)}"
+        )
+
+    def _local_filesystem_scan_interval_ms(self) -> int:
+        try:
+            seconds = config.load_local_filesystem_scan_interval_seconds()
+        except Exception:
+            seconds = 120
+        return max(15, int(seconds)) * 1000
+
+    def _schedule_local_filesystem_scan(self, reason: str, *, force: bool = False) -> None:
+        if self._remote_mode or not self.vault_root:
+            return
+        now = time.monotonic()
+        min_gap = 0.0 if force else min(30.0, max(5.0, self._local_filesystem_scan_interval_ms() / 2000.0))
+        if not force and self._local_fs_last_scan_requested_at and (now - self._local_fs_last_scan_requested_at) < min_gap:
+            return
+        self._local_fs_last_scan_requested_at = now
+        self._homebase_tree_refresh_reason = str(reason or "").strip() or "local filesystem scan"
+        self._on_local_fs_ui_quiet_timeout()
+
+    def _check_current_file_for_external_change(self, reason: str) -> bool:
+        if self._remote_mode or not self.vault_root or not self.current_path:
+            return False
+        normalized = self._normalize_editor_path(self.current_path)
+        if not normalized:
+            return False
+        try:
+            stat = (Path(self.vault_root) / normalized.lstrip("/")).stat()
+        except OSError:
+            return False
+        current_meta = (
+            int(getattr(stat, "st_mtime_ns", 0) or 0),
+            int(stat.st_size or 0),
+        )
+        previous_meta = self._local_fs_page_snapshot.get(normalized)
+        if previous_meta and previous_meta != current_meta:
+            self._schedule_local_filesystem_scan(reason, force=True)
+            return True
+        return False
 
     def _on_homebase_fs_changed(self, path: str) -> None:
+        MainWindow._record_homebase_fs_signal(self, path)
         if self._should_suppress_local_fs_change(path):
             if self._homebase_watch_refresh_timer:
                 self._homebase_watch_refresh_timer.start()
@@ -5638,6 +5810,23 @@ class MainWindow(QMainWindow):
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
         if self._is_homebase_mode_enabled():
             self._update_homebase_status_badge(status)
+
+    def _record_homebase_fs_signal(self, path: str) -> None:
+        if not eventloop_diag.enabled():
+            return
+        now = time.monotonic()
+        window_elapsed = now - self._homebase_fs_signal_window_started_at
+        if window_elapsed >= 1.0:
+            rate = self._homebase_fs_signal_count / max(window_elapsed, 0.001)
+            warn_rate = eventloop_diag.env_int("SP_EVENT_LOOP_FS_SIGNAL_WARN", 100)
+            if rate >= warn_rate:
+                eventloop_diag.log(
+                    "high QFileSystemWatcher signal rate "
+                    f"count={self._homebase_fs_signal_count} window={window_elapsed:.2f}s last_path={path!r}"
+                )
+            self._homebase_fs_signal_count = 0
+            self._homebase_fs_signal_window_started_at = now
+        self._homebase_fs_signal_count += 1
 
     def _open_local_vault_terminal(self) -> None:
         if not self.vault_root:
@@ -5988,14 +6177,15 @@ class MainWindow(QMainWindow):
 
     def _configure_homebase_sync_for_vault(self) -> None:
         self._shutdown_homebase_sync()
+        local_vault_root = Path(self.vault_root) if self.vault_root and not self._remote_mode else None
+        if local_vault_root is not None:
+            self._ensure_homebase_watcher(local_vault_root)
         if not self.vault_root or not self._is_homebase_mode_enabled():
             _log_homebase_client(
                 "sync config skipped: "
                 f"vault_root={'set' if bool(self.vault_root) else 'missing'} "
                 f"homebase_mode={self._is_homebase_mode_enabled()}"
             )
-            if self.vault_root and not self._remote_mode:
-                self._ensure_homebase_watcher(Path(self.vault_root))
             self._update_homebase_sync_action_state()
             return
         try:
@@ -6055,7 +6245,6 @@ class MainWindow(QMainWindow):
                 f"debounce={cfg.push_debounce_seconds}s parallel={cfg.max_parallel_transfers}"
             )
             self._homebase_sync_engine = HomebaseSyncEngine(cfg)
-            self._ensure_homebase_watcher(Path(self.vault_root))
             self._homebase_sync_engine.start()
             self._homebase_status_poll_timer = QTimer(self)
             self._homebase_status_poll_timer.setInterval(1000)
@@ -6110,7 +6299,39 @@ class MainWindow(QMainWindow):
         if should_refresh_tree_for_local_sync:
             self._schedule_homebase_tree_refresh_on_ui_activity("local sync completed")
         self._update_homebase_status_badge(status)
+        update_poll_interval = getattr(self, "_update_homebase_status_poll_interval", None)
+        if callable(update_poll_interval):
+            update_poll_interval(status)
         self._update_homebase_sync_action_state()
+
+    def _update_homebase_status_poll_interval(self, status: Optional[HomebaseSyncStatus]) -> None:
+        timer = self._homebase_status_poll_timer
+        if timer is None:
+            return
+        desired_ms = 1000
+        if status is not None:
+            active = bool(
+                status.pending
+                or status.state == "syncing"
+                or int(getattr(status, "pending_uploads", 0) or 0) > 0
+                or int(getattr(status, "pending_downloads", 0) or 0) > 0
+                or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+            )
+            if active:
+                desired_ms = 1000
+            elif status.state == "hibernated":
+                desired_ms = 15000
+            elif status.state in {"idle"}:
+                desired_ms = 5000
+            else:
+                desired_ms = 5000
+        try:
+            if timer.interval() != desired_ms:
+                timer.setInterval(desired_ms)
+            if not timer.isActive():
+                timer.start()
+        except Exception:
+            pass
 
     def _schedule_local_filesystem_ui_refresh(self, reason: str, changed_path: Optional[str] = None) -> None:
         if self._remote_mode or not self.vault_root:
@@ -6138,14 +6359,25 @@ class MainWindow(QMainWindow):
         current_path = self.current_path
 
         def _worker() -> None:
-            reconcile = self._compute_local_fs_refresh_payload(
-                current_path=current_path,
-                recent_self_saved_paths=recent_self_saved_paths,
-            )
+            try:
+                reconcile = self._compute_local_fs_refresh_payload(
+                    current_path=current_path,
+                    recent_self_saved_paths=recent_self_saved_paths,
+                )
+            except Exception as exc:
+                reconcile = {
+                    "error": repr(exc),
+                    "snapshot": dict(getattr(self, "_local_fs_page_snapshot", {}) or {}),
+                }
             self._local_fs_refresh_result_queue.put((current_generation, reason, reconcile))
 
         threading.Thread(target=_worker, daemon=True).start()
+        self._local_fs_refresh_started_at = time.monotonic()
         if self._local_fs_refresh_result_timer:
+            try:
+                self._local_fs_refresh_result_timer.setInterval(50)
+            except Exception:
+                pass
             self._local_fs_refresh_result_timer.start()
 
     def _on_homebase_fs_sync_quiet_timeout(self) -> None:
@@ -7001,6 +7233,11 @@ class MainWindow(QMainWindow):
                 return
             try:
                 self._homebase_sync_engine.schedule_sync(reason)
+                try:
+                    status = self._homebase_sync_engine.get_status()
+                except Exception:
+                    status = None
+                self._update_homebase_status_poll_interval(status)
             except Exception:
                 pass
 
@@ -7015,6 +7252,11 @@ class MainWindow(QMainWindow):
             return
         try:
             self._homebase_sync_engine.sync_now(reason)
+            try:
+                status = self._homebase_sync_engine.get_status()
+            except Exception:
+                status = None
+            self._update_homebase_status_poll_interval(status)
             self.statusBar().showMessage("Homebase sync requested.", 2500)
         except Exception as exc:
             self.statusBar().showMessage(f"Homebase sync request failed: {exc}", 5000)
@@ -12907,6 +13149,12 @@ class MainWindow(QMainWindow):
 
     def _on_application_state_changed(self, state) -> None:
         """Persist editor content when app deactivates (Alt+Tab/window switch)."""
+        if eventloop_diag.enabled():
+            try:
+                state_name = state.name
+            except Exception:
+                state_name = str(state)
+            eventloop_diag.log(f"QGuiApplication state changed: {state_name}")
         try:
             inactive = state == Qt.ApplicationState.ApplicationInactive
         except Exception:
@@ -12916,6 +13164,8 @@ class MainWindow(QMainWindow):
             # Homebase auto-reload races with pending editor state changes.
             self._homebase_reload_not_before = time.monotonic() + 1.0
             QTimer.singleShot(0, self._refresh_editor_visual_state_after_activation)
+            if not self._check_current_file_for_external_change("app activated current page"):
+                self._schedule_local_filesystem_scan("app activated")
             return
         self._homebase_reload_not_before = time.monotonic() + 3.0
         self._remember_history_cursor()

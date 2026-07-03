@@ -243,6 +243,148 @@ def test_local_fs_quiet_timeout_reloads_current_page_after_incremental_index(mon
     assert kwargs["force"] is True
 
 
+def test_local_fs_quiet_timeout_stops_result_timer_after_worker_error(monkeypatch) -> None:
+    class _Dummy:
+        _remote_mode = False
+        vault_root = "/vault"
+        _homebase_tree_refresh_reason = "filesystem change"
+        current_path = None
+        _local_fs_refresh_generation = 0
+        _recent_self_saved_paths = {}
+        _local_fs_page_snapshot = {"/PageA/PageA.md": (1, 1)}
+
+        def __init__(self) -> None:
+            self._local_fs_refresh_result_queue = queue.Queue()
+            self._local_fs_refresh_result_timer = _DummyTimer()
+
+        def _compute_local_fs_refresh_payload(self, *, current_path, recent_self_saved_paths):
+            raise RuntimeError("scan failed")
+
+        def _backoff_local_fs_refresh_poll(self) -> None:
+            raise AssertionError("no backoff needed once worker error is queued")
+
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+
+    dummy = _Dummy()
+    MainWindow._on_local_fs_ui_quiet_timeout(dummy)
+    MainWindow._drain_local_fs_refresh_results(dummy)
+
+    assert dummy._local_fs_refresh_result_timer.started == 1
+    assert dummy._local_fs_refresh_result_timer.stopped == 1
+    assert dummy._local_fs_refresh_started_at is None
+
+
+def test_local_fs_scan_schedules_homebase_sync_for_external_changes(monkeypatch) -> None:
+    class _DummyEngine:
+        pass
+
+    class _Dummy:
+        _remote_mode = False
+        vault_root = "/vault"
+        _homebase_tree_refresh_reason = "periodic local filesystem scan"
+        current_path = None
+        _local_fs_refresh_generation = 0
+        _recent_self_saved_paths = {}
+
+        def __init__(self) -> None:
+            self.status = _DummyStatusBar()
+            self._local_fs_refresh_result_queue = queue.Queue()
+            self._local_fs_refresh_result_timer = _DummyTimer()
+            self._local_fs_page_snapshot = {}
+            self._homebase_sync_engine = _DummyEngine()
+            self.unsynced_marks = 0
+            self.sync_reasons: list[str] = []
+            self.right_panel = type(
+                "_RightPanel",
+                (),
+                {"refresh_tasks": lambda self: None, "refresh_links": lambda self, _path: None},
+            )()
+
+        def _compute_local_fs_refresh_payload(self, *, current_path, recent_self_saved_paths):
+            return {
+                "indexed_paths": ["/PageB/PageB.md"],
+                "removed_paths": [],
+                "structure_changed": True,
+                "current_page_changed": False,
+                "current_page_removed": False,
+                "snapshot": {},
+            }
+
+        def _prune_recent_self_saved_paths(self) -> None:
+            return None
+
+        def _ensure_config_active_vault_context(self) -> None:
+            return None
+
+        def _schedule_homebase_tree_refresh_on_ui_activity(self, reason: str) -> None:
+            return None
+
+        def _is_editor_idle_for_remote_reload(self) -> bool:
+            return False
+
+        def _refresh_detached_task_panels(self) -> None:
+            return None
+
+        def _refresh_detached_calendar_panels(self) -> None:
+            return None
+
+        def _refresh_detached_link_panels(self, path) -> None:
+            return None
+
+        def _is_homebase_mode_enabled(self) -> bool:
+            return True
+
+        def _mark_homebase_unsynced_local_change(self) -> None:
+            self.unsynced_marks += 1
+
+        def _schedule_homebase_sync(self, reason: str) -> None:
+            self.sync_reasons.append(reason)
+
+        def statusBar(self) -> _DummyStatusBar:
+            return self.status
+
+    monkeypatch.setattr(config, "bump_tree_version", lambda: None)
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+
+    dummy = _Dummy()
+    MainWindow._on_local_fs_ui_quiet_timeout(dummy)
+    MainWindow._drain_local_fs_refresh_results(dummy)
+
+    assert dummy.unsynced_marks == 1
+    assert dummy.sync_reasons == ["local filesystem scan"]
+
+
+def test_self_saved_path_updates_local_snapshot(tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    page = vault_root / "PageA" / "PageA.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# A\n", encoding="utf-8")
+
+    class _Dummy:
+        _remote_mode = False
+
+        def __init__(self) -> None:
+            self.vault_root = str(vault_root)
+            self.vault_root_name = vault_root.name
+            self._recent_self_saved_paths = {}
+            self._local_fs_page_snapshot = {}
+
+        def _normalize_editor_path(self, path: str) -> str:
+            return MainWindow._normalize_editor_path(self, path)
+
+        def _folder_to_file_path(self, path: str) -> str:
+            return MainWindow._folder_to_file_path(self, path)
+
+        def _normalize_root_page_path(self, path: str) -> str:
+            return MainWindow._normalize_root_page_path(self, path)
+
+    dummy = _Dummy()
+    MainWindow._mark_recent_self_saved_path(dummy, "/PageA/PageA.md")
+
+    assert "/PageA/PageA.md" in dummy._recent_self_saved_paths
+    assert dummy._local_fs_page_snapshot["/PageA/PageA.md"][1] == page.stat().st_size
+
+
 def test_homebase_fs_change_suppresses_status_for_recent_self_save(tmp_path) -> None:
     vault_root = tmp_path / "vault"
     page_dir = vault_root / "PageA"

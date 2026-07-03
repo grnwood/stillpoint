@@ -1324,6 +1324,22 @@ def save_local_filesystem_quiet_seconds(seconds: int) -> None:
     _update_global_config({"local_filesystem_quiet_seconds": max(1, int(seconds))})
 
 
+def load_local_filesystem_scan_interval_seconds(default: int = 120) -> int:
+    """Return cadence for coarse local-vault change scans."""
+    payload = _read_global_config()
+    raw = payload.get("local_filesystem_scan_interval_seconds", default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(15, value)
+
+
+def save_local_filesystem_scan_interval_seconds(seconds: int) -> None:
+    """Persist cadence for coarse local-vault change scans."""
+    _update_global_config({"local_filesystem_scan_interval_seconds": max(15, int(seconds))})
+
+
 def load_agent_tool_settings() -> dict:
     """Load agent tool configuration settings."""
     payload = _read_global_config()

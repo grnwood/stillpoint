@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon, QPalette, QColor
 
 from sp.app import config
+from sp.app import eventloop_diag
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
@@ -46,6 +47,7 @@ from sp.app.ui.main_window import MainWindow
 # SP_LOG_DIAGRAMS        - Mermaid/PlantUML details
 # SP_LOG_UI_STATE        - UI geometry/panel state details
 # SP_LOG_PERFORMANCE     - Timing/performance traces
+# SP_LOG_EVENT_LOOP      - Qt dispatcher/fd diagnostics for wakeup livelocks
 # SP_LOG_ALL             - Enable all detailed areas
 #
 # Examples:
@@ -692,15 +694,22 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
         log_config=log_config,
     )
     server = uvicorn.Server(config)
+    eventloop_diag.log(
+        "embedded API server configured "
+        f"host={host} port={port} loop={config.loop!r} http={config.http!r} ws={config.ws!r}"
+    )
     
     # Track startup status
     startup_error = [None]
     
     def run_server():
         try:
+            eventloop_diag.log("embedded API server thread starting")
             server.run()
+            eventloop_diag.log("embedded API server thread stopped")
         except Exception as e:
             startup_error[0] = e
+            eventloop_diag.log(f"embedded API server thread failed: {e!r}")
     
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
@@ -911,6 +920,8 @@ def main() -> None:
     api_module.set_local_ui_token(local_ui_token)
     _sp(f"API server started on {args.host}:{port}.")
     qt_app = QApplication(sys.argv)
+    eventloop_diag.log_fd_target("after QApplication creation")
+    eventloop_diag.install_qt_event_sampler(qt_app)
     qt_app.aboutToQuit.connect(lambda: _startup("QApplication aboutToQuit emitted."))
     _apply_application_font(qt_app)
     _apply_startup_theme_defaults(qt_app)
@@ -918,7 +929,11 @@ def main() -> None:
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
     # Ensure server shutdown when the UI exits
-    qt_app.aboutToQuit.connect(lambda: setattr(server, "should_exit", True))
+    def _request_server_exit() -> None:
+        eventloop_diag.log("QApplication aboutToQuit: requesting embedded API server exit")
+        setattr(server, "should_exit", True)
+
+    qt_app.aboutToQuit.connect(_request_server_exit)
     window = MainWindow(
         api_base=f"http://{args.host}:{port}",
         local_auth_token=local_ui_token,
