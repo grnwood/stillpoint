@@ -2205,7 +2205,7 @@ class MainWindow(QMainWindow):
         self._local_fs_ui_quiet_timer.timeout.connect(self._on_local_fs_ui_quiet_timeout)
         self._local_fs_refresh_result_queue: queue.Queue[tuple[int, str, dict[str, Any]]] = queue.Queue()
         self._local_fs_refresh_result_timer: Optional[QTimer] = QTimer(self)
-        self._local_fs_refresh_result_timer.setInterval(50)
+        self._local_fs_refresh_result_timer.setInterval(100)
         self._local_fs_refresh_result_timer.timeout.connect(self._drain_local_fs_refresh_results)
         self._local_fs_refresh_generation: int = 0
         self._local_fs_refresh_started_at: Optional[float] = None
@@ -6375,7 +6375,7 @@ class MainWindow(QMainWindow):
         self._local_fs_refresh_started_at = time.monotonic()
         if self._local_fs_refresh_result_timer:
             try:
-                self._local_fs_refresh_result_timer.setInterval(50)
+                self._local_fs_refresh_result_timer.setInterval(100)
             except Exception:
                 pass
             self._local_fs_refresh_result_timer.start()
@@ -9114,6 +9114,11 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._apply_tab_widget_theme_styles()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "right_panel", None):
+                self.right_panel.apply_theme()
         except Exception:
             pass
         try:

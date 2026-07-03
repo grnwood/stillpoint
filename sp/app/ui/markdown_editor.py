@@ -1786,6 +1786,11 @@ class MarkdownEditor(QTextEdit):
         self._hr_timer.setInterval(120)
         self._hr_timer.setSingleShot(True)
         self._hr_timer.timeout.connect(self._refresh_hr_selections)
+        self._hr_retry_timer = QTimer(self)
+        self._hr_retry_timer.setInterval(75)
+        self._hr_retry_timer.setSingleShot(True)
+        self._hr_retry_timer.timeout.connect(self._retry_refresh_hr)
+        self._hr_refresh_retry_token: Optional[int] = None
         self._hr_resize_timer = QTimer(self)
         self._hr_resize_timer.setInterval(120)
         self._hr_resize_timer.setSingleShot(True)
@@ -2168,10 +2173,10 @@ class MarkdownEditor(QTextEdit):
             return
         if self._post_load_repaint_armed:
             return
-        remaining_ms = 1
+        remaining_ms = 16
         until = self._post_load_paint_guard_until
         if until > 0.0:
-            remaining_ms = max(1, int((until - time.perf_counter()) * 1000.0))
+            remaining_ms = max(16, int((until - time.perf_counter()) * 1000.0))
         self._post_load_repaint_armed = True
         QTimer.singleShot(
             remaining_ms,
@@ -2200,7 +2205,7 @@ class MarkdownEditor(QTextEdit):
         # between _begin_page_load() and _finish_page_load(), and calling
         # super().paintEvent() against that state can cause an access violation on
         # Windows (and similar instability on other platforms).
-        if self._load_in_flight_token == load_token:
+        if self._load_in_flight_token != 0 and self._load_in_flight_token == load_token:
             self._queue_post_load_repaint(load_token)
             return True
         until = self._post_load_paint_guard_until
@@ -2234,8 +2239,12 @@ class MarkdownEditor(QTextEdit):
         # so the repaint happens after the current load completes.  Apply this
         # guard on all platforms (the previous Linux-only restriction left Windows
         # exposed to painting against a partially-loaded document).
-        if self._load_in_flight_token == self.current_load_token():
-            self._queue_post_load_repaint(load_token)
+        if self._load_in_flight_token != 0 and self._load_in_flight_token == self.current_load_token():
+            self._post_load_repaint_armed = True
+            QTimer.singleShot(
+                50,
+                lambda tok=load_token: self._deferred_post_load_repaint(tok),
+            )
             return
         if not self._is_alive(self) or not self._editor_alive:
             return
@@ -8420,18 +8429,16 @@ class MarkdownEditor(QTextEdit):
     def _refresh_hr_selections(self, load_token: Optional[int] = None) -> None:
         if not self._is_current_load_token(load_token):
             self._hr_refresh_retry_pending = False
+            self._hr_refresh_retry_token = None
             return
         if self._mutations_blocked():
-            if not self._hr_refresh_retry_pending:
-                self._hr_refresh_retry_pending = True
-                QTimer.singleShot(0, lambda tok=load_token: self._retry_refresh_hr(tok))
+            self._schedule_hr_retry(load_token)
             return
         if self._post_load_paint_guard_active():
-            if not self._hr_refresh_retry_pending:
-                self._hr_refresh_retry_pending = True
-                QTimer.singleShot(0, lambda tok=load_token: self._retry_refresh_hr(tok))
+            self._schedule_hr_retry(load_token)
             return
         self._hr_refresh_retry_pending = False
+        self._hr_refresh_retry_token = None
         doc = self.document()
         if doc is None:
             return
@@ -8478,14 +8485,24 @@ class MarkdownEditor(QTextEdit):
         existing.extend(selections)
         self.setExtraSelections(existing)
 
+    def _schedule_hr_retry(self, load_token: Optional[int] = None) -> None:
+        if self._hr_refresh_retry_pending:
+            return
+        self._hr_refresh_retry_pending = True
+        self._hr_refresh_retry_token = load_token
+        self._hr_retry_timer.start()
+
     def _retry_refresh_hr(self, load_token: Optional[int] = None) -> None:
         if not Shiboken.isValid(self):
             return
-        if not self._is_current_load_token(load_token):
+        retry_token = self._hr_refresh_retry_token if load_token is None else load_token
+        if not self._is_current_load_token(retry_token):
             self._hr_refresh_retry_pending = False
+            self._hr_refresh_retry_token = None
             return
         self._hr_refresh_retry_pending = False
-        self._refresh_hr_selections(load_token=load_token)
+        self._hr_refresh_retry_token = None
+        self._refresh_hr_selections(load_token=retry_token)
 
     def apply_hr_line_height(self) -> None:
         """Reload HR line height from preferences and refresh the display."""

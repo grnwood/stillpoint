@@ -331,6 +331,38 @@ class TabbedRightPanel(QWidget):
         if self.link_panel:
             self.link_panel.set_vault_accent_color(self._vault_accent_color)
 
+    def apply_theme(self) -> None:
+        """Refresh theme-sensitive child panels after the effective theme changes."""
+        for panel in (
+            self.ai_chat_panel,
+            self.task_panel,
+            self.calendar_panel,
+            self.link_panel,
+            self.map_panel,
+            self.attachments_panel,
+        ):
+            if panel is None:
+                continue
+            for method_name in ("apply_theme", "apply_theme_style", "apply_theme_palette"):
+                method = getattr(panel, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    if method_name == "apply_theme_palette":
+                        app = QApplication.instance()
+                        if app is None:
+                            break
+                        method(app.palette())
+                    else:
+                        method()
+                except Exception:
+                    pass
+                break
+        try:
+            self.tabs.update()
+        except Exception:
+            pass
+
     def get_ai_font_size(self) -> int:
         """Return current AI chat font size."""
         if self.ai_chat_panel:
@@ -720,6 +752,7 @@ class TabbedRightPanel(QWidget):
         self.link_panel.forwardRequested.connect(self.linkForwardRequested)
         self.link_panel.homeRequested.connect(self.linkHomeRequested)
         self.link_panel.set_vault_accent_color(self._vault_accent_color)
+        self.link_panel.apply_theme()
 
     def _remove_link_tab(self) -> None:
         if not self.link_panel:

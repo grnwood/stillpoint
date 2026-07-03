@@ -288,7 +288,7 @@ class CalendarPanel(QWidget):
         self._api_tasks_global_error_until: float = 0.0
         self._api_task_result_queue: queue.Queue[tuple[str, tuple[bool, bool, bool], object]] = queue.Queue()
         self._api_task_result_timer = QTimer(self)
-        self._api_task_result_timer.setInterval(75)
+        self._api_task_result_timer.setInterval(200)
         self._api_task_result_timer.timeout.connect(self._drain_task_fetch_results)
         self._api_task_result_timer.start()
         self._remote_mode = False
@@ -1137,6 +1137,46 @@ class CalendarPanel(QWidget):
         self._apply_insight_list_styles()
         self._apply_multi_selection_formats()
         self.refresh_theme_visuals()
+
+    def apply_theme(self) -> None:
+        """Rebuild theme-sensitive styles after the effective theme changes."""
+        palette = QApplication.palette()
+        is_light = palette.color(QPalette.Window).lightness() > 128
+        base_bg = palette.color(QPalette.Base)
+        alt_bg = palette.color(QPalette.AlternateBase)
+        text_fg = palette.color(QPalette.Text)
+
+        self._calendar_theme_selected_bg = QColor(theme_value("calendar_panel.calendar.selected_bg", "#2D7FF9"))
+        self._calendar_theme_selected_text = QColor(theme_value("calendar_panel.calendar.selected_text", "#FFFFFF"))
+
+        grid_color = (
+            theme_value("calendar_panel.calendar.grid_light", "#DDDDDD")
+            if is_light
+            else theme_value("calendar_panel.calendar.grid_dark", "#555555")
+        )
+        default_header_bg = (
+            theme_value("calendar_panel.calendar.header_dark", "#3A3A3A")
+            if not is_light
+            else theme_value("calendar_panel.calendar.header_light", "#F5F5F5")
+        )
+        if alt_bg.isValid():
+            alt_lightness = alt_bg.lightness()
+            if (not is_light and alt_lightness > 140) or (is_light and alt_lightness > 245):
+                header_bg = default_header_bg
+            else:
+                header_bg = alt_bg.name()
+        else:
+            header_bg = default_header_bg
+        nav_text = text_fg.name() if text_fg.isValid() else (
+            theme_value("calendar_panel.calendar.nav_text_dark", "#E6E6E6")
+            if not is_light
+            else theme_value("calendar_panel.calendar.nav_text_light", "#1F1F1F")
+        )
+
+        self._calendar_grid_color = grid_color
+        self._calendar_header_bg = header_bg
+        self._calendar_nav_text = nav_text
+        self.set_vault_accent_color(self._vault_accent_color)
 
     def set_task_date_filter_opener(self, opener: Optional[Callable[[Optional[QWidget]], None]]) -> None:
         """Allow parent to provide a date filter opener for the Task panel."""

@@ -919,7 +919,9 @@ def main() -> None:
     from sp.server import api as api_module
     api_module.set_local_ui_token(local_ui_token)
     _sp(f"API server started on {args.host}:{port}.")
-    qt_app = QApplication(sys.argv)
+    eventloop_diag.install_qtimer_probe()
+    qt_app = eventloop_diag.create_application(sys.argv)
+    eventloop_diag.install_ui_method_probe()
     eventloop_diag.log_fd_target("after QApplication creation")
     eventloop_diag.install_qt_event_sampler(qt_app)
     qt_app.aboutToQuit.connect(lambda: _startup("QApplication aboutToQuit emitted."))

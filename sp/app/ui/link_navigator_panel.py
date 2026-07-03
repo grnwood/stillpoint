@@ -7,12 +7,13 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, Signal, QVariantAnimation, QParallelAnimationGroup, QEasingCurve
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, Signal, QVariantAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QColor, QFont, QBrush, QKeyEvent, QPalette, QPen, QPainter, QPolygonF
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
+    QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -64,6 +65,7 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
         self.setPen(self._base_pen)
         self.setZValue(self._base_z)
         self.setAcceptHoverEvents(True)
+        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
 
         label = QGraphicsSimpleTextItem(data.label, self)
         font = QFont(label.font())
@@ -76,6 +78,7 @@ class _GalaxyNodeItem(QGraphicsEllipseItem):
         rect = label.boundingRect()
         label.setPos(-rect.width() / 2, -rect.height() / 2)
         label.setOpacity(0.82)
+        label.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.label_item = label
 
     def set_theme_colors(
@@ -208,8 +211,13 @@ class GalaxyGraphView(QGraphicsView):
         self._center_path: Optional[str] = None
         self._zoom = 1.0
         self._hover_path: Optional[str] = None
+        self._pending_hover_leave: Optional[str] = None
         self._base_positions: dict[str, QPointF] = {}
-        self._spread_anim: Optional[QParallelAnimationGroup] = None
+        self._spread_anim: Optional[QVariantAnimation] = None
+        self._hover_clear_timer = QTimer(self)
+        self._hover_clear_timer.setSingleShot(True)
+        self._hover_clear_timer.setInterval(90)
+        self._hover_clear_timer.timeout.connect(self._clear_hover_after_leave)
         self._arrows_enabled = True
         self._node_size_scale = 1.0
         self._edge_width_scale = 1.0
@@ -232,6 +240,7 @@ class GalaxyGraphView(QGraphicsView):
         self._edges.clear()
         self._center_path = None
         self._hover_path = None
+        self._pending_hover_leave = None
         self._selected_path = None
         self._is_panning = False
         self._pan_start_pos = None
@@ -239,6 +248,8 @@ class GalaxyGraphView(QGraphicsView):
         if self._spread_anim:
             self._spread_anim.stop()
             self._spread_anim = None
+        if self._hover_clear_timer.isActive():
+            self._hover_clear_timer.stop()
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
@@ -372,8 +383,8 @@ class GalaxyGraphView(QGraphicsView):
             item.set_accent_colors(self._active_bg, self._active_border, self._active_text)
             pos = positions.get(data.path, QPointF(0, 0))
             item.setPos(pos)
-            item.hoverEnterEvent = lambda _e, p=data.path: self._on_hover(p)  # type: ignore[assignment]
-            item.hoverLeaveEvent = lambda _e: self._on_hover(None)  # type: ignore[assignment]
+            item.hoverEnterEvent = lambda _e, p=data.path: self._on_hover_enter(p)  # type: ignore[assignment]
+            item.hoverLeaveEvent = lambda _e, p=data.path: self._on_hover_leave(p)  # type: ignore[assignment]
             self._scene.addItem(item)
             self._nodes[data.path] = item
             self._base_positions[data.path] = QPointF(pos)
@@ -468,7 +479,30 @@ class GalaxyGraphView(QGraphicsView):
         for node in self._nodes.values():
             node.label_item.setVisible(not zoomed_out)
 
-    def _on_hover(self, path: Optional[str]) -> None:
+    def _on_hover_enter(self, path: str) -> None:
+        self._pending_hover_leave = None
+        if self._hover_clear_timer.isActive():
+            self._hover_clear_timer.stop()
+        self._apply_hover_path(path)
+
+    def _on_hover_leave(self, path: str) -> None:
+        if self._hover_path != path:
+            return
+        self._pending_hover_leave = path
+        self._hover_clear_timer.start()
+
+    def _clear_hover_after_leave(self) -> None:
+        if self._pending_hover_leave is None:
+            return
+        if self._hover_path != self._pending_hover_leave:
+            self._pending_hover_leave = None
+            return
+        self._pending_hover_leave = None
+        self._apply_hover_path(None)
+
+    def _apply_hover_path(self, path: Optional[str]) -> None:
+        if self._hover_path == path:
+            return
         self._hover_path = path
         self._apply_focus_effect(path or self._selected_path)
 
@@ -503,8 +537,8 @@ class GalaxyGraphView(QGraphicsView):
         hover_base = self._base_positions.get(path)
         if hover_base is None:
             hover_base = self._nodes.get(path).pos() if path in self._nodes else QPointF(0, 0)
-        spread = 1.45
-        min_offset = 28.0
+        spread = 1.12
+        min_offset = 14.0
         targets: dict[str, QPointF] = {}
         for node_path, base in self._base_positions.items():
             if node_path == path or node_path not in connected_paths:
@@ -527,8 +561,7 @@ class GalaxyGraphView(QGraphicsView):
         if self._spread_anim:
             self._spread_anim.stop()
             self._spread_anim = None
-        group = QParallelAnimationGroup(self)
-        duration = 220
+        moves: list[tuple[_GalaxyNodeItem, QPointF, QPointF]] = []
         for path, node in self._nodes.items():
             target = targets.get(path)
             if target is None:
@@ -536,18 +569,32 @@ class GalaxyGraphView(QGraphicsView):
             start = node.pos()
             if start == target:
                 continue
-            anim = QVariantAnimation(self)
-            anim.setStartValue(start)
-            anim.setEndValue(target)
-            anim.setDuration(duration)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.valueChanged.connect(lambda value, n=node: n.setPos(value))
-            anim.valueChanged.connect(lambda _value: self._update_edges())
-            group.addAnimation(anim)
-        if group.animationCount() == 0:
+            moves.append((node, QPointF(start), QPointF(target)))
+        if not moves:
             return
-        self._spread_anim = group
-        group.start()
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.InOutSine)
+
+        def apply_frame(progress: float) -> None:
+            for node, start, target in moves:
+                node.setPos(
+                    start.x() + (target.x() - start.x()) * progress,
+                    start.y() + (target.y() - start.y()) * progress,
+                )
+            self._update_edges()
+
+        def clear_anim() -> None:
+            if self._spread_anim is anim:
+                self._spread_anim = None
+
+        anim.valueChanged.connect(lambda value: apply_frame(float(value)))
+        anim.finished.connect(clear_anim)
+        self._spread_anim = anim
+        anim.start()
 
     def set_arrow_mode(self, enabled: bool) -> None:
         self._arrows_enabled = bool(enabled)

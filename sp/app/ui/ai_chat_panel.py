@@ -1895,7 +1895,7 @@ class AIChatPanel(QtWidgets.QWidget):
         # Stream coalescing to keep UI responsive
         self._pending_stream_chunks: dict[int, list[str]] = {}
         self._stream_flush_timer = QtCore.QTimer(self)
-        self._stream_flush_timer.setInterval(40)
+        self._stream_flush_timer.setInterval(100)
         self._stream_flush_timer.setSingleShot(True)
         self._stream_flush_timer.timeout.connect(self._flush_pending_stream_chunks)
         self._stream_think_state: dict[int, dict[str, str | bool]] = {}
@@ -1908,7 +1908,7 @@ class AIChatPanel(QtWidgets.QWidget):
             "visible": "",
         }
         self._condense_flush_timer = QtCore.QTimer(self)
-        self._condense_flush_timer.setInterval(40)
+        self._condense_flush_timer.setInterval(100)
         self._condense_flush_timer.setSingleShot(True)
         self._condense_flush_timer.timeout.connect(self._flush_condense_buffer)
         self._preserve_session_on_reset = False
@@ -2250,6 +2250,11 @@ class AIChatPanel(QtWidgets.QWidget):
         self._toggle_chat_list(False)
         self._update_context_summary()
         self._apply_font_size()
+
+    def apply_theme(self) -> None:
+        """Rebuild theme-sensitive styles after the effective theme changes."""
+        self._apply_theme_styles()
+        self.set_vault_accent_color(self._vault_accent_color)
 
     def _reset_chat_history(self) -> None:
         _log_ai_chat("[AIChat][reset] Starting chat reset.")

@@ -490,7 +490,7 @@ class TaskPanel(QWidget):
         self._api_task_error_until: dict[tuple, float] = {}
         self._api_task_result_queue: queue.Queue[tuple[str, tuple, object, float]] = queue.Queue()
         self._api_result_timer = QTimer(self)
-        self._api_result_timer.setInterval(75)
+        self._api_result_timer.setInterval(200)
         self._api_result_timer.timeout.connect(self._drain_remote_task_results)
         self._api_result_timer.start()
         self._setup_focus_defaults()

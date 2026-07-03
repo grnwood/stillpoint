@@ -50,6 +50,16 @@ def test_paint_guard_blocks_during_load_in_flight(monkeypatch, qapp) -> None:
         editor.close()
 
 
+def test_paint_guard_is_inactive_for_fresh_editor_without_load(qapp) -> None:
+    editor = MarkdownEditor()
+    try:
+        assert editor.current_load_token() == 0
+        assert editor._load_in_flight_token == 0  # type: ignore[attr-defined]
+        assert editor._post_load_paint_guard_active() is False
+    finally:
+        editor.close()
+
+
 def test_paint_guard_blocks_until_repaint_token_set_on_all_platforms(monkeypatch, qapp) -> None:
     """Paint guard must block until _deferred_post_load_repaint fires on all platforms.
 
