@@ -1,9 +1,9 @@
 # Local File System Handling
 
-* [ ] StillPoint no longer depends on recursively registering every vault directory with
-  `QFileSystemWatcher`. Local changes are detected through a coarse snapshot scan,
-  with the expensive work pushed into a background thread and the UI updated only
-  after the worker returns a compact result.
+StillPoint no longer depends on recursively registering every vault directory with
+`QFileSystemWatcher`. Local changes are detected through a coarse snapshot scan,
+with the expensive work pushed into a background thread and the UI updated only
+after the worker returns a compact result.
 
 ```mermaid
 flowchart TD
