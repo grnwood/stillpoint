@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import base64
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -59,27 +60,16 @@ def _configure_linux_webengine_env() -> None:
         if cfg_path.exists():
             try:
                 payload = json.loads(cfg_path.read_text(encoding="utf-8"))
-                inline_pref = bool(payload.get("mermaid_inline_web_preview", False))
+                inline_pref = bool(payload.get("mermaid_inline_web_preview", True))
             except Exception:
-                inline_pref = False
+                inline_pref = True
+        else:
+            inline_pref = True
 
     if not inline_pref:
         return
 
-    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-
-    required_flags = [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-features=VizDisplayCompositor",
-    ]
-    existing = (os.getenv("QTWEBENGINE_CHROMIUM_FLAGS") or "").strip()
-    for flag in required_flags:
-        if flag not in existing:
-            existing = f"{existing} {flag}".strip()
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = existing
+    configure_linux_webengine_env(disable_env_var="SP_DISABLE_MERMAID_WEB_PREVIEW")
 
 
 _QWEBENGINE_VIEW_CLASS = None
@@ -91,6 +81,7 @@ from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import BackgroundRenderNotifier, ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
+from .webengine_env import configure_linux_webengine_env
 
 _LOGGING = log_enabled("diagrams")
 
@@ -125,6 +116,8 @@ def _inline_preview_preference_enabled() -> bool:
 
 def _should_use_web_preview() -> bool:
     if not _inline_preview_preference_enabled():
+        return False
+    if sys.platform.startswith("linux") and not _truthy_env("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE"):
         return False
     if _load_qwebengine_view_class() is None:
         return False
@@ -174,6 +167,25 @@ def _generate_error_svg(error_message: str, line_number: int = 0) -> str:
     return svg
 
 
+def _render_failure_details(result: object, error: object) -> str:
+    """Build the text shown in the Mermaid preview when rendering fails."""
+    if error is not None:
+        if isinstance(error, BaseException):
+            traceback_text = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            ).strip()
+            return traceback_text or str(error)
+        return str(error)
+
+    details = "Mermaid preview is unavailable."
+    if result and getattr(result, "error_message", ""):
+        details = str(result.error_message)
+    stderr = getattr(result, "stderr", "") if result else ""
+    if stderr and stderr != details:
+        details = f"{details}\n\nDetails:\n{stderr}"
+    return details
+
+
 class MermaidEditorWindow(QMainWindow):
     """Non-modal editor window for Mermaid diagrams with split editor/preview."""
 
@@ -185,9 +197,7 @@ class MermaidEditorWindow(QMainWindow):
 
         self.file_path = Path(file_path)
         self._on_save = on_save
-        self._external_browser_preview = (
-            sys.platform.startswith("linux") and not _inline_preview_preference_enabled()
-        )
+        self._external_browser_preview = not _inline_preview_preference_enabled()
         self._use_web_preview = _should_use_web_preview()
         if self._external_browser_preview:
             self._use_web_preview = False
@@ -253,7 +263,7 @@ class MermaidEditorWindow(QMainWindow):
         if self._external_browser_preview:
             self.auto_render_checkbox.setChecked(False)
             self.auto_render_checkbox.setEnabled(False)
-            self.auto_render_checkbox.setToolTip("Disabled in external browser preview mode")
+            self.auto_render_checkbox.setToolTip("Disabled when inline preview is off")
             self._auto_render_enabled = False
         editor_section.addWidget(self.auto_render_checkbox)
 
@@ -1569,7 +1579,7 @@ class MermaidEditorWindow(QMainWindow):
         )
 
     def _open_external_browser_preview(self, mermaid_text: str) -> None:
-        """Render Mermaid using browser runtime in the system browser."""
+        """Render Mermaid using browser runtime outside the main Qt process."""
         try:
             cache_dir = Path.home() / ".stillpoint_cache" / "mermaid_browser_preview"
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1584,8 +1594,8 @@ class MermaidEditorWindow(QMainWindow):
                 payload_js_url=payload_path.as_uri(),
             )
             html_path.write_text(html_doc, encoding="utf-8")
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(html_path)))
-            self.statusBar().showMessage("Opened Mermaid preview in browser", 3000)
+            self._open_browser_preview_url(html_path.as_uri())
+            self.statusBar().showMessage("Opened Mermaid preview", 3000)
             self._build_external_browser_payload_async(
                 token=token,
                 mermaid_text=mermaid_text,
@@ -1594,6 +1604,9 @@ class MermaidEditorWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Preview Error", f"Failed to open browser preview: {exc}")
             self.render_btn.setText("Render Failed")
+
+    def _open_browser_preview_url(self, url: str) -> None:
+        QDesktopServices.openUrl(QUrl(url))
 
     def _external_browser_png_scale(self) -> float:
         zoom = 1.0 + (self.preview_zoom_level * 0.1)
@@ -1651,7 +1664,7 @@ class MermaidEditorWindow(QMainWindow):
 
         try:
             if error is not None:
-                error_svg = _generate_error_svg(f"Mermaid render error\n\n{error}")
+                error_svg = _generate_error_svg(_render_failure_details(None, error))
                 self._last_svg = error_svg
                 self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
                 self._update_preview_display()
@@ -1673,12 +1686,7 @@ class MermaidEditorWindow(QMainWindow):
                 self.render_btn.setText("Render Failed")
                 return
 
-            details = "Mermaid preview is unavailable."
-            if result and getattr(result, "error_message", ""):
-                details = result.error_message
-            if result and getattr(result, "stderr", "") and result.stderr != details:
-                details = f"{details}\n\nDetails:\n{result.stderr[:500]}"
-            error_svg = _generate_error_svg(details)
+            error_svg = _generate_error_svg(_render_failure_details(result, None))
             self._last_svg = error_svg
             self.preview_pixmap = self._svg_to_pixmap(error_svg, background_color=preview_bg)
             self._update_preview_display()

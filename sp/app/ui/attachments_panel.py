@@ -65,6 +65,8 @@ class AttachmentsPanel(QWidget):
     plantumlEditorRequested = Signal(object)  # file_path or payload
     # Signal emitted when user wants to open a Mermaid diagram file in the Mermaid editor
     mermaidEditorRequested = Signal(object)  # file_path or payload
+    # Signal emitted when user wants to open an Excalidraw file in the Excalidraw editor
+    excalidrawEditorRequested = Signal(object)  # file_path or payload
     # Signal emitted when local attachment files changed on disk.
     attachmentsModified = Signal(str)
 
@@ -695,6 +697,10 @@ class AttachmentsPanel(QWidget):
                     if log_enabled("attachments_media"):
                         print(f"[Attachments] Double-click Mermaid -> open editor: {data}")
                     self.mermaidEditorRequested.emit(data)
+                elif file_path.suffix.lower() == ".excalidraw":
+                    if log_enabled("attachments_media"):
+                        print(f"[Attachments] Double-click Excalidraw -> open editor: {data}")
+                    self.excalidrawEditorRequested.emit(data)
                 else:
                     # Open with default system handler
                     if log_enabled("attachments_media"):
@@ -717,6 +723,9 @@ class AttachmentsPanel(QWidget):
 
         add_mermaid_action = menu.addAction("Add new Mermaid...")
         add_mermaid_action.triggered.connect(self._create_new_mermaid)
+
+        add_excalidraw_action = menu.addAction("Add new Excalidraw...")
+        add_excalidraw_action.triggered.connect(self._create_new_excalidraw)
 
         delete_action = menu.addAction("Delete")
         delete_action.setEnabled(bool(selected))
@@ -890,6 +899,59 @@ class AttachmentsPanel(QWidget):
             self.attachmentsModified.emit("mermaid created")
         except Exception as exc:
             from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+
+    def _create_new_excalidraw(self) -> None:
+        """Create a new .excalidraw file in the attachments folder."""
+        if not self.current_page_path:
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "New Excalidraw Drawing",
+            "Enter drawing name (without .excalidraw extension):",
+            text="drawing",
+        )
+
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        if not name.lower().endswith(".excalidraw"):
+            name = name + ".excalidraw"
+
+        if self._remote_mode:
+            QMessageBox.information(
+                self,
+                "Local Only",
+                "Excalidraw editing is local-vault only for now.",
+            )
+            return
+
+        page_folder = self.current_page_path.parent
+        if not page_folder.exists() or not page_folder.is_dir():
+            return
+
+        file_path = page_folder / name
+        if file_path.exists():
+            QMessageBox.warning(self, "File Exists", f"File {name} already exists.")
+            return
+
+        template = """{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "stillpoint",
+  "elements": [],
+  "appState": {},
+  "files": {}
+}
+"""
+        try:
+            file_path.write_text(template, encoding="utf-8")
+            self._refresh_attachments()
+            self.excalidrawEditorRequested.emit(str(file_path))
+            self.attachmentsModified.emit("excalidraw created")
+        except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
 
     def _open_terminal_here(self) -> None:

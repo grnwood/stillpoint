@@ -1166,12 +1166,14 @@ def save_mermaid_enabled(enabled: bool) -> None:
 def load_mermaid_inline_web_preview() -> bool:
     """Load Mermaid inline web preview preference.
 
-    Defaults to enabled on Windows, disabled on Linux/macOS.
+    Defaults to enabled. On Linux this opens the preview in StillPoint's
+    out-of-process WebEngine helper instead of embedding QtWebEngine in the
+    main process.
     """
     payload = _read_global_config()
     value = payload.get("mermaid_inline_web_preview")
     if value is None:
-        return platform.system().lower().startswith("win")
+        return True
     return bool(value)
 
 

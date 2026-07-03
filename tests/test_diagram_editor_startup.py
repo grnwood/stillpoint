@@ -3,11 +3,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QListWidgetItem, QInputDialog, QWidget
 
 from sp.app.mermaid_renderer import MermaidRenderer, RenderResult as MermaidRenderResult
 from sp.app.plantuml_renderer import RenderResult as PlantumlRenderResult
+from sp.app.ui.attachments_panel import AttachmentsPanel
+from sp.app.ui import excalidraw_window
+from sp.app.ui.excalidraw_window import ExcalidrawWindow
 from sp.app.ui import mermaid_editor_window
+from sp.app.ui import webengine_env
 from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
 from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
 
@@ -146,6 +152,185 @@ def test_mermaid_qwebengine_load_applies_linux_env_first(monkeypatch):
     assert calls == ["configure", "import"]
 
 
+def test_mermaid_linux_inline_uses_split_preview_without_webengine_import(monkeypatch):
+    imports: list[str] = []
+    monkeypatch.setattr(mermaid_editor_window.sys, "platform", "linux")
+    monkeypatch.setenv("SP_ENABLE_MERMAID_WEB_PREVIEW", "1")
+    monkeypatch.delenv("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE", raising=False)
+    monkeypatch.setattr(mermaid_editor_window, "_QWEBENGINE_VIEW_CLASS", None)
+    monkeypatch.setattr(mermaid_editor_window, "_QWEBENGINE_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "PySide6.QtWebEngineWidgets":
+            imports.append(name)
+            raise AssertionError("Mermaid should not import in-process WebEngine on Linux by default")
+        return original_import(name, globals, locals, fromlist, level)
+
+    original_import = __import__
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    assert mermaid_editor_window._should_use_web_preview() is False
+    assert imports == []
+
+
+def test_mermaid_inline_default_is_enabled(monkeypatch):
+    monkeypatch.setattr("sp.app.config._read_global_config", lambda: {})
+
+    assert mermaid_editor_window.config.load_mermaid_inline_web_preview() is True
+
+
+def test_mermaid_linux_constructor_uses_inline_preview_column(monkeypatch, tmp_path: Path):
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr(mermaid_editor_window.sys, "platform", "linux")
+    monkeypatch.setenv("SP_ENABLE_MERMAID_WEB_PREVIEW", "1")
+    monkeypatch.delenv("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE", raising=False)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window.config.load_mermaid_inline_web_preview", lambda: True)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False)
+    file_path = tmp_path / "sample.mmd"
+    file_path.write_text("flowchart TD\n  A --> B\n", encoding="utf-8")
+
+    window = MermaidEditorWindow(str(file_path))
+
+    assert window._external_browser_preview is False
+    assert window._use_web_preview is False
+    assert window.preview_web is None
+    assert window._vertical_splitter is not None
+    window.close()
+
+
+def test_excalidraw_attachment_double_click_emits_editor_request(qtbot, tmp_path: Path):
+    panel = AttachmentsPanel()
+    qtbot.addWidget(panel)
+    drawing = tmp_path / "sample.excalidraw"
+    drawing.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    item = QListWidgetItem("sample.excalidraw")
+    item.setData(Qt.UserRole, str(drawing))
+    requested: list[str] = []
+    panel.excalidrawEditorRequested.connect(requested.append)
+
+    panel._open_attachment(item)
+
+    assert requested == [str(drawing)]
+
+
+def test_create_new_excalidraw_attachment_creates_file_and_opens(qtbot, monkeypatch, tmp_path: Path):
+    page = tmp_path / "Page.md"
+    page.write_text("# Page\n", encoding="utf-8")
+    panel = AttachmentsPanel()
+    qtbot.addWidget(panel)
+    panel.current_page_path = page
+    requested: list[str] = []
+    panel.excalidrawEditorRequested.connect(requested.append)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("sketch", True))
+
+    panel._create_new_excalidraw()
+
+    drawing = tmp_path / "sketch.excalidraw"
+    assert drawing.exists()
+    assert '"type": "excalidraw"' in drawing.read_text(encoding="utf-8")
+    assert requested == [str(drawing)]
+
+
+def test_excalidraw_poc_window_loads_local_url(qapp, monkeypatch, tmp_path: Path):
+    loaded: list[str] = []
+
+    class FakeWebView(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+
+        def load(self, url):
+            loaded.append(url.toString())
+
+    monkeypatch.setattr(excalidraw_window, "_load_qwebengine_view_class", lambda: FakeWebView)
+    drawing = tmp_path / "sample.excalidraw"
+    drawing.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+
+    window = ExcalidrawWindow(str(drawing), base_url="http://127.0.0.1:4777")
+
+    assert loaded == ["http://127.0.0.1:4777/excalidraw/poc"]
+    window.close()
+
+
+def test_excalidraw_disable_flag_skips_webengine_import(monkeypatch):
+    imports: list[str] = []
+    monkeypatch.setenv("SP_DISABLE_EXCALIDRAW_WEBENGINE", "1")
+    monkeypatch.setattr(excalidraw_window, "_QWEBENGINE_VIEW_CLASS", None)
+    monkeypatch.setattr(excalidraw_window, "_QWEBENGINE_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "PySide6.QtWebEngineWidgets":
+            imports.append(name)
+            raise AssertionError("QtWebEngine should not be imported when disabled")
+        return original_import(name, globals, locals, fromlist, level)
+
+    original_import = __import__
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    assert excalidraw_window._load_qwebengine_view_class() is None
+    assert imports == []
+
+
+def test_webengine_safe_profile_sets_software_rendering(monkeypatch):
+    monkeypatch.setattr(webengine_env.sys, "platform", "linux")
+    for name in (
+        "SP_WEBENGINE_PROFILE",
+        "QT_OPENGL",
+        "QTWEBENGINE_DISABLE_SANDBOX",
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        "SP_WEBENGINE_EXTRA_FLAGS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    webengine_env.configure_linux_webengine_env()
+
+    assert os_environ("QT_OPENGL") == "software"
+    assert os_environ("QTWEBENGINE_DISABLE_SANDBOX") == "1"
+    flags = os_environ("QTWEBENGINE_CHROMIUM_FLAGS")
+    assert "--use-gl=swiftshader" not in flags
+    assert "--disable-vulkan" in flags
+    assert "--disable-gpu" in flags
+
+
+def test_webengine_xcb_profile_sets_platform(monkeypatch):
+    monkeypatch.setattr(webengine_env.sys, "platform", "linux")
+    monkeypatch.setenv("SP_WEBENGINE_PROFILE", "xcb")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+
+    webengine_env.configure_linux_webengine_env()
+
+    assert os_environ("QT_QPA_PLATFORM") == "xcb"
+    assert "--no-sandbox" in os_environ("QTWEBENGINE_CHROMIUM_FLAGS")
+
+
+def test_webengine_swiftshader_profile_does_not_disable_gpu(monkeypatch):
+    monkeypatch.setattr(webengine_env.sys, "platform", "linux")
+    monkeypatch.setenv("SP_WEBENGINE_PROFILE", "swiftshader")
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+
+    webengine_env.configure_linux_webengine_env()
+
+    flags = os_environ("QTWEBENGINE_CHROMIUM_FLAGS")
+    assert "--use-gl=swiftshader" in flags
+    assert "--disable-gpu" not in flags
+
+
+def os_environ(name: str) -> str:
+    import os
+
+    return os.getenv(name, "")
+
+
+def test_excalidraw_poc_route_serves_minimal_local_page():
+    from sp.server.api import excalidraw_poc
+
+    response = excalidraw_poc()
+    content = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "StillPoint Excalidraw POC" in content
+    assert "foxnews" not in content.lower()
+
+
 def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp_path: Path):
     _patch_common_editor_deps(monkeypatch)
     monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: False)
@@ -170,6 +355,28 @@ def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp
     assert "const payloadJsUrl = \"\";" in html
     assert "const serializer = new XMLSerializer();" in html
 
+    window.close()
+
+
+def test_mermaid_browser_preview_uses_system_browser_when_inline_disabled(monkeypatch, tmp_path: Path):
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window.sys.platform", "linux")
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: False)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False)
+    opened: list[str] = []
+
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window.QDesktopServices.openUrl",
+        lambda url: opened.append(url.toString()),
+    )
+    file_path = tmp_path / "sample.mmd"
+    file_path.write_text("flowchart TD\n  A --> B\n", encoding="utf-8")
+
+    window = MermaidEditorWindow(str(file_path))
+    window._open_browser_preview_url("file:///tmp/preview.html")
+
+    assert opened == ["file:///tmp/preview.html"]
+    assert window._external_browser_preview is True
     window.close()
 
 
@@ -227,3 +434,104 @@ def test_prepare_svg_for_export_replaces_foreignobject_labels_with_svg_text():
     assert "<text" in exported
     assert "Hello" in exported
     assert "World" in exported
+
+
+def test_prepare_mermaid_text_strips_styling_directives_and_html_breaks():
+    renderer = MermaidRenderer()
+    source = (
+        "flowchart TD\n"
+        "    A[Line 1<br/>Line 2] --> B[End]\n"
+        "    classDef accent fill:#f00,stroke:#000\n"
+        "    class A accent\n"
+        "    style A fill:#fff,stroke:#333\n"
+        "    linkStyle 0 stroke:#999\n"
+    )
+
+    prepared = renderer._prepare_mermaid_text(source)
+
+    assert "classDef" not in prepared
+    assert "class A accent" not in prepared
+    assert "style A" not in prepared
+    assert "linkStyle" not in prepared
+    assert "Line 1\\nLine 2" in prepared
+
+
+def test_qtsvg_normalization_converts_mindmap_foreignobject_labels():
+    renderer = MermaidRenderer()
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:html="http://www.w3.org/1999/xhtml" id="my-svg">'
+        '<style>#my-svg .section-root text{fill:#333;}#my-svg .mindmap-node-label{dy:1em;}</style>'
+        '<g class="node mindmap-node section-root" transform="translate(100, 80)">'
+        '<circle r="43.5" cx="0" cy="0" />'
+        '<g class="label" transform="translate(-33.5, -12)">'
+        '<rect />'
+        '<foreignObject width="67" height="24">'
+        '<html:div><html:span class="nodeLabel"><html:p>StillPoint</html:p></html:span></html:div>'
+        '</foreignObject>'
+        '</g>'
+        '</g>'
+        '</svg>'
+    )
+
+    normalized = renderer._normalize_svg_for_qtsvg(source)
+
+    assert "<foreignObject" not in normalized
+    assert "<text" in normalized
+    assert "StillPoint" in normalized
+    assert "fill=\"#24292F\"" in normalized
+
+
+def test_qtsvg_css_inliner_preserves_specific_sequence_line_strokes():
+    renderer = MermaidRenderer()
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" id="my-svg">'
+        '<style>'
+        '#my-svg .messageLine0{stroke-width:1.5;stroke:#333;}'
+        '#my-svg line{stroke:hsl(0, 0%, 83%);stroke-width:2px;}'
+        '</style>'
+        '<line x1="1" y1="2" x2="20" y2="2" class="messageLine0" />'
+        '</svg>'
+    )
+
+    normalized = renderer._normalize_svg_for_qtsvg(source)
+
+    assert 'class="messageLine0"' in normalized
+    assert 'stroke="#333"' in normalized
+
+
+def test_qtsvg_normalization_converts_css_color_functions():
+    renderer = MermaidRenderer()
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" id="my-svg">'
+        '<path class="row-rect-even" fill="hsl(240, 100%, 97.2745098039%)" '
+        'stroke="rgb(0,0,0,0.5)" style="fill: hsl(240, 100%, 100%); stroke: hsl(0, 0%, 83%);" />'
+        '</svg>'
+    )
+
+    normalized = renderer._normalize_svg_for_qtsvg(source)
+
+    assert "hsl(" not in normalized
+    assert "rgb(" not in normalized
+    assert 'fill="#F1F1FF"' in normalized
+    assert "stroke: #D4D4D4" in normalized
+
+
+def test_render_failure_details_includes_stderr_and_traceback():
+    result = MermaidRenderResult(
+        success=False,
+        error_message="Mermaid render error (exit 1)",
+        stderr="stderr line 1\nstderr line 2",
+    )
+
+    details = mermaid_editor_window._render_failure_details(result, None)
+    assert "Mermaid render error (exit 1)" in details
+    assert "stderr line 1" in details
+    assert "stderr line 2" in details
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        traceback_details = mermaid_editor_window._render_failure_details(None, exc)
+
+    assert "RuntimeError" in traceback_details
+    assert "boom" in traceback_details

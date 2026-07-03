@@ -2679,6 +2679,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             print(f"[MainWindow] Failed to connect Mermaid editor signal: {exc}")
         try:
+            self.right_panel.attachments_panel.excalidrawEditorRequested.connect(self._open_excalidraw_editor)
+            if log_enabled("startup"):
+                print("[MainWindow] Connected Excalidraw editor request signal")
+        except Exception as exc:
+            print(f"[MainWindow] Failed to connect Excalidraw editor signal: {exc}")
+        try:
             self.right_panel.attachments_panel.attachmentsModified.connect(self._on_local_attachment_changed)
         except Exception:
             pass
@@ -16323,6 +16329,42 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._alert(f"Failed to open Mermaid editor: {exc}")
 
+    def _open_excalidraw_editor(self, file_path) -> None:
+        """Open an Excalidraw POC window for the given .excalidraw file."""
+        if not file_path:
+            return
+        try:
+            from .excalidraw_window import POC_PATH
+            from .webengine_env import env_truthy
+
+            url = f"{self.api_base.rstrip('/')}{POC_PATH}"
+            if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):
+                QDesktopServices.openUrl(QUrl(url))
+                return
+            title = f"Excalidraw POC - {Path(str(file_path)).name}"
+            cmd = [
+                sys.executable,
+                "-m",
+                "sp.app.excalidraw_webview_process",
+                "--url",
+                url,
+                "--title",
+                title,
+            ]
+            env = os.environ.copy()
+            env.setdefault("SP_WEBENGINE_PROFILE", os.getenv("SP_WEBENGINE_PROFILE", "safe"))
+            process = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[3]), env=env)
+            if not hasattr(self, "_excalidraw_processes"):
+                self._excalidraw_processes: list[subprocess.Popen] = []
+            self._excalidraw_processes.append(process)
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(
+                    lambda p=process: p.terminate() if p.poll() is None else None
+                )
+        except Exception as exc:
+            self._alert(f"Failed to open Excalidraw editor: {exc}")
+
     def _open_remote_mermaid_editor(self, remote_path: str, page_key: Optional[str]) -> None:
         if not remote_path:
             return
@@ -17304,6 +17346,9 @@ class MainWindow(QMainWindow):
                 return True
             if candidate.suffix.lower() in {".mmd", ".mermaid"}:
                 self._open_mermaid_editor(candidate)
+                return True
+            if candidate.suffix.lower() == ".excalidraw":
+                self._open_excalidraw_editor(candidate)
                 return True
         except Exception:
             pass

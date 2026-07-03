@@ -1973,6 +1973,47 @@ def file_raw(path: str) -> FileResponse:
     return FileResponse(target)
 
 
+@app.get("/excalidraw/poc")
+def excalidraw_poc() -> HTMLResponse:
+    html = """<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>StillPoint Excalidraw POC</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: system-ui, sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      main {
+        width: min(720px, calc(100vw - 48px));
+        border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+        border-radius: 8px;
+        padding: 24px;
+      }
+      h1 { margin: 0 0 10px; font-size: 24px; }
+      p { margin: 0; line-height: 1.45; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>StillPoint Excalidraw POC</h1>
+      <p>Local Qt WebEngine smoke page loaded from <code>/excalidraw/poc</code>.</p>
+    </main>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=html, status_code=200)
+
+
 @app.get("/print/{path:path}")
 async def print_page(
     request: Request,

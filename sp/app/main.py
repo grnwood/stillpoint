@@ -23,6 +23,7 @@ from sp.app import eventloop_diag
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
+from sp.app.ui.webengine_env import configure_linux_webengine_env
 
 
 # ============================================================================
@@ -895,6 +896,7 @@ def main() -> None:
         _run_webserver_mode(args)
         return
 
+    configure_linux_webengine_env()
     try:
         QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     except Exception:

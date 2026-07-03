@@ -44,7 +44,7 @@ class MermaidRenderer:
 
     _DEFAULT_FONT_STACK = "Arial,Helvetica,'DejaVu Sans','Noto Sans',sans-serif"
     _LINUX_FONT_FAMILY_REPLACEMENT = "'DejaVu Sans','Noto Sans',Arial,Helvetica,sans-serif"
-    _RENDER_PIPELINE_VERSION = "3"
+    _RENDER_PIPELINE_VERSION = "7"
     _QTSVG_TEXT_OVERRIDE = (
         "<style id=\"stillpoint-qtsvg-fixes\">"
         "#my-svg text,#my-svg tspan,text,tspan{"
@@ -408,13 +408,36 @@ class MermaidRenderer:
     def _prepare_mermaid_text(self, mermaid_text: str) -> str:
         """Normalize Mermaid source to improve Linux font fallback in headless Chromium."""
         if not os.name == "posix":
-            return mermaid_text
+            return self._strip_mermaid_styling(mermaid_text)
         if not mermaid_text:
             return mermaid_text
-        return mermaid_text.replace(
+        return self._strip_mermaid_styling(mermaid_text).replace(
             "ui-sans-serif,system-ui",
             self._LINUX_FONT_FAMILY_REPLACEMENT,
         )
+
+    def _strip_mermaid_styling(self, mermaid_text: str) -> str:
+        """Remove Mermaid styling directives and HTML label breaks from source text."""
+        if not mermaid_text:
+            return mermaid_text
+
+        trailing_newline = mermaid_text.endswith("\n")
+        cleaned_lines: list[str] = []
+        for line in mermaid_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                cleaned_lines.append(line)
+                continue
+            if re.match(r"^%%\{.*\}%%$", stripped):
+                continue
+            if re.match(r"^(?:classDef|class|style|linkStyle|themeCSS|themeVariables|theme)\b", stripped):
+                continue
+            cleaned_lines.append(re.sub(r"<br\s*/?>", r"\\n", line, flags=re.IGNORECASE))
+
+        cleaned_text = "\n".join(cleaned_lines)
+        if trailing_newline:
+            cleaned_text += "\n"
+        return cleaned_text
 
     def _normalize_svg_for_qtsvg(self, svg_content: str) -> str:
         """Normalize Mermaid SVG for QtSvg compatibility in fallback preview mode."""
@@ -422,10 +445,13 @@ class MermaidRenderer:
             return svg_content
 
         normalized = self._inline_class_styles_for_qtsvg(svg_content)
+        normalized = self.prepare_svg_for_export(normalized)
+        normalized = self._normalize_colors_for_qtsvg(normalized)
 
-        # QtSvg can render black placeholder boxes for foreignObject-heavy labels.
+        # QtSvg cannot render HTML foreignObject labels; drop any leftovers after
+        # the best-effort conversion above.
         normalized = re.sub(
-            r"<foreignObject\\b[\\s\\S]*?</foreignObject>",
+            r"<foreignObject\b[\s\S]*?</foreignObject>",
             "",
             normalized,
             flags=re.IGNORECASE,
@@ -434,7 +460,7 @@ class MermaidRenderer:
         # Strip CSS features that QtSvg may not parse reliably.
         normalized = normalized.replace("position:absolute;", "")
         normalized = re.sub(r"box-shadow:[^;]+;", "", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"filter:drop-shadow\\([^)]*\\);", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"filter:drop-shadow\([^)]*\);", "", normalized, flags=re.IGNORECASE)
 
         # Enforce a known-good text style for labels.
         if "stillpoint-qtsvg-fixes" not in normalized:
@@ -444,6 +470,126 @@ class MermaidRenderer:
                 normalized = normalized + self._QTSVG_TEXT_OVERRIDE
 
         return normalized
+
+    def _normalize_colors_for_qtsvg(self, svg_content: str) -> str:
+        """Convert CSS color functions to plain SVG colors QtSvg can render."""
+        try:
+            ET.register_namespace("", self._SVG_NS)
+            ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+            root = ET.fromstring(svg_content)
+        except Exception:
+            return svg_content
+
+        color_attrs = {"fill", "stroke", "color"}
+        for elem in root.iter():
+            if self._local_name(elem.tag) == "style" and elem.text:
+                elem.text = self._normalize_css_colors_for_qtsvg(elem.text)
+            for attr in color_attrs:
+                value = elem.attrib.get(attr)
+                if value:
+                    elem.set(attr, self._normalize_qtsvg_color_value(value))
+            style_attr = elem.attrib.get("style")
+            if style_attr:
+                elem.set("style", self._normalize_style_colors_for_qtsvg(style_attr))
+
+        try:
+            return ET.tostring(root, encoding="unicode")
+        except Exception:
+            return svg_content
+
+    def _normalize_style_colors_for_qtsvg(self, style_attr: str) -> str:
+        parts: list[str] = []
+        for item in style_attr.split(";"):
+            if ":" not in item:
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            prop, value = item.split(":", 1)
+            prop_name = prop.strip()
+            normalized = self._normalize_qtsvg_color_value(value.strip())
+            parts.append(f"{prop_name}: {normalized}")
+        return "; ".join(parts)
+
+    def _normalize_css_colors_for_qtsvg(self, css_text: str) -> str:
+        text = re.sub(
+            r"hsla?\(\s*[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?%\s*,\s*[-+]?\d+(?:\.\d+)?%(?:\s*,\s*[-+]?\d+(?:\.\d+)?)?\s*\)",
+            lambda match: self._normalize_qtsvg_color_value(match.group(0)),
+            css_text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"rgba?\(\s*[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?(?:\s*,\s*[-+]?\d+(?:\.\d+)?)?\s*\)",
+            lambda match: self._normalize_qtsvg_color_value(match.group(0)),
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text
+
+    def _normalize_qtsvg_color_value(self, value: str) -> str:
+        text = (value or "").strip()
+        lower = text.lower()
+        if lower in {"transparent", "rgba(0, 0, 0, 0)", "rgba(0,0,0,0)"}:
+            return "none"
+        converted = self._convert_hsl_color(text)
+        if converted:
+            return converted
+        converted = self._convert_rgb_color(text)
+        if converted:
+            return converted
+        return text
+
+    @staticmethod
+    def _convert_hsl_color(value: str) -> Optional[str]:
+        match = re.fullmatch(
+            r"hsla?\(\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)%\s*,\s*([-+]?\d+(?:\.\d+)?)%(?:\s*,\s*([-+]?\d+(?:\.\d+)?))?\s*\)",
+            value.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        hue = float(match.group(1)) % 360.0
+        sat = max(0.0, min(100.0, float(match.group(2)))) / 100.0
+        light = max(0.0, min(100.0, float(match.group(3)))) / 100.0
+        alpha = match.group(4)
+        if alpha is not None and float(alpha) <= 0:
+            return "none"
+        chroma = (1 - abs(2 * light - 1)) * sat
+        h_prime = hue / 60.0
+        x_val = chroma * (1 - abs((h_prime % 2) - 1))
+        if 0 <= h_prime < 1:
+            r1, g1, b1 = chroma, x_val, 0
+        elif 1 <= h_prime < 2:
+            r1, g1, b1 = x_val, chroma, 0
+        elif 2 <= h_prime < 3:
+            r1, g1, b1 = 0, chroma, x_val
+        elif 3 <= h_prime < 4:
+            r1, g1, b1 = 0, x_val, chroma
+        elif 4 <= h_prime < 5:
+            r1, g1, b1 = x_val, 0, chroma
+        else:
+            r1, g1, b1 = chroma, 0, x_val
+        m_val = light - chroma / 2
+        r = round((r1 + m_val) * 255)
+        g = round((g1 + m_val) * 255)
+        b = round((b1 + m_val) * 255)
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    @staticmethod
+    def _convert_rgb_color(value: str) -> Optional[str]:
+        match = re.fullmatch(
+            r"rgba?\(\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)(?:\s*,\s*([-+]?\d+(?:\.\d+)?))?\s*\)",
+            value.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        alpha = match.group(4)
+        if alpha is not None and float(alpha) <= 0:
+            return "none"
+        r = max(0, min(255, round(float(match.group(1)))))
+        g = max(0, min(255, round(float(match.group(2)))))
+        b = max(0, min(255, round(float(match.group(3)))))
+        return f"#{r:02X}{g:02X}{b:02X}"
 
     def prepare_svg_for_export(self, svg_content: str) -> str:
         """Convert browser-oriented Mermaid SVG into an editor-friendly standalone SVG."""
@@ -526,7 +672,8 @@ class MermaidRenderer:
         text_elem.set("dominant-baseline", "middle")
         text_elem.set("fill", "#24292F")
         text_elem.set("font-family", "Arial,Helvetica,'DejaVu Sans','Noto Sans',sans-serif")
-        text_elem.set("font-size", "14")
+        text_elem.set("font-size", f"{self._estimate_svg_text_font_size(height, len(lines)):.3f}")
+        text_elem.set("xml:space", "preserve")
 
         baseline_offset = (len(lines) - 1) * 0.6
         for idx, line in enumerate(lines):
@@ -538,6 +685,15 @@ class MermaidRenderer:
                 tspan.set("dy", "1.2em")
             tspan.text = line
         return text_elem
+
+    @staticmethod
+    def _estimate_svg_text_font_size(height: float, line_count: int) -> float:
+        """Estimate a readable font size for exported SVG text nodes."""
+        if height <= 0:
+            return 14.0
+        line_count = max(1, line_count)
+        estimated = height / (line_count * 1.35)
+        return max(10.0, min(14.0, estimated))
 
     def _inline_class_styles_for_qtsvg(self, svg_content: str) -> str:
         """Inline selected Mermaid CSS rules so QtSvg applies diagram styling reliably."""
@@ -559,6 +715,13 @@ class MermaidRenderer:
         rules = self._parse_css_rules("\n".join(style_blocks))
         if not rules:
             return svg_content
+        rules = sorted(
+            rules,
+            key=lambda rule: (
+                rule.get("specificity", (0, 0, 0)),
+                int(rule.get("order", 0)),
+            ),
+        )
 
         for elem in root.iter():
             for rule in rules:
@@ -599,7 +762,7 @@ class MermaidRenderer:
             "text-anchor",
         }
         rules: list[dict[str, object]] = []
-        for match in re.finditer(r"([^{}]+)\{([^{}]+)\}", css_text):
+        for order, match in enumerate(re.finditer(r"([^{}]+)\{([^{}]+)\}", css_text)):
             raw_selector = match.group(1).strip()
             if raw_selector.startswith("@"):
                 continue
@@ -622,6 +785,8 @@ class MermaidRenderer:
                 if parsed is None:
                     continue
                 parsed["decl"] = decl_map
+                parsed["specificity"] = self._selector_specificity(selector)
+                parsed["order"] = order
                 rules.append(parsed)
         return rules
 
@@ -657,6 +822,20 @@ class MermaidRenderer:
             "parent_class": parent_class,
             "child_tag": child_tag,
         }
+
+    @staticmethod
+    def _selector_specificity(selector: str) -> tuple[int, int, int]:
+        text = selector.split(":", 1)[0]
+        id_count = len(re.findall(r"#[A-Za-z_][\w-]*", text))
+        class_count = len(re.findall(r"\.[A-Za-z_][\w-]*", text))
+        stripped = re.sub(r"#[A-Za-z_][\w-]*", " ", text)
+        stripped = re.sub(r"\.[A-Za-z_][\w-]*", " ", stripped)
+        element_count = 0
+        for token in re.split(r"[\s>+~]+", stripped):
+            token = token.strip()
+            if token and token != "*":
+                element_count += 1
+        return id_count, class_count, element_count
 
     def _matches_rule(self, elem: ET.Element, rule: dict[str, object]) -> bool:
         parent_tag = rule.get("parent_tag")
