@@ -2825,18 +2825,15 @@ class MainWindow(QMainWindow):
 
         # Create history bar (separate row for history buttons)
         self.history_bar = QWidget()
+        self.history_bar.setObjectName("historyBar")
         self.history_bar.setMaximumHeight(40)
-        self.history_bar.setStyleSheet(
-            "border-top: 1px solid "
-            f"{theme_value('main_window.history.border', '#555555')};"
-        )
         history_bar_layout = QHBoxLayout(self.history_bar)
         history_bar_layout.setContentsMargins(5, 2, 5, 2)
         history_bar_layout.setSpacing(4)
         
         # Add history buttons container
         self.history_strip = QWidget()
-        self.history_strip.setStyleSheet("")  # Clear any inherited styles
+        self.history_strip.setObjectName("historyStrip")
         self.history_strip.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.history_strip.setMinimumWidth(1)
         self.history_layout = QHBoxLayout(self.history_strip)
@@ -2866,6 +2863,7 @@ class MainWindow(QMainWindow):
         self.history_scroll_right.clicked.connect(lambda: self._scroll_history(180))
 
         self.history_container = QWidget()
+        self.history_container.setObjectName("historyContainer")
         self.history_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.history_container.setMinimumHeight(self.history_bar.maximumHeight())
         self.history_container.setMaximumHeight(self.history_bar.maximumHeight())
@@ -3603,6 +3601,7 @@ class MainWindow(QMainWindow):
 
         # Add bookmark display area with horizontal scroll controls
         self.bookmark_strip = QWidget()
+        self.bookmark_strip.setObjectName("bookmarkStrip")
         self.bookmark_layout = QHBoxLayout(self.bookmark_strip)
         self.bookmark_layout.setContentsMargins(0, 0, 0, 0)
         self.bookmark_layout.setSpacing(4)
@@ -3652,6 +3651,7 @@ class MainWindow(QMainWindow):
         self.bookmark_scroll_area.installEventFilter(self)
         self.toolbar.installEventFilter(self)
         self._update_bookmark_scroll_buttons()
+        self._apply_top_nav_container_styles()
         
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
@@ -9144,6 +9144,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self._apply_top_nav_container_styles()
+        except Exception:
+            pass
+        try:
             filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
             filter_active_border = filter_active.name()
             filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 48)"
@@ -10032,10 +10036,83 @@ class MainWindow(QMainWindow):
         hover_bg = self._hover_bg_for_accent(vault_accent, hover_fallback) if vault_accent else hover_fallback
         return f"QPushButton:hover {{ border-color: {hover_border}; background: {hover_bg}; }}"
 
+    def _top_nav_normal_button_colors(self, section: str) -> tuple[str, str]:
+        palette = self.palette()
+        bg_default = palette.color(QPalette.ColorRole.Button).name()
+        text_default = palette.color(QPalette.ColorRole.ButtonText).name()
+        bg = theme_value(f"main_window.{section}.button_bg", None)
+        if bg is None and section == "bookmark":
+            bg = theme_value("main_window.bookmark.normal_bg", None)
+        text = theme_value(f"main_window.{section}.button_text", None)
+        if text is None and section == "bookmark":
+            text = theme_value("main_window.bookmark.normal_text", None)
+        return str(bg or bg_default), str(text or text_default)
+
+    @staticmethod
+    def _top_nav_border_for_background(border: str, background: str) -> str:
+        border_color = QColor(str(border))
+        bg_color = QColor(str(background))
+        if not border_color.isValid() or not bg_color.isValid():
+            return str(border)
+        if bg_color.lightness() < 128 and border_color.lightness() > 170:
+            return bg_color.lighter(230).name()
+        return str(border)
+
+    @staticmethod
+    def _prepare_top_nav_chicklet(btn: QPushButton, kind: str) -> None:
+        btn.setFlat(True)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setProperty("topNavChicklet", "true")
+        btn.setProperty("topNavChickletKind", kind)
+        try:
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        except Exception:
+            pass
+
+    def _apply_top_nav_container_styles(self) -> None:
+        palette = self.palette()
+        bg = str(theme_value("main_window.top_nav.bg", palette.color(QPalette.ColorRole.Window).name()))
+        history_border = str(theme_value("main_window.history.border", theme_value("main_window.tree.header_border", "#555555")))
+        history_border = self._top_nav_border_for_background(history_border, bg)
+
+        if getattr(self, "history_bar", None):
+            self.history_bar.setStyleSheet(
+                "QWidget#historyBar { "
+                f"background: {bg}; "
+                f"border-top: 1px solid {history_border}; "
+                "border-left: none; border-right: none; border-bottom: none; "
+                "}"
+            )
+        for widget, selector in (
+            (getattr(self, "history_container", None), "QWidget#historyContainer"),
+            (getattr(self, "history_strip", None), "QWidget#historyStrip"),
+            (getattr(self, "bookmark_container", None), "QWidget#bookmarkContainer"),
+            (getattr(self, "bookmark_strip", None), "QWidget#bookmarkStrip"),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.setStyleSheet(f"{selector} {{ background: transparent; border: none; }}")
+            except Exception:
+                pass
+        for area, selector in (
+            (getattr(self, "history_scroll_area", None), "QScrollArea#historyScrollArea"),
+            (getattr(self, "bookmark_scroll_area", None), "QScrollArea#bookmarkScrollArea"),
+        ):
+            if area is None:
+                continue
+            try:
+                area.setStyleSheet(f"{selector} {{ background: transparent; border: none; }}")
+            except Exception:
+                pass
+
     def _apply_bookmark_button_style(self, btn: QPushButton, bookmark_path: str) -> None:
+        self._prepare_top_nav_chicklet(btn, "bookmark")
         is_active = bool(self.current_path and bookmark_path == self.current_path)
         is_filtered = self._bookmark_matches_nav_filter(bookmark_path)
         vault_accent = getattr(self, "_vault_accent_color", None)
+        normal_bg, normal_text = self._top_nav_normal_button_colors("bookmark")
         active_border = (
             vault_accent
             if vault_accent
@@ -10057,10 +10134,14 @@ class MainWindow(QMainWindow):
         filtered_bg = theme_value("main_window.bookmark.filtered_bg", filtered_border)
         filtered_text = theme_value("main_window.bookmark.filtered_text", "#ffffff")
         normal_border = theme_value("main_window.bookmark.normal_border", "#555555")
+        normal_border = self._top_nav_border_for_background(str(normal_border), normal_bg)
         border_color = filtered_border if is_filtered else (active_border if is_active else normal_border)
         style = (
-            f"QPushButton {{ border: 1px solid {border_color}; "
-            "padding: 2px 6px; border-radius: 3px;"
+            "QPushButton[topNavChicklet=\"true\"] { "
+            "border-width: 1px; border-style: solid; "
+            f"border-color: {border_color}; "
+            f"background: {normal_bg}; color: {normal_text}; "
+            "padding: 2px 6px; border-radius: 3px; outline: 0px;"
         )
         if is_filtered:
             style += f" background: {filtered_bg}; color: {filtered_text};"
@@ -10072,8 +10153,11 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(style)
 
     def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
+        self._prepare_top_nav_chicklet(btn, "history")
         is_active = bool(self.current_path and history_path == self.current_path)
+        normal_bg, normal_text = self._top_nav_normal_button_colors("history")
         normal_border = theme_value("main_window.history.button_border", "#555555")
+        normal_border = self._top_nav_border_for_background(str(normal_border), normal_bg)
         vault_accent = getattr(self, "_vault_accent_color", None)
         active_border = (
             vault_accent
@@ -10094,8 +10178,11 @@ class MainWindow(QMainWindow):
             active_text = theme_value("main_window.history.active_text", "palette(highlighted-text)")
         border_color = active_border if is_active else normal_border
         style = (
-            f"QPushButton {{ border: 1px solid {border_color}; "
-            "padding: 2px 6px; border-radius: 3px;"
+            "QPushButton[topNavChicklet=\"true\"] { "
+            "border-width: 1px; border-style: solid; "
+            f"border-color: {border_color}; "
+            f"background: {normal_bg}; color: {normal_text}; "
+            "padding: 2px 6px; border-radius: 3px; outline: 0px;"
         )
         if is_active:
             style += f" background: {active_bg}; color: {active_text};"
@@ -15191,6 +15278,11 @@ class MainWindow(QMainWindow):
             self._suspend_autosave = False
         try:
             self.editor.document().setModified(True)
+        except Exception:
+            pass
+        try:
+            self.right_panel.refresh_map(self.current_path)
+            self._refresh_detached_map_panels(self.current_path)
         except Exception:
             pass
         scroll_path = self.current_path

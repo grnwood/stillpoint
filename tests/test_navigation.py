@@ -197,6 +197,34 @@ class TestHistoryNavigation:
         assert "QPushButton:hover" in history_style
         assert "#3B82F6" in history_style
 
+    def test_top_nav_chicklets_include_theme_normal_colors(self, main_window):
+        main_window.bookmarks = ["/PageA/PageA.md"]
+        main_window.page_history = ["/PageB/PageB.md"]
+
+        main_window._refresh_bookmark_buttons()
+        main_window._refresh_history_buttons()
+
+        bookmark_style = next(iter(main_window.bookmark_buttons.values())).styleSheet()
+        history_style = main_window.history_buttons[0].styleSheet()
+
+        assert "background:" in bookmark_style
+        assert "color:" in bookmark_style
+        assert "border-color:" in bookmark_style
+        assert next(iter(main_window.bookmark_buttons.values())).property("topNavChicklet") == "true"
+        assert "background:" in history_style
+        assert "color:" in history_style
+        assert "border-color:" in history_style
+        assert main_window.history_buttons[0].property("topNavChicklet") == "true"
+
+        main_window._apply_top_nav_container_styles()
+        assert "QWidget#historyBar" in main_window.history_bar.styleSheet()
+        assert "border-top:" in main_window.history_bar.styleSheet()
+
+    def test_top_nav_chicklet_border_adapts_when_light_global_border_meets_dark_vault_bg(self):
+        border = MainWindow._top_nav_border_for_background("#e5e7eb", "#161c24")
+
+        assert border != "#e5e7eb"
+
     def test_recent_history_uses_scroll_arrows_instead_of_button_shrinking(self, main_window):
         main_window.page_history = [f"/Page{idx}/Page{idx}.md" for idx in range(1, 10)]
 

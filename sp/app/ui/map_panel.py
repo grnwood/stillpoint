@@ -195,6 +195,27 @@ class _MapContentTooltip(QFrame):
             "}"
         )
 
+    def apply_theme_palette(self, palette: QPalette) -> None:
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+        self._editor.setPalette(palette)
+        self._editor.setAutoFillBackground(True)
+        bg = palette.color(QPalette.Base).name()
+        text = palette.color(QPalette.Text).name()
+        border = palette.color(QPalette.Mid).name()
+        self.setStyleSheet(
+            "#mapContentTooltip {"
+            f"background: {bg};"
+            f"border: 2px solid {border};"
+            "border-radius: 6px;"
+            "}"
+            "#mapContentTooltip QTextEdit {"
+            f"background: {bg};"
+            f"color: {text};"
+            "border: none;"
+            "}"
+        )
+
     def set_pinned(self, pinned: bool) -> None:
         if pinned == self._is_pinned:
             if log_enabled("ui_state"):
@@ -390,9 +411,7 @@ class _MapContentTooltip(QFrame):
                     event.accept()
                     return True
                 if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
-                    self.page_forward()
-                    event.accept()
-                    return True
+                    return self._dismiss_key(event)
             except Exception:
                 pass
         if obj is self._editor and event.type() == QEvent.ContextMenu:
@@ -449,8 +468,7 @@ class _MapContentTooltip(QFrame):
             event.accept()
             return
         if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
-            self.page_forward()
-            event.accept()
+            self._dismiss_key(event)
             return
         super().keyPressEvent(event)
 
@@ -807,6 +825,7 @@ class MapPanel(QWidget):
         self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
         self.preview_label.setStyleSheet(f"background: {colors['canvas']};")
         self.scroll_area.setStyleSheet(f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {colors['canvas']}; border: none; }}")
+        self._content_tooltip.apply_theme_palette(self._editor_theme_palette())
         modal_border = colors["selected_stroke"]
         modal_fill = QColor(colors["selected_stroke"])
         modal_fill.setAlpha(28)
@@ -2547,6 +2566,11 @@ class MapPanel(QWidget):
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
             return True
+        if key == Qt.Key_Space and mods == Qt.ControlModifier:
+            self._tooltip_debug_log("selected_popup_keypress:ctrl_space")
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return True
         if key in (Qt.Key_Left, Qt.Key_Right) and mods == Qt.NoModifier:
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
@@ -2584,10 +2608,6 @@ class MapPanel(QWidget):
                 self._content_tooltip.page_forward()
             else:
                 self._content_tooltip.page_backward()
-            return True
-        if key == Qt.Key_Space and mods == Qt.ControlModifier:
-            self._tooltip_debug_log("selected_popup_keypress:ctrl_space")
-            self._content_tooltip.page_forward()
             return True
         if key in (Qt.Key_PageDown, Qt.Key_Space) and mods == Qt.NoModifier:
             self._content_tooltip.page_forward()
@@ -3014,7 +3034,7 @@ class MapPanel(QWidget):
             event.accept()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier:
-            if self._page_selected_node_note_popup() or self._show_selected_node_note_popup():
+            if self._start_inline_rename():
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
@@ -3022,7 +3042,7 @@ class MapPanel(QWidget):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
-            if self._start_inline_rename():
+            if self._activate_selected_node(keep_focus=False):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
@@ -3035,6 +3055,10 @@ class MapPanel(QWidget):
                 return
         if key == Qt.Key_I and mods == Qt.ControlModifier:
             if self._start_draft_heading(as_child=True):
+                event.accept()
+                return
+        if key == Qt.Key_Space and mods == Qt.ControlModifier:
+            if self._show_selected_node_note_popup():
                 event.accept()
                 return
         if key == Qt.Key_Space and not mods:

@@ -56,6 +56,7 @@ Right Panel
 -----------
 - Tabs: Tasks, Calendar, Attachments, Link Navigator, AI Chat (if enabled).
 - Calendar keyboard flow: arrow keys move day by day, `Enter` opens the selected day and focuses the editor, and `Ctrl+Enter` opens the day while keeping focus in Calendar. In vi mode, `h/j/k/l` move by day or week, `Shift` with arrows or vi keys extends a multi-day selection, `t` jumps to today, `/` moves into headings/subpages, and `Esc` returns from those lists to the calendar. From the main editor, `Ctrl+Alt+D` opens a compact date-jump popup so you can pick a journal day without leaving the page.
+- Map keyboard flow: `Ctrl+Enter` opens the selected node and focuses the editor, `Shift+Enter` opens it while keeping focus in the Map, `Alt+Enter` starts inline rename, `Ctrl+Space` toggles the selected node note popup, and `Space` folds/unfolds the selected node.
 - Context menus and Vault menu let you open Tasks/Links/AI in separate windows.
 
 Bookmarks

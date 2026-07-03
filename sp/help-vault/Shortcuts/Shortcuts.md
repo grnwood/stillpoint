@@ -58,14 +58,14 @@ These shortcuts will speed up your workflow:
 ### Panels
 - `Ctrl+Shift+Space`: Cycle focus between panels
 - `F11`: Toggle fullscreen
-- In the Map tab, `Enter` opens the selected node and focuses the editor; `Shift+Enter` opens it and keeps focus in the Map
+- In the Map tab, `Ctrl+Enter` opens the selected node and focuses the editor; `Shift+Enter` opens it and keeps focus in the Map
 - In the Map tab, `Alt+Up` / `Alt+Down` zoom in/out around the selected node (Map-active scope)
 - In the Map tab, `Alt+J` / `Alt+K` also zoom in/out around the selected node
 - In the Map tab, `Ctrl++` / `Ctrl+-` also zoom the map around the selected node instead of changing editor font size
 - In the Map tab, `f` fits the currently visible map as tightly as possible in the viewport
 - In the Map tab, `Alt+[` filters to the selected subtree and `Alt+]` clears the filter
-- In the Map tab, `Alt+Enter` toggles the selected node note popup
-- In the Map tab, `Ctrl+Enter` starts editing the selected node name
+- In the Map tab, `Alt+Enter` starts editing the selected node name
+- In the Map tab, `Ctrl+Space` toggles the selected node note popup
 - In the Map tab, `Space` folds or unfolds the selected node; on the root/title node it hides or shows the H1 branches
 - In the Map tab, `Esc` collapses the map back to the root/title node and centers it
 - In an open Map note popup, `Up` / `Down` scroll by line and `Left` / `Right` close the popup
