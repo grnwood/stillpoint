@@ -185,6 +185,7 @@ class HomebaseSyncEngine:
         self._conflict_path = self._sync_dir / "conflict_log.json"
         self._scan_path = self._sync_dir / "last_scan.json"
         self._object_cache_path = self._sync_dir / "object_cache.json"
+        self._sync_errors_path = self._sync_dir / "sync_errors.json"
 
     def _canonical_rel_path(self, rel_path: str) -> str:
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
@@ -367,6 +368,67 @@ class HomebaseSyncEngine:
         if limit > 0:
             unresolved = unresolved[-int(limit) :]
         return unresolved
+
+    def _record_sync_error(self, *, path: str, phase: str, reason: str, object_id: str = "") -> None:
+        rel_path = str(path or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_path:
+            return
+        phase_text = str(phase or "unknown").strip().lower() or "unknown"
+        reason_text = str(reason or "").strip() or "Unknown error"
+        object_id_text = str(object_id or "").strip().lower()
+
+        payload = _read_json(
+            self._sync_errors_path,
+            {
+                "schema_version": 1,
+                "vault_id": self.cfg.vault_id,
+                "errors": [],
+            },
+        )
+        errors = payload.get("errors")
+        if not isinstance(errors, list):
+            errors = []
+            payload["errors"] = errors
+        errors.append(
+            {
+                "ts": _utc_now_iso(),
+                "path": rel_path,
+                "phase": phase_text,
+                "reason": reason_text,
+                "object_id": object_id_text,
+            }
+        )
+        max_entries = 500
+        if len(errors) > max_entries:
+            payload["errors"] = errors[-max_entries:]
+        _write_json(self._sync_errors_path, payload)
+
+    def list_sync_errors(self, limit: int = 200) -> list[dict[str, Any]]:
+        payload = _read_json(self._sync_errors_path, {"errors": []})
+        errors = payload.get("errors")
+        if not isinstance(errors, list):
+            return []
+        sanitized: list[dict[str, Any]] = []
+        for item in errors:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            if not path:
+                continue
+            sanitized.append(
+                {
+                    "ts": str(item.get("ts") or "").strip(),
+                    "path": path,
+                    "phase": str(item.get("phase") or "unknown").strip() or "unknown",
+                    "reason": str(item.get("reason") or "").strip() or "Unknown error",
+                    "object_id": str(item.get("object_id") or "").strip().lower(),
+                }
+            )
+        if limit > 0:
+            sanitized = sanitized[-int(limit) :]
+        # Show newest entries first in UI.
+        sanitized.reverse()
+        return sanitized
 
     def resolve_conflict_entry(self, conflict_copy_path: str, resolution: str = "merged") -> bool:
         cleaned = str(conflict_copy_path or "").strip().replace("\\", "/").lstrip("/")
@@ -1062,6 +1124,7 @@ class HomebaseSyncEngine:
         unchanged = 0
         conflicts = 0
         download_errors = 0
+        apply_errors = 0
         cache = local_object_cache or {}
         relevant_entries = [
             (rel, meta)
@@ -1117,6 +1180,12 @@ class HomebaseSyncEngine:
                 # Remove from pulled_cache so the next sync cycle retries.
                 pulled_cache.pop(rel_key, None)
                 download_errors += 1
+                self._record_sync_error(
+                    path=rel_key,
+                    phase="download",
+                    reason=f"/{rel_key}: {dl_exc}",
+                    object_id=object_id_text,
+                )
                 remaining_downloads = max(0, remaining_downloads - 1)
                 self._set_status_locked(
                     summary=(
@@ -1140,11 +1209,143 @@ class HomebaseSyncEngine:
                 ) from exc
             downloaded += 1
             remote_mtime = int(meta.get("mtime", 0) or 0)
-            if not local_path.exists():
-                self._update_transfer_worker(0, f"WRITE {rel_key}")
-                write_bytes_atomic(local_path, plaintext)
-                written_new += 1
-                applied_paths.append(str(rel))
+            try:
+                if not local_path.exists():
+                    self._update_transfer_worker(0, f"WRITE {rel_key}")
+                    write_bytes_atomic(local_path, plaintext)
+                    written_new += 1
+                    applied_paths.append(str(rel))
+                    remaining_downloads = max(0, remaining_downloads - 1)
+                    self._set_status_locked(
+                        summary=(
+                            f"Pulling {remaining_downloads} object(s)..."
+                            if remaining_downloads
+                            else "Applying pulled files..."
+                        ),
+                        pending_downloads=remaining_downloads,
+                        transfer_workers=["Idle"],
+                    )
+                    _log(
+                        f"pull decision=new-file path={rel} remote_mtime={remote_mtime} "
+                        f"remote_checkpoint={checkpoint_id} remote_device={remote_device_id}"
+                    )
+                    continue
+                local_bytes = read_bytes(local_path)
+                if bytes_equal(local_bytes, plaintext):
+                    unchanged += 1
+                    continue
+                if str(rel_key).lower().endswith((".md", ".txt")):
+                    try:
+                        local_text = local_bytes.decode("utf-8")
+                        remote_text = plaintext.decode("utf-8")
+                    except UnicodeDecodeError:
+                        local_text = ""
+                        remote_text = ""
+                    else:
+                        if not has_material_text_difference(local_text, remote_text):
+                            unchanged += 1
+                            remaining_downloads = max(0, remaining_downloads - 1)
+                            self._set_status_locked(
+                                summary=(
+                                    f"Pulling {remaining_downloads} object(s)..."
+                                    if remaining_downloads
+                                    else "Applying pulled files..."
+                                ),
+                                pending_downloads=remaining_downloads,
+                                transfer_workers=["Idle"],
+                            )
+                            _log(
+                                f"pull decision=non-material-text path={rel} remote_checkpoint={checkpoint_id} "
+                                f"remote_device={remote_device_id}"
+                            )
+                            continue
+                # Prefer last-writer-wins for normal cross-device edits:
+                # if remote mtime is newer-or-equal, replace local contents directly.
+                _, local_mtime = stat_file(local_path)
+                local_mtime_i = int(local_mtime)
+                if remote_mtime > 0 and remote_mtime >= int(local_mtime):
+                    self._update_transfer_worker(0, f"WRITE {rel_key}")
+                    write_bytes_atomic(local_path, plaintext)
+                    overwritten += 1
+                    applied_paths.append(str(rel))
+                    remaining_downloads = max(0, remaining_downloads - 1)
+                    self._set_status_locked(
+                        summary=(
+                            f"Pulling {remaining_downloads} object(s)..."
+                            if remaining_downloads
+                            else "Applying pulled files..."
+                        ),
+                        pending_downloads=remaining_downloads,
+                        transfer_workers=["Idle"],
+                    )
+                    _log(
+                        f"pull decision=overwrite-lww path={rel} local_mtime={local_mtime_i} "
+                        f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
+                        f"remote_device={remote_device_id}"
+                    )
+                    continue
+                prior_resolution = self._resolved_conflict_resolution(rel_key, checkpoint_id)
+                if prior_resolution == "keep-local":
+                    _log(
+                        f"pull decision=keep-local path={rel} local_mtime={local_mtime_i} "
+                        f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
+                        f"remote_device={remote_device_id}"
+                    )
+                    unchanged += 1
+                    remaining_downloads = max(0, remaining_downloads - 1)
+                    self._set_status_locked(
+                        summary=(
+                            f"Pulling {remaining_downloads} object(s)..."
+                            if remaining_downloads
+                            else "Applying pulled files..."
+                        ),
+                        pending_downloads=remaining_downloads,
+                        transfer_workers=["Idle"],
+                    )
+                    continue
+                conflict_rel = conflict_copy_path(rel_key, remote_device_id)
+                conflict_path = self.cfg.vault_root / conflict_rel
+                self._update_transfer_worker(0, f"WRITE {conflict_rel}")
+                write_bytes_atomic(conflict_path, plaintext)
+                applied_paths.append(str(conflict_rel))
+                reason = "local_newer_than_remote" if remote_mtime > 0 else "remote_mtime_missing"
+                _log(
+                    f"pull decision=conflict-copy path={rel} local_mtime={local_mtime_i} "
+                    f"remote_mtime={remote_mtime} reason={reason} "
+                    f"remote_checkpoint={checkpoint_id} remote_device={remote_device_id} "
+                    f"conflict_copy={conflict_rel}"
+                )
+                self._record_conflict(
+                    path=rel_key,
+                    conflict_copy=str(conflict_rel),
+                    remote_checkpoint_id=checkpoint_id,
+                    remote_device_id=remote_device_id,
+                    local_mtime=local_mtime_i,
+                    remote_mtime=remote_mtime,
+                    reason=reason,
+                )
+                conflicts += 1
+                remaining_downloads = max(0, remaining_downloads - 1)
+                self._set_status_locked(
+                    summary=(
+                        f"Pulling {remaining_downloads} object(s)..."
+                        if remaining_downloads
+                        else "Applying pulled files..."
+                    ),
+                    pending_downloads=remaining_downloads,
+                    transfer_workers=["Idle"],
+                )
+            except OSError as apply_exc:
+                # Keep pull progress moving when a specific local path cannot be
+                # represented on this platform (e.g., WinError 123).
+                pulled_cache.pop(rel_key, None)
+                apply_errors += 1
+                self._record_sync_error(
+                    path=rel_key,
+                    phase="apply",
+                    reason=f"/{rel_key}: {apply_exc}",
+                    object_id=object_id_text,
+                )
                 remaining_downloads = max(0, remaining_downloads - 1)
                 self._set_status_locked(
                     summary=(
@@ -1156,115 +1357,10 @@ class HomebaseSyncEngine:
                     transfer_workers=["Idle"],
                 )
                 _log(
-                    f"pull decision=new-file path={rel} remote_mtime={remote_mtime} "
-                    f"remote_checkpoint={checkpoint_id} remote_device={remote_device_id}"
+                    f"pull decision=local-apply-error path={rel} "
+                    f"object_id={object_id_text} error={apply_exc}"
                 )
                 continue
-            local_bytes = read_bytes(local_path)
-            if bytes_equal(local_bytes, plaintext):
-                unchanged += 1
-                continue
-            if str(rel_key).lower().endswith((".md", ".txt")):
-                try:
-                    local_text = local_bytes.decode("utf-8")
-                    remote_text = plaintext.decode("utf-8")
-                except UnicodeDecodeError:
-                    local_text = ""
-                    remote_text = ""
-                else:
-                    if not has_material_text_difference(local_text, remote_text):
-                        unchanged += 1
-                        remaining_downloads = max(0, remaining_downloads - 1)
-                        self._set_status_locked(
-                            summary=(
-                                f"Pulling {remaining_downloads} object(s)..."
-                                if remaining_downloads
-                                else "Applying pulled files..."
-                            ),
-                            pending_downloads=remaining_downloads,
-                            transfer_workers=["Idle"],
-                        )
-                        _log(
-                            f"pull decision=non-material-text path={rel} remote_checkpoint={checkpoint_id} "
-                            f"remote_device={remote_device_id}"
-                        )
-                        continue
-            # Prefer last-writer-wins for normal cross-device edits:
-            # if remote mtime is newer-or-equal, replace local contents directly.
-            _, local_mtime = stat_file(local_path)
-            local_mtime_i = int(local_mtime)
-            if remote_mtime > 0 and remote_mtime >= int(local_mtime):
-                self._update_transfer_worker(0, f"WRITE {rel_key}")
-                write_bytes_atomic(local_path, plaintext)
-                overwritten += 1
-                applied_paths.append(str(rel))
-                remaining_downloads = max(0, remaining_downloads - 1)
-                self._set_status_locked(
-                    summary=(
-                        f"Pulling {remaining_downloads} object(s)..."
-                        if remaining_downloads
-                        else "Applying pulled files..."
-                    ),
-                    pending_downloads=remaining_downloads,
-                    transfer_workers=["Idle"],
-                )
-                _log(
-                    f"pull decision=overwrite-lww path={rel} local_mtime={local_mtime_i} "
-                    f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
-                    f"remote_device={remote_device_id}"
-                )
-                continue
-            prior_resolution = self._resolved_conflict_resolution(rel_key, checkpoint_id)
-            if prior_resolution == "keep-local":
-                _log(
-                    f"pull decision=keep-local path={rel} local_mtime={local_mtime_i} "
-                    f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
-                    f"remote_device={remote_device_id}"
-                )
-                unchanged += 1
-                remaining_downloads = max(0, remaining_downloads - 1)
-                self._set_status_locked(
-                    summary=(
-                        f"Pulling {remaining_downloads} object(s)..."
-                        if remaining_downloads
-                        else "Applying pulled files..."
-                    ),
-                    pending_downloads=remaining_downloads,
-                    transfer_workers=["Idle"],
-                )
-                continue
-            conflict_rel = conflict_copy_path(rel_key, remote_device_id)
-            conflict_path = self.cfg.vault_root / conflict_rel
-            self._update_transfer_worker(0, f"WRITE {conflict_rel}")
-            write_bytes_atomic(conflict_path, plaintext)
-            applied_paths.append(str(conflict_rel))
-            reason = "local_newer_than_remote" if remote_mtime > 0 else "remote_mtime_missing"
-            _log(
-                f"pull decision=conflict-copy path={rel} local_mtime={local_mtime_i} "
-                f"remote_mtime={remote_mtime} reason={reason} "
-                f"remote_checkpoint={checkpoint_id} remote_device={remote_device_id} "
-                f"conflict_copy={conflict_rel}"
-            )
-            self._record_conflict(
-                path=rel_key,
-                conflict_copy=str(conflict_rel),
-                remote_checkpoint_id=checkpoint_id,
-                remote_device_id=remote_device_id,
-                local_mtime=local_mtime_i,
-                remote_mtime=remote_mtime,
-                reason=reason,
-            )
-            conflicts += 1
-            remaining_downloads = max(0, remaining_downloads - 1)
-            self._set_status_locked(
-                summary=(
-                    f"Pulling {remaining_downloads} object(s)..."
-                    if remaining_downloads
-                    else "Applying pulled files..."
-                ),
-                pending_downloads=remaining_downloads,
-                transfer_workers=["Idle"],
-            )
         self._set_status_locked(
             pending_downloads=0,
             transfer_workers=[],
@@ -1274,7 +1370,7 @@ class HomebaseSyncEngine:
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
             f"skipped_cached={skipped_cached} conflicts={conflicts} "
-            f"download_errors={download_errors}"
+            f"download_errors={download_errors} apply_errors={apply_errors}"
         )
         return applied_paths, pulled_cache
 

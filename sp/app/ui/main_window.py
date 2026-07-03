@@ -6767,6 +6767,70 @@ class MainWindow(QMainWindow):
         finally:
             self._homebase_conflict_popup_open = False
 
+    def _show_homebase_sync_errors_popup(self, errors: list[dict[str, Any]]) -> None:
+        if not errors:
+            QMessageBox.information(self, "Homebase Sync Errors", "No skipped sync errors were recorded.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Homebase Sync Errors")
+        dialog.resize(900, 520)
+        layout = QVBoxLayout(dialog)
+        info = QLabel(
+            "These files failed during sync and were skipped so the rest of sync could continue. "
+            "Review the reason for each entry."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        list_widget = QListWidget(dialog)
+        detail_label = QLabel("")
+        detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail_label.setWordWrap(True)
+        detail_label.setStyleSheet(
+            f"padding: 8px; border: 1px solid {theme_value('main_window.splitter.handle', '#444')};"
+        )
+        for entry in errors:
+            path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            phase = str(entry.get("phase") or "unknown").strip().lower() or "unknown"
+            ts_text = self._format_homebase_conflict_ts(entry.get("ts"))
+            item_text = f"/{path}  |  {phase}  |  {ts_text}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, entry)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget, 1)
+        layout.addWidget(detail_label)
+
+        buttons = QHBoxLayout()
+        close_btn = QPushButton("Close", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        def _update_detail() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                detail_label.setText("")
+                return
+            entry = item.data(Qt.UserRole) or {}
+            path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            phase = str(entry.get("phase") or "unknown").strip().lower() or "unknown"
+            reason = str(entry.get("reason") or "Unknown error").strip() or "Unknown error"
+            object_id = str(entry.get("object_id") or "").strip().lower()
+            lines = [
+                f"Path: /{path}",
+                f"Stage: {phase}",
+                f"Detected: {self._format_homebase_conflict_ts(entry.get('ts'))}",
+                f"Reason: {reason}",
+            ]
+            if object_id:
+                lines.append(f"Object ID: {object_id}")
+            detail_label.setText("\n".join(lines))
+
+        list_widget.currentItemChanged.connect(lambda _cur, _prev: _update_detail())
+        if list_widget.count():
+            list_widget.setCurrentRow(0)
+        dialog.exec()
+
     def _apply_homebase_conflict_resolution(
         self,
         entry: dict[str, Any],
@@ -7636,7 +7700,10 @@ class MainWindow(QMainWindow):
         reset_auth_btn = QPushButton("Reset Auth")
         reset_passphrase_btn = QPushButton("Reset Encryption Passphrase")
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
+        sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
+        sync_errors_btn = QPushButton(f"View Sync Errors ({len(sync_errors)})")
         button_row.addWidget(conflicts_btn)
+        button_row.addWidget(sync_errors_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
 
@@ -7680,11 +7747,19 @@ class MainWindow(QMainWindow):
                 conflicts = []
             self._show_homebase_conflicts_popup(conflicts)
 
+        def _view_sync_errors() -> None:
+            try:
+                errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
+            except Exception:
+                errors = []
+            self._show_homebase_sync_errors_popup(errors)
+
         save_settings_btn.clicked.connect(_save_settings)
         sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
         reset_auth_btn.clicked.connect(self._reset_homebase_auth)
         reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
         conflicts_btn.clicked.connect(_view_conflicts)
+        sync_errors_btn.clicked.connect(_view_sync_errors)
 
         def _refresh_dialog_status() -> None:
             current = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
@@ -7702,6 +7777,12 @@ class MainWindow(QMainWindow):
             error_label.setText(str(current.last_error or "None"))
             conflicts_btn.setText(f"View Conflicts ({int(getattr(current, 'conflicts', 0) or 0)})")
             conflicts_btn.setEnabled(bool(self._homebase_sync_engine) and int(getattr(current, "conflicts", 0) or 0) > 0)
+            try:
+                sync_error_count = len(self._homebase_sync_engine.list_sync_errors(limit=200)) if self._homebase_sync_engine else 0
+            except Exception:
+                sync_error_count = 0
+            sync_errors_btn.setText(f"View Sync Errors ({int(sync_error_count)})")
+            sync_errors_btn.setEnabled(bool(self._homebase_sync_engine) and int(sync_error_count) > 0)
 
             activity_phase, activity_lines = self._homebase_activity_snapshot(current)
             activity_phase_label.setText(activity_phase)

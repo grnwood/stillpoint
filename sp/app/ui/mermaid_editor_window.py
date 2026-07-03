@@ -310,6 +310,12 @@ class MermaidEditorWindow(QMainWindow):
         self.preview_zoom_in_btn.clicked.connect(self._zoom_in_preview)
         preview_section.addWidget(self.preview_zoom_in_btn)
 
+        self.preview_fit_btn = QToolButton()
+        self.preview_fit_btn.setText("Fit")
+        self.preview_fit_btn.setToolTip("Fit preview to window")
+        self.preview_fit_btn.clicked.connect(self._reset_preview_view)
+        preview_section.addWidget(self.preview_fit_btn)
+
         preview_section.addSpacing(10)
 
         self.export_btn = QToolButton()
@@ -403,6 +409,27 @@ class MermaidEditorWindow(QMainWindow):
 
         right_v_splitter = None
         self.loading_overlay = None
+        self.preview_label = ZoomablePreviewLabel()
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumSize(400, 300)
+        self.preview_label.setStyleSheet(
+            "background-color: "
+            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
+            "color: "
+            f"{theme_value('mermaid_editor.preview.text', '#000000')};"
+        )
+        self.preview_label.setWordWrap(True)
+        self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
+        self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
+
+        self.preview_scroll_area = QScrollArea()
+        self.preview_scroll_area.setWidgetResizable(True)
+        self.preview_scroll_area.setWidget(self.preview_label)
+        self.preview_scroll_area.setStyleSheet(
+            "background-color: "
+            f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
+        )
         if not self._external_browser_preview:
             right_v_splitter = QSplitter(Qt.Vertical)
 
@@ -421,29 +448,10 @@ class MermaidEditorWindow(QMainWindow):
                 self.preview_web.installEventFilter(self)
                 self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
                 self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
+                self.preview_scroll_area.hide()
                 preview_layout.addWidget(self.preview_web)
+                preview_layout.addWidget(self.preview_scroll_area)
             else:
-                self.preview_label = ZoomablePreviewLabel()
-                self.preview_label.setAlignment(Qt.AlignCenter)
-                self.preview_label.setMinimumSize(400, 300)
-                self.preview_label.setStyleSheet(
-                    "background-color: "
-                    f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')}; "
-                    "color: "
-                    f"{theme_value('mermaid_editor.preview.text', '#000000')};"
-                )
-                self.preview_label.setWordWrap(True)
-                self.preview_label.zoomRequested.connect(self._on_preview_wheel_zoom)
-                self.preview_label.setContextMenuPolicy(Qt.CustomContextMenu)
-                self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
-
-                self.preview_scroll_area = QScrollArea()
-                self.preview_scroll_area.setWidgetResizable(True)
-                self.preview_scroll_area.setWidget(self.preview_label)
-                self.preview_scroll_area.setStyleSheet(
-                    "background-color: "
-                    f"{theme_value('mermaid_editor.preview.bg', '#f8f8f8')};"
-                )
                 preview_layout.addWidget(self.preview_scroll_area)
             self.loading_overlay = self._create_loading_overlay(preview_container)
             preview_container.setLayout(preview_layout)
@@ -457,7 +465,8 @@ class MermaidEditorWindow(QMainWindow):
                 self.ai_panel = None
                 right_v_splitter.setSizes([700])
             right_v_splitter.setCollapsible(0, False)
-            right_v_splitter.setCollapsible(1, True)
+            if self._ai_chat_enabled:
+                right_v_splitter.setCollapsible(1, True)
 
             main_h_splitter.addWidget(right_v_splitter)
             main_h_splitter.setSizes([400, 600])
@@ -615,6 +624,7 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
     def _set_preview_loading_state(self, message: str = "Generating preview…") -> None:
+        self._refresh_preview_mode()
         if self._external_browser_preview:
             return
         if self._use_web_preview and self.preview_web is not None:
@@ -707,7 +717,7 @@ class MermaidEditorWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if self._use_web_preview and self.preview_web is not None and obj is self.preview_web:
             from PySide6.QtCore import QEvent
-            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.RightButton:
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 self._show_preview_context_menu(pos)
                 return True
@@ -1480,6 +1490,30 @@ class MermaidEditorWindow(QMainWindow):
         if self._auto_render_enabled and not self._external_browser_preview:
             self.render_timer.start()
 
+    def _refresh_preview_mode(self) -> None:
+        if self._external_browser_preview:
+            return
+        want_web = _should_use_web_preview()
+        if want_web and self.preview_web is None:
+            web_view_class = _load_qwebengine_view_class()
+            if web_view_class is not None:
+                self.preview_web = web_view_class(self)
+                self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
+                self.preview_web.installEventFilter(self)
+                self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
+                self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
+                if hasattr(self, "preview_scroll_area"):
+                    self.preview_scroll_area.hide()
+                    self.preview_scroll_area.setParent(self.preview_web.parent())
+        if want_web != self._use_web_preview:
+            self._use_web_preview = want_web and self.preview_web is not None
+        if hasattr(self, "preview_scroll_area"):
+            self.preview_scroll_area.setVisible(not self._use_web_preview)
+        if self._use_web_preview and self.preview_web is not None:
+            self.preview_web.setVisible(True)
+        elif self.preview_web is not None:
+            self.preview_web.setVisible(False)
+
     def _render(self) -> None:
         self.render_timer.stop()
         if self._closing:
@@ -1499,6 +1533,7 @@ class MermaidEditorWindow(QMainWindow):
         except RuntimeError:
             return
 
+        self._refresh_preview_mode()
         self._startup_render_pending = False
         self._render_in_progress = True
         self._render_requeued = False
@@ -1680,6 +1715,7 @@ class MermaidEditorWindow(QMainWindow):
             return None
 
     def _update_preview_display(self) -> None:
+        self._refresh_preview_mode()
         if self._use_web_preview:
             self._apply_web_zoom_level()
             return
@@ -1709,6 +1745,7 @@ class MermaidEditorWindow(QMainWindow):
             pass
 
     def _show_preview_error(self, message: str) -> None:
+        self._refresh_preview_mode()
         if self._use_web_preview and self.preview_web is not None:
             self.preview_web.setHtml(self._build_mermaid_html("", error_message=message), self._web_preview_base_url())
             return
@@ -1806,6 +1843,9 @@ class MermaidEditorWindow(QMainWindow):
     def _show_preview_context_menu(self, pos) -> None:
         menu = QMenu(self)
         apply_menu_theme(menu, self)
+        reset_view = menu.addAction("Reset View")
+        reset_view.triggered.connect(self._reset_preview_view)
+        menu.addSeparator()
         copy_svg = menu.addAction("Copy SVG")
         copy_svg.triggered.connect(self._copy_svg)
         copy_png = menu.addAction("Copy PNG")
@@ -1814,6 +1854,35 @@ class MermaidEditorWindow(QMainWindow):
             menu.exec(self.preview_web.mapToGlobal(pos))
         else:
             menu.exec(self.preview_label.mapToGlobal(pos))
+
+    def _reset_preview_view(self) -> None:
+        if self._use_web_preview and self.preview_web is not None:
+            # Match keyboard '0' behavior in the embedded web preview.
+            self.preview_web.page().runJavaScript(
+                "if (window.spFitDiagram) { window.spFitDiagram(); } else if (typeof fitDiagram === 'function') { fitDiagram(); }"
+            )
+            return
+        self.preview_zoom_level = 0
+        try:
+            self._update_preview_display()
+        except RuntimeError:
+            return
+        try:
+            config.save_mermaid_preview_zoom(self.preview_zoom_level)
+        except Exception:
+            pass
+        if hasattr(self, "preview_scroll_area"):
+            def _center_scrollbars() -> None:
+                try:
+                    hbar = self.preview_scroll_area.horizontalScrollBar()
+                    vbar = self.preview_scroll_area.verticalScrollBar()
+                    hbar.setValue(max(0, int(hbar.maximum() / 2)))
+                    vbar.setValue(max(0, int(vbar.maximum() / 2)))
+                except Exception:
+                    pass
+            QTimer.singleShot(0, _center_scrollbars)
+        if hasattr(self, "_geom_timer"):
+            self._geom_timer.start()
 
     def _export_svg(self) -> None:
         if not self._ensure_svg():
@@ -2039,6 +2108,7 @@ class MermaidEditorWindow(QMainWindow):
         let browserControls = null;
         let browserStatus = null;
         const state = {{ zoom: {initial_zoom}, tx: 0, ty: 0, panning: false, panX: 0, panY: 0 }};
+        const wheelState = {{ accumulator: 0 }};
         const includeBrowserControls = {controls_enabled};
         const payloadJsUrl = {payload_js_url_json};
         let preRenderedPngDataUrl = '';
@@ -2109,18 +2179,39 @@ class MermaidEditorWindow(QMainWindow):
             const rect = viewport.getBoundingClientRect();
             const bbox = fitSvgToCanvas(svg);
             state.zoom = Math.max(0.2, Math.min(4.0, zoom));
-            state.tx = Math.round((rect.width - (bbox.width * state.zoom)) / 2);
-            state.ty = Math.round((rect.height - (bbox.height * state.zoom)) / 2);
+            state.tx = Math.round((rect.width - (bbox.width * state.zoom)) / 2 - (bbox.x * state.zoom));
+            state.ty = Math.round((rect.height - (bbox.height * state.zoom)) / 2 - (bbox.y * state.zoom));
             applyTransform();
         }}
 
         function fitSvgToCanvas(svg) {{
+            // Mermaid can emit SVGs whose nominal viewBox is not the same as the
+            // actual diagram extents. Prefer the content bounds when available.
+            try {{
+                if (svg && typeof svg.getBBox === 'function') {{
+                    const box = svg.getBBox();
+                    if (box && box.width > 0 && box.height > 0) {{
+                        return {{
+                            x: Number.isFinite(box.x) ? box.x : 0,
+                            y: Number.isFinite(box.y) ? box.y : 0,
+                            width: Math.max(1, Math.ceil(box.width)),
+                            height: Math.max(1, Math.ceil(box.height)),
+                        }};
+                    }}
+                }}
+            }} catch (_err) {{
+                // Fall back to the intrinsic SVG box below.
+            }}
             const viewBox = svg.viewBox && svg.viewBox.baseVal
                 ? svg.viewBox.baseVal
                 : null;
             const width = viewBox && viewBox.width ? viewBox.width : (svg.width && svg.width.baseVal ? svg.width.baseVal.value : 1200);
             const height = viewBox && viewBox.height ? viewBox.height : (svg.height && svg.height.baseVal ? svg.height.baseVal.value : 800);
+            const x = viewBox && Number.isFinite(viewBox.x) ? viewBox.x : 0;
+            const y = viewBox && Number.isFinite(viewBox.y) ? viewBox.y : 0;
             return {{
+                x,
+                y,
                 width: Math.max(1, Math.ceil(width || 1200)),
                 height: Math.max(1, Math.ceil(height || 800)),
             }};
@@ -2139,6 +2230,14 @@ class MermaidEditorWindow(QMainWindow):
                 )
             );
             centerSvgAtZoom(fitZoom);
+        }}
+
+        function scheduleFitDiagram() {{
+            window.requestAnimationFrame(() => {{
+                window.requestAnimationFrame(() => {{
+                    fitDiagram();
+                }});
+            }});
         }}
 
         function zoomAbout(delta, cx, cy) {{
@@ -2384,7 +2483,7 @@ class MermaidEditorWindow(QMainWindow):
             const copyPngBtn = document.getElementById('copy-png-btn');
             if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => stepZoom(-1));
             if (zoomInBtn) zoomInBtn.addEventListener('click', () => stepZoom(1));
-            if (fitBtn) fitBtn.addEventListener('click', () => fitDiagram());
+            if (fitBtn) fitBtn.addEventListener('click', () => scheduleFitDiagram());
             if (saveSvgBtn) saveSvgBtn.addEventListener('click', () => void exportSvg());
             if (exportPngBtn) exportPngBtn.addEventListener('click', () => void exportPng());
             if (copySvgBtn) copySvgBtn.addEventListener('click', () => void copySvg());
@@ -2421,18 +2520,35 @@ class MermaidEditorWindow(QMainWindow):
             zoomAbout((next - old) / 0.1, cx, cy);
         }};
 
+        window.spFitDiagram = () => {{
+            scheduleFitDiagram();
+        }};
+
         function bindInteractions() {{
             if (!viewport) return;
             viewport.addEventListener('wheel', (event) => {{
                 event.preventDefault();
+                const rawDelta = Number(event.deltaY || 0);
+                if (!rawDelta) return;
+                // Match PlantUML's coarse wheel-step zoom behavior to avoid
+                // hypersensitive zooming on Windows precision touchpads.
+                wheelState.accumulator += rawDelta;
+                const wheelStep = 120;
+                if (Math.abs(wheelState.accumulator) < wheelStep) return;
                 const rect = viewport.getBoundingClientRect();
                 const cx = event.clientX - rect.left;
                 const cy = event.clientY - rect.top;
-                zoomAbout(event.deltaY < 0 ? 1 : -1, cx, cy);
+                const steps = Math.trunc(Math.abs(wheelState.accumulator) / wheelStep);
+                const direction = wheelState.accumulator < 0 ? 1 : -1;
+                for (let i = 0; i < steps; i += 1) {{
+                    zoomAbout(direction, cx, cy);
+                }}
+                wheelState.accumulator -= direction < 0 ? (steps * wheelStep) : (-steps * wheelStep);
             }}, {{ passive: false }});
 
             viewport.addEventListener('mousedown', (event) => {{
-                if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+                // Match PlantUML behavior: pan with right mouse drag only.
+                if (event.button !== 2) return;
                 state.panning = true;
                 state.panX = event.clientX;
                 state.panY = event.clientY;
@@ -2452,7 +2568,7 @@ class MermaidEditorWindow(QMainWindow):
             }});
 
             window.addEventListener('mouseup', (event) => {{
-                if ((event.button !== 0 && event.button !== 1 && event.button !== 2) || !state.panning) return;
+                if (event.button !== 2 || !state.panning) return;
                 state.panning = false;
                 if (viewport) viewport.style.cursor = 'default';
                 event.preventDefault();
@@ -2513,7 +2629,7 @@ class MermaidEditorWindow(QMainWindow):
                 const id = `sp-mermaid-${{Date.now()}}`;
                 const rendered = await mermaid.render(id, source);
                 if (host) host.innerHTML = rendered.svg;
-                fitDiagram();
+                scheduleFitDiagram();
                 setStatus(includeBrowserControls ? 'Rendered. Wheel to zoom. Drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
             }} catch (err) {{
                 if (host) host.innerHTML = buildErrorSvg(err && err.message ? err.message : String(err));

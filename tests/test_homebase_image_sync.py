@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import sp.sync.engine as sync_engine
 from sp.sync.crypto import derive_key_from_passphrase, encrypt_bytes, object_id_from_ciphertext
 from sp.sync.engine import HomebaseSyncConfig, HomebaseSyncEngine, _write_json
 
@@ -220,6 +221,65 @@ class TestImageSyncPull:
 
         # The missing entry must NOT be in pulled_cache so next sync retries it.
         assert "Notes/paste_image_001.png" not in pulled_cache
+
+        sync_errors = engine_b.list_sync_errors(limit=50)
+        assert any(
+            str(item.get("path") or "") == "Notes/paste_image_001.png"
+            and str(item.get("phase") or "") == "download"
+            for item in sync_errors
+        )
+
+    def test_pull_continues_after_single_local_apply_error(self, tmp_path, monkeypatch):
+        """If writing one pulled entry fails locally, other entries should still apply."""
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        notes_dir = vault_a / "Notes"
+        notes_dir.mkdir(parents=True)
+        (notes_dir / "bad.md").write_text("bad\n", encoding="utf-8")
+        (notes_dir / "good.md").write_text("good\n", encoding="utf-8")
+
+        cfg_a = _make_cfg(vault_a)
+        engine_a = HomebaseSyncEngine(cfg_a)
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        real_write = sync_engine.write_bytes_atomic
+
+        def _flaky_write(full_path, data):
+            if full_path.name == "bad.md":
+                raise OSError(123, "The filename, directory name, or volume label syntax is incorrect")
+            return real_write(full_path, data)
+
+        monkeypatch.setattr("sp.sync.engine.write_bytes_atomic", _flaky_write)
+
+        applied, pulled_cache = engine_b._apply_remote_checkpoint(client, key, checkpoint_id)
+
+        # good.md must still be applied even though bad.md fails locally.
+        assert (vault_b / "Notes" / "good.md").exists()
+        assert (vault_b / "Notes" / "good.md").read_text(encoding="utf-8") == "good\n"
+
+        # bad.md should be skipped and retried on a future sync.
+        assert not (vault_b / "Notes" / "bad.md").exists()
+        assert "Notes/bad.md" not in pulled_cache
+        assert "Notes/good.md" in pulled_cache
+
+        # applied should include only successfully written entries.
+        assert "Notes/good.md" in applied
+        assert "Notes/bad.md" not in applied
+
+        sync_errors = engine_b.list_sync_errors(limit=50)
+        assert any(
+            str(item.get("path") or "") == "Notes/bad.md"
+            and str(item.get("phase") or "") == "apply"
+            and "filename" in str(item.get("reason") or "").lower()
+            for item in sync_errors
+        )
 
     def test_sync_once_bootstraps_empty_client_even_when_checkpoint_was_marked_seen(self, tmp_path, monkeypatch):
         """An empty fresh client must pull the remote vault before publishing anything."""
