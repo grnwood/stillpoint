@@ -445,6 +445,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Allow server mode without SERVER_ADMIN_PASSWORD (NOT RECOMMENDED).",
     )
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
+    parser.add_argument("--excalidraw-webview", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--excalidraw-webview-url", help=argparse.SUPPRESS)
+    parser.add_argument("--excalidraw-webview-title", default="StillPoint Excalidraw", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -876,6 +879,23 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+
+    if args.excalidraw_webview:
+        if not args.excalidraw_webview_url:
+            print("ERROR: --excalidraw-webview-url is required", file=sys.stderr)
+            sys.exit(2)
+        from sp.app.excalidraw_webview_process import main as excalidraw_webview_main
+
+        sys.exit(
+            excalidraw_webview_main(
+                [
+                    "--url",
+                    args.excalidraw_webview_url,
+                    "--title",
+                    args.excalidraw_webview_title,
+                ]
+            )
+        )
 
     if args.server:
         _run_server_mode(args)

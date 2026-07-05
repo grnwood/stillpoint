@@ -55,11 +55,11 @@ class ExcalidrawWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="StillPoint Excalidraw WebEngine host")
     parser.add_argument("--url", required=True)
     parser.add_argument("--title", default="StillPoint Excalidraw")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     configure_linux_webengine_env(disable_env_var="SP_DISABLE_EXCALIDRAW_WEBENGINE")
     if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):

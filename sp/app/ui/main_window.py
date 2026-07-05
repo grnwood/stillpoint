@@ -16362,15 +16362,25 @@ class MainWindow(QMainWindow):
                 self._ensure_excalidraw_open_page_poll()
                 return
             title = f"Excalidraw - {target.name}"
-            cmd = [
-                sys.executable,
-                "-m",
-                "sp.app.excalidraw_webview_process",
-                "--url",
-                url,
-                "--title",
-                title,
-            ]
+            if getattr(sys, "frozen", False):
+                cmd = [
+                    sys.executable,
+                    "--excalidraw-webview",
+                    "--excalidraw-webview-url",
+                    url,
+                    "--excalidraw-webview-title",
+                    title,
+                ]
+            else:
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "sp.app.excalidraw_webview_process",
+                    "--url",
+                    url,
+                    "--title",
+                    title,
+                ]
             env = os.environ.copy()
             env.setdefault("SP_WEBENGINE_PROFILE", os.getenv("SP_WEBENGINE_PROFILE", "safe"))
             process = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[3]), env=env)

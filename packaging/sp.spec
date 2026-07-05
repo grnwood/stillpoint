@@ -41,6 +41,7 @@ hidden = (
         'sp.app.ui.calendar_panel',
         'sp.app.ui.task_panel',
         'sp.app.ui.toc_widget',
+        'sp.app.excalidraw_webview_process',
         'sp.app.quickcapture',
         'sp.server.api',
         'sp.server.indexer',
