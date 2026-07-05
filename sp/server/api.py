@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import concurrent.futures
 import hashlib
 import html
@@ -20,7 +22,7 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 from urllib.parse import quote, unquote, urlparse
@@ -69,6 +71,7 @@ from sp import VERSION as STILLPOINT_VERSION
 from sp.app import config
 from sp.app import indexer as app_indexer
 from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
+from sp.app.ui.ai_api import build_api_request
 from sp.logging_flags import log_enabled
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
 
@@ -184,6 +187,8 @@ _TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
 _UI_QUICK_CAPTURE_HOOK = None
+_EXCALIDRAW_OPEN_PAGE_REQUESTS: list[str] = []
+_EXCALIDRAW_OPEN_PAGE_LOCK = threading.Lock()
 
 _REINDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, message, total, current}
 _REINDEX_LOCK = threading.Lock()
@@ -1038,6 +1043,38 @@ class FilePathPayload(BaseModel):
 
 class FileWritePayload(FilePathPayload):
     content: str
+
+
+class ExcalidrawSavePayload(FilePathPayload):
+    scene: dict
+
+
+class ExcalidrawPreviewPayload(FilePathPayload):
+    png_base64: str
+
+
+class ExcalidrawAiRewritePayload(FilePathPayload):
+    prompt: str
+    scene: dict
+    server: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ExcalidrawSummaryPayload(FilePathPayload):
+    scene: dict
+    server: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ExcalidrawChatPayload(FilePathPayload):
+    prompt: str
+    history: list[dict] = Field(default_factory=list)
+    server: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ExcalidrawOpenPagePayload(FilePathPayload):
+    source_path: Optional[str] = None
 
 
 class JournalPayload(BaseModel):
@@ -1973,6 +2010,1081 @@ def file_raw(path: str) -> FileResponse:
     return FileResponse(target)
 
 
+_EXCALIDRAW_MAX_JSON_BYTES = 20 * 1024 * 1024
+_EXCALIDRAW_MAX_PNG_BYTES = 30 * 1024 * 1024
+_EXCALIDRAW_AI_MAX_JSON_BYTES = 120 * 1024
+_EXCALIDRAW_AI_MAX_ELEMENTS = 250
+_EXCALIDRAW_AI_DEBUG_DIR = Path("/tmp") / "stillpoint_excalidraw_ai"
+_EXCALIDRAW_ELEMENT_TYPES = {
+    "rectangle",
+    "diamond",
+    "ellipse",
+    "arrow",
+    "line",
+    "freedraw",
+    "text",
+    "image",
+    "frame",
+    "magicframe",
+    "iframe",
+    "embeddable",
+}
+
+
+def _log_excalidraw_ai(message: str) -> None:
+    if log_enabled("excalidraw_ai"):
+        print(f"[ExcalidrawAI] {message}")
+
+
+def _write_excalidraw_ai_debug(name: str, payload: object) -> Optional[Path]:
+    if not log_enabled("excalidraw_ai"):
+        return None
+    try:
+        _EXCALIDRAW_AI_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        target = _EXCALIDRAW_AI_DEBUG_DIR / name
+        if isinstance(payload, str):
+            target.write_text(payload, encoding="utf-8")
+        else:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return target
+    except OSError as exc:
+        _log_excalidraw_ai(f"Failed to write debug artifact {name}: {exc}")
+        return None
+
+
+def _empty_excalidraw_scene() -> dict:
+    return {
+        "type": "excalidraw",
+        "version": 2,
+        "source": "stillpoint",
+        "elements": [],
+        "appState": {},
+        "files": {},
+    }
+
+
+def _normalize_ai_server(entry: dict) -> dict:
+    entry = entry or {}
+    auth_mode = entry.get("auth_mode") or ("proxy" if entry.get("api_secret") else "openai")
+    base_url = str(entry.get("base_url") or "").rstrip("/")
+    models_path = entry.get("models_path") or ("/mods" if auth_mode == "proxy" else "/v1/models")
+    chat_path = entry.get("chat_path") or "/v1/chat/completions"
+    default_model = entry.get("default_model") or "gpt-3.5-turbo"
+    return {
+        "name": entry.get("name") or (base_url or "Server"),
+        "base_url": base_url,
+        "auth_mode": auth_mode,
+        "api_secret": entry.get("api_secret", ""),
+        "api_key": entry.get("api_key", ""),
+        "custom_header_name": entry.get("custom_header_name", ""),
+        "custom_header_value": entry.get("custom_header_value", ""),
+        "models_path": models_path,
+        "chat_path": chat_path,
+        "verify_ssl": bool(entry.get("verify_ssl", True)),
+        "default_model": default_model,
+    }
+
+
+def _default_ai_servers() -> list[dict]:
+    default_model = "gpt-3.5-turbo"
+    return [
+        {
+            "name": "LM Studio",
+            "base_url": os.getenv("LM_STUDIO_URL", "http://localhost:1234"),
+            "auth_mode": "proxy",
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "default_model": default_model,
+            "verify_ssl": True,
+        },
+        {
+            "name": "OpenAI Compatible (8000)",
+            "base_url": "http://localhost:8000",
+            "auth_mode": "proxy",
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "default_model": default_model,
+            "verify_ssl": True,
+        },
+        {
+            "name": "OpenAI Compatible (8080)",
+            "base_url": "http://localhost:8080",
+            "auth_mode": "proxy",
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "default_model": default_model,
+            "verify_ssl": True,
+        },
+    ]
+
+
+def _load_ai_servers() -> list[dict]:
+    try:
+        payload = config._read_global_config()
+        servers = payload.get("servers", [])
+    except Exception:
+        servers = []
+    if not servers:
+        servers = _default_ai_servers()
+    return [_normalize_ai_server(server) for server in servers if server]
+
+
+def _get_ai_server(name: Optional[str]) -> Optional[dict]:
+    servers = _load_ai_servers()
+    if name:
+        for server in servers:
+            if server.get("name") == name:
+                return server
+    preferred = config.load_default_ai_server()
+    if preferred:
+        for server in servers:
+            if server.get("name") == preferred:
+                return server
+    try:
+        active = config._read_global_config().get("active_server")
+    except Exception:
+        active = None
+    if active:
+        for server in servers:
+            if server.get("name") == active:
+                return server
+    return servers[0] if servers else None
+
+
+def _available_ai_models(server: Optional[dict]) -> list[str]:
+    server = server or {}
+    fallback = server.get("default_model") or "gpt-3.5-turbo"
+    if not server.get("name"):
+        return [fallback]
+    try:
+        payload = config._read_global_config()
+        models = payload.get("server_models", {}).get(server["name"], [])
+    except Exception:
+        models = []
+    cleaned = sorted({str(model) for model in models if model})
+    return cleaned or [fallback]
+
+
+def _load_excalidraw_ai_system_prompt() -> str:
+    try:
+        prompt = (Path(__file__).resolve().parents[1] / "app" / "excal-prompt.txt").read_text(encoding="utf-8")
+    except OSError:
+        prompt = "StillPoint diagrams are knowledge artifacts. Improve the diagram while preserving meaning."
+    strict = """
+
+You are editing an Excalidraw scene.
+Return only one complete valid JSON object for the full updated Excalidraw scene.
+Do not return markdown, commentary, explanations, JSON patches, or partial elements.
+The JSON object must include: type, version, elements, appState, and files.
+Preserve existing files entries unless the user explicitly asks to remove attached assets.
+"""
+    return prompt.rstrip() + strict
+
+
+def _load_excalidraw_deconstruct_prompt() -> str:
+    try:
+        return (Path(__file__).resolve().parents[1] / "app" / "excal-deconstruct.txt").read_text(
+            encoding="utf-8"
+        ).rstrip()
+    except OSError:
+        return (
+            "You are an enterprise architecture analyst. Analyze the Excalidraw scene as architecture "
+            "knowledge and return only valid JSON with title, diagram_type, summary, and embedding_summary."
+        )
+
+
+def _normalize_excalidraw_scene(scene: dict) -> dict:
+    if not isinstance(scene, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw scene must be a JSON object")
+    normalized = dict(scene)
+    normalized.setdefault("type", "excalidraw")
+    normalized.setdefault("version", 2)
+    normalized.setdefault("source", "stillpoint")
+    elements = normalized.get("elements")
+    if elements is None:
+        elements = []
+    if not isinstance(elements, list):
+        raise HTTPException(status_code=400, detail="Excalidraw elements must be a list")
+    app_state = normalized.get("appState")
+    if app_state is None:
+        app_state = {}
+    if not isinstance(app_state, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw appState must be a JSON object")
+    files = normalized.get("files")
+    if files is None:
+        files = {}
+    if not isinstance(files, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw files must be a JSON object")
+    normalized["elements"] = elements
+    normalized["appState"] = app_state
+    normalized["files"] = files
+    return normalized
+
+
+def _excalidraw_number(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _excalidraw_int(value: object, default: int = 0) -> int:
+    return int(round(_excalidraw_number(value, float(default))))
+
+
+def _excalidraw_string(value: object, default: str = "") -> str:
+    return value if isinstance(value, str) else default
+
+
+def _excalidraw_bool(value: object, default: bool = False) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _excalidraw_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _excalidraw_point(value: object, default: Optional[list[float]] = None) -> list[float]:
+    fallback = default or [0.0, 0.0]
+    if not isinstance(value, list) or len(value) < 2:
+        return fallback
+    return [_excalidraw_number(value[0]), _excalidraw_number(value[1])]
+
+
+def _excalidraw_points(value: object, fallback: list[list[float]], *, min_points: int) -> list[list[float]]:
+    if not isinstance(value, list):
+        return fallback
+    points = [_excalidraw_point(point) for point in value if isinstance(point, list)]
+    return points if len(points) >= min_points else fallback
+
+
+def _excalidraw_binding(value: object) -> Optional[dict]:
+    if not isinstance(value, dict) or not isinstance(value.get("elementId"), str):
+        return None
+    binding = {
+        "elementId": value["elementId"],
+        "focus": _excalidraw_number(value.get("focus")),
+        "gap": _excalidraw_number(value.get("gap")),
+    }
+    if isinstance(value.get("fixedPoint"), list):
+        binding["fixedPoint"] = _excalidraw_point(value["fixedPoint"])
+    return binding
+
+
+def _excalidraw_bound_elements(value: object) -> Optional[list[dict]]:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    cleaned = []
+    for item in value:
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("type"), str):
+            cleaned.append({"id": item["id"], "type": item["type"]})
+    return cleaned or None
+
+
+def _sanitize_excalidraw_element(element: dict, *, now_ms: int, ordinal: int) -> Optional[dict]:
+    element_type = _excalidraw_string(element.get("type"), "rectangle")
+    if element_type == "selection":
+        element_type = "rectangle"
+    if element_type not in _EXCALIDRAW_ELEMENT_TYPES:
+        _log_excalidraw_ai(f"Dropped unsupported AI element type={element_type!r}")
+        return None
+    width = _excalidraw_number(element.get("width"), 100.0)
+    height = _excalidraw_number(element.get("height"), 60.0)
+    sanitized = dict(element)
+    sanitized.update(
+        {
+            "id": _excalidraw_string(element.get("id"), f"ai-{now_ms}-{ordinal}"),
+            "type": element_type,
+            "x": _excalidraw_number(element.get("x")),
+            "y": _excalidraw_number(element.get("y")),
+            "width": width,
+            "height": height,
+            "angle": _excalidraw_number(element.get("angle")),
+            "strokeColor": _excalidraw_string(element.get("strokeColor"), "#1e1e1e"),
+            "backgroundColor": _excalidraw_string(element.get("backgroundColor"), "transparent"),
+            "fillStyle": _excalidraw_string(element.get("fillStyle"), "hachure"),
+            "strokeWidth": _excalidraw_number(element.get("strokeWidth"), 2.0),
+            "strokeStyle": _excalidraw_string(element.get("strokeStyle"), "solid"),
+            "roughness": _excalidraw_number(element.get("roughness"), 1.0),
+            "opacity": _excalidraw_number(element.get("opacity"), 100.0),
+            "groupIds": _excalidraw_string_list(element.get("groupIds")),
+            "frameId": element.get("frameId") if isinstance(element.get("frameId"), str) else None,
+            "roundness": element.get("roundness") if isinstance(element.get("roundness"), dict) else None,
+            "seed": _excalidraw_int(element.get("seed"), ordinal + 1),
+            "version": max(1, _excalidraw_int(element.get("version"), 1)),
+            "versionNonce": _excalidraw_int(element.get("versionNonce"), now_ms % 2_147_483_647),
+            "isDeleted": _excalidraw_bool(element.get("isDeleted"), False),
+            "boundElements": _excalidraw_bound_elements(element.get("boundElements")),
+            "updated": _excalidraw_int(element.get("updated"), now_ms),
+            "link": element.get("link") if isinstance(element.get("link"), str) else None,
+            "locked": _excalidraw_bool(element.get("locked"), False),
+            "index": None,
+        }
+    )
+    if element_type in {"line", "arrow"}:
+        fallback_points = [[0.0, 0.0], [width if width else 100.0, height if height else 0.0]]
+        sanitized["points"] = _excalidraw_points(element.get("points"), fallback_points, min_points=2)
+        sanitized["lastCommittedPoint"] = (
+            _excalidraw_point(element.get("lastCommittedPoint")) if isinstance(element.get("lastCommittedPoint"), list) else None
+        )
+        sanitized["startBinding"] = _excalidraw_binding(element.get("startBinding"))
+        sanitized["endBinding"] = _excalidraw_binding(element.get("endBinding"))
+        sanitized["startArrowhead"] = element.get("startArrowhead") if isinstance(element.get("startArrowhead"), str) else None
+        sanitized["endArrowhead"] = element.get("endArrowhead") if isinstance(element.get("endArrowhead"), str) else ("arrow" if element_type == "arrow" else None)
+        if element_type == "arrow":
+            sanitized["elbowed"] = _excalidraw_bool(element.get("elbowed"), False)
+            sanitized.setdefault("fixedSegments", None)
+            sanitized.setdefault("startIsSpecial", None)
+            sanitized.setdefault("endIsSpecial", None)
+    elif element_type == "freedraw":
+        sanitized["points"] = _excalidraw_points(element.get("points"), [[0.0, 0.0]], min_points=1)
+        pressures = element.get("pressures")
+        sanitized["pressures"] = (
+            [_excalidraw_number(item) for item in pressures]
+            if isinstance(pressures, list)
+            else [0.5 for _ in sanitized["points"]]
+        )
+        sanitized["simulatePressure"] = _excalidraw_bool(element.get("simulatePressure"), True)
+        sanitized["lastCommittedPoint"] = None
+    elif element_type == "text":
+        text = _excalidraw_string(element.get("text"), _excalidraw_string(element.get("originalText"), ""))
+        sanitized["text"] = text
+        sanitized["originalText"] = _excalidraw_string(element.get("originalText"), text)
+        sanitized["fontSize"] = _excalidraw_number(element.get("fontSize"), 20.0)
+        sanitized["fontFamily"] = _excalidraw_int(element.get("fontFamily"), 5)
+        sanitized["textAlign"] = _excalidraw_string(element.get("textAlign"), "left")
+        sanitized["verticalAlign"] = _excalidraw_string(element.get("verticalAlign"), "top")
+        sanitized["containerId"] = element.get("containerId") if isinstance(element.get("containerId"), str) else None
+        sanitized["autoResize"] = _excalidraw_bool(element.get("autoResize"), True)
+        sanitized["lineHeight"] = _excalidraw_number(element.get("lineHeight"), 1.25)
+    elif element_type == "image":
+        sanitized["fileId"] = element.get("fileId") if isinstance(element.get("fileId"), str) else None
+        sanitized["status"] = element.get("status") if element.get("status") in {"pending", "saved", "error"} else "saved"
+        scale = element.get("scale")
+        sanitized["scale"] = [_excalidraw_number(scale[0], 1.0), _excalidraw_number(scale[1], 1.0)] if isinstance(scale, list) and len(scale) >= 2 else [1.0, 1.0]
+        sanitized["crop"] = element.get("crop") if isinstance(element.get("crop"), dict) else None
+    elif element_type in {"frame", "magicframe"}:
+        sanitized["name"] = element.get("name") if isinstance(element.get("name"), str) else None
+    return sanitized
+
+
+def _sanitize_excalidraw_ai_scene(scene: dict) -> dict:
+    normalized = _normalize_excalidraw_scene(scene)
+    sanitized_elements = []
+    now_ms = int(time.time() * 1000)
+    for ordinal, element in enumerate(normalized.get("elements", [])):
+        if not isinstance(element, dict):
+            _log_excalidraw_ai("Dropped non-object AI element")
+            continue
+        next_element = _sanitize_excalidraw_element(element, now_ms=now_ms, ordinal=ordinal)
+        if next_element is not None:
+            sanitized_elements.append(next_element)
+    normalized["elements"] = sanitized_elements
+    return normalized
+
+
+def _excalidraw_ai_scene_size(scene: dict) -> tuple[int, int]:
+    normalized = _normalize_excalidraw_scene(scene)
+    encoded = json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return len(encoded), len(normalized.get("elements", []))
+
+
+def _strip_json_fence(content: str) -> str:
+    text = (content or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    return text.strip()
+
+
+def _parse_excalidraw_ai_scene(content: str) -> dict:
+    text = _strip_json_fence(content)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"AI did not return valid Excalidraw JSON: {exc}") from exc
+    if isinstance(parsed, dict) and isinstance(parsed.get("scene"), dict):
+        parsed = parsed["scene"]
+    return _sanitize_excalidraw_ai_scene(parsed)
+
+
+def _parse_excalidraw_summary(content: str) -> dict:
+    text = _strip_json_fence(content)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"AI did not return valid summary JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="AI summary response must be a JSON object")
+    return parsed
+
+
+def _normalize_excalidraw_chat_history(history: object) -> list[dict]:
+    if not isinstance(history, list):
+        return []
+    normalized = []
+    for item in history[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content[:6000]})
+    return normalized
+
+
+def _extract_ai_message_content(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+    choice = (data.get("choices") or [{}])[0]
+    if not isinstance(choice, dict):
+        return ""
+    message = choice.get("message") or {}
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    return ""
+
+
+def _read_streaming_ai_response(url: str, headers: dict, verify: bool, timeout: httpx.Timeout, payload: dict) -> str:
+    full = ""
+    with httpx.stream("POST", url, json=payload, headers=headers, timeout=timeout, verify=verify) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+            if not decoded.startswith("data: "):
+                continue
+            json_data = decoded[len("data: ") :].strip()
+            if json_data == "[DONE]":
+                break
+            try:
+                data = json.loads(json_data)
+            except json.JSONDecodeError:
+                continue
+            choice = (data.get("choices") or [{}])[0]
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            if isinstance(delta, dict) and delta.get("content"):
+                full += str(delta["content"])
+    return full
+
+
+def _request_excalidraw_ai_content(server: dict, messages: list[dict], model: str) -> str:
+    url, headers, verify, timeout, payload = build_api_request(server, messages, model, stream=True)
+    _log_excalidraw_ai(
+        f"Requesting AI content server={server.get('name', '')!r} model={model!r} "
+        f"stream=True url={url}"
+    )
+    try:
+        streamed = _read_streaming_ai_response(url, headers, verify, timeout, payload)
+        if streamed:
+            _log_excalidraw_ai(f"Received streaming response chars={len(streamed)}")
+            return streamed
+    except httpx.ReadTimeout as exc:
+        read_timeout = getattr(timeout, "read", None)
+        suffix = f" after {read_timeout:g}s" if isinstance(read_timeout, (int, float)) else ""
+        raise HTTPException(
+            status_code=504,
+            detail=f"AI server read timed out{suffix} while generating the Excalidraw response.",
+        ) from exc
+    except httpx.ConnectTimeout as exc:
+        raise HTTPException(status_code=504, detail="AI server connection timed out.") from exc
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not connect to AI server: {exc}") from exc
+    except httpx.HTTPStatusError:
+        raise
+    except httpx.HTTPError:
+        # Some OpenAI-compatible servers ignore stream=true; try one normal request below.
+        pass
+
+    url, headers, verify, timeout, payload = build_api_request(server, messages, model, stream=False)
+    _log_excalidraw_ai(f"Falling back to non-streaming request server={server.get('name', '')!r} model={model!r}")
+    try:
+        with httpx.Client(timeout=timeout, verify=verify) as client:
+            response = client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            content = _extract_ai_message_content(response.json())
+            _log_excalidraw_ai(f"Received non-streaming response chars={len(content)}")
+            return content
+    except httpx.ReadTimeout as exc:
+        read_timeout = getattr(timeout, "read", None)
+        suffix = f" after {read_timeout:g}s" if isinstance(read_timeout, (int, float)) else ""
+        raise HTTPException(
+            status_code=504,
+            detail=f"AI server read timed out{suffix}. Try a faster model or increase the AI chat read timeout.",
+        ) from exc
+    except httpx.ConnectTimeout as exc:
+        raise HTTPException(status_code=504, detail="AI server connection timed out.") from exc
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not connect to AI server: {exc}") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] if exc.response is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"AI server returned an error: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"AI request failed: {exc}") from exc
+
+
+def _resolve_excalidraw_path(path: str, *, must_exist: bool) -> tuple[str, Path]:
+    root = _get_vault_root().resolve()
+    normalized = _vault_relative_path(path)
+    if not normalized.lower().endswith(".excalidraw"):
+        raise HTTPException(status_code=400, detail="Excalidraw path must end with .excalidraw")
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Excalidraw path") from exc
+    if must_exist and (not target.exists() or not target.is_file()):
+        raise HTTPException(status_code=404, detail="Excalidraw file not found")
+    return normalized, target
+
+
+def _excalidraw_summary_path(target: Path) -> Path:
+    name = target.name
+    if name.lower().endswith(".excalidraw"):
+        name = name[: -len(".excalidraw")]
+    return target.with_name(f"{name}-summary.json")
+
+
+def _excalidraw_relative_path(target: Path) -> str:
+    return f"/{target.resolve().relative_to(_get_vault_root().resolve()).as_posix()}"
+
+
+def _load_excalidraw_summary_sidecar(target: Path) -> Optional[dict]:
+    summary_path = _excalidraw_summary_path(target)
+    if not summary_path.exists() or not summary_path.is_file():
+        return None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Excalidraw summary JSON: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read Excalidraw summary: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw summary must be a JSON object")
+    return payload
+
+
+def _excalidraw_updated_at(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _excalidraw_static_root() -> Path:
+    return Path(__file__).resolve().parent / "static" / "excalidraw"
+
+
+@app.get("/static/app-assets/{asset_path:path}")
+def app_static_asset(asset_path: str) -> FileResponse:
+    root = (Path(__file__).resolve().parents[1] / "assets").resolve()
+    target = (root / asset_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid asset path") from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(target)
+
+
+@app.get("/static/excalidraw/{asset_path:path}")
+def excalidraw_static(asset_path: str) -> FileResponse:
+    root = _excalidraw_static_root().resolve()
+    target = (root / asset_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Excalidraw asset path") from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Excalidraw asset not found")
+    return FileResponse(target)
+
+
+@app.get("/excalidraw/edit")
+def excalidraw_edit(path: str = Query(...), token: Optional[str] = Query(None)) -> Response:
+    normalized, _ = _resolve_excalidraw_path(path, must_exist=False)
+    bundle_index = _excalidraw_static_root() / "index.html"
+    if bundle_index.exists() and bundle_index.is_file():
+        return FileResponse(bundle_index)
+
+    token_json = json.dumps(token or "")
+    path_json = json.dumps(normalized)
+    html_doc = f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>StillPoint Excalidraw</title>
+    <style>
+      html, body, #app {{ width: 100%; height: 100%; margin: 0; }}
+      body {{ font-family: system-ui, sans-serif; background: #f6f7f8; color: #172026; }}
+      #app {{ display: grid; grid-template-rows: auto 1fr; }}
+      header {{ display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: #10251b; color: #f4fff8; }}
+      header strong {{ font-size: 14px; }}
+      header span {{ opacity: .75; font-size: 12px; }}
+      main {{ display: grid; grid-template-columns: minmax(280px, 380px) 1fr; min-height: 0; }}
+      textarea {{ width: 100%; height: 100%; box-sizing: border-box; border: 0; border-right: 1px solid #cfd6dc; padding: 14px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: none; color: #172026; background: #fff; }}
+      section {{ min-width: 0; min-height: 0; display: grid; place-items: center; padding: 24px; }}
+      .panel {{ max-width: 720px; border: 1px solid #ccd4da; background: white; padding: 20px; }}
+      .panel h1 {{ margin: 0 0 8px; font-size: 20px; }}
+      .panel p {{ margin: 6px 0; line-height: 1.45; }}
+      .actions {{ display: flex; gap: 8px; margin-top: 14px; }}
+      button {{ border: 1px solid #9fb0bb; background: #eef3f6; color: #172026; padding: 6px 10px; border-radius: 4px; }}
+      button:active {{ transform: translateY(1px); }}
+      .error {{ color: #9d1c24; }}
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header><strong>StillPoint Excalidraw</strong><span id="status">Loading...</span></header>
+      <main>
+        <textarea id="scene" spellcheck="false"></textarea>
+        <section>
+          <div class="panel">
+            <h1>Excalidraw persistence shell</h1>
+            <p>This local editor route is wired to the StillPoint vault API.</p>
+            <p>The real Excalidraw canvas can replace this shell once the frontend package is bundled.</p>
+            <p><strong>Path:</strong> <code id="path"></code></p>
+            <div class="actions">
+              <button id="save">Save JSON</button>
+              <button id="reload">Reload</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script>
+      const drawingPath = {path_json};
+      const localToken = {token_json};
+      const statusEl = document.getElementById('status');
+      const pathEl = document.getElementById('path');
+      const textEl = document.getElementById('scene');
+      pathEl.textContent = drawingPath;
+      function headers() {{
+        const h = {{ 'content-type': 'application/json' }};
+        if (localToken) h['x-local-ui-token'] = localToken;
+        return h;
+      }}
+      async function load() {{
+        statusEl.textContent = 'Loading...';
+        const res = await fetch('/api/excalidraw?path=' + encodeURIComponent(drawingPath), {{ headers: headers() }});
+        if (!res.ok) throw new Error(await res.text());
+        const payload = await res.json();
+        textEl.value = JSON.stringify(payload.scene, null, 2);
+        statusEl.textContent = 'Loaded ' + payload.title;
+      }}
+      async function save() {{
+        statusEl.textContent = 'Saving...';
+        let scene;
+        try {{ scene = JSON.parse(textEl.value); }}
+        catch (err) {{ statusEl.innerHTML = '<span class="error">Invalid JSON</span>'; return; }}
+        const res = await fetch('/api/excalidraw', {{
+          method: 'PUT',
+          headers: headers(),
+          body: JSON.stringify({{ path: drawingPath, scene }})
+        }});
+        if (!res.ok) throw new Error(await res.text());
+        statusEl.textContent = 'Saved';
+      }}
+      document.getElementById('save').addEventListener('click', () => save().catch(err => statusEl.textContent = 'Save failed: ' + err.message));
+      document.getElementById('reload').addEventListener('click', () => load().catch(err => statusEl.textContent = 'Load failed: ' + err.message));
+      load().catch(err => statusEl.textContent = 'Load failed: ' + err.message);
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=html_doc, status_code=200)
+
+
+@app.get("/api/excalidraw")
+def excalidraw_load(path: str = Query(...)) -> dict:
+    normalized, target = _resolve_excalidraw_path(path, must_exist=True)
+    try:
+        if target.stat().st_size > _EXCALIDRAW_MAX_JSON_BYTES:
+            raise HTTPException(status_code=413, detail="Excalidraw file is too large")
+        raw = target.read_text(encoding="utf-8")
+        if not raw.strip():
+            raise HTTPException(status_code=400, detail="Excalidraw file is empty")
+        scene = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Excalidraw JSON: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read Excalidraw file: {exc}") from exc
+    if not isinstance(scene, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw scene must be a JSON object")
+    scene = _sanitize_excalidraw_ai_scene(scene)
+    return {
+        "path": normalized,
+        "title": target.name,
+        "scene": scene,
+        "updated_at": _excalidraw_updated_at(target),
+    }
+
+
+@app.put("/api/excalidraw")
+def excalidraw_save(
+    payload: ExcalidrawSavePayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    normalized, target = _resolve_excalidraw_path(payload.path, must_exist=False)
+    scene = payload.scene
+    if not isinstance(scene, dict):
+        raise HTTPException(status_code=400, detail="Excalidraw scene must be a JSON object")
+    scene = _sanitize_excalidraw_ai_scene(scene)
+    encoded = json.dumps(scene, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(encoded) > _EXCALIDRAW_MAX_JSON_BYTES:
+        raise HTTPException(status_code=413, detail="Excalidraw scene is too large")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(encoded + b"\n")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save Excalidraw file: {exc}") from exc
+    return {"ok": True, "path": normalized, "updated_at": _excalidraw_updated_at(target)}
+
+
+@app.put("/api/excalidraw/preview")
+def excalidraw_save_preview(
+    payload: ExcalidrawPreviewPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    normalized, target = _resolve_excalidraw_path(payload.path, must_exist=False)
+    try:
+        data = base64.b64decode(payload.png_base64.split(",", 1)[-1], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid PNG base64") from exc
+    if len(data) > _EXCALIDRAW_MAX_PNG_BYTES:
+        raise HTTPException(status_code=413, detail="Excalidraw preview PNG is too large")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=400, detail="Preview data must be a PNG")
+    preview_path = target.with_name(f"{target.name}.png")
+    try:
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        preview_path.write_bytes(data)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save Excalidraw preview: {exc}") from exc
+    preview_rel = f"/{preview_path.resolve().relative_to(_get_vault_root().resolve()).as_posix()}"
+    return {"ok": True, "preview_path": preview_rel}
+
+
+@app.get("/api/excalidraw/ai/config")
+def excalidraw_ai_config(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    enabled = config.load_enable_ai_chats()
+    servers = _load_ai_servers() if enabled else []
+    selected = _get_ai_server(None) if enabled else None
+    preferred_model = config.load_default_ai_model()
+    server_payload = []
+    for server in servers:
+        models = _available_ai_models(server)
+        selected_model = preferred_model if preferred_model in models else server.get("default_model")
+        if selected_model not in models:
+            selected_model = models[0] if models else ""
+        server_payload.append(
+            {
+                "name": server.get("name", ""),
+                "models": models,
+                "default_model": selected_model,
+            }
+        )
+    default_server = selected.get("name") if selected else ""
+    default_models = _available_ai_models(selected) if selected else []
+    default_model = preferred_model if preferred_model in default_models else (selected or {}).get("default_model", "")
+    if default_model not in default_models and default_models:
+        default_model = default_models[0]
+    return {
+        "enabled": enabled,
+        "max_json_bytes": _EXCALIDRAW_AI_MAX_JSON_BYTES,
+        "max_elements": _EXCALIDRAW_AI_MAX_ELEMENTS,
+        "servers": server_payload,
+        "default_server": default_server,
+        "default_model": default_model,
+    }
+
+
+@app.post("/api/excalidraw/open-page")
+def excalidraw_request_open_page(
+    payload: ExcalidrawOpenPagePayload,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    normalized = _vault_relative_path(payload.path)
+    root = _get_vault_root().resolve()
+    target = (root / normalized.lstrip("/")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid page path") from exc
+    if not target.exists():
+        candidates = [target.with_suffix(suffix) for suffix in PAGE_SUFFIXES]
+        if not any(candidate.exists() for candidate in candidates):
+            raise HTTPException(status_code=404, detail="Page not found")
+    with _EXCALIDRAW_OPEN_PAGE_LOCK:
+        _EXCALIDRAW_OPEN_PAGE_REQUESTS.append(normalized)
+        del _EXCALIDRAW_OPEN_PAGE_REQUESTS[:-20]
+    return {"ok": True, "path": normalized}
+
+
+@app.get("/api/excalidraw/open-page/next")
+def excalidraw_next_open_page_request(
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    with _EXCALIDRAW_OPEN_PAGE_LOCK:
+        path = _EXCALIDRAW_OPEN_PAGE_REQUESTS.pop(0) if _EXCALIDRAW_OPEN_PAGE_REQUESTS else None
+    return {"path": path}
+
+
+def _select_excalidraw_ai_server_model(server_name: Optional[str], model_name: Optional[str]) -> tuple[dict, str]:
+    server = _get_ai_server(server_name)
+    if not server:
+        raise HTTPException(status_code=400, detail="No AI server configured")
+    models = _available_ai_models(server)
+    model = (model_name or "").strip() or config.load_default_ai_model() or server.get("default_model") or ""
+    if not model:
+        model = models[0] if models else "gpt-3.5-turbo"
+    return server, model
+
+
+@app.get("/api/excalidraw/summary")
+def excalidraw_summary_load(
+    path: str = Query(...),
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    normalized, target = _resolve_excalidraw_path(path, must_exist=True)
+    summary_path = _excalidraw_summary_path(target)
+    summary = _load_excalidraw_summary_sidecar(target)
+    payload = {
+        "exists": summary is not None,
+        "path": normalized,
+        "summary_path": _excalidraw_relative_path(summary_path),
+        "source_updated_at": _excalidraw_updated_at(target),
+    }
+    if summary is not None:
+        payload.update(
+            {
+                "summary": summary,
+                "updated_at": _excalidraw_updated_at(summary_path),
+            }
+        )
+    return payload
+
+
+@app.post("/api/excalidraw/summary")
+def excalidraw_summary_generate(
+    payload: ExcalidrawSummaryPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    if not config.load_enable_ai_chats():
+        raise HTTPException(status_code=403, detail="AI chats are disabled")
+    normalized_path, target = _resolve_excalidraw_path(payload.path, must_exist=False)
+    scene = _normalize_excalidraw_scene(payload.scene)
+    size_bytes, element_count = _excalidraw_ai_scene_size(scene)
+    if size_bytes > _EXCALIDRAW_AI_MAX_JSON_BYTES or element_count > _EXCALIDRAW_AI_MAX_ELEMENTS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Diagram is too large to summarize with the current full-scene analyzer. "
+                f"Limit is {_EXCALIDRAW_AI_MAX_ELEMENTS} elements and {_EXCALIDRAW_AI_MAX_JSON_BYTES} bytes."
+            ),
+        )
+
+    server, model = _select_excalidraw_ai_server_model(payload.server, payload.model)
+    scene_json = json.dumps(scene, ensure_ascii=False, indent=2)
+    messages = [
+        {"role": "system", "content": _load_excalidraw_deconstruct_prompt()},
+        {
+            "role": "user",
+            "content": (
+                f"File path: {normalized_path}\n\n"
+                "Current Excalidraw scene JSON:\n"
+                f"{scene_json}"
+            ),
+        },
+    ]
+    request_debug_path = _write_excalidraw_ai_debug(
+        "last-summary-request.json",
+        {
+            "path": normalized_path,
+            "server": server.get("name", ""),
+            "model": model,
+            "scene_bytes": size_bytes,
+            "element_count": element_count,
+            "messages": messages,
+        },
+    )
+    if request_debug_path:
+        _log_excalidraw_ai(f"Wrote summary request debug artifact: {request_debug_path}")
+    content = _request_excalidraw_ai_content(server, messages, model)
+    response_debug_path = _write_excalidraw_ai_debug("last-summary-response.txt", content)
+    if response_debug_path:
+        _log_excalidraw_ai(f"Wrote raw summary response debug artifact: {response_debug_path}")
+    if not content:
+        raise HTTPException(status_code=502, detail="AI response did not include message content")
+    summary = _parse_excalidraw_summary(content)
+    summary_path = _excalidraw_summary_path(target)
+    try:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save Excalidraw summary: {exc}") from exc
+    summary_debug_path = _write_excalidraw_ai_debug("last-summary.json", summary)
+    if summary_debug_path:
+        _log_excalidraw_ai(f"Wrote parsed summary debug artifact: {summary_debug_path}")
+    return {
+        "ok": True,
+        "exists": True,
+        "path": normalized_path,
+        "summary_path": _excalidraw_relative_path(summary_path),
+        "summary": summary,
+        "updated_at": _excalidraw_updated_at(summary_path),
+        "source_updated_at": _excalidraw_updated_at(target) if target.exists() else None,
+        "server": server.get("name", ""),
+        "model": model,
+    }
+
+
+@app.post("/api/excalidraw/chat")
+def excalidraw_chat(
+    payload: ExcalidrawChatPayload,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    if not config.load_enable_ai_chats():
+        raise HTTPException(status_code=403, detail="AI chats are disabled")
+    prompt = (payload.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    normalized_path, target = _resolve_excalidraw_path(payload.path, must_exist=True)
+    summary = _load_excalidraw_summary_sidecar(target)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Diagram summary is missing. Analyze the diagram first.")
+
+    server, model = _select_excalidraw_ai_server_model(payload.server, payload.model)
+    summary_json = json.dumps(summary, ensure_ascii=False, indent=2)
+    history = _normalize_excalidraw_chat_history(payload.history)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an architecture assistant inside StillPoint. Answer using the provided "
+                "Excalidraw architecture summary as context. If the summary does not contain enough "
+                "information, say what is missing instead of inventing details."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"File path: {normalized_path}\n\n"
+                "Excalidraw architecture summary JSON:\n"
+                f"{summary_json}"
+            ),
+        },
+    ] + history + [{"role": "user", "content": prompt}]
+    request_debug_path = _write_excalidraw_ai_debug(
+        "last-chat-request.json",
+        {
+            "path": normalized_path,
+            "summary_path": _excalidraw_relative_path(_excalidraw_summary_path(target)),
+            "server": server.get("name", ""),
+            "model": model,
+            "history_count": len(history),
+            "messages": messages,
+        },
+    )
+    if request_debug_path:
+        _log_excalidraw_ai(f"Wrote chat request debug artifact: {request_debug_path}")
+    content = _request_excalidraw_ai_content(server, messages, model)
+    response_debug_path = _write_excalidraw_ai_debug("last-chat-response.txt", content)
+    if response_debug_path:
+        _log_excalidraw_ai(f"Wrote raw chat response debug artifact: {response_debug_path}")
+    if not content:
+        raise HTTPException(status_code=502, detail="AI response did not include message content")
+    return {
+        "ok": True,
+        "path": normalized_path,
+        "summary_path": _excalidraw_relative_path(_excalidraw_summary_path(target)),
+        "reply": content,
+        "server": server.get("name", ""),
+        "model": model,
+    }
+
+
+@app.post("/api/excalidraw/ai")
+def excalidraw_ai_rewrite(
+    payload: ExcalidrawAiRewritePayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    if not config.load_enable_ai_chats():
+        raise HTTPException(status_code=403, detail="AI chats are disabled")
+    prompt = (payload.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    normalized_path, _ = _resolve_excalidraw_path(payload.path, must_exist=False)
+    scene = _normalize_excalidraw_scene(payload.scene)
+    size_bytes, element_count = _excalidraw_ai_scene_size(scene)
+    if size_bytes > _EXCALIDRAW_AI_MAX_JSON_BYTES or element_count > _EXCALIDRAW_AI_MAX_ELEMENTS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Diagram is too large for full-scene drawing AI. "
+                f"Limit is {_EXCALIDRAW_AI_MAX_ELEMENTS} elements and {_EXCALIDRAW_AI_MAX_JSON_BYTES} bytes."
+            ),
+        )
+
+    server, model = _select_excalidraw_ai_server_model(payload.server, payload.model)
+    scene_json = json.dumps(scene, ensure_ascii=False, indent=2)
+    messages = [
+        {"role": "system", "content": _load_excalidraw_ai_system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                f"File path: {normalized_path}\n\n"
+                "Current Excalidraw scene JSON:\n"
+                f"{scene_json}\n\n"
+                f"User request: {prompt}"
+            ),
+        },
+    ]
+    request_debug_path = _write_excalidraw_ai_debug(
+        "last-draw-request.json",
+        {
+            "path": normalized_path,
+            "server": server.get("name", ""),
+            "model": model,
+            "scene_bytes": size_bytes,
+            "element_count": element_count,
+            "messages": messages,
+        },
+    )
+    if request_debug_path:
+        _log_excalidraw_ai(f"Wrote draw request debug artifact: {request_debug_path}")
+    content = _request_excalidraw_ai_content(server, messages, model)
+    response_debug_path = _write_excalidraw_ai_debug("last-draw-response.txt", content)
+    if response_debug_path:
+        _log_excalidraw_ai(f"Wrote raw draw response debug artifact: {response_debug_path}")
+    if not content:
+        raise HTTPException(status_code=502, detail="AI response did not include message content")
+    scene = _parse_excalidraw_ai_scene(content)
+    scene_debug_path = _write_excalidraw_ai_debug("last-draw-scene.json", scene)
+    if scene_debug_path:
+        _log_excalidraw_ai(f"Wrote parsed draw scene debug artifact: {scene_debug_path}")
+    return {
+        "ok": True,
+        "path": normalized_path,
+        "scene": scene,
+        "server": server.get("name", ""),
+        "model": model,
+    }
+
+
 @app.get("/excalidraw/poc")
 def excalidraw_poc() -> HTMLResponse:
     html = """<!doctype html>
@@ -2593,14 +3705,15 @@ def api_search(
 @app.get("/api/pages/search")
 def api_pages_search(
     q: str = "",
-    limit: int = 100
+    limit: int = 100,
+    filter_path: Optional[str] = None,
 ) -> dict:
     """Simple page search by path/title for navigation dialogs (Jump/Link).
     
     This is a lighter-weight search than /api/search, intended for autocomplete
     in dialogs. It does substring matching on page paths and titles.
     """
-    _log_api(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit}{_ANSI_RESET}")
+    _log_api(f"{_ANSI_BLUE}[API] GET /api/pages/search q={q} limit={limit} filter_path={filter_path}{_ANSI_RESET}")
     
     db_path = config._vault_db_path()
     if not db_path:
@@ -2614,12 +3727,20 @@ def api_pages_search(
         exact_path = f"/{term_lower}"
         starts_path = f"{exact_path}/%"
         
+        where_clauses = ["(LOWER(path) LIKE ? OR LOWER(COALESCE(title, '')) LIKE ?)"]
+        query_params: list[object] = [like, like]
+        normalized_filter = _vault_relative_path(filter_path or "")
+        if normalized_filter != "/":
+            filter_prefix = normalized_filter.rstrip("/")
+            where_clauses.append("(path = ? OR path LIKE ?)")
+            query_params.extend([filter_prefix, f"{filter_prefix}/%"])
+
         # Try to use path_ci/title_ci columns if they exist, otherwise fall back to LOWER()
         cur = conn.execute(
-            """
+            f"""
             SELECT path, title
             FROM pages
-            WHERE LOWER(path) LIKE ? OR LOWER(COALESCE(title, '')) LIKE ?
+            WHERE {" AND ".join(where_clauses)}
             ORDER BY
                 CASE
                     WHEN LOWER(path) = ? THEN 0
@@ -2631,7 +3752,7 @@ def api_pages_search(
                 COALESCE(updated, 0) DESC
             LIMIT ?
             """,
-            (like, like, exact_path, starts_path, term_lower, like, limit),
+            (*query_params, exact_path, starts_path, term_lower, like, limit),
         )
         rows = cur.fetchall()
         conn.close()

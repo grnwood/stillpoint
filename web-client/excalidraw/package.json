@@ -1,0 +1,20 @@
+{
+  "name": "stillpoint-excalidraw",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "prebuild": "node scripts/copy-fonts.mjs",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@vitejs/plugin-react": "^5.1.1",
+    "vite": "^7.2.4",
+    "typescript": "~5.9.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0"
+  },
+  "devDependencies": {}
+}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import time
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from sp.app.ui import mermaid_editor_window
 from sp.app.ui import webengine_env
 from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
 from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
+from sp.server import api as server_api
 
 
 def _wait_for(qapp, predicate, timeout: float = 2.0) -> None:
@@ -329,6 +332,288 @@ def test_excalidraw_poc_route_serves_minimal_local_page():
     assert response.status_code == 200
     assert "StillPoint Excalidraw POC" in content
     assert "foxnews" not in content.lower()
+
+
+def test_excalidraw_api_loads_and_saves_scene(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    drawing = tmp_path / "Design" / "drawing.excalidraw"
+    drawing.parent.mkdir()
+    drawing.write_text(
+        json.dumps({"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}}),
+        encoding="utf-8",
+    )
+
+    loaded = server_api.excalidraw_load("/Design/drawing.excalidraw")
+
+    assert loaded["path"] == "/Design/drawing.excalidraw"
+    assert loaded["title"] == "drawing.excalidraw"
+    assert loaded["scene"]["type"] == "excalidraw"
+
+    payload = server_api.ExcalidrawSavePayload(
+        path="/Design/drawing.excalidraw",
+        scene={"elements": [{"id": "one", "type": "rectangle"}]},
+    )
+    saved = server_api.excalidraw_save(payload)
+
+    assert saved["ok"] is True
+    persisted = json.loads(drawing.read_text(encoding="utf-8"))
+    assert persisted["type"] == "excalidraw"
+    assert persisted["elements"][0]["id"] == "one"
+
+
+def test_excalidraw_api_load_repairs_incomplete_saved_scene(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    drawing = tmp_path / "broken.excalidraw"
+    drawing.write_text(
+        json.dumps(
+            {
+                "type": "excalidraw",
+                "version": 2,
+                "elements": [{"id": "arrow", "type": "arrow", "x": 0, "y": 0}],
+                "appState": {},
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = server_api.excalidraw_load("/broken.excalidraw")
+
+    arrow = loaded["scene"]["elements"][0]
+    assert arrow["groupIds"] == []
+    assert len(arrow["points"]) == 2
+    assert arrow["boundElements"] is None
+
+
+def test_excalidraw_api_rejects_paths_outside_vault(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+
+    try:
+        server_api.excalidraw_load("/../outside.excalidraw")
+    except server_api.HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("Expected path traversal to be rejected")
+
+
+def test_excalidraw_preview_writes_png_sidecar(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    png = b"\x89PNG\r\n\x1a\n" + b"stillpoint"
+    payload = server_api.ExcalidrawPreviewPayload(
+        path="/drawing.excalidraw",
+        png_base64=base64.b64encode(png).decode("ascii"),
+    )
+
+    result = server_api.excalidraw_save_preview(payload)
+
+    assert result == {"ok": True, "preview_path": "/drawing.excalidraw.png"}
+    assert (tmp_path / "drawing.excalidraw.png").read_bytes() == png
+
+
+def test_excalidraw_ai_parses_fenced_full_scene_response():
+    response = """```json
+{"type":"excalidraw","version":2,"elements":[{"id":"box"}],"appState":{},"files":{}}
+```"""
+
+    scene = server_api._parse_excalidraw_ai_scene(response)
+
+    assert scene["type"] == "excalidraw"
+    assert scene["elements"][0]["id"] == "box"
+    assert scene["elements"][0]["type"] == "rectangle"
+    assert scene["elements"][0]["groupIds"] == []
+    assert scene["files"] == {}
+
+
+def test_excalidraw_ai_neutralizes_generated_fractional_indices():
+    response = json.dumps(
+        {
+            "type": "excalidraw",
+            "version": 2,
+            "elements": [{"id": "box", "index": "p9"}],
+            "appState": {},
+            "files": {},
+        }
+    )
+
+    scene = server_api._parse_excalidraw_ai_scene(response)
+
+    assert scene["elements"][0]["index"] is None
+
+
+def test_excalidraw_ai_fills_required_element_arrays():
+    response = json.dumps(
+        {
+            "type": "excalidraw",
+            "version": 2,
+            "elements": [
+                {"id": "box", "type": "rectangle", "x": 10, "y": 20},
+                {"id": "arrow", "type": "arrow", "x": 0, "y": 0},
+                {"id": "label", "type": "text", "x": 5, "y": 5, "text": "Hello"},
+            ],
+            "appState": {},
+            "files": {},
+        }
+    )
+
+    scene = server_api._parse_excalidraw_ai_scene(response)
+
+    box, arrow, label = scene["elements"]
+    assert box["groupIds"] == []
+    assert box["boundElements"] is None
+    assert box["width"] == 100.0
+    assert len(arrow["points"]) == 2
+    assert arrow["startBinding"] is None
+    assert arrow["endBinding"] is None
+    assert label["originalText"] == "Hello"
+    assert label["lineHeight"] == 1.25
+
+
+def test_excalidraw_ai_scene_size_counts_bytes_and_elements():
+    scene = {
+        "type": "excalidraw",
+        "version": 2,
+        "elements": [{"id": str(index)} for index in range(3)],
+        "appState": {},
+        "files": {},
+    }
+
+    size_bytes, element_count = server_api._excalidraw_ai_scene_size(scene)
+
+    assert size_bytes > 0
+    assert element_count == 3
+
+
+def test_excalidraw_summary_path_uses_filename_sidecar(tmp_path: Path):
+    target = tmp_path / "folder" / "diagram.excalidraw"
+
+    summary_path = server_api._excalidraw_summary_path(target)
+
+    assert summary_path == tmp_path / "folder" / "diagram-summary.json"
+
+
+def test_excalidraw_summary_parser_accepts_fenced_json():
+    response = """```json
+{"title":"Order Flow","diagram_type":"Integration Architecture","summary":"Orders move through the platform."}
+```"""
+
+    summary = server_api._parse_excalidraw_summary(response)
+
+    assert summary["title"] == "Order Flow"
+    assert summary["diagram_type"] == "Integration Architecture"
+
+
+def test_excalidraw_summary_load_reports_missing_and_existing(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    drawing = tmp_path / "diagram.excalidraw"
+    drawing.write_text(json.dumps({"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}}), encoding="utf-8")
+
+    missing = server_api.excalidraw_summary_load("/diagram.excalidraw")
+
+    assert missing["exists"] is False
+    assert missing["summary_path"] == "/diagram-summary.json"
+
+    (tmp_path / "diagram-summary.json").write_text(json.dumps({"title": "Diagram"}), encoding="utf-8")
+
+    existing = server_api.excalidraw_summary_load("/diagram.excalidraw")
+
+    assert existing["exists"] is True
+    assert existing["summary"] == {"title": "Diagram"}
+
+
+def test_excalidraw_summary_generate_writes_sidecar(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    monkeypatch.setattr(server_api.config, "load_enable_ai_chats", lambda: True)
+    monkeypatch.setattr(server_api, "_get_ai_server", lambda name: {"name": "Test AI", "default_model": "test-model"})
+    monkeypatch.setattr(server_api, "_available_ai_models", lambda server: ["test-model"])
+    drawing = tmp_path / "diagram.excalidraw"
+    drawing.write_text(json.dumps({"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}}), encoding="utf-8")
+
+    def fake_request(server, messages, model):
+        assert "enterprise architecture analyst" in messages[0]["content"]
+        assert "Current Excalidraw scene JSON" in messages[1]["content"]
+        return json.dumps({"title": "Diagram", "diagram_type": "Whiteboard", "summary": "A small diagram."})
+
+    monkeypatch.setattr(server_api, "_request_excalidraw_ai_content", fake_request)
+    payload = server_api.ExcalidrawSummaryPayload(
+        path="/diagram.excalidraw",
+        scene={"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}},
+        server="Test AI",
+        model="test-model",
+    )
+
+    result = server_api.excalidraw_summary_generate(payload)
+
+    assert result["ok"] is True
+    assert result["summary_path"] == "/diagram-summary.json"
+    assert json.loads((tmp_path / "diagram-summary.json").read_text(encoding="utf-8"))["title"] == "Diagram"
+
+
+def test_excalidraw_chat_uses_summary_context_without_scene(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    monkeypatch.setattr(server_api.config, "load_enable_ai_chats", lambda: True)
+    monkeypatch.setattr(server_api, "_get_ai_server", lambda name: {"name": "Test AI", "default_model": "test-model"})
+    monkeypatch.setattr(server_api, "_available_ai_models", lambda server: ["test-model"])
+    drawing = tmp_path / "diagram.excalidraw"
+    drawing.write_text(json.dumps({"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}}), encoding="utf-8")
+    (tmp_path / "diagram-summary.json").write_text(json.dumps({"title": "Orders", "summary": "OMS owns order flow."}), encoding="utf-8")
+
+    def fake_request(server, messages, model):
+        content = messages[1]["content"]
+        assert "Excalidraw architecture summary JSON" in content
+        assert "OMS owns order flow" in content
+        assert "Current Excalidraw scene JSON" not in content
+        assert messages[2] == {"role": "user", "content": "Earlier question"}
+        assert messages[3] == {"role": "assistant", "content": "Earlier answer"}
+        assert messages[-1] == {"role": "user", "content": "What owns order flow?"}
+        return "The diagram says OMS owns order flow."
+
+    monkeypatch.setattr(server_api, "_request_excalidraw_ai_content", fake_request)
+    payload = server_api.ExcalidrawChatPayload(
+        path="/diagram.excalidraw",
+        prompt="What owns order flow?",
+        history=[
+            {"role": "system", "content": "ignore me"},
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ],
+    )
+
+    result = server_api.excalidraw_chat(payload)
+
+    assert result["reply"] == "The diagram says OMS owns order flow."
+
+
+def test_excalidraw_draw_rewrite_endpoint_returns_sanitized_scene(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    monkeypatch.setattr(server_api.config, "load_enable_ai_chats", lambda: True)
+    monkeypatch.setattr(server_api, "_get_ai_server", lambda name: {"name": "Test AI", "default_model": "test-model"})
+    monkeypatch.setattr(server_api, "_available_ai_models", lambda server: ["test-model"])
+
+    def fake_request(server, messages, model):
+        assert "You are editing an Excalidraw scene" in messages[0]["content"]
+        assert "User request: rewrite it" in messages[1]["content"]
+        return json.dumps(
+            {
+                "type": "excalidraw",
+                "version": 2,
+                "elements": [{"id": "box", "index": "p9"}],
+                "appState": {},
+                "files": {},
+            }
+        )
+
+    monkeypatch.setattr(server_api, "_request_excalidraw_ai_content", fake_request)
+    payload = server_api.ExcalidrawAiRewritePayload(
+        path="/diagram.excalidraw",
+        prompt="rewrite it",
+        scene={"type": "excalidraw", "version": 2, "elements": [], "appState": {}, "files": {}},
+    )
+
+    result = server_api.excalidraw_ai_rewrite(payload)
+
+    assert result["ok"] is True
+    assert result["scene"]["elements"][0]["id"] == "box"
+    assert result["scene"]["elements"][0]["index"] is None
 
 
 def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp_path: Path):

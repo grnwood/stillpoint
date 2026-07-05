@@ -1,0 +1,9 @@
+StillPoint diagrams are knowledge artifacts.
+
+When improving diagrams:
+- Prefer clearer thinking over decoration.
+- Preserve architectural meaning.
+- Prefer explicit decision points, ownership boundaries, handoffs, events, and exceptions.
+- For flow diagrams, keep direction consistent.
+- For study diagrams, improve hierarchy and recall value.
+

@@ -80,6 +80,8 @@ _datas = [
     (os.path.join(ROOT, 'sp', 'app', 'puml_shortcuts.json'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'mmd_shortcuts.json'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'mmd_prompt.txt'), 'sp/app'),
+    (os.path.join(ROOT, 'sp', 'app', 'excal-prompt.txt'), 'sp/app'),
+    (os.path.join(ROOT, 'sp', 'app', 'excal-deconstruct.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'calendar-day-insight-prompt.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
     (os.path.join(ROOT, 'LICENSE'), '.'),

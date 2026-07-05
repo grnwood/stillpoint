@@ -2222,6 +2222,7 @@ class MainWindow(QMainWindow):
         self._event_loop_rate_window_started_at = time.monotonic()
         self._event_loop_last_wall_time = time.time()
         self._event_loop_sleep_timer: Optional[QTimer] = None
+        self._excalidraw_open_page_timer: Optional[QTimer] = None
         self._homebase_fs_signal_count = 0
         self._homebase_fs_signal_window_started_at = time.monotonic()
         # Stable selected remote vault path; may differ from API-reported root.
@@ -16330,18 +16331,37 @@ class MainWindow(QMainWindow):
             self._alert(f"Failed to open Mermaid editor: {exc}")
 
     def _open_excalidraw_editor(self, file_path) -> None:
-        """Open an Excalidraw POC window for the given .excalidraw file."""
+        """Open an Excalidraw editor window for the given .excalidraw file."""
         if not file_path:
             return
         try:
-            from .excalidraw_window import POC_PATH
             from .webengine_env import env_truthy
 
-            url = f"{self.api_base.rstrip('/')}{POC_PATH}"
+            if self._remote_mode or not self.vault_root:
+                self._alert("Excalidraw editing is local-vault only for now.")
+                return
+            root = Path(self.vault_root).resolve()
+            target = Path(str(file_path)).expanduser().resolve()
+            try:
+                rel_path = "/" + target.relative_to(root).as_posix()
+            except ValueError:
+                self._alert("Excalidraw file must be inside the current vault.")
+                return
+            if target.suffix.lower() != ".excalidraw":
+                self._alert("Excalidraw editor can only open .excalidraw files.")
+                return
+            query = f"path={quote(rel_path, safe='')}"
+            if self._local_auth_token:
+                query += f"&token={quote(self._local_auth_token, safe='')}"
+            filter_path = getattr(self, "_nav_filter_path", None)
+            if filter_path and filter_path != "/":
+                query += f"&filter_path={quote(filter_path, safe='')}"
+            url = f"{self.api_base.rstrip('/')}/excalidraw/edit?{query}"
             if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):
                 QDesktopServices.openUrl(QUrl(url))
+                self._ensure_excalidraw_open_page_poll()
                 return
-            title = f"Excalidraw POC - {Path(str(file_path)).name}"
+            title = f"Excalidraw - {target.name}"
             cmd = [
                 sys.executable,
                 "-m",
@@ -16357,6 +16377,7 @@ class MainWindow(QMainWindow):
             if not hasattr(self, "_excalidraw_processes"):
                 self._excalidraw_processes: list[subprocess.Popen] = []
             self._excalidraw_processes.append(process)
+            self._ensure_excalidraw_open_page_poll()
             app = QApplication.instance()
             if app is not None:
                 app.aboutToQuit.connect(
@@ -16364,6 +16385,41 @@ class MainWindow(QMainWindow):
                 )
         except Exception as exc:
             self._alert(f"Failed to open Excalidraw editor: {exc}")
+
+    def _ensure_excalidraw_open_page_poll(self) -> None:
+        """Poll local Excalidraw navigation requests from the WebEngine process."""
+        if self._remote_mode:
+            return
+        timer = getattr(self, "_excalidraw_open_page_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(500)
+            timer.timeout.connect(self._poll_excalidraw_open_page_request)
+            self._excalidraw_open_page_timer = timer
+        if not timer.isActive():
+            timer.start()
+
+    def _poll_excalidraw_open_page_request(self) -> None:
+        if self._remote_mode or not self.http:
+            return
+        try:
+            resp = self.http.get("/api/excalidraw/open-page/next")
+            resp.raise_for_status()
+            path = (resp.json() or {}).get("path")
+        except Exception as exc:
+            print(f"[Excalidraw] Failed to poll StillPoint page open requests: {exc}", file=sys.stderr)
+            return
+        if not path:
+            return
+        try:
+            self._open_file(path)
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.statusBar().showMessage(f"Opened linked page: {path}", 2500)
+        except Exception as exc:
+            print(f"[Excalidraw] Failed to open linked page {path}: {exc}", file=sys.stderr)
+            self.statusBar().showMessage(f"Failed to open linked page: {path}", 4000)
 
     def _open_remote_mermaid_editor(self, remote_path: str, page_key: Optional[str]) -> None:
         if not remote_path:

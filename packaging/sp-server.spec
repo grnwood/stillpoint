@@ -40,6 +40,7 @@ hidden = (
         "sp.server.api",
         "sp.app.config",
         "sp.app.indexer",
+        "sp.app.ui.ai_api",
         "sp.app.ui.path_utils",
         "sp.logging_flags",
         "fastapi",
@@ -62,6 +63,10 @@ hidden = (
 # Runtime data needed by headless API server
 _datas = [
     (os.path.join(ROOT, "sp", "server", "templates"), "sp/server/templates"),
+    (os.path.join(ROOT, "sp", "server", "static"), "sp/server/static"),
+    (os.path.join(ROOT, "sp", "assets"), "sp/assets"),
+    (os.path.join(ROOT, "sp", "app", "excal-prompt.txt"), "sp/app"),
+    (os.path.join(ROOT, "sp", "app", "excal-deconstruct.txt"), "sp/app"),
     (os.path.join(ROOT, "packaging", "server", "run-server.sh"), "."),
     (os.path.join(ROOT, "packaging", "server", "_launch.sh"), "."),
     (os.path.join(ROOT, "packaging", "server", "stillpoint-server.service"), "."),
