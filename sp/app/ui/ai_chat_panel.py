@@ -2017,13 +2017,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self.debug_checkbox = QtWidgets.QCheckBox("Debug")
         self.debug_checkbox.setChecked(False)
         self.debug_checkbox.setToolTip("Show debug traces in chat")
-        self.debug_checkbox.setStyleSheet("color: #9a9a9a;")
         model_row.addWidget(self.debug_checkbox)
         # Use a compact font size for model/server controls
-        compact_css = f"font-size: {theme_value('ai_chat_panel.compact_font_size_px', 12)}px;"
-        self.server_config_widget.setStyleSheet(compact_css)
-        self.prompt_btn.setStyleSheet(compact_css)
-        refresh_models_btn.setStyleSheet(compact_css)
+        self._refresh_models_btn = refresh_models_btn
         model_row.addWidget(self.prompt_btn)
         cfg_layout.addLayout(model_row)
         layout.addWidget(self.server_config_widget)
@@ -2083,6 +2079,7 @@ class AIChatPanel(QtWidgets.QWidget):
         right_layout.setContentsMargins(4, 4, 4, 4)
         right_layout.setSpacing(4)
         chat_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        chat_split.setObjectName("aiChatMessageSplitter")
         right_layout.addWidget(chat_split, 1)
         self.chat_view = QtWidgets.QTextBrowser()
         self.chat_view.setOpenExternalLinks(False)
@@ -2091,23 +2088,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self.chat_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.chat_view.customContextMenuRequested.connect(self._on_history_context_menu)
         self.chat_view.setReadOnly(True)
-        chat_colors = _chat_surface_defaults(self)
-        self.chat_view.setStyleSheet(
-            "QTextBrowser {"
-            "  padding: 6px;"
-            "  background: "
-            f"{theme_value('ai_chat_panel.chat_view.bg', chat_colors['base'])};"
-            "  color: "
-            f"{theme_value('ai_chat_panel.chat_view.text', chat_colors['text'])};"
-            "  border: 1px solid "
-            f"{theme_value('ai_chat_panel.chat_view.border', chat_colors['mid'])};"
-            "}"
-        )
         self.chat_view.installEventFilter(self)
         self._apply_font_size()
         chat_split.addWidget(self.chat_view)
         # Compact input row: two-line textbox with controls on the right
         input_container = QtWidgets.QWidget()
+        input_container.setObjectName("aiChatInputContainer")
         input_layout = QtWidgets.QHBoxLayout(input_container)
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(6)
@@ -2135,14 +2121,6 @@ class AIChatPanel(QtWidgets.QWidget):
         self.stop_btn.setIconSize(QSize(10, 10))
         self.stop_btn.clicked.connect(self._cancel_active_operation)
         self.stop_btn.setFixedWidth(28)
-        self.stop_btn.setStyleSheet(
-            "background:"
-            f"{theme_value('ai_chat_panel.stop_button.bg', '#e53935')}; "
-            "color:"
-            f"{theme_value('ai_chat_panel.stop_button.text', '#ffffff')}; "
-            "border:1px solid "
-            f"{theme_value('ai_chat_panel.stop_button.border', '#c62828')};"
-        )
         self.send_btn = QtWidgets.QToolButton()
         self.send_btn.setToolTip("Send message (Ctrl+Enter)")
         send_icon = _load_icon("send-message.svg", QSize(10, 10))
@@ -2166,14 +2144,10 @@ class AIChatPanel(QtWidgets.QWidget):
         btn_col.addStretch()
         input_layout.addLayout(btn_col)
         self.status_label = QtWidgets.QLabel()
+        self.status_label.setObjectName("aiChatStatusLabel")
         right_layout.addWidget(self.status_label)
         self.model_status_label = QtWidgets.QLabel()
-        self.model_status_label.setStyleSheet(
-            "font-size: "
-            f"{theme_value('ai_chat_panel.model_status.size_px', 10)}px; "
-            "color: "
-            f"{theme_value('ai_chat_panel.model_status.color', '#888888')};"
-        )
+        self.model_status_label.setObjectName("aiChatModelStatusLabel")
         self.model_status_label.setWordWrap(False)
         self.model_status_label.setMinimumWidth(0)
         self.model_status_label.setMaximumWidth(500)
@@ -2186,16 +2160,16 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _apply_theme_styles(self) -> None:
         colors = _chat_surface_defaults(self)
-        panel_bg = theme_value("ai_chat_panel.panel.bg", colors["window"])
-        panel_text = theme_value("ai_chat_panel.panel.text", colors["window_text"])
-        surface_bg = theme_value("ai_chat_panel.panel.surface_bg", colors["base"])
-        alt_bg = theme_value("ai_chat_panel.panel.alt_bg", colors["alt"])
-        border = theme_value("ai_chat_panel.panel.border", colors["mid"])
-        input_bg = theme_value("ai_chat_panel.panel.input_bg", colors["base"])
-        input_text = theme_value("ai_chat_panel.panel.input_text", colors["text"])
-        highlight = theme_value("ai_chat_panel.panel.selected_bg", colors["highlight"])
-        highlighted_text = theme_value("ai_chat_panel.panel.selected_text", colors["highlighted_text"])
-        disabled_text = theme_value("ai_chat_panel.panel.muted_text", colors["disabled_text"])
+        panel_bg = colors["window"]
+        panel_text = colors["window_text"]
+        surface_bg = colors["base"]
+        alt_bg = colors["alt"]
+        border = colors["mid"]
+        input_bg = colors["base"]
+        input_text = colors["text"]
+        highlight = colors["highlight"]
+        highlighted_text = colors["highlighted_text"]
+        disabled_text = colors["disabled_text"]
         self.setStyleSheet(
             f"""
             QWidget#aiChatPanel {{
@@ -2205,9 +2179,17 @@ class AIChatPanel(QtWidgets.QWidget):
             QWidget#aiChatLeft,
             QWidget#aiChatRight,
             QWidget#aiChatContextBar,
-            QWidget#aiChatServerConfig {{
+            QWidget#aiChatServerConfig,
+            QWidget#aiChatInputContainer {{
                 background: {panel_bg};
                 color: {panel_text};
+            }}
+            QSplitter#aiChatMessageSplitter {{
+                background: {panel_bg};
+            }}
+            QSplitter#aiChatMessageSplitter::handle {{
+                background: {border};
+                height: 1px;
             }}
             QTreeWidget {{
                 background: {surface_bg};
@@ -2242,19 +2224,151 @@ class AIChatPanel(QtWidgets.QWidget):
             QLabel {{
                 color: {panel_text};
             }}
+            QLabel#aiChatStatusLabel,
+            QLabel#aiChatModelStatusLabel {{
+                background: {panel_bg};
+            }}
             QCheckBox {{
                 color: {disabled_text};
             }}
             """
         )
+        self._apply_theme_widget_styles(colors)
         self._toggle_chat_list(False)
         self._update_context_summary()
         self._apply_font_size()
+
+    def _apply_theme_widget_styles(self, colors: Optional[dict[str, str]] = None) -> None:
+        colors = colors or _chat_surface_defaults(self)
+        if hasattr(self, "context_label"):
+            self.context_label.setStyleSheet(
+                "color: "
+                f"{colors['text']}; "
+                "background: transparent; "
+                "font-weight: "
+                f"{theme_value('ai_chat_panel.context_label.weight', 'bold')};"
+            )
+        if hasattr(self, "context_summary_label"):
+            self.context_summary_label.setStyleSheet(
+                "color: "
+                f"{colors['highlight']}; "
+                "background: transparent; "
+                "text-decoration: underline;"
+            )
+        if hasattr(self, "context_bar"):
+            self.context_bar.setStyleSheet(
+                f"QWidget#aiChatContextBar {{ background: {colors['window']}; color: {colors['window_text']}; }}"
+            )
+        if hasattr(self, "chat_view"):
+            chat_bg = colors["base"]
+            chat_text = colors["text"]
+            chat_border = colors["mid"]
+            palette = self.chat_view.palette()
+            palette.setColor(QPalette.ColorRole.Base, QColor(chat_bg))
+            palette.setColor(QPalette.ColorRole.Window, QColor(chat_bg))
+            palette.setColor(QPalette.ColorRole.Text, QColor(chat_text))
+            self.chat_view.setPalette(palette)
+            self.chat_view.viewport().setPalette(palette)
+            self.chat_view.viewport().setAutoFillBackground(True)
+            self.chat_view.document().setDefaultStyleSheet(
+                f"html, body {{ background: {chat_bg}; color: {chat_text}; }}"
+            )
+            self.chat_view.setStyleSheet(
+                f"""
+                QTextBrowser {{
+                    padding: 6px;
+                    background: {chat_bg};
+                    background-color: {chat_bg};
+                    color: {chat_text};
+                    border: 1px solid {chat_border};
+                }}
+                QTextBrowser QWidget {{
+                    background: {chat_bg};
+                    background-color: {chat_bg};
+                }}
+                """
+            )
+        if hasattr(self, "input_edit"):
+            input_palette = self.input_edit.palette()
+            input_palette.setColor(QPalette.ColorRole.Base, QColor(colors["base"]))
+            input_palette.setColor(QPalette.ColorRole.Window, QColor(colors["base"]))
+            input_palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
+            self.input_edit.setPalette(input_palette)
+            self.input_edit.viewport().setPalette(input_palette)
+            self.input_edit.viewport().setAutoFillBackground(True)
+            self.input_edit.setStyleSheet(
+                f"""
+                QPlainTextEdit {{
+                    background: {colors['base']};
+                    background-color: {colors['base']};
+                    color: {colors['text']};
+                    border: 1px solid {colors['mid']};
+                    border-radius: 6px;
+                    selection-background-color: {colors['highlight']};
+                    selection-color: {colors['highlighted_text']};
+                }}
+                QPlainTextEdit QWidget {{
+                    background: {colors['base']};
+                    background-color: {colors['base']};
+                }}
+                """
+            )
+        compact_css = f"font-size: {theme_value('ai_chat_panel.compact_font_size_px', 12)}px;"
+        for widget_name in ("server_config_widget", "prompt_btn", "_refresh_models_btn"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setStyleSheet(compact_css)
+        if hasattr(self, "debug_checkbox"):
+            self.debug_checkbox.setStyleSheet(
+                f"color: {colors['disabled_text']}; background: transparent;"
+            )
+        if hasattr(self, "status_label") and not self.status_label.text():
+            self.status_label.setStyleSheet(
+                f"color: {colors['window_text']}; background: transparent;"
+            )
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setStyleSheet(
+                "background:"
+                f"{theme_value('ai_chat_panel.stop_button.bg', '#e53935')}; "
+                "color:"
+                f"{theme_value('ai_chat_panel.stop_button.text', '#ffffff')}; "
+                "border:1px solid "
+                f"{theme_value('ai_chat_panel.stop_button.border', '#c62828')};"
+            )
+        if hasattr(self, "model_status_label"):
+            self.model_status_label.setStyleSheet(
+                "font-size: "
+                f"{theme_value('ai_chat_panel.model_status.size_px', 10)}px; "
+                "color: "
+                f"{colors['disabled_text']}; "
+                "background: transparent;"
+            )
+        self._refresh_theme_icons()
+
+    def _refresh_theme_icons(self) -> None:
+        if hasattr(self, "new_chat_btn"):
+            self.new_chat_btn.setIcon(_load_tinted_icon(_get_asset_directory() / "new-chat.svg", QSize(18, 18)))
+        if hasattr(self, "server_config_btn"):
+            self.server_config_btn.setIcon(_load_tinted_icon(_get_asset_directory() / "settings.svg", QSize(18, 18)))
+        self._chat_list_visible_icon = _load_tinted_icon(_get_asset_directory() / "folder-collapse.svg", QSize(20, 20))
+        self._chat_list_hidden_icon = _load_tinted_icon(_get_asset_directory() / "folder-expand.svg", QSize(20, 20))
+        if hasattr(self, "show_chats_btn"):
+            self._update_chat_list_toggle_button(bool(getattr(self, "chat_tree_container", None) and self.chat_tree_container.isVisible()))
+        if hasattr(self, "condense_btn"):
+            self.condense_btn.setIcon(_load_icon("condense.svg", QSize(10, 10)))
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setIcon(_load_icon("cancel.svg", QSize(10, 10)))
+        if hasattr(self, "send_btn"):
+            self.send_btn.setIcon(_load_icon("send-message.svg", QSize(10, 10)))
 
     def apply_theme(self) -> None:
         """Rebuild theme-sensitive styles after the effective theme changes."""
         self._apply_theme_styles()
         self.set_vault_accent_color(self._vault_accent_color)
+        try:
+            self._render_messages()
+        except Exception:
+            pass
 
     def _reset_chat_history(self) -> None:
         _log_ai_chat("[AIChat][reset] Starting chat reset.")
@@ -2591,21 +2705,12 @@ class AIChatPanel(QtWidgets.QWidget):
     def _render_messages(self) -> None:
         parts: List[str] = []
         chat_colors = _chat_surface_defaults(self.chat_view)
-        base_color = theme_value("ai_chat_panel.chat_html.base_bg", chat_colors["base"])
-        text_color = theme_value("ai_chat_panel.chat_html.text", chat_colors["text"])
-        accent = theme_value("ai_chat_panel.chat_html.accent", chat_colors["highlight"])
-        code_bg = theme_value(
-            "ai_chat_panel.chat_html.code_bg",
-            theme_value("markdown_editor.syntax.code_block_bg", chat_colors["alt"]),
-        )
-        code_text = theme_value(
-            "ai_chat_panel.chat_html.code_text",
-            theme_value("markdown_editor.syntax.code_block_text", chat_colors["text"]),
-        )
-        code_border = theme_value(
-            "ai_chat_panel.chat_html.code_border",
-            theme_value("ai_chat_panel.chat_html.summary_border", chat_colors["mid"]),
-        )
+        base_color = chat_colors["base"]
+        text_color = chat_colors["text"]
+        accent = chat_colors["highlight"]
+        code_bg = chat_colors["alt"]
+        code_text = chat_colors["text"]
+        code_border = chat_colors["mid"]
         parts.append(
             f"<style>body {{ background:{base_color}; color:{text_color}; font-family: \"Courier New\", monospace; }}"
             f".bubble {{ position:relative; border-radius:6px; padding:6px 8px 12px; margin-bottom:8px; }}"
@@ -2613,11 +2718,11 @@ class AIChatPanel(QtWidgets.QWidget):
             f".actions {{ text-align:left; display:none; margin-top:6px; margin-left:0; }}"
             f".bubble:hover .actions {{ display:block; }}"
             f".actions a {{ margin-right:12px; margin-left:0; text-decoration:none; color:{accent}; }}"
-            f".user {{ color:{theme_value('ai_chat_panel.chat_html.user', chat_colors['link'])}; background:transparent; }}"
-            f".assistant {{ color:{theme_value('ai_chat_panel.chat_html.assistant', chat_colors['text'])}; background:transparent; }}"
+            f".user {{ color:{chat_colors['link']}; background:transparent; }}"
+            f".assistant {{ color:{chat_colors['text']}; background:transparent; }}"
             f".app {{ color:{theme_value('ai_chat_panel.chat_html.app', chat_colors['disabled_text'])}; background:transparent; "
             f"font-size:0.92em; font-style:italic; }}"
-            f".summary {{ border:1px solid {theme_value('ai_chat_panel.chat_html.summary_border', chat_colors['mid'])}; }}"
+            f".summary {{ border:1px solid {chat_colors['mid']}; }}"
             f".bubble pre {{ background:{code_bg}; color:{code_text}; border:1px solid {code_border}; "
             f"border-radius:6px; padding:8px; overflow-x:auto; white-space:pre-wrap; }}"
             f".bubble code {{ background:{code_bg}; color:{code_text}; border-radius:4px; padding:0 4px; }}"
@@ -2630,9 +2735,9 @@ class AIChatPanel(QtWidgets.QWidget):
             f".think-toggle {{ margin-top:6px; color:{accent}; text-decoration:none; display:inline-block; }}"
             f".think-active a {{ animation: thinkPulse 1.2s infinite; }}"
             f".think-body {{ margin-top:6px; padding:6px; border:2px solid "
-            f"{theme_value('ai_chat_panel.chat_html.think_border', chat_colors['highlight'])};"
-            f" background:{theme_value('ai_chat_panel.chat_html.think_bg', chat_colors['alt'])}; max-height:7em; overflow:auto; white-space:pre-wrap;"
-            f" color:{theme_value('ai_chat_panel.chat_html.think_text', chat_colors['text'])}; }}"
+            f"{chat_colors['highlight']};"
+            f" background:{chat_colors['alt']}; max-height:7em; overflow:auto; white-space:pre-wrap;"
+            f" color:{chat_colors['text']}; }}"
             f"@keyframes thinkPulse {{ 0% {{ opacity:0.4; }} 50% {{ opacity:1; }} 100% {{ opacity:0.4; }} }}"
             f".role {{ font-weight:bold; color:{accent}; }}"
             f".app .role {{ font-size:0.95em; }}</style>"
@@ -5682,6 +5787,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_system_prompts()
         self._load_chat_tree()
         self.set_vault_accent_color(config.load_vault_accent_color())
+        try:
+            self.apply_theme()
+        except Exception:
+            pass
 
     def set_api_client(self, api_client: Optional[httpx.Client]) -> None:
         """Update the shared HTTP client used for vector operations."""

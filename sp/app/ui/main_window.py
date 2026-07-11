@@ -16356,6 +16356,9 @@ class MainWindow(QMainWindow):
             filter_path = getattr(self, "_nav_filter_path", None)
             if filter_path and filter_path != "/":
                 query += f"&filter_path={quote(filter_path, safe='')}"
+            for key, value in self._excalidraw_theme_query_params().items():
+                if value:
+                    query += f"&{key}={quote(value, safe='')}"
             url = f"{self.api_base.rstrip('/')}/excalidraw/edit?{query}"
             if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):
                 QDesktopServices.openUrl(QUrl(url))
@@ -16395,6 +16398,44 @@ class MainWindow(QMainWindow):
                 )
         except Exception as exc:
             self._alert(f"Failed to open Excalidraw editor: {exc}")
+
+    def _excalidraw_theme_query_params(self) -> dict[str, str]:
+        palette = QApplication.palette()
+
+        def _color(role: QPalette.ColorRole, fallback: str) -> str:
+            try:
+                color = palette.color(role)
+                if color.isValid():
+                    return color.name()
+            except Exception:
+                pass
+            return fallback
+
+        base = _color(QPalette.ColorRole.Base, "#f8faf9")
+        window = _color(QPalette.ColorRole.Window, base)
+        alternate = _color(QPalette.ColorRole.AlternateBase, window)
+        text = _color(QPalette.ColorRole.Text, "#1d2a25")
+        border = _color(QPalette.ColorRole.Mid, "#789083")
+        accent = _color(QPalette.ColorRole.Highlight, theme_color("main_window.toolbar.bookmark_color", "#0f5135").name())
+        accent_text = _color(QPalette.ColorRole.HighlightedText, "#ffffff")
+        muted = _color(QPalette.ColorRole.WindowText, text)
+        error = theme_color("main_window.badge.dirty_bg", "#9d1c24").name()
+        try:
+            mode = "light" if QColor(base).lightness() >= 140 else "dark"
+        except Exception:
+            mode = "light"
+        return {
+            "theme": mode,
+            "ui_bg": base,
+            "ui_panel": window,
+            "ui_panel_soft": alternate,
+            "ui_text": text,
+            "ui_muted": muted,
+            "ui_border": border,
+            "ui_accent": accent,
+            "ui_accent_text": accent_text,
+            "ui_error": error,
+        }
 
     def _ensure_excalidraw_open_page_poll(self) -> None:
         """Poll local Excalidraw navigation requests from the WebEngine process."""

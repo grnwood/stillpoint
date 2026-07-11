@@ -31,6 +31,18 @@ function readParams() {
     path: params.get("path") || "",
     token: params.get("token") || "",
     filterPath: params.get("filter_path") || "",
+    theme: params.get("theme") || "",
+    themeVars: {
+      "--sp-ui-bg": params.get("ui_bg") || "",
+      "--sp-ui-panel": params.get("ui_panel") || "",
+      "--sp-ui-panel-soft": params.get("ui_panel_soft") || "",
+      "--sp-ui-text": params.get("ui_text") || "",
+      "--sp-ui-muted": params.get("ui_muted") || "",
+      "--sp-ui-border": params.get("ui_border") || "",
+      "--sp-ui-accent": params.get("ui_accent") || "",
+      "--sp-ui-accent-text": params.get("ui_accent_text") || "",
+      "--sp-ui-error": params.get("ui_error") || "",
+    },
   };
 }
 
@@ -243,7 +255,7 @@ async function requestJson(url, options = {}) {
 }
 
 function App() {
-  const { path, token, filterPath } = useMemo(readParams, []);
+  const { path, token, filterPath, theme, themeVars } = useMemo(readParams, []);
   const [initialData, setInitialData] = useState(null);
   const [status, setStatus] = useState("Loading");
   const [error, setError] = useState("");
@@ -382,6 +394,12 @@ function App() {
 
   useEffect(() => {
     mountedRef.current = true;
+    Object.entries(themeVars).forEach(([key, value]) => {
+      if (value) {
+        document.documentElement.style.setProperty(key, value);
+      }
+    });
+    document.documentElement.dataset.spTheme = theme || "auto";
     if (!path) {
       setError("Missing drawing path");
       setStatus("Load failed");
@@ -416,7 +434,7 @@ function App() {
       window.clearTimeout(saveTimerRef.current);
       window.clearTimeout(previewTimerRef.current);
     };
-  }, [aiConfig, path, token]);
+  }, [aiConfig, path, theme, themeVars, token]);
 
   useEffect(() => {
     requestJson("/api/excalidraw/ai/config", {
@@ -502,6 +520,7 @@ function App() {
   const summaryReady = Boolean(summaryInfo?.exists && summaryInfo?.summary);
   const summaryStale = Boolean(summaryInfo?.stale);
   const summaryTitle = summaryInfo?.summary?.title || summaryInfo?.summary?.diagram_type || "summary ready";
+  const excalidrawTheme = theme === "dark" ? "dark" : "light";
   const drawDisabledReason = !aiConfig.enabled
     ? "AI chats are disabled"
     : stats.overLimit
@@ -1231,6 +1250,7 @@ function App() {
           excalidrawAPI={setApi}
           initialData={initialData}
           onChange={handleChange}
+          theme={excalidrawTheme}
         />
       ) : (
         <div className="sp-loading">Loading</div>

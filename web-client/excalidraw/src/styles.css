@@ -1,3 +1,16 @@
+:root {
+  --sp-ui-bg: #f8faf9;
+  --sp-ui-panel: rgba(248, 250, 249, 0.95);
+  --sp-ui-panel-soft: rgba(255, 255, 255, 0.74);
+  --sp-ui-text: #1d2a25;
+  --sp-ui-muted: #4f6259;
+  --sp-ui-border: rgba(37, 53, 47, 0.18);
+  --sp-ui-accent: #0f5135;
+  --sp-ui-accent-text: #f4fff8;
+  --sp-ui-error: #9d1c24;
+  --sp-ui-shadow: rgba(20, 31, 27, 0.18);
+}
+
 html,
 body,
 #root {
@@ -8,7 +21,7 @@ body,
 
 body {
   overflow: hidden;
-  background: #f8faf9;
+  background: var(--sp-ui-bg);
 }
 
 .sp-excalidraw {
@@ -32,12 +45,12 @@ body {
   gap: 8px;
   max-width: min(520px, calc(100vw - 24px));
   padding: 5px 7px;
-  border: 1px solid rgba(37, 53, 47, 0.18);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 6px;
-  background: rgba(248, 250, 249, 0.92);
-  color: #1d2a25;
+  background: var(--sp-ui-panel);
+  color: var(--sp-ui-text);
   font: 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  box-shadow: 0 10px 28px rgba(20, 31, 27, 0.12);
+  box-shadow: 0 10px 28px var(--sp-ui-shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -46,22 +59,22 @@ body {
 .sp-ai-panel select {
   min-width: 46px;
   height: 24px;
-  border: 1px solid #789083;
+  border: 1px solid var(--sp-ui-border);
   border-radius: 4px;
-  background: #ffffff;
-  color: #10251b;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font: inherit;
 }
 
 .sp-status .sp-link-toggle-button[data-linked="true"] {
-  border-color: rgba(30, 119, 82, 0.42);
-  background: rgba(30, 119, 82, 0.09);
-  color: #0f5135;
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 12%, transparent);
+  color: var(--sp-ui-accent);
   font-weight: 700;
 }
 
 .sp-status .sp-link-toggle-button[data-active="true"] {
-  box-shadow: inset 0 -2px 0 #0f5135;
+  box-shadow: inset 0 -2px 0 var(--sp-ui-accent);
 }
 
 .sp-status .sp-link-toggle-button[data-working="true"],
@@ -87,18 +100,18 @@ body {
   gap: 8px;
   width: min(340px, calc(100vw - 24px));
   padding: 10px;
-  border: 1px solid rgba(37, 53, 47, 0.18);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 8px;
-  background: rgba(248, 250, 249, 0.95);
-  color: #1d2a25;
+  background: var(--sp-ui-panel);
+  color: var(--sp-ui-text);
   font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  box-shadow: 0 18px 44px rgba(20, 31, 27, 0.18);
+  box-shadow: 0 18px 44px var(--sp-ui-shadow);
   backdrop-filter: blur(10px);
 }
 
 .sp-ai-panel[data-busy="true"] {
-  border-color: rgba(30, 119, 82, 0.42);
-  box-shadow: 0 18px 44px rgba(20, 31, 27, 0.18), 0 0 0 1px rgba(30, 119, 82, 0.12);
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 55%, transparent);
+  box-shadow: 0 18px 44px var(--sp-ui-shadow), 0 0 0 1px color-mix(in srgb, var(--sp-ui-accent) 18%, transparent);
 }
 
 .sp-ai-row {
@@ -112,24 +125,24 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 4px;
   padding: 3px;
-  border: 1px solid rgba(37, 53, 47, 0.16);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 6px;
-  background: rgba(37, 53, 47, 0.06);
+  background: color-mix(in srgb, var(--sp-ui-text) 7%, transparent);
 }
 
 .sp-ai-mode-toggle button {
   width: 100%;
   border-color: transparent;
   background: transparent;
-  color: #4f6259;
+  color: var(--sp-ui-muted);
 }
 
 .sp-ai-mode-toggle button[data-active="true"] {
-  border-color: rgba(30, 119, 82, 0.34);
-  background: #ffffff;
-  color: #10251b;
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 44%, transparent);
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font-weight: 700;
-  box-shadow: 0 1px 4px rgba(20, 31, 27, 0.1);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--sp-ui-shadow) 70%, transparent);
 }
 
 .sp-ai-panel select {
@@ -139,7 +152,7 @@ body {
 }
 
 .sp-ai-meter {
-  color: #4f6259;
+  color: var(--sp-ui-muted);
   font-size: 11px;
 }
 
@@ -149,16 +162,16 @@ body {
   gap: 8px;
   align-items: center;
   padding: 7px 8px;
-  border: 1px solid rgba(37, 53, 47, 0.14);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.74);
-  color: #4f6259;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-muted);
 }
 
 .sp-ai-summary[data-ready="true"] {
-  border-color: rgba(30, 119, 82, 0.22);
-  background: rgba(30, 119, 82, 0.07);
-  color: #214a3a;
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 10%, transparent);
+  color: var(--sp-ui-accent);
 }
 
 .sp-ai-summary span {
@@ -171,7 +184,7 @@ body {
 .sp-ai-meter[data-over-limit="true"],
 .sp-ai-notice,
 .sp-ai-message.is-error {
-  color: #9d1c24;
+  color: var(--sp-ui-error);
 }
 
 .sp-ai-progress {
@@ -179,10 +192,10 @@ body {
   align-items: center;
   gap: 8px;
   padding: 7px 8px;
-  border: 1px solid rgba(30, 119, 82, 0.24);
+  border: 1px solid color-mix(in srgb, var(--sp-ui-accent) 30%, transparent);
   border-radius: 6px;
-  background: rgba(30, 119, 82, 0.09);
-  color: #0f5135;
+  background: color-mix(in srgb, var(--sp-ui-accent) 12%, transparent);
+  color: var(--sp-ui-accent);
   font-weight: 600;
 }
 
@@ -191,17 +204,17 @@ body {
   width: 12px;
   height: 12px;
   flex: 0 0 12px;
-  border: 2px solid rgba(15, 81, 53, 0.24);
-  border-top-color: #0f5135;
+  border: 2px solid color-mix(in srgb, var(--sp-ui-accent) 24%, transparent);
+  border-top-color: var(--sp-ui-accent);
   border-radius: 50%;
   animation: sp-ai-spin 0.8s linear infinite;
 }
 
 .sp-ai-notice {
   padding: 7px;
-  border: 1px solid rgba(157, 28, 36, 0.24);
+  border: 1px solid color-mix(in srgb, var(--sp-ui-error) 30%, transparent);
   border-radius: 6px;
-  background: rgba(157, 28, 36, 0.08);
+  background: color-mix(in srgb, var(--sp-ui-error) 10%, transparent);
 }
 
 .sp-ai-messages {
@@ -247,7 +260,7 @@ body {
 .sp-ai-message code {
   padding: 1px 4px;
   border-radius: 4px;
-  background: rgba(16, 37, 27, 0.08);
+  background: color-mix(in srgb, var(--sp-ui-text) 10%, transparent);
   font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
@@ -256,8 +269,8 @@ body {
   overflow: auto;
   padding: 8px;
   border-radius: 6px;
-  background: #10251b;
-  color: #f4fff8;
+  background: color-mix(in srgb, var(--sp-ui-text) 85%, #000000);
+  color: var(--sp-ui-bg);
 }
 
 .sp-ai-message pre code {
@@ -268,37 +281,37 @@ body {
 
 .sp-ai-message blockquote {
   padding-left: 9px;
-  border-left: 3px solid rgba(30, 119, 82, 0.28);
-  color: #4f6259;
+  border-left: 3px solid color-mix(in srgb, var(--sp-ui-accent) 35%, transparent);
+  color: var(--sp-ui-muted);
 }
 
 .sp-ai-message a {
-  color: #0f6c46;
+  color: var(--sp-ui-accent);
   text-decoration-thickness: 1px;
 }
 
 .sp-ai-message-user {
   align-self: flex-end;
   max-width: 88%;
-  background: #10251b;
-  color: #f4fff8;
+  background: var(--sp-ui-accent);
+  color: var(--sp-ui-accent-text);
 }
 
 .sp-ai-message-assistant {
   align-self: flex-start;
   max-width: 92%;
-  border: 1px solid rgba(37, 53, 47, 0.16);
-  background: #ffffff;
-  color: #1d2a25;
+  border: 1px solid var(--sp-ui-border);
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
 }
 
 .sp-ai-message-system {
   align-self: flex-start;
   max-width: 94%;
   padding: 5px 7px;
-  border: 1px solid rgba(30, 119, 82, 0.14);
-  background: rgba(30, 119, 82, 0.07);
-  color: #315246;
+  border: 1px solid color-mix(in srgb, var(--sp-ui-accent) 20%, transparent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 9%, transparent);
+  color: var(--sp-ui-muted);
   font-size: 11px;
 }
 
@@ -315,10 +328,10 @@ body {
   resize: none;
   box-sizing: border-box;
   padding: 7px;
-  border: 1px solid #789083;
+  border: 1px solid var(--sp-ui-border);
   border-radius: 6px;
-  background: #ffffff;
-  color: #10251b;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -333,9 +346,9 @@ body {
 }
 
 .sp-ai-form button.is-working {
-  border-color: #0f5135;
-  background: #e5f4ec;
-  color: #0f5135;
+  border-color: var(--sp-ui-accent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 16%, transparent);
+  color: var(--sp-ui-accent);
   animation: sp-ai-button-pulse 1.1s ease-in-out infinite;
 }
 
@@ -346,12 +359,12 @@ body {
   right: 12px;
   width: min(280px, calc(100vw - 24px));
   padding: 9px;
-  border: 1px solid rgba(37, 53, 47, 0.18);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 8px;
-  background: rgba(248, 250, 249, 0.95);
-  color: #1d2a25;
+  background: var(--sp-ui-panel);
+  color: var(--sp-ui-text);
   font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  box-shadow: 0 14px 34px rgba(20, 31, 27, 0.16);
+  box-shadow: 0 14px 34px var(--sp-ui-shadow);
   backdrop-filter: blur(10px);
 }
 
@@ -360,7 +373,7 @@ body {
 }
 
 .sp-page-link-panel[data-opening="true"] {
-  border-color: rgba(30, 119, 82, 0.44);
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 55%, transparent);
   animation: sp-stillpoint-panel-pulse 0.9s ease-in-out infinite;
 }
 
@@ -385,16 +398,16 @@ body {
   height: 20px;
   flex: 0 0 20px;
   place-items: center;
-  border: 1px solid rgba(37, 53, 47, 0.18);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 4px;
-  background: #ffffff;
-  color: #10251b;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font: inherit;
 }
 
 .sp-page-link-header-actions button:hover {
-  border-color: rgba(30, 119, 82, 0.4);
-  background: rgba(30, 119, 82, 0.07);
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 10%, transparent);
 }
 
 .sp-page-link-header-actions span,
@@ -402,7 +415,7 @@ body {
 .sp-page-link-path {
   min-width: 0;
   overflow: hidden;
-  color: #5b6d64;
+  color: var(--sp-ui-muted);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -420,20 +433,20 @@ body {
   gap: 7px;
   margin-bottom: 7px;
   padding: 6px 7px;
-  border: 1px solid rgba(30, 119, 82, 0.24);
+  border: 1px solid color-mix(in srgb, var(--sp-ui-accent) 30%, transparent);
   border-radius: 5px;
-  background: rgba(30, 119, 82, 0.08);
-  color: #0f5135;
+  background: color-mix(in srgb, var(--sp-ui-accent) 11%, transparent);
+  color: var(--sp-ui-accent);
   font-weight: 700;
 }
 
 .sp-page-link-title,
 .sp-page-link-actions button,
 .sp-page-link-results button {
-  border: 1px solid rgba(37, 53, 47, 0.18);
+  border: 1px solid var(--sp-ui-border);
   border-radius: 5px;
-  background: #ffffff;
-  color: #10251b;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font: inherit;
 }
 
@@ -461,10 +474,10 @@ body {
   width: 100%;
   box-sizing: border-box;
   padding: 6px 7px;
-  border: 1px solid #789083;
+  border: 1px solid var(--sp-ui-border);
   border-radius: 5px;
-  background: #ffffff;
-  color: #10251b;
+  background: var(--sp-ui-panel-soft);
+  color: var(--sp-ui-text);
   font: inherit;
 }
 
@@ -486,8 +499,8 @@ body {
 .sp-page-link-results button:hover,
 .sp-page-link-title:hover,
 .sp-page-link-actions button:hover {
-  border-color: rgba(30, 119, 82, 0.4);
-  background: rgba(30, 119, 82, 0.07);
+  border-color: color-mix(in srgb, var(--sp-ui-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--sp-ui-accent) 10%, transparent);
 }
 
 .sp-page-link-results span,
@@ -499,22 +512,22 @@ body {
 }
 
 .sp-page-link-results small {
-  color: #5b6d64;
+  color: var(--sp-ui-muted);
   font-size: 11px;
 }
 
 .sp-page-link-empty {
   padding: 7px;
-  color: #5b6d64;
+  color: var(--sp-ui-muted);
 }
 
 .sp-page-link-error {
   margin-top: 7px;
   padding: 6px;
-  border: 1px solid rgba(157, 28, 36, 0.24);
+  border: 1px solid color-mix(in srgb, var(--sp-ui-error) 30%, transparent);
   border-radius: 5px;
-  background: rgba(157, 28, 36, 0.08);
-  color: #9d1c24;
+  background: color-mix(in srgb, var(--sp-ui-error) 10%, transparent);
+  color: var(--sp-ui-error);
 }
 
 .sp-linked-badges {
