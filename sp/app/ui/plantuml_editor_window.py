@@ -633,10 +633,42 @@ class ZoomablePreviewLabel(QLabel):
         super().__init__()
         self.pan_start_pos = None
         self.is_panning = False
+        self._touchpad_zoom_accumulator = 0
         self.grabGesture(Qt.PinchGesture)
     
     def wheelEvent(self, event) -> None:
-        """Handle wheel zoom and Shift+wheel horizontal scrolling."""
+        """Zoom discrete mouse wheels; pan precision touchpad gestures."""
+        pixel_delta = event.pixelDelta()
+        if not pixel_delta.isNull():
+            # Qt supplies pixel deltas for precision touchpads.  Preserve both
+            # axes as scrolling unless Ctrl explicitly requests zoom.
+            if event.modifiers() & Qt.ControlModifier:
+                delta = pixel_delta.y() or event.angleDelta().y()
+                if delta:
+                    self._touchpad_zoom_accumulator += delta
+                    threshold = 40
+                    while abs(self._touchpad_zoom_accumulator) >= threshold:
+                        direction = 1 if self._touchpad_zoom_accumulator > 0 else -1
+                        self.zoomRequested.emit(direction)
+                        self._touchpad_zoom_accumulator -= direction * threshold
+                    event.accept()
+                    return
+            parent = self.parent()
+            while parent:
+                if isinstance(parent, QScrollArea):
+                    horizontal = pixel_delta.x()
+                    vertical = pixel_delta.y()
+                    if event.modifiers() & Qt.ShiftModifier and not horizontal:
+                        horizontal, vertical = vertical, 0
+                    parent.horizontalScrollBar().setValue(
+                        parent.horizontalScrollBar().value() - horizontal
+                    )
+                    parent.verticalScrollBar().setValue(
+                        parent.verticalScrollBar().value() - vertical
+                    )
+                    event.accept()
+                    return
+                parent = parent.parent()
         if event.modifiers() & Qt.ShiftModifier:
             delta = event.angleDelta().y()
             if delta:

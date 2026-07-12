@@ -3002,6 +3002,10 @@ class MainWindow(QMainWindow):
             lambda checked=False: self._show_new_page_dialog(insert_link_in_editor=False)
         )
         file_menu.addAction(new_page_action)
+        move_page_action = QAction("Move Page…", self)
+        move_page_action.setToolTip("Move the current page to another location")
+        move_page_action.triggered.connect(self._move_current_page_dialog)
+        file_menu.addAction(move_page_action)
         open_page_in_new_editor_action = QAction("Open Page in New Editor", self)
         open_page_in_new_editor_action.setToolTip("Open the current page in a separate editor window")
         open_page_in_new_editor_action.triggered.connect(self._open_current_page_in_new_editor)
@@ -3155,6 +3159,11 @@ class MainWindow(QMainWindow):
         jump_bookmark_action.setToolTip("Jump to a bookmarked page (Ctrl+Alt+J)")
         jump_bookmark_action.triggered.connect(self._jump_to_bookmark)
         go_menu.addAction(jump_bookmark_action)
+
+        locate_page_action = QAction("Locate in Page Tree", self)
+        locate_page_action.setToolTip("Reveal and select the current page in the navigation tree")
+        locate_page_action.triggered.connect(self._locate_current_page_in_tree)
+        go_menu.addAction(locate_page_action)
 
         self._action_go_today = QAction("Today", self)
         self._action_go_today.setToolTip("Today's journal entry (Alt+D)")
@@ -6409,7 +6418,7 @@ class MainWindow(QMainWindow):
             config.bump_sync_revision()
         except Exception:
             pass
-        self.statusBar().showMessage("Vault tree refresh queued until next UI activity...", 2500)
+        self.statusBar().showMessage("Vault tree update ready; it will apply when navigation is used.", 2500)
 
     def _flush_pending_homebase_tree_refresh(self) -> None:
         if not self._homebase_tree_refresh_pending:
@@ -6423,7 +6432,7 @@ class MainWindow(QMainWindow):
             config.bump_sync_revision()
         except Exception:
             pass
-        _log_homebase_client(f"flushing deferred tree refresh on UI activity: reason={reason}")
+        _log_homebase_client(f"flushing deferred tree refresh on navigation activity: reason={reason}")
         self.statusBar().showMessage("Refreshing vault tree...", 2500)
         self._refresh_tree()
 
@@ -14095,15 +14104,19 @@ class MainWindow(QMainWindow):
         self._mark_homebase_unsynced_local_change()
         self._schedule_homebase_sync("page create")
         # Keep inline link creation from triggering navigation side effects in the tree.
-        saved_pending_selection = self._pending_selection
+        # A pending selection belongs to an older navigation operation.  Do
+        # not restore it after this rebuild: on slower event loops (notably
+        # Windows) its queued callback can otherwise scroll the freshly
+        # rebuilt tree to an unrelated page after creation completes.
         self._pending_selection = None
+        self._deferred_nav_tree_refresh_target = None
+        self._selection_retry_path = None
         saved_suspend = self._suspend_selection_open
         self._suspend_selection_open = True
         try:
             self._populate_vault_tree()
         finally:
             self._suspend_selection_open = saved_suspend
-            self._pending_selection = saved_pending_selection
 
         created_colon = path_to_colon(target_file) or normalized_colon
         return ensure_root_colon_link(created_colon), True
@@ -14371,15 +14384,18 @@ class MainWindow(QMainWindow):
         self._mark_homebase_unsynced_local_change()
         self._schedule_homebase_sync("page create")
 
-        saved_pending_selection = self._pending_selection
+        # Discard selection work queued before page creation.  Restoring it
+        # after the model reset can make a delayed Windows callback scroll to
+        # an unrelated page.
         self._pending_selection = None
+        self._deferred_nav_tree_refresh_target = None
+        self._selection_retry_path = None
         saved_suspend = self._suspend_selection_open
         self._suspend_selection_open = True
         try:
             self._populate_vault_tree()
         finally:
             self._suspend_selection_open = saved_suspend
-            self._pending_selection = saved_pending_selection
 
         if insert_link_in_editor and self.current_path:
             colon_path = path_to_colon(file_path)
@@ -20297,6 +20313,15 @@ class MainWindow(QMainWindow):
         """
         if not self.current_path:
             return
+        # Hidden journal pages intentionally have no visible tree target.
+        # Scheduling a deferred selection here causes a later navigation event
+        # to rebuild/scroll the tree even though the user chose to hide Journal.
+        if self._is_journal_path(self.current_path) and not self._show_journal_in_nav:
+            if self._deferred_nav_tree_refresh_target == self.current_path:
+                self._deferred_nav_tree_refresh_target = None
+            if self._pending_selection == self.current_path:
+                self._pending_selection = None
+            return
         suppress_path = (self._suppress_nav_sync_path or "").rstrip("/")
         if suppress_path and self.current_path.startswith(suppress_path + "/"):
             self._suppress_nav_sync_path = None
@@ -21898,6 +21923,14 @@ class MainWindow(QMainWindow):
         self._update_dirty_indicator()
         self._update_window_title()
 
+    def _is_tree_navigation_activity(self, obj: object, event_type: QEvent.Type) -> bool:
+        tree_view = getattr(self, "tree_view", None)
+        tree_viewport = tree_view.viewport() if tree_view is not None else None
+        return bool(
+            obj in (tree_view, tree_viewport)
+            and event_type in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.FocusIn)
+        )
+
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() == QEvent.Resize:
             if obj in (
@@ -21910,9 +21943,13 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
                 QTimer.singleShot(0, self._sync_history_scroll_range)
                 QTimer.singleShot(0, self._update_history_scroll_buttons)
+        # Filesystem reconciliation runs in a worker, but rebuilding a Qt item
+        # model must stay on the GUI thread.  Do not let an editor key/focus
+        # event pay that GUI cost: apply the pending model update only when the
+        # user is about to use the navigation tree.
         if (
             self._homebase_tree_refresh_pending
-            and event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.FocusIn)
+            and self._is_tree_navigation_activity(obj, event.type())
         ):
             QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
         if event.type() == QEvent.KeyPress:

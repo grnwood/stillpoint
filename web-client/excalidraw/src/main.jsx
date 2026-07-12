@@ -293,6 +293,8 @@ function App() {
   const latestSceneRef = useRef(null);
   const saveTimerRef = useRef(null);
   const previewTimerRef = useRef(null);
+  const previewGenerationRef = useRef(0);
+  const previewQueueRef = useRef(Promise.resolve());
   const mountedRef = useRef(false);
   const loadedRef = useRef(false);
 
@@ -326,21 +328,35 @@ function App() {
 
   const savePreview = useCallback(
     async (scene) => {
-      if (!path || !scene || !scene.elements.length) {
+      if (!path || !scene) {
         return;
       }
       try {
-        const blob = await exportToBlob({
-          elements: scene.elements,
-          appState: {
-            ...scene.appState,
-            exportBackground: true,
-            exportWithDarkMode: false,
-            viewBackgroundColor: scene.appState?.viewBackgroundColor || "#ffffff",
-          },
-          files: scene.files,
-          mimeType: "image/png",
-        });
+        const liveElements = scene.elements.filter((element) => !element.isDeleted);
+        let blob;
+        if (liveElements.length) {
+          blob = await exportToBlob({
+            elements: liveElements,
+            appState: {
+              ...scene.appState,
+              exportBackground: true,
+              exportWithDarkMode: false,
+              viewBackgroundColor: scene.appState?.viewBackgroundColor || "#ffffff",
+            },
+            files: scene.files,
+            mimeType: "image/png",
+          });
+        } else {
+          const canvas = document.createElement("canvas");
+          canvas.width = 1;
+          canvas.height = 1;
+          const context = canvas.getContext("2d");
+          context.fillStyle = scene.appState?.viewBackgroundColor || "#ffffff";
+          context.fillRect(0, 0, 1, 1);
+          blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Blank preview export failed")), "image/png");
+          });
+        }
         const pngBase64 = await blobToDataUrl(blob);
         await requestJson("/api/excalidraw/preview", {
           method: "PUT",
@@ -354,6 +370,23 @@ function App() {
     [path, token],
   );
 
+  const queuePreview = useCallback(
+    (scene) => {
+      const generation = previewGenerationRef.current + 1;
+      previewGenerationRef.current = generation;
+      previewQueueRef.current = previewQueueRef.current
+        .catch(() => undefined)
+        .then(() => {
+          if (generation !== previewGenerationRef.current) {
+            return undefined;
+          }
+          return savePreview(scene);
+        });
+      return previewQueueRef.current;
+    },
+    [savePreview],
+  );
+
   const schedulePersist = useCallback(
     (scene) => {
       window.clearTimeout(saveTimerRef.current);
@@ -365,10 +398,10 @@ function App() {
         });
       }, SAVE_DEBOUNCE_MS);
       previewTimerRef.current = window.setTimeout(() => {
-        savePreview(scene);
+        queuePreview(scene);
       }, PREVIEW_DEBOUNCE_MS);
     },
-    [savePreview, saveScene],
+    [queuePreview, saveScene],
   );
 
   const applyScene = useCallback(
@@ -506,14 +539,15 @@ function App() {
 
   const handleManualSave = useCallback(() => {
     window.clearTimeout(saveTimerRef.current);
+    window.clearTimeout(previewTimerRef.current);
     const scene = latestSceneRef.current;
     saveScene(scene)
-      .then(() => savePreview(scene))
+      .then(() => queuePreview(scene))
       .catch((err) => {
         setError(err.message);
         setStatus("Save failed");
       });
-  }, [savePreview, saveScene]);
+  }, [queuePreview, saveScene]);
 
   const selectedServer = aiConfig.servers.find((server) => server.name === aiServer) || aiConfig.servers[0];
   const aiModels = selectedServer?.models || [];
@@ -878,7 +912,7 @@ function App() {
         setAiPhase("exporting");
         setStatus(AI_PHASE_LABELS.exporting);
         setAiMessages((messages) => [...messages, makeAiMessage("system", "Exporting PNG preview sidecar")]);
-        await savePreview(nextScene);
+        await queuePreview(nextScene);
         setAiPhase("complete");
         setStatus("AI drawing applied");
         setAiMessages((messages) => [
@@ -898,7 +932,7 @@ function App() {
         }, 1200);
       }
     },
-    [aiBusy, aiModel, aiPrompt, aiServer, applyScene, drawDisabledReason, path, rememberAiPrompt, savePreview, saveScene, stats.elements, stats.jsonBytes, token],
+    [aiBusy, aiModel, aiPrompt, aiServer, applyScene, drawDisabledReason, path, queuePreview, rememberAiPrompt, saveScene, stats.elements, stats.jsonBytes, token],
   );
 
   const handleAnalyzeChatSubmit = useCallback(
@@ -976,12 +1010,12 @@ function App() {
     setUndoScene(null);
     setSummaryInfo((current) => (current ? { ...current, stale: true } : current));
     saveScene(restored)
-      .then(() => savePreview(restored))
+      .then(() => queuePreview(restored))
       .catch((err) => {
         setError(err.message);
         setStatus("Save failed");
       });
-  }, [applyScene, savePreview, saveScene, undoScene]);
+  }, [applyScene, queuePreview, saveScene, undoScene]);
 
   if (error && !initialData) {
     return (

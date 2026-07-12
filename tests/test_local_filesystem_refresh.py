@@ -4,6 +4,8 @@ import queue
 from pathlib import Path
 import threading
 
+from PySide6.QtCore import QEvent
+
 from sp.app.ui.main_window import MainWindow
 from sp.app import config
 
@@ -60,6 +62,26 @@ class _ReconcileDummy:
             "current_page_changed": False,
             "current_page_removed": False,
         }
+
+
+def test_pending_tree_refresh_is_triggered_only_by_navigation_activity() -> None:
+    viewport = object()
+
+    class _Tree:
+        def viewport(self):
+            return viewport
+
+    class _Dummy:
+        tree_view = _Tree()
+
+    dummy = _Dummy()
+    editor = object()
+
+    assert MainWindow._is_tree_navigation_activity(dummy, dummy.tree_view, QEvent.KeyPress)
+    assert MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.MouseButtonPress)
+    assert not MainWindow._is_tree_navigation_activity(dummy, editor, QEvent.KeyPress)
+    assert not MainWindow._is_tree_navigation_activity(dummy, editor, QEvent.FocusIn)
+    assert not MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.Paint)
 
 
 def test_reconcile_local_filesystem_index_detects_added_page(tmp_path) -> None:

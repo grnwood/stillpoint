@@ -536,6 +536,27 @@ class TestTreeClickGuard:
         assert not main_window.tree_view.currentIndex().isValid()
         assert current_pages == [(None, None)]
 
+    def test_hidden_journal_page_does_not_queue_tree_selection(self, main_window, monkeypatch):
+        journal_path = "/Journal/2026/07/11/11.md"
+        main_window.current_path = journal_path
+        main_window._show_journal_in_nav = False
+        main_window._pending_selection = journal_path
+        main_window._deferred_nav_tree_refresh_target = journal_path
+        ensured: list[str] = []
+        monkeypatch.setattr(main_window, "_ensure_tree_path_loaded", lambda path, **kwargs: ensured.append(path))
+
+        main_window._sync_nav_tree_to_active_page()
+
+        assert ensured == []
+        assert main_window._pending_selection is None
+        assert main_window._deferred_nav_tree_refresh_target is None
+
+    def test_command_bar_contains_page_move_and_locate_actions(self, main_window):
+        labels = {label for label, _action in main_window._collect_menu_actions()}
+
+        assert "File / Move Page…" in labels
+        assert "Go / Locate in Page Tree" in labels
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

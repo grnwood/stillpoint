@@ -2496,7 +2496,7 @@ class MermaidEditorWindow(QMainWindow):
             if (exportPngBtn) exportPngBtn.addEventListener('click', () => void exportPng());
             if (copySvgBtn) copySvgBtn.addEventListener('click', () => void copySvg());
             if (copyPngBtn) copyPngBtn.addEventListener('click', () => void copyPng());
-            setStatus('Wheel to zoom. Drag to pan. Keys: +, -, 0. Export payloads loading...');
+            setStatus('Mouse wheel or Ctrl+scroll to zoom. Two-finger scroll or right-drag to pan. Keys: +, -, 0. Export payloads loading...');
         }}
 
         function loadPayloadScript() {{
@@ -2510,7 +2510,7 @@ class MermaidEditorWindow(QMainWindow):
                 payloadVersion = payload.version;
                 preRenderedSvgText = payload.svg || '';
                 preRenderedPngDataUrl = payload.pngDataUrl || '';
-                setStatus('Export payloads ready. Wheel to zoom. Drag to pan. Keys: +, -, 0.');
+                setStatus('Export payloads ready. Mouse wheel or Ctrl+scroll to zoom. Two-finger scroll or right-drag to pan. Keys: +, -, 0.');
             }};
             script.onerror = () => {{}};
             document.head.appendChild(script);
@@ -2537,11 +2537,22 @@ class MermaidEditorWindow(QMainWindow):
             viewport.addEventListener('wheel', (event) => {{
                 event.preventDefault();
                 const rawDelta = Number(event.deltaY || 0);
+                const legacyWheelDelta = Math.abs(Number(event.wheelDeltaY || 0));
+                const discreteMouseWheel = event.deltaMode !== 0 ||
+                    (legacyWheelDelta >= 120 && legacyWheelDelta % 120 === 0 && !event.deltaX);
+                const wantsZoom = event.ctrlKey || discreteMouseWheel;
+                if (!wantsZoom) {{
+                    // Precision touchpads report continuous pixel deltas. Pan
+                    // the canvas on both axes, matching normal two-finger
+                    // scrolling in document and diagram applications.
+                    state.tx -= Number(event.deltaX || 0);
+                    state.ty -= rawDelta;
+                    applyTransform();
+                    return;
+                }}
                 if (!rawDelta) return;
-                // Match PlantUML's coarse wheel-step zoom behavior to avoid
-                // hypersensitive zooming on Windows precision touchpads.
                 wheelState.accumulator += rawDelta;
-                const wheelStep = 120;
+                const wheelStep = event.ctrlKey && !discreteMouseWheel ? 40 : 120;
                 if (Math.abs(wheelState.accumulator) < wheelStep) return;
                 const rect = viewport.getBoundingClientRect();
                 const cx = event.clientX - rect.left;
@@ -2638,7 +2649,7 @@ class MermaidEditorWindow(QMainWindow):
                 const rendered = await mermaid.render(id, source);
                 if (host) host.innerHTML = rendered.svg;
                 scheduleFitDiagram();
-                setStatus(includeBrowserControls ? 'Rendered. Wheel to zoom. Drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
+                setStatus(includeBrowserControls ? 'Rendered. Mouse wheel or Ctrl+scroll to zoom. Two-finger scroll or right-drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
             }} catch (err) {{
                 if (host) host.innerHTML = buildErrorSvg(err && err.message ? err.message : String(err));
                 state.tx = 0;

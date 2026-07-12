@@ -5,9 +5,9 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QListWidgetItem, QInputDialog, QWidget
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QIcon, QWheelEvent
+from PySide6.QtWidgets import QListWidgetItem, QInputDialog, QScrollArea, QWidget
 
 from sp.app.mermaid_renderer import MermaidRenderer, RenderResult as MermaidRenderResult
 from sp.app.plantuml_renderer import RenderResult as PlantumlRenderResult
@@ -17,7 +17,7 @@ from sp.app.ui.excalidraw_window import ExcalidrawWindow
 from sp.app.ui import mermaid_editor_window
 from sp.app.ui import webengine_env
 from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
-from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
+from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow, ZoomablePreviewLabel
 from sp.server import api as server_api
 
 
@@ -30,6 +30,59 @@ def _wait_for(qapp, predicate, timeout: float = 2.0) -> None:
         time.sleep(0.01)
     qapp.processEvents()
     assert predicate()
+
+
+def _wheel_event(*, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier) -> QWheelEvent:
+    return QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(0, pixel_y),
+        QPoint(0, angle_y),
+        Qt.NoButton,
+        modifiers,
+        Qt.ScrollUpdate,
+        False,
+    )
+
+
+def test_preview_touchpad_scroll_pans_but_mouse_wheel_zooms(qtbot) -> None:
+    area = QScrollArea()
+    label = ZoomablePreviewLabel()
+    label.resize(1000, 1000)
+    area.setWidget(label)
+    area.resize(200, 200)
+    qtbot.addWidget(area)
+    area.show()
+    area.verticalScrollBar().setValue(200)
+    zooms: list[int] = []
+    label.zoomRequested.connect(zooms.append)
+
+    label.wheelEvent(_wheel_event(pixel_y=-30))
+
+    assert area.verticalScrollBar().value() == 230
+    assert zooms == []
+
+    label.wheelEvent(_wheel_event(angle_y=120))
+
+    assert zooms == [1]
+
+
+def test_preview_ctrl_touchpad_scroll_zooms_without_panning(qtbot) -> None:
+    area = QScrollArea()
+    label = ZoomablePreviewLabel()
+    label.resize(1000, 1000)
+    area.setWidget(label)
+    area.resize(200, 200)
+    qtbot.addWidget(area)
+    area.show()
+    area.verticalScrollBar().setValue(200)
+    zooms: list[int] = []
+    label.zoomRequested.connect(zooms.append)
+
+    label.wheelEvent(_wheel_event(pixel_y=45, modifiers=Qt.ControlModifier))
+
+    assert area.verticalScrollBar().value() == 200
+    assert zooms == [1]
 
 
 def _patch_common_editor_deps(monkeypatch) -> None:
