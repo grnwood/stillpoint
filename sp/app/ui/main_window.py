@@ -16180,7 +16180,9 @@ class MainWindow(QMainWindow):
         """Open a lightweight editor window for a single page (shared server)."""
         if not path or not self.vault_root:
             return
-        rel_path = self._normalize_editor_path(path)
+        rel_path = self._resolve_page_editor_target(path)
+        if not rel_path:
+            return
         try:
             window = PageEditorWindow(
                 api_base=self.api_base,
@@ -16208,6 +16210,34 @@ class MainWindow(QMainWindow):
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)
         except Exception as exc:
             self._alert(f"Failed to open editor window: {exc}")
+
+    def _resolve_page_editor_target(self, target: str) -> Optional[str]:
+        """Resolve a page reference for a detached editor without navigating the main editor."""
+        cleaned = (target or "").strip().split("\x00", 1)[0]
+        if not cleaned:
+            return None
+        if cleaned == "//":
+            return self._home_page_path() or self._vault_root_page_path()
+        if cleaned.startswith(("http://", "https://")):
+            return None
+
+        page_ref, _anchor = self._split_link_anchor(cleaned)
+        if not page_ref:
+            return self.current_path
+        if self._is_attachment_link(page_ref) or self._is_local_file_link(page_ref):
+            return None
+        if page_ref.startswith("/") or ":" in page_ref:
+            return self._resolve_case_insensitive_rel_path(self._normalize_editor_path(page_ref))
+
+        # Bare wiki links are relative to the page containing the link, matching
+        # the normal link-activation behavior in ``_open_camel_link``.
+        if page_ref == self.vault_root_name:
+            return self._vault_root_page_path()
+        if not self.current_path:
+            return self._normalize_editor_path(page_ref)
+        parent = Path(self.current_path.lstrip("/")).parent
+        rel_path = parent / page_ref / f"{page_ref}{PAGE_SUFFIX}"
+        return self._resolve_case_insensitive_rel_path(f"/{rel_path.as_posix()}")
 
     def _open_plantuml_editor(self, file_path) -> None:
         """Open a PlantUML editor window for the given .puml file."""

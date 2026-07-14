@@ -5595,7 +5595,7 @@ class MarkdownEditor(QTextEdit):
                 open_popup_action.setEnabled(bool(self._open_in_window_callback))
                 if self._open_in_window_callback:
                     open_popup_action.triggered.connect(
-                        lambda: self._open_in_window_callback(self._current_path or "")
+                        lambda checked=False, target=link_for_copy: self._open_page_in_new_editor(target)
                     )
                 delete_page_action = page_sub.addAction("Delete Page")
                 delete_page_action.triggered.connect(
@@ -5688,9 +5688,7 @@ class MarkdownEditor(QTextEdit):
             open_popup_action = page_sub.addAction("Open Page in New Editor")
             open_popup_action.setEnabled(bool(self._open_in_window_callback))
             if self._open_in_window_callback:
-                open_popup_action.triggered.connect(
-                    lambda: self._open_in_window_callback(self._current_path or "")
-                )
+                open_popup_action.triggered.connect(self._open_page_in_new_editor)
             delete_page_action = page_sub.addAction("Delete Page")
             delete_page_action.triggered.connect(lambda pos=event.globalPos(): self.deletePageRequested.emit(pos))
 
@@ -5869,6 +5867,11 @@ class MarkdownEditor(QTextEdit):
                 window._show_new_page_dialog()
             except Exception:
                 pass
+
+    def _open_page_in_new_editor(self, target: Optional[str] = None) -> None:
+        """Open a link target, or the current page when invoked away from a link."""
+        if self._open_in_window_callback:
+            self._open_in_window_callback(target or self._current_path or "")
 
     def _request_mode_overlay(self, mode: str) -> None:
         window = self.window()
