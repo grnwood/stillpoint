@@ -16,6 +16,7 @@ from sp.server.adapters.files import (
     LEGACY_SUFFIX,
     PAGE_SUFFIX,
     PAGE_SUFFIXES,
+    file_content_lock,
     strip_page_suffix,
 )
 
@@ -296,53 +297,53 @@ def update_links_on_disk(root: Path, path_map: dict[str, str]) -> list[str]:
         return []
     touched: list[str] = []
     wiki_pattern = re.compile(r"\[(?P<link>[^\]|]+)\|(?P<label>[^\]]*)\]")
+
+    def rewrite_content(content: str) -> str:
+        updated = content
+        for old, new in replacements:
+            if not old or not new or old == new:
+                continue
+
+            def _replace(match):
+                link = match.group("link")
+                label = match.group("label")
+                if link != old:
+                    return match.group(0)
+                old_leaf = _link_leaf(old)
+                new_leaf = _link_leaf(new)
+                normalized_label = label.strip()
+                new_label = label
+                if normalized_label and old_leaf:
+                    if normalized_label == old_leaf or normalized_label == old_leaf.replace("_", " "):
+                        new_label = new_leaf.replace("_", " ")
+                return f"[{new}|{new_label}]"
+
+            updated = wiki_pattern.sub(_replace, updated)
+            if old.startswith(":") and ":" in old[1:]:
+                pattern = re.compile(r'\b' + re.escape(old) + r'\b')
+                updated = pattern.sub(new, updated)
+            elif old.startswith(":"):
+                pattern = re.compile(re.escape(old) + r'(?![:\w])')
+                updated = pattern.sub(new, updated)
+            else:
+                if old in new:
+                    continue
+                if old in updated:
+                    updated = updated.replace(old, new)
+        return updated
+
     for suffix in PAGE_SUFFIXES:
         for txt_file in sorted(root.rglob(f"*{suffix}")):
             if suffix == LEGACY_SUFFIX and txt_file.with_suffix(PAGE_SUFFIX).exists():
                 continue
             if ".stillpoint" in txt_file.parts:
                 continue
-            try:
-                content = txt_file.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            updated = content
-            for old, new in replacements:
-                if not old or not new or old == new:
+            with file_content_lock(txt_file):
+                try:
+                    content = txt_file.read_text(encoding="utf-8")
+                except Exception:
                     continue
-                # Update wiki-style links and adjust label when it matches the old leaf
-                def _replace(match):
-                    link = match.group("link")
-                    label = match.group("label")
-                    if link != old:
-                        return match.group(0)
-                    old_leaf = _link_leaf(old)
-                    new_leaf = _link_leaf(new)
-                    normalized_label = label.strip()
-                    new_label = label
-                    if normalized_label and old_leaf:
-                        if normalized_label == old_leaf or normalized_label == old_leaf.replace("_", " "):
-                            new_label = new_leaf.replace("_", " ")
-                    return f"[{new}|{new_label}]"
-
-                updated = wiki_pattern.sub(_replace, updated)
-                # For colon-style links, use word boundaries to avoid partial matches
-                if old.startswith(":") and ":" in old[1:]:
-                    # Multi-level colon link like :Foo:Bar - use word boundaries
-                    pattern = re.compile(r'\b' + re.escape(old) + r'\b')
-                    updated = pattern.sub(new, updated)
-                elif old.startswith(":"):
-                    # Root-level colon link like :RootPage
-                    # Match only when followed by non-colon or end of word
-                    pattern = re.compile(re.escape(old) + r'(?![:\w])')
-                    updated = pattern.sub(new, updated)
-                else:
-                    # Regular path replacement - use the old logic
-                    if old in new:
-                        # Avoid recursive growth when new contains old
-                        continue
-                    if old in updated:
-                        updated = updated.replace(old, new)
+                updated = rewrite_content(content)
                 if updated != content:
                     try:
                         txt_file.write_text(updated, encoding="utf-8")

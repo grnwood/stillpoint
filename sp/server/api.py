@@ -4164,6 +4164,64 @@ def vault_update_links(payload: UpdateLinksPayload, user: AuthModels.UserInfo = 
     return {"ok": True, "touched": touched}
 
 
+_LINK_UPDATE_JOBS: dict[str, dict] = {}
+_LINK_UPDATE_JOBS_LOCK = threading.Lock()
+_LINK_UPDATE_RUN_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _run_link_update_job(job_id: str, root: Path, path_map: dict[str, str]) -> None:
+    root_key = str(root.resolve())
+    with _LINK_UPDATE_JOBS_LOCK:
+        run_lock = _LINK_UPDATE_RUN_LOCKS.setdefault(root_key, threading.Lock())
+        _LINK_UPDATE_JOBS[job_id].update(status="running", message="Updating links…")
+    try:
+        with run_lock:
+            touched = file_ops.update_links_on_disk(root, path_map)
+        with _LINK_UPDATE_JOBS_LOCK:
+            _LINK_UPDATE_JOBS[job_id].update(
+                status="completed",
+                message=f"Updated links in {len(touched)} page(s)",
+                touched=len(touched),
+            )
+    except Exception as exc:
+        with _LINK_UPDATE_JOBS_LOCK:
+            _LINK_UPDATE_JOBS[job_id].update(status="error", message=str(exc))
+
+
+@app.post("/api/vault/update-links/background")
+def vault_update_links_background(
+    payload: UpdateLinksPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    """Start a serialized backlink rewrite without blocking the requesting UI."""
+    root = vault_state.get_root()
+    job_id = str(uuid.uuid4())
+    with _LINK_UPDATE_JOBS_LOCK:
+        _LINK_UPDATE_JOBS[job_id] = {
+            "status": "queued",
+            "message": "Waiting to update links…",
+            "touched": 0,
+        }
+    threading.Thread(
+        target=_run_link_update_job,
+        args=(job_id, root, dict(payload.path_map)),
+        daemon=True,
+    ).start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/vault/update-links/status/{job_id}")
+def vault_update_links_status(
+    job_id: str,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    with _LINK_UPDATE_JOBS_LOCK:
+        job = _LINK_UPDATE_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Link update job not found")
+        return {"job_id": job_id, **job}
+
+
 @app.post("/files/attach")
 def attach_files(
     request: Request,

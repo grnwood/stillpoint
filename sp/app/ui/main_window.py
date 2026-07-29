@@ -2354,6 +2354,11 @@ class MainWindow(QMainWindow):
         
         # Track pending link path maps for backlink rewriting
         self._pending_link_path_maps: list[dict[str, str]] = []
+        self._pending_background_link_path_maps: list[dict[str, str]] = []
+        self._link_update_job_id: Optional[str] = None
+        self._link_update_poll_timer = QTimer(self)
+        self._link_update_poll_timer.setInterval(500)
+        self._link_update_poll_timer.timeout.connect(self._poll_background_link_update)
         
         # Bookmarks
         self.bookmarks: list[str] = []
@@ -12057,6 +12062,11 @@ class MainWindow(QMainWindow):
         self._pending_tree_open_retry_armed = False
 
     def _prepare_vault_switch_ui_reset(self) -> None:
+        # The server-side job keeps its captured vault root, but its job ID is
+        # meaningful only to the server/vault context that started it.
+        self._link_update_poll_timer.stop()
+        self._link_update_job_id = None
+        self._pending_background_link_path_maps.clear()
         self._clear_pending_tree_open()
         self._pending_selection = None
         self._skip_next_selection_open = True
@@ -19920,12 +19930,9 @@ class MainWindow(QMainWindow):
     def _handle_move_response(self, dest_path: str, data: dict, progress=None) -> None:
         path_map = data.get("page_map") or {}
         self._apply_path_map(path_map)
-        # Immediately rewrite backlinks if enabled
+        # Rewrite backlinks after the move so the editor is immediately usable.
         if self.rewrite_backlinks_on_move and path_map:
-            try:
-                self._rewrite_links_on_disk_immediate(path_map)
-            except Exception as exc:
-                print(f"[UI] Failed to rewrite backlinks: {exc}")
+            self._queue_background_link_update(path_map)
         new_open_path = self._folder_to_file_path(dest_path)
         # If we were filtered to a subtree and the item moved outside it, clear the filter so it stays visible
         if self._nav_filter_path and dest_path and not dest_path.startswith(self._nav_filter_path):
@@ -20425,20 +20432,76 @@ class MainWindow(QMainWindow):
         print("[UI] Reindex requested (link update mode=reindex)")
         self._reindex_vault(show_progress=False)
 
-    def _rewrite_links_on_disk_immediate(self, path_map: dict[str, str]) -> None:
-        """Rewrite page links across the vault immediately after a move."""
-        if not self.vault_root or not path_map:
+    def _queue_background_link_update(self, path_map: dict[str, str]) -> None:
+        """Serialize and coalesce backlink rewrites initiated by moves."""
+        if not self.vault_root or not path_map or not self.rewrite_backlinks_on_move:
+            return
+        self._pending_background_link_path_maps.append(dict(path_map))
+        self.statusBar().showMessage("Updating links in background…", 0)
+        if self._link_update_job_id:
+            return
+        self._start_next_background_link_update()
+
+    def _start_next_background_link_update(self) -> None:
+        if self._link_update_job_id or not self._pending_background_link_path_maps:
+            return
+        path_map: dict[str, str] = {}
+        while self._pending_background_link_path_maps:
+            path_map.update(self._pending_background_link_path_maps.pop(0))
+        try:
+            resp = self.http.post(
+                "/api/vault/update-links/background",
+                json={"path_map": path_map},
+            )
+            resp.raise_for_status()
+            job_id = str(resp.json().get("job_id") or "").strip()
+            if not job_id:
+                raise RuntimeError("Link update did not return a job ID")
+            self._link_update_job_id = job_id
+            self._link_update_poll_timer.start()
+        except httpx.HTTPError as exc:
+            print(f"[UI] Failed to start background link update: {exc}")
+            self.statusBar().showMessage("Unable to start background link update", 5000)
+        except Exception as exc:
+            print(f"[UI] Failed to start background link update: {exc}")
+            self.statusBar().showMessage(f"Unable to update links: {exc}", 5000)
+
+    def _poll_background_link_update(self) -> None:
+        job_id = self._link_update_job_id
+        if not job_id:
+            self._link_update_poll_timer.stop()
             return
         try:
-            resp = self.http.post("/api/vault/update-links", json={"path_map": path_map})
+            resp = self.http.get(f"/api/vault/update-links/status/{job_id}")
             resp.raise_for_status()
             data = resp.json()
-            touched = data.get("touched") or []
-            if touched:
-                print(f"[UI] Rewrote backlinks in {len(touched)} file(s)")
-                self.statusBar().showMessage(f"Updated backlinks in {len(touched)} file(s)", 3000)
-        except httpx.HTTPError as exc:
-            print(f"[UI] Failed to rewrite backlinks: {exc}")
+        except Exception as exc:
+            self._link_update_poll_timer.stop()
+            self._link_update_job_id = None
+            print(f"[UI] Failed to poll background link update: {exc}")
+            self.statusBar().showMessage(f"Link update status unavailable: {exc}", 6000)
+            self._start_next_background_link_update()
+            return
+
+        status = str(data.get("status") or "")
+        message = str(data.get("message") or "Updating links…")
+        if status in {"queued", "running"}:
+            self.statusBar().showMessage(message, 0)
+            return
+
+        self._link_update_poll_timer.stop()
+        self._link_update_job_id = None
+        if status == "completed":
+            print(f"[UI] Background link update complete: {message}")
+            self.statusBar().showMessage(message, 4000)
+            try:
+                self.right_panel.refresh_links(self.current_path)
+            except Exception:
+                pass
+        else:
+            print(f"[UI] Background link update failed: {message}")
+            self.statusBar().showMessage(f"Link update failed: {message}", 8000)
+        self._start_next_background_link_update()
 
     def _ensure_page_title(self, content: str, path: Optional[str]) -> str:
         """Ensure first non-empty line is a heading matching the leaf name if missing."""
@@ -22189,6 +22252,7 @@ class MainWindow(QMainWindow):
         # Stop any pending timers
         self.autosave_timer.stop()
         self._search_sync.stop()
+        self._link_update_poll_timer.stop()
         self.geometry_save_timer.stop()
         self._shutdown_homebase_sync()
 

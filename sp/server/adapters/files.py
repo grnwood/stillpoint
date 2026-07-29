@@ -3,8 +3,10 @@ import datetime as dt
 import os
 import shutil
 import traceback
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
+from threading import RLock
 from typing import Dict, List
 
 def assert_not_vault_root_write(path):
@@ -36,6 +38,23 @@ PAGE_SUFFIXES = (PAGE_SUFFIX, LEGACY_SUFFIX)
 
 class FileAccessError(RuntimeError):
     pass
+
+
+_FILE_LOCKS: Dict[str, RLock] = {}
+_FILE_LOCKS_GUARD = RLock()
+
+
+@contextmanager
+def file_content_lock(path: Path):
+    """Serialize in-process reads and writes that replace page content."""
+    key = str(path.resolve())
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.setdefault(key, RLock())
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _page_file_for(directory: Path, suffix: str = PAGE_SUFFIX) -> Path:
@@ -144,7 +163,8 @@ def write_file(root: Path, path: str, content: str) -> None:
     if target.parent == root and target.suffix.lower() in PAGE_SUFFIXES:
         raise FileAccessError("Vault root files are not allowed; create a folder and save inside it.")
     _ensure_valid_page_name(target, allow_legacy=False)
-    target.write_text(content, encoding="utf-8")
+    with file_content_lock(target):
+        target.write_text(content, encoding="utf-8")
 
 
 def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dict]:
