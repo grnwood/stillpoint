@@ -12116,6 +12116,15 @@ class MainWindow(QMainWindow):
                 lambda p=path, r=retry, a=add_to_history, f=force, c=cursor_at_end, rh=restore_history_cursor, sc=sync_calendar: self._open_file(p, r, a, f, c, rh, sc),
             )
             return
+        # If there is a deferred nav-tree refresh (e.g. from a newly created journal page) for
+        # a path other than the one we are about to open, discard it now.  Keeping it alive lets
+        # a later focusInEvent trigger a full tree rebuild and—via _deferred_select_tree_path—
+        # silently navigate the editor back to the stale path even though the user has moved on.
+        _deferred_tgt = self._deferred_nav_tree_refresh_target
+        if _deferred_tgt and _deferred_tgt != path:
+            self._deferred_nav_tree_refresh_target = None
+            if self._pending_selection == _deferred_tgt:
+                self._pending_selection = None
         # Stop any running scroll animation before switching pages to prevent
         # _finish_flash from firing with a cursor from the old document after
         # the document is cleared and replaced.
@@ -20372,6 +20381,12 @@ class MainWindow(QMainWindow):
             # Select and scroll to the page in the tree
             self._select_tree_path(self.current_path)
             logNav(f"_sync_nav_tree_to_active_page: selected {self.current_path}")
+            # Tree is now synced – discard any lingering deferred-refresh state for
+            # this path so a later focusInEvent doesn't trigger a spurious rebuild.
+            if self._deferred_nav_tree_refresh_target == self.current_path:
+                self._deferred_nav_tree_refresh_target = None
+            if self._pending_selection == self.current_path:
+                self._pending_selection = None
         except Exception as e:
             logNav(f"_sync_nav_tree_to_active_page: error syncing {self.current_path} ({e})")
 

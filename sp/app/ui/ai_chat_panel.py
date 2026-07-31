@@ -4307,6 +4307,8 @@ class AIChatPanel(QtWidgets.QWidget):
             self.condense_btn.setEnabled(False)
             self._update_stop_button()
         except Exception as exc:
+            if self._condense_worker is not None:
+                self._condense_worker.deleteLater()
             self._condense_worker = None
             QtWidgets.QMessageBox.critical(self, "Condense", str(exc))
 
@@ -4651,6 +4653,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._cancel_pending_send = False
             self._stream_think_state.pop(idx, None)
             self._message_think_active.discard(idx)
+            self._api_worker.deleteLater()
             self._api_worker = None
             self._update_stop_button()
             return
@@ -4724,6 +4727,7 @@ class AIChatPanel(QtWidgets.QWidget):
             pass
         self._update_model_status()
         self.send_btn.setEnabled(True)
+        self._api_worker.deleteLater()
         self._api_worker = None
         self._update_stop_button()
         _log_llm_response(f"[AIChat][stream complete] response_len={len(full)}")
@@ -4845,6 +4849,7 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _handle_chat_summary_title_finished(self, text: str) -> None:
         session_id = self._title_target_session_id
+        self._title_worker.deleteLater()
         self._title_worker = None
         self._title_target_session_id = None
         title = self._normalize_generated_chat_title(text)
@@ -4862,6 +4867,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_stop_button()
 
     def _handle_chat_summary_title_failed(self, err: str) -> None:
+        self._title_worker.deleteLater()
         self._title_worker = None
         self._title_target_session_id = None
         if err == "Cancelled":
@@ -4881,6 +4887,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def _handle_condense_finished(self, full: str) -> None:
         if self._cancel_pending_condense:
             self._cancel_pending_condense = False
+            self._condense_worker.deleteLater()
             self._condense_worker = None
             self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
             self._update_stop_button()
@@ -4889,6 +4896,7 @@ class AIChatPanel(QtWidgets.QWidget):
         clean_full = self._strip_think_blocks(full or fallback)
         self._summary_content = clean_full or self._strip_think_blocks(self._condense_buffer)
         self._condense_buffer = ""
+        self._condense_worker.deleteLater()
         self._condense_worker = None
         self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
         self.condense_btn.setEnabled(True)
@@ -4903,6 +4911,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._condense_buffer = ""
         if err != "Cancelled":
             self._summary_content = None
+        self._condense_worker.deleteLater()
         self._condense_worker = None
         self._cancel_pending_condense = False
         self._condense_think_state = {"in_think": False, "pending": "", "visible": ""}
@@ -5013,6 +5022,7 @@ class AIChatPanel(QtWidgets.QWidget):
             self._set_status(f"API error: {err}")
             self._notify_status_bar_connection_error(err)
         self.send_btn.setEnabled(True)
+        self._api_worker.deleteLater()
         self._api_worker = None
         self._cancel_pending_send = False
         self._update_model_status()
