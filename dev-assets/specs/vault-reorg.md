@@ -188,7 +188,7 @@ Staging a canonical day page creates an `add_reference` operation targeting an e
 - [Journal:2026:08:01|Saturday 01 August 2026] — MSC
 ```
 
-The link label comes from the Journal page H1 and the optional note defaults to the active candidate query. Existing identical entries are not duplicated. The source Journal page and folder remain untouched. Selecting the vault root is invalid because this release requires an existing target page; automatic topic-page creation may be added separately.
+The link label comes from the Journal page H1. For the optional note, candidate discovery first finds the best matching ATX heading (`#` through `######`) containing every search term and uses that heading's exact text. Exact and prefix heading matches rank ahead of other heading matches. Only when no heading matches does the note fall back to the active candidate query. Existing identical entries are not duplicated. The source Journal page and folder remain untouched. Selecting the vault root is invalid because this release requires an existing target page; automatic topic-page creation may be added separately.
 
 ### Eligible moves
 

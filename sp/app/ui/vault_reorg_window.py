@@ -131,6 +131,7 @@ class VaultReorgWindow(QDialog):
         self._updating_table = False
         self._destination_expanded_paths: set[str] = {"/"}
         self._selected_destination_path = "/"
+        self._candidate_reference_notes: dict[str, str] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -411,6 +412,7 @@ class VaultReorgWindow(QDialog):
     def _run_search(self) -> None:
         query = self.search_edit.text().strip()
         self.candidate_list.clear()
+        self._candidate_reference_notes.clear()
         if not query:
             self.result_label.setText("Enter a search term")
             return
@@ -436,6 +438,10 @@ class VaultReorgWindow(QDialog):
             suffix = f"\n{result.get('snippet')}" if result.get("match_type") == "content" else ""
             operation_type = str(result.get("operation_type") or "move")
             prefix = "[Journal entry — add reference]\n" if operation_type == "add_reference" else ""
+            matched_heading = str(result.get("matched_heading") or "").strip()
+            if operation_type == "add_reference" and matched_heading:
+                self._candidate_reference_notes[path] = matched_heading
+                prefix += f"Matched heading: {matched_heading}\n"
             item = QListWidgetItem(f"{prefix}{title}\n{path}{suffix}")
             item.setData(_PATH_ROLE, path)
             self.candidate_list.addItem(item)
@@ -482,7 +488,11 @@ class VaultReorgWindow(QDialog):
             else:
                 default_name = Path(source).name
                 if operation_type == "add_reference":
-                    default_name = self.search_edit.text().strip() or default_name
+                    default_name = (
+                        self._candidate_reference_notes.get(source)
+                        or self.search_edit.text().strip()
+                        or default_name
+                    )
                 operation = {
                     "operation_type": operation_type,
                     "source_path": source,

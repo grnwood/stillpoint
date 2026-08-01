@@ -51,7 +51,7 @@ def test_journal_day_candidate_is_marked_as_reference_only(reorg_vault) -> None:
     _write_page(
         reorg_vault,
         "/Journal/2026/08/01",
-        "# Saturday 01 August 2026\n\n## MSC\n",
+        "# Saturday 01 August 2026\n\n## MSC Program Delivery\n",
         title="Saturday 01 August 2026 MSC",
     )
 
@@ -59,6 +59,7 @@ def test_journal_day_candidate_is_marked_as_reference_only(reorg_vault) -> None:
 
     assert result["results"][0]["folder_path"] == "/Journal/2026/08/01"
     assert result["results"][0]["operation_type"] == "add_reference"
+    assert result["results"][0]["matched_heading"] == "MSC Program Delivery"
 
 
 def test_journal_day_cannot_be_staged_as_a_move(reorg_vault) -> None:
@@ -393,7 +394,21 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot) -> None
         def get(self, path, params=None):
             if path == "/api/vault/reorganize/candidates":
                 self.candidate_calls += 1
-                return _Response({"results": [], "content_index_available": True})
+                return _Response(
+                    {
+                        "results": [
+                            {
+                                "title": "Saturday 01 August 2026",
+                                "folder_path": "/Journal/2026/08/01",
+                                "match_type": "content",
+                                "snippet": "MSC Program Delivery",
+                                "operation_type": "add_reference",
+                                "matched_heading": "MSC Program Delivery",
+                            }
+                        ],
+                        "content_index_available": True,
+                    }
+                )
             assert path == "/api/vault/tree"
             return _Response(
                 {
@@ -467,10 +482,11 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot) -> None
     window._clear_plan()
     window.destination_staged_only.setChecked(False)
     window.search_edit.setText("MSC")
+    window._run_search()
     window._stage_paths(["/Journal/2026/08/01"], "/Topics")
 
     assert window._plan[0]["operation_type"] == "add_reference"
-    assert window._plan[0]["new_name"] == "MSC"
+    assert window._plan[0]["new_name"] == "MSC Program Delivery"
     assert window.plan_table.item(0, 0).text() == "Add reference"
     window._clear_plan()
     assert http.candidate_calls >= 1

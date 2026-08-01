@@ -104,6 +104,41 @@ def _candidate_operation_type(folder_path: str) -> str:
     return "add_reference" if _is_journal_day(folder_path) else "move"
 
 
+def _matching_markdown_heading(folder_path: str, query: str) -> str:
+    """Return the best ATX heading whose text contains every query term."""
+    if not _is_journal_day(folder_path):
+        return ""
+    active_root = config.get_active_vault()
+    if not active_root:
+        return ""
+    page_path = config.folder_to_page_path(folder_path)
+    try:
+        content = (Path(active_root) / page_path.lstrip("/")).read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    terms = [term.casefold() for term in query.split() if term.strip()]
+    if not terms:
+        return ""
+    matches: list[tuple[tuple[int, int, int], str]] = []
+    for line_number, line in enumerate(content.splitlines()):
+        match = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if not match:
+            continue
+        heading = match.group(2).strip()
+        heading_cf = heading.casefold()
+        if not all(term in heading_cf for term in terms):
+            continue
+        joined = " ".join(terms)
+        if heading_cf == joined:
+            match_rank = 0
+        elif heading_cf.startswith(joined):
+            match_rank = 1
+        else:
+            match_rank = 2
+        matches.append(((match_rank, len(match.group(1)), line_number), heading))
+    return min(matches, default=((0, 0, 0), ""), key=lambda item: item[0])[1]
+
+
 def _day_has_subtree_link(day_page: str, source: str) -> bool:
     db_path = config._vault_db_path()
     if not db_path:
@@ -178,6 +213,9 @@ def _metadata_candidates(query: str, *, journal_only: bool, limit: int) -> list[
     results = [item[1] for item in ranked[:limit]]
     for item in results:
         item["operation_type"] = _candidate_operation_type(str(item.get("folder_path") or ""))
+        item["matched_heading"] = _matching_markdown_heading(
+            str(item.get("folder_path") or ""), query
+        )
     return results
 
 
@@ -213,16 +251,16 @@ def search_candidates(
                         folder = _folder_for_page(page_path)
                         if folder == "/":
                             continue
-                        results.append(
-                            {
+                        result = {
                                 "path": page_path,
                                 "folder_path": folder,
                                 "title": Path(folder.rstrip("/")).name,
                                 "match_type": "content",
                                 "snippet": str(item.get("snippet") or ""),
                                 "operation_type": _candidate_operation_type(folder),
+                                "matched_heading": _matching_markdown_heading(folder, query),
                             }
-                        )
+                        results.append(result)
                         seen.add(page_path)
                         if len(results) >= limit:
                             break
