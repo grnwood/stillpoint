@@ -62,7 +62,7 @@ from .task_style import (
     TaskSemanticColorDelegate,
 )
 from markdown import markdown as render_markdown
-from .ai_chat_panel import ApiWorker, ServerManager
+from .ai_chat_panel import ApiWorker, resolve_operations_server_and_model
 from .date_insert_dialog import DateInsertDialog, journal_day_file_days, journal_day_text_format
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 
@@ -2248,43 +2248,7 @@ class CalendarPanel(QWidget):
         return "\n\n".join(parts).strip()
 
     def _resolve_ai_server_and_model(self) -> Optional[tuple[dict, str]]:
-        try:
-            server_mgr = ServerManager()
-        except Exception:
-            return None
-        server_config: dict = {}
-        try:
-            default_server_name = config.load_default_ai_server()
-        except Exception:
-            default_server_name = None
-        if default_server_name:
-            try:
-                server_config = server_mgr.get_server(default_server_name) or {}
-            except Exception:
-                server_config = {}
-        if not server_config:
-            try:
-                active = server_mgr.get_active_server_name()
-                if active:
-                    server_config = server_mgr.get_server(active) or {}
-            except Exception:
-                server_config = {}
-        if not server_config:
-            try:
-                servers = server_mgr.load_servers()
-                if servers:
-                    server_config = servers[0]
-            except Exception:
-                server_config = {}
-        if not server_config:
-            return None
-        try:
-            model = config.load_default_ai_model()
-        except Exception:
-            model = None
-        if not model:
-            model = server_config.get("default_model") or "gpt-3.5-turbo"
-        return server_config, model
+        return resolve_operations_server_and_model()
 
     def _on_generate_ai_summary(self) -> None:
         if not self._ai_enabled:

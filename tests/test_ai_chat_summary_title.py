@@ -25,7 +25,7 @@ def test_build_chat_summary_request_messages_weights_latest() -> None:
     assert "Assistant: latest answer" in payload[1]["content"]
 
 
-def test_request_chat_summary_title_uses_configured_default_model(monkeypatch) -> None:
+def test_request_chat_summary_title_uses_operations_model(monkeypatch) -> None:
     panel = AIChatPanel.__new__(AIChatPanel)
     statuses: list[str] = []
     stop_updates: list[str] = []
@@ -54,6 +54,11 @@ def test_request_chat_summary_title_uses_configured_default_model(monkeypatch) -
             captured["cancelled"] = True
 
     monkeypatch.setattr(ai_chat_panel_module, "ApiWorker", FakeWorker)
+    monkeypatch.setattr(
+        ai_chat_panel_module,
+        "resolve_operations_server_and_model",
+        lambda manager: ({"name": "operations-server", "default_model": "server-default"}, "operations-model"),
+    )
 
     panel._api_worker = None
     panel._condense_worker = None
@@ -77,8 +82,8 @@ def test_request_chat_summary_title_uses_configured_default_model(monkeypatch) -
 
     assert captured["started"] is True
     assert captured["stream"] is False
-    assert captured["server_config"] == {"name": "configured-server", "default_model": "server-default"}
-    assert captured["model"] == "configured-model"
+    assert captured["server_config"] == {"name": "operations-server", "default_model": "server-default"}
+    assert captured["model"] == "operations-model"
     assert panel._title_target_session_id == 22
     assert statuses[-1] == "Generating chat summary..."
     assert stop_updates[-1] == "updated"

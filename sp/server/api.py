@@ -4182,6 +4182,7 @@ def _run_link_update_job(job_id: str, root: Path, path_map: dict[str, str]) -> N
                 status="completed",
                 message=f"Updated links in {len(touched)} page(s)",
                 touched=len(touched),
+                touched_paths=touched,
             )
     except Exception as exc:
         with _LINK_UPDATE_JOBS_LOCK:
@@ -4201,6 +4202,7 @@ def vault_update_links_background(
             "status": "queued",
             "message": "Waiting to update links…",
             "touched": 0,
+            "touched_paths": [],
         }
     threading.Thread(
         target=_run_link_update_job,

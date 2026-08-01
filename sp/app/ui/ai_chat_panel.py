@@ -1463,6 +1463,68 @@ def get_available_models(server_config: Optional[dict]) -> List[str]:
     return sorted(set(models))
 
 
+def resolve_operations_server_and_model(
+    server_manager: Optional["ServerManager"] = None,
+) -> Optional[tuple[dict, str]]:
+    """Resolve the configured server/model for bounded StillPoint operations."""
+    try:
+        manager = server_manager or ServerManager()
+    except Exception:
+        return None
+
+    server: dict = {}
+    try:
+        configured_server = (stillpoint_config.load_default_ai_server() or "").strip()
+    except Exception:
+        configured_server = ""
+    if configured_server:
+        try:
+            server = manager.get_server(configured_server) or {}
+        except Exception:
+            server = {}
+    if not server:
+        try:
+            servers = manager.load_servers()
+            if servers:
+                server = servers[0] or {}
+        except Exception:
+            server = {}
+    if not server:
+        return None
+
+    try:
+        operations_model = (stillpoint_config.load_default_ai_operations_model() or "").strip()
+    except Exception:
+        operations_model = ""
+    try:
+        general_model = (stillpoint_config.load_default_ai_model() or "").strip()
+    except Exception:
+        general_model = ""
+    server_default = str(server.get("default_model") or "").strip()
+
+    cached_models: list[str] = []
+    try:
+        payload = stillpoint_config._read_global_config()
+        model_map = payload.get("server_models", {}) if isinstance(payload, dict) else {}
+        raw_models = model_map.get(server.get("name"), []) if isinstance(model_map, dict) else []
+        cached_models = [str(model).strip() for model in raw_models if str(model).strip()]
+    except Exception:
+        cached_models = []
+
+    if cached_models:
+        for candidate in (operations_model, general_model):
+            if candidate and candidate in cached_models:
+                return server, candidate
+        if server_default:
+            return server, server_default
+        return server, cached_models[0]
+
+    for candidate in (operations_model, general_model, server_default):
+        if candidate:
+            return server, candidate
+    return None
+
+
 class ApiWorker(QtCore.QThread):
     chunk = QtCore.Signal(str)
     finished = QtCore.Signal(str)
@@ -4763,28 +4825,9 @@ class AIChatPanel(QtWidgets.QWidget):
         title = " ".join(clipped)
         return title[:72]
 
-    def _summary_server_and_model(self, session: Optional[Dict] = None) -> tuple[dict, str]:
-        configured_server = (self._config_default_server() or "").strip()
-        configured_model = (self._config_default_model() or "").strip()
-        server = None
-        if configured_server:
-            server = self.server_manager.get_server(configured_server)
-        if not server:
-            session_server = ((session or {}).get("last_server") or "").strip()
-            if session_server:
-                server = self.server_manager.get_server(session_server)
-        if not server:
-            server = self.current_server or self.server_manager.get_server(self.server_combo.currentText()) or {}
-        models = get_available_models(server)
-        if not models:
-            models = [server.get("default_model") or "gpt-3.5-turbo"]
-        if configured_model:
-            model = configured_model
-        elif server.get("default_model") in models:
-            model = server.get("default_model")
-        else:
-            model = models[0]
-        return server, model
+    def _summary_server_and_model(self, session: Optional[Dict] = None) -> Optional[tuple[dict, str]]:
+        del session  # Operations intentionally do not inherit a chat session's model.
+        return resolve_operations_server_and_model(self.server_manager)
 
     def _normalize_generated_chat_title(self, text: str) -> Optional[str]:
         cleaned = self._strip_think_blocks(text or "")
@@ -4835,7 +4878,11 @@ class AIChatPanel(QtWidgets.QWidget):
         if not request_messages:
             self._set_status("Add some chat messages before generating a summary.", "#f6c343")
             return
-        server, model = self._summary_server_and_model(session)
+        server_model = self._summary_server_and_model(session)
+        if not server_model:
+            self._set_status("Configure an AI server and operations model before generating a summary.", "#f6c343")
+            return
+        server, model = server_model
         self._title_target_session_id = session_id
         self._title_worker = ApiWorker(server, request_messages, model, stream=False)
         self._title_worker.finished.connect(self._handle_chat_summary_title_finished)
@@ -4849,7 +4896,10 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _handle_chat_summary_title_finished(self, text: str) -> None:
         session_id = self._title_target_session_id
-        self._title_worker.deleteLater()
+        try:
+            self._title_worker.deleteLater()
+        except Exception:
+            pass
         self._title_worker = None
         self._title_target_session_id = None
         title = self._normalize_generated_chat_title(text)
@@ -4867,7 +4917,10 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_stop_button()
 
     def _handle_chat_summary_title_failed(self, err: str) -> None:
-        self._title_worker.deleteLater()
+        try:
+            self._title_worker.deleteLater()
+        except Exception:
+            pass
         self._title_worker = None
         self._title_target_session_id = None
         if err == "Cancelled":

@@ -18,6 +18,7 @@ import sys
 import tempfile 
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone, timedelta
 import faulthandler
@@ -131,6 +132,9 @@ from sp.app import zim_import
 from sp import VERSION as APP_VERSION
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
+_AUTO_RENAME_PROMPT_CACHE: Optional[str] = None
+_AUTO_RENAME_MAX_CHARS = 12_000
+_AUTO_RENAME_MAX_LINES = 200
 
 
 def _load_one_shot_prompt() -> str:
@@ -150,6 +154,99 @@ def _load_one_shot_prompt() -> str:
         pass
     _ONE_SHOT_PROMPT_CACHE = default_prompt
     return default_prompt
+
+
+def _load_auto_rename_prompt() -> str:
+    """Load the bundled auto-rename prompt once, with a safe fallback."""
+    global _AUTO_RENAME_PROMPT_CACHE
+    if _AUTO_RENAME_PROMPT_CACHE is not None:
+        return _AUTO_RENAME_PROMPT_CACHE
+    default_prompt = (
+        "Generate a concise, specific 3-7 word page title from the supplied page body. "
+        "Base it on substantive content and ignore template headings, dates, and boilerplate. "
+        "Return only the title with no quotes, Markdown, explanation, path, or filename extension."
+    )
+    try:
+        prompt_path = Path(__file__).parent.parent / "auto-rename-prompt.txt"
+        if prompt_path.exists():
+            content = prompt_path.read_text(encoding="utf-8").strip()
+            if content:
+                _AUTO_RENAME_PROMPT_CACHE = content
+                return content
+    except Exception:
+        pass
+    _AUTO_RENAME_PROMPT_CACHE = default_prompt
+    return default_prompt
+
+
+def _bounded_auto_rename_body(
+    body: str,
+    *,
+    max_chars: int = _AUTO_RENAME_MAX_CHARS,
+    max_lines: int = _AUTO_RENAME_MAX_LINES,
+) -> tuple[str, bool]:
+    """Return a trimmed leading page sample and whether it was truncated."""
+    trimmed = (body or "").strip()
+    if not trimmed:
+        return "", False
+    lines = trimmed.splitlines()
+    truncated = len(trimmed) > max_chars or len(lines) > max_lines
+    sample = "\n".join(lines[:max_lines])
+    if len(sample) > max_chars:
+        clipped = sample[:max_chars]
+        if "\n" in clipped:
+            complete_lines = clipped.rsplit("\n", 1)[0]
+            if complete_lines.strip():
+                clipped = complete_lines
+        sample = clipped
+    return sample.strip(), truncated
+
+
+def _auto_rename_source_body(body: str, current_leaf: str) -> str:
+    """Remove a conventional current-title H1 from the model's input only."""
+    if not body or not current_leaf:
+        return body or ""
+
+    def comparable_title(value: str) -> str:
+        return re.sub(r"\s+", " ", value.replace("_", " ").strip()).casefold()
+
+    lines = body.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        visible = line.rstrip("\r\n").removeprefix("\ufeff")
+        if not visible.strip():
+            continue
+        match = re.fullmatch(r" {0,3}#[ \t]+(?P<title>.*?)[ \t]*", visible)
+        if match and comparable_title(match.group("title")) == comparable_title(current_leaf):
+            del lines[index]
+        break
+    return "".join(lines)
+
+
+def _normalize_auto_rename_title(text: str) -> Optional[str]:
+    """Normalize a model-generated title into a safe cross-platform page name."""
+    if not text:
+        return None
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<think\b[^>]*/>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<think\b[^>]*>.*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    lines = [line.strip() for line in cleaned.replace("\r", "\n").splitlines() if line.strip()]
+    while lines and re.fullmatch(r"```[A-Za-z0-9_-]*", lines[0]):
+        lines.pop(0)
+    if not lines:
+        return None
+    title = lines[0].strip(" \t\"'`")
+    title = re.sub(r"\s+", " ", title)
+    title = title.rstrip(" \t.,:;!?")
+    title = re.sub(r"(?i)\.(?:md|txt)$", "", title).strip()
+    title = title.rstrip(" \t.,:;!?")
+    title = title[:72].rstrip(" \t.,:;!?")
+    if not title or title in {".", ".."}:
+        return None
+    if any(unicodedata.category(char) == "Cc" or char in '/\\:*?"<>|' for char in title):
+        return None
+    if re.fullmatch(r"(?i)(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", title):
+        return None
+    return title
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
 
@@ -2726,6 +2823,9 @@ class MainWindow(QMainWindow):
         self._refresh_right_minibar_tabs()
         self._sync_right_minibar_selection(self.right_panel.tabs.currentIndex())
         self._inline_editor: Optional[InlineNameEdit] = None
+        self._auto_rename_worker = None
+        self._auto_rename_source_path: Optional[str] = None
+        self._auto_rename_closing = False
         self._pending_selection: Optional[str] = None
         self._suspend_autosave = False
         self._vault_lock_path: Optional[Path] = None
@@ -2924,6 +3024,13 @@ class MainWindow(QMainWindow):
         vault_prefs_action.setToolTip("Override global preferences for this vault")
         vault_prefs_action.triggered.connect(self._open_vault_preferences)
         vault_menu.addAction(vault_prefs_action)
+        self._action_toggle_journal = QAction("Toggle Journal", self)
+        self._action_toggle_journal.setToolTip("Show or hide Journal in the file navigator")
+        self._action_toggle_journal.setCheckable(True)
+        self._action_toggle_journal.setChecked(self._show_journal_in_nav)
+        self._action_toggle_journal.setEnabled(False)
+        self._action_toggle_journal.triggered.connect(self._set_show_journal_in_nav)
+        vault_menu.addAction(self._action_toggle_journal)
         self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
         self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
         self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
@@ -3190,11 +3297,15 @@ class MainWindow(QMainWindow):
         command_bar_action.triggered.connect(self._show_command_bar)
         go_menu.addAction(command_bar_action)
 
-        rename_action = QAction("Rename", self)
-        rename_action.setShortcut(QKeySequence(Qt.Key_F2))
-        rename_action.setShortcutContext(Qt.ApplicationShortcut)
-        rename_action.triggered.connect(self._trigger_tree_rename)
-        file_menu.addAction(rename_action)
+        self._action_rename_manual = QAction("Rename (Manual)", self)
+        self._action_rename_manual.setShortcut(QKeySequence(Qt.Key_F2))
+        self._action_rename_manual.setShortcutContext(Qt.ApplicationShortcut)
+        self._action_rename_manual.triggered.connect(self._trigger_manual_rename)
+        file_menu.addAction(self._action_rename_manual)
+
+        self._action_rename_auto = QAction("Rename Auto (AI)", self)
+        self._action_rename_auto.triggered.connect(self._trigger_auto_rename)
+        file_menu.addAction(self._action_rename_auto)
 
         file_menu.addSeparator()
         
@@ -3778,7 +3889,7 @@ class MainWindow(QMainWindow):
         date_shortcut.activated.connect(self._insert_date)
         rename_shortcut = QShortcut(QKeySequence(Qt.Key_F2), self)
         rename_shortcut.setContext(Qt.ApplicationShortcut)
-        rename_shortcut.activated.connect(self._trigger_tree_rename)
+        rename_shortcut.activated.connect(self._trigger_manual_rename)
         switch_vault_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         switch_vault_shortcut.activated.connect(lambda: self._select_vault())
         open_vault_new_win_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
@@ -9622,6 +9733,7 @@ class MainWindow(QMainWindow):
                     pass
                 try:
                     self.journal_tree_button.setEnabled(True)
+                    self._action_toggle_journal.setEnabled(True)
                 except Exception:
                     pass
                 try:
@@ -9629,6 +9741,9 @@ class MainWindow(QMainWindow):
                     blocker = QSignalBlocker(self.journal_tree_button)
                     self.journal_tree_button.setChecked(self._show_journal_in_nav)
                     del blocker
+                    action_blocker = QSignalBlocker(self._action_toggle_journal)
+                    self._action_toggle_journal.setChecked(self._show_journal_in_nav)
+                    del action_blocker
                 except Exception:
                     pass
                 try:
@@ -9748,6 +9863,12 @@ class MainWindow(QMainWindow):
         try:
             blocker = QSignalBlocker(self.journal_tree_button)
             self.journal_tree_button.setChecked(self._show_journal_in_nav)
+            del blocker
+        except Exception:
+            pass
+        try:
+            blocker = QSignalBlocker(self._action_toggle_journal)
+            self._action_toggle_journal.setChecked(self._show_journal_in_nav)
             del blocker
         except Exception:
             pass
@@ -18518,7 +18639,7 @@ class MainWindow(QMainWindow):
             if path != "/":
                 rename_action = menu.addAction("Rename")
                 rename_action.triggered.connect(
-                    lambda checked=False, p=path, idx=index: self._start_inline_rename(p, self._parent_path(idx), global_pos, idx)
+                    lambda checked=False, p=path: self._prompt_rename_path(p)
                 )
                 move_action = menu.addAction("Move…")
                 move_action.triggered.connect(
@@ -19356,22 +19477,246 @@ class MainWindow(QMainWindow):
             self._schedule_homebase_sync("page create")
         self._populate_vault_tree()
 
-    def _trigger_tree_rename(self) -> None:
-        """Start inline rename on the selected tree item (and select text)."""
+    def _active_rename_target(self) -> Optional[str]:
+        """Resolve a rename target without requiring it to be visible in the tree."""
+        if self.current_path:
+            try:
+                if self.current_path == self._vault_root_page_path():
+                    return None
+            except Exception:
+                pass
+            folder_path = self._file_path_to_folder(self.current_path)
+            if folder_path and folder_path != "/":
+                return folder_path
+
         index = self.tree_view.currentIndex()
-        if (not index or not index.isValid()) and self.current_path:
-            self._select_tree_path(self.current_path)
-            index = self.tree_view.currentIndex()
         if not index or not index.isValid():
-            return
+            return None
         path = index.data(PATH_ROLE)
-        if not path or path == FILTER_BANNER:
+        if not path or path in {FILTER_BANNER, "/"}:
+            return None
+        return str(path)
+
+    def _trigger_manual_rename(self) -> None:
+        """Prompt for a new name for the active page, even when hidden from navigation."""
+        source_path = self._active_rename_target()
+        if not source_path:
+            self.statusBar().showMessage("Open or select a non-root page to rename.", 5000)
             return
-        parent_path = self._parent_path(index)
-        rect = self.tree_view.visualRect(index)
-        global_pos = self.tree_view.viewport().mapToGlobal(rect.topLeft())
-        self.tree_view.setFocus(Qt.ShortcutFocusReason)
-        self._start_inline_rename(path, parent_path, global_pos, anchor_index=index)
+        self._prompt_rename_path(source_path)
+
+    def _prompt_rename_path(self, source_path: str) -> None:
+        """Collect and apply a new leaf name for a page or folder."""
+        current_name = Path(source_path.rstrip("/")).name
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Rename",
+            "New name:",
+            QLineEdit.Normal,
+            current_name,
+        )
+        if not accepted:
+            return
+        parent_path = str(Path(source_path.rstrip("/")).parent).replace("\\", "/")
+        if parent_path in {"", "."}:
+            parent_path = "/"
+        elif not parent_path.startswith("/"):
+            parent_path = f"/{parent_path}"
+        self._handle_inline_rename(parent_path, source_path, new_name)
+
+    def _trigger_tree_rename(self) -> None:
+        """Backward-compatible entry point for the dialog-based manual rename."""
+        self._trigger_manual_rename()
+
+    def _trigger_auto_rename(self) -> None:
+        """Generate a page name with the configured StillPoint operations model."""
+        if not config.load_enable_ai_chats():
+            self.statusBar().showMessage("Enable AI Chats before using Rename Auto (AI).", 5000)
+            return
+        if self._read_only:
+            self.statusBar().showMessage(
+                self._read_only_status_message("Cannot auto-rename pages while the vault is read-only."),
+                5000,
+            )
+            return
+        if self._auto_rename_worker is not None:
+            self.statusBar().showMessage("A page auto-rename is already running.", 5000)
+            return
+        if not self._save_dirty_page_before_rename("pre-auto-rename backlink save"):
+            return
+
+        source_path = self._active_rename_target()
+        if not source_path:
+            self.statusBar().showMessage("Open or select a non-root page to auto-rename.", 5000)
+            return
+        page_path = self._folder_to_file_path(source_path)
+        if not page_path:
+            self.statusBar().showMessage("Unable to resolve the selected page.", 5000)
+            return
+
+        try:
+            read_resp = self.http.post("/api/file/read", json={"path": page_path})
+            read_resp.raise_for_status()
+            read_payload = read_resp.json()
+            body = read_payload.get("content", "") if isinstance(read_payload, dict) else ""
+            if not isinstance(body, str):
+                body = ""
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to read {page_path}")
+            return
+        except Exception:
+            self.statusBar().showMessage(f"Failed to read {page_path}.", 6000)
+            return
+
+        current_leaf = Path(str(source_path).rstrip("/")).name
+        model_body = _auto_rename_source_body(body, current_leaf)
+        bounded_body, truncated = _bounded_auto_rename_body(model_body)
+        if not bounded_body:
+            self.statusBar().showMessage("Cannot auto-rename an empty page.", 5000)
+            return
+
+        try:
+            from .ai_chat_panel import ApiWorker, resolve_operations_server_and_model
+
+            server_model = resolve_operations_server_and_model()
+        except Exception:
+            server_model = None
+        if not server_model:
+            self.statusBar().showMessage(
+                "Configure an AI server and operations model before using Rename Auto (AI).",
+                6000,
+            )
+            return
+        server_config, model = server_model
+        truncation_note = (
+            "The page body was truncated to its leading content."
+            if truncated
+            else "The full page body is included."
+        )
+        messages = [
+            {"role": "system", "content": _load_auto_rename_prompt()},
+            {
+                "role": "user",
+                "content": f"{truncation_note}\n\nPage body:\n{bounded_body}",
+            },
+        ]
+        try:
+            worker = ApiWorker(server_config, messages, model, stream=False, parent=self)
+            self._auto_rename_source_path = str(source_path)
+            self._auto_rename_worker = worker
+            worker.finished.connect(self._handle_auto_rename_finished)
+            worker.failed.connect(self._handle_auto_rename_failed)
+            self.statusBar().showMessage("Generating page title...", 0)
+            worker.start()
+        except Exception:
+            self._cleanup_auto_rename_worker()
+            self.statusBar().showMessage("Failed to start page auto-rename.", 6000)
+
+    def _cleanup_auto_rename_worker(self) -> None:
+        worker = self._auto_rename_worker
+        self._auto_rename_worker = None
+        self._auto_rename_source_path = None
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+
+    def _handle_auto_rename_finished(self, text: str) -> None:
+        source_path = self._auto_rename_source_path
+        if self._auto_rename_closing or not source_path:
+            self._cleanup_auto_rename_worker()
+            return
+        title = _normalize_auto_rename_title(text)
+        if not title:
+            self.statusBar().showMessage("AI returned an invalid page title; the page was not renamed.", 6000)
+            self._cleanup_auto_rename_worker()
+            return
+
+        old_name = Path(source_path.rstrip("/")).name
+        if title == old_name:
+            self.statusBar().showMessage("The page already has the suggested name.", 5000)
+            self._cleanup_auto_rename_worker()
+            return
+        if not self._save_dirty_page_before_rename("pre-auto-rename backlink save"):
+            self._cleanup_auto_rename_worker()
+            return
+        source_file = self._folder_to_file_path(source_path)
+        if not source_file:
+            self.statusBar().showMessage("The selected page changed before it could be renamed.", 6000)
+            self._cleanup_auto_rename_worker()
+            return
+        try:
+            check_resp = self.http.post("/api/file/read", json={"path": source_file})
+            check_resp.raise_for_status()
+        except Exception:
+            self.statusBar().showMessage("The selected page changed before it could be renamed.", 6000)
+            self._cleanup_auto_rename_worker()
+            return
+
+        parent_path = str(Path(source_path.rstrip("/")).parent).replace("\\", "/")
+        if parent_path in {"", "."}:
+            parent_path = "/"
+        elif not parent_path.startswith("/"):
+            parent_path = f"/{parent_path}"
+        dest_path = self._join_paths(parent_path, title)
+        try:
+            resp = self.http.post("/api/file/rename", json={"from": source_path, "to": dest_path})
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("Rename response must be an object")
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, f"Failed to rename {source_path}")
+            self._cleanup_auto_rename_worker()
+            return
+        except Exception:
+            self.statusBar().showMessage(f"Failed to rename {source_path}.", 6000)
+            self._cleanup_auto_rename_worker()
+            return
+
+        self._cleanup_auto_rename_worker()
+        self._apply_rename_response(dest_path, data, success_message=f"Renamed page to '{title}'.")
+
+    def _handle_auto_rename_failed(self, message: str) -> None:
+        if not self._auto_rename_closing:
+            if message == "Cancelled":
+                self.statusBar().showMessage("Page auto-rename cancelled.", 4000)
+            else:
+                self.statusBar().showMessage(f"Page auto-rename failed: {message or 'Unknown error'}", 6000)
+        self._cleanup_auto_rename_worker()
+
+    def _save_dirty_page_before_rename(self, reason: str) -> bool:
+        """Persist the active editor before a rename may rewrite its links on disk."""
+        if not self.current_path or not self._is_editor_dirty():
+            return True
+        self._save_current_file(auto=False, reason=reason)
+        if self._is_editor_dirty():
+            self.statusBar().showMessage("Save the current page before renaming another page.", 6000)
+            return False
+        return True
+
+    def _apply_rename_response(
+        self,
+        dest_path: str,
+        data: dict,
+        *,
+        success_message: Optional[str] = None,
+    ) -> None:
+        """Reconcile a successful rename and rewrite backlinks on disk."""
+        path_map = data.get("page_map") or {}
+        self._apply_path_map(path_map)
+        self._register_link_path_map(path_map)
+        new_open_path = self._folder_to_file_path(dest_path)
+        if new_open_path:
+            self._pending_selection = new_open_path
+            if self.current_path == new_open_path:
+                self._open_file(new_open_path, force=True)
+        self._populate_vault_tree()
+        if success_message:
+            self.statusBar().showMessage(success_message, 6000)
+        if self.rewrite_backlinks_on_move and path_map:
+            self._queue_background_link_update(path_map)
 
     def _start_inline_rename(
         self,
@@ -19416,9 +19761,8 @@ class MainWindow(QMainWindow):
             return
         if not self._ensure_writable("rename pages or folders"):
             return
-        old_open_path = self._folder_to_file_path(old_path)
-        if self.current_path and old_open_path and self.current_path == old_open_path:
-            self._save_dirty_page(reason="pre-rename save")
+        if not self._save_dirty_page_before_rename("pre-rename backlink save"):
+            return
         try:
             resp = self.http.post("/api/file/rename", json={"from": old_path, "to": dest_path})
             resp.raise_for_status()
@@ -19426,15 +19770,7 @@ class MainWindow(QMainWindow):
             self._alert_api_error(exc, f"Failed to rename {old_path}")
             return
         data = resp.json()
-        self._apply_path_map(data.get("page_map") or {})
-        self._register_link_path_map(data.get("page_map") or {})
-        new_open_path = self._folder_to_file_path(dest_path)
-        if new_open_path:
-            self._pending_selection = new_open_path
-            # Reload editor if this page was open so heading/title changes are reflected
-            if self.current_path == new_open_path:
-                self._open_file(new_open_path, force=True)
-        self._populate_vault_tree()
+        self._apply_rename_response(dest_path, data)
 
     def _move_path_dialog(self, folder_path: str, current_parent: str) -> None:
         if not self._ensure_writable("move pages or folders"):
@@ -20448,7 +20784,7 @@ class MainWindow(QMainWindow):
         self._reindex_vault(show_progress=False)
 
     def _queue_background_link_update(self, path_map: dict[str, str]) -> None:
-        """Serialize and coalesce backlink rewrites initiated by moves."""
+        """Serialize and coalesce backlink rewrites initiated by moves or renames."""
         if not self.vault_root or not path_map or not self.rewrite_backlinks_on_move:
             return
         self._pending_background_link_path_maps.append(dict(path_map))
@@ -20513,6 +20849,13 @@ class MainWindow(QMainWindow):
                 self.right_panel.refresh_links(self.current_path)
             except Exception:
                 pass
+            touched_paths = data.get("touched_paths") or []
+            if (
+                self.current_path
+                and self.current_path in touched_paths
+                and not self._is_editor_dirty()
+            ):
+                self._open_file(self.current_path, add_to_history=False, force=True)
         else:
             print(f"[UI] Background link update failed: {message}")
             self.statusBar().showMessage(f"Link update failed: {message}", 8000)
@@ -22264,6 +22607,13 @@ class MainWindow(QMainWindow):
         self.geometry_save_timer.start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._auto_rename_closing = True
+        worker = getattr(self, "_auto_rename_worker", None)
+        if worker is not None:
+            try:
+                worker.request_cancel()
+            except Exception:
+                pass
         # Stop any pending timers
         self.autosave_timer.stop()
         self._search_sync.stop()

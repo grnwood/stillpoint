@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QFrame,
     QRadioButton,
+    QToolButton,
     QTableWidget,
     QTableWidgetItem,
     QFrame,
@@ -532,7 +533,7 @@ class PreferencesDialog(QDialog):
         self.manage_server_btn.clicked.connect(self._open_manage_server_dialog)
         ai_layout.addWidget(self.manage_server_btn)
         add_divider(ai_layout)
-        ai_layout.addWidget(QLabel("<b>Default Server and Model</b>"))
+        ai_layout.addWidget(QLabel("<b>Default Server and Models</b>"))
         row = QHBoxLayout()
         row.addWidget(QLabel("Server:"))
         self.default_server_combo = QComboBox()
@@ -540,14 +541,58 @@ class PreferencesDialog(QDialog):
         row.addWidget(self.default_server_combo, 1)
         ai_layout.addLayout(row)
 
+        chats_help_text = (
+            "Used as the default for AI chats and agents, inline and one-shot AI, "
+            "chat condensation, and diagram generation. Individual features may "
+            "allow a different model selection."
+        )
+        operations_help_text = (
+            "Used for Generate Chat Summary titles, calendar AI insights, task AI "
+            "insights, and Rename Auto (AI). If unavailable, StillPoint falls back "
+            "to the chats-and-agents model and then the server's available defaults."
+        )
+
+        def model_help_button(text: str, accessible_name: str) -> QToolButton:
+            button = QToolButton()
+            button.setText("?")
+            button.setAutoRaise(True)
+            button.setFocusPolicy(Qt.StrongFocus)
+            button.setAccessibleName(accessible_name)
+            button.setAccessibleDescription(text)
+            button.setToolTip(text)
+            button.setFixedSize(20, 20)
+            return button
+
+        chat_label_row = QHBoxLayout()
+        chat_label_row.addWidget(QLabel("Default model for chats and agents:"))
+        self.default_model_help_btn = model_help_button(
+            chats_help_text,
+            "About the chats and agents model",
+        )
+        chat_label_row.addWidget(self.default_model_help_btn)
+        chat_label_row.addStretch(1)
+        ai_layout.addLayout(chat_label_row)
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Model:"))
         self.default_model_combo = QComboBox()
         row2.addWidget(self.default_model_combo, 1)
         self.refresh_models_btn = QPushButton("Refresh Models")
         self.refresh_models_btn.clicked.connect(self._refresh_default_models_from_server)
         row2.addWidget(self.refresh_models_btn)
         ai_layout.addLayout(row2)
+
+        operations_label_row = QHBoxLayout()
+        operations_label_row.addWidget(QLabel("Default model for StillPoint operations:"))
+        self.operations_model_help_btn = model_help_button(
+            operations_help_text,
+            "About the StillPoint operations model",
+        )
+        operations_label_row.addWidget(self.operations_model_help_btn)
+        operations_label_row.addStretch(1)
+        ai_layout.addLayout(operations_label_row)
+        row_operations = QHBoxLayout()
+        self.default_operations_model_combo = QComboBox()
+        row_operations.addWidget(self.default_operations_model_combo, 1)
+        ai_layout.addLayout(row_operations)
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Connect timeout (s):"))
         self.ai_connect_timeout_spin = QDoubleSpinBox()
@@ -794,7 +839,7 @@ class PreferencesDialog(QDialog):
         self.rebuild_button.clicked.connect(self._on_rebuild_clicked)
         vault_layout.addWidget(self.rebuild_button)
 
-        self.rewrite_backlinks_checkbox = QCheckBox("Rewrite backlinks on page move")
+        self.rewrite_backlinks_checkbox = QCheckBox("Rewrite backlinks on page move or rename")
         try:
             self.rewrite_backlinks_checkbox.setChecked(config.load_rewrite_backlinks_on_move())
         except Exception:
@@ -902,6 +947,7 @@ class PreferencesDialog(QDialog):
         except Exception:
             self.default_server_combo.clear()
             self.default_model_combo.clear()
+            self.default_operations_model_combo.clear()
 
     def _refresh_default_models(self, mgr=None):
         try:
@@ -917,8 +963,32 @@ class PreferencesDialog(QDialog):
                 self.default_model_combo.setCurrentText(desired_model)
             elif models:
                 self.default_model_combo.setCurrentIndex(0)
+
+            self.default_operations_model_combo.clear()
+            desired_operations_model = config.load_default_ai_operations_model()
+            operations_models = list(models)
+            try:
+                payload = config._read_global_config()
+                model_map = payload.get("server_models", {}) if isinstance(payload, dict) else {}
+                cached_models = model_map.get(server.get("name"), []) if isinstance(model_map, dict) and server else []
+            except Exception:
+                cached_models = []
+            if not cached_models and desired_operations_model and desired_operations_model not in operations_models:
+                operations_models.insert(0, desired_operations_model)
+            self.default_operations_model_combo.addItems(operations_models)
+            if desired_operations_model and desired_operations_model in models:
+                self.default_operations_model_combo.setCurrentText(desired_operations_model)
+            elif desired_operations_model and desired_operations_model in operations_models and not cached_models:
+                self.default_operations_model_combo.setCurrentText(desired_operations_model)
+            elif desired_model and desired_model in models:
+                self.default_operations_model_combo.setCurrentText(desired_model)
+            elif server and server.get("default_model") in models:
+                self.default_operations_model_combo.setCurrentText(server.get("default_model"))
+            elif models:
+                self.default_operations_model_combo.setCurrentIndex(0)
         except Exception:
             self.default_model_combo.clear()
+            self.default_operations_model_combo.clear()
 
     def _on_default_server_changed(self):
         self._refresh_default_models()
@@ -1156,6 +1226,7 @@ class PreferencesDialog(QDialog):
         config.save_local_filesystem_quiet_seconds(self.local_filesystem_quiet_spin.value())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
+        config.save_default_ai_operations_model(self.default_operations_model_combo.currentText() or None)
         config.save_ai_chat_connect_timeout(self.ai_connect_timeout_spin.value())
         config.save_ai_chat_read_timeout(self.ai_read_timeout_spin.value())
         try:

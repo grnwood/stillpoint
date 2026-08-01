@@ -49,6 +49,21 @@ def test_link_rewrite_waits_for_editor_write_and_preserves_latest_content(tmp_pa
     assert page.read_text(encoding="utf-8") == "[New|New]\nuser edit\n"
 
 
+def test_rename_link_rewrite_preserves_custom_label(tmp_path) -> None:
+    root = tmp_path / "vault"
+    page = root / "Ref" / "Ref.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("[Old:Old|My custom label]\n", encoding="utf-8")
+
+    touched = file_ops.update_links_on_disk(
+        root,
+        {"/Old/Old.md": "/New Name/New Name.md"},
+    )
+
+    assert touched == ["/Ref/Ref.md"]
+    assert page.read_text(encoding="utf-8") == "[New_Name:New_Name|My custom label]\n"
+
+
 def test_window_serializes_background_link_update_jobs(main_window, monkeypatch) -> None:
     posted: list[dict] = []
     statuses = [
@@ -117,4 +132,52 @@ def test_server_background_job_reports_completion(tmp_path, monkeypatch) -> None
         "status": "completed",
         "message": "Updated links in 2 page(s)",
         "touched": 2,
+        "touched_paths": ["/One/One.md", "/Two/Two.md"],
     }
+
+
+def test_rename_response_queues_backlink_rewrite(main_window, monkeypatch) -> None:
+    queued: list[dict[str, str]] = []
+    path_map = {"/Old/Old.md": "/New/New.md"}
+    main_window.rewrite_backlinks_on_move = True
+    main_window.current_path = None
+    monkeypatch.setattr(main_window, "_apply_path_map", lambda value: None)
+    monkeypatch.setattr(main_window, "_register_link_path_map", lambda value: None)
+    monkeypatch.setattr(main_window, "_populate_vault_tree", lambda: None)
+    monkeypatch.setattr(main_window, "_queue_background_link_update", lambda value: queued.append(dict(value)))
+
+    main_window._apply_rename_response("/New", {"page_map": path_map})
+
+    assert queued == [path_map]
+
+
+def test_completed_link_rewrite_reloads_clean_open_page(main_window, monkeypatch) -> None:
+    current = "/Ref/Ref.md"
+    reopened: list[tuple[str, bool, bool]] = []
+    main_window.current_path = current
+    main_window._link_update_job_id = "job-1"
+    monkeypatch.setattr(
+        main_window.http,
+        "get",
+        lambda path: _Response(
+            {
+                "status": "completed",
+                "message": "Updated links in 1 page(s)",
+                "touched": 1,
+                "touched_paths": [current],
+            }
+        ),
+    )
+    monkeypatch.setattr(main_window, "_is_editor_dirty", lambda: False)
+    monkeypatch.setattr(
+        main_window,
+        "_open_file",
+        lambda path, add_to_history=True, force=False, **kwargs: reopened.append(
+            (path, add_to_history, force)
+        ),
+    )
+    monkeypatch.setattr(main_window, "_start_next_background_link_update", lambda: None)
+
+    main_window._poll_background_link_update()
+
+    assert reopened == [(current, False, True)]

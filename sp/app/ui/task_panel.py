@@ -49,7 +49,12 @@ from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
-from .ai_chat_panel import AIChatPanel, ApiWorker, ServerManager, VectorAPIClient
+from .ai_chat_panel import (
+    AIChatPanel,
+    ApiWorker,
+    VectorAPIClient,
+    resolve_operations_server_and_model,
+)
 from .date_insert_dialog import DateInsertDialog
 from .path_utils import colon_to_path, path_to_colon
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
@@ -1941,43 +1946,7 @@ class TaskPanel(QWidget):
         return ok
 
     def _resolve_ai_server_and_model(self) -> Optional[tuple[dict, str]]:
-        try:
-            server_mgr = ServerManager()
-        except Exception:
-            return None
-        server_config: dict = {}
-        try:
-            default_server_name = config.load_default_ai_server()
-        except Exception:
-            default_server_name = None
-        if default_server_name:
-            try:
-                server_config = server_mgr.get_server(default_server_name) or {}
-            except Exception:
-                server_config = {}
-        if not server_config:
-            try:
-                active = server_mgr.get_active_server_name()
-                if active:
-                    server_config = server_mgr.get_server(active) or {}
-            except Exception:
-                server_config = {}
-        if not server_config:
-            try:
-                servers = server_mgr.load_servers()
-                if servers:
-                    server_config = servers[0]
-            except Exception:
-                server_config = {}
-        if not server_config:
-            return None
-        try:
-            model = config.load_default_ai_model()
-        except Exception:
-            model = None
-        if not model:
-            model = server_config.get("default_model") or "gpt-3.5-turbo"
-        return server_config, model
+        return resolve_operations_server_and_model()
 
     def _on_generate_ai_summary(self) -> None:
         if not self._ai_enabled:

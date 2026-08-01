@@ -29,6 +29,24 @@ def test_preferences_dialog_loads_markdown_image_max_width_default(qtbot, monkey
     assert dialog.markdown_image_max_width_combo.currentData() == 900
 
 
+def test_ai_model_help_controls_explain_their_scope(qtbot) -> None:
+    from sp.app.ui.preferences_dialog import PreferencesDialog
+
+    dialog = PreferencesDialog()
+    qtbot.addWidget(dialog)
+
+    assert dialog.default_model_help_btn.text() == "?"
+    assert dialog.default_model_help_btn.accessibleName() == "About the chats and agents model"
+    assert "AI chats and agents" in dialog.default_model_help_btn.toolTip()
+    assert dialog.default_model_help_btn.accessibleDescription() == dialog.default_model_help_btn.toolTip()
+
+    assert dialog.operations_model_help_btn.text() == "?"
+    assert dialog.operations_model_help_btn.accessibleName() == "About the StillPoint operations model"
+    assert "calendar AI insights" in dialog.operations_model_help_btn.toolTip()
+    assert "Rename Auto (AI)" in dialog.operations_model_help_btn.toolTip()
+    assert dialog.operations_model_help_btn.accessibleDescription() == dialog.operations_model_help_btn.toolTip()
+
+
 def test_effective_theme_preference_prefers_vault_override(monkeypatch) -> None:
     from sp.app import config
 

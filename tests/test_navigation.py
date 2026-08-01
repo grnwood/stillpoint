@@ -174,6 +174,28 @@ class TestHistoryNavigation:
         assert "/Journal/2026/05/18/18.md" in history_paths
         assert any(btn.text() == "18-May-26" for btn in main_window.history_buttons)
 
+    def test_vault_toggle_journal_action_and_nav_button_stay_synchronized(self, main_window, monkeypatch):
+        from sp.app import config
+
+        saved: list[bool] = []
+        monkeypatch.setattr(config, "save_show_journal", lambda value: saved.append(bool(value)))
+        monkeypatch.setattr(main_window, "_populate_vault_tree", lambda: None)
+        main_window._action_toggle_journal.setEnabled(True)
+        main_window.journal_tree_button.setEnabled(True)
+        main_window._set_show_journal_in_nav(False)
+
+        command_labels = [label for label, _action in main_window._collect_menu_actions()]
+        assert "Vault / Toggle Journal" in command_labels
+
+        main_window._action_toggle_journal.trigger()
+        assert main_window._show_journal_in_nav is True
+        assert main_window.journal_tree_button.isChecked() is True
+
+        main_window.journal_tree_button.click()
+        assert main_window._show_journal_in_nav is False
+        assert main_window._action_toggle_journal.isChecked() is False
+        assert saved[-2:] == [True, False]
+
     def test_recent_history_chicklets_prettify_underscored_page_names(self, main_window):
         main_window.page_history = ["/Roles_And_Stuff/Roles_And_Stuff.md"]
 

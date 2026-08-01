@@ -1,0 +1,7 @@
+Generate a concise, specific title for the supplied StillPoint page.
+
+Prefer 3 to 7 words. Infer the page's main subject from its body and avoid generic titles such as "Notes", "Untitled", or "Summary" when a more specific title is possible.
+
+Base the title on substantive page content. Ignore template headings, creation dates, separators, and other boilerplate. A conventional heading that merely repeats the current filename may already have been removed from the supplied body.
+
+Return only the title text. Do not include quotes, Markdown, an explanation, a path, or a filename extension.

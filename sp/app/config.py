@@ -818,7 +818,7 @@ def load_minimal_font_scan_enabled() -> bool:
 
 
 def load_rewrite_backlinks_on_move() -> bool:
-    """Return whether to rewrite backlinks immediately when a page is moved (default: True)."""
+    """Return whether to rewrite backlinks after page moves or renames (default: True)."""
     payload = _read_global_config()
     val = payload.get("rewrite_backlinks_on_move")
     if val is None:
@@ -827,7 +827,7 @@ def load_rewrite_backlinks_on_move() -> bool:
 
 
 def save_rewrite_backlinks_on_move(enabled: bool) -> None:
-    """Persist preference to rewrite backlinks on page moves."""
+    """Persist the backlink rewrite preference for page moves and renames."""
     _update_global_config({"rewrite_backlinks_on_move": bool(enabled)})
 
 
@@ -2251,6 +2251,13 @@ def load_default_ai_model() -> Optional[str]:
     return str(model) if model else None
 
 
+def load_default_ai_operations_model() -> Optional[str]:
+    """Load the preferred model for bounded StillPoint AI operations."""
+    payload = _read_global_config()
+    model = payload.get("default_ai_operations_model")
+    return str(model) if model else None
+
+
 def load_enable_main_soft_scroll(default: bool = True) -> bool:
     """Return whether main editor soft auto-scroll is enabled."""
     payload = _read_global_config()
@@ -2287,6 +2294,12 @@ def save_main_soft_scroll_lines(lines: int) -> None:
 def save_default_ai_model(model: Optional[str]) -> None:
     """Persist preferred default AI model for new chats."""
     _update_global_config({"default_ai_model": model})
+
+
+def save_default_ai_operations_model(model: Optional[str]) -> None:
+    """Persist the preferred model for bounded StillPoint AI operations."""
+    _update_global_config({"default_ai_operations_model": model})
+
 
 def load_ai_chat_connect_timeout(default: float = 5.0) -> float:
     """Load AI chat connect timeout in seconds."""

@@ -173,7 +173,9 @@ def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_ord
                 legacy_old.rename(new_page)
             except Exception:
                 pass
-        # Note: We do NOT rewrite the heading when moving pages - users control their own titles
+        # Keep a conventional title heading synchronized, but only when it still
+        # unambiguously represents the old page name.
+        _rewrite_heading_if_matches(new_page, old_leaf, new_leaf)
         try:
             moved = config.move_tree_index(src_folder, dest_folder, root, set_new_parent_order=set_new_parent_order)
         except RuntimeError as exc:
@@ -196,31 +198,34 @@ def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_ord
     }
 
 
-def _rewrite_heading_if_matches(page_path: Path, old_leaf: str, new_leaf: str) -> None:
-    """Update the first heading if it matches the old page name."""
+def _rewrite_heading_if_matches(page_path: Path, old_leaf: str, new_leaf: str) -> bool:
+    """Update a leading H1 that exactly represents the old page leaf name."""
     if not page_path.exists() or old_leaf == new_leaf:
-        return
+        return False
     try:
-        content = page_path.read_text(encoding="utf-8")
+        with file_content_lock(page_path):
+            content = page_path.read_bytes().decode("utf-8")
+            lines = content.splitlines(keepends=True)
+            for idx, line in enumerate(lines):
+                line_body = line.rstrip("\r\n")
+                visible_body = line_body.removeprefix("\ufeff")
+                if not visible_body.strip():
+                    continue
+                match = re.fullmatch(
+                    r"(?P<prefix>\ufeff? {0,3}#[ \t]+)(?P<title>.*?)(?P<trailing>[ \t]*)(?P<ending>\r\n|\n|\r)?",
+                    line,
+                )
+                if not match or match.group("title") != old_leaf:
+                    return False
+                lines[idx] = (
+                    f'{match.group("prefix")}{new_leaf}'
+                    f'{match.group("trailing")}{match.group("ending") or ""}'
+                )
+                page_path.write_bytes("".join(lines).encode("utf-8"))
+                return True
+            return False
     except Exception:
-        return
-    lines = content.splitlines()
-    changed = False
-    for idx, line in enumerate(lines):
-        match = re.match(r"^(#+)\s+(.*)$", line.strip())
-        if not match:
-            continue
-        heading_text = match.group(2).strip()
-        if heading_text == old_leaf:
-            prefix = match.group(1)
-            lines[idx] = f"{prefix} {new_leaf}"
-            changed = True
-        break
-    if changed:
-        try:
-            page_path.write_text("\n".join(lines), encoding="utf-8")
-        except Exception:
-            pass
+        return False
 
 
 def _path_to_colon(page_path: str) -> str:
