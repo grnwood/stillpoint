@@ -2834,6 +2834,7 @@ class MainWindow(QMainWindow):
         self._ai_chat_store: Optional[AIChatStore] = None
         self._ai_badge_icon: Optional[QIcon] = None
         self._page_windows: list[PageEditorWindow] = []
+        self._vault_reorg_window = None
         self._mode_window: Optional[ModeWindow] = None
         self._detached_ai_chat_panel: Optional[AIChatPanel] = None
         self._detached_ai_chat_window: Optional[QMainWindow] = None
@@ -3031,6 +3032,11 @@ class MainWindow(QMainWindow):
         self._action_toggle_journal.setEnabled(False)
         self._action_toggle_journal.triggered.connect(self._set_show_journal_in_nav)
         vault_menu.addAction(self._action_toggle_journal)
+        self._action_reorganize_vault = QAction("Reorganize Vault…", self)
+        self._action_reorganize_vault.setToolTip("Find, stage, and apply page moves across the vault")
+        self._action_reorganize_vault.setEnabled(False)
+        self._action_reorganize_vault.triggered.connect(self._open_vault_reorganization)
+        vault_menu.addAction(self._action_reorganize_vault)
         self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
         self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
         self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
@@ -4382,6 +4388,118 @@ class MainWindow(QMainWindow):
             pass
 
     # --- Vault actions -------------------------------------------------
+
+    def _check_vault_reorganization_recovery(self) -> bool:
+        """Detect an incomplete batch before allowing another reorganization."""
+        if not self.vault_root:
+            return False
+        try:
+            response = self.http.get("/api/vault/reorganize/recovery")
+            response.raise_for_status()
+            required = bool(response.json().get("recovery_required"))
+        except Exception:
+            return False
+        self._action_reorganize_vault.setEnabled(not required)
+        if required:
+            answer = QMessageBox.question(
+                self,
+                "Vault Reorganization Recovery Required",
+                "A previous vault reorganization could not be fully rolled back. "
+                "StillPoint preserved a recovery manifest in the vault's .stillpoint folder. "
+                "Retry automatic recovery now?",
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Retry,
+            )
+            if answer == QMessageBox.StandardButton.Retry:
+                try:
+                    response = self.http.post("/api/vault/reorganize/recover")
+                    response.raise_for_status()
+                    self._action_reorganize_vault.setEnabled(True)
+                    self._populate_vault_tree()
+                    self.statusBar().showMessage("Vault reorganization recovery completed.", 5000)
+                    return False
+                except Exception as exc:
+                    QMessageBox.critical(self, "Recovery Failed", str(exc))
+        return required
+
+    def _open_vault_reorganization(self) -> None:
+        if not self.vault_root:
+            self.statusBar().showMessage("Select a vault before reorganizing pages.", 4000)
+            return
+        existing = getattr(self, "_vault_reorg_window", None)
+        if existing is not None:
+            try:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:
+                self._vault_reorg_window = None
+        from .vault_reorg_window import VaultReorgWindow
+
+        window = VaultReorgWindow(
+            http_client=self.http,
+            vault_name=self.vault_root_name or Path(self.vault_root).name,
+            read_only=self._read_only,
+            before_commit=self._prepare_for_vault_reorganization,
+            parent=self,
+        )
+        window.reorganizationCommitted.connect(self._handle_vault_reorganization_committed)
+        window.destroyed.connect(lambda: setattr(self, "_vault_reorg_window", None))
+        self._vault_reorg_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _prepare_for_vault_reorganization(self, preflight: dict) -> bool:
+        """Save every dirty editor before a batch may move or rewrite its file."""
+        if self.current_path and self._is_editor_dirty():
+            self._save_current_file(auto=False, reason="pre-vault-reorganization save")
+            if self._is_editor_dirty():
+                self.statusBar().showMessage("Save the current page before reorganizing the vault.", 6000)
+                return False
+        for window in list(getattr(self, "_page_windows", [])):
+            try:
+                if not window._is_dirty():
+                    continue
+                window._save_current_file(auto=False, reason="pre-vault-reorganization save")
+                if window._is_dirty():
+                    self.statusBar().showMessage("Save all open page windows before reorganizing the vault.", 6000)
+                    return False
+            except Exception:
+                self.statusBar().showMessage("Unable to save an open page window.", 6000)
+                return False
+        return True
+
+    def _handle_vault_reorganization_committed(self, data: dict) -> None:
+        path_map = dict(data.get("page_map") or {})
+        journal_paths = set(data.get("journal_paths") or [])
+        touched_paths = journal_paths | set(data.get("touched_paths") or [])
+        self._apply_path_map(path_map)
+        self._register_link_path_map(path_map)
+        for window in list(getattr(self, "_page_windows", [])):
+            try:
+                source = str(getattr(window, "_source_path", "") or "")
+                new_source = path_map.get(source, source)
+                if new_source != source:
+                    window._source_path = new_source
+                if new_source != source or new_source in touched_paths:
+                    window._load_content()
+            except Exception:
+                pass
+        try:
+            self._tree_cache.clear()
+            self._tree_path_version.clear()
+        except Exception:
+            pass
+        if self.current_path and (self.current_path in path_map.values() or self.current_path in touched_paths):
+            self._open_file(self.current_path, add_to_history=False, force=True)
+        self._populate_vault_tree()
+        if self.rewrite_backlinks_on_move and path_map:
+            self._queue_background_link_update(path_map)
+        count = len(data.get("operations") or [])
+        self.statusBar().showMessage(f"Reorganized {count} page(s).", 5000)
+
     def _fetch_remote_vaults_with_status(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         """Load configured remote vaults with individual connectivity status."""
         results: list[dict[str, str]] = []
@@ -4916,6 +5034,15 @@ class MainWindow(QMainWindow):
             else:
                 self._launch_vault_process(selection["path"])
             return True
+        reorg_window = getattr(self, "_vault_reorg_window", None)
+        if reorg_window is not None:
+            try:
+                reorg_window.close()
+                if reorg_window.isVisible():
+                    return False
+            except Exception:
+                pass
+            self._vault_reorg_window = None
         if selection.get("kind") == "remote":
             server_url = selection.get("server_url")
             verify_ssl = selection.get("verify_ssl", True)
@@ -7250,26 +7377,69 @@ class MainWindow(QMainWindow):
         current_server = config.load_homebase_remote_url().strip()
         current_vault_id = (config.load_homebase_vault_id() or "").strip()
         profiles = config.load_homebase_vault_profiles()
-        updated = False
-        for profile in profiles:
-            if not isinstance(profile, dict):
-                continue
-            profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
-            if profile_path != current_path:
-                continue
-            if current_server and str(profile.get("server_url") or "").strip() != current_server:
-                continue
-            if current_vault_id and str(profile.get("vault_id") or "").strip() != current_vault_id:
-                continue
+        path_matches = [
+            profile
+            for profile in profiles
+            if isinstance(profile, dict)
+            and self._normalize_vault_path(str(profile.get("path") or "")) == current_path
+        ]
+        normalized_server = current_server.rstrip("/")
+        profile = next(
+            (
+                item
+                for item in path_matches
+                if (not normalized_server or str(item.get("server_url") or "").strip().rstrip("/") == normalized_server)
+                and (not current_vault_id or str(item.get("vault_id") or "").strip() == current_vault_id)
+            ),
+            path_matches[0] if path_matches else None,
+        )
+        if profile is not None:
             profile["auto_sync"] = bool(auto_sync)
             profile["sync_at_startup"] = bool(sync_at_startup)
             profile["interval_seconds"] = int(interval_seconds)
             profile["push_debounce_seconds"] = int(push_debounce_seconds)
             profile["max_parallel_transfers"] = int(max_parallel_transfers)
-            updated = True
-            break
-        if updated:
             config.save_homebase_vault_profiles(profiles)
+        metadata_profile = dict(profile or {})
+        metadata_profile.update(
+            {
+                "name": str(metadata_profile.get("name") or Path(current_path).name),
+                "server_url": str(current_server or metadata_profile.get("server_url") or "").strip().rstrip("/"),
+                "verify_ssl": bool(config.load_homebase_verify_ssl()),
+                "vault_id": str(current_vault_id or metadata_profile.get("vault_id") or "").strip(),
+                "auto_sync": bool(auto_sync),
+                "sync_at_startup": bool(sync_at_startup),
+                "interval_seconds": int(interval_seconds),
+                "push_debounce_seconds": int(push_debounce_seconds),
+                "max_parallel_transfers": int(max_parallel_transfers),
+            }
+        )
+        config.save_homebase_vault_metadata(current_path, metadata_profile)
+
+    def _save_homebase_sync_settings(
+        self,
+        *,
+        auto_sync: bool,
+        sync_at_startup: bool,
+        interval_seconds: int,
+        push_debounce_seconds: int,
+        max_parallel_transfers: int,
+    ) -> None:
+        """Persist sync settings in the active vault and its reopen profile."""
+        self._ensure_config_active_vault_context()
+        config.save_homebase_auto_sync(bool(auto_sync))
+        config.save_homebase_sync_at_startup(bool(sync_at_startup))
+        config.save_homebase_interval_seconds(int(interval_seconds))
+        config.save_homebase_push_debounce_seconds(int(push_debounce_seconds))
+        config.save_homebase_max_parallel_transfers(int(max_parallel_transfers))
+        self._persist_homebase_sync_settings_to_profile(
+            auto_sync=auto_sync,
+            sync_at_startup=sync_at_startup,
+            interval_seconds=interval_seconds,
+            push_debounce_seconds=push_debounce_seconds,
+            max_parallel_transfers=max_parallel_transfers,
+        )
+        self._configure_homebase_sync_for_vault()
 
     def _persist_homebase_passphrase_pref_to_profile(self, store_passphrase: bool) -> None:
         if not self.vault_root:
@@ -7849,25 +8019,18 @@ class MainWindow(QMainWindow):
 
         def _save_settings() -> None:
             try:
-                self._ensure_config_active_vault_context()
                 new_auto_sync = bool(auto_sync_cb.isChecked())
                 new_sync_at_startup = bool(startup_sync_cb.isChecked())
                 new_interval = int(interval_spin.value())
                 new_debounce = int(debounce_spin.value())
                 new_parallel = int(max_parallel_spin.value())
-                config.save_homebase_auto_sync(new_auto_sync)
-                config.save_homebase_sync_at_startup(new_sync_at_startup)
-                config.save_homebase_interval_seconds(new_interval)
-                config.save_homebase_push_debounce_seconds(new_debounce)
-                config.save_homebase_max_parallel_transfers(new_parallel)
-                self._persist_homebase_sync_settings_to_profile(
+                self._save_homebase_sync_settings(
                     auto_sync=new_auto_sync,
                     sync_at_startup=new_sync_at_startup,
                     interval_seconds=new_interval,
                     push_debounce_seconds=new_debounce,
                     max_parallel_transfers=new_parallel,
                 )
-                self._configure_homebase_sync_for_vault()
                 self.statusBar().showMessage("Homebase sync settings updated.", 4000)
             except Exception as exc:
                 QMessageBox.critical(dialog, "Homebase Sync", f"Failed to save settings: {exc}")
@@ -9734,6 +9897,8 @@ class MainWindow(QMainWindow):
                 try:
                     self.journal_tree_button.setEnabled(True)
                     self._action_toggle_journal.setEnabled(True)
+                    self._action_reorganize_vault.setEnabled(True)
+                    QTimer.singleShot(0, self._check_vault_reorganization_recovery)
                 except Exception:
                     pass
                 try:
@@ -22607,6 +22772,15 @@ class MainWindow(QMainWindow):
         self.geometry_save_timer.start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        reorg_window = getattr(self, "_vault_reorg_window", None)
+        if reorg_window is not None:
+            try:
+                reorg_window.close()
+                if reorg_window.isVisible():
+                    event.ignore()
+                    return
+            except Exception:
+                pass
         self._auto_rename_closing = True
         worker = getattr(self, "_auto_rename_worker", None)
         if worker is not None:

@@ -60,6 +60,7 @@ except ImportError:
 from sp.server import indexer
 from sp.server import file_ops
 from sp.server import search_index
+from sp.server import vault_reorg
 from sp.server import homebase_api
 from sp.server import homebase_gc
 from sp.server.adapters import files
@@ -1123,6 +1124,20 @@ class RenameMovePayload(BaseModel):
 
 class UpdateLinksPayload(BaseModel):
     path_map: dict[str, str]
+
+
+class ReorganizationOperationPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    from_path: str = Field(..., alias="from")
+    destination_parent: str
+    new_name: str
+    operation_type: str = "move"
+
+
+class ReorganizationPlanPayload(BaseModel):
+    operations: List[ReorganizationOperationPayload]
+    tree_version: Optional[int] = None
+    plan_token: Optional[str] = None
 
 
 class ReorderPayload(BaseModel):
@@ -4019,8 +4034,10 @@ def create_path(payload: CreatePathPayload, user: AuthModels.UserInfo = Depends(
 @app.post("/api/path/delete")
 def delete_path(payload: DeletePathPayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
+    _require_no_reorganization_recovery(root)
     try:
-        result = file_ops.delete_folder(root, payload.path)
+        with vault_reorg.structural_operation(root):
+            result = file_ops.delete_folder(root, payload.path)
         # Remove from search index
         db_path = config._vault_db_path()
         if db_path:
@@ -4048,30 +4065,39 @@ def delete_path(payload: DeletePathPayload, user: AuthModels.UserInfo = Depends(
 @app.options("/api/file/operation")
 def file_operation_options(path: str, op: Literal["rename", "move", "delete"], dest: Optional[str] = None) -> dict:
     root = vault_state.get_root()
+    if vault_reorg.recovery_status(root).get("recovery_required"):
+        return {"canOperate": False, "reason": "Vault reorganization recovery is required"}
     ok, reason = file_ops.preflight(root, op, path, dest)
     return {"canOperate": ok, "reason": reason}
+
+
+def _require_no_reorganization_recovery(root: Path) -> None:
+    if vault_reorg.recovery_status(root).get("recovery_required"):
+        raise HTTPException(status_code=409, detail="Vault reorganization recovery is required.")
 
 
 @app.post("/api/file/rename")
 def file_rename(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
-    ok, reason = file_ops.preflight(root, "rename", payload.from_path, payload.to_path)
-    if not ok:
-        exc = RuntimeError(reason or "Preflight failed")
-        raise HTTPException(
-            status_code=400,
-            detail=_format_file_op_detail(f"Rename preflight failed for {payload.from_path}", exc),
-        ) from exc
-    try:
-        result = file_ops.rename_folder(root, payload.from_path, payload.to_path)
-    except FileNotFoundError as exc:
-        _raise_file_http(404, f"Rename failed for {payload.from_path}", exc)
-    except FileAccessError as exc:
-        _raise_file_http(400, f"Rename blocked for {payload.from_path}", exc)
-    except OSError as exc:
-        _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
-    except Exception as exc:
-        _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
+    _require_no_reorganization_recovery(root)
+    with vault_reorg.structural_operation(root):
+        ok, reason = file_ops.preflight(root, "rename", payload.from_path, payload.to_path)
+        if not ok:
+            exc = RuntimeError(reason or "Preflight failed")
+            raise HTTPException(
+                status_code=400,
+                detail=_format_file_op_detail(f"Rename preflight failed for {payload.from_path}", exc),
+            ) from exc
+        try:
+            result = file_ops.rename_folder(root, payload.from_path, payload.to_path)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, f"Rename failed for {payload.from_path}", exc)
+        except FileAccessError as exc:
+            _raise_file_http(400, f"Rename blocked for {payload.from_path}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"Rename error for {payload.from_path}", exc)
     return {"ok": True, **result}
 
 
@@ -4079,56 +4105,121 @@ def file_rename(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(
 def file_move(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     _log_api(f"{_ANSI_BLUE}[API] POST /api/file/move from={payload.from_path} to={payload.to_path}{_ANSI_RESET}")
     root = vault_state.get_root()
-    ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
-    if not ok:
-        _log_api(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
-        exc = RuntimeError(reason or "Preflight failed")
-        raise HTTPException(
-            status_code=400,
-            detail=_format_file_op_detail(f"Move preflight failed for {payload.from_path}", exc),
-        ) from exc
-    try:
-        result = file_ops.move_folder(root, payload.from_path, payload.to_path, rewrite_links=payload.rewrite_links)
-    except FileNotFoundError as exc:
-        _log_api(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
-        _raise_file_http(404, f"Move failed for {payload.from_path}", exc)
-    except FileAccessError as exc:
-        _log_api(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
-        _raise_file_http(400, f"Move blocked for {payload.from_path}", exc)
-    except OSError as exc:
-        _raise_file_http(500, f"Move error for {payload.from_path}", exc)
-    except Exception as exc:
-        _raise_file_http(500, f"Move error for {payload.from_path}", exc)
+    _require_no_reorganization_recovery(root)
+    with vault_reorg.structural_operation(root):
+        ok, reason = file_ops.preflight(root, "move", payload.from_path, payload.to_path)
+        if not ok:
+            _log_api(f"{_ANSI_BLUE}[API] /api/file/move preflight failed: {reason}{_ANSI_RESET}")
+            exc = RuntimeError(reason or "Preflight failed")
+            raise HTTPException(
+                status_code=400,
+                detail=_format_file_op_detail(f"Move preflight failed for {payload.from_path}", exc),
+            ) from exc
+        try:
+            result = file_ops.move_folder(root, payload.from_path, payload.to_path, rewrite_links=payload.rewrite_links)
+        except FileNotFoundError as exc:
+            _log_api(f"{_ANSI_BLUE}[API] /api/file/move not found: {exc}{_ANSI_RESET}")
+            _raise_file_http(404, f"Move failed for {payload.from_path}", exc)
+        except FileAccessError as exc:
+            _log_api(f"{_ANSI_BLUE}[API] /api/file/move error: {exc}{_ANSI_RESET}")
+            _raise_file_http(400, f"Move blocked for {payload.from_path}", exc)
+        except OSError as exc:
+            _raise_file_http(500, f"Move error for {payload.from_path}", exc)
+        except Exception as exc:
+            _raise_file_http(500, f"Move error for {payload.from_path}", exc)
     return {"ok": True, **result}
+
+
+@app.get("/api/vault/reorganize/candidates")
+def vault_reorganize_candidates(
+    q: str = "",
+    include_content: bool = False,
+    journal_only: bool = False,
+    limit: int = 100,
+) -> dict:
+    return vault_reorg.search_candidates(
+        q,
+        include_content=include_content,
+        journal_only=journal_only,
+        limit=max(1, min(int(limit), 500)),
+    )
+
+
+@app.post("/api/vault/reorganize/preflight")
+def vault_reorganize_preflight(
+    payload: ReorganizationPlanPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    root = vault_state.get_root()
+    operations = [item.model_dump(by_alias=True) for item in payload.operations]
+    return vault_reorg.preflight_plan(root, operations, payload.tree_version)
+
+
+@app.post("/api/vault/reorganize/commit")
+def vault_reorganize_commit(
+    payload: ReorganizationPlanPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    if payload.tree_version is None or not payload.plan_token:
+        raise HTTPException(status_code=400, detail="A validated plan token is required.")
+    root = vault_state.get_root()
+    operations = [item.model_dump(by_alias=True) for item in payload.operations]
+    try:
+        return vault_reorg.commit_plan(
+            root,
+            operations,
+            tree_version=int(payload.tree_version),
+            plan_token=payload.plan_token,
+        )
+    except vault_reorg.ReorganizationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "errors": exc.errors},
+        ) from exc
+
+
+@app.get("/api/vault/reorganize/recovery")
+def vault_reorganize_recovery_status() -> dict:
+    return vault_reorg.recovery_status(vault_state.get_root())
+
+
+@app.post("/api/vault/reorganize/recover")
+def vault_reorganize_recover(user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
+    try:
+        return vault_reorg.recover_incomplete(vault_state.get_root())
+    except vault_reorg.ReorganizationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.delete("/api/file")
 def file_delete(payload: FileDeletePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
     root = vault_state.get_root()
-    ok, reason = file_ops.preflight(root, "delete", payload.path)
-    if not ok:
-        exc = RuntimeError(reason or "Preflight failed")
-        raise HTTPException(
-            status_code=400,
-            detail=_format_file_op_detail(f"Delete preflight failed for {payload.path}", exc),
-        ) from exc
-    try:
-        result = file_ops.delete_folder(root, payload.path)
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=_format_file_op_detail(f"Delete file failed for {payload.path}", exc),
-        ) from exc
-    except FileAccessError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=_format_file_op_detail(f"Delete file blocked for {payload.path}", exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=_format_file_op_detail(f"Delete file error for {payload.path}", exc),
-        ) from exc
+    _require_no_reorganization_recovery(root)
+    with vault_reorg.structural_operation(root):
+        ok, reason = file_ops.preflight(root, "delete", payload.path)
+        if not ok:
+            exc = RuntimeError(reason or "Preflight failed")
+            raise HTTPException(
+                status_code=400,
+                detail=_format_file_op_detail(f"Delete preflight failed for {payload.path}", exc),
+            ) from exc
+        try:
+            result = file_ops.delete_folder(root, payload.path)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=_format_file_op_detail(f"Delete file failed for {payload.path}", exc),
+            ) from exc
+        except FileAccessError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=_format_file_op_detail(f"Delete file blocked for {payload.path}", exc),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=_format_file_op_detail(f"Delete file error for {payload.path}", exc),
+            ) from exc
     return {"ok": True, **result}
 
 

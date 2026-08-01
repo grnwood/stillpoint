@@ -180,13 +180,28 @@ def load_homebase_vault_metadata(vault_root: str | Path) -> Optional[dict[str, A
         vault_id = str(payload.get("vault_id") or "").strip()
         if not server_url or not vault_id:
             return None
-        return {
+        result: dict[str, Any] = {
             "mode": "connect",
             "server_url": server_url,
             "verify_ssl": bool(payload.get("verify_ssl", True)),
             "vault_id": vault_id,
             "vault_name": str(payload.get("vault_name") or "").strip(),
         }
+        if "auto_sync" in payload:
+            result["auto_sync"] = bool(payload.get("auto_sync"))
+        if "sync_at_startup" in payload:
+            result["sync_at_startup"] = bool(payload.get("sync_at_startup"))
+        for key, default in (
+            ("interval_seconds", 60),
+            ("push_debounce_seconds", 3),
+            ("max_parallel_transfers", 3),
+        ):
+            if key in payload:
+                try:
+                    result[key] = int(payload.get(key, default))
+                except (TypeError, ValueError):
+                    result[key] = default
+        return result
     except Exception:
         return None
 
@@ -210,6 +225,16 @@ def save_homebase_vault_metadata(vault_root: str | Path, entry: dict[str, Any]) 
             "vault_id": vault_id,
             "vault_name": str(entry.get("name") or entry.get("vault_name") or root.name).strip(),
         }
+        for key in ("auto_sync", "sync_at_startup"):
+            if key in entry:
+                payload[key] = bool(entry.get(key))
+        for key, default in (
+            ("interval_seconds", 60),
+            ("push_debounce_seconds", 3),
+            ("max_parallel_transfers", 3),
+        ):
+            if key in entry:
+                payload[key] = int(entry.get(key, default))
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return True
     except Exception:

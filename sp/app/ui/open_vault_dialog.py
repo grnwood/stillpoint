@@ -417,10 +417,11 @@ class AddHomebaseVaultDialog(QDialog):
             "refresh_token": refresh_token,
             "passphrase": passphrase,
             "store_passphrase": bool(self.store_passphrase_checkbox.isChecked()),
-            "auto_sync": True,
-            "interval_seconds": 60,
-            "push_debounce_seconds": 3,
-            "max_parallel_transfers": 3,
+            "auto_sync": bool((detected_metadata or {}).get("auto_sync", True)),
+            "sync_at_startup": bool((detected_metadata or {}).get("sync_at_startup", True)),
+            "interval_seconds": int((detected_metadata or {}).get("interval_seconds", 60)),
+            "push_debounce_seconds": int((detected_metadata or {}).get("push_debounce_seconds", 3)),
+            "max_parallel_transfers": int((detected_metadata or {}).get("max_parallel_transfers", 3)),
         }
         super().accept()
 

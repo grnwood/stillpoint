@@ -44,6 +44,80 @@ def test_save_homebase_vault_metadata_writes_only_non_secret_fields(tmp_path) ->
     }
 
 
+def test_homebase_vault_metadata_round_trips_sync_settings(tmp_path) -> None:
+    entry = {
+        "name": "Recovered Vault",
+        "server_url": "https://server.example",
+        "verify_ssl": True,
+        "vault_id": "vault-123",
+        "auto_sync": False,
+        "sync_at_startup": False,
+        "interval_seconds": 300,
+        "push_debounce_seconds": 8,
+        "max_parallel_transfers": 5,
+    }
+
+    assert config.save_homebase_vault_metadata(tmp_path, entry) is True
+
+    loaded = config.load_homebase_vault_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded["auto_sync"] is False
+    assert loaded["sync_at_startup"] is False
+    assert loaded["interval_seconds"] == 300
+    assert loaded["push_debounce_seconds"] == 8
+    assert loaded["max_parallel_transfers"] == 5
+
+
+def test_sync_popup_settings_update_path_matched_profile_when_connection_text_differs(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    profiles = [
+        {
+            "id": "homebase::https://server.example/::vault-123::vault",
+            "kind": "homebase",
+            "name": "Vault",
+            "path": str(vault_root),
+            "server_url": "https://server.example/",
+            "verify_ssl": True,
+            "vault_id": "vault-123",
+            "auto_sync": True,
+            "sync_at_startup": True,
+        }
+    ]
+    saved_profiles: list[list[dict]] = []
+    saved_metadata: list[dict] = []
+    main_window.vault_root = str(vault_root)
+    monkeypatch.setattr(config, "load_homebase_remote_url", lambda default="": "https://server.example")
+    monkeypatch.setattr(config, "load_homebase_vault_id", lambda default=None: "vault-123")
+    monkeypatch.setattr(config, "load_homebase_verify_ssl", lambda default=True: True)
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [dict(profile) for profile in profiles])
+    monkeypatch.setattr(
+        config,
+        "save_homebase_vault_profiles",
+        lambda value: saved_profiles.append([dict(profile) for profile in value]),
+    )
+    monkeypatch.setattr(
+        config,
+        "save_homebase_vault_metadata",
+        lambda path, value: saved_metadata.append(dict(value)) or True,
+    )
+
+    main_window._persist_homebase_sync_settings_to_profile(
+        auto_sync=False,
+        sync_at_startup=False,
+        interval_seconds=120,
+        push_debounce_seconds=4,
+        max_parallel_transfers=2,
+    )
+
+    assert saved_profiles[0][0]["auto_sync"] is False
+    assert saved_profiles[0][0]["sync_at_startup"] is False
+    assert saved_metadata[0]["auto_sync"] is False
+    assert saved_metadata[0]["sync_at_startup"] is False
+
+
 def test_save_homebase_vault_profiles_omits_passphrase(monkeypatch, tmp_path) -> None:
     global_config = tmp_path / "stillpoint-config.json"
     monkeypatch.setattr(config, "GLOBAL_CONFIG", global_config)
