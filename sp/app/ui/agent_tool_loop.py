@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from html import unescape
@@ -13,7 +14,7 @@ import httpx
 from PySide6 import QtCore
 
 from .ai_api import build_api_request
-from .path_utils import colon_to_path
+from .path_utils import colon_to_path, ensure_root_colon_link, normalize_link_target, path_to_colon
 from sp.app import config
 
 try:
@@ -124,6 +125,10 @@ Available tools:
   Writes content to a vault page. If mode=append, it appends to the existing file.
   Use StillPoint page paths where the file name matches its parent folder
   (for example: /Playpage/Key Dates/Key Dates.md).
+- vault.create_child: args={{"parent_path":"string","title":"string","content":"string"}}
+  Creates or replaces a direct child page beneath parent_path. Always use this tool
+  when the user asks for a page under, beneath, or inside another page. parent_path
+  may be the page-file path returned by daily.open; StillPoint resolves its folder.
 - tasks.list: args={{"query":"string | null","tags":["tag"],"status":"todo|done|all"}}
   Lists tasks with optional filters.
 - daily.open: args={{}}
@@ -138,6 +143,16 @@ Available tools:
 If the user says "add", "append", or "edit", prefer vault.write with mode="append". If the page name is ambiguous, search for the page and ask the user to pick one.
 When appending without an explicit page name, default to the current editor page or the chat page; if both exist and differ, ask the user to choose.
 Only call tools the user explicitly asked for. Do not call daily.open unless the user asked about today's journal or daily page.
+For a child of today's journal page, call daily.open first, then pass its returned path
+unchanged as parent_path to vault.create_child. Never construct a child path by appending
+the journal page filename yourself.
+
+StillPoint internal link rules:
+- Use root-relative colon links: [:Parent:Child|Visible Label].
+- A tool path such as /2-Projects/Acushnet/LineItemXml/LineItemXml.md becomes
+  [:2-Projects:Acushnet:LineItemXml|LineItemXml].
+- Never combine the current page's colon path with a slash path.
+- Never put a local .md path directly inside a link. Markdown links are for external URLs.
 
 Tool results will be sent back as JSON objects with type="tool_result".
 Continue the loop until you can return a final answer.
@@ -178,6 +193,41 @@ def _summarize_output_for_log(output: Any) -> str:
         suffix = f'... <trimmed {max(len(output) - len(trimmed), 0)} chars>' if len(output) > len(trimmed) else ""
         return f' content="{trimmed}{suffix}"'
     return ""
+
+
+def _format_agent_activity(tool_name: str, args: dict) -> str:
+    """Return a compact, user-facing description of one agent tool operation."""
+    name = _normalize_tool_name(tool_name) or tool_name or "tool"
+    values = args if isinstance(args, dict) else {}
+
+    def _short(value: Any, fallback: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return fallback
+        return f"{text[:93]}…" if len(text) > 94 else text
+
+    if name == "vault.read":
+        return f"[Agent: reading {_short(values.get('path'), 'the current page')}…]"
+    if name == "vault.search":
+        return f"[Agent: searching the vault for {_short(values.get('query'), 'matching pages')}…]"
+    if name == "vault.write":
+        verb = "appending to" if values.get("mode") == "append" else "writing"
+        return f"[Agent: {verb} {_short(values.get('path'), 'a page')}…]"
+    if name == "vault.create_child":
+        title = _short(values.get("title"), "a child page")
+        parent = _short(values.get("parent_path"), "the current page")
+        return f"[Agent: creating {title} under {parent}…]"
+    if name == "tasks.list":
+        return "[Agent: listing tasks…]"
+    if name == "daily.open":
+        return "[Agent: opening today's journal…]"
+    if name == "web.search":
+        return f"[Agent: searching the web for {_short(values.get('query'), 'results')}…]"
+    if name == "web.fetch":
+        return f"[Agent: fetching {_short(values.get('url'), 'a web page')}…]"
+    if name == "web.scrape":
+        return f"[Agent: reading {_short(values.get('url'), 'a web page')}…]"
+    return f"[Agent: running {_short(name, 'a tool')}…]"
 
 
 def build_vault_key(api_base: str, vault_root: str) -> str:
@@ -250,6 +300,34 @@ def parse_agent_message(text: str) -> Optional[dict]:
             continue
         if isinstance(parsed, dict) and parsed.get("type") in {"tool_request", "final"}:
             return parsed
+    # Some models ignore the JSON envelope and emit a Python-style tool call.
+    # Parse this narrowly and safely so it executes as a tool request instead of
+    # leaking a potentially enormous content argument into the visible chat.
+    plain_call = re.fullmatch(
+        r"\s*Tool call:\s*(?P<name>[A-Za-z0-9_.-]+)\s+(?P<args>\{.*\})\s*",
+        raw,
+        flags=re.DOTALL,
+    )
+    if plain_call:
+        args_text = plain_call.group("args")
+        try:
+            args = json.loads(args_text)
+        except json.JSONDecodeError:
+            try:
+                args = ast.literal_eval(args_text)
+            except (ValueError, SyntaxError):
+                args = None
+        if isinstance(args, dict):
+            return {
+                "type": "tool_request",
+                "calls": [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "name": plain_call.group("name"),
+                        "args": args,
+                    }
+                ],
+            }
     return None
 
 
@@ -286,6 +364,8 @@ def _normalize_tool_name(name: str) -> str:
         return "web.fetch"
     if "search" in compact:
         return "vault.search"
+    if "child" in compact and ("create" in compact or "page" in compact or "write" in compact):
+        return "vault.create_child"
     if (
         ("read" in compact and "vault" in compact)
         or compact in {"read", "vaultread", "readpage", "readpagecontent", "readcontent"}
@@ -315,6 +395,11 @@ def _normalize_tool_name(name: str) -> str:
         "vaultwrite": "vault.write",
         "writevaultpage": "vault.write",
         "vault.write": "vault.write",
+        "createchild": "vault.create_child",
+        "createchildpage": "vault.create_child",
+        "vaultcreatechild": "vault.create_child",
+        "vault.createchild": "vault.create_child",
+        "vault.create_child": "vault.create_child",
         "taskslist": "tasks.list",
         "listtasks": "tasks.list",
         "tasks.list": "tasks.list",
@@ -344,6 +429,8 @@ def _infer_tool_name_from_args(args: dict) -> str:
         return "tasks.list"
     if "query" in args:
         return "vault.search"
+    if "content" in args and "parent_path" in args and "title" in args:
+        return "vault.create_child"
     if "content" in args and "path" in args:
         return "vault.write"
     if "url" in args:
@@ -543,6 +630,93 @@ def _synthesize_key_dates_content(text: str, *, title: str = "Key Dates") -> str
         return header + "- No explicit dated items were found in the source page.\n"
     bullets = "\n".join(f"- {line}" for line in lines)
     return f"{header}{bullets}\n"
+
+
+_AGENT_MIXED_PAGE_LINK_PATTERN = re.compile(
+    r":[^\n\]|]*:\[(?P<path>/[^\n\]|]+?\.(?:md|txt))",
+    re.IGNORECASE,
+)
+_AGENT_WIKI_LINK_PATTERN = re.compile(
+    r"\[(?P<target>[^\]|]+)\|(?P<label>[^\]]*)\]",
+)
+_AGENT_MARKDOWN_LINK_PATTERN = re.compile(
+    r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)",
+)
+_AGENT_UNLABELED_COLON_LINK_PATTERN = re.compile(
+    r"\[(?P<target>:[^\[\]\s|]+)\]",
+)
+
+
+def _agent_page_target_to_colon(target: str) -> str:
+    """Convert a page target to a root-relative colon target when appropriate."""
+    raw = (target or "").strip().strip("<>")
+    if not raw or raw.startswith(("http://", "https://", "mailto:", "ftp://", "#")):
+        return target
+    base, anchor = (raw.split("#", 1) + [""])[:2] if "#" in raw else (raw, "")
+    suffix = Path(base).suffix.lower()
+    if ("/" in base or "\\" in base) and suffix in {".md", ".txt"}:
+        slash_path = base.replace("\\", "/")
+        colon = ensure_root_colon_link(path_to_colon(slash_path))
+        return f"{colon}#{anchor}" if anchor else colon
+    if base.startswith(":"):
+        colon = ensure_root_colon_link(normalize_link_target(base))
+        return f"{colon}#{anchor}" if anchor else colon
+    return target
+
+
+def _normalize_agent_link_line(line: str) -> str:
+    """Repair generated internal links on a single non-code Markdown line."""
+    def _mixed(match: re.Match[str]) -> str:
+        return _agent_page_target_to_colon(match.group("path"))
+
+    def _wiki(match: re.Match[str]) -> str:
+        target = match.group("target")
+        normalized = _agent_page_target_to_colon(target)
+        if normalized == target:
+            return match.group(0)
+        label = (match.group("label") or "").strip() or normalized.lstrip(":").split(":")[-1]
+        return f"[{normalized}|{label}]"
+
+    def _markdown(match: re.Match[str]) -> str:
+        target = match.group("target")
+        normalized = _agent_page_target_to_colon(target)
+        if normalized == target:
+            return match.group(0)
+        return f"[{normalized}|{match.group('label')}]"
+
+    def _unlabeled(match: re.Match[str]) -> str:
+        target = _agent_page_target_to_colon(match.group("target"))
+        label = target.split("#", 1)[0].lstrip(":").split(":")[-1]
+        return f"[{target}|{label}]"
+
+    normalized = _AGENT_MIXED_PAGE_LINK_PATTERN.sub(_mixed, line)
+    normalized = _AGENT_MARKDOWN_LINK_PATTERN.sub(_markdown, normalized)
+    normalized = _AGENT_WIKI_LINK_PATTERN.sub(_wiki, normalized)
+    return _AGENT_UNLABELED_COLON_LINK_PATTERN.sub(_unlabeled, normalized)
+
+
+def _normalize_agent_page_links(content: str) -> str:
+    """Normalize agent-generated page links without altering fenced code samples."""
+    if not content:
+        return content
+    output: list[str] = []
+    in_fence = False
+    fence_marker = ""
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()
+        marker_match = re.match(r"(`{3,}|~{3,})", stripped)
+        if marker_match:
+            marker = marker_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker[0]
+            elif marker[0] == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            output.append(line)
+            continue
+        output.append(line if in_fence else _normalize_agent_link_line(line))
+    return "".join(output)
 
 
 def _detect_guard_state(prompt: str) -> dict:
@@ -758,6 +932,7 @@ def _tool_vault_write(client: httpx.Client, args: dict, context: dict) -> dict:
             _log_tool("vault.write received empty content; synthesized summary from last vault.read result")
         else:
             return {"ok": False, "error": _tool_error("invalid_args", "content must be non-empty")}
+    content = _normalize_agent_page_links(content)
     if mode == "append" and _is_implicit_page_reference(path):
         current_path = context.get("current_editor_path") or context.get("current_path") or ""
         chat_page_path = context.get("chat_page_path") or ""
@@ -803,6 +978,17 @@ def _tool_vault_write(client: httpx.Client, args: dict, context: dict) -> dict:
     path = _normalize_write_path(path, vault_root_name=context.get("vault_root_name", ""))
     if not path:
         return {"ok": False, "error": _tool_error("invalid_args", "path is required")}
+    duplicate = _daily_page_repeated_as_child(path, context.get("last_daily_path") or "")
+    if duplicate:
+        return {
+            "ok": False,
+            "error": _tool_error(
+                "invalid_args",
+                "Refusing a path that repeats the daily page as a child folder. "
+                "Use vault.create_child with the unchanged daily.open path as parent_path.",
+                duplicate,
+            ),
+        }
     _log_tool(f"vault.write preparing path={path} mode={mode} bytes={len(str(content).encode('utf-8'))}")
     final_content = content
     if mode == "append":
@@ -829,6 +1015,118 @@ def _tool_vault_write(client: httpx.Client, args: dict, context: dict) -> dict:
                 "path": path,
                 "bytes": len(final_content.encode("utf-8")),
                 "mode": mode,
+            },
+        }
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response else "n/a"
+        return {"ok": False, "error": _tool_error("conflict", f"HTTP {status}", {"path": path})}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": _tool_error("unavailable", str(exc), {"path": path})}
+
+
+def _page_folder_path(page_path: str, *, vault_root_name: str = "") -> str:
+    """Return the folder that structurally represents a StillPoint page."""
+    normalized = _normalize_read_path(page_path, vault_root_name=vault_root_name)
+    if not normalized:
+        return ""
+    page = Path(normalized.lstrip("/"))
+    if page.suffix.lower() in {".md", ".txt"}:
+        page = page.parent
+    if str(page) in {"", "."}:
+        return "/"
+    return f"/{page.as_posix()}"
+
+
+def _child_page_path(parent_path: str, title: str, *, vault_root_name: str = "") -> str:
+    clean_title = (title or "").strip()
+    for suffix in (".md", ".txt"):
+        if clean_title.lower().endswith(suffix):
+            clean_title = clean_title[: -len(suffix)].rstrip()
+            break
+    if not clean_title or clean_title in {".", ".."}:
+        return ""
+    if any(char in clean_title for char in ("/", "\\", ":")):
+        return ""
+    parent_folder = _page_folder_path(parent_path, vault_root_name=vault_root_name)
+    if not parent_folder:
+        return ""
+    prefix = "" if parent_folder == "/" else parent_folder
+    return f"{prefix}/{clean_title}/{clean_title}.md"
+
+
+def _daily_page_repeated_as_child(path: str, daily_path: str) -> Optional[dict]:
+    """Identify the erroneous ``day/day/child`` hierarchy without guessing globally."""
+    if not path or not daily_path:
+        return None
+    daily_file = Path(_normalize_read_path(daily_path).lstrip("/"))
+    if daily_file.suffix.lower() not in {".md", ".txt"}:
+        return None
+    daily_folder = daily_file.parent
+    candidate = Path(path.lstrip("/"))
+    repeated_prefix = daily_folder / daily_file.stem
+    try:
+        remainder = candidate.relative_to(repeated_prefix)
+    except ValueError:
+        return None
+    if str(remainder) in {"", "."}:
+        return None
+    return {
+        "daily_path": f"/{daily_file.as_posix()}",
+        "rejected_path": f"/{candidate.as_posix()}",
+        "repeated_folder": f"/{repeated_prefix.as_posix()}",
+    }
+
+
+def _tool_vault_create_child(client: httpx.Client, args: dict, context: dict) -> dict:
+    parent_path = (args or {}).get("parent_path") or ""
+    title = (args or {}).get("title") or ""
+    content = (args or {}).get("content")
+    parent_label = str(parent_path).strip().lower().replace("’", "'")
+    if parent_label in {
+        "today",
+        "today's journal",
+        "today's journal page",
+        "today's page",
+        "daily",
+        "daily page",
+        "journal",
+    } and context.get("last_daily_path"):
+        parent_path = context.get("last_daily_path") or ""
+    elif parent_label in {"current", "current page", "this", "this page", "here"}:
+        parent_path = context.get("current_editor_path") or context.get("current_path") or ""
+    if not parent_path:
+        parent_path = context.get("last_daily_path") or context.get("current_editor_path") or context.get("current_path") or ""
+    if not isinstance(content, str) or not content.strip():
+        return {"ok": False, "error": _tool_error("invalid_args", "content must be non-empty")}
+    content = _normalize_agent_page_links(content)
+    path = _child_page_path(
+        parent_path,
+        title,
+        vault_root_name=context.get("vault_root_name", ""),
+    )
+    if not path:
+        return {
+            "ok": False,
+            "error": _tool_error(
+                "invalid_args",
+                "parent_path and a valid single-segment title are required",
+                {"parent_path": parent_path, "title": title},
+            ),
+        }
+    _log_tool(f"vault.create_child resolved parent={parent_path} title={title!r} -> {path}")
+    try:
+        resp = client.post("/api/file/write", json={"path": path, "content": content})
+        resp.raise_for_status()
+        return {
+            "ok": True,
+            "output": {
+                "path": path,
+                "parent_path": _page_folder_path(
+                    parent_path,
+                    vault_root_name=context.get("vault_root_name", ""),
+                ),
+                "bytes": len(content.encode("utf-8")),
+                "mode": "replace",
             },
         }
     except httpx.HTTPStatusError as exc:
@@ -1215,6 +1513,7 @@ class AgentToolLoopWorker(QtCore.QThread):
             "vault.read": _tool_vault_read,
             "vault.search": _tool_vault_search,
             "vault.write": _tool_vault_write,
+            "vault.create_child": _tool_vault_create_child,
             "tasks.list": _tool_tasks_list,
             "daily.open": _tool_daily_open,
             "web.fetch": _tool_web_fetch,
@@ -1274,7 +1573,7 @@ class AgentToolLoopWorker(QtCore.QThread):
                         retries = int(self._context.get("write_guard_retries") or 0)
                         if retries >= 1:
                             self.failed.emit(
-                                "Agent did not issue required vault.write call. "
+                                "Agent did not issue a required vault write call. "
                                 "Try again and specify a concrete destination page path."
                             )
                             return
@@ -1282,10 +1581,11 @@ class AgentToolLoopWorker(QtCore.QThread):
                         hint_path = _extract_quoted_page_name(self._user_prompt)
                         path_hint = f' path="{hint_path}"' if hint_path else ""
                         reminder = (
-                            "You must return type='tool_request' with a vault.write call before any final answer."
-                            f" Use mode='replace'.{path_hint}"
+                            "You must return type='tool_request' with vault.write or vault.create_child "
+                            f"before any final answer. Use mode='replace' for vault.write.{path_hint}"
                         )
-                        self.toolLog.emit(f"Guard: {reminder}")
+                        if self._context.get("debug"):
+                            self.toolLog.emit(f"Guard: {reminder}")
                         _log_tool(f"Guard: {reminder}")
                         messages.append({"role": "user", "content": reminder})
                         continue
@@ -1352,7 +1652,9 @@ class AgentToolLoopWorker(QtCore.QThread):
                         msg = f"Tool call: {name} -> {normalized_name} {args}"
                     else:
                         msg = f"Tool call: {name} {args}"
-                    self.toolLog.emit(msg)
+                    self.toolLog.emit(f"Agent activity: {_format_agent_activity(normalized_name or name, args)}")
+                    if self._context.get("debug"):
+                        self.toolLog.emit(msg)
                     _log_tool(msg)
                     handler = tools.get(normalized_name)
                     if guard_error:
@@ -1384,7 +1686,11 @@ class AgentToolLoopWorker(QtCore.QThread):
                                 self._context["last_read_path"] = path
                     if normalized_name == "tasks.list" and result.get("status") == "ok":
                         self._context["tasks_list_done"] = True
-                    if normalized_name == "vault.write" and result.get("status") == "ok":
+                    if normalized_name == "daily.open" and result.get("status") == "ok":
+                        output = result.get("output") or {}
+                        if isinstance(output, dict) and output.get("path"):
+                            self._context["last_daily_path"] = output.get("path")
+                    if normalized_name in {"vault.write", "vault.create_child"} and result.get("status") == "ok":
                         self._context["vault_write_done"] = True
                         output = result.get("output") or {}
                         if isinstance(output, dict) and output.get("path"):
@@ -1466,6 +1772,7 @@ class AgentToolChatWorker(QtCore.QThread):
             "vault.read": _tool_vault_read,
             "vault.search": _tool_vault_search,
             "vault.write": _tool_vault_write,
+            "vault.create_child": _tool_vault_create_child,
             "tasks.list": _tool_tasks_list,
             "daily.open": _tool_daily_open,
             "web.fetch": _tool_web_fetch,
@@ -1523,7 +1830,7 @@ class AgentToolChatWorker(QtCore.QThread):
                         retries = int(self._context.get("write_guard_retries") or 0)
                         if retries >= 1:
                             self.failed.emit(
-                                "Agent did not issue required vault.write call. "
+                                "Agent did not issue a required vault write call. "
                                 "Try again and specify a concrete destination page path."
                             )
                             return
@@ -1531,10 +1838,11 @@ class AgentToolChatWorker(QtCore.QThread):
                         hint_path = _extract_quoted_page_name(self._user_prompt)
                         path_hint = f' path="{hint_path}"' if hint_path else ""
                         reminder = (
-                            "You must return type='tool_request' with a vault.write call before any final answer."
-                            f" Use mode='replace'.{path_hint}"
+                            "You must return type='tool_request' with vault.write or vault.create_child "
+                            f"before any final answer. Use mode='replace' for vault.write.{path_hint}"
                         )
-                        self.toolMessage.emit(f"Guard: {reminder}")
+                        if self._context.get("debug"):
+                            self.toolMessage.emit(f"Guard: {reminder}")
                         _log_tool(f"Guard: {reminder}")
                         messages.append({"role": "user", "content": reminder})
                         continue
@@ -1601,7 +1909,9 @@ class AgentToolChatWorker(QtCore.QThread):
                         msg = f"Tool call: {name} -> {normalized_name} {args}"
                     else:
                         msg = f"Tool call: {name} {args}"
-                    self.toolMessage.emit(msg)
+                    self.toolMessage.emit(f"Agent activity: {_format_agent_activity(normalized_name or name, args)}")
+                    if self._context.get("debug"):
+                        self.toolMessage.emit(msg)
                     _log_tool(msg)
                     handler = tools.get(normalized_name)
                     if guard_error:
@@ -1633,7 +1943,11 @@ class AgentToolChatWorker(QtCore.QThread):
                                 self._context["last_read_path"] = path
                     if normalized_name == "tasks.list" and result.get("status") == "ok":
                         self._context["tasks_list_done"] = True
-                    if normalized_name == "vault.write" and result.get("status") == "ok":
+                    if normalized_name == "daily.open" and result.get("status") == "ok":
+                        output = result.get("output") or {}
+                        if isinstance(output, dict) and output.get("path"):
+                            self._context["last_daily_path"] = output.get("path")
+                    if normalized_name in {"vault.write", "vault.create_child"} and result.get("status") == "ok":
                         self._context["vault_write_done"] = True
                         output = result.get("output") or {}
                         if isinstance(output, dict) and output.get("path"):

@@ -5,6 +5,93 @@ from types import SimpleNamespace
 from sp.app.ui.ai_chat_panel import AIChatPanel
 
 
+class _DebugToggle:
+    def __init__(self, checked: bool) -> None:
+        self._checked = checked
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+
+def test_agent_activity_hides_raw_tool_result_when_debug_is_off(monkeypatch) -> None:
+    panel = AIChatPanel.__new__(AIChatPanel)
+    panel.debug_checkbox = _DebugToggle(False)
+    panel._agent_placeholder_index = None
+    panel._agent_progress_lines = []
+    panel._last_agent_read_path = None
+    progress: list[str] = []
+    assistant_messages: list[str] = []
+    monkeypatch.setattr(panel, "_update_agent_progress", progress.append)
+    monkeypatch.setattr(panel, "_append_assistant_message", assistant_messages.append)
+
+    panel._handle_agent_tool_message("Agent activity: [Agent: searching the vault for ClubGlove…]")
+    panel._handle_agent_tool_message(
+        "Tool result: vault.search status=ok matches=4 details={'large': 'payload'}"
+    )
+
+    assert progress == ["[Agent: searching the vault for ClubGlove…]"]
+    assert assistant_messages == []
+
+
+def test_agent_activity_keeps_raw_call_and_result_in_debug_entry(monkeypatch) -> None:
+    panel = AIChatPanel.__new__(AIChatPanel)
+    panel.debug_checkbox = _DebugToggle(True)
+    panel._agent_placeholder_index = None
+    panel._agent_progress_lines = []
+    panel._last_agent_read_path = None
+    panel._active_tool_debug = None
+    panel._debug_entries = []
+    progress: list[str] = []
+    updates: list[tuple[int, str, bool]] = []
+    monkeypatch.setattr(panel, "_update_agent_progress", progress.append)
+
+    def _append_debug(title, content, *, open_state, anchor_index):
+        panel._debug_entries.append({"title": title, "content": content})
+        return len(panel._debug_entries) - 1
+
+    monkeypatch.setattr(panel, "_append_debug_entry", _append_debug)
+    monkeypatch.setattr(
+        panel,
+        "_update_debug_entry",
+        lambda entry_id, content, *, open_state: updates.append((entry_id, content, open_state)),
+    )
+
+    panel._handle_agent_tool_message("Agent activity: [Agent: reading /Projects/Alpha/Alpha.md…]")
+    panel._handle_agent_tool_message(
+        "Tool call: vault.read {'path': '/Projects/Alpha/Alpha.md'}"
+    )
+    panel._handle_agent_tool_message(
+        "Tool result: vault.read status=ok path=/Projects/Alpha/Alpha.md bytes=400"
+    )
+
+    assert progress == ["[Agent: reading /Projects/Alpha/Alpha.md…]"]
+    assert panel._debug_entries[0]["content"].startswith("Tool call: vault.read")
+    assert updates and "Tool result: vault.read status=ok" in updates[0][1]
+
+
+def test_unparsed_tool_payload_is_never_rendered_as_non_debug_final(monkeypatch) -> None:
+    panel = AIChatPanel.__new__(AIChatPanel)
+    panel.debug_checkbox = _DebugToggle(False)
+    panel.messages = [("assistant", "Running agent tools...")]
+    panel._agent_placeholder_index = 0
+    panel.current_session_id = None
+    panel._agent_progress_lines = []
+    panel._agent_tool_worker = object()
+    panel.send_btn = SimpleNamespace(setEnabled=lambda _enabled: None)
+    monkeypatch.setattr(panel, "_set_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(panel, "_render_messages", lambda: None)
+    monkeypatch.setattr(panel, "_update_stop_button", lambda: None)
+
+    panel._handle_agent_final(
+        "Tool call: vault.create_child {'content': 'an extremely long generated page'}"
+    )
+
+    assert panel.messages[0] == (
+        "assistant",
+        "[Agent: unable to parse the tool operation response.]",
+    )
+
+
 def test_open_chat_for_page_attaches_page_context(monkeypatch) -> None:
     panel = AIChatPanel.__new__(AIChatPanel)
     calls: list[tuple[str, object]] = []

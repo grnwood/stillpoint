@@ -1094,6 +1094,11 @@ class PreferencesDialog(QDialog):
                     "settings": "triggers=write,create a page,new page,make a page,add a page",
                 },
                 {
+                    "name": "vault.create_child",
+                    "sample": "create a page under today's journal called \"Daily Summary\"",
+                    "settings": "triggers=under,beneath,inside,child page,subpage",
+                },
+                {
                     "name": "vault.write.append",
                     "sample": "add to my favorite poems page a haiku",
                     "settings": "triggers=add to,append,insert into,update,edit",

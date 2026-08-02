@@ -143,8 +143,20 @@ class AgentToolOverlay(QDialog):
     def _append_tool_log(self, text: str) -> None:
         if not text:
             return
-        self.tool_log.appendPlainText(text)
-        self._live_events.append(text)
+        visible = text
+        if text.startswith("Agent activity:"):
+            visible = text.split("Agent activity:", 1)[-1].strip()
+        elif text.startswith("Tool result:"):
+            if " status=error" not in text:
+                return
+            tool_name = text.split("Tool result:", 1)[-1].strip().split()[0]
+            message = text.split(" message=", 1)[-1].split(" details=", 1)[0].strip()
+            suffix = f" — {message[:120]}" if message and message != text else ""
+            visible = f"[Agent: {tool_name} failed{suffix}]"
+        elif text.startswith(("Tool call:", "Guard:", "Thinking:")):
+            return
+        self.tool_log.appendPlainText(visible)
+        self._live_events.append(visible)
         preview = "\n".join(self._live_events[-30:])
         self.chat_view.setPlainText(f"Running agent tools...\n\n{preview}")
 

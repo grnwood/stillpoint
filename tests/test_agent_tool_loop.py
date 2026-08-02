@@ -2,15 +2,21 @@ import httpx
 
 from sp.app.ui.agent_tool_loop import (
     _apply_guard_to_tool_call,
+    _child_page_path,
+    _daily_page_repeated_as_child,
     _extract_key_date_lines,
     _fallback_search_query,
+    _format_agent_activity,
     _infer_tool_name_from_args,
     _normalize_read_path,
+    _normalize_agent_page_links,
     _normalize_tool_name,
     _normalize_write_path,
     _paths_refer_same_page,
     _parse_trigger_settings,
+    parse_agent_message,
     _tool_vault_write,
+    _tool_vault_create_child,
 )
 
 
@@ -53,6 +59,159 @@ class _DummyClient:
 
 def test_normalize_tool_name_maps_read_page_content() -> None:
     assert _normalize_tool_name("Read Page Content") == "vault.read"
+
+
+def test_normalize_tool_name_maps_create_child_page() -> None:
+    assert _normalize_tool_name("Create Child Page") == "vault.create_child"
+
+
+def test_agent_activity_is_a_concise_one_liner_without_content_payload() -> None:
+    activity = _format_agent_activity(
+        "vault.write",
+        {
+            "path": "/Journal/2026/08/02/Summary/Summary.md",
+            "content": "very detailed body\nwith another line",
+            "mode": "replace",
+        },
+    )
+    assert activity == "[Agent: writing /Journal/2026/08/02/Summary/Summary.md…]"
+    assert "detailed body" not in activity
+
+
+def test_agent_activity_describes_child_creation_without_body_details() -> None:
+    activity = _format_agent_activity(
+        "vault.create_child",
+        {
+            "parent_path": "/Journal/2026/08/02/02.md",
+            "title": "ClubGlove Results",
+            "content": "# large generated page",
+        },
+    )
+    assert activity == (
+        "[Agent: creating ClubGlove Results under /Journal/2026/08/02/02.md…]"
+    )
+
+
+def test_parse_agent_message_accepts_python_style_tool_call_without_leaking_content() -> None:
+    raw = (
+        "Tool call: vault.create_child "
+        "{'parent_path': '02', 'title': 'MSC Summary', "
+        "'content': '# MSC Summary\\nA long generated body'}"
+    )
+    parsed = parse_agent_message(raw)
+    assert parsed is not None
+    assert parsed["type"] == "tool_request"
+    call = parsed["calls"][0]
+    assert call["name"] == "vault.create_child"
+    assert call["args"]["parent_path"] == "02"
+    assert call["args"]["content"].startswith("# MSC Summary\n")
+
+
+def test_agent_links_strip_journal_prefix_from_mixed_root_path() -> None:
+    malformed = (
+        "[:Journal:2026:08:02:Clubglove_Results:"
+        "[/2-Projects/Acushnet/1-Projects/ClubGlove/Design/LineItemXml/LineItemXml.md|"
+        "LineItemXml]"
+    )
+    assert _normalize_agent_page_links(malformed) == (
+        "[:2-Projects:Acushnet:1-Projects:ClubGlove:Design:LineItemXml|LineItemXml]"
+    )
+
+
+def test_agent_links_convert_local_markdown_page_link_to_root_colon_link() -> None:
+    content = "[Requirements](/2-Projects/ClubGlove/Requirements/Requirements.md)"
+    assert _normalize_agent_page_links(content) == (
+        "[:2-Projects:ClubGlove:Requirements|Requirements]"
+    )
+
+
+def test_agent_links_leave_external_links_and_fenced_code_unchanged() -> None:
+    content = (
+        "[OpenAI](https://openai.com)\n"
+        "```markdown\n"
+        "[Local](/Projects/Local/Local.md)\n"
+        "```\n"
+    )
+    assert _normalize_agent_page_links(content) == content
+
+
+def test_agent_links_add_label_to_unlabeled_colon_link() -> None:
+    assert _normalize_agent_page_links("[:Projects:Alpha]") == (
+        "[:Projects:Alpha|Alpha]"
+    )
+
+
+def test_child_page_path_uses_daily_page_folder_without_repeating_day() -> None:
+    assert _child_page_path(
+        "/Journal/2026/08/02/02.md",
+        "msc-vault-search-summary",
+    ) == (
+        "/Journal/2026/08/02/msc-vault-search-summary/"
+        "msc-vault-search-summary.md"
+    )
+
+
+def test_vault_create_child_writes_directly_beneath_daily_page() -> None:
+    client = _DummyClient()
+    result = _tool_vault_create_child(
+        client,
+        {
+            "parent_path": "/Journal/2026/08/02/02.md",
+            "title": "msc-vault-search-summary",
+            "content": "# MSC vault search summary\n",
+        },
+        {},
+    )
+    assert result.get("ok") is True
+    assert client.last_write_payload == {
+        "path": (
+            "/Journal/2026/08/02/msc-vault-search-summary/"
+            "msc-vault-search-summary.md"
+        ),
+        "content": "# MSC vault search summary\n",
+    }
+
+
+def test_vault_create_child_resolves_today_label_from_daily_open_context() -> None:
+    client = _DummyClient()
+    result = _tool_vault_create_child(
+        client,
+        {
+            "parent_path": "today's journal",
+            "title": "Call notes",
+            "content": "# Call notes\n",
+        },
+        {"last_daily_path": "/Journal/2026/08/02/02.md"},
+    )
+    assert result.get("ok") is True
+    assert client.last_write_payload["path"] == (
+        "/Journal/2026/08/02/Call notes/Call notes.md"
+    )
+
+
+def test_daily_duplicate_child_path_is_detected_from_daily_open_result() -> None:
+    details = _daily_page_repeated_as_child(
+        "/Journal/2026/08/02/02/msc-vault-search-summary/msc-vault-search-summary.md",
+        "/Journal/2026/08/02/02.md",
+    )
+    assert details is not None
+    assert details["repeated_folder"] == "/Journal/2026/08/02/02"
+
+
+def test_vault_write_rejects_repeated_daily_page_folder() -> None:
+    client = _DummyClient()
+    result = _tool_vault_write(
+        client,
+        {
+            "path": "/Journal/2026/08/02/02/msc-vault-search-summary/msc-vault-search-summary.md",
+            "content": "# Summary\n",
+            "mode": "replace",
+        },
+        {"last_daily_path": "/Journal/2026/08/02/02.md"},
+    )
+    assert result.get("ok") is False
+    assert (result.get("error") or {}).get("code") == "invalid_args"
+    assert client.last_write_payload is None
 
 
 def test_vault_write_append_bare_title_is_not_treated_as_implicit_page_reference() -> None:

@@ -4587,10 +4587,23 @@ class AIChatPanel(QtWidgets.QWidget):
         self._set_status("Waiting for agent response…", "#f6c343")
         self._update_stop_button()
 
+    def _update_agent_progress(self, line: str) -> None:
+        if not line:
+            return
+        self._agent_progress_lines.append(line)
+        if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
+            role, _ = self.messages[self._agent_placeholder_index]
+            preview = "\n".join(self._agent_progress_lines[-20:])
+            self.messages[self._agent_placeholder_index] = (role, f"Running agent tools...\n\n{preview}")
+            self._render_messages()
+
     def _handle_agent_tool_message(self, text: str) -> None:
         if not text:
             return
-        if text.startswith("Tool result: vault.write status=ok") and "path=" in text:
+        if text.startswith((
+            "Tool result: vault.write status=ok",
+            "Tool result: vault.create_child status=ok",
+        )) and "path=" in text:
             try:
                 path_part = text.split("path=", 1)[1]
                 path = path_part.split()[0].strip()
@@ -4598,12 +4611,6 @@ class AIChatPanel(QtWidgets.QWidget):
                     self.pageWritten.emit(path)
             except Exception:
                 pass
-        self._agent_progress_lines.append(text)
-        if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
-            role, _ = self.messages[self._agent_placeholder_index]
-            preview = "\n".join(self._agent_progress_lines[-20:])
-            self.messages[self._agent_placeholder_index] = (role, f"Running agent tools...\n\n{preview}")
-            self._render_messages()
         if "Tool result: vault.read status=ok" in text and "path=" in text:
             try:
                 path_part = text.split("path=", 1)[1]
@@ -4612,7 +4619,11 @@ class AIChatPanel(QtWidgets.QWidget):
                     self._last_agent_read_path = path
             except Exception:
                 pass
-        if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
+        debug_enabled = bool(getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked())
+        if text.startswith("Agent activity:"):
+            self._update_agent_progress(text.split("Agent activity:", 1)[-1].strip())
+            return
+        if debug_enabled:
             anchor_index = (self._agent_placeholder_index - 1) if self._agent_placeholder_index is not None else None
             if text.startswith("Guard:"):
                 self._append_debug_entry("Guard", text, open_state=False, anchor_index=anchor_index)
@@ -4648,11 +4659,24 @@ class AIChatPanel(QtWidgets.QWidget):
                     anchor_index=anchor_index,
                 )
                 return
-        if not text.startswith("Guard:"):
-            self._append_assistant_message(text)
+        if text.startswith("Tool result:"):
+            if " status=error" in text:
+                tool_name = text.split("Tool result:", 1)[-1].strip().split()[0]
+                message = text.split(" message=", 1)[-1].split(" details=", 1)[0].strip()
+                suffix = f" — {message[:120]}" if message and message != text else ""
+                self._update_agent_progress(f"[Agent: {tool_name} failed{suffix}]")
+            return
+        if text.startswith(("Tool call:", "Guard:", "Thinking:")):
+            return
+        compact = " ".join(text.split())
+        if compact:
+            self._update_agent_progress(f"[Agent: {compact[:140]}]")
 
     def _handle_agent_final(self, text: str) -> None:
         final_text = text or ""
+        debug_enabled = bool(getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked())
+        if not debug_enabled and final_text.lstrip().startswith(("Tool call:", "Tool result:")):
+            final_text = "[Agent: unable to parse the tool operation response.]"
         if self._agent_placeholder_index is not None and 0 <= self._agent_placeholder_index < len(self.messages):
             self.messages[self._agent_placeholder_index] = ("assistant", final_text)
             if self.current_session_id:
