@@ -77,8 +77,12 @@ def test_pending_tree_refresh_is_triggered_only_by_navigation_activity() -> None
     dummy = _Dummy()
     editor = object()
 
+    # MouseButtonRelease (not Press) is the trigger to avoid mid-click tree rebuilds
+    assert MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.MouseButtonRelease)
     assert MainWindow._is_tree_navigation_activity(dummy, dummy.tree_view, QEvent.KeyPress)
-    assert MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.MouseButtonPress)
+    assert MainWindow._is_tree_navigation_activity(dummy, dummy.tree_view, QEvent.FocusIn)
+    # MouseButtonPress no longer triggers a flush (prevents indexAt() race between press and release)
+    assert not MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.MouseButtonPress)
     assert not MainWindow._is_tree_navigation_activity(dummy, editor, QEvent.KeyPress)
     assert not MainWindow._is_tree_navigation_activity(dummy, editor, QEvent.FocusIn)
     assert not MainWindow._is_tree_navigation_activity(dummy, viewport, QEvent.Paint)

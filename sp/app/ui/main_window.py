@@ -11842,6 +11842,17 @@ class MainWindow(QMainWindow):
         self._cancel_inline_editor()
         if not self.vault_root:
             return
+        # Defer the rebuild if the user is mid-click on the navigation tree.
+        # Rebuilding the model between MouseButtonPress and MouseButtonRelease causes
+        # indexAt(event.pos()) in mouseReleaseEvent to resolve a different row than the
+        # one the user pressed on, leading to the wrong page being opened.
+        tree_view = getattr(self, "tree_view", None)
+        if tree_view is not None and bool(QApplication.mouseButtons() & Qt.LeftButton):
+            viewport = tree_view.viewport() if hasattr(tree_view, "viewport") else None
+            if viewport is not None and (tree_view.underMouse() or viewport.underMouse()):
+                logNav("_populate_vault_tree: deferred (left-click in progress on tree)")
+                QTimer.singleShot(60, self._populate_vault_tree)
+                return
         # Prevent overlapping resets that can confuse the model/view
         if self._tree_refresh_in_progress:
             self._pending_tree_refresh = True
@@ -22544,10 +22555,19 @@ class MainWindow(QMainWindow):
     def _is_tree_navigation_activity(self, obj: object, event_type: QEvent.Type) -> bool:
         tree_view = getattr(self, "tree_view", None)
         tree_viewport = tree_view.viewport() if tree_view is not None else None
-        return bool(
-            obj in (tree_view, tree_viewport)
-            and event_type in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.FocusIn)
-        )
+        if obj not in (tree_view, tree_viewport):
+            return False
+        # Use MouseButtonRelease (not Press) so the homebase tree flush fires *after*
+        # mouseReleaseEvent has already called indexAt() and emitted rowClicked.
+        # Triggering a tree rebuild between press and release causes indexAt() to return
+        # a different row than the one the user pressed, loading the wrong page.
+        if event_type == QEvent.MouseButtonRelease:
+            return True
+        # For keyboard/focus events: only trigger when no mouse button is held,
+        # so a click that also changes focus does not schedule a mid-click rebuild.
+        if event_type in (QEvent.KeyPress, QEvent.FocusIn):
+            return not bool(QApplication.mouseButtons() & Qt.LeftButton)
+        return False
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if event.type() == QEvent.Resize:

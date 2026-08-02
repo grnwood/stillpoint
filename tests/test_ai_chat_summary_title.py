@@ -96,7 +96,7 @@ def test_handle_chat_summary_title_finished_renames_chat(monkeypatch) -> None:
     statuses: list[str] = []
     stop_updates: list[str] = []
 
-    panel._title_worker = object()
+    panel._title_worker = SimpleNamespace(deleteLater=lambda: None)
     panel._title_target_session_id = 31
     panel.current_session_id = 31
     panel.store = SimpleNamespace(
