@@ -4429,7 +4429,8 @@ class MainWindow(QMainWindow):
         existing = getattr(self, "_vault_reorg_window", None)
         if existing is not None:
             try:
-                existing.show()
+                existing.set_vault_accent_color(self._effective_tree_accent_color())
+                existing.showMaximized()
                 existing.raise_()
                 existing.activateWindow()
                 return
@@ -4441,13 +4442,14 @@ class MainWindow(QMainWindow):
             http_client=self.http,
             vault_name=self.vault_root_name or Path(self.vault_root).name,
             read_only=self._read_only,
+            vault_accent_color=self._effective_tree_accent_color(),
             before_commit=self._prepare_for_vault_reorganization,
             parent=self,
         )
         window.reorganizationCommitted.connect(self._handle_vault_reorganization_committed)
         window.destroyed.connect(lambda: setattr(self, "_vault_reorg_window", None))
         self._vault_reorg_window = window
-        window.show()
+        window.showMaximized()
         window.raise_()
         window.activateWindow()
 

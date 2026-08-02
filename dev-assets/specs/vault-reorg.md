@@ -34,11 +34,17 @@ The first release uses a purpose-built tree/list workspace. Existing tree, drag-
 
 Add a **Vault > Reorganize Vault…** action. Because menu actions populate the command palette, it must also appear as **Vault / Reorganize Vault…** there.
 
-Open a modeless, single-instance window owned by the current main window. Triggering the action while it is open raises and activates the existing window. Closing the main window closes the workspace. Switching vaults with a non-empty staged plan requires the same discard confirmation described below.
+Open a maximized, modeless, single-instance window owned by the current main window. The user can restore or minimize it to inspect and work in the vault underneath while keeping the staged plan open. Triggering the action while it is open maximizes, raises, and activates the existing window. Closing the main window closes the workspace. Switching vaults with a non-empty staged plan requires the same discard confirmation described below.
+
+The vault may change while this modeless workspace is open. Trust the user to work concurrently; retain the existing tree-version refresh, authoritative preflight, and commit-token checks so stale operations are refreshed or blocked without discarding the staged plan.
 
 Disable the action when no vault is open. In read-only mode, the workspace may open for discovery and inspection, but staging and applying changes are disabled with the normal read-only explanation.
 
 The workspace title is `Reorganize Vault — <vault name>`.
+
+On first open, keyboard focus starts in Candidate search with the insertion cursor ready for immediate typing.
+
+A prominent **? Help** button opens an in-app explanation of candidate search, staging, validation/application, durable Journal day pages, freely movable Journal subpages, and the reference/link behavior that preserves history.
 
 ## Workspace layout
 
@@ -49,6 +55,7 @@ Use three primary regions and a bottom action row.
 The left pane contains:
 
 - a search field with placeholder `Find pages by title or path…`;
+- an inline clear-search button using the same treatment as the destination filter;
 - a **Content matches** checkbox, off by default;
 - a **Journal pages only** checkbox, off by default;
 - a result count;
@@ -60,6 +67,8 @@ Canonical Journal day results are labeled **Journal entry — add reference** so
 
 Candidate rows use the active theme's alternating base colors so adjacent multi-line results remain visually distinct in both light and dark themes.
 
+Hovering a candidate displays a theme-native tooltip with its title, current path, matched heading when available, and the relevant full-text snippet. Tooltip text is escaped and bounded so indexed Markdown cannot inject rich-text markup or create an unmanageably large popup.
+
 An empty query shows no candidates rather than the whole vault. Search is debounced and stale responses must not replace results for a newer query.
 
 ### Destination pane
@@ -70,10 +79,12 @@ A type-ahead field filters destinations by case-insensitive name or path while r
 
 Dropping one or more candidate pages on a page/folder stages that node as their destination parent; it does not move files. The vault root is a valid destination parent. Invalid drops, including a source onto itself or its descendants, are rejected immediately.
 
+Dragging from Candidates displays a compact theme-colored drag card containing the first candidate name and an additional-item count. As the pointer moves through the destination hierarchy, the effective target row is selected and a prominent `Drop target: <full path>` message appears beneath the tree. Hovering empty tree space identifies and highlights the vault root. Canceling or leaving the tree restores the prior selection; completing the drop retains the chosen destination.
+
 The tree provides a visual preview:
 
 - staged source nodes are dimmed and marked as moving;
-- proposed destination nodes appear as italic/ghost children under their new parent;
+- proposed destination nodes appear as italic ghost children under their new parent, with text in the current vault accent color;
 - selecting a staged source or ghost selects the corresponding plan row;
 - removing or editing a plan row updates the preview immediately.
 
@@ -92,6 +103,10 @@ The right pane contains one row per top-level staged operation with these column
 | Journal history | `Existing link will update`, `Will add to # Moved Pages`, or blank |
 | Status | Valid, warning, or blocking validation message |
 
+Use compact headers: **Action**, **Source**, **Destination**, **Name / Ref**, **Journal**, and **Status**. Source and destination columns share the flexible table width and use middle elision rather than widening the table for full paths. Every non-empty staged-table cell exposes its complete labeled value in a theme-native hover tooltip, including Action, Name/Ref, Journal, and Status; Source and Destination format the complete escaped value as a path.
+
+Validation distinguishes row validity from complete-plan validity. A row with its own error displays that specific message. A row that is individually valid while another row or cross-row rule blocks commit displays `Valid — plan blocked elsewhere`, never the ambiguous status `Blocked`. While validation is unsuccessful, a persistent red message above the table shows plan-wide errors or directs the user to row errors; it remains until the plan changes or validation succeeds.
+
 Changing **New name** updates the ghost preview and destination path. It uses the same cross-platform name rules and backend validation as manual and AI rename. Moving to another parent while retaining the name and moving while changing the name are both supported.
 
 Provide **Remove**, **Clear Plan**, and **Validate** controls. Multi-row removal is supported.
@@ -104,6 +119,16 @@ Show a concise summary such as `4 pages staged; 2 Journal references will be add
 
 **Apply Reorganization** is disabled when the plan is empty, validation is pending, any row has a blocking error, the vault is read-only, or another structural operation is active.
 
+The validation/apply controls communicate the workflow state visually and through tooltips:
+
+- with no staged changes, **Validate** and **Apply Reorganization** are disabled and red;
+- with staged changes requiring validation, **Validate** is enabled and green while Apply remains red;
+- after successful validation, Validate returns to normal styling and **Apply Reorganization** becomes enabled and green;
+- after failed validation, Validate remains the green next action and Apply remains red;
+- read-only mode keeps both unavailable actions red with a read-only explanation.
+
+The adjacent summary states the same next step in text so color is not the only indicator.
+
 Closing with staged changes prompts:
 
 ```text
@@ -111,6 +136,25 @@ Discard the staged reorganization plan?
 ```
 
 The options are **Keep Working** and **Discard Plan**. Plans are session-only in this release.
+
+### Keyboard focus visibility
+
+The Candidate, Destination hierarchy, and Staged changes panes each have a stable border. Whenever focus is within a pane—including its search field, filters, list/tree/table, or buttons—that pane's border uses the current vault accent color. Focus follows normal tab order through all interactive controls, and the highlight follows focus without requiring a mouse click. When focus moves to the bottom action row, no content pane remains highlighted.
+
+The three detail controls also support spatial arrow-key navigation:
+
+- Down from Candidate search focuses Candidate results and selects the first result when needed;
+- Up from the first Candidate result returns focus to Candidate search;
+- Enter on Candidate results stages the current selection using the selected destination, equivalent to **Stage Selected →**;
+- Ctrl+Right cycles Candidate results → Destination hierarchy → Staged changes → Candidate results;
+- Ctrl+Left cycles the same controls in reverse;
+- unmodified Left/Right retain native behavior, including text-cursor movement and destination-tree expansion/collapse.
+
+A persistent bottom-row hint reads `Ctrl+← / Ctrl+→ switch panes`.
+
+Escape never closes the workspace. From any workspace control it clears the Candidate query and results, preserves the staged plan, and returns focus to Candidate search.
+
+Workspace buttons do not participate in `QDialog` automatic-default behavior. Pressing Enter while editing either search field must remain a search-field action and must never open Help or trigger validation/application implicitly.
 
 ## Candidate discovery
 

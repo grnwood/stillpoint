@@ -382,14 +382,18 @@ class _Response:
         return self.payload
 
 
-def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot) -> None:
+def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot, monkeypatch) -> None:
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QPalette
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from sp.app.ui.vault_reorg_window import VaultReorgWindow, _PATH_ROLE
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow, _GHOST_ROLE, _PATH_ROLE
 
     class Http:
         def __init__(self):
             self.candidate_calls = 0
+            self.preflight_payload = None
 
         def get(self, path, params=None):
             if path == "/api/vault/reorganize/candidates":
@@ -435,27 +439,132 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot) -> None
                 }
             )
 
+        def post(self, path, json=None):
+            assert path == "/api/vault/reorganize/preflight"
+            assert self.preflight_payload is not None
+            return _Response(self.preflight_payload)
+
     http = Http()
     window = VaultReorgWindow(
         http_client=http,
         vault_name="Test",
         read_only=False,
+        vault_accent_color="#12ab34",
     )
     qtbot.addWidget(window)
 
+    assert window.search_edit.isClearButtonEnabled() is True
+    assert window._focus_accent_color == "#12ab34"
+    assert all(not button.autoDefault() for button in window.findChildren(type(window.help_btn)))
+    assert window.validate_btn.isEnabled() is False
+    assert window.validate_btn.property("workflowState") == "blocked"
+    assert window.apply_btn.isEnabled() is False
+    assert window.apply_btn.property("workflowState") == "blocked"
+    assert "stage a change" in window.summary_label.text()
     assert window.candidate_list.alternatingRowColors() is True
+    drag_pixmap = window.candidate_list._build_drag_pixmap(["/Journal/2026/08/01/TopicA"])
+    assert drag_pixmap.isNull() is False
+    assert drag_pixmap.width() == 280
     assert "QListWidget::item:alternate" in window.candidate_list.styleSheet()
     assert window._candidate_alternate_color != window.candidate_list.palette().color(
         QPalette.ColorRole.Base
     ).name()
+    window.show()
+    window.activateWindow()
+    QApplication.processEvents()
+    assert window.search_edit.hasFocus() is True
+    window.search_edit.setFocus(Qt.FocusReason.TabFocusReason)
+    assert window._active_focus_pane is window.candidate_pane
+    assert window._focus_accent_color in window.candidate_pane.styleSheet()
+    window.destination_search_edit.setFocus(Qt.FocusReason.TabFocusReason)
+    QApplication.processEvents()
+    assert window._active_focus_pane is window.destination_pane
+    window.plan_table.setFocus(Qt.FocusReason.TabFocusReason)
+    QApplication.processEvents()
+    assert window._active_focus_pane is window.plan_pane
     journal_item = window._find_tree_item("/Journal")
     topics_item = window._find_tree_item("/Topics")
     assert journal_item is not None
     assert topics_item is not None
+    window.destination_tree._show_drag_target(topics_item)
+    assert topics_item.isSelected() is True
+    assert window.destination_hint_label.text() == "Drop target: /Topics"
+    window.destination_tree._finish_drag_target(restore_previous=False)
+    assert window.destination_hint_label.text().startswith("Drag search results")
+
+    help_messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda _parent, title, message: help_messages.append((title, message)),
+    )
+    window._show_help()
+    assert help_messages[0][0] == "About Vault Reorganization"
+    assert "Journal history is durable" in help_messages[0][1]
+    assert "Nothing moves until" in help_messages[0][1]
+    help_count = len(help_messages)
+    window.search_edit.setFocus(Qt.FocusReason.TabFocusReason)
+    QTest.keyClick(window.search_edit, Qt.Key.Key_Return)
+    QApplication.processEvents()
+    assert len(help_messages) == help_count
     journal_item.setExpanded(True)
     window.destination_tree.setCurrentItem(topics_item)
     window._stage_paths(["/Journal/2026/08/01/TopicA"], "/Topics")
     window.plan_table.item(0, 3).setText("Topic A")
+
+    topics_preview = window._find_tree_item("/Topics")
+    staged_ghosts = [
+        topics_preview.child(index)
+        for index in range(topics_preview.childCount())
+        if topics_preview.child(index).data(0, _GHOST_ROLE)
+    ]
+    assert len(staged_ghosts) == 1
+    assert staged_ghosts[0].font(0).italic() is True
+    assert staged_ghosts[0].foreground(0).color().name() == "#12ab34"
+
+    assert [window.plan_table.horizontalHeaderItem(column).text() for column in range(6)] == [
+        "Action",
+        "Source",
+        "Destination",
+        "Name / Ref",
+        "Journal",
+        "Status",
+    ]
+    assert window.plan_table.textElideMode() == Qt.TextElideMode.ElideMiddle
+    assert "/Journal/2026/08/01/TopicA" in window.plan_table.item(0, 1).toolTip()
+    assert "/Topics" in window.plan_table.item(0, 2).toolTip()
+    assert "<b>Action</b>" in window.plan_table.item(0, 0).toolTip()
+    assert "Topic A" in window.plan_table.item(0, 3).toolTip()
+    assert "Not validated" in window.plan_table.item(0, 5).toolTip()
+    window._plan[0]["journal_reference_action"] = "append"
+    window._refresh_plan_view()
+    assert "Will add to # Moved Pages" in window.plan_table.item(0, 4).toolTip()
+    assert window.validate_btn.isEnabled() is True
+    assert window.validate_btn.property("workflowState") == "ready"
+    assert window.apply_btn.isEnabled() is False
+    assert window.apply_btn.property("workflowState") == "blocked"
+    assert "validation required" in window.summary_label.text()
+
+    http.preflight_payload = {
+        "ok": False,
+        "errors": [{"row": None, "message": "The staged moves contain a structural cycle."}],
+        "operations": [{}],
+        "tree_version": 7,
+    }
+    assert window._validate_plan() is False
+    assert window._plan[0]["status"] == "Valid — plan blocked elsewhere"
+    assert window.plan_error_label.isVisible() is True
+    assert "Plan blocked:" in window.plan_error_label.text()
+    assert "structural cycle" in window.plan_error_label.text()
+
+    window._preflight = {"ok": True}
+    window._refresh_plan_view()
+    assert window.validate_btn.property("workflowState") == "neutral"
+    assert window.apply_btn.isEnabled() is True
+    assert window.apply_btn.property("workflowState") == "ready"
+    assert "ready to apply" in window.summary_label.text()
+    window._invalidate_preflight()
+    window._refresh_plan_view()
 
     assert window._plan == [
         {
@@ -483,11 +592,78 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot) -> None
     window.destination_staged_only.setChecked(False)
     window.search_edit.setText("MSC")
     window._run_search()
-    window._stage_paths(["/Journal/2026/08/01"], "/Topics")
+    assert "Matched heading:" in window.candidate_list.item(0).toolTip()
+    assert "Matching content:" in window.candidate_list.item(0).toolTip()
+    assert "MSC Program Delivery" in window.candidate_list.item(0).toolTip()
+
+    window.search_edit.setFocus(Qt.FocusReason.TabFocusReason)
+    QTest.keyClick(window.search_edit, Qt.Key.Key_Down)
+    QApplication.processEvents()
+    assert window.candidate_list.hasFocus() is True
+    assert window.candidate_list.currentRow() == 0
+    QTest.keyClick(window.candidate_list, Qt.Key.Key_Up)
+    QApplication.processEvents()
+    assert window.search_edit.hasFocus() is True
+
+    cursor_before = window.search_edit.cursorPosition()
+    QTest.keyClick(window.search_edit, Qt.Key.Key_Left)
+    QApplication.processEvents()
+    assert window.search_edit.hasFocus() is True
+    assert window.search_edit.cursorPosition() == max(0, cursor_before - 1)
+
+    QTest.keyClick(window.search_edit, Qt.Key.Key_Down)
+    QTest.keyClick(window.candidate_list, Qt.Key.Key_Right)
+    QApplication.processEvents()
+    assert window.candidate_list.hasFocus() is True
+    QTest.keyClick(
+        window.candidate_list,
+        Qt.Key.Key_Right,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    QApplication.processEvents()
+    assert window.destination_tree.hasFocus() is True
+    QTest.keyClick(window.destination_tree, Qt.Key.Key_Right)
+    QApplication.processEvents()
+    assert window.destination_tree.hasFocus() is True
+    QTest.keyClick(
+        window.destination_tree,
+        Qt.Key.Key_Right,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    QApplication.processEvents()
+    assert window.plan_table.hasFocus() is True
+    QTest.keyClick(
+        window.plan_table,
+        Qt.Key.Key_Right,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    QApplication.processEvents()
+    assert window.candidate_list.hasFocus() is True
+    QTest.keyClick(
+        window.candidate_list,
+        Qt.Key.Key_Left,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    QApplication.processEvents()
+    assert window.plan_table.hasFocus() is True
+    assert window.keyboard_hint_label.text() == "Ctrl+← / Ctrl+→ switch panes"
+
+    window.candidate_list.setCurrentRow(0)
+    window.candidate_list.setFocus(Qt.FocusReason.TabFocusReason)
+    QTest.keyClick(window.candidate_list, Qt.Key.Key_Return)
+    QApplication.processEvents()
 
     assert window._plan[0]["operation_type"] == "add_reference"
     assert window._plan[0]["new_name"] == "MSC Program Delivery"
     assert window.plan_table.item(0, 0).text() == "Add reference"
+    window.plan_table.setFocus(Qt.FocusReason.TabFocusReason)
+    QTest.keyClick(window.plan_table, Qt.Key.Key_Escape)
+    QApplication.processEvents()
+    assert window.isVisible() is True
+    assert window.search_edit.text() == ""
+    assert window.candidate_list.count() == 0
+    assert window.search_edit.hasFocus() is True
+    assert len(window._plan) == 1
     window._clear_plan()
     assert http.candidate_calls >= 1
 

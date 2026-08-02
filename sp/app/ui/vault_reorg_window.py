@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QMimeData, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDrag, QPalette
+from PySide6.QtCore import QEvent, QMimeData, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QDrag, QKeyEvent, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,7 +32,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
 _REORG_MIME = "application/x-stillpoint-reorg-paths"
 _PATH_ROLE = Qt.ItemDataRole.UserRole
 _GHOST_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -37,6 +39,26 @@ _JOURNAL_DAY_RE = re.compile(r"^/Journal/\d{4}/\d{1,2}/\d{1,2}$", re.IGNORECASE)
 
 
 class _CandidateList(QListWidget):
+    def _build_drag_pixmap(self, paths: list[str]) -> QPixmap:
+        first_name = Path(paths[0].rstrip("/")).name if paths else "Candidate"
+        label = first_name if len(paths) == 1 else f"{first_name} + {len(paths) - 1} more"
+        pixmap = QPixmap(280, 48)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        background = QColor(self.palette().color(QPalette.ColorRole.Highlight))
+        background.setAlpha(235)
+        painter.setBrush(background)
+        painter.setPen(self.palette().color(QPalette.ColorRole.HighlightedText))
+        painter.drawRoundedRect(1, 1, 278, 46, 7, 7)
+        painter.drawText(
+            pixmap.rect().adjusted(12, 0, -12, 0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            f"Dragging: {label}",
+        )
+        painter.end()
+        return pixmap
+
     def startDrag(self, supported_actions) -> None:  # type: ignore[override]
         paths = [str(item.data(_PATH_ROLE) or "") for item in self.selectedItems()]
         paths = [path for path in paths if path]
@@ -46,11 +68,14 @@ class _CandidateList(QListWidget):
         mime.setData(_REORG_MIME, json.dumps(paths).encode("utf-8"))
         drag = QDrag(self)
         drag.setMimeData(mime)
+        drag.setPixmap(self._build_drag_pixmap(paths))
+        drag.setHotSpot(QPoint(18, 18))
         drag.exec(Qt.DropAction.CopyAction)
 
 
 class _DestinationTree(QTreeWidget):
     pathsDropped = Signal(list, str)
+    dragTargetChanged = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -58,6 +83,43 @@ class _DestinationTree(QTreeWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDropIndicatorShown(True)
+        self._drag_target_item: Optional[QTreeWidgetItem] = None
+        self._pre_drag_current: Optional[QTreeWidgetItem] = None
+        self._pre_drag_selected: list[QTreeWidgetItem] = []
+
+    @staticmethod
+    def _real_drop_target(item: Optional[QTreeWidgetItem]) -> Optional[QTreeWidgetItem]:
+        if item is not None and item.data(0, _GHOST_ROLE):
+            return item.parent()
+        return item
+
+    def _show_drag_target(self, item: Optional[QTreeWidgetItem]) -> None:
+        target = self._real_drop_target(item)
+        if target is None and self.topLevelItemCount():
+            target = self.topLevelItem(0)
+        if target is self._drag_target_item:
+            return
+        self._drag_target_item = target
+        if target is None:
+            return
+        self.clearSelection()
+        target.setSelected(True)
+        self.setCurrentItem(target)
+        self.scrollToItem(target, QAbstractItemView.ScrollHint.EnsureVisible)
+        self.dragTargetChanged.emit(str(target.data(0, _PATH_ROLE) or "/"))
+
+    def _finish_drag_target(self, *, restore_previous: bool) -> None:
+        self._drag_target_item = None
+        if restore_previous:
+            self.clearSelection()
+            for item in self._pre_drag_selected:
+                item.setSelected(True)
+            if self._pre_drag_current is not None:
+                self.setCurrentItem(self._pre_drag_current)
+        self._pre_drag_current = None
+        self._pre_drag_selected = []
+        self.dragTargetChanged.emit("")
 
     def startDrag(self, supported_actions) -> None:  # type: ignore[override]
         paths = [
@@ -76,32 +138,46 @@ class _DestinationTree(QTreeWidget):
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasFormat(_REORG_MIME):
+            self._pre_drag_current = self.currentItem()
+            self._pre_drag_selected = list(self.selectedItems())
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasFormat(_REORG_MIME):
+            self._show_drag_target(self.itemAt(event.position().toPoint()))
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
+        self._finish_drag_target(restore_previous=True)
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
         if not event.mimeData().hasFormat(_REORG_MIME):
             super().dropEvent(event)
             return
-        target = self.itemAt(event.position().toPoint())
+        target = self._real_drop_target(self.itemAt(event.position().toPoint()))
+        if target is None and self.topLevelItemCount():
+            target = self.topLevelItem(0)
         target_path = str(target.data(0, _PATH_ROLE) or "") if target else "/"
-        if target and target.data(0, _GHOST_ROLE):
-            target = target.parent()
-            target_path = str(target.data(0, _PATH_ROLE) or "/") if target else "/"
+        if target is not None:
+            self.clearSelection()
+            target.setSelected(True)
+            self.setCurrentItem(target)
         try:
             paths = json.loads(bytes(event.mimeData().data(_REORG_MIME)).decode("utf-8"))
         except Exception:
             paths = []
         if isinstance(paths, list) and target_path:
             self.pathsDropped.emit([str(path) for path in paths if path], target_path)
+            self._finish_drag_target(restore_previous=False)
             event.acceptProposedAction()
+            return
+        self._finish_drag_target(restore_previous=True)
+        event.ignore()
 
 
 class VaultReorgWindow(QDialog):
@@ -113,6 +189,7 @@ class VaultReorgWindow(QDialog):
         http_client,
         vault_name: str,
         read_only: bool,
+        vault_accent_color: Optional[str] = None,
         before_commit: Optional[Callable[[dict[str, Any]], bool]] = None,
         parent=None,
     ) -> None:
@@ -123,6 +200,7 @@ class VaultReorgWindow(QDialog):
         self.resize(1280, 720)
         self.http = http_client
         self.read_only = bool(read_only)
+        self._vault_accent_color = (vault_accent_color or "").strip() or None
         self.before_commit = before_commit
         self._tree_payload: list[dict[str, Any]] = []
         self._tree_version = 0
@@ -132,18 +210,36 @@ class VaultReorgWindow(QDialog):
         self._destination_expanded_paths: set[str] = {"/"}
         self._selected_destination_path = "/"
         self._candidate_reference_notes: dict[str, str] = {}
+        self._initial_focus_applied = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
+
+        header_row = QHBoxLayout()
+        header_row.addStretch(1)
+        self.help_btn = QPushButton("?  Help")
+        self.help_btn.setToolTip("Learn how Vault Reorganization works")
+        self.help_btn.clicked.connect(self._show_help)
+        header_row.addWidget(self.help_btn)
+        root.addLayout(header_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_candidate_pane())
         splitter.addWidget(self._build_destination_pane())
         splitter.addWidget(self._build_plan_pane())
+        self._focus_panes = [self.candidate_pane, self.destination_pane, self.plan_pane]
+        self._active_focus_pane: Optional[QFrame] = None
+        self._setup_focus_panes()
         splitter.setSizes([330, 470, 480])
         root.addWidget(splitter, 1)
 
         bottom = QHBoxLayout()
+        self.keyboard_hint_label = QLabel("Ctrl+← / Ctrl+→ switch panes")
+        self.keyboard_hint_label.setToolTip(
+            "Move keyboard focus between Candidates, Destination hierarchy, and Staged changes"
+        )
+        bottom.addWidget(self.keyboard_hint_label)
+        bottom.addSpacing(12)
         self.summary_label = QLabel("No changes staged")
         bottom.addWidget(self.summary_label, 1)
         self.apply_btn = QPushButton("Apply Reorganization")
@@ -153,6 +249,12 @@ class VaultReorgWindow(QDialog):
         close_btn.clicked.connect(self.close)
         bottom.addWidget(close_btn)
         root.addLayout(bottom)
+
+        # QDialog otherwise promotes the first auto-default button (currently
+        # Help), causing Enter in a search field to activate it.
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
 
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
@@ -164,15 +266,19 @@ class VaultReorgWindow(QDialog):
         self.destination_search_edit.textChanged.connect(lambda _text: self._rebuild_tree_preview())
         self.destination_staged_only.toggled.connect(lambda _checked: self._rebuild_tree_preview())
         self.destination_tree.pathsDropped.connect(self._stage_paths)
+        self.destination_tree.dragTargetChanged.connect(self._update_drag_target_hint)
         self._load_tree()
         self._refresh_plan_view()
 
     def _build_candidate_pane(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
+        pane.setObjectName("reorgCandidatePane")
+        self.candidate_pane = pane
         layout = QVBoxLayout(pane)
         layout.addWidget(QLabel("<b>Candidates</b>"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Find pages by title or path…")
+        self.search_edit.setClearButtonEnabled(True)
         layout.addWidget(self.search_edit)
         filters = QHBoxLayout()
         self.content_checkbox = QCheckBox("Content matches")
@@ -215,7 +321,9 @@ class VaultReorgWindow(QDialog):
         )
 
     def _build_destination_pane(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
+        pane.setObjectName("reorgDestinationPane")
+        self.destination_pane = pane
         layout = QVBoxLayout(pane)
         layout.addWidget(QLabel("<b>Destination hierarchy</b>"))
         self.destination_search_edit = QLineEdit()
@@ -227,21 +335,44 @@ class VaultReorgWindow(QDialog):
         self.destination_tree = _DestinationTree()
         self.destination_tree.setHeaderLabel("Complete vault (Journal included)")
         layout.addWidget(self.destination_tree, 1)
-        hint = QLabel("Drag search results or tree pages onto a destination parent.")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self.destination_hint_label = QLabel("Drag search results or tree pages onto a destination parent.")
+        self.destination_hint_label.setWordWrap(True)
+        layout.addWidget(self.destination_hint_label)
         return pane
 
     def _build_plan_pane(self) -> QWidget:
-        pane = QWidget()
+        pane = QFrame()
+        pane.setObjectName("reorgPlanPane")
+        self.plan_pane = pane
         layout = QVBoxLayout(pane)
         layout.addWidget(QLabel("<b>Staged changes</b>"))
+        self.plan_error_label = QLabel()
+        self.plan_error_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.plan_error_label.setWordWrap(True)
+        self.plan_error_label.setAccessibleName("Plan validation status")
+        self.plan_error_label.setStyleSheet(
+            "background-color: #5f2020; color: #ffe4e4; border: 1px solid #a84343; "
+            "border-radius: 4px; padding: 6px; font-weight: 600;"
+        )
+        self.plan_error_label.hide()
+        layout.addWidget(self.plan_error_label)
         self.plan_table = QTableWidget(0, 6)
         self.plan_table.setHorizontalHeaderLabels(
-            ["Operation", "Source", "Destination", "New name / reference note", "Journal history", "Status"]
+            ["Action", "Source", "Destination", "Name / Ref", "Journal", "Status"]
         )
-        self.plan_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.plan_table.horizontalHeader().setStretchLastSection(True)
+        header = self.plan_table.horizontalHeader()
+        header.setMinimumSectionSize(44)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(3, 82)
+        header.resizeSection(4, 78)
+        header.resizeSection(5, 72)
+        header.setStretchLastSection(False)
+        self.plan_table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.plan_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.plan_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.plan_table.itemChanged.connect(self._plan_item_changed)
@@ -260,8 +391,168 @@ class VaultReorgWindow(QDialog):
         layout.addLayout(buttons)
         return pane
 
+    def _setup_focus_panes(self) -> None:
+        for pane in self._focus_panes:
+            pane.installEventFilter(self)
+            for child in pane.findChildren(QWidget):
+                child.installEventFilter(self)
+        self.set_vault_accent_color(self._vault_accent_color)
+
+    def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
+        """Apply the accent already resolved by the owning vault window."""
+        accent = QColor((color_hex or "").strip())
+        if not accent.isValid():
+            accent = self.palette().color(QPalette.ColorRole.Highlight)
+        self._vault_accent_color = accent.name()
+        self._focus_accent_color = accent.name()
+        if hasattr(self, "_focus_panes"):
+            self._apply_focus_pane_styles()
+        self._update_staged_ghost_colors()
+        if hasattr(self, "help_btn"):
+            text_color = "#111111" if accent.lightness() >= 150 else "#ffffff"
+            self.help_btn.setStyleSheet(
+                f"QPushButton {{ background-color: {accent.name()}; color: {text_color}; "
+                f"border: 1px solid {accent.lighter(125).name()}; border-radius: 5px; "
+                "padding: 5px 12px; font-weight: 700; }}"
+                f"QPushButton:hover {{ background-color: {accent.lighter(115).name()}; }}"
+            )
+
+    def _update_staged_ghost_colors(self) -> None:
+        tree = getattr(self, "destination_tree", None)
+        accent = QColor(getattr(self, "_focus_accent_color", ""))
+        if tree is None or not accent.isValid():
+            return
+        root = tree.invisibleRootItem()
+        stack = [root.child(index) for index in range(root.childCount())]
+        while stack:
+            item = stack.pop()
+            if item.data(0, _GHOST_ROLE):
+                item.setForeground(0, QBrush(accent))
+            stack.extend(item.child(index) for index in range(item.childCount()))
+
+    def _update_drag_target_hint(self, path: str) -> None:
+        if path:
+            self.destination_hint_label.setText(f"Drop target: {path}")
+            self.destination_hint_label.setStyleSheet(
+                f"color: {self._focus_accent_color}; font-weight: 700;"
+            )
+        else:
+            self.destination_hint_label.setText(
+                "Drag search results or tree pages onto a destination parent."
+            )
+            self.destination_hint_label.setStyleSheet("")
+
+    def _show_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "About Vault Reorganization",
+            "Vault Reorganization helps you find pages by title, path, or indexed content and rehome "
+            "them in a more useful part of your vault.\n\n"
+            "Search for an idea or topic, choose a destination, and stage one or more changes. You can "
+            "adjust names and destinations before validating the complete plan. Nothing moves until "
+            "you select Apply Reorganization.\n\n"
+            "Journal history is durable:\n"
+            "• A Journal day page stays in the Journal. Reorganizing it adds a reference from the "
+            "selected topic page back to that day.\n"
+            "• Pages created underneath a Journal day can be rehomed freely. StillPoint preserves the "
+            "history by adding or updating a link on the original day page.\n\n"
+            "This lets you collect ideas during daily work, then organize them into topical areas "
+            "without losing when and where the work began.",
+        )
+
+    def _pane_for_widget(self, widget: Optional[QWidget]) -> Optional[QFrame]:
+        current = widget
+        while current is not None:
+            if current in self._focus_panes:
+                return current
+            current = current.parentWidget()
+        return None
+
+    def _sync_focus_pane(self) -> None:
+        self._active_focus_pane = self._pane_for_widget(QApplication.focusWidget())
+        self._apply_focus_pane_styles()
+
+    def _apply_focus_pane_styles(self) -> None:
+        inactive = self.palette().color(QPalette.ColorRole.Mid).name()
+        for pane in self._focus_panes:
+            border = self._focus_accent_color if pane is self._active_focus_pane else inactive
+            pane.setStyleSheet(
+                f"QFrame#{pane.objectName()} {{ border: 2px solid {border}; border-radius: 5px; }}"
+            )
+
+    def _focus_detail_area(self, widget: QWidget) -> None:
+        if widget is self.candidate_list and self.candidate_list.count() and self.candidate_list.currentRow() < 0:
+            self.candidate_list.setCurrentRow(0)
+        elif widget is self.destination_tree and self.destination_tree.currentItem() is None:
+            if self.destination_tree.topLevelItemCount():
+                self.destination_tree.setCurrentItem(self.destination_tree.topLevelItem(0))
+        elif widget is self.plan_table and self.plan_table.rowCount() and self.plan_table.currentRow() < 0:
+            self.plan_table.setCurrentCell(0, 0)
+            self.plan_table.selectRow(0)
+        widget.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _cycle_detail_area(self, current: QWidget, direction: int) -> bool:
+        detail_areas: list[QWidget] = [
+            self.candidate_list,
+            self.destination_tree,
+            self.plan_table,
+        ]
+        pane = self._pane_for_widget(current)
+        if pane not in self._focus_panes:
+            return False
+        index = self._focus_panes.index(pane)
+        self._focus_detail_area(detail_areas[(index + direction) % len(detail_areas)])
+        return True
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            if modifiers == Qt.KeyboardModifier.NoModifier:
+                if watched is self.search_edit and key == Qt.Key.Key_Down:
+                    self._focus_detail_area(self.candidate_list)
+                    event.accept()
+                    return True
+                if (
+                    watched is self.candidate_list
+                    and key == Qt.Key.Key_Up
+                    and self.candidate_list.currentRow() <= 0
+                ):
+                    self.search_edit.setFocus(Qt.FocusReason.BacktabFocusReason)
+                    event.accept()
+                    return True
+                if watched is self.candidate_list and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                    self._stage_selected_candidates()
+                    event.accept()
+                    return True
+            elif modifiers == Qt.KeyboardModifier.ControlModifier and isinstance(watched, QWidget):
+                if key == Qt.Key.Key_Right and self._cycle_detail_area(watched, 1):
+                    event.accept()
+                    return True
+                if key == Qt.Key.Key_Left and self._cycle_detail_area(watched, -1):
+                    event.accept()
+                    return True
+        if event.type() == QEvent.Type.FocusIn:
+            pane = self._pane_for_widget(watched if isinstance(watched, QWidget) else None)
+            if pane is not None and pane is not self._active_focus_pane:
+                self._active_focus_pane = pane
+                self._apply_focus_pane_styles()
+        elif event.type() == QEvent.Type.FocusOut:
+            QTimer.singleShot(0, self._sync_focus_pane)
+        return super().eventFilter(watched, event)
+
     def has_staged_changes(self) -> bool:
         return bool(self._plan)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self._initial_focus_applied:
+            return
+        self._initial_focus_applied = True
+        QTimer.singleShot(
+            0,
+            lambda: self.search_edit.setFocus(Qt.FocusReason.ActiveWindowFocusReason),
+        )
 
     def _load_tree(self) -> None:
         try:
@@ -361,6 +652,9 @@ class VaultReorgWindow(QDialog):
             font = ghost.font(0)
             font.setItalic(True)
             ghost.setFont(0, font)
+            accent = QColor(getattr(self, "_focus_accent_color", ""))
+            if accent.isValid():
+                ghost.setForeground(0, QBrush(accent))
             parent_item.addChild(ghost)
             parent_item.setExpanded(True)
             self._destination_expanded_paths.add(op["destination_parent"])
@@ -444,16 +738,48 @@ class VaultReorgWindow(QDialog):
                 prefix += f"Matched heading: {matched_heading}\n"
             item = QListWidgetItem(f"{prefix}{title}\n{path}{suffix}")
             item.setData(_PATH_ROLE, path)
+            tooltip_parts = [
+                f"<b>{html.escape(title)}</b>",
+                f"<code>{html.escape(path)}</code>",
+            ]
+            if matched_heading:
+                tooltip_parts.append(f"<b>Matched heading:</b> {html.escape(matched_heading)}")
+            snippet = str(result.get("snippet") or "").strip()
+            if snippet:
+                tooltip_parts.append(
+                    "<b>Matching content:</b><br>"
+                    + html.escape(snippet[:1200]).replace("\n", "<br>")
+                )
+            item.setToolTip("<br><br>".join(tooltip_parts))
             self.candidate_list.addItem(item)
         message = f"{len(results)} result(s)"
         if self.content_checkbox.isChecked() and not payload.get("content_index_available"):
             message += " — content index unavailable; showing title/path matches"
         self.result_label.setText(message)
 
+    def _clear_candidate_search(self) -> None:
+        self.search_timer.stop()
+        self.search_edit.clear()
+        # clear() emits textChanged and starts the debounce timer; this reset is
+        # immediate and should not leave a redundant callback queued.
+        self.search_timer.stop()
+        self._run_search()
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key.Key_Escape:
+            self._clear_candidate_search()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _stage_selected_candidates(self) -> None:
         target = self.destination_tree.currentItem()
         target_path = str(target.data(0, _PATH_ROLE) or "") if target else ""
-        paths = [str(item.data(_PATH_ROLE) or "") for item in self.candidate_list.selectedItems()]
+        selected = list(self.candidate_list.selectedItems())
+        if not selected and self.candidate_list.currentItem() is not None:
+            selected = [self.candidate_list.currentItem()]
+        paths = [str(item.data(_PATH_ROLE) or "") for item in selected]
         if not target_path:
             QMessageBox.information(self, "Choose Destination", "Select a destination parent first.")
             return
@@ -542,10 +868,18 @@ class VaultReorgWindow(QDialog):
                     }.get(op.get("journal_reference_action"), ""),
                     op.get("status", "Not validated"),
                 ]
+                tooltip_labels = ["Action", "Source path", "Destination path", "Name / Ref", "Journal", "Status"]
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
                     if column != 3:
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if value:
+                        label = tooltip_labels[column]
+                        escaped_value = html.escape(str(value)).replace("\n", "<br>")
+                        value_markup = f"<code>{escaped_value}</code>" if column in {1, 2} else escaped_value
+                        item.setToolTip(
+                            f"<b>{label}</b><br>{value_markup}"
+                        )
                     self.plan_table.setItem(row, column, item)
         finally:
             self._updating_table = False
@@ -556,11 +890,86 @@ class VaultReorgWindow(QDialog):
             summary += f"; {append_count} Journal reference(s) will be added"
         if reference_count:
             summary += f"; {reference_count} Journal entry reference(s) staged"
-        self.summary_label.setText(summary if self._plan else "No changes staged")
-        self.validate_btn.setEnabled(bool(self._plan) and not self.read_only)
-        self.apply_btn.setEnabled(bool(self._plan) and bool(self._preflight and self._preflight.get("ok")) and not self.read_only)
+        has_plan = bool(self._plan)
+        validated_ok = bool(self._preflight and self._preflight.get("ok"))
+        validation_failed = bool(self._preflight is not None and not self._preflight.get("ok"))
+        if self.read_only:
+            summary = "Read-only vault — validation and apply are unavailable"
+        elif not has_plan:
+            summary = "No changes staged — stage a change to enable validation"
+        elif validated_ok:
+            summary += "; validated and ready to apply"
+        elif validation_failed:
+            summary += "; resolve validation errors, then validate again"
+        else:
+            summary += "; validation required"
+        self.summary_label.setText(summary)
+        self.validate_btn.setEnabled(has_plan and not self.read_only)
+        self.apply_btn.setEnabled(has_plan and validated_ok and not self.read_only)
+        if not has_plan or self.read_only:
+            validate_state = "blocked"
+            validate_tip = (
+                "Validation is unavailable while the vault is read-only."
+                if self.read_only
+                else "Stage at least one change before validating."
+            )
+        elif validated_ok:
+            validate_state = "neutral"
+            validate_tip = "The plan is valid. You may validate again if the vault changed."
+        else:
+            validate_state = "ready"
+            validate_tip = "Next step: validate the staged changes."
+        if self.apply_btn.isEnabled():
+            apply_state = "ready"
+            apply_tip = "Next step: apply the validated reorganization."
+        else:
+            apply_state = "blocked"
+            apply_tip = (
+                "Apply is unavailable while the vault is read-only."
+                if self.read_only
+                else "Validate the staged plan successfully before applying it."
+            )
+        self._set_workflow_button_state(self.validate_btn, validate_state, validate_tip)
+        self._set_workflow_button_state(self.apply_btn, apply_state, apply_tip)
+        self._update_plan_error_label()
         self.stage_btn.setEnabled(not self.read_only)
         self._rebuild_tree_preview()
+
+    def _update_plan_error_label(self) -> None:
+        if self._preflight is None or self._preflight.get("ok"):
+            self.plan_error_label.clear()
+            self.plan_error_label.hide()
+            return
+        general_errors = [
+            str(error.get("message") or "Invalid plan")
+            for error in self._preflight.get("errors") or []
+            if not isinstance(error.get("row"), int)
+        ]
+        if general_errors:
+            message = "Plan blocked:\n" + "\n".join(f"• {error}" for error in general_errors)
+        else:
+            message = "Plan blocked — resolve the row errors shown in the Status column."
+        self.plan_error_label.setText(message)
+        self.plan_error_label.show()
+
+    @staticmethod
+    def _set_workflow_button_state(button: QPushButton, state: str, tooltip: str) -> None:
+        button.setProperty("workflowState", state)
+        button.setToolTip(tooltip)
+        if state == "ready":
+            button.setStyleSheet(
+                "QPushButton { background-color: #1f7a3f; color: white; border: 1px solid #39a85c; "
+                "border-radius: 4px; padding: 5px 10px; font-weight: 600; }"
+                "QPushButton:hover { background-color: #278f4b; }"
+                "QPushButton:pressed { background-color: #176031; }"
+            )
+        elif state == "blocked":
+            button.setStyleSheet(
+                "QPushButton, QPushButton:disabled { background-color: #7f2525; color: #f7dddd; "
+                "border: 1px solid #a84343; border-radius: 4px; padding: 5px 10px; }"
+            )
+        else:
+            button.setStyleSheet("")
 
     def _plan_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_table or item.column() != 3 or not (0 <= item.row() < len(self._plan)):
@@ -614,21 +1023,22 @@ class VaultReorgWindow(QDialog):
         if tree_version_changed:
             self._load_tree()
         errors_by_row: dict[int, list[str]] = {}
-        general_errors: list[str] = []
         for error in self._preflight.get("errors") or []:
             row = error.get("row")
             if isinstance(row, int):
                 errors_by_row.setdefault(row, []).append(str(error.get("message") or "Invalid operation"))
-            else:
-                general_errors.append(str(error.get("message") or "Invalid plan"))
         normalized = self._preflight.get("operations") or []
         for row, op in enumerate(self._plan):
             server_op = normalized[row] if row < len(normalized) else {}
             op["journal_reference_action"] = server_op.get("journal_reference_action", "none")
-            op["status"] = "; ".join(errors_by_row.get(row, [])) or ("Valid" if self._preflight.get("ok") else "Blocked")
+            row_errors = errors_by_row.get(row, [])
+            if row_errors:
+                op["status"] = "; ".join(row_errors)
+            elif self._preflight.get("ok"):
+                op["status"] = "Valid"
+            else:
+                op["status"] = "Valid — plan blocked elsewhere"
         self._refresh_plan_view()
-        if general_errors:
-            QMessageBox.warning(self, "Plan Needs Attention", "\n".join(general_errors))
         return bool(self._preflight.get("ok"))
 
     def _apply_plan(self) -> None:
