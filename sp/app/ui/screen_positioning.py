@@ -68,3 +68,33 @@ def clamp_popup_top_left(desired: QPoint, size: QSize, bounds: QRect, margin: in
     x = max(left, min(int(desired.x()), max_x))
     y = max(top, min(int(desired.y()), max_y))
     return QPoint(x, y)
+
+
+def fit_size_to_bounds(preferred: QSize, bounds: QRect, margin: int = 24) -> QSize:
+    """Cap a preferred window size to the usable area inside ``bounds``."""
+    inset = max(0, int(margin))
+    available_width = max(1, int(bounds.width()) - (2 * inset))
+    available_height = max(1, int(bounds.height()) - (2 * inset))
+    return QSize(
+        min(max(1, int(preferred.width())), available_width),
+        min(max(1, int(preferred.height())), available_height),
+    )
+
+
+def fit_window_to_available_screen(
+    window: QWidget,
+    preferred: QSize,
+    *,
+    parent: Optional[QWidget] = None,
+    margin: int = 24,
+) -> QSize:
+    """Resize and center a window so it remains inside its screen's work area."""
+    bounds = popup_available_geometry(parent=parent or window.parentWidget() or window)
+    size = fit_size_to_bounds(preferred, bounds, margin=margin)
+    desired = QPoint(
+        bounds.left() + (bounds.width() - size.width()) // 2,
+        bounds.top() + (bounds.height() - size.height()) // 2,
+    )
+    window.resize(size)
+    window.move(clamp_popup_top_left(desired, size, bounds, margin=max(0, int(margin))))
+    return size

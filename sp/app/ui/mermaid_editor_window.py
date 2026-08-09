@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QDesktopServices
 
+from .screen_positioning import fit_window_to_available_screen, popup_available_geometry
+
 
 def _env_truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
@@ -213,6 +215,9 @@ class MermaidEditorWindow(QMainWindow):
         self._last_saved_content: Optional[str] = None
         self._last_svg: str = ""
         self._window_shown = False
+        self._splitter_layout_initialized = False
+        self._pending_hsplit_state: Optional[str] = None
+        self._pending_vsplit_state: Optional[str] = None
         self._startup_render_pending = True
         self._render_in_progress = False
         self._render_requeued = False
@@ -470,7 +475,9 @@ class MermaidEditorWindow(QMainWindow):
             if self._ai_chat_enabled:
                 self.ai_panel = self._create_ai_chat_panel()
                 right_v_splitter.addWidget(self.ai_panel)
-                right_v_splitter.setSizes([490, 210])
+                right_v_splitter.setStretchFactor(0, 1)
+                right_v_splitter.setStretchFactor(1, 0)
+                right_v_splitter.setSizes([640, 60])
             else:
                 self.ai_panel = None
                 right_v_splitter.setSizes([700])
@@ -479,6 +486,8 @@ class MermaidEditorWindow(QMainWindow):
                 right_v_splitter.setCollapsible(1, True)
 
             main_h_splitter.addWidget(right_v_splitter)
+            main_h_splitter.setStretchFactor(0, 2)
+            main_h_splitter.setStretchFactor(1, 3)
             main_h_splitter.setSizes([400, 600])
             main_h_splitter.setCollapsible(0, False)
             main_h_splitter.setCollapsible(1, False)
@@ -649,10 +658,46 @@ class MermaidEditorWindow(QMainWindow):
         super().showEvent(event)
         if not self._window_shown:
             self._window_shown = True
+            self._initialize_splitter_layout()
             # In external browser mode don't auto-render on open —
             # the user triggers preview explicitly via Render button.
             if self._startup_render_pending and not self._external_browser_preview:
                 QTimer.singleShot(0, self._render)
+
+    def _initialize_splitter_layout(self) -> None:
+        """Apply splitter state after Qt has assigned the window its final size."""
+        if self._splitter_layout_initialized:
+            return
+        self._splitter_layout_initialized = True
+
+        h_restored = False
+        if self._pending_hsplit_state and not self._external_browser_preview:
+            try:
+                h_restored = self.editor_preview_splitter.restoreState(
+                    QByteArray.fromBase64(self._pending_hsplit_state.encode("utf-8"))
+                )
+            except Exception:
+                h_restored = False
+        if not h_restored and not self._external_browser_preview:
+            total = max(1, self.editor_preview_splitter.width())
+            self.editor_preview_splitter.setSizes([max(1, total * 2 // 5), max(1, total * 3 // 5)])
+
+        if self._vertical_splitter is None:
+            return
+        v_restored = False
+        if self._pending_vsplit_state:
+            try:
+                v_restored = self._vertical_splitter.restoreState(
+                    QByteArray.fromBase64(self._pending_vsplit_state.encode("utf-8"))
+                )
+            except Exception:
+                v_restored = False
+        if not v_restored and self._ai_chat_enabled and self.ai_panel is not None:
+            total = max(1, self._vertical_splitter.height())
+            chat_hint = max(48, self.ai_panel.sizeHint().height(), self.ai_input.height())
+            chat_height = min(chat_hint, max(1, total // 3))
+            preview_height = max(1, total - self._vertical_splitter.handleWidth() - chat_height)
+            self._vertical_splitter.setSizes([preview_height, chat_height])
 
     def _run_render_in_background(self, token: int, render_fn) -> None:
         def _worker() -> None:
@@ -1123,7 +1168,8 @@ class MermaidEditorWindow(QMainWindow):
     def _show_ai_response_dialog(self, ai_text: str) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Review AI Generated Diagram - Accept or Decline")
-        dialog.setGeometry(50, 50, 1400, 800)
+        available = popup_available_geometry(parent=self)
+        stack_diff = available.width() < 760
         dialog_bg = theme_value("mermaid_editor.diff_dialog.bg", "#1e1e1e")
         dialog_label = theme_value("mermaid_editor.diff_dialog.label", "#e0e0e0")
         button_bg = theme_value("mermaid_editor.diff_dialog.button_bg", "#2d2d2d")
@@ -1154,7 +1200,9 @@ class MermaidEditorWindow(QMainWindow):
 
         layout = QVBoxLayout()
 
-        title = QLabel("Review Changes - Left: Current | Right: AI Generated")
+        comparison_hint = "Top: Current | Bottom: AI Generated" if stack_diff else "Left: Current | Right: AI Generated"
+        title = QLabel(f"Review Changes - {comparison_hint}")
+        title.setWordWrap(True)
         title_color = theme_value("mermaid_editor.diff_dialog.title_color", "#e0e0e0")
         title_weight = theme_value("mermaid_editor.diff_dialog.title_weight", "bold")
         title_size = theme_value("mermaid_editor.diff_dialog.title_size_px", 12)
@@ -1163,7 +1211,8 @@ class MermaidEditorWindow(QMainWindow):
         )
         layout.addWidget(title)
 
-        diff_layout = QHBoxLayout()
+        diff_splitter = QSplitter(Qt.Vertical if stack_diff else Qt.Horizontal)
+        diff_splitter.setChildrenCollapsible(False)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout()
@@ -1189,12 +1238,15 @@ class MermaidEditorWindow(QMainWindow):
         right_layout.addWidget(right_display)
         right_panel.setLayout(right_layout)
 
-        diff_layout.addWidget(left_panel, stretch=1)
-        diff_layout.addWidget(right_panel, stretch=1)
-        layout.addLayout(diff_layout, stretch=1)
+        diff_splitter.addWidget(left_panel)
+        diff_splitter.addWidget(right_panel)
+        diff_splitter.setStretchFactor(0, 1)
+        diff_splitter.setStretchFactor(1, 1)
+        layout.addWidget(diff_splitter, stretch=1)
 
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
+        button_layout = QVBoxLayout() if available.width() < 380 else QHBoxLayout()
+        if isinstance(button_layout, QHBoxLayout):
+            button_layout.addStretch()
 
         accept_btn = QPushButton("Accept Changes")
         accept_btn.setMinimumWidth(150)
@@ -1236,6 +1288,7 @@ class MermaidEditorWindow(QMainWindow):
 
         layout.addLayout(button_layout)
         dialog.setLayout(layout)
+        fit_window_to_available_screen(dialog, QSize(1400, 800), parent=self)
 
         self._active_diff_dialog = dialog
         dialog.exec()
@@ -1392,15 +1445,11 @@ class MermaidEditorWindow(QMainWindow):
             pass
         try:
             if not self._external_browser_preview:
-                hstate64 = config.load_mermaid_hsplit_state()
-                if hstate64:
-                    self.editor_preview_splitter.restoreState(QByteArray.fromBase64(hstate64.encode("utf-8")))
+                self._pending_hsplit_state = config.load_mermaid_hsplit_state()
         except Exception:
             pass
         try:
-            vstate64 = config.load_mermaid_vsplit_state()
-            if vstate64 and hasattr(self, "_vertical_splitter") and self._vertical_splitter:
-                self._vertical_splitter.restoreState(QByteArray.fromBase64(vstate64.encode("utf-8")))
+            self._pending_vsplit_state = config.load_mermaid_vsplit_state()
         except Exception:
             pass
 

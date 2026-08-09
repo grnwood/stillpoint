@@ -123,7 +123,11 @@ from sp.logging_flags import log_enabled
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig, has_material_text_difference
 from .theme import apply_menu_theme, theme_color, theme_value
-from .screen_positioning import popup_available_geometry, clamp_popup_top_left
+from .screen_positioning import (
+    clamp_popup_top_left,
+    fit_window_to_available_screen,
+    popup_available_geometry,
+)
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -6913,9 +6917,10 @@ class MainWindow(QMainWindow):
             self._homebase_conflict_seen_keys.add(self._homebase_conflict_key(entry))
         dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync Conflicts")
-        dialog.resize(860, 460)
+        available = popup_available_geometry(parent=self)
         layout = QVBoxLayout(dialog)
         info = QLabel("Homebase detected file conflicts. Select a file and open the diff viewer to merge changes.")
+        info.setWordWrap(True)
         layout.addWidget(info)
         list_widget = QListWidget(dialog)
         detail_label = QLabel("")
@@ -6936,12 +6941,13 @@ class MainWindow(QMainWindow):
             list_widget.addItem(item)
         layout.addWidget(list_widget, 1)
         layout.addWidget(detail_label)
-        buttons = QHBoxLayout()
+        buttons = QVBoxLayout() if available.width() < 700 else QHBoxLayout()
         open_diff_btn = QPushButton("Open Diff Viewer", dialog)
         keep_server_btn = QPushButton("Keep Server Version", dialog)
         keep_local_btn = QPushButton("Keep My Version", dialog)
         close_btn = QPushButton("Close", dialog)
-        buttons.addStretch(1)
+        if isinstance(buttons, QHBoxLayout):
+            buttons.addStretch(1)
         buttons.addWidget(keep_local_btn)
         buttons.addWidget(keep_server_btn)
         buttons.addWidget(open_diff_btn)
@@ -7024,6 +7030,7 @@ class MainWindow(QMainWindow):
             list_widget.setCurrentRow(0)
         self._homebase_conflict_popup_open = True
         try:
+            fit_window_to_available_screen(dialog, QSize(860, 460), parent=self)
             dialog.exec()
         finally:
             self._homebase_conflict_popup_open = False
@@ -7034,7 +7041,6 @@ class MainWindow(QMainWindow):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync Errors")
-        dialog.resize(900, 520)
         layout = QVBoxLayout(dialog)
         info = QLabel(
             "These files failed during sync and were skipped so the rest of sync could continue. "
@@ -7090,6 +7096,7 @@ class MainWindow(QMainWindow):
         list_widget.currentItemChanged.connect(lambda _cur, _prev: _update_detail())
         if list_widget.count():
             list_widget.setCurrentRow(0)
+        fit_window_to_available_screen(dialog, QSize(900, 520), parent=self)
         dialog.exec()
 
     def _apply_homebase_conflict_resolution(
@@ -7856,7 +7863,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Homebase Sync")
         dialog.setModal(True)
-        dialog.resize(620, 560)
+        available = popup_available_geometry(parent=self)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -7867,6 +7874,16 @@ class MainWindow(QMainWindow):
         header.addWidget(title)
         header.addStretch(1)
         layout.addLayout(header)
+
+        body_scroll = QScrollArea(dialog)
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.NoFrame)
+        body_widget = QWidget(body_scroll)
+        body_layout = QVBoxLayout(body_widget)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_scroll.setWidget(body_widget)
+        layout.addWidget(body_scroll, 1)
 
         info_box = QFrame()
         info_box.setFrameShape(QFrame.StyledPanel)
@@ -7927,7 +7944,7 @@ class MainWindow(QMainWindow):
         error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         info_layout.addWidget(error_label, row, 1)
 
-        layout.addWidget(info_box)
+        body_layout.addWidget(info_box)
 
         activity_box = QFrame()
         activity_box.setFrameShape(QFrame.StyledPanel)
@@ -7944,7 +7961,7 @@ class MainWindow(QMainWindow):
         activity_details = QListWidget()
         activity_details.setAlternatingRowColors(True)
         activity_layout.addWidget(activity_details)
-        layout.addWidget(activity_box)
+        body_layout.addWidget(activity_box)
 
         transfers_box = QFrame()
         transfers_box.setFrameShape(QFrame.StyledPanel)
@@ -7957,7 +7974,7 @@ class MainWindow(QMainWindow):
         transfers_list = QListWidget()
         transfers_list.setAlternatingRowColors(True)
         transfers_layout.addWidget(transfers_list)
-        layout.addWidget(transfers_box)
+        body_layout.addWidget(transfers_box)
 
         settings_box = QFrame()
         settings_box.setFrameShape(QFrame.StyledPanel)
@@ -7990,7 +8007,7 @@ class MainWindow(QMainWindow):
         max_parallel_spin.setValue(max(1, max_parallel_transfers))
         settings_layout.addRow("Max Parallel Transfers:", max_parallel_spin)
 
-        layout.addWidget(settings_box)
+        body_layout.addWidget(settings_box)
 
         def _toggle_interval_enabled() -> None:
             interval_spin.setEnabled(bool(auto_sync_cb.isChecked()))
@@ -7998,7 +8015,6 @@ class MainWindow(QMainWindow):
         auto_sync_cb.toggled.connect(_toggle_interval_enabled)
         _toggle_interval_enabled()
 
-        button_row = QHBoxLayout()
         save_settings_btn = QPushButton("Save Settings")
         sync_now_btn = QPushButton("Sync Now")
         reset_auth_btn = QPushButton("Reset Auth")
@@ -8006,18 +8022,31 @@ class MainWindow(QMainWindow):
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
         sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
         sync_errors_btn = QPushButton(f"View Sync Errors ({len(sync_errors)})")
-        button_row.addWidget(conflicts_btn)
-        button_row.addWidget(sync_errors_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
 
-        button_row.addWidget(save_settings_btn)
-        button_row.addWidget(sync_now_btn)
-        button_row.addWidget(reset_auth_btn)
-        button_row.addWidget(reset_passphrase_btn)
-        button_row.addStretch(1)
-        button_row.addWidget(close_btn)
-        layout.addLayout(button_row)
+        status_actions = QVBoxLayout() if available.width() < 620 else QHBoxLayout()
+        status_actions.addWidget(conflicts_btn)
+        status_actions.addWidget(sync_errors_btn)
+        if isinstance(status_actions, QHBoxLayout):
+            status_actions.addStretch(1)
+        body_layout.insertLayout(1, status_actions)
+
+        settings_actions = QVBoxLayout() if available.width() < 620 else QHBoxLayout()
+        settings_actions.addWidget(reset_auth_btn)
+        settings_actions.addWidget(reset_passphrase_btn)
+        if isinstance(settings_actions, QHBoxLayout):
+            settings_actions.addStretch(1)
+        body_layout.addLayout(settings_actions)
+        body_layout.addStretch(1)
+
+        primary_actions = QVBoxLayout() if available.width() < 420 else QHBoxLayout()
+        if isinstance(primary_actions, QHBoxLayout):
+            primary_actions.addStretch(1)
+        primary_actions.addWidget(save_settings_btn)
+        primary_actions.addWidget(sync_now_btn)
+        primary_actions.addWidget(close_btn)
+        layout.addLayout(primary_actions)
 
         def _save_settings() -> None:
             try:
@@ -8102,6 +8131,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda _result: refresh_timer.stop())
         _refresh_dialog_status()
 
+        fit_window_to_available_screen(dialog, QSize(620, 560), parent=self)
         dialog.exec()
 
     def _reset_homebase_passphrase(self, parent_dialog=None) -> None:
@@ -15211,11 +15241,92 @@ class MainWindow(QMainWindow):
             return
         print(f"[QuickCapture] UI overlay target resolved: {target}")
 
-        def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> None:
-            self._submit_quick_capture(text, target, attachments)
+        def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> dict:
+            return _on_capture_with_destination(text, attachments, _vault_path, selected_destination)
+
+        selected_destination = {
+            "label": "Today's Journal"
+            if target.get("page_mode") == "today"
+            else self._quick_capture_destination_label(str(target.get("page_ref") or "")),
+            "page_mode": target.get("page_mode") or "today",
+            "page_ref": target.get("page_ref"),
+        }
+
+        def _on_capture_with_destination(
+            text: str,
+            attachments: list[dict],
+            _vault_path: Optional[str],
+            destination: dict[str, Any],
+        ) -> dict:
+            capture_target = dict(target)
+            capture_target["page_mode"] = destination.get("page_mode") or "today"
+            capture_target["page_ref"] = destination.get("page_ref")
+            receipt = self._submit_quick_capture(text, capture_target, attachments)
+            if not receipt.get("ok", False):
+                return receipt
+            receipt.update(
+                {
+                    "created": datetime.now().isoformat(timespec="seconds"),
+                    "destination": destination.get("label")
+                    or destination.get("page_ref")
+                    or "Today's Journal",
+                    "excerpt": text.replace("\n", " ")[:160],
+                    "vault_path": str(capture_target.get("vault_path") or ""),
+                    "kind": str(capture_target.get("kind") or ""),
+                    "server_url": str(capture_target.get("server_url") or ""),
+                    "page_mode": str(capture_target.get("page_mode") or "today"),
+                    "page_ref": str(capture_target.get("page_ref") or ""),
+                }
+            )
+            config.add_quick_capture_history(receipt)
+            return receipt
+
+        destination_options = [{"label": "Today's Journal", "page_mode": "today", "page_ref": None}]
+        seen_custom_refs: set[str] = set()
+        configured_ref = str(target.get("page_ref") or "").strip()
+        if configured_ref:
+            seen_custom_refs.add(configured_ref)
+            destination_options.append(
+                {
+                    "label": self._quick_capture_destination_label(configured_ref),
+                    "page_mode": "custom",
+                    "page_ref": configured_ref,
+                }
+            )
+        for entry in config.load_quick_capture_history():
+            page_ref = str(entry.get("page_ref") or "").strip()
+            if entry.get("page_mode") != "custom" or not page_ref or page_ref in seen_custom_refs:
+                continue
+            seen_custom_refs.add(page_ref)
+            destination_options.append(
+                {
+                    "label": self._quick_capture_destination_label(page_ref),
+                    "page_mode": "custom",
+                    "page_ref": page_ref,
+                }
+            )
+            if len(destination_options) >= 10:
+                break
+
+        def _on_undo(capture_id: str) -> dict:
+            if target.get("kind") != "local":
+                return {"ok": False, "error": "Remote captures cannot be undone from this window."}
+            from sp.app import quickcapture as qc
+
+            return qc._undo_file_capture(capture_id)
 
         subtitle = self._quick_capture_subtitle(target)
-        overlay = QuickCaptureOverlay(parent=self, on_capture=_on_capture, subtitle=subtitle)
+        overlay = QuickCaptureOverlay(
+            parent=self,
+            on_capture=_on_capture,
+            subtitle=subtitle,
+            destination_options=destination_options,
+            selected_destination=selected_destination,
+            on_capture_with_destination=_on_capture_with_destination,
+            on_undo=_on_undo if target.get("kind") == "local" else None,
+            on_open_capture=self._open_quick_capture_receipt,
+            capture_history=config.load_quick_capture_history(),
+        )
         overlay.adjustSize()
         geo = self.frameGeometry()
         pos = geo.center() - overlay.rect().center()
@@ -15377,7 +15488,12 @@ class MainWindow(QMainWindow):
             pass
         return headers
 
-    def _submit_quick_capture(self, text: str, target: dict[str, Any], attachments: Optional[list[dict]] = None) -> None:
+    def _submit_quick_capture(
+        self,
+        text: str,
+        target: dict[str, Any],
+        attachments: Optional[list[dict]] = None,
+    ) -> dict:
         payload = {
             "vault_path": target.get("vault_path"),
             "page_mode": target.get("page_mode"),
@@ -15391,21 +15507,23 @@ class MainWindow(QMainWindow):
                 vault_root = Path(target.get("vault_path") or "")
                 page_mode = target.get("page_mode") or "today"
                 page_ref = target.get("page_ref")
-                qc._capture_to_files(vault_root, page_mode, page_ref, text, attachments)
+                result = qc._capture_to_files_result(vault_root, page_mode, page_ref, text, attachments)
                 self.statusBar().showMessage("Quick Capture saved.", 3000)
-                return
+                return result
             except Exception as exc:
                 self._quick_capture_fail(str(exc))
-                return
+                return {"ok": False, "error": str(exc)}
         if attachments and target.get("kind") == "remote":
-            self._quick_capture_fail("Attachments are not supported for remote Quick Capture yet.")
-            return
+            error = "Attachments are not supported for remote Quick Capture yet."
+            self._quick_capture_fail(error)
+            return {"ok": False, "error": error}
         try:
             if target.get("kind") == "remote":
                 server_url = str(target.get("server_url") or "").rstrip("/")
                 if not server_url:
-                    self._quick_capture_fail("Remote target is missing server URL.")
-                    return
+                    error = "Remote target is missing server URL."
+                    self._quick_capture_fail(error)
+                    return {"ok": False, "error": error}
                 verify_ssl = self._remote_verify_ssl(server_url)
                 connect_timeout, read_timeout = self._remote_timeout_settings_for_url(server_url)
                 timeout = self._http_timeout(connect_timeout, read_timeout)
@@ -15421,12 +15539,43 @@ class MainWindow(QMainWindow):
                 resp = self.http.post("/api/quick-capture", json=payload)
             resp.raise_for_status()
             self.statusBar().showMessage("Quick Capture saved.", 3000)
+            response_payload = resp.json()
+            if isinstance(response_payload, dict):
+                return response_payload
+            return {"ok": True}
         except httpx.HTTPStatusError as exc:
-            self._quick_capture_fail(self._quick_capture_http_detail(exc.response))
+            error = self._quick_capture_http_detail(exc.response)
+            self._quick_capture_fail(error)
+            return {"ok": False, "error": error}
         except httpx.HTTPError as exc:
             self._quick_capture_fail(str(exc))
+            return {"ok": False, "error": str(exc)}
         except Exception as exc:
             self._quick_capture_fail(str(exc))
+            return {"ok": False, "error": str(exc)}
+
+    def _open_quick_capture_receipt(self, receipt: dict) -> None:
+        path = str(receipt.get("path") or "").strip()
+        if not path:
+            return
+        receipt_vault = str(receipt.get("vault_path") or "").strip()
+        current_vault = str(self.vault_root or "").strip()
+        same_vault = False
+        if receipt_vault and current_vault:
+            try:
+                same_vault = Path(receipt_vault).expanduser().resolve() == Path(current_vault).expanduser().resolve()
+            except OSError:
+                same_vault = receipt_vault == current_vault
+        if receipt.get("kind") == "remote":
+            same_vault = (
+                self._remote_mode
+                and receipt_vault == str(self._remote_vault_ref_path or self.vault_root or "")
+                and self._server_key_for_url(str(receipt.get("server_url") or "")) == self._remote_server_key()
+            )
+        if not same_vault:
+            self.statusBar().showMessage("Open the capture's vault to view this page.", 5000)
+            return
+        self._open_file(path, add_to_history=True, force=True)
 
     def _quick_capture_subtitle(self, target: dict[str, Any]) -> str:
         vault_path = target.get("vault_path") or ""
@@ -15435,13 +15584,19 @@ class MainWindow(QMainWindow):
             server_url = str(target.get("server_url") or "")
             if server_url:
                 vault_name = f"{vault_name} @ {self._format_remote_host(server_url)}"
-        page_mode = target.get("page_mode") or "today"
-        page_ref = target.get("page_ref") or ""
-        page_label = "Today's Journal" if page_mode == "today" else page_ref
-        if config.load_quick_capture_vault():
-            return f"Dropping to {vault_name}: {page_label}"
         current_name = Path(self.vault_root).name if self.vault_root else vault_name
-        return f"Dropping to: {current_name}: {page_label} | Today's Journal"
+        return f"Vault: {vault_name if config.load_quick_capture_vault() else current_name}"
+
+    @staticmethod
+    def _quick_capture_destination_label(page_ref: str) -> str:
+        cleaned = str(page_ref or "").strip()
+        if not cleaned:
+            return "Custom page"
+        if cleaned.startswith(":"):
+            return " / ".join(part.replace("_", " ") for part in cleaned.split(":") if part)
+        normalized = cleaned.replace("\\", "/").rstrip("/")
+        name = Path(normalized).stem
+        return name.replace("_", " ") or cleaned
         try:
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
         except Exception:

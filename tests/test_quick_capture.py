@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
@@ -61,6 +61,39 @@ def test_quick_capture_input_inserts_clipboard_image_placeholder_at_cursor(qtbot
     assert payloads[0]["placeholder"] == "<clipboard-Image-1-320x240>"
 
 
+def test_quick_capture_input_adds_non_image_file_attachment(qtbot, tmp_path: Path) -> None:
+    widget = QuickCaptureInput()
+    qtbot.addWidget(widget)
+    attachment = tmp_path / "meeting-notes.pdf"
+    attachment.write_bytes(b"not-an-image")
+    payloads: list[dict] = []
+    widget.imageFileAdded.connect(payloads.append)
+
+    assert widget.add_local_file(attachment) is True
+
+    assert widget.toPlainText() == "<file-Attachment-1-meeting-notes>"
+    assert payloads == [
+        {
+            "path": attachment,
+            "placeholder": "<file-Attachment-1-meeting-notes>",
+            "is_image": False,
+        }
+    ]
+
+
+def test_quick_capture_overlay_tracks_non_image_file_attachment(qtbot, tmp_path: Path) -> None:
+    overlay = QuickCaptureOverlay(parent=None, on_capture=lambda text, attachments, vault_path: None)
+    qtbot.addWidget(overlay)
+    attachment = tmp_path / "agenda.pdf"
+    attachment.write_bytes(b"not-an-image")
+
+    assert overlay.input.add_local_file(attachment) is True
+
+    assert len(overlay._attachments) == 1
+    assert overlay._attachments[0]["path"] == attachment
+    assert overlay._attachments[0]["is_image"] is False
+
+
 def test_quick_capture_overlay_uses_persistent_tool_window_flags(qtbot) -> None:
     overlay = QuickCaptureOverlay(parent=None, on_capture=lambda text, attachments, vault_path: None)
     qtbot.addWidget(overlay)
@@ -88,6 +121,124 @@ def test_quick_capture_overlay_stays_visible_when_focus_moves(qtbot) -> None:
     QTest.qWait(50)
 
     assert overlay.isVisible()
+
+
+def test_quick_capture_overlay_captures_to_selected_destination_and_continues(qtbot) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def capture(text: str, attachments: list[dict], vault_path: str | None, destination: dict) -> dict:
+        calls.append((text, destination))
+        return {"ok": True, "id": "capture-1", "path": "/INBOX/INBOX.md"}
+
+    custom = {"label": "Inbox", "page_mode": "custom", "page_ref": ":INBOX"}
+    overlay = QuickCaptureOverlay(
+        parent=None,
+        on_capture=lambda text, attachments, vault_path: None,
+        destination_options=[
+            {"label": "Today's Journal", "page_mode": "today", "page_ref": None},
+            custom,
+        ],
+        selected_destination=custom,
+        on_capture_with_destination=capture,
+    )
+    qtbot.addWidget(overlay)
+    overlay.input.setPlainText("capture this")
+
+    overlay._capture(close_after=False)
+
+    assert calls == [("capture this", custom)]
+    assert overlay.input.toPlainText() == ""
+    assert overlay.history_list.count() == 1
+    assert overlay.status_label.text() == "Saved to Inbox."
+
+
+def test_quick_capture_overlay_accepts_typed_custom_destination(qtbot) -> None:
+    overlay = QuickCaptureOverlay(
+        parent=None,
+        on_capture=lambda text, attachments, vault_path: None,
+        destination_options=[
+            {"label": "Today's Journal", "page_mode": "today", "page_ref": None},
+        ],
+    )
+    qtbot.addWidget(overlay)
+
+    overlay.destination_combo.setEditText(":PROJECTS")
+
+    assert overlay._current_destination() == {
+        "label": ":PROJECTS",
+        "page_mode": "custom",
+        "page_ref": ":PROJECTS",
+    }
+
+
+def test_quick_capture_ctrl_p_cycles_destination_without_leaving_input(qtbot) -> None:
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    print_calls: list[str] = []
+    print_action = QAction("Print", parent)
+    print_action.setShortcut(QKeySequence.Print)
+    print_action.triggered.connect(lambda: print_calls.append("print"))
+    parent.addAction(print_action)
+    overlay = QuickCaptureOverlay(
+        parent=parent,
+        on_capture=lambda text, attachments, vault_path: None,
+        destination_options=[
+            {"label": "Today's Journal", "page_mode": "today", "page_ref": None},
+            {"label": "INBOX", "page_mode": "custom", "page_ref": ":INBOX"},
+        ],
+    )
+    qtbot.addWidget(overlay)
+    overlay.show()
+    overlay.input.setFocus()
+    overlay.input.setPlainText("keep typing here")
+    cursor_position = overlay.input.textCursor().position()
+
+    QTest.keyClick(overlay.input, Qt.Key_P, Qt.ControlModifier)
+
+    assert overlay.destination_combo.currentData()["page_ref"] == ":INBOX"
+    assert overlay.input.hasFocus()
+    assert overlay.input.textCursor().position() == cursor_position
+    assert print_calls == []
+
+
+def test_quick_capture_pasted_image_has_thumbnail(qtbot) -> None:
+    overlay = QuickCaptureOverlay(
+        parent=None,
+        on_capture=lambda text, attachments, vault_path: None,
+    )
+    qtbot.addWidget(overlay)
+    image = QImage(320, 240, QImage.Format_ARGB32)
+    image.fill(Qt.red)
+
+    overlay.input.insertFromMimeData(
+        type("Mime", (), {"hasImage": lambda self: True, "imageData": lambda self: image})()
+    )
+
+    assert overlay.attachments_widget.isHidden() is False
+    assert len(overlay._attachment_preview_labels) == 1
+    thumbnail = overlay._attachment_preview_labels[0].pixmap()
+    assert thumbnail is not None
+    assert thumbnail.isNull() is False
+    assert thumbnail.width() <= 70
+    assert thumbnail.height() <= 70
+
+
+def test_quick_capture_image_file_has_thumbnail(qtbot, tmp_path: Path) -> None:
+    overlay = QuickCaptureOverlay(
+        parent=None,
+        on_capture=lambda text, attachments, vault_path: None,
+    )
+    qtbot.addWidget(overlay)
+    image_path = tmp_path / "diagram.png"
+    image = QImage(180, 120, QImage.Format_ARGB32)
+    image.fill(Qt.blue)
+    assert image.save(str(image_path), "PNG") is True
+
+    assert overlay.input.add_local_file(image_path) is True
+
+    thumbnail = overlay._attachment_preview_labels[0].pixmap()
+    assert thumbnail is not None
+    assert thumbnail.isNull() is False
 
 
 def test_quick_capture_entry_uses_timestamp_header_and_indented_note_body() -> None:
@@ -127,6 +278,29 @@ def test_quick_capture_entry_strips_unresolved_placeholder_tokens() -> None:
 
     assert build_quick_capture_entry("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am") == expected
     assert build_quick_capture_entry_lite("before <clipboard-Image-1-320x240> after", "2026-05-07: 07:01am") == expected
+
+
+def test_quick_capture_entry_links_non_image_attachment() -> None:
+    attachments = [
+        {
+            "name": "meeting-notes.pdf",
+            "placeholder": "<file-Attachment-1-meeting-notes>",
+            "is_image": False,
+        }
+    ]
+    expected = [
+        "- *2026-05-07: 07:01am*",
+        "  See [meeting-notes.pdf](./meeting-notes.pdf)",
+        "",
+        "---",
+    ]
+
+    assert build_quick_capture_entry(
+        "See <file-Attachment-1-meeting-notes>", "2026-05-07: 07:01am", attachments
+    ) == expected
+    assert build_quick_capture_entry_lite(
+        "See <file-Attachment-1-meeting-notes>", "2026-05-07: 07:01am", attachments
+    ) == expected
 
 
 def test_quick_capture_section_title_constant_is_shared() -> None:

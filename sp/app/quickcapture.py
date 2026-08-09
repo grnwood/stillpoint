@@ -4,6 +4,7 @@ import argparse
 import re
 import os
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,8 @@ from sp.app import config
 from sp.app.quickcapture_common import (
     QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE,
     QUICK_CAPTURE_SECTION_TITLE,
+    format_attachment_link,
+    resolve_attachment_placeholders,
 )
 from sp.app.ui.quick_capture_overlay import QuickCaptureOverlay
 from sp.server import search_index
@@ -111,26 +114,11 @@ def _resolve_custom_page_ref(page_ref: str) -> str:
 
 
 def _format_image_link(name: str, width: Optional[int]) -> str:
-    if width and width > 600:
-        return f"![](./{name}){{width=600}}"
-    return f"![](./{name})"
+    return format_attachment_link(name, width, is_image=True)
 
 
 def _resolve_attachment_placeholders(text: str, images: Optional[list[dict]] = None) -> tuple[str, list[str]]:
-    resolved = text
-    appended: list[str] = []
-    for entry in images or []:
-        name = entry.get("name")
-        if not name:
-            continue
-        image_link = _format_image_link(name, entry.get("width"))
-        placeholder = str(entry.get("placeholder") or "").strip()
-        if placeholder and placeholder in resolved:
-            resolved = resolved.replace(placeholder, image_link)
-        else:
-            appended.append(f"  {image_link}")
-    resolved = QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE.sub("", resolved)
-    return resolved, appended
+    return resolve_attachment_placeholders(text, images)
 
 
 def _build_quick_capture_entry(text: str, timestamp: str, images: Optional[list[dict]] = None) -> list[str]:
@@ -194,7 +182,15 @@ def _persist_attachments(vault_root: Path, page_path: str, attachments: list[dic
             target_name = unique_name(path.name)
             target_path = folder / target_name
             target_path.write_bytes(path.read_bytes())
-            saved.append({"name": target_name, "width": entry.get("width"), "placeholder": entry.get("placeholder")})
+            saved.append(
+                {
+                    "name": target_name,
+                    "width": entry.get("width"),
+                    "placeholder": entry.get("placeholder"),
+                    "is_image": bool(entry.get("is_image", entry.get("width") is not None)),
+                    "stored_path": str(target_path),
+                }
+            )
             continue
         image = entry.get("image")
         if image is None:
@@ -202,7 +198,15 @@ def _persist_attachments(vault_root: Path, page_path: str, attachments: list[dic
         target_name = next_paste_name()
         target_path = folder / target_name
         if image.save(str(target_path), "PNG"):
-            saved.append({"name": target_name, "width": entry.get("width"), "placeholder": entry.get("placeholder")})
+            saved.append(
+                {
+                    "name": target_name,
+                    "width": entry.get("width"),
+                    "placeholder": entry.get("placeholder"),
+                    "is_image": True,
+                    "stored_path": str(target_path),
+                }
+            )
     return saved
 
 
@@ -235,6 +239,21 @@ def _capture_to_files(
     text: str,
     attachments: Optional[list[dict]] = None,
 ) -> str:
+    return str(
+        _capture_to_files_result(vault_root, page_mode, page_ref, text, attachments)["path"]
+    )
+
+
+_LOCAL_CAPTURE_UNDO: dict[str, dict] = {}
+
+
+def _capture_to_files_result(
+    vault_root: Path,
+    page_mode: str,
+    page_ref: Optional[str],
+    text: str,
+    attachments: Optional[list[dict]] = None,
+) -> dict:
     config.init_settings()
     config.set_active_vault(str(vault_root))
     if page_mode == "today":
@@ -266,7 +285,48 @@ def _capture_to_files(
         conn.close()
     except Exception:
         pass
-    return rel_path
+    capture_id = uuid.uuid4().hex
+    _LOCAL_CAPTURE_UNDO[capture_id] = {
+        "vault_root": str(vault_root),
+        "path": rel_path,
+        "before": content,
+        "after": updated,
+        "attachments": [item.get("stored_path") for item in saved_images if item.get("stored_path")],
+    }
+    if len(_LOCAL_CAPTURE_UNDO) > 50:
+        _LOCAL_CAPTURE_UNDO.pop(next(iter(_LOCAL_CAPTURE_UNDO)))
+    return {"ok": True, "id": capture_id, "path": rel_path}
+
+
+def _undo_file_capture(capture_id: str) -> dict:
+    receipt = _LOCAL_CAPTURE_UNDO.get(str(capture_id or ""))
+    if not receipt:
+        return {"ok": False, "error": "That capture can no longer be undone."}
+    vault_root = Path(receipt["vault_root"])
+    rel_path = str(receipt["path"])
+    current = files.read_file(vault_root, rel_path)
+    if current != receipt["after"]:
+        return {"ok": False, "error": "The destination page changed after capture; undo was not applied."}
+    files.write_file(vault_root, rel_path, receipt["before"])
+    for raw_path in receipt.get("attachments") or []:
+        path = Path(str(raw_path))
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+    _LOCAL_CAPTURE_UNDO.pop(capture_id, None)
+    config.remove_quick_capture_history(capture_id)
+    try:
+        db_path = vault_root / ".stillpoint" / "settings.db"
+        import sqlite3
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        search_index.upsert_page(conn, rel_path, int(datetime.now().timestamp()), receipt["before"])
+        conn.close()
+    except Exception:
+        pass
+    return {"ok": True, "path": rel_path}
 
 
 def _capture_via_api(base: str, token: Optional[str], payload: dict) -> bool:

@@ -71,7 +71,7 @@ from sp.rag.index import RetrievedChunk
 from sp import VERSION as STILLPOINT_VERSION
 from sp.app import config
 from sp.app import indexer as app_indexer
-from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
+from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE, resolve_attachment_placeholders
 from sp.app.ui.ai_api import build_api_request
 from sp.logging_flags import log_enabled
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
@@ -235,13 +235,18 @@ def _colon_to_page_path(colon_path: str) -> str:
     return f"/{folder_path}/{file_name}"
 
 
-def _build_quick_capture_entry(text: str, timestamp: str) -> list[str]:
+def _build_quick_capture_entry(
+    text: str,
+    timestamp: str,
+    attachments: Optional[list[dict]] = None,
+) -> list[str]:
+    text, trailing_attachment_lines = resolve_attachment_placeholders(text, attachments)
     lines = [line.rstrip() for line in text.splitlines()]
     if not lines:
         return []
     first = f"- *{timestamp}*"
     note_lines = [f"  {line}" for line in lines]
-    return [first] + note_lines + ["", "---"]
+    return [first] + note_lines + trailing_attachment_lines + ["", "---"]
 
 
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:

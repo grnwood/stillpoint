@@ -108,6 +108,41 @@ def _patch_common_editor_deps(monkeypatch) -> None:
     monkeypatch.setattr("sp.app.ui.mermaid_editor_window.config.load_mermaid_vsplit_state", lambda: None)
 
 
+def test_diagram_editors_initialize_with_compact_ai_chat_pane(qapp, qtbot, monkeypatch, tmp_path: Path) -> None:
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_enable_ai_chats", lambda: True)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window.config.load_enable_ai_chats", lambda: True)
+    monkeypatch.setattr(PlantUMLEditorWindow, "_load_ai_servers_models", lambda self: None)
+    monkeypatch.setattr(MermaidEditorWindow, "_load_ai_servers_models", lambda self: None)
+    monkeypatch.setattr(PlantUMLEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(MermaidEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setattr(mermaid_editor_window, "_should_use_web_preview", lambda: False)
+
+    plant_path = tmp_path / "layout.puml"
+    plant_path.write_text("@startuml\nAlice -> Bob\n@enduml\n", encoding="utf-8")
+    mermaid_path = tmp_path / "layout.mmd"
+    mermaid_path.write_text("flowchart TD\nA --> B\n", encoding="utf-8")
+
+    windows = [PlantUMLEditorWindow(str(plant_path)), MermaidEditorWindow(str(mermaid_path))]
+    for window in windows:
+        qtbot.addWidget(window)
+        window.show()
+        _wait_for(qapp, lambda window=window: window._splitter_layout_initialized)
+
+        horizontal_sizes = window.editor_preview_splitter.sizes()
+        vertical_sizes = window._vertical_splitter.sizes()
+
+        assert len(horizontal_sizes) == 2
+        assert horizontal_sizes[0] > 0
+        assert horizontal_sizes[1] > horizontal_sizes[0]
+        assert len(vertical_sizes) == 2
+        assert vertical_sizes[0] > vertical_sizes[1] >= 40
+        assert vertical_sizes[1] <= max(1, sum(vertical_sizes) // 3)
+
+        window.close()
+
+
 def test_plantuml_editor_defers_initial_render_until_window_is_shown(qapp, monkeypatch, tmp_path: Path):
     _patch_common_editor_deps(monkeypatch)
     calls: list[str] = []

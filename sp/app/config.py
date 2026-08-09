@@ -714,6 +714,45 @@ def save_quick_capture_custom_page(value: Optional[str]) -> None:
     _update_global_config({"quick_capture_custom_page": cleaned})
 
 
+def load_quick_capture_history() -> list[dict]:
+    """Return recent capture receipts used by the lightweight history UI."""
+    payload = _read_global_config()
+    value = payload.get("quick_capture_history")
+    if not isinstance(value, list):
+        return []
+    return [dict(entry) for entry in value[:20] if isinstance(entry, dict)]
+
+
+def add_quick_capture_history(entry: dict) -> None:
+    """Record capture metadata without duplicating the full captured note."""
+    cleaned = {
+        "id": str(entry.get("id") or ""),
+        "created": str(entry.get("created") or ""),
+        "destination": str(entry.get("destination") or ""),
+        "excerpt": str(entry.get("excerpt") or "")[:160],
+        "path": str(entry.get("path") or ""),
+        "vault_path": str(entry.get("vault_path") or ""),
+        "kind": str(entry.get("kind") or ""),
+        "server_url": str(entry.get("server_url") or ""),
+        "page_mode": str(entry.get("page_mode") or "today"),
+        "page_ref": str(entry.get("page_ref") or ""),
+    }
+    history = load_quick_capture_history()
+    capture_id = cleaned["id"]
+    if capture_id:
+        history = [item for item in history if str(item.get("id") or "") != capture_id]
+    _update_global_config({"quick_capture_history": [cleaned, *history][:20]})
+
+
+def remove_quick_capture_history(capture_id: str) -> None:
+    history = [
+        item
+        for item in load_quick_capture_history()
+        if str(item.get("id") or "") != str(capture_id or "")
+    ]
+    _update_global_config({"quick_capture_history": history})
+
+
 def load_quick_capture_app_hotkey() -> str:
     payload = _read_global_config()
     value = payload.get("quick_capture_app_hotkey")

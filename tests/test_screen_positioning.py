@@ -29,6 +29,22 @@ def test_clamp_popup_top_left_respects_margin() -> None:
     assert clamped == QPoint(12, 12)
 
 
+def test_fit_size_to_bounds_caps_both_dimensions() -> None:
+    bounds = QRect(100, 50, 800, 600)
+
+    fitted = pos.fit_size_to_bounds(QSize(1400, 800), bounds, margin=24)
+
+    assert fitted == QSize(752, 552)
+
+
+def test_fit_size_to_bounds_preserves_smaller_preferred_size() -> None:
+    bounds = QRect(0, 0, 1920, 1080)
+
+    fitted = pos.fit_size_to_bounds(QSize(620, 560), bounds, margin=24)
+
+    assert fitted == QSize(620, 560)
+
+
 def test_popup_available_geometry_prefers_anchor_screen(monkeypatch) -> None:
     anchor_screen = _FakeScreen(QRect(2000, 0, 1920, 1080))
     parent_screen = _FakeScreen(QRect(0, 0, 1920, 1080))

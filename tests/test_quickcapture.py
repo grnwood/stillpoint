@@ -21,6 +21,23 @@ def test_capture_to_files_custom_page_creates_missing_folder(tmp_path: Path, mon
     assert "idea one" in content
 
 
+def test_capture_to_files_result_can_be_undone(tmp_path: Path, monkeypatch) -> None:
+    from sp.app import quickcapture
+
+    monkeypatch.setattr(quickcapture.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture.config, "set_active_vault", lambda _path: None)
+    monkeypatch.setattr(quickcapture.config, "remove_quick_capture_history", lambda _capture_id: None)
+
+    receipt = quickcapture._capture_to_files_result(tmp_path, "custom", ":INBOX", "temporary idea")
+    target = tmp_path / "INBOX" / "INBOX.md"
+    assert "temporary idea" in target.read_text(encoding="utf-8")
+
+    result = quickcapture._undo_file_capture(receipt["id"])
+
+    assert result == {"ok": True, "path": "/INBOX/INBOX.md"}
+    assert target.read_text(encoding="utf-8") == "# INBOX\n\n"
+
+
 def test_capture_to_files_custom_page_creates_missing_folder_lite(tmp_path: Path, monkeypatch) -> None:
     from sp.app import quickcapture_lite
 

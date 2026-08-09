@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QGridLayout,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import theme_color, theme_value
+from .screen_positioning import fit_window_to_available_screen, popup_available_geometry
 
 
 class MergeConflictDialog(QDialog):
@@ -26,7 +28,8 @@ class MergeConflictDialog(QDialog):
     def __init__(self, local_text: str, remote_text: str, path: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Resolve Conflict")
-        self.resize(1200, 800)
+        available = popup_available_geometry(parent=parent if parent is not None else self)
+        narrow = available.width() < 760
 
         self._local_text = local_text or ""
         self._remote_text = remote_text or ""
@@ -69,7 +72,7 @@ class MergeConflictDialog(QDialog):
         )
         layout.addWidget(title)
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Vertical if narrow else Qt.Horizontal)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -119,16 +122,13 @@ class MergeConflictDialog(QDialog):
         splitter.setStretchFactor(2, 1)
         layout.addWidget(splitter, stretch=1)
 
-        nav_layout = QHBoxLayout()
         self._prev_button = QPushButton("Previous")
         self._prev_button.clicked.connect(self._previous_diff)
         self._next_button = QPushButton("Next")
         self._next_button.clicked.connect(self._next_diff)
-        nav_layout.addWidget(self._prev_button)
-        nav_layout.addWidget(self._next_button)
 
         self._status_label = QLabel("")
-        nav_layout.addWidget(self._status_label, stretch=1)
+        self._status_label.setWordWrap(True)
 
         self._reject_button = QPushButton("Reject Change")
         self._reject_button.clicked.connect(self._reject_current_change)
@@ -136,9 +136,22 @@ class MergeConflictDialog(QDialog):
         self._accept_button.clicked.connect(self._accept_current_change)
         self._accept_both_button = QPushButton("Accept Both")
         self._accept_both_button.clicked.connect(self._accept_both_change)
-        nav_layout.addWidget(self._reject_button)
-        nav_layout.addWidget(self._accept_button)
-        nav_layout.addWidget(self._accept_both_button)
+        if narrow:
+            nav_layout = QGridLayout()
+            nav_layout.addWidget(self._prev_button, 0, 0)
+            nav_layout.addWidget(self._next_button, 0, 1)
+            nav_layout.addWidget(self._status_label, 1, 0, 1, 2)
+            nav_layout.addWidget(self._reject_button, 2, 0)
+            nav_layout.addWidget(self._accept_button, 2, 1)
+            nav_layout.addWidget(self._accept_both_button, 3, 0, 1, 2)
+        else:
+            nav_layout = QHBoxLayout()
+            nav_layout.addWidget(self._prev_button)
+            nav_layout.addWidget(self._next_button)
+            nav_layout.addWidget(self._status_label, stretch=1)
+            nav_layout.addWidget(self._reject_button)
+            nav_layout.addWidget(self._accept_button)
+            nav_layout.addWidget(self._accept_both_button)
         layout.addLayout(nav_layout)
 
         action_layout = QHBoxLayout()
@@ -153,6 +166,7 @@ class MergeConflictDialog(QDialog):
         layout.addLayout(action_layout)
 
         self._refresh_views()
+        fit_window_to_available_screen(self, QSize(1200, 800), parent=parent)
 
     def merged_text(self) -> str:
         return self._merged_text
