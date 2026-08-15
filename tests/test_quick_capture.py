@@ -7,11 +7,14 @@ from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
-from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE
+from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE, append_quick_capture_section
 from sp.app.quickcapture import _build_quick_capture_entry as build_quick_capture_entry
+from sp.app.quickcapture import _append_quick_capture_section as append_desktop_capture
 from sp.app.quickcapture_lite import _build_quick_capture_entry as build_quick_capture_entry_lite
+from sp.app.quickcapture_lite import _append_quick_capture_section as append_lite_capture
 from sp.app.ui.quick_capture_overlay import QuickCaptureInput, QuickCaptureOverlay
 from sp.server.api import _build_quick_capture_entry as build_api_quick_capture_entry
+from sp.server.api import _append_quick_capture_section as append_api_capture
 
 
 def test_quick_capture_input_uses_enter_for_newline_and_ctrl_enter_for_capture(qtbot) -> None:
@@ -305,3 +308,32 @@ def test_quick_capture_entry_links_non_image_attachment() -> None:
 
 def test_quick_capture_section_title_constant_is_shared() -> None:
     assert QUICK_CAPTURE_SECTION_TITLE == "## QuickCaptures"
+
+
+def test_capture_consolidates_duplicate_and_task_prefixed_headers() -> None:
+    content = (
+        "# Today\n\n## Follow-up\n☐ ## QuickCaptures\n"
+        "- *08:08 am*\n  first\n\n---\n\n"
+        "## QuickCaptures\n"
+        "- *08:09 am*\n  second\n\n---\n---\n"
+    )
+    updated = append_quick_capture_section(
+        content, ["- *08:10 am*", "  third", "", "---"], "Captured Notes"
+    )
+
+    assert updated.count("## Captured Notes") == 1
+    assert "QuickCaptures" not in updated
+    assert "☐ ##" not in updated
+    assert all(value in updated for value in ("  first", "  second", "  third"))
+    assert "---\n---" not in updated
+
+
+def test_all_capture_clients_use_configured_header(monkeypatch) -> None:
+    monkeypatch.setattr("sp.app.config.load_quick_capture_header", lambda: "Captured Notes")
+    for append_capture in (append_desktop_capture, append_lite_capture, append_api_capture):
+        first = append_capture("# Today\n", ["- *one*", "  first", "", "---"])
+        second = append_capture(first, ["- *two*", "  second", "", "---"])
+
+        assert second.count("## Captured Notes") == 1
+        assert second.count("  first") == 1
+        assert second.count("  second") == 1

@@ -714,6 +714,21 @@ def save_quick_capture_custom_page(value: Optional[str]) -> None:
     _update_global_config({"quick_capture_custom_page": cleaned})
 
 
+def load_quick_capture_header() -> str:
+    payload = _read_global_config()
+    value = payload.get("quick_capture_header")
+    if isinstance(value, str):
+        cleaned = value.strip().lstrip("#").strip()
+        if cleaned:
+            return cleaned
+    return "QuickCaptures"
+
+
+def save_quick_capture_header(value: Optional[str]) -> None:
+    cleaned = str(value or "").strip().lstrip("#").strip() or "QuickCaptures"
+    _update_global_config({"quick_capture_header": cleaned})
+
+
 def load_quick_capture_history() -> list[dict]:
     """Return recent capture receipts used by the lightweight history UI."""
     payload = _read_global_config()

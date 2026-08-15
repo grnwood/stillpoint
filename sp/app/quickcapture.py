@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from sp.app import config
 from sp.app.quickcapture_common import (
     QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE,
-    QUICK_CAPTURE_SECTION_TITLE,
+    append_quick_capture_section,
     format_attachment_link,
     resolve_attachment_placeholders,
 )
@@ -211,25 +211,7 @@ def _persist_attachments(vault_root: Path, page_path: str, attachments: list[dic
 
 
 def _append_quick_capture_section(content: str, entry_lines: list[str]) -> str:
-    if not entry_lines:
-        return content
-    section_title = QUICK_CAPTURE_SECTION_TITLE
-    lines = content.splitlines()
-    header_idx = next((i for i, line in enumerate(lines) if line.strip() == section_title), -1)
-    if header_idx == -1:
-        trimmed = content.rstrip("\n")
-        spacer = "\n\n" if trimmed else ""
-        return f"{trimmed}{spacer}{section_title}\n" + "\n".join(entry_lines) + "\n"
-    insert_at = len(lines)
-    for i in range(header_idx + 1, len(lines)):
-        if lines[i].startswith("#"):
-            insert_at = i
-            break
-    new_lines = lines[:insert_at] + entry_lines + lines[insert_at:]
-    result = "\n".join(new_lines)
-    if not result.endswith("\n"):
-        result += "\n"
-    return result
+    return append_quick_capture_section(content, entry_lines)
 
 
 def _capture_to_files(

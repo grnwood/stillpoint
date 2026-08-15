@@ -221,6 +221,13 @@ class PreferencesDialog(QDialog):
         self.quick_capture_custom_edit.setPlaceholderText("Page name or :Colon:Path")
         general_layout.addWidget(self.quick_capture_custom_edit)
 
+        row_capture_header = QHBoxLayout()
+        row_capture_header.addWidget(QLabel("Quick Capture heading:"))
+        self.quick_capture_header_edit = QLineEdit(config.load_quick_capture_header())
+        self.quick_capture_header_edit.setPlaceholderText("QuickCaptures")
+        row_capture_header.addWidget(self.quick_capture_header_edit, 1)
+        general_layout.addLayout(row_capture_header)
+
         capture_help = QLabel(
             "Used for quick captures via tray icon.\n"
             "If unset, StillPoint falls back to the currently open vault's Today page."
@@ -1182,6 +1189,7 @@ class PreferencesDialog(QDialog):
         capture_mode = "today" if self.quick_capture_page_combo.currentIndex() == 0 else "custom"
         config.save_quick_capture_page_mode(capture_mode)
         config.save_quick_capture_custom_page(self.quick_capture_custom_edit.text())
+        config.save_quick_capture_header(self.quick_capture_header_edit.text())
         hotkey = self.quick_capture_hotkey_edit.keySequence().toString().strip()
         if hotkey and re.match(r"^Alt\+[A-Za-z]$", hotkey):
             QMessageBox.warning(

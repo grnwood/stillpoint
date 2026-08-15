@@ -35,6 +35,7 @@ Note: Feature toggles may require reopening the vault or restarting the app.
 - **Home Quick Capture Vault**: Where tray-based quick captures are written.
 - **Default Capture Page**: Choose between `Today Journal Page` and `Custom Page`.
 - **Custom Page**: Enter a page name or a path-like name.
+- **Quick Capture heading**: Sets the shared heading used for captures (`QuickCaptures` by default). Repeated captures reuse this section.
 - **Quick Capture Hotkey (in-app)**: Keyboard shortcut for quick capture inside StillPoint.
 
 ## Appearance
