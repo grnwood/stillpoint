@@ -72,6 +72,16 @@ from sp import VERSION as STILLPOINT_VERSION
 from sp.app import config
 from sp.app import indexer as app_indexer
 from sp.app.quickcapture_common import append_quick_capture_section, resolve_attachment_placeholders
+from sp.app.capture_triage import (
+    capture_header,
+    invalidate_triage_cache,
+    list_quick_capture_chunks,
+    list_triage_items,
+    new_capture_id,
+    process_quick_capture_chunk,
+    process_triage_item,
+)
+from sp.app.task_mutations import TaskConflictError, TaskMutationTarget, mutate_task, undo_file_mutation
 from sp.app.ui.ai_api import build_api_request
 from sp.logging_flags import log_enabled
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
@@ -188,6 +198,8 @@ _TREE_CACHE: dict[tuple[str, str, bool, bool], dict[str, object]] = {}
 _LOCAL_UI_TOKEN: Optional[str] = None
 _VAULTS_ROOT: Optional[str] = None
 _UI_QUICK_CAPTURE_HOOK = None
+_TASK_MUTATION_UNDO: dict[str, dict] = {}
+_TASK_MUTATION_UNDO_LOCK = threading.Lock()
 _EXCALIDRAW_OPEN_PAGE_REQUESTS: list[str] = []
 _EXCALIDRAW_OPEN_PAGE_LOCK = threading.Lock()
 
@@ -239,12 +251,15 @@ def _build_quick_capture_entry(
     text: str,
     timestamp: str,
     attachments: Optional[list[dict]] = None,
+    *,
+    capture_id: Optional[str] = None,
+    inbox: bool = False,
 ) -> list[str]:
     text, trailing_attachment_lines = resolve_attachment_placeholders(text, attachments)
     lines = [line.rstrip() for line in text.splitlines()]
     if not lines:
         return []
-    first = f"- *{timestamp}*"
+    first = capture_header(timestamp, capture_id=capture_id, inbox=inbox)
     note_lines = [f"  {line}" for line in lines]
     return [first] + note_lines + trailing_attachment_lines + ["", "---"]
 
@@ -1074,6 +1089,7 @@ class QuickCapturePayload(BaseModel):
     page_mode: Literal["today", "custom"] = "today"
     page_ref: Optional[str] = None
     text: str
+    triage: Optional[bool] = None
 
 
 class VaultSelectPayload(BaseModel):
@@ -1156,6 +1172,52 @@ class TaskDateUpdatePayload(BaseModel):
     apply_due: bool = True
     clear_start: bool = False
     clear_due: bool = False
+
+
+class TaskMutationTargetPayload(BaseModel):
+    path: str
+    line: int
+    expected_text: str
+    expected_status: Literal["todo", "done"] = "todo"
+
+
+class TaskMutationPayload(BaseModel):
+    targets: List[TaskMutationTargetPayload]
+    text: Optional[str] = None
+    status: Optional[Literal["todo", "done"]] = None
+    priority: Optional[int] = Field(default=None, ge=0, le=3)
+    tags: Optional[List[str]] = None
+    start: Optional[str] = None
+    due: Optional[str] = None
+    destination: Optional[str] = None
+    delete: bool = False
+
+
+class TriageProcessPayload(BaseModel):
+    path: str
+    item_id: str
+    expected_hash: str
+    action: Literal["task", "file", "note", "delete"]
+    text: str = ""
+    destination: Optional[str] = None
+    priority: int = Field(default=0, ge=0, le=3)
+    tags: List[str] = Field(default_factory=list)
+    start: str = ""
+    due: str = ""
+
+
+class QuickCaptureProcessPayload(BaseModel):
+    path: str
+    start_line: int
+    expected_hash: str
+    action: Literal["task", "move"]
+    destination: str
+    text: str = ""
+    status: Literal["todo", "done"] = "todo"
+    priority: int = Field(default=0, ge=0, le=3)
+    tags: List[str] = Field(default_factory=list)
+    start: str = ""
+    due: str = ""
 
 
 class AttachmentDeletePayload(BaseModel):
@@ -3310,6 +3372,8 @@ def file_write(
             app_indexer.index_page(payload.path, payload.content)
         except Exception:
             pass
+        if payload.path.startswith("/Journal/") or Path(payload.path).stem.casefold() == "inbox":
+            invalidate_triage_cache(root)
         # Update search index
         db_path = config._vault_db_path()
         if db_path:
@@ -3516,10 +3580,21 @@ def quick_capture(
         timestamp = now.strftime("%I:%M %p").lower()
     else:
         timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
-    entry_lines = _build_quick_capture_entry(text, timestamp)
+    triage_requested = (
+        config.load_quick_capture_triage_enabled()
+        if payload.triage is None
+        else bool(payload.triage)
+    )
+    triage = triage_requested and is_journal
+    capture_id = new_capture_id()
+    entry_lines = _build_quick_capture_entry(
+        text, timestamp, capture_id=capture_id if triage else None, inbox=triage
+    )
     updated = _append_quick_capture_section(content, entry_lines)
     try:
         files.write_file(root, rel_path, updated)
+        if triage:
+            invalidate_triage_cache(root)
     except FileAccessError as exc:
         _raise_file_http(400, f"Quick capture write blocked for {rel_path}", exc)
     except FileNotFoundError as exc:
@@ -3535,7 +3610,7 @@ def quick_capture(
         conn.close()
     except Exception:
         pass
-    return {"ok": True, "path": rel_path}
+    return {"ok": True, "id": capture_id, "path": rel_path}
 
 
 @app.get("/api/tasks")
@@ -3584,6 +3659,173 @@ def api_tasks(
             f"actionable_only={actionable_only} status={normalized_status}"
         )
     return {"items": [_serialize_task(task) for task in task_rows]}
+
+
+@app.post("/api/tasks/mutate")
+def api_mutate_tasks(
+    payload: TaskMutationPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    root = _get_vault_root()
+    if not payload.targets:
+        return {"ok": True, "updated": 0, "paths": []}
+    paths: list[str] = []
+    undo_receipt: dict[str, dict] = {"before": {}, "after": {}}
+    for raw_target in payload.targets:
+        target = TaskMutationTarget(
+            path=raw_target.path,
+            line=raw_target.line,
+            expected_text=raw_target.expected_text,
+            expected_status=raw_target.expected_status,
+        )
+        try:
+            result = mutate_task(
+                root,
+                target,
+                text=payload.text,
+                status=payload.status,
+                priority=payload.priority,
+                tags=payload.tags,
+                start=payload.start,
+                due=payload.due,
+                destination=payload.destination,
+                delete=payload.delete,
+            )
+        except TaskConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileAccessError as exc:
+            _raise_file_http(400, "Task mutation blocked", exc)
+        paths.extend(result.get("paths") or [])
+        for path, content in (result.get("before") or {}).items():
+            undo_receipt["before"].setdefault(path, content)
+        undo_receipt["after"].update(result.get("after") or {})
+    _clear_task_cache()
+    undo_id = uuid.uuid4().hex
+    with _TASK_MUTATION_UNDO_LOCK:
+        _TASK_MUTATION_UNDO[undo_id] = undo_receipt
+        while len(_TASK_MUTATION_UNDO) > 100:
+            _TASK_MUTATION_UNDO.pop(next(iter(_TASK_MUTATION_UNDO)))
+    return {
+        "ok": True,
+        "updated": len(payload.targets),
+        "paths": list(dict.fromkeys(paths)),
+        "undo_id": undo_id,
+    }
+
+
+@app.get("/api/tasks/triage")
+def api_task_triage(user: AuthModels.UserInfo = Depends(get_current_user)) -> dict:
+    root = _get_vault_root()
+    items = list_triage_items(root)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/quick-captures/process")
+def api_quick_capture_chunks(
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    items = list_quick_capture_chunks(_get_vault_root())
+    return {"items": items, "count": len(items)}
+
+
+@app.post("/api/quick-captures/process")
+def api_process_quick_capture_chunk(
+    payload: QuickCaptureProcessPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    try:
+        result = process_quick_capture_chunk(
+            _get_vault_root(),
+            path=payload.path,
+            start_line=payload.start_line,
+            expected_hash=payload.expected_hash,
+            action=payload.action,
+            destination=payload.destination,
+            text=payload.text,
+            status=payload.status,
+            priority=payload.priority,
+            tags=payload.tags,
+            start=payload.start,
+            due=payload.due,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        _raise_file_http(400, "Quick Capture processing blocked", exc)
+    _clear_task_cache()
+    receipt = {
+        "before": result.pop("before", {}),
+        "after": result.pop("after", {}),
+        "attachment_moves": result.pop("attachment_moves", []),
+    }
+    undo_id = uuid.uuid4().hex
+    with _TASK_MUTATION_UNDO_LOCK:
+        _TASK_MUTATION_UNDO[undo_id] = receipt
+        while len(_TASK_MUTATION_UNDO) > 100:
+            _TASK_MUTATION_UNDO.pop(next(iter(_TASK_MUTATION_UNDO)))
+    result["undo_id"] = undo_id
+    return result
+
+
+@app.post("/api/tasks/triage/process")
+def api_process_task_triage(
+    payload: TriageProcessPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    root = _get_vault_root()
+    try:
+        result = process_triage_item(
+            root,
+            path=payload.path,
+            item_id=payload.item_id,
+            expected_hash=payload.expected_hash,
+            action=payload.action,
+            text=payload.text,
+            destination=payload.destination,
+            priority=payload.priority,
+            tags=payload.tags,
+            start=payload.start,
+            due=payload.due,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        _raise_file_http(400, "Triage processing blocked", exc)
+    _clear_task_cache()
+    receipt = {
+        "before": result.pop("before", {}),
+        "after": result.pop("after", {}),
+        "attachment_moves": result.pop("attachment_moves", []),
+    }
+    undo_id = uuid.uuid4().hex
+    with _TASK_MUTATION_UNDO_LOCK:
+        _TASK_MUTATION_UNDO[undo_id] = receipt
+        while len(_TASK_MUTATION_UNDO) > 100:
+            _TASK_MUTATION_UNDO.pop(next(iter(_TASK_MUTATION_UNDO)))
+    result["undo_id"] = undo_id
+    return result
+
+
+@app.post("/api/tasks/undo/{undo_id}")
+def api_undo_task_mutation(
+    undo_id: str,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    with _TASK_MUTATION_UNDO_LOCK:
+        receipt = _TASK_MUTATION_UNDO.get(undo_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="That task action can no longer be undone.")
+    try:
+        result = undo_file_mutation(_get_vault_root(), receipt)
+    except TaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    with _TASK_MUTATION_UNDO_LOCK:
+        _TASK_MUTATION_UNDO.pop(undo_id, None)
+    _clear_task_cache()
+    invalidate_triage_cache(_get_vault_root())
+    return result
 
 
 @app.post("/api/tasks/update-dates")

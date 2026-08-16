@@ -4,7 +4,6 @@ import argparse
 import re
 import os
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,6 +19,7 @@ from sp.app.quickcapture_common import (
     resolve_attachment_placeholders,
 )
 from sp.app.ui.quick_capture_overlay import QuickCaptureOverlay
+from sp.app.capture_triage import capture_header, invalidate_triage_cache, new_capture_id
 from sp.server import search_index
 from sp.server.adapters import files
 from sp.server.adapters.files import FileAccessError, PAGE_SUFFIX
@@ -121,12 +121,19 @@ def _resolve_attachment_placeholders(text: str, images: Optional[list[dict]] = N
     return resolve_attachment_placeholders(text, images)
 
 
-def _build_quick_capture_entry(text: str, timestamp: str, images: Optional[list[dict]] = None) -> list[str]:
+def _build_quick_capture_entry(
+    text: str,
+    timestamp: str,
+    images: Optional[list[dict]] = None,
+    *,
+    capture_id: Optional[str] = None,
+    inbox: bool = False,
+) -> list[str]:
     text, trailing_image_lines = _resolve_attachment_placeholders(text, images)
     lines = [line.rstrip() for line in text.splitlines()]
     if not lines:
         return []
-    first = f"- *{timestamp}*"
+    first = capture_header(timestamp, capture_id=capture_id, inbox=inbox)
     note_lines = [f"  {line}" for line in lines]
     return [first] + note_lines + trailing_image_lines + ["", "---"]
 
@@ -254,10 +261,16 @@ def _capture_to_files_result(
         timestamp = now.strftime("%I:%M %p").lower()
     else:
         timestamp = f"{now:%Y-%m-%d}: {now.strftime('%I:%M%p').lower()}"
+    capture_id = new_capture_id()
+    triage = False
     saved_images = _persist_attachments(vault_root, rel_path, attachments or [])
-    entry_lines = _build_quick_capture_entry(text, timestamp, saved_images)
+    entry_lines = _build_quick_capture_entry(
+        text, timestamp, saved_images, capture_id=capture_id if triage else None, inbox=triage
+    )
     updated = _append_quick_capture_section(content, entry_lines)
     files.write_file(vault_root, rel_path, updated)
+    if triage:
+        invalidate_triage_cache(vault_root)
     db_path = vault_root / ".stillpoint" / "settings.db"
     try:
         import sqlite3
@@ -267,7 +280,6 @@ def _capture_to_files_result(
         conn.close()
     except Exception:
         pass
-    capture_id = uuid.uuid4().hex
     _LOCAL_CAPTURE_UNDO[capture_id] = {
         "vault_root": str(vault_root),
         "path": rel_path,
@@ -290,6 +302,7 @@ def _undo_file_capture(capture_id: str) -> dict:
     if current != receipt["after"]:
         return {"ok": False, "error": "The destination page changed after capture; undo was not applied."}
     files.write_file(vault_root, rel_path, receipt["before"])
+    invalidate_triage_cache(vault_root)
     for raw_path in receipt.get("attachments") or []:
         path = Path(str(raw_path))
         try:

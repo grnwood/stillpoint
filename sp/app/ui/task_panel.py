@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint, QSignalBlocker
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QDesktopServices, QPalette
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QDesktopServices, QPalette, QShortcut
 from PySide6.QtGui import QCursor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (
     QCalendarWidget,
     QAbstractSpinBox,
     QButtonGroup,
+    QMessageBox,
+    QInputDialog,
 )
 
 from markdown import markdown as render_markdown
@@ -66,6 +68,9 @@ from .task_style import (
     relative_day_label,
     TaskSemanticColorDelegate,
 )
+from .task_quick_editor import TaskQuickEditor
+from sp.app.capture_triage import list_triage_items, process_triage_item
+from sp.app.task_mutations import TaskMutationTarget, mutate_task, undo_file_mutation
 
 TAG_PATTERN = re.compile(r"(?<![\w.+-])@([A-Za-z0-9_]+)")
 TAG_PREFIX_PATTERN = re.compile(r"(?<![\w.+-])@[\w_]*$")
@@ -75,6 +80,46 @@ PRINT_LINK_PATTERN = re.compile(
     r"(?P<md>\[(?P<md_label>[^\]]+)\]\((?P<md_url>[^\s)]+)\))|"
     r"(?P<wiki>\[(?P<wiki_link>[^\]|]+)\|(?P<wiki_label>[^\]]+)\])"
 )
+
+
+class TaskDateQuickMenu(QMenu):
+    """Date-choice menu with optional vi navigation."""
+
+    def __init__(self, parent=None, *, use_vi_keys: bool = False) -> None:
+        super().__init__(parent)
+        self._use_vi_keys = bool(use_vi_keys)
+        self._vi_shortcuts: list[QShortcut] = []
+        if self._use_vi_keys:
+            for sequence, direction in (("Ctrl+Shift+J", 1), ("Ctrl+Shift+K", -1)):
+                shortcut = QShortcut(QKeySequence(sequence), self)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(lambda step=direction: self._move_active(step))
+                self._vi_shortcuts.append(shortcut)
+
+    def _move_active(self, direction: int) -> None:
+        choices = [action for action in self.actions() if action.isEnabled() and not action.isSeparator()]
+        if not choices:
+            return
+        active = self.activeAction()
+        current = choices.index(active) if active in choices else (-1 if direction > 0 else 0)
+        self.setActiveAction(choices[(current + direction) % len(choices)])
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        key = event.key()
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        plain_vi = self._use_vi_keys and not modifiers and key in (Qt.Key_J, Qt.Key_K)
+        chord_vi = (
+            self._use_vi_keys
+            and key in (Qt.Key_J, Qt.Key_K)
+            and bool(modifiers & Qt.ControlModifier)
+            and bool(modifiers & Qt.ShiftModifier)
+            and not bool(modifiers & (Qt.AltModifier | Qt.MetaModifier))
+        )
+        if plain_vi or chord_vi:
+            self._move_active(1 if key == Qt.Key_J else -1)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def _active_tag_token(text: str, cursor: int) -> Optional[str]:
@@ -145,6 +190,10 @@ class DebugTaskTree(QTreeWidget):
             while parent and not hasattr(parent, 'taskActivated'):
                 parent = parent.parent()
             if parent and hasattr(parent, 'taskActivated'):
+                if getattr(parent, "_triage_mode", False):
+                    parent._open_triage_editor()
+                    self._pending_task_data = None
+                    return
                 try:
                     parent._mark_activation_source("mouse")
                 except Exception:
@@ -166,6 +215,7 @@ class TaskPanel(QWidget):
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
+    statusRequested = Signal(str, int)
     remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
 
     def __init__(
@@ -225,6 +275,11 @@ class TaskPanel(QWidget):
         self._http_client = None
         self._vector_api = VectorAPIClient(None)
         self._calendar_feature_enabled = config.load_feature_calendar_enabled()
+        self._triage_mode = False
+        self._triage_items: list[dict] = []
+        self._advance_after_refresh = False
+        self._last_undo_id: Optional[str] = None
+        self._last_undo_receipt: Optional[dict] = None
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search tasks… Esc to clear... enter text or @tag(s)...")
@@ -413,6 +468,15 @@ class TaskPanel(QWidget):
         self._date_filter_btn.clicked.connect(self._open_date_filter_dialog)
         self._update_date_filter_button()
         header_row.addWidget(self._date_filter_btn)
+        self._triage_btn = QToolButton(self)
+        self._triage_btn.setText("Triage")
+        self._triage_btn.setCheckable(True)
+        self._triage_btn.setToolTip("Process Quick Captures inside Tasks")
+        self._triage_btn.setAutoRaise(True)
+        self._triage_btn.toggled.connect(self._set_triage_mode)
+        # Kept internally for compatibility with already-marked captures, but the
+        # supported processing surface is Tools > Process Quick Captures.
+        self._triage_btn.hide()
         header_row.addSpacing(6)
         header_row.addWidget(self.search, 1)
         self.zoom_out_btn = QToolButton()
@@ -2169,6 +2233,395 @@ class TaskPanel(QWidget):
         except Exception:
             pass
 
+    def _current_row_data(self) -> Optional[dict]:
+        item = self.task_tree.currentItem()
+        if not item:
+            return None
+        value = item.data(0, Qt.UserRole)
+        return dict(value) if isinstance(value, dict) else None
+
+    def _normalize_destination(self, value: Optional[str]) -> Optional[str]:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("/"):
+            return cleaned
+        vault_name = Path(self.vault_root).name if self.vault_root else ""
+        return colon_to_path(cleaned, vault_name)
+
+    @staticmethod
+    def _mutation_target_payload(task: dict) -> dict:
+        return {
+            "path": str(task.get("path") or ""),
+            "line": int(task.get("line") or 1),
+            "expected_text": str(task.get("text") or ""),
+            "expected_status": str(task.get("status") or "todo"),
+        }
+
+    def _show_mutation_error(self, exc: Exception) -> None:
+        message = str(exc)
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                payload = response.json()
+                message = str(payload.get("detail") or message)
+            except Exception:
+                pass
+        QMessageBox.warning(self, "Task update blocked", message)
+
+    def _apply_task_mutation(self, tasks: list[dict], **changes) -> bool:
+        if not tasks:
+            return False
+        if changes.get("destination") or changes.get("delete"):
+            selected_ids = {str(task.get("id") or "") for task in tasks}
+            tasks = [
+                task
+                for task in tasks
+                if not task.get("parent") or str(task.get("parent")) not in selected_ids
+            ]
+        paths = sorted({"/" + str(task.get("path") or "").lstrip("/") for task in tasks})
+        if paths:
+            self.taskDatesWillApply.emit(paths)
+        destination = self._normalize_destination(changes.pop("destination", None))
+        try:
+            if self._http_client:
+                payload = {
+                    "targets": [self._mutation_target_payload(task) for task in tasks],
+                    **changes,
+                    "destination": destination,
+                }
+                response = self._http_client.post("/api/tasks/mutate", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                changed_paths = list(result.get("paths") or paths)
+                self._last_undo_id = str(result.get("undo_id") or "") or None
+                self._last_undo_receipt = None
+            else:
+                vault = self.vault_root or config.get_active_vault()
+                if not vault:
+                    return False
+                changed_paths: list[str] = []
+                receipt: dict[str, dict] = {"before": {}, "after": {}}
+                for task in tasks:
+                    raw = self._mutation_target_payload(task)
+                    result = mutate_task(
+                        Path(vault),
+                        TaskMutationTarget(**raw),
+                        destination=destination,
+                        **changes,
+                    )
+                    changed_paths.extend(result.get("paths") or [])
+                    for path, content in (result.get("before") or {}).items():
+                        receipt["before"].setdefault(path, content)
+                    receipt["after"].update(result.get("after") or {})
+                self._last_undo_receipt = receipt
+                self._last_undo_id = None
+            self._api_task_cache.clear()
+            self._last_refresh_signature = None
+            if changed_paths:
+                self.taskDatesApplied.emit(list(dict.fromkeys(changed_paths)))
+            self.statusRequested.emit(
+                f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo.",
+                5000,
+            )
+            self._single_shot_ui(80, self._refresh_tasks)
+            return True
+        except Exception as exc:
+            self._show_mutation_error(exc)
+            return False
+
+    def _open_task_editor(self, *, focus_field: Optional[str] = None) -> None:
+        task = self._current_row_data()
+        if not task:
+            return
+        if self._triage_mode:
+            self._open_triage_editor()
+            return
+        self.edit_task(task, focus_field=focus_field)
+
+    def edit_task(
+        self,
+        task: dict,
+        *,
+        focus_field: Optional[str] = None,
+        parent=None,
+        anchor_pos: Optional[QPoint] = None,
+    ) -> bool:
+        """Open the shared task editor for an explicit task record."""
+        dialog = TaskQuickEditor(
+            task,
+            parent or self,
+            focus_field=focus_field,
+            known_tags=self._known_tags_for_editor(),
+            page_search=self._search_destination_pages,
+            anchor_pos=anchor_pos or self._task_date_anchor(),
+            vi_mode=self._is_vi_mode(),
+            vault_accent_color=self._vault_accent_color,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        try:
+            values = dialog.values()
+        except ValueError as exc:
+            self._show_mutation_error(exc)
+            return False
+        self._advance_after_refresh = dialog.save_and_next
+        return self._apply_task_mutation(
+            [task],
+            text=values["text"],
+            status=values["status"],
+            priority=values["priority"],
+            tags=values["tags"],
+            start=values["start"],
+            due=values["due"],
+            destination=values["destination"],
+        )
+
+    def _open_triage_editor(self, initial_outcome: Optional[str] = None) -> None:
+        capture = self._current_row_data()
+        if not capture:
+            return
+        dialog = TaskQuickEditor(
+            capture,
+            self,
+            triage=True,
+            initial_outcome=initial_outcome,
+            known_tags=self._known_tags_for_editor(),
+            page_search=self._search_destination_pages,
+            anchor_pos=self._task_date_anchor(),
+            vi_mode=self._is_vi_mode(),
+            vault_accent_color=self._vault_accent_color,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            values = dialog.values()
+        except ValueError as exc:
+            self._show_mutation_error(exc)
+            return
+        if values["action"] == "delete":
+            answer = QMessageBox.question(
+                self,
+                "Delete capture?",
+                "Delete this Quick Capture? This cannot currently be undone.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        destination = self._normalize_destination(values["destination"])
+        paths = [str(capture.get("path") or "")]
+        if destination:
+            paths.append(destination)
+        self.taskDatesWillApply.emit(paths)
+        try:
+            payload = {
+                "path": capture.get("path"),
+                "item_id": capture.get("id"),
+                "expected_hash": capture.get("expected_hash"),
+                "action": values["action"],
+                "text": values["text"],
+                "destination": destination,
+                "priority": values["priority"],
+                "tags": values["tags"],
+                "start": values["start"],
+                "due": values["due"],
+            }
+            if self._http_client:
+                response = self._http_client.post("/api/tasks/triage/process", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                self._last_undo_id = str(result.get("undo_id") or "") or None
+                self._last_undo_receipt = None
+            else:
+                vault = self.vault_root or config.get_active_vault()
+                if not vault:
+                    return
+                result = process_triage_item(Path(vault), **payload)
+                self._last_undo_receipt = {
+                    "before": result.get("before") or {},
+                    "after": result.get("after") or {},
+                    "attachment_moves": result.get("attachment_moves") or [],
+                }
+                self._last_undo_id = None
+            changed_paths = list(result.get("paths") or paths)
+            self._advance_after_refresh = dialog.save_and_next
+            self._api_task_cache.clear()
+            self._last_refresh_signature = None
+            self.taskDatesApplied.emit(changed_paths)
+            self.statusRequested.emit("Triage item processed. Ctrl+Z to undo.", 5000)
+            self._refresh_tasks()
+        except Exception as exc:
+            self._show_mutation_error(exc)
+
+    def _search_destination_pages(self, query: str) -> list[str]:
+        """Search the full page index, independent of the active Tasks filter."""
+        term = str(query or "").strip().lstrip(":")
+        if not term:
+            return []
+        try:
+            if self._http_client:
+                response = self._http_client.get(
+                    "/api/pages/search",
+                    params={"q": term, "limit": 40},
+                )
+                response.raise_for_status()
+                pages = response.json().get("pages", [])
+            else:
+                pages = config.search_pages(term, limit=40)
+        except Exception as exc:
+            if log_enabled("tasks_calendar"):
+                print(f"[TASKS] Destination page search failed: {exc}")
+            return []
+
+        destinations: list[str] = []
+        for page in pages:
+            raw_path = str(page.get("path") or "") if isinstance(page, dict) else str(page or "")
+            colon_path = path_to_colon(raw_path)
+            if colon_path:
+                destinations.append(f":{colon_path.lstrip(':')}")
+        return list(dict.fromkeys(destinations))
+
+    def _known_tags_for_editor(self) -> list[str]:
+        """Return vault-wide known tags rather than only tags visible in the Tasks filter."""
+        tags = {str(tag).lstrip("@").strip() for tag in self._available_tags if str(tag).strip()}
+        try:
+            if self._http_client:
+                response = self._http_client.get("/tags")
+                response.raise_for_status()
+                entries = response.json().get("tags", [])
+                for entry in entries:
+                    value = entry.get("tag") if isinstance(entry, dict) else entry
+                    if str(value or "").strip():
+                        tags.add(str(value).lstrip("@").strip())
+            else:
+                for source in (config.fetch_task_tags(), config.fetch_tag_summary()):
+                    for value, _count in source:
+                        if str(value or "").strip():
+                            tags.add(str(value).lstrip("@").strip())
+        except Exception as exc:
+            if log_enabled("tasks_calendar"):
+                print(f"[TASKS] Known-tag lookup failed: {exc}")
+        return sorted(tags, key=str.casefold)
+
+    def _undo_last_mutation(self) -> None:
+        if not self._last_undo_id and not self._last_undo_receipt:
+            return
+        try:
+            if self._http_client and self._last_undo_id:
+                response = self._http_client.post(f"/api/tasks/undo/{self._last_undo_id}")
+                response.raise_for_status()
+                result = response.json()
+            else:
+                vault = self.vault_root or config.get_active_vault()
+                if not vault or not self._last_undo_receipt:
+                    return
+                result = undo_file_mutation(Path(vault), self._last_undo_receipt)
+            self._last_undo_id = None
+            self._last_undo_receipt = None
+            if not self._http_client:
+                from sp.app.capture_triage import invalidate_triage_cache
+
+                invalidate_triage_cache(Path(vault))
+            paths = list(result.get("paths") or [])
+            if paths:
+                self.taskDatesApplied.emit(paths)
+            self.statusRequested.emit("Task change undone.", 4000)
+            self._api_task_cache.clear()
+            self._last_refresh_signature = None
+            self._refresh_tasks()
+        except Exception as exc:
+            self._show_mutation_error(exc)
+
+    def _selected_task_data(self) -> list[dict]:
+        result: list[dict] = []
+        for item in self.task_tree.selectedItems():
+            value = item.data(0, Qt.UserRole)
+            if isinstance(value, dict):
+                result.append(dict(value))
+        current = self._current_row_data()
+        if not result and current:
+            result.append(current)
+        return result
+
+    def _cycle_selected_priority(self) -> None:
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        current = self._current_row_data() or tasks[0]
+        priority = (int(current.get("priority") or 0) + 1) % 4
+        self._apply_task_mutation(tasks, priority=priority)
+
+    def _delete_selected_tasks(self) -> None:
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        count = len(tasks)
+        answer = QMessageBox.question(
+            self,
+            "Delete task?" if count == 1 else f"Delete {count} tasks?",
+            "Delete the selected task?" if count == 1 else f"Delete {count} selected tasks?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._apply_task_mutation(tasks, delete=True)
+
+    def _edit_selected_tags(self) -> None:
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        if len(tasks) == 1:
+            self._open_task_editor(focus_field="tags")
+            return
+        current_tags = " ".join(
+            "@" + str(tag).lstrip("@") for tag in tasks[0].get("tags") or []
+        )
+        value, accepted = QInputDialog.getText(
+            self,
+            f"Edit tags for {len(tasks)} tasks",
+            "Tags:",
+            text=current_tags,
+        )
+        if not accepted:
+            return
+        tags = [part.lstrip("@") for part in re.split(r"[\s,]+", value) if part]
+        self._apply_task_mutation(tasks, tags=tags)
+
+    def _move_selected_tasks(self) -> None:
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        self._open_task_editor(focus_field="destination")
+
+    def _shift_selected_due(self, days: int) -> None:
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        for task in tasks:
+            raw = str(task.get("due") or "")
+            try:
+                base = date.fromisoformat(raw) if raw else date.today()
+            except ValueError:
+                base = date.today()
+            self._apply_task_mutation([task], due=(base + timedelta(days=days)).isoformat())
+
+    def _show_task_shortcuts(self) -> None:
+        if self._triage_mode:
+            text = (
+                "Triage shortcuts\n\nE/F2  Edit capture\nA  Make Task\nF  File as Note\n"
+                "N  Keep as Note\nDelete  Delete\nCtrl+Enter  Process and advance\n"
+                "Ctrl+Z  Undo last change\nEsc  Return to Tasks"
+            )
+        else:
+            text = (
+                "Task shortcuts\n\nSpace  Complete/reopen\nE/F2  Edit\nD  Due date\n"
+                "S  Start date\n[ / ]  Due date ±1 day\nShift+[ / ]  ±1 week\n"
+                "P  Cycle priority\nT  Edit tags\nM  Edit move destination\nCtrl+Z  Undo last change\n"
+                "Enter  Open source\n/  Search"
+            )
+        QMessageBox.information(self, "Tasks keyboard shortcuts", text)
+
     def eventFilter(self, obj, event):
         if getattr(self, "tag_list", None):
             viewport = self.tag_list.viewport()
@@ -2191,6 +2644,83 @@ class TaskPanel(QWidget):
                 self.search.text(), self.search.cursorPosition(), self._available_tags
             ):
                 return super().eventFilter(obj, event)
+            if obj is self.task_tree:
+                key = event.key()
+                if key == Qt.Key_Z and mods == Qt.ControlModifier:
+                    self._undo_last_mutation()
+                    event.accept()
+                    return True
+                if self._triage_mode:
+                    outcome_keys = {
+                        Qt.Key_A: "task",
+                        Qt.Key_F: "file",
+                        Qt.Key_N: "note",
+                    }
+                    if key in outcome_keys and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._open_triage_editor(outcome_keys[key])
+                        event.accept()
+                        return True
+                    if key in (Qt.Key_E, Qt.Key_F2, Qt.Key_Return, Qt.Key_Enter):
+                        self._open_triage_editor()
+                        event.accept()
+                        return True
+                    if key == Qt.Key_Delete:
+                        self._open_triage_editor("delete")
+                        event.accept()
+                        return True
+                    if key == Qt.Key_Escape:
+                        self._triage_btn.setChecked(False)
+                        event.accept()
+                        return True
+                else:
+                    if key == Qt.Key_Space:
+                        tasks = self._selected_task_data()
+                        current = self._current_row_data()
+                        if current:
+                            status = "todo" if current.get("status") == "done" else "done"
+                            self._apply_task_mutation(tasks, status=status)
+                        event.accept()
+                        return True
+                    if key in (Qt.Key_E, Qt.Key_F2) and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._open_task_editor()
+                        event.accept()
+                        return True
+                    if key in (Qt.Key_D, Qt.Key_S) and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        targets = self._collect_task_targets()
+                        if targets:
+                            self._open_task_date_quick_menu(
+                                "due" if key == Qt.Key_D else "start",
+                                targets,
+                                self._task_date_anchor(),
+                            )
+                        event.accept()
+                        return True
+                    if key == Qt.Key_P and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._cycle_selected_priority()
+                        event.accept()
+                        return True
+                    if key == Qt.Key_T and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._edit_selected_tags()
+                        event.accept()
+                        return True
+                    if key == Qt.Key_M and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._move_selected_tasks()
+                        event.accept()
+                        return True
+                    if event.text() in ("[", "]", "{", "}"):
+                        direction = -1 if event.text() in ("[", "{") else 1
+                        magnitude = 7 if mods & Qt.ShiftModifier else 1
+                        self._shift_selected_due(direction * magnitude)
+                        event.accept()
+                        return True
+                    if key == Qt.Key_Delete:
+                        self._delete_selected_tasks()
+                        event.accept()
+                        return True
+                if event.text() == "?":
+                    self._show_task_shortcuts()
+                    event.accept()
+                    return True
             if obj is self.task_tree and event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 current = self.task_tree.currentItem()
                 if current:
@@ -2503,6 +3033,10 @@ class TaskPanel(QWidget):
             self._last_refresh_signature = None
             self.clear()
             return
+        if self._triage_mode:
+            self._last_refresh_signature = None
+            self._refresh_tasks()
+            return
         signature = self._refresh_signature()
         if signature == self._last_refresh_signature:
             if log_enabled("tasks_calendar"):
@@ -2524,6 +3058,7 @@ class TaskPanel(QWidget):
             str(self._nav_filter_prefix or ""),
             bool(self._nav_filter_enabled),
             bool(self._include_journal),
+            bool(self._triage_mode),
             str(self._date_filter_active_preset or ""),
             self._date_filter_start.isoformat() if self._date_filter_start else "",
             self._date_filter_end.isoformat() if self._date_filter_end else "",
@@ -2618,7 +3153,88 @@ class TaskPanel(QWidget):
             self.tag_list.addItem(item)
         self.tag_list.blockSignals(False)
 
+    def _set_triage_mode(self, enabled: bool) -> None:
+        self._triage_mode = bool(enabled)
+        self.active_tags.clear()
+        self.search.clear()
+        self._refresh_tasks()
+        self.task_tree.setFocus(Qt.ShortcutFocusReason)
+
+    def _set_task_filter_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.show_completed,
+            self.show_future,
+            self.show_actionable,
+            self._date_filter_btn,
+        ):
+            if widget is not None:
+                widget.setEnabled(enabled)
+        try:
+            self.splitter.widget(0).setVisible(enabled)
+        except Exception:
+            pass
+
+    def _fetch_triage_items(self) -> list[dict]:
+        if self._http_client:
+            try:
+                response = self._http_client.get("/api/tasks/triage")
+                response.raise_for_status()
+                payload = response.json()
+                return list(payload.get("items") or [])
+            except Exception as exc:
+                if log_enabled("tasks_calendar"):
+                    print(f"[TASK_PANEL] Failed to load Triage items: {exc}")
+                return []
+        vault = self.vault_root or config.get_active_vault()
+        if not vault:
+            return []
+        return list_triage_items(Path(vault))
+
+    def _update_triage_label(self, count: int) -> None:
+        self._triage_btn.setText(f"Triage ({count})" if count else "Triage")
+
+    def _refresh_triage(self) -> None:
+        self._set_task_filter_controls_enabled(False)
+        self.task_tree.setSortingEnabled(False)
+        self.task_tree.clear()
+        self.task_tree.setColumnCount(3)
+        self.task_tree.setHeaderLabels(["", "Capture", "Source"])
+        self.task_tree.setColumnWidth(0, 28)
+        self.task_tree.setColumnWidth(1, 340)
+        items = self._fetch_triage_items()
+        self._triage_items = items
+        self._update_triage_label(len(items))
+        query = self.search.text().strip().casefold()
+        visible = [
+            item
+            for item in items
+            if not query
+            or query in str(item.get("text") or "").casefold()
+            or query in str(item.get("path") or "").casefold()
+        ]
+        for capture in visible:
+            preview = " ".join(str(capture.get("text") or "").split())
+            row = QTreeWidgetItem(["◆", preview, self._present_path(str(capture.get("path") or ""))])
+            row.setData(0, Qt.UserRole, capture)
+            row.setToolTip(1, str(capture.get("text") or ""))
+            self.task_tree.addTopLevelItem(row)
+        self._visible_tasks = visible
+        self.summary_footer.setText(
+            f"{len(visible)} capture{'s' if len(visible) != 1 else ''} to triage"
+        )
+        if visible:
+            target_index = 0
+            if self._advance_after_refresh:
+                target_index = min(1, len(visible) - 1)
+            self.task_tree.setCurrentItem(self.task_tree.topLevelItem(target_index))
+        self._advance_after_refresh = False
+
     def _refresh_tasks(self) -> None:
+        if self._triage_mode:
+            self._refresh_triage()
+            return
+        self._set_task_filter_controls_enabled(True)
+        self.task_tree.setSortingEnabled(True)
         commit_active_tag = bool(self._search_commit_next)
         self._search_commit_next = False
         current_item = self.task_tree.currentItem()
@@ -2846,6 +3462,18 @@ class TaskPanel(QWidget):
         self.task_tree.expandAll()
         self.task_tree.sortItems(self.sort_column, self.sort_order)
         self._restore_last_keyboard_selection(items_by_id)
+        if self._advance_after_refresh:
+            ordered = self._visible_items()
+            current = self.task_tree.currentItem()
+            if ordered:
+                try:
+                    current_index = ordered.index(current)
+                except ValueError:
+                    current_index = -1
+                next_index = min(current_index + 1, len(ordered) - 1)
+                self.task_tree.setCurrentItem(ordered[next_index])
+                self.task_tree.scrollToItem(ordered[next_index])
+                self._advance_after_refresh = False
         self._refresh_tags()
         self._update_summary_footer(visible_tasks)
         self._single_shot_ui(0, self._reset_horizontal_scroll)
@@ -2990,71 +3618,11 @@ class TaskPanel(QWidget):
         return line
 
     def _set_tasks_completed(self, targets: list[dict], done: bool) -> None:
-        if not config.has_active_vault():
-            return
-        vault_root_val = config.get_active_vault()
-        if not vault_root_val:
-            return
-        vault_root = Path(vault_root_val)
-        affected_paths = sorted(
-            {
-                "/" + str(t.get("path") or "").strip().lstrip("/")
-                for t in targets
-                if str(t.get("path") or "").strip()
-            }
-        )
-        if affected_paths:
-            self.taskDatesWillApply.emit(affected_paths)
-        targets_by_path: dict[str, list[dict]] = {}
-        for target in targets:
-            path = target.get("path")
-            if not path:
-                continue
-            targets_by_path.setdefault(str(path), []).append(target)
-        changed_paths: set[str] = set()
-        for rel_path, items in targets_by_path.items():
-            file_path = vault_root / rel_path.lstrip("/")
-            if not file_path.exists():
-                continue
-            try:
-                lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
-            except Exception:
-                try:
-                    lines = file_path.read_text(errors="ignore").splitlines(keepends=True)
-                except Exception:
-                    continue
-            changed = False
-            for target in items:
-                line_num = target.get("line") or 1
-                try:
-                    line_idx = int(line_num) - 1
-                except (TypeError, ValueError):
-                    line_idx = 0
-                if line_idx < 0 or line_idx >= len(lines):
-                    continue
-                original = lines[line_idx]
-                updated = self._update_task_line_checkbox(original, done)
-                if updated != original:
-                    lines[line_idx] = updated
-                    changed = True
-            if not changed:
-                continue
-            try:
-                new_content = "".join(lines)
-                file_path.write_text(new_content, encoding="utf-8")
-            except Exception:
-                continue
-            try:
-                indexer.index_page(rel_path if rel_path.startswith("/") else f"/{rel_path}", new_content)
-            except Exception:
-                pass
-            changed_paths.add("/" + str(rel_path).lstrip("/"))
-        if changed_paths:
-            self.taskDatesApplied.emit(sorted(changed_paths))
-        self._single_shot_ui(100, self._refresh_tasks)
+        tasks = [target.get("task") for target in targets if target.get("task")]
+        self._apply_task_mutation(tasks, status="done" if done else "todo")
 
     def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
-        menu = QMenu(self)
+        menu = TaskDateQuickMenu(self, use_vi_keys=self._is_vi_mode())
         apply_menu_theme(menu, self.task_tree)
         for label in ("Today", "Tomorrow", "Yesterday"):
             act = menu.addAction(label)
@@ -3096,16 +3664,12 @@ class TaskPanel(QWidget):
         target_date = self._resolve_quick_date(label, role)
         if not target_date:
             return
-        if role == "start":
-            self._update_tasks_with_dates(targets, target_date, None, apply_start=True, apply_due=False)
-        else:
-            self._update_tasks_with_dates(targets, None, target_date, apply_start=False, apply_due=True)
+        tasks = [target.get("task") for target in targets if target.get("task")]
+        self._apply_task_mutation(tasks, **({"start": target_date} if role == "start" else {"due": target_date}))
 
     def _clear_task_date_choice(self, role: str, targets: list[dict]) -> None:
-        if role == "start":
-            self._update_tasks_with_dates(targets, None, None, apply_start=True, apply_due=False)
-        else:
-            self._update_tasks_with_dates(targets, None, None, apply_start=False, apply_due=True)
+        tasks = [target.get("task") for target in targets if target.get("task")]
+        self._apply_task_mutation(tasks, **({"start": ""} if role == "start" else {"due": ""}))
 
     def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
         anchor_pos = anchor or self._task_date_anchor()
@@ -3115,7 +3679,7 @@ class TaskPanel(QWidget):
             accept_on_double_click=True,
             accept_on_enter=True,
             allow_nav_keys=False,
-            use_vi_keys=False,
+            use_vi_keys=self._is_vi_mode(),
             keep_edit_focus=True,
         )
         if dlg.exec() != QDialog.Accepted:
@@ -3123,10 +3687,8 @@ class TaskPanel(QWidget):
         value = dlg.selected_date_text()
         if not value:
             return
-        if role == "start":
-            self._update_tasks_with_dates(targets, value, None, apply_start=True, apply_due=False)
-        else:
-            self._update_tasks_with_dates(targets, None, value, apply_start=False, apply_due=True)
+        tasks = [target.get("task") for target in targets if target.get("task")]
+        self._apply_task_mutation(tasks, **({"start": value} if role == "start" else {"due": value}))
 
     def _task_date_anchor(self) -> QPoint:
         items = self.task_tree.selectedItems()
@@ -3311,6 +3873,9 @@ class TaskPanel(QWidget):
         return cleaned + newline
 
     def _on_task_double_clicked(self, item: QTreeWidgetItem, col: int) -> None:
+        if self._triage_mode:
+            self._open_triage_editor()
+            return
         # If double-clicking column 0 (priority/checkbox), toggle the task instead of opening it
         if col == 0:
             task = item.data(0, Qt.UserRole)
@@ -3337,6 +3902,8 @@ class TaskPanel(QWidget):
         self._emit_task_activation(item)
 
     def _on_task_item_clicked(self, item: QTreeWidgetItem, col: int) -> None:
+        if self._triage_mode:
+            return
         due_idx = 2
         start_idx = 3 if self._show_task_start_column else None
         if col == due_idx or (start_idx is not None and col == start_idx):
@@ -3385,6 +3952,30 @@ class TaskPanel(QWidget):
         if not item.isSelected():
             self.task_tree.clearSelection()
             item.setSelected(True)
+        if self._triage_mode:
+            menu = QMenu(self)
+            apply_menu_theme(menu, self.task_tree)
+            menu.addAction("Edit Capture… (E)").triggered.connect(self._open_triage_editor)
+            menu.addAction("Make Task (A)").triggered.connect(
+                lambda: self._open_triage_editor("task")
+            )
+            menu.addAction("File as Note (F)").triggered.connect(
+                lambda: self._open_triage_editor("file")
+            )
+            menu.addAction("Keep as Note (N)").triggered.connect(
+                lambda: self._open_triage_editor("note")
+            )
+            menu.addSeparator()
+            menu.addAction("Delete…").triggered.connect(
+                lambda: self._open_triage_editor("delete")
+            )
+            if self._last_undo_id or self._last_undo_receipt:
+                menu.addSeparator()
+                menu.addAction("Undo Last Change (Ctrl+Z)").triggered.connect(
+                    self._undo_last_mutation
+                )
+            menu.exec(self.task_tree.viewport().mapToGlobal(pos))
+            return
         due_idx = 2
         start_idx = 3 if self._show_task_start_column else None
         if col == due_idx or (start_idx is not None and col == start_idx):
@@ -3412,6 +4003,22 @@ class TaskPanel(QWidget):
         if any_done:
             menu.addAction("Reopen Task").triggered.connect(
                 lambda: self._set_tasks_completed(targets, False)
+            )
+        menu.addSeparator()
+        menu.addAction("Edit Task… (E)").triggered.connect(self._open_task_editor)
+        menu.addAction("Set Due Date… (D)").triggered.connect(
+            lambda: self._open_task_date_quick_menu("due", targets, self._task_date_anchor())
+        )
+        menu.addAction("Set Start Date… (S)").triggered.connect(
+            lambda: self._open_task_date_quick_menu("start", targets, self._task_date_anchor())
+        )
+        menu.addAction("Edit Tags… (T)").triggered.connect(self._edit_selected_tags)
+        menu.addAction("Move… (M)").triggered.connect(self._move_selected_tasks)
+        menu.addAction("Delete Task…").triggered.connect(self._delete_selected_tasks)
+        if self._last_undo_id or self._last_undo_receipt:
+            menu.addSeparator()
+            menu.addAction("Undo Last Change (Ctrl+Z)").triggered.connect(
+                self._undo_last_mutation
             )
         if menu.actions():
             menu.exec(self.task_tree.viewport().mapToGlobal(pos))

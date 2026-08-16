@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QImage, QKeySequence
+from PySide6.QtGui import QAction, QImage, QKeySequence, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
@@ -13,6 +13,7 @@ from sp.app.quickcapture import _append_quick_capture_section as append_desktop_
 from sp.app.quickcapture_lite import _build_quick_capture_entry as build_quick_capture_entry_lite
 from sp.app.quickcapture_lite import _append_quick_capture_section as append_lite_capture
 from sp.app.ui.quick_capture_overlay import QuickCaptureInput, QuickCaptureOverlay
+from sp.app.ui.markdown_editor import MarkdownHighlighter
 from sp.server.api import _build_quick_capture_entry as build_api_quick_capture_entry
 from sp.server.api import _append_quick_capture_section as append_api_capture
 
@@ -258,6 +259,20 @@ def test_quick_capture_entry_uses_timestamp_header_and_indented_note_body() -> N
     assert build_api_quick_capture_entry("first line\nsecond line", "2026-05-07: 07:01am") == expected
 
 
+def test_all_capture_clients_can_mark_a_triage_capture() -> None:
+    expected = "- *10:42 am* @inbox <!-- sp:capture:capture-1 -->"
+
+    assert build_quick_capture_entry(
+        "idea", "10:42 am", capture_id="capture-1", inbox=True
+    )[0] == expected
+    assert build_quick_capture_entry_lite(
+        "idea", "10:42 am", capture_id="capture-1", inbox=True
+    )[0] == expected
+    assert build_api_quick_capture_entry(
+        "idea", "10:42 am", capture_id="capture-1", inbox=True
+    )[0] == expected
+
+
 def test_quick_capture_entry_replaces_attachment_placeholder_in_place() -> None:
     images = [{"name": "paste_image_001.png", "width": 320, "placeholder": "<clipboard-Image-1-320x240>"}]
     expected = [
@@ -337,3 +352,21 @@ def test_all_capture_clients_use_configured_header(monkeypatch) -> None:
         assert second.count("## Captured Notes") == 1
         assert second.count("  first") == 1
         assert second.count("  second") == 1
+
+
+def test_capture_metadata_comment_is_hidden_by_highlighter(qtbot) -> None:
+    document = QTextDocument()
+    highlighter = MarkdownHighlighter(document)
+    text = "- *10:42 am* @inbox <!-- sp:capture:capture-1 -->"
+    document.setPlainText(text)
+    highlighter.rehighlight()
+
+    comment_start = text.index("<!--")
+    formats = document.firstBlock().layout().formats()
+    hidden = [
+        span
+        for span in formats
+        if span.start <= comment_start < span.start + span.length
+    ]
+    assert hidden
+    assert hidden[-1].format.fontPointSize() < 0.1

@@ -87,3 +87,4 @@ This makes Homebase a strong fit for:
 - Use TLS for any non-local network use.
 - Review user roles periodically.
 - For agent or CLI workflows, prefer additive page creation and let StillPoint/Homebase handle the sync layer.
+- The Homebase Sync dialog keeps **Reset Auth** and **Reset Encryption Passphrase** in its always-visible Recovery row. Sync settings, manual sync, conflicts, sync errors, and Close remain available in the same dialog.

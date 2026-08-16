@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QEvent,
     QModelIndex,
     QPoint,
+    QRect,
     QDate,
     Qt,
     Signal,
@@ -970,6 +971,7 @@ from .date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
 from .open_vault_dialog import OpenVaultDialog, AddHomebaseVaultDialog, _persist_homebase_passphrase_settings
 from .vault_preferences_dialog import VaultPreferencesDialog
 from .quick_capture_overlay import QuickCaptureOverlay
+from .quick_capture_processor import QuickCaptureProcessorDialog
 from .page_editor_window import PageEditorWindow
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
 from .mode_window import ModeWindow
@@ -977,6 +979,8 @@ from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
 from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
+from sp.app.capture_triage import list_quick_capture_chunks, process_quick_capture_chunk
+from sp.app.task_mutations import undo_file_mutation
 
 
 PATH_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -2613,6 +2617,8 @@ class MainWindow(QMainWindow):
             lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
         )
         self.editor.imageSaved.connect(self._on_image_saved)
+        self.editor.set_task_hover_edit_enabled(True)
+        self.editor.taskEditRequested.connect(self._edit_task_from_main_editor)
         self.editor.textChanged.connect(self._on_editor_text_changed)
         self.editor.focusLost.connect(self._on_editor_focus_lost)
         app = QApplication.instance()
@@ -2770,6 +2776,9 @@ class MainWindow(QMainWindow):
         )
         self.right_panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
         self.right_panel.taskDatesApplied.connect(self._on_task_dates_applied)
+        self.right_panel.taskStatusRequested.connect(
+            lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
+        )
         self.right_panel.linkBackRequested.connect(self._navigate_history_back)
         self.right_panel.linkForwardRequested.connect(self._navigate_history_forward)
         self.right_panel.linkHomeRequested.connect(self._go_home)
@@ -3195,6 +3204,14 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(move_text_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self._action_quick_capture)
+        self._action_process_quick_captures = QAction("Process Quick Captures…", self)
+        self._action_process_quick_captures.setToolTip(
+            "Move or convert entries from Quick Capture pages"
+        )
+        self._action_process_quick_captures.triggered.connect(
+            self._process_quick_captures
+        )
+        tools_menu.addAction(self._action_process_quick_captures)
         self._action_view_vault_disk = view_vault_disk_action
         self._action_zim_import = zim_import_action
         self._action_rebuild_index = rebuild_index_action
@@ -7876,6 +7893,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         body_scroll = QScrollArea(dialog)
+        body_scroll.setObjectName("homebaseSyncBodyScroll")
         body_scroll.setWidgetResizable(True)
         body_scroll.setFrameShape(QFrame.NoFrame)
         body_widget = QWidget(body_scroll)
@@ -8018,7 +8036,9 @@ class MainWindow(QMainWindow):
         save_settings_btn = QPushButton("Save Settings")
         sync_now_btn = QPushButton("Sync Now")
         reset_auth_btn = QPushButton("Reset Auth")
+        reset_auth_btn.setObjectName("homebaseResetAuthButton")
         reset_passphrase_btn = QPushButton("Reset Encryption Passphrase")
+        reset_passphrase_btn.setObjectName("homebaseResetEncryptionButton")
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
         sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
         sync_errors_btn = QPushButton(f"View Sync Errors ({len(sync_errors)})")
@@ -8032,13 +8052,24 @@ class MainWindow(QMainWindow):
             status_actions.addStretch(1)
         body_layout.insertLayout(1, status_actions)
 
-        settings_actions = QVBoxLayout() if available.width() < 620 else QHBoxLayout()
-        settings_actions.addWidget(reset_auth_btn)
-        settings_actions.addWidget(reset_passphrase_btn)
-        if isinstance(settings_actions, QHBoxLayout):
-            settings_actions.addStretch(1)
-        body_layout.addLayout(settings_actions)
         body_layout.addStretch(1)
+
+        # Keep account/encryption recovery visible. These controls used to live in
+        # the fixed button row; placing them inside the scrolling body made them
+        # appear to be missing on shorter displays.
+        recovery_box = QFrame(dialog)
+        recovery_box.setObjectName("homebaseSyncRecoveryBar")
+        recovery_box.setFrameShape(QFrame.StyledPanel)
+        recovery_actions = QVBoxLayout(recovery_box) if available.width() < 620 else QHBoxLayout(recovery_box)
+        recovery_actions.setContentsMargins(10, 8, 10, 8)
+        recovery_label = QLabel("Recovery:", recovery_box)
+        recovery_label.setStyleSheet("font-weight: 600;")
+        recovery_actions.addWidget(recovery_label)
+        recovery_actions.addWidget(reset_auth_btn)
+        recovery_actions.addWidget(reset_passphrase_btn)
+        if isinstance(recovery_actions, QHBoxLayout):
+            recovery_actions.addStretch(1)
+        layout.addWidget(recovery_box)
 
         primary_actions = QVBoxLayout() if available.width() < 420 else QHBoxLayout()
         if isinstance(primary_actions, QHBoxLayout):
@@ -15231,6 +15262,332 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+    def _quick_capture_calendar_center(self) -> QDate:
+        panel = getattr(self.right_panel, "calendar_panel", None)
+        calendar = getattr(panel, "calendar", None)
+        selected = calendar.selectedDate() if calendar is not None else QDate.currentDate()
+        return selected if selected.isValid() else QDate.currentDate()
+
+    def _configured_quick_capture_path(self, center: QDate) -> Optional[str]:
+        if config.load_quick_capture_page_mode() != "custom":
+            return (
+                f"/Journal/{center.year():04d}/{center.month():02d}/"
+                f"{center.day():02d}/{center.day():02d}.md"
+            )
+        value = str(config.load_quick_capture_custom_page() or "").strip()
+        if not value:
+            return None
+        if value.startswith("/"):
+            return value
+        if "/" in value:
+            return "/" + value.lstrip("/")
+        return colon_to_path(value)
+
+    def _saved_custom_quick_capture_path(self) -> Optional[str]:
+        value = str(config.load_quick_capture_custom_page() or "").strip()
+        if not value:
+            return None
+        if value.startswith("/"):
+            return value
+        if "/" in value:
+            return "/" + value.lstrip("/")
+        return colon_to_path(value)
+
+    def _quick_capture_scope_items(self, scope: str) -> tuple[list[dict], int]:
+        if self._remote_mode:
+            try:
+                response = self.http.get("/api/quick-captures/process")
+                response.raise_for_status()
+                all_items = list(response.json().get("items") or [])
+            except Exception as exc:
+                self.statusBar().showMessage(f"Could not load Quick Captures: {exc}", 6000)
+                return [], 0
+        else:
+            vault_value = self._local_vault_root()
+            if not vault_value:
+                return [], 0
+            all_items = list_quick_capture_chunks(Path(vault_value))
+        if scope == "all":
+            return all_items, 0
+        center = self._quick_capture_calendar_center()
+        calendar_paths: set[str] = set()
+        for offset in range(-7, 8):
+            day = center.addDays(offset)
+            base = (
+                f"/Journal/{day.year():04d}/{day.month():02d}/"
+                f"{day.day():02d}/{day.day():02d}"
+            )
+            calendar_paths.update({base + ".md", base + ".txt"})
+        configured = self._configured_quick_capture_path(center)
+        configured_paths = {configured} if configured else set()
+        saved_custom = self._saved_custom_quick_capture_path()
+        active_paths = calendar_paths | configured_paths
+        if saved_custom:
+            active_paths.add(saved_custom)
+        if scope == "configured":
+            selected_paths = configured_paths
+        elif scope == "calendar":
+            selected_paths = calendar_paths
+        else:
+            selected_paths = active_paths
+        items = [item for item in all_items if str(item.get("path") or "") in selected_paths]
+        items.sort(
+            key=lambda item: (
+                0 if str(item.get("path") or "") in configured_paths else 1,
+                0 if str(item.get("path") or "") == saved_custom else 1,
+                str(item.get("path") or ""),
+                int(item.get("start_line") or 0),
+            )
+        )
+        return items, max(0, len(all_items) - len(items))
+
+    def _clear_quick_capture_highlight(self) -> None:
+        key = QTextFormat.UserProperty + 37
+        self.editor.setExtraSelections(
+            [
+                selection
+                for selection in self.editor.extraSelections()
+                if selection.format.property(key) is None
+            ]
+        )
+
+    def _activate_quick_capture_item(self, item: dict) -> None:
+        path = str(item.get("path") or "")
+        if not path:
+            return
+        if self.current_path != path:
+            self._open_file(path, add_to_history=False, sync_calendar=False)
+        if self.current_path != path:
+            return
+        self._clear_quick_capture_highlight()
+        key = QTextFormat.UserProperty + 37
+        color = QColor(
+            str(
+                getattr(self, "_vault_accent_color", None)
+                or theme_value("main_window.highlight.selection_bg", "#4A90E2")
+            )
+        )
+        if not color.isValid():
+            color = QColor("#4A90E2")
+        color.setAlpha(82)
+        selections = self.editor.extraSelections()
+        start_line = max(1, int(item.get("start_line") or 1))
+        end_line = max(start_line, int(item.get("end_line") or start_line))
+        first_cursor: Optional[QTextCursor] = None
+        for line_number in range(start_line, end_line + 1):
+            block = self.editor.document().findBlockByNumber(line_number - 1)
+            if not block.isValid():
+                continue
+            cursor = QTextCursor(block)
+            if first_cursor is None:
+                first_cursor = QTextCursor(cursor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setBackground(color)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selection.format.setProperty(key, True)
+            selections.append(selection)
+        self.editor.setExtraSelections(selections)
+        if first_cursor is not None:
+            self.editor.setTextCursor(first_cursor)
+            self._scroll_cursor_to_top_quarter(first_cursor, animate=False, flash=False)
+
+    def _quick_capture_page_search(self, query: str) -> list[str]:
+        panel = getattr(self.right_panel, "task_panel", None)
+        if panel is None:
+            return []
+        if not str(query or "").strip():
+            try:
+                response = self.http.get(
+                    "/api/pages/search",
+                    params={"q": "", "limit": 40},
+                )
+                response.raise_for_status()
+                destinations: list[str] = []
+                for page in response.json().get("pages", []):
+                    path = str(page.get("path") or "") if isinstance(page, dict) else str(page or "")
+                    colon = path_to_colon(path)
+                    if colon:
+                        destinations.append(f":{colon.lstrip(':')}")
+                return list(dict.fromkeys(destinations))
+            except Exception:
+                return []
+        return panel._search_destination_pages(query)
+
+    def _fresh_quick_capture_item(self, item: dict) -> dict:
+        """Revalidate a displayed capture immediately before mutating it."""
+        source_path = str(item.get("path") or "")
+        if self.current_path == source_path and self._is_editor_dirty():
+            self._save_current_file(
+                auto=True,
+                reason="process quick capture source",
+                force=True,
+                allow_when_suspended=True,
+            )
+        if self._remote_mode:
+            response = self.http.get("/api/quick-captures/process")
+            response.raise_for_status()
+            candidates = list(response.json().get("items") or [])
+        else:
+            vault_value = self._local_vault_root()
+            if not vault_value:
+                raise ValueError("The active vault is unavailable.")
+            candidates = list_quick_capture_chunks(
+                Path(vault_value),
+                paths={source_path},
+            )
+        candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("path") or "") == source_path
+        ]
+        expected_hash = str(item.get("expected_hash") or "")
+        exact = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("expected_hash") or "") == expected_hash
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        timestamp = str(item.get("timestamp") or "").strip()
+        text = str(item.get("text") or "").strip()
+        equivalent = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("timestamp") or "").strip() == timestamp
+            and str(candidate.get("text") or "").strip() == text
+        ]
+        if equivalent:
+            original_line = int(item.get("start_line") or 1)
+            equivalent.sort(
+                key=lambda candidate: abs(
+                    int(candidate.get("start_line") or 1) - original_line
+                )
+            )
+            return equivalent[0]
+        raise ValueError(
+            "This Quick Capture changed after it was displayed. Reload the processor and try again."
+        )
+
+    def _process_quick_capture_move(self, item: dict, destination: str) -> bool:
+        try:
+            item = self._fresh_quick_capture_item(item)
+            payload = {
+                "path": str(item.get("path") or ""),
+                "start_line": int(item.get("start_line") or 1),
+                "expected_hash": str(item.get("expected_hash") or ""),
+                "action": "move",
+                "destination": colon_to_path(destination),
+            }
+            if self._remote_mode:
+                response = self.http.post("/api/quick-captures/process", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                self._quick_capture_processor_undo_id = str(result.get("undo_id") or "") or None
+                self._quick_capture_processor_receipt = None
+            else:
+                vault_value = self._local_vault_root()
+                if not vault_value:
+                    return False
+                result = process_quick_capture_chunk(Path(vault_value), **payload)
+                self._quick_capture_processor_receipt = {
+                    "before": result.get("before") or {},
+                    "after": result.get("after") or {},
+                    "attachment_moves": result.get("attachment_moves") or [],
+                }
+                self._quick_capture_processor_undo_id = None
+            if self.current_path in set(result.get("paths") or []):
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    sync_calendar=False,
+                )
+            self.right_panel.refresh_tasks()
+            self.statusBar().showMessage("Quick Capture moved. Ctrl+Z to undo.", 5000)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "Move Quick Capture", str(exc))
+            return False
+
+    def _undo_quick_capture_processing(self) -> bool:
+        receipt = getattr(self, "_quick_capture_processor_receipt", None)
+        undo_id = getattr(self, "_quick_capture_processor_undo_id", None)
+        if not receipt and not undo_id:
+            self.statusBar().showMessage("There is no Quick Capture action to undo.", 3000)
+            return False
+        try:
+            if undo_id:
+                response = self.http.post(f"/api/tasks/undo/{undo_id}")
+                response.raise_for_status()
+                result = response.json()
+            else:
+                vault_value = self._local_vault_root()
+                if not vault_value:
+                    return False
+                result = undo_file_mutation(Path(vault_value), receipt)
+            self._quick_capture_processor_receipt = None
+            self._quick_capture_processor_undo_id = None
+            if self.current_path in set(result.get("paths") or []):
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    sync_calendar=False,
+                )
+            self.right_panel.refresh_tasks()
+            self.statusBar().showMessage("Quick Capture action undone.", 4000)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "Undo Quick Capture", str(exc))
+            return False
+
+    def _process_quick_captures(self) -> None:
+        if not self.current_path or not self.vault_root:
+            self._alert("Open a vault before processing Quick Captures.")
+            return
+        self._save_current_file(
+            auto=True,
+            reason="process quick captures",
+            force=self._is_editor_dirty(),
+            allow_when_suspended=True,
+        )
+        original_path = self.current_path
+        original_cursor = self.editor.textCursor().position()
+        original_scroll = self.editor.verticalScrollBar().value()
+        self._quick_capture_processor_receipt = None
+        self._quick_capture_processor_undo_id = None
+        top_left = self.editor.viewport().mapToGlobal(QPoint(0, 0))
+        anchor_rect = QRect(top_left, self.editor.viewport().size())
+        dialog = QuickCaptureProcessorDialog(
+            self,
+            item_provider=self._quick_capture_scope_items,
+            activate_item=self._activate_quick_capture_item,
+            move_item=self._process_quick_capture_move,
+            undo_last=self._undo_quick_capture_processing,
+            page_search=self._quick_capture_page_search,
+            anchor_rect=anchor_rect,
+            vi_mode=bool(self._vi_enabled),
+        )
+        self._quick_capture_processor_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._clear_quick_capture_highlight()
+            self._quick_capture_processor_dialog = None
+            if original_path:
+                self._open_file(
+                    original_path,
+                    add_to_history=False,
+                    force=True,
+                    sync_calendar=False,
+                )
+                cursor = self.editor.textCursor()
+                cursor.setPosition(min(original_cursor, len(self.editor.toPlainText())))
+                self.editor.setTextCursor(cursor)
+                bar = self.editor.verticalScrollBar()
+                bar.setValue(max(0, min(original_scroll, bar.maximum())))
+
     def _show_quick_capture_overlay(self) -> None:
         target, reason = self._resolve_quick_capture_target()
         if not target:
@@ -15499,6 +15856,7 @@ class MainWindow(QMainWindow):
             "page_mode": target.get("page_mode"),
             "page_ref": target.get("page_ref"),
             "text": text,
+            "triage": False,
         }
         attachments = attachments or []
         if target.get("kind") == "local":
@@ -16385,6 +16743,8 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         panel = TaskPanel(font_size_key="task_font_size_detached")
+        panel.set_http_client(self.http)
+        panel.set_remote_mode(bool(self._remote_mode))
         panel.set_vault_root(self._local_vault_root() or "")
         panel.set_filter_clear_enabled(False)
         try:
@@ -16395,6 +16755,9 @@ class MainWindow(QMainWindow):
         panel.taskActivated.connect(self._open_task_from_panel)
         panel.taskDatesWillApply.connect(self._on_task_dates_will_apply)
         panel.taskDatesApplied.connect(self._on_task_dates_applied)
+        panel.statusRequested.connect(
+            lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
+        )
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
         window.setWindowTitle("Tasks")
@@ -21326,6 +21689,47 @@ class MainWindow(QMainWindow):
         self._history_cursor_positions[self.current_path] = position
         if getattr(self, "_main_soft_scroll_enabled", True):
             self._soft_autoscroll_main()
+
+    def _edit_task_from_main_editor(self, block_number: int, anchor_pos) -> None:
+        """Open the shared Task Editor for a task hovered in the main editor."""
+        if not self.current_path:
+            return
+        try:
+            if self._dirty_flag or self.editor.document().isModified():
+                self._save_current_file(
+                    auto=True,
+                    reason="edit hovered task",
+                    force=True,
+                    allow_when_suspended=True,
+                )
+            lines = self.editor.to_markdown().splitlines()
+            line_index = int(block_number)
+            if line_index < 0 or line_index >= len(lines):
+                raise ValueError("The hovered task line is no longer available.")
+            parsed = indexer.extract_tasks(self.current_path, lines[line_index])
+            if not parsed:
+                raise ValueError("The hovered line is no longer a task.")
+            task = dict(parsed[0])
+            task["path"] = self.current_path
+            task["line"] = line_index + 1
+            task["id"] = f"{self.current_path}:{line_index + 1}"
+        except Exception as exc:
+            QMessageBox.warning(self, "Edit Task", str(exc))
+            return
+
+        panel = getattr(self.right_panel, "task_panel", None)
+        if panel is None:
+            QMessageBox.information(
+                self,
+                "Edit Task",
+                "Enable the Tasks panel to use the task editor.",
+            )
+            return
+        panel.edit_task(
+            task,
+            parent=self,
+            anchor_pos=anchor_pos if isinstance(anchor_pos, QPoint) else None,
+        )
 
     def _remember_history_cursor(self) -> None:
         """Remember the current cursor position for history restore."""

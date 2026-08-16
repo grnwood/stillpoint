@@ -49,6 +49,7 @@ class TabbedRightPanel(QWidget):
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
+    taskStatusRequested = Signal(str, int)
     remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
     pageAboutToBeDeleted = Signal(str)  # page about to be deleted (for editor unload)
     pageDeleted = Signal(str)  # page path deleted from calendar panel
@@ -684,6 +685,7 @@ class TabbedRightPanel(QWidget):
         self.task_panel.filterClearRequested.connect(self.filterClearRequested)
         self.task_panel.taskDatesWillApply.connect(self.taskDatesWillApply)
         self.task_panel.taskDatesApplied.connect(self.taskDatesApplied)
+        self.task_panel.statusRequested.connect(self.taskStatusRequested)
         self.task_panel.remoteRequestObserved.connect(self.remoteRequestObserved, Qt.QueuedConnection)
         if self._http_client:
             self.task_panel.set_http_client(self._http_client)

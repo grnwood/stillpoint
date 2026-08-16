@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from PySide6.QtWidgets import QDialog, QFrame, QPushButton, QScrollArea
+
 from sp.app.ui.main_window import MainWindow
 from sp.sync.engine import HomebaseSyncStatus
 
@@ -47,3 +49,37 @@ def test_homebase_activity_snapshot_reports_backoff_phase(main_window) -> None:
 
     assert phase == "Waiting to retry"
     assert details == ["Offline (retry backoff)"]
+
+
+def test_homebase_recovery_buttons_remain_outside_scrolling_body(main_window, monkeypatch) -> None:
+    status = HomebaseSyncStatus(state="idle", summary="Up to date")
+
+    class Engine:
+        def get_status(self):
+            return status
+
+        def list_sync_errors(self, *, limit: int):
+            return []
+
+        def list_conflicts(self, *, limit: int):
+            return []
+
+    captured: list[QDialog] = []
+    main_window._homebase_sync_engine = Engine()
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: True)
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: captured.append(dialog) or QDialog.Rejected)
+
+    main_window._show_homebase_sync_summary()
+
+    assert len(captured) == 1
+    dialog = captured[0]
+    recovery = dialog.findChild(QFrame, "homebaseSyncRecoveryBar")
+    body_scroll = dialog.findChild(QScrollArea, "homebaseSyncBodyScroll")
+    reset_auth = dialog.findChild(QPushButton, "homebaseResetAuthButton")
+    reset_encryption = dialog.findChild(QPushButton, "homebaseResetEncryptionButton")
+    assert recovery is not None
+    assert body_scroll is not None
+    assert reset_auth is not None and reset_auth.parentWidget() is recovery
+    assert reset_encryption is not None and reset_encryption.parentWidget() is recovery
+    assert not body_scroll.isAncestorOf(reset_auth)
+    assert not body_scroll.isAncestorOf(reset_encryption)

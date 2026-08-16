@@ -729,6 +729,16 @@ def save_quick_capture_header(value: Optional[str]) -> None:
     _update_global_config({"quick_capture_header": cleaned})
 
 
+def load_quick_capture_triage_enabled(default: bool = False) -> bool:
+    payload = _read_global_config()
+    value = payload.get("quick_capture_triage_enabled")
+    return bool(value) if isinstance(value, bool) else bool(default)
+
+
+def save_quick_capture_triage_enabled(enabled: bool) -> None:
+    _update_global_config({"quick_capture_triage_enabled": bool(enabled)})
+
+
 def load_quick_capture_history() -> list[dict]:
     """Return recent capture receipts used by the lightweight history UI."""
     payload = _read_global_config()

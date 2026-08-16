@@ -1325,6 +1325,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             if end_u16 > start_u16:
                 self.setFormat(start_u16, end_u16 - start_u16, fmt)
 
+        for comment in re.finditer(r"<!--.*?-->", text):
+            set_format_cp_span(comment.start(), comment.end(), self.hidden_format)
+
         level = heading_level_from_char(stripped[0]) if stripped else 0
         heading_applied = False
         if level:
@@ -1550,7 +1553,9 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             offset = len(text) - len(stripped2)
             self.setFormat(offset, 1, self.checkbox_format)
 
-
+        # Durable capture IDs remain in Markdown without becoming editor content.
+        for comment in re.finditer(r"<!--.*?-->", text):
+            set_format_cp_span(comment.start(), comment.end(), self.hidden_format)
 
         # Store computed formats in persistent cache
         self._capturing_formats = False
@@ -1660,6 +1665,7 @@ class MarkdownEditor(QTextEdit):
     vaultPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     bookmarkPickerRequested = Signal()  # Request bookmark quick picker
     pageTagInserted = Signal(str)  # Emits tag when a new page tag is inserted
+    taskEditRequested = Signal(int, object)  # zero-based block number, global anchor
     LIST_INDENT_UNIT = "  "
     _VI_EXTRA_KEY = QTextFormat.UserProperty + 1
     _VI_LINE_EXTRA_KEY = QTextFormat.UserProperty + 4
@@ -1716,6 +1722,8 @@ class MarkdownEditor(QTextEdit):
         self._vi_activation_timer: Optional[QTimer] = None
         self._vi_pending_prefix: Optional[str] = None
         self._vi_prefix_timer: Optional[QTimer] = None
+        self._task_hover_edit_enabled: bool = False
+        self._task_hover_block_number: Optional[int] = None
         # A short cross-platform paint guard prevents rare Qt paint races
         # immediately after document replacement/reload.
         default_paint_guard_ms = 180 if sys.platform.startswith("win") else 120
@@ -1814,6 +1822,19 @@ class MarkdownEditor(QTextEdit):
         self._processing_inline_trigger: bool = False
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
+        self._task_hover_edit_button = QToolButton(self.viewport())
+        self._task_hover_edit_button.setObjectName("taskHoverEditButton")
+        self._task_hover_edit_button.setText("✎")
+        self._task_hover_edit_button.setToolTip("Edit task (E)")
+        self._task_hover_edit_button.setAccessibleName("Edit task")
+        self._task_hover_edit_button.setCursor(Qt.PointingHandCursor)
+        self._task_hover_edit_button.setAutoRaise(True)
+        self._task_hover_edit_button.setFixedSize(24, 22)
+        self._task_hover_edit_button.clicked.connect(self._emit_hovered_task_edit)
+        self._task_hover_edit_button.hide()
+        self.verticalScrollBar().valueChanged.connect(
+            lambda *_: self._hide_task_hover_edit_button()
+        )
         # Enable drag and drop for file attachments
         self.setAcceptDrops(True)
         # Configure scroll-past-end margin initially
@@ -6420,6 +6441,7 @@ class MarkdownEditor(QTextEdit):
     def mouseMoveEvent(self, event):  # type: ignore[override]
         # Show pointing hand cursor when hovering over a link
         cursor = self.cursorForPosition(event.pos())
+        self._update_task_hover_edit_button(event.pos(), cursor)
         link = self._link_under_cursor(cursor)
         if link:
             self.viewport().setCursor(Qt.PointingHandCursor)
@@ -6428,6 +6450,12 @@ class MarkdownEditor(QTextEdit):
             self.viewport().setCursor(Qt.IBeamCursor)
             self.linkHovered.emit("")  # Empty string to clear status bar
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):  # type: ignore[override]
+        button = getattr(self, "_task_hover_edit_button", None)
+        if button is None or not button.underMouse():
+            self._hide_task_hover_edit_button()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
         # Preserve selection on right-click (opening context menu should not unselect buffer).
@@ -7269,6 +7297,62 @@ class MarkdownEditor(QTextEdit):
             self._vi_insert_mode = False
             self.set_vi_mode(False)
             self.viInsertModeChanged.emit(False)
+            self._hide_task_hover_edit_button()
+
+    def set_task_hover_edit_enabled(self, enabled: bool) -> None:
+        """Enable the single task edit affordance used by the main editor."""
+        self._task_hover_edit_enabled = bool(enabled)
+        if not enabled:
+            self._hide_task_hover_edit_button()
+
+    def _hide_task_hover_edit_button(self) -> None:
+        self._task_hover_block_number = None
+        button = getattr(self, "_task_hover_edit_button", None)
+        if button is not None:
+            button.hide()
+
+    def _update_task_hover_edit_button(
+        self,
+        pos: QPoint,
+        cursor: Optional[QTextCursor] = None,
+    ) -> None:
+        if (
+            not self._task_hover_edit_enabled
+            or not self._vi_feature_enabled
+            or self._vi_insert_mode
+            or self._overlay_active
+        ):
+            self._hide_task_hover_edit_button()
+            return
+        cursor = cursor or self.cursorForPosition(pos)
+        block = cursor.block()
+        is_task, _indent, _state, _content = self._is_task_line(block.text())
+        if not is_task:
+            self._hide_task_hover_edit_button()
+            return
+        line_cursor = QTextCursor(block)
+        line_rect = self.cursorRect(line_cursor)
+        button = self._task_hover_edit_button
+        x = max(2, self.viewport().width() - button.width() - 8)
+        y = max(0, line_rect.top() + (line_rect.height() - button.height()) // 2)
+        button.move(x, y)
+        self._task_hover_block_number = block.blockNumber()
+        button.show()
+        button.raise_()
+
+    def _emit_hovered_task_edit(self) -> None:
+        block_number = self._task_hover_block_number
+        if block_number is None:
+            return
+        anchor = self._task_hover_edit_button.mapToGlobal(
+            QPoint(0, self._task_hover_edit_button.height() + 4)
+        )
+        self._request_task_edit(block_number, anchor)
+
+    def _request_task_edit(self, block_number: int, anchor: QPoint) -> None:
+        """Request editing for one source task line."""
+        self._hide_task_hover_edit_button()
+        self.taskEditRequested.emit(int(block_number), anchor)
 
     def _schedule_vi_activation(self) -> None:
         if not self._vi_pending_activation or not self._vi_feature_enabled:
@@ -7338,6 +7422,7 @@ class MarkdownEditor(QTextEdit):
         if self._vi_insert_mode and not self._vi_replace_pending:
             return
         self._vi_insert_mode = True
+        self._hide_task_hover_edit_button()
         self.set_vi_mode(False)
         self.viInsertModeChanged.emit(True)
 
@@ -7539,6 +7624,16 @@ class MarkdownEditor(QTextEdit):
             return True
         if key == Qt.Key_F and not shift:
             self.bookmarkPickerRequested.emit()
+            return True
+        if key == Qt.Key_E and not shift and self._task_hover_edit_enabled:
+            is_task, _indent, _state, _content = self._is_task_line(cursor.block().text())
+            if is_task:
+                if read_only:
+                    return _block_vi_edit()
+                anchor = self.viewport().mapToGlobal(self.cursorRect(cursor).bottomRight())
+                self._request_task_edit(cursor.blockNumber(), anchor)
+            else:
+                self._status_message("Cursor is not on a task.")
             return True
         if key == Qt.Key_N:
             self.search_repeat_last(reverse=False)
@@ -8295,6 +8390,7 @@ class MarkdownEditor(QTextEdit):
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
+        self._hide_task_hover_edit_button()
         self.viewportResized.emit()
         # Reapply scroll-past-end margin on resize
         self._apply_scroll_past_end_margin()
