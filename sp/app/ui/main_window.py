@@ -2419,6 +2419,7 @@ class MainWindow(QMainWindow):
         self.page_history: list[str] = []
         self.history_index: int = -1
         self._page_revisions: dict[str, dict[str, int | None]] = {}
+        self._page_hydration_generation: int = 0
         self._merge_dialog_open = False
         # Guard to suppress auto-open on tree selection during programmatic navigation
         self._suspend_selection_open: bool = False
@@ -12584,18 +12585,6 @@ class MainWindow(QMainWindow):
         self._last_saved_content = content
         self._update_dirty_indicator()
         self._capture_undo_snapshot(path, content, source="load")
-        updated = indexer.index_page(path, content)
-        if updated:
-            self.right_panel.refresh_tasks()
-        if tracer:
-            tracer.mark(f"index refresh {'+ tasks' if updated else '(no task changes)'}")
-        # Keep Link Navigator in sync when a page is opened or reloaded
-        self.right_panel.refresh_links(path)
-        self._refresh_detached_link_panels(path)
-        if tracer:
-            tracer.mark("right panel links refreshed")
-        # Persist panel visibility when a page is opened (captures programmatic restores)
-        self._save_panel_visibility()
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         remember_cursor_positions = bool(self._feature_remember_cursor_position_enabled)
         if not remember_cursor_positions:
@@ -12683,50 +12672,96 @@ class MainWindow(QMainWindow):
         if hasattr(self, "toc_widget"):
             root_base = ensure_root_colon_link(display_path) if display_path else ""
             self.toc_widget.set_base_path(root_base)
-            self.editor.refresh_heading_outline()
         self.statusBar().showMessage(f"Editing {display_path}")
         self._update_window_title()
-        
-        # Automatically sync the nav tree to highlight the active page
-        self._sync_nav_tree_to_active_page()
-        
-        # Save the last opened file
-        if config.has_active_vault():
-            config.save_last_file(path)
-            # Refresh read-only badge if preference or lock state changed mid-session
-            self._update_dirty_indicator()
-        
-        # Update calendar if this is a journal page.
-        if sync_calendar:
-            self._update_calendar_for_journal_page(path)
-        
-        # Update attachments panel with current page
-        from pathlib import Path
-        if path:
-            full_path = Path(self.vault_root) / path.lstrip("/")
-            has_chat = self.right_panel.set_current_page(full_path, path, sync_calendar=sync_calendar)
-            self.editor.set_ai_chat_available(has_chat, active=self.right_panel.is_active_chat_for_page(path))
-            self._refresh_detached_map_panels(path)
-        else:
-            self.right_panel.set_current_page(None, None, sync_calendar=sync_calendar)
-            self.editor.set_ai_chat_available(False)
-            self._refresh_detached_map_panels(None)
         self._mark_initial_page_loaded()
         if tracer:
-            tracer.end("ready for edit")
-            # Set up a defensive stack dump if the Qt loop does not resume quickly.
-            faulthandler.cancel_dump_traceback_later()
-            faulthandler.dump_traceback_later(5.0, repeat=False)
-            loop_start = time.perf_counter()
+            tracer.mark("text ready for edit; secondary hydration queued")
+        self._schedule_page_hydration(path, content, sync_calendar=sync_calendar, tracer=tracer)
+
+    def _schedule_page_hydration(
+        self,
+        path: str,
+        content: str,
+        *,
+        sync_calendar: bool,
+        tracer: Optional[PageLoadLogger],
+    ) -> None:
+        """Run non-essential page work only after the editor's guarded first paint."""
+        # A newer request invalidates any zero-delay/guard-waiting predecessor.
+        self._page_hydration_generation += 1
+        generation = self._page_hydration_generation
+        load_token = self.editor.current_load_token()
+        QTimer.singleShot(
+            0,
+            lambda p=path, text=content, sync=sync_calendar, trace=tracer, gen=generation, tok=load_token: self._hydrate_open_page(
+                p, text, sync_calendar=sync, tracer=trace, generation=gen, load_token=tok, attempts=0
+            ),
+        )
+
+    def _hydrate_open_page(
+        self,
+        path: str,
+        content: str,
+        *,
+        sync_calendar: bool,
+        tracer: Optional[PageLoadLogger],
+        generation: int,
+        load_token: int,
+        attempts: int,
+    ) -> None:
+        """Apply secondary state iff the page and editor generation are current."""
+        if (
+            generation != self._page_hydration_generation
+            or path != self.current_path
+            or load_token != self.editor.current_load_token()
+        ):
+            if tracer:
+                tracer.end("secondary hydration cancelled (stale page)")
+            return
+
+        # Wait until the guarded first repaint has actually been released.  This
+        # avoids racing document layout/paint on Windows, the source of previous
+        # native crashes, without retaining any QTextDocument/QCursor objects.
+        if getattr(self.editor, "_post_load_repaint_token", 0) != load_token:
+            if attempts >= 125:  # roughly two seconds; never spin forever while hidden
+                if tracer:
+                    tracer.end("secondary hydration cancelled (first paint unavailable)")
+                return
             QTimer.singleShot(
-                0,
-                lambda: (
-                    faulthandler.cancel_dump_traceback_later(),
-                    tracer.mark(
-                        f"qt loop resumed post-open delay={(time.perf_counter() - loop_start)*1000:.1f}ms"
-                    ),
+                16,
+                lambda p=path, text=content, sync=sync_calendar, trace=tracer, gen=generation, tok=load_token, n=attempts + 1: self._hydrate_open_page(
+                    p, text, sync_calendar=sync, tracer=trace, generation=gen, load_token=tok, attempts=n
                 ),
             )
+            return
+
+        updated = indexer.index_page(path, content)
+        if updated:
+            self.right_panel.refresh_tasks()
+        if tracer:
+            tracer.mark(f"deferred index refresh {'+ tasks' if updated else '(no task changes)'}")
+
+        self.right_panel.refresh_links(path)
+        self._refresh_detached_link_panels(path)
+        self._save_panel_visibility()
+        self.editor.refresh_heading_outline()
+        self._sync_nav_tree_to_active_page()
+        if config.has_active_vault():
+            config.save_last_file(path)
+            self._update_dirty_indicator()
+        if sync_calendar:
+            self._update_calendar_for_journal_page(path)
+
+        full_path = Path(self.vault_root) / path.lstrip("/") if path else None
+        has_chat = self.right_panel.set_current_page(full_path, path, sync_calendar=sync_calendar)
+        self.editor.set_ai_chat_available(
+            has_chat,
+            active=self.right_panel.is_active_chat_for_page(path),
+        )
+        self._refresh_detached_map_panels(path or None)
+        if tracer:
+            tracer.end("secondary hydration complete")
 
     def _if_match_headers(self, path: str) -> Optional[dict[str, str]]:
         if not self._remote_mode:
@@ -15258,7 +15293,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             return
-        
         super().closeEvent(event)
 
 
@@ -23362,6 +23396,9 @@ class MainWindow(QMainWindow):
                     return
             except Exception:
                 pass
+        # Invalidate hydration callbacks before child Qt objects enter their
+        # native destruction sequence.
+        self._page_hydration_generation += 1
         self._auto_rename_closing = True
         worker = getattr(self, "_auto_rename_worker", None)
         if worker is not None:

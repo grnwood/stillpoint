@@ -272,6 +272,32 @@ def test_stale_image_retry_is_ignored_after_next_load(monkeypatch, qapp, tmp_pat
         editor.close()
 
 
+def test_image_hydration_waits_for_first_guarded_repaint(monkeypatch, qapp) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    calls: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(
+        editor,
+        "_retry_render_images",
+        lambda text, scheduled_at, token: calls.append((text, token)),
+    )
+    try:
+        editor.set_markdown("# Fast text\n\n![Later](large.png)\n")
+        token = editor.current_load_token()
+
+        assert calls == []
+        assert editor._pending_image_hydration is not None  # type: ignore[attr-defined]
+        queued_display = editor._pending_image_hydration[0]  # type: ignore[attr-defined]
+
+        editor._deferred_post_load_repaint(token)
+        QApplication.processEvents()
+
+        assert calls == [(queued_display, token)]
+        assert editor._pending_image_hydration is None  # type: ignore[attr-defined]
+    finally:
+        editor.close()
+
+
 def test_scroll_to_position_with_flash_ignores_stale_path_or_token(qtbot, monkeypatch) -> None:
     window = MainWindow(api_base="http://localhost:5050")
     qtbot.addWidget(window)
