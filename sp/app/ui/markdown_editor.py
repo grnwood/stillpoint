@@ -1875,6 +1875,10 @@ class MarkdownEditor(QTextEdit):
         self.cursorPositionChanged.connect(self._maybe_close_task_tag_suggest)
         self._scroll_margin_retry_pending = False
         self._render_images_retry_pending = False
+        # Inline image hydration is deliberately held until the guarded first
+        # text repaint.  The tuple contains only immutable Python data and a
+        # generation token; no Qt object crosses an asynchronous boundary.
+        self._pending_image_hydration: Optional[tuple[str, float, int]] = None
         self._hr_refresh_retry_pending = False
         self.destroyed.connect(self._on_editor_destroyed)
         self._connect_document_signals(self.document())
@@ -1886,6 +1890,7 @@ class MarkdownEditor(QTextEdit):
         if getattr(self, "_teardown_done", False):
             return
         self._teardown_done = True
+        self._pending_image_hydration = None
         try:
             viewport = self.viewport()
         except Exception:
@@ -2282,6 +2287,19 @@ class MarkdownEditor(QTextEdit):
             viewport.update()
         except Exception:
             pass
+        pending_images = self._pending_image_hydration
+        if pending_images is not None:
+            display_text, scheduled_at, image_token = pending_images
+            self._pending_image_hydration = None
+            if self._is_current_load_token(image_token):
+                # A second event-loop turn lets the text update requested above
+                # reach the window system before document image mutations begin.
+                QTimer.singleShot(
+                    0,
+                    lambda text=display_text, at=scheduled_at, tok=image_token: self._retry_render_images(
+                        text, at, tok
+                    ),
+                )
         if self._vi_pending_activation:
             self._schedule_vi_activation()
 
@@ -2816,13 +2834,19 @@ class MarkdownEditor(QTextEdit):
                 self.textChanged.connect(self._schedule_heading_outline)
                 if highlighter_disabled:
                     self.highlighter.setDocument(self.document())
-                    # Force synchronous highlighting so stats are available immediately
-                    # Qt's default is async (deferred), which means stats would be checked before highlighting runs
-                    self.highlighter.rehighlight()
+                    # Attaching schedules Qt's normal rehighlight pass.  Do not
+                    # force a second synchronous full-document pass here: on
+                    # heading-heavy pages that kept first paint on the hot path.
+                    # The highlighter is detached before every subsequent load,
+                    # so Qt cannot retain a callback against an old document.
+                    self._mark_page_load("syntax highlighting queued", load_token)
                 self.setUpdatesEnabled(True)
-                self._render_images(display, time.perf_counter(), load_token=load_token)
+                # Do not decode or insert images on the text-to-editable path.
+                # _deferred_post_load_repaint hydrates them only after the first
+                # guarded repaint and drops this work if another page wins.
+                self._pending_image_hydration = (display, time.perf_counter(), load_token)
                 t4 = time.perf_counter()
-                self._mark_page_load("render images", load_token)
+                self._mark_page_load("image hydration queued", load_token)
                 self._display_guard = False
                 self._schedule_heading_outline()
                 self._refresh_hr_selections(load_token=load_token)
