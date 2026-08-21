@@ -24,7 +24,15 @@ from sp.sync.crypto import (
     object_id_from_ciphertext,
 )
 from sp.sync.homebase_client import HomebaseClient
-from sp.sync.local_fs import bytes_equal, conflict_copy_path, iter_files, read_bytes, stat_file, write_bytes_atomic
+from sp.sync.local_fs import (
+    bytes_equal,
+    conflict_copy_path,
+    iter_files,
+    read_bytes,
+    sha256_file,
+    stat_file,
+    write_bytes_atomic,
+)
 
 
 _HOMEBASE_LOG = log_enabled("homebase_sync")
@@ -173,6 +181,8 @@ class HomebaseSyncEngine:
         self._last_interval_run_at: float = 0.0
         self._force_run = False
         self._ignore_backoff_once = False
+        self._sync_suspended = False
+        self._sync_in_progress = False
         self._status_lock = threading.Lock()
         self._status = HomebaseSyncStatus()
         self._no_change_streak = 0
@@ -215,6 +225,19 @@ class HomebaseSyncEngine:
                 continue
             results.append((self._canonical_rel_path(rel_key), full))
         return results
+
+    def _local_path_for_rel(self, rel_path: str) -> Path:
+        """Resolve a manifest path, including the legacy root-page shorthand."""
+        rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+        canonical = self.cfg.vault_root / rel_key
+        if canonical.exists():
+            return canonical
+        vault_name = self.cfg.vault_root.name
+        if rel_key == f"{vault_name}/{vault_name}.md":
+            shorthand = self.cfg.vault_root / f"{vault_name}.md"
+            if shorthand.exists():
+                return shorthand
+        return canonical
 
     def _canonicalize_manifest_entries(self, entries: Any) -> dict[str, Any]:
         if not isinstance(entries, dict):
@@ -261,6 +284,28 @@ class HomebaseSyncEngine:
             )
             self._cv.notify_all()
         _log(f"scheduled sync in {delay}s ({reason})")
+
+    def suspend_sync(self, reason: str = "transaction") -> None:
+        """Pause new cycles and wait for an active cycle to finish."""
+        with self._cv:
+            self._sync_suspended = True
+            self._hibernating = False
+            self._cv.notify_all()
+            while self._sync_in_progress and not self._stop:
+                self._cv.wait(timeout=0.1)
+        _log(f"sync suspended ({reason})")
+
+    def resume_sync(self, reason: str = "transaction", *, sync_now: bool = False) -> None:
+        """Resume cycles, optionally coalescing pending work into one immediate run."""
+        with self._cv:
+            self._sync_suspended = False
+            if sync_now:
+                self._force_run = True
+                self._ignore_backoff_once = True
+                self._next_run_at = None
+                self._set_status_locked(pending=True, summary=f"Sync requested ({reason})")
+            self._cv.notify_all()
+        _log(f"sync resumed ({reason}) immediate={'yes' if sync_now else 'no'}")
 
     def sync_now(self, reason: str = "manual") -> None:
         with self._cv:
@@ -314,7 +359,11 @@ class HomebaseSyncEngine:
             current_scan = {}
             for rel, full in self._iter_sync_files():
                 size, mtime = stat_file(full)
-                current_scan[rel] = {"size": int(size), "mtime": int(mtime)}
+                current_scan[rel] = {
+                    "size": int(size),
+                    "mtime": int(mtime),
+                    "content_sha256": sha256_file(full),
+                }
             _write_json(
                 self._scan_path,
                 {
@@ -577,6 +626,9 @@ class HomebaseSyncEngine:
             with self._cv:
                 if self._stop:
                     return
+                if self._sync_suspended:
+                    self._cv.wait(timeout=None)
+                    continue
                 if self._hibernating and not self._force_run and self._next_run_at is None:
                     self._cv.wait(timeout=None)
                     continue
@@ -603,6 +655,7 @@ class HomebaseSyncEngine:
                     continue
                 self._force_run = False
                 self._next_run_at = None
+                self._sync_in_progress = True
             try:
                 self._sync_once()
             except Exception as exc:
@@ -614,7 +667,11 @@ class HomebaseSyncEngine:
                     pending=False,
                 )
                 _log(f"sync loop unexpected failure: {exc}")
-            self._last_interval_run_at = time.monotonic()
+            finally:
+                with self._cv:
+                    self._sync_in_progress = False
+                    self._last_interval_run_at = time.monotonic()
+                    self._cv.notify_all()
 
     def _default_state(self) -> dict[str, Any]:
         return {
@@ -712,7 +769,6 @@ class HomebaseSyncEngine:
                     client,
                     key,
                     remote_head,
-                    local_object_cache=object_cache,
                 )
                 self._queue_remote_updates(applied_paths)
                 hb["last_seen_latest_checkpoint_id"] = remote_head
@@ -720,7 +776,6 @@ class HomebaseSyncEngine:
                 object_cache = dict(pulled_object_cache)
                 self._save_object_cache(object_cache)
             else:
-                pulled_object_cache = {}
                 _log(f"pull: no remote change latest={remote_head}")
 
             manifest = self._build_local_manifest()
@@ -728,6 +783,7 @@ class HomebaseSyncEngine:
                 rel: {
                     "size": int(meta.get("size", 0)),
                     "mtime": int(meta.get("mtime", 0)),
+                    "content_sha256": sha256_file(self._local_path_for_rel(rel)),
                 }
                 for rel, meta in manifest.get("entries", {}).items()
                 if isinstance(meta, dict)
@@ -793,29 +849,19 @@ class HomebaseSyncEngine:
                 if rel_key.startswith(".stillpoint/"):
                     continue
                 cached_object_id = ""
-                if rel_key in pulled_object_cache:
-                    cached_object_id = str(pulled_object_cache.get(rel_key) or "").strip().lower()
-                else:
-                    prev = previous_scan.get(rel_key)
-                    if isinstance(prev, dict):
-                        try:
-                            prev_size = int(prev.get("size", -1))
-                            prev_mtime = int(prev.get("mtime", -1))
-                            cur_size = int(meta.get("size", -2))
-                            cur_mtime = int(meta.get("mtime", -2))
-                            if prev_size == cur_size and prev_mtime == cur_mtime:
-                                cached_object_id = str(object_cache.get(rel_key) or "").strip().lower()
-                        except Exception:
-                            cached_object_id = ""
+                prev = previous_scan.get(rel_key)
+                current = current_scan.get(rel_key)
+                if isinstance(prev, dict) and isinstance(current, dict):
+                    previous_hash = str(prev.get("content_sha256") or "").strip().lower()
+                    current_hash = str(current.get("content_sha256") or "").strip().lower()
+                    if previous_hash and previous_hash == current_hash:
+                        cached_object_id = str(object_cache.get(rel_key) or "").strip().lower()
                 if self._is_valid_object_id(cached_object_id):
-                    # Entries from pulled_object_cache were just fetched from the
-                    # server manifest, so the objects are guaranteed to exist.
-                    # For entries from the local object_cache, only verify
-                    # against the server when the cache might be stale (no
-                    # prior successful push, or recovering from errors).
+                    # The persisted content fingerprint proves that this path
+                    # still contains the bytes represented by the cached id.
+                    # Also verify server presence when recovering from stale state.
                     if (
                         needs_cache_verify
-                        and rel_key not in pulled_object_cache
                         and not client.has_object(cached_object_id)
                     ):
                         _log(f"cached object missing on server path={rel_key} object_id={cached_object_id}")
@@ -825,7 +871,7 @@ class HomebaseSyncEngine:
                         meta["object_id"] = cached_object_id
                         reused_cached_count += 1
                         continue
-                full = self.cfg.vault_root / rel_path
+                full = self._local_path_for_rel(rel_path)
                 plaintext = read_bytes(full)
                 envelope = encrypt_bytes(key, plaintext)
                 object_id = object_id_from_ciphertext(envelope)
@@ -1107,7 +1153,6 @@ class HomebaseSyncEngine:
         client: HomebaseClient,
         key: bytes,
         checkpoint_id: str,
-        local_object_cache: Optional[dict[str, str]] = None,
     ) -> tuple[list[str], dict[str, str]]:
         _log(f"pull begin checkpoint={checkpoint_id}")
         manifest_bytes = client.get_manifest(checkpoint_id)
@@ -1118,14 +1163,12 @@ class HomebaseSyncEngine:
         applied_paths: list[str] = []
         pulled_cache: dict[str, str] = {}
         downloaded = 0
-        skipped_cached = 0
         written_new = 0
         overwritten = 0
         unchanged = 0
         conflicts = 0
         download_errors = 0
         apply_errors = 0
-        cache = local_object_cache or {}
         relevant_entries = [
             (rel, meta)
             for rel, meta in entries.items()
@@ -1150,28 +1193,7 @@ class HomebaseSyncEngine:
                 continue
             rel_key = self._canonical_rel_path(str(rel))
             object_id_text = str(object_id).strip().lower()
-            if self._is_valid_object_id(object_id_text):
-                pulled_cache[rel_key] = object_id_text
-            local_path = self.cfg.vault_root / rel
-            if (
-                rel_key
-                and local_path.exists()
-                and self._is_valid_object_id(object_id_text)
-                and str(cache.get(rel_key) or "").strip().lower() == object_id_text
-            ):
-                unchanged += 1
-                skipped_cached += 1
-                remaining_downloads = max(0, remaining_downloads - 1)
-                self._set_status_locked(
-                    summary=(
-                        f"Pulling {remaining_downloads} object(s)..."
-                        if remaining_downloads
-                        else "Applying pulled files..."
-                    ),
-                    pending_downloads=remaining_downloads,
-                    transfer_workers=["Idle"],
-                )
-                continue
+            local_path = self._local_path_for_rel(rel_key)
             try:
                 self._update_transfer_worker(0, f"GET {rel_key}")
                 ciphertext = client.get_object(str(object_id))
@@ -1201,6 +1223,12 @@ class HomebaseSyncEngine:
                     f"object_id={object_id_text} error={dl_exc}"
                 )
                 continue
+            actual_object_id = object_id_from_ciphertext(ciphertext)
+            if actual_object_id != object_id_text:
+                raise ValueError(
+                    f"Homebase object integrity failed for '{rel}' "
+                    f"(expected {object_id_text}, received {actual_object_id})"
+                )
             try:
                 plaintext = decrypt_bytes(key, ciphertext)
             except CryptoError as exc:
@@ -1213,6 +1241,8 @@ class HomebaseSyncEngine:
                 if not local_path.exists():
                     self._update_transfer_worker(0, f"WRITE {rel_key}")
                     write_bytes_atomic(local_path, plaintext)
+                    if self._is_valid_object_id(object_id_text):
+                        pulled_cache[rel_key] = object_id_text
                     written_new += 1
                     applied_paths.append(str(rel))
                     remaining_downloads = max(0, remaining_downloads - 1)
@@ -1232,6 +1262,8 @@ class HomebaseSyncEngine:
                     continue
                 local_bytes = read_bytes(local_path)
                 if bytes_equal(local_bytes, plaintext):
+                    if self._is_valid_object_id(object_id_text):
+                        pulled_cache[rel_key] = object_id_text
                     unchanged += 1
                     continue
                 if str(rel_key).lower().endswith((".md", ".txt")):
@@ -1266,6 +1298,8 @@ class HomebaseSyncEngine:
                 if remote_mtime > 0 and remote_mtime >= int(local_mtime):
                     self._update_transfer_worker(0, f"WRITE {rel_key}")
                     write_bytes_atomic(local_path, plaintext)
+                    if self._is_valid_object_id(object_id_text):
+                        pulled_cache[rel_key] = object_id_text
                     overwritten += 1
                     applied_paths.append(str(rel))
                     remaining_downloads = max(0, remaining_downloads - 1)
@@ -1369,7 +1403,7 @@ class HomebaseSyncEngine:
         _log(
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
-            f"skipped_cached={skipped_cached} conflicts={conflicts} "
+            f"conflicts={conflicts} "
             f"download_errors={download_errors} apply_errors={apply_errors}"
         )
         return applied_paths, pulled_cache
@@ -1399,6 +1433,12 @@ class HomebaseSyncEngine:
             if self._is_valid_object_id(object_id_text):
                 pulled_cache[rel_key] = object_id_text
             ciphertext = client.get_object(object_id)
+            actual_object_id = object_id_from_ciphertext(ciphertext)
+            if actual_object_id != object_id_text:
+                raise ValueError(
+                    f"Homebase object integrity failed for '{rel_key}' "
+                    f"(expected {object_id_text}, received {actual_object_id})"
+                )
             try:
                 plaintext = decrypt_bytes(key, ciphertext)
             except CryptoError as exc:

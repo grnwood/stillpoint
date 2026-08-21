@@ -229,6 +229,26 @@ class TestImageSyncPull:
             for item in sync_errors
         )
 
+    def test_pull_rejects_object_whose_bytes_do_not_match_id(self, tmp_path):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "Page.md").write_text("original\n", encoding="utf-8")
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(engine_a, client)
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+        object_id = manifest["entries"]["Page.md"]["object_id"]
+        client.objects[object_id] = client.objects[object_id][:-1] + b"x"
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        with pytest.raises(ValueError, match="object integrity failed"):
+            engine_b._apply_remote_checkpoint(client, key, checkpoint_id)
+
     def test_pull_continues_after_single_local_apply_error(self, tmp_path, monkeypatch):
         """If writing one pulled entry fails locally, other entries should still apply."""
         vault_a = tmp_path / "vault_a"
@@ -356,6 +376,60 @@ class TestImageSyncPull:
 
         assert second_oid == first_oid
         assert len(client.objects) == 1
+
+    def test_sync_once_does_not_reuse_cache_for_same_size_and_mtime_content_change(
+        self, tmp_path, monkeypatch
+    ):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        page = vault / "Page.md"
+        page.write_bytes(b"old bytes\n")
+        original_mtime = page.stat().st_mtime
+        cfg = _make_cfg(vault)
+        engine = HomebaseSyncEngine(cfg)
+        client = FakeClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **kwargs: client)
+
+        engine._sync_once()
+        first_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        first_oid = first_manifest["entries"]["Page.md"]["object_id"]
+
+        page.write_bytes(b"new bytes\n")
+        os.utime(page, (original_mtime, original_mtime))
+        engine._sync_once()
+        second_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        second_oid = second_manifest["entries"]["Page.md"]["object_id"]
+
+        assert second_oid != first_oid
+        assert client.has_object(second_oid)
+
+    def test_suspended_engine_coalesces_pending_work_into_one_resume_sync(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        cfg = _make_cfg(vault, auto_sync=False)
+        engine = HomebaseSyncEngine(cfg)
+        calls: list[str] = []
+        completed = threading.Event()
+
+        def _fake_sync_once(*_args, **_kwargs):
+            calls.append("sync")
+            completed.set()
+
+        engine._sync_once = _fake_sync_once  # type: ignore[method-assign]
+        engine.start()
+        try:
+            engine.suspend_sync("test transaction")
+            engine.sync_now("change one")
+            engine.sync_now("change two")
+            time.sleep(0.05)
+            assert calls == []
+
+            engine.resume_sync("test transaction", sync_now=True)
+            assert completed.wait(timeout=1.0)
+            time.sleep(0.05)
+            assert calls == ["sync"]
+        finally:
+            engine.stop()
 
     def test_sync_once_uploads_objects_in_parallel(self, tmp_path, monkeypatch):
         """Initial uploads should use multiple workers when configured."""

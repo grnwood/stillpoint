@@ -191,6 +191,8 @@ class VaultReorgWindow(QDialog):
         read_only: bool,
         vault_accent_color: Optional[str] = None,
         before_commit: Optional[Callable[[dict[str, Any]], bool]] = None,
+        begin_commit: Optional[Callable[[], None]] = None,
+        finish_commit: Optional[Callable[[bool], None]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -202,6 +204,8 @@ class VaultReorgWindow(QDialog):
         self.read_only = bool(read_only)
         self._vault_accent_color = (vault_accent_color or "").strip() or None
         self.before_commit = before_commit
+        self.begin_commit = begin_commit
+        self.finish_commit = finish_commit
         self._tree_payload: list[dict[str, Any]] = []
         self._tree_version = 0
         self._plan: list[dict[str, Any]] = []
@@ -1085,7 +1089,11 @@ class VaultReorgWindow(QDialog):
         progress.setCancelButton(None)
         progress.setMinimumDuration(0)
         progress.show()
+        commit_started = False
         try:
+            if self.begin_commit:
+                self.begin_commit()
+            commit_started = True
             response = self.http.post(
                 "/api/vault/reorganize/commit",
                 json={
@@ -1097,6 +1105,8 @@ class VaultReorgWindow(QDialog):
             response.raise_for_status()
             result = response.json()
         except Exception as exc:
+            if commit_started and self.finish_commit:
+                self.finish_commit(False)
             progress.close()
             QMessageBox.critical(self, "Reorganization Failed", str(exc))
             self._invalidate_preflight()
@@ -1104,6 +1114,8 @@ class VaultReorgWindow(QDialog):
             return
         progress.close()
         self.reorganizationCommitted.emit(result)
+        if commit_started and self.finish_commit:
+            self.finish_commit(True)
         self._plan.clear()
         self._preflight = None
         self._refresh_plan_view()

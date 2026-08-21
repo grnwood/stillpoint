@@ -672,3 +672,27 @@ def test_main_menu_exposes_reorganization_in_command_palette(main_window) -> Non
     labels = [label for label, _action in main_window._collect_menu_actions()]
 
     assert "Vault / Reorganize Vault…" in labels
+
+
+def test_homebase_sync_is_suspended_only_during_reorganization_commit(main_window, monkeypatch) -> None:
+    calls = []
+
+    class Engine:
+        def suspend_sync(self, reason: str) -> None:
+            calls.append(("suspend", reason))
+
+        def resume_sync(self, reason: str, *, sync_now: bool = False) -> None:
+            calls.append(("resume", reason, sync_now))
+
+    main_window._homebase_sync_engine = Engine()
+    monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window, "_mark_homebase_unsynced_local_change", lambda: calls.append(("dirty",)))
+
+    main_window._begin_vault_reorganization_commit()
+    main_window._finish_vault_reorganization_commit(True)
+
+    assert calls == [
+        ("suspend", "vault reorganization"),
+        ("dirty",),
+        ("resume", "vault reorganization", True),
+    ]

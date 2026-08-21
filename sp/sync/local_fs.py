@@ -54,6 +54,14 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def sha256_file(full_path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with full_path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def conflict_copy_path(rel_path: str, device_id: str, ts: Optional[int] = None) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(ts or int(time.time())))
     path = Path(rel_path)

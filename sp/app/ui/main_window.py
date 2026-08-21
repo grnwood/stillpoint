@@ -4466,6 +4466,8 @@ class MainWindow(QMainWindow):
             read_only=self._read_only,
             vault_accent_color=self._effective_tree_accent_color(),
             before_commit=self._prepare_for_vault_reorganization,
+            begin_commit=self._begin_vault_reorganization_commit,
+            finish_commit=self._finish_vault_reorganization_commit,
             parent=self,
         )
         window.reorganizationCommitted.connect(self._handle_vault_reorganization_committed)
@@ -4494,6 +4496,18 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Unable to save an open page window.", 6000)
                 return False
         return True
+
+    def _begin_vault_reorganization_commit(self) -> None:
+        engine = self._homebase_sync_engine
+        if engine and self._is_homebase_mode_enabled():
+            engine.suspend_sync("vault reorganization")
+
+    def _finish_vault_reorganization_commit(self, committed: bool) -> None:
+        engine = self._homebase_sync_engine
+        if engine and self._is_homebase_mode_enabled():
+            if committed:
+                self._mark_homebase_unsynced_local_change()
+            engine.resume_sync("vault reorganization", sync_now=committed)
 
     def _handle_vault_reorganization_committed(self, data: dict) -> None:
         path_map = dict(data.get("page_map") or {})
