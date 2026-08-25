@@ -309,6 +309,9 @@ SYMBOL_TASK_LINE_PATTERN = re.compile(
     r"^(\s*)([☐☑])(\s+)(?P<body>.*)$",
     re.MULTILINE,
 )
+TASK_TAG_RE = re.compile(r"(?<![\w.+-])@[A-Za-z0-9_]+")
+TASK_PRIORITY_RE = re.compile(r"(?<!\S)!{1,3}(?!\S)")
+TASK_DATE_RE = re.compile(r"(?<!\S)[<>][0-9]{4}-[0-9]{2}-[0-9]{2}(?!\S)")
 # Bullet patterns for storage and display
 BULLET_STORAGE_PATTERN = re.compile(r"^(\s*)\* ", re.MULTILINE)
 BULLET_DISPLAY_PATTERN = re.compile(r"^(\s*)• ", re.MULTILINE)
@@ -1591,6 +1594,8 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
 
 class MarkdownEditor(QTextEdit):
+    TASK_HOVER_RAIL_WIDTH = 34
+
     def _convert_camelcase_links(self, text: str) -> str:
         """Convert +CamelCase links to colon-style links [:Path:Path:Page|+CamelCase] using current page context, but only if not already inside a [link|label]."""
         import re
@@ -1713,7 +1718,6 @@ class MarkdownEditor(QTextEdit):
         self._vi_last_cursor_pos: int = -1
         self._vi_feature_enabled: bool = False
         self._vi_insert_mode: bool = False
-        self._vi_replace_pending: bool = False
         self._vi_last_edit: Optional[Callable[[], None]] = None
         self._vi_clipboard: str = ""
         self._vi_pending_activation: bool = False
@@ -1822,7 +1826,9 @@ class MarkdownEditor(QTextEdit):
         self._processing_inline_trigger: bool = False
         # Enable mouse tracking for hover cursor changes
         self.viewport().setMouseTracking(True)
-        self._task_hover_edit_button = QToolButton(self.viewport())
+        # Parent the button to the scroll area so it can live in the reserved
+        # gutter instead of covering (or moving) document text on hover.
+        self._task_hover_edit_button = QToolButton(self)
         self._task_hover_edit_button.setObjectName("taskHoverEditButton")
         self._task_hover_edit_button.setText("✎")
         self._task_hover_edit_button.setToolTip("Edit task (E)")
@@ -1830,6 +1836,7 @@ class MarkdownEditor(QTextEdit):
         self._task_hover_edit_button.setCursor(Qt.PointingHandCursor)
         self._task_hover_edit_button.setAutoRaise(True)
         self._task_hover_edit_button.setFixedSize(24, 22)
+        self._style_task_hover_edit_button()
         self._task_hover_edit_button.clicked.connect(self._emit_hovered_task_edit)
         self._task_hover_edit_button.hide()
         self.verticalScrollBar().valueChanged.connect(
@@ -1983,6 +1990,41 @@ class MarkdownEditor(QTextEdit):
         border_color = border_color.lighter(170) if border_color.lightness() < 128 else border_color.darker(135)
         pal.setColor(QPalette.Mid, border_color)
         self.setPalette(pal)
+        self._style_task_hover_edit_button()
+
+    def _style_task_hover_edit_button(self) -> None:
+        """Keep the pencil legible against both light and dark editor themes."""
+        button = getattr(self, "_task_hover_edit_button", None)
+        if button is None:
+            return
+        base_color = self.palette().color(QPalette.Base)
+        light_theme = base_color.lightness() >= 128
+        ink = QColor("#181818" if light_theme else "#f2f2f2")
+        hover_bg = "rgba(0, 0, 0, 28)" if light_theme else "rgba(255, 255, 255, 35)"
+        pressed_bg = "rgba(0, 0, 0, 45)" if light_theme else "rgba(255, 255, 255, 55)"
+        button_palette = button.palette()
+        button_palette.setColor(QPalette.ButtonText, ink)
+        button_palette.setColor(QPalette.WindowText, ink)
+        button.setPalette(button_palette)
+        button.setStyleSheet(
+            f"""
+            QToolButton#taskHoverEditButton {{
+                color: {ink.name()};
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                font-size: 16px;
+            }}
+            QToolButton#taskHoverEditButton:hover {{
+                color: {ink.name()};
+                background: {hover_bg};
+            }}
+            QToolButton#taskHoverEditButton:pressed {{
+                color: {ink.name()};
+                background: {pressed_bg};
+            }}
+            """
+        )
 
     def find_replace_bar_palette(self) -> QPalette:
         return QPalette(self.palette())
@@ -2033,9 +2075,8 @@ class MarkdownEditor(QTextEdit):
         self._read_only_mode = bool(read_only)
         self.setReadOnly(self._read_only_mode)
         if self._read_only_mode and self._vi_feature_enabled:
-            # Exit insert/replace states so vi navigation keys keep working
+            # Exit insert state so vi navigation keys keep working
             self._vi_insert_mode = False
-            self._vi_replace_pending = False
             try:
                 self._enter_vi_navigation_mode()
             except Exception:
@@ -4761,8 +4802,39 @@ class MarkdownEditor(QTextEdit):
 
     def _strip_task_tags(self, text: str) -> str:
         """Remove @tags from the given text."""
-        cleaned = re.sub(r"(?<![\\w.+-])@[A-Za-z0-9_]+", "", text)
-        return re.sub(r"\\s{2,}", " ", cleaned).strip()
+        cleaned = TASK_TAG_RE.sub(" ", text)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    def _strip_task_metadata(self, text: str) -> str:
+        """Remove task-only tags, priority markers, and start/due dates."""
+        cleaned = TASK_TAG_RE.sub(" ", text)
+        cleaned = TASK_PRIORITY_RE.sub(" ", cleaned)
+        cleaned = TASK_DATE_RE.sub(" ", cleaned)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    def _vi_remove_task_indicators_at_cursor(self) -> bool:
+        """Turn the task on the cursor line into a plain dash item."""
+        cursor = QTextCursor(self.textCursor())
+        block = cursor.block()
+        is_task, indent, _state, content = self._is_task_line(block.text())
+        if not is_task:
+            self._status_message("Cursor is not on a task.")
+            return False
+
+        new_line = f"{indent}- {self._strip_task_metadata(content)}"
+        old_offset = cursor.position() - block.position()
+        line_cursor = QTextCursor(block)
+        line_cursor.beginEditBlock()
+        line_cursor.select(QTextCursor.LineUnderCursor)
+        line_cursor.insertText(new_line)
+        line_cursor.endEditBlock()
+
+        line_cursor.setPosition(block.position() + min(old_offset, len(new_line)))
+        self.setTextCursor(line_cursor)
+        self._refresh_hanging_indent(block, new_line)
+        self._hide_task_hover_edit_button()
+        self._schedule_heading_outline()
+        return True
 
     def _apply_escape_selection_transform(self) -> bool:
         """Apply Esc behavior for a selection in vi mode."""
@@ -7309,7 +7381,7 @@ class MarkdownEditor(QTextEdit):
         if self._vi_feature_enabled == enabled:
             return
         self._vi_feature_enabled = enabled
-        self._vi_replace_pending = False
+        self._update_task_hover_rail()
         self._vi_pending_activation = False
         if enabled:
             if self.isVisible() and self._vi_has_painted:
@@ -7326,8 +7398,15 @@ class MarkdownEditor(QTextEdit):
     def set_task_hover_edit_enabled(self, enabled: bool) -> None:
         """Enable the single task edit affordance used by the main editor."""
         self._task_hover_edit_enabled = bool(enabled)
+        self._update_task_hover_rail()
         if not enabled:
             self._hide_task_hover_edit_button()
+
+    def _update_task_hover_rail(self) -> None:
+        """Reserve a stable gutter while the vi task affordance is available."""
+        enabled = self._task_hover_edit_enabled and self._vi_feature_enabled
+        left = self.TASK_HOVER_RAIL_WIDTH if enabled else 0
+        self.setViewportMargins(left, 0, 0, 0)
 
     def _hide_task_hover_edit_button(self) -> None:
         self._task_hover_block_number = None
@@ -7357,8 +7436,14 @@ class MarkdownEditor(QTextEdit):
         line_cursor = QTextCursor(block)
         line_rect = self.cursorRect(line_cursor)
         button = self._task_hover_edit_button
-        x = max(2, self.viewport().width() - button.width() - 8)
-        y = max(0, line_rect.top() + (line_rect.height() - button.height()) // 2)
+        viewport_rect = self.viewport().geometry()
+        x = max(2, viewport_rect.left() - button.width() - 4)
+        y = max(
+            0,
+            viewport_rect.top()
+            + line_rect.top()
+            + (line_rect.height() - button.height()) // 2,
+        )
         button.move(x, y)
         self._task_hover_block_number = block.blockNumber()
         button.show()
@@ -7435,7 +7520,6 @@ class MarkdownEditor(QTextEdit):
             return
         emit_needed = force_emit or self._vi_insert_mode
         self._vi_insert_mode = False
-        self._vi_replace_pending = False
         self.set_vi_mode(True)
         if emit_needed:
             self.viInsertModeChanged.emit(False)
@@ -7443,7 +7527,7 @@ class MarkdownEditor(QTextEdit):
     def _enter_vi_insert_mode(self) -> None:
         if not self._vi_feature_enabled:
             return
-        if self._vi_insert_mode and not self._vi_replace_pending:
+        if self._vi_insert_mode:
             return
         self._vi_insert_mode = True
         self._hide_task_hover_edit_button()
@@ -7453,10 +7537,6 @@ class MarkdownEditor(QTextEdit):
     def _handle_vi_escape(self) -> bool:
         if not self._vi_feature_enabled:
             return False
-        if self._vi_replace_pending:
-            self._vi_replace_pending = False
-            self._enter_vi_navigation_mode()
-            return True
         if self._vi_insert_mode:
             self._enter_vi_navigation_mode()
             return True
@@ -7546,23 +7626,6 @@ class MarkdownEditor(QTextEdit):
         if other_mods:
             return False
 
-        if self._vi_replace_pending:
-            if key == Qt.Key_Escape:
-                self._vi_replace_pending = False
-                self._enter_vi_navigation_mode()
-                return True
-            if read_only:
-                self._vi_replace_pending = False
-                return _block_vi_edit()
-            text = event.text()
-            if text:
-                char = text[0]
-                self._vi_replace_char(char)
-                self._vi_last_edit = lambda ch=char: self._vi_replace_char(ch)
-            self._vi_replace_pending = False
-            self._enter_vi_navigation_mode()
-            return True
-
         if self._vi_insert_mode:
             if key == Qt.Key_Escape and not shift:
                 self._enter_vi_navigation_mode()
@@ -7648,6 +7711,12 @@ class MarkdownEditor(QTextEdit):
             return True
         if key == Qt.Key_F and not shift:
             self.bookmarkPickerRequested.emit()
+            return True
+        if key == Qt.Key_R and not shift:
+            if read_only:
+                return _block_vi_edit()
+            if self._vi_remove_task_indicators_at_cursor():
+                self._vi_last_edit = self._vi_remove_task_indicators_at_cursor
             return True
         if key == Qt.Key_E and not shift and self._task_hover_edit_enabled:
             is_task, _indent, _state, _content = self._is_task_line(cursor.block().text())
@@ -7769,12 +7838,6 @@ class MarkdownEditor(QTextEdit):
                 return _block_vi_edit()
             self._vi_delete_selection_or_line()
             self._vi_last_edit = self._vi_delete_selection_or_line
-            return True
-        if key == Qt.Key_R and not shift:
-            if read_only:
-                return _block_vi_edit()
-            self._vi_replace_pending = True
-            self._enter_vi_insert_mode()
             return True
         if key == Qt.Key_U and not shift:
             if read_only:
@@ -8158,18 +8221,6 @@ class MarkdownEditor(QTextEdit):
             cursor.removeSelectedText()
             if not cursor.atEnd():
                 cursor.deleteChar()
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
-
-    def _vi_replace_char(self, char: str) -> None:
-        if not char:
-            return
-        cursor = self.textCursor()
-        if cursor.atEnd():
-            return
-        cursor.beginEditBlock()
-        cursor.deleteChar()
-        cursor.insertText(char)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 

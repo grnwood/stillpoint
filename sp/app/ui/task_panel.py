@@ -278,6 +278,7 @@ class TaskPanel(QWidget):
         self._triage_mode = False
         self._triage_items: list[dict] = []
         self._advance_after_refresh = False
+        self._focus_after_removed_task: Optional[dict] = None
         self._last_undo_id: Optional[str] = None
         self._last_undo_receipt: Optional[dict] = None
 
@@ -2567,6 +2568,27 @@ class TaskPanel(QWidget):
         if answer == QMessageBox.Yes:
             self._apply_task_mutation(tasks, delete=True)
 
+    def _remove_selected_task_indicators(self) -> None:
+        """Turn selected tasks into plain dash items and remove task metadata."""
+        tasks = self._selected_task_data()
+        if not tasks or self._triage_mode:
+            return
+        removed_ids = {str(task.get("id") or "") for task in tasks}
+        ordered = self._visible_items()
+        current = self.task_tree.currentItem()
+        next_task: dict = {}
+        if current in ordered:
+            current_index = ordered.index(current)
+            candidates = ordered[current_index + 1 :] + list(reversed(ordered[:current_index]))
+            for candidate in candidates:
+                task = candidate.data(0, Qt.UserRole) or {}
+                if str(task.get("id") or "") not in removed_ids:
+                    next_task = dict(task)
+                    break
+        self._focus_after_removed_task = next_task
+        if not self._apply_task_mutation(tasks, remove_indicators=True):
+            self._focus_after_removed_task = None
+
     def _edit_selected_tags(self) -> None:
         tasks = self._selected_task_data()
         if not tasks or self._triage_mode:
@@ -2617,7 +2639,8 @@ class TaskPanel(QWidget):
             text = (
                 "Task shortcuts\n\nSpace  Complete/reopen\nE/F2  Edit\nD  Due date\n"
                 "S  Start date\n[ / ]  Due date ±1 day\nShift+[ / ]  ±1 week\n"
-                "P  Cycle priority\nT  Edit tags\nM  Edit move destination\nCtrl+Z  Undo last change\n"
+                "P  Cycle priority\nT  Edit tags\nM  Edit move destination\n"
+                "R  Remove task indicators\nCtrl+Z  Undo last change\n"
                 "Enter  Open source\n/  Search"
             )
         QMessageBox.information(self, "Tasks keyboard shortcuts", text)
@@ -2705,6 +2728,10 @@ class TaskPanel(QWidget):
                         return True
                     if key == Qt.Key_M and mods in (Qt.NoModifier, Qt.ShiftModifier):
                         self._move_selected_tasks()
+                        event.accept()
+                        return True
+                    if key == Qt.Key_R and mods in (Qt.NoModifier, Qt.ShiftModifier):
+                        self._remove_selected_task_indicators()
                         event.accept()
                         return True
                     if event.text() in ("[", "]", "{", "}"):
@@ -3082,6 +3109,7 @@ class TaskPanel(QWidget):
         self._last_keyboard_task_id = None
         self._last_keyboard_task_path = None
         self._last_keyboard_task_line = None
+        self._focus_after_removed_task = None
         self._task_context_dirty = True
         self._task_context_initialized = False
         self._update_filter_indicator()
@@ -3474,6 +3502,7 @@ class TaskPanel(QWidget):
                 self.task_tree.setCurrentItem(ordered[next_index])
                 self.task_tree.scrollToItem(ordered[next_index])
                 self._advance_after_refresh = False
+        self._restore_focus_after_removed_task(items_by_id)
         self._refresh_tags()
         self._update_summary_footer(visible_tasks)
         self._single_shot_ui(0, self._reset_horizontal_scroll)
@@ -3992,6 +4021,12 @@ class TaskPanel(QWidget):
         targets = self._collect_task_targets()
         if not targets:
             return
+        menu = self._build_task_context_menu(targets)
+        if menu.actions():
+            menu.exec(self.task_tree.viewport().mapToGlobal(pos))
+
+    def _build_task_context_menu(self, targets: list[dict]) -> QMenu:
+        """Build the context menu for one or more selected task rows."""
         any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
         any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
         menu = QMenu(self)
@@ -4014,14 +4049,16 @@ class TaskPanel(QWidget):
         )
         menu.addAction("Edit Tags… (T)").triggered.connect(self._edit_selected_tags)
         menu.addAction("Move… (M)").triggered.connect(self._move_selected_tasks)
+        menu.addAction("Remove Task Indicators (R)").triggered.connect(
+            self._remove_selected_task_indicators
+        )
         menu.addAction("Delete Task…").triggered.connect(self._delete_selected_tasks)
         if self._last_undo_id or self._last_undo_receipt:
             menu.addSeparator()
             menu.addAction("Undo Last Change (Ctrl+Z)").triggered.connect(
                 self._undo_last_mutation
             )
-        if menu.actions():
-            menu.exec(self.task_tree.viewport().mapToGlobal(pos))
+        return menu
 
     def _mark_activation_source(self, source: str) -> None:
         self._last_activation_source = source
@@ -4059,6 +4096,32 @@ class TaskPanel(QWidget):
         if target:
             self.task_tree.setCurrentItem(target)
             self.task_tree.scrollToItem(target)
+
+    def _restore_focus_after_removed_task(
+        self,
+        items_by_id: dict[str, QTreeWidgetItem],
+    ) -> None:
+        """Restore Tasks-pane focus after the current task leaves the index."""
+        pending = self._focus_after_removed_task
+        if pending is None:
+            return
+        target = items_by_id.get(str(pending.get("id") or ""))
+        if target is None and pending:
+            path = str(pending.get("path") or "")
+            line = pending.get("line")
+            for item in items_by_id.values():
+                task = item.data(0, Qt.UserRole) or {}
+                if str(task.get("path") or "") == path and task.get("line") == line:
+                    target = item
+                    break
+        if target is None:
+            ordered = self._visible_items()
+            target = ordered[0] if ordered else None
+        if target is not None:
+            self.task_tree.setCurrentItem(target)
+            self.task_tree.scrollToItem(target)
+        self.task_tree.setFocus(Qt.OtherFocusReason)
+        self._focus_after_removed_task = None
 
     def _present_path(self, path: str) -> str:
         return path_to_colon(path)

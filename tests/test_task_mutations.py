@@ -8,6 +8,7 @@ from sp.app.task_mutations import (
     TaskConflictError,
     TaskMutationTarget,
     mutate_task,
+    remove_task_indicators,
     rewrite_task_line,
     undo_file_mutation,
 )
@@ -27,6 +28,29 @@ def test_rewrite_task_line_updates_all_editable_fields() -> None:
     )
 
     assert updated == "  ☑ Send the proposal !!! @work @email >2026-08-22 <2026-08-23\n"
+
+
+def test_remove_task_indicators_preserves_plain_text_and_indentation() -> None:
+    line = "  ☐ Email alex@example.com !! @phone >2026-08-20 <2026-08-21 important!\n"
+
+    assert remove_task_indicators(line) == "  - Email alex@example.com important!\n"
+
+
+def test_mutate_task_removes_indicators_and_can_be_undone(tmp_path: Path) -> None:
+    page = tmp_path / "Page" / "Page.md"
+    page.parent.mkdir()
+    original = "# Page\n\n☐ Call Sarah !! @phone >2026-08-20 <2026-08-21\n"
+    page.write_text(original, encoding="utf-8")
+
+    receipt = mutate_task(
+        tmp_path,
+        TaskMutationTarget("/Page/Page.md", 3, "Call Sarah", "todo"),
+        remove_indicators=True,
+    )
+
+    assert page.read_text(encoding="utf-8") == "# Page\n\n- Call Sarah\n"
+    undo_file_mutation(tmp_path, receipt)
+    assert page.read_text(encoding="utf-8") == original
 
 
 def test_mutate_task_relocates_after_line_shift(tmp_path: Path) -> None:

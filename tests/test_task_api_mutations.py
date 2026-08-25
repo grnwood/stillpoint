@@ -36,6 +36,36 @@ def test_task_mutation_api_and_undo(tmp_path: Path, monkeypatch) -> None:
     assert page.read_text(encoding="utf-8") == "# Page\n\n☐ Call Sarah\n"
 
 
+def test_task_mutation_api_removes_task_indicators(tmp_path: Path, monkeypatch) -> None:
+    page = tmp_path / "Page" / "Page.md"
+    page.parent.mkdir()
+    page.write_text(
+        "# Page\n\n☐ Call Sarah !! @phone >2026-08-20 <2026-08-21\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "_get_vault_root", lambda: tmp_path)
+    monkeypatch.setattr(api, "_clear_task_cache", lambda: None)
+
+    result = api.api_mutate_tasks(
+        api.TaskMutationPayload(
+            targets=[
+                api.TaskMutationTargetPayload(
+                    path="/Page/Page.md",
+                    line=3,
+                    expected_text="Call Sarah",
+                    expected_status="todo",
+                )
+            ],
+            remove_indicators=True,
+        ),
+        user=None,
+    )
+
+    assert page.read_text(encoding="utf-8") == "# Page\n\n- Call Sarah\n"
+    api.api_undo_task_mutation(result["undo_id"], user=None)
+    assert "☐ Call Sarah !! @phone" in page.read_text(encoding="utf-8")
+
+
 def test_triage_api_lists_and_processes_capture(tmp_path: Path, monkeypatch) -> None:
     journal = tmp_path / "Journal" / "2026" / "08" / "15" / "15.md"
     journal.parent.mkdir(parents=True)

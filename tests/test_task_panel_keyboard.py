@@ -7,17 +7,23 @@ from PySide6.QtWidgets import QTreeWidgetItem
 from sp.app.ui.task_panel import TaskDateQuickMenu, TaskPanel
 
 
-def _add_task(panel: TaskPanel, *, status: str = "todo") -> dict:
+def _add_task(
+    panel: TaskPanel,
+    *,
+    status: str = "todo",
+    line: int = 3,
+    text: str = "Call Sarah",
+) -> dict:
     task = {
-        "id": "/Page/Page.md:3",
+        "id": f"/Page/Page.md:{line}",
         "path": "/Page/Page.md",
-        "line": 3,
-        "text": "Call Sarah",
+        "line": line,
+        "text": text,
         "status": status,
         "priority": 0,
         "tags": [],
     }
-    item = QTreeWidgetItem(["", "Call Sarah", ""])
+    item = QTreeWidgetItem(["", text, ""])
     item.setData(0, Qt.UserRole, task)
     panel.task_tree.addTopLevelItem(item)
     panel.task_tree.setCurrentItem(item)
@@ -63,6 +69,60 @@ def test_m_opens_full_editor_with_destination_focused(qtbot, monkeypatch) -> Non
     QTest.keyClick(panel.task_tree, Qt.Key_M)
 
     assert opened == [{"focus_field": "destination"}]
+
+
+def test_r_removes_selected_task_indicators(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    task = _add_task(panel)
+    calls: list[tuple[list[dict], dict]] = []
+    monkeypatch.setattr(
+        panel,
+        "_apply_task_mutation",
+        lambda tasks, **changes: calls.append((tasks, changes)) or True,
+    )
+
+    QTest.keyClick(panel.task_tree, Qt.Key_R)
+
+    assert calls == [([task], {"remove_indicators": True})]
+
+
+def test_r_advances_to_next_task_and_restores_tree_focus(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    first = _add_task(panel, line=3, text="First")
+    second = _add_task(panel, line=4, text="Second")
+    first_item = panel.task_tree.topLevelItem(0)
+    second_item = panel.task_tree.topLevelItem(1)
+    panel.task_tree.clearSelection()
+    panel.task_tree.setCurrentItem(first_item)
+    first_item.setSelected(True)
+    monkeypatch.setattr(panel, "_apply_task_mutation", lambda *_args, **_kwargs: True)
+
+    QTest.keyClick(panel.task_tree, Qt.Key_R)
+
+    assert panel._focus_after_removed_task == second
+    assert panel._selected_task_data() == [first]
+
+    panel.task_tree.takeTopLevelItem(0)
+    focus_calls: list[object] = []
+    monkeypatch.setattr(panel.task_tree, "setFocus", lambda reason: focus_calls.append(reason))
+    panel._restore_focus_after_removed_task({second["id"]: second_item})
+
+    assert panel.task_tree.currentItem() is second_item
+    assert focus_calls == [Qt.OtherFocusReason]
+    assert panel._focus_after_removed_task is None
+
+
+def test_task_context_menu_offers_remove_indicators(qtbot) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    task = _add_task(panel)
+
+    menu = panel._build_task_context_menu([{"task": task}])
+    labels = [action.text() for action in menu.actions()]
+
+    assert "Remove Task Indicators (R)" in labels
 
 
 def test_triage_mode_reuses_task_tree(qtbot, monkeypatch) -> None:

@@ -102,10 +102,11 @@ If VI mode is enabled:
 - `t`: Open heading picker
 - `v`: Open quick vault picker (`\` inside it collapses the whole popup tree back to the top)
 - `f`: Open bookmark picker
+- `e`: Edit the task on the cursor line
+- `r`: Remove task indicators and turn the cursor-line task into a plain dash item
 - `c`: Copy selection or current line
 - `x`: Cut selection or current character
 - `d`: Delete selection or current line
-- `r`: Replace next character
 - `p`: Paste
 - `u`: Undo
 - `y`: Redo

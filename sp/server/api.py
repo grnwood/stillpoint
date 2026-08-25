@@ -1191,6 +1191,7 @@ class TaskMutationPayload(BaseModel):
     due: Optional[str] = None
     destination: Optional[str] = None
     delete: bool = False
+    remove_indicators: bool = False
 
 
 class TriageProcessPayload(BaseModel):
@@ -3690,6 +3691,7 @@ def api_mutate_tasks(
                 due=payload.due,
                 destination=payload.destination,
                 delete=payload.delete,
+                remove_indicators=payload.remove_indicators,
             )
         except TaskConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

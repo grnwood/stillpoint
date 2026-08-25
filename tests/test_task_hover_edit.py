@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QToolButton
 
@@ -23,11 +23,14 @@ def test_main_editor_reuses_one_hover_button_for_vi_tasks(qtbot, qapp) -> None:
     editor.set_vi_mode_enabled(True)
     qapp.processEvents()
 
+    text_x_before_hover = editor.cursorRect(QTextCursor(editor.document().firstBlock())).left()
     _hover_block(editor, 0)
     button = editor.findChild(QToolButton, "taskHoverEditButton")
     assert button is not None and button.isVisible()
     assert len(editor.findChildren(QToolButton, "taskHoverEditButton")) == 1
     assert editor._task_hover_block_number == 0
+    assert button.geometry().right() < editor.viewport().geometry().left()
+    assert editor.cursorRect(QTextCursor(editor.document().firstBlock())).left() == text_x_before_hover
 
     _hover_block(editor, 2)
     assert not button.isVisible()
@@ -59,6 +62,21 @@ def test_hover_edit_button_emits_task_block_and_hides_in_insert_mode(qtbot, qapp
     assert not button.isVisible()
 
 
+def test_hover_edit_pencil_uses_dark_ink_on_light_theme(qtbot) -> None:
+    editor = MarkdownEditor()
+    qtbot.addWidget(editor)
+    palette = editor.palette()
+    palette.setColor(QPalette.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.Window, QColor("#ffffff"))
+    editor.setPalette(palette)
+
+    editor._style_task_hover_edit_button()
+
+    button = editor.findChild(QToolButton, "taskHoverEditButton")
+    assert button.palette().color(QPalette.ButtonText).name() == "#181818"
+    assert "color: #181818" in button.styleSheet()
+
+
 def test_vi_e_requests_editor_for_task_on_cursor_line(qtbot, qapp) -> None:
     editor = MarkdownEditor()
     editor.set_markdown("Not a task\n- [ ] Call Sarah\n")
@@ -80,6 +98,46 @@ def test_vi_e_requests_editor_for_task_on_cursor_line(qtbot, qapp) -> None:
     editor.setTextCursor(QTextCursor(editor.document().findBlockByNumber(0)))
     QTest.keyClick(editor, Qt.Key_E)
     assert requested == []
+
+
+def test_vi_r_removes_task_indicators_and_strips_metadata(qtbot, qapp) -> None:
+    editor = MarkdownEditor()
+    editor.set_markdown(
+        "  () Call Sarah !! @phone >2026-08-20 <2026-08-21\n"
+        "- [x] Email alex@example.com about important! @done\n"
+    )
+    qtbot.addWidget(editor)
+    editor.set_vi_mode_enabled(True)
+    editor.show()
+    editor.setFocus()
+
+    first = editor.document().findBlockByNumber(0)
+    editor.setTextCursor(QTextCursor(first))
+    QTest.keyClick(editor, Qt.Key_R)
+    assert editor.document().findBlockByNumber(0).text() == "  - Call Sarah"
+
+    second = editor.document().findBlockByNumber(1)
+    editor.setTextCursor(QTextCursor(second))
+    QTest.keyClick(editor, Qt.Key_R)
+    assert second.text() == "- Email alex@example.com about important!"
+    assert editor._is_task_line(first.text())[0] is False
+    assert editor._is_task_line(second.text())[0] is False
+
+
+def test_vi_r_ignores_non_task_lines(qtbot, qapp, monkeypatch) -> None:
+    editor = MarkdownEditor()
+    editor.set_markdown("Keep @tag !! <2026-08-21\n")
+    qtbot.addWidget(editor)
+    editor.set_vi_mode_enabled(True)
+    editor.show()
+    editor.setFocus()
+    messages: list[str] = []
+    monkeypatch.setattr(editor, "_status_message", lambda message, duration=2000: messages.append(message))
+
+    QTest.keyClick(editor, Qt.Key_R)
+
+    assert editor.toPlainText() == "Keep @tag !! <2026-08-21\n"
+    assert messages == ["Cursor is not on a task."]
 
 
 def test_main_window_routes_hovered_line_to_shared_task_editor(main_window, monkeypatch) -> None:

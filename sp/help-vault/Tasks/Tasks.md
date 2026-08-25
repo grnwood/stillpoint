@@ -57,13 +57,14 @@ When focus is in the task list:
 - `P`: cycle priority.
 - `T`: edit tags.
 - `M`: open the full task editor with **Move/File to** focused.
+- `R`: remove task indicators and convert the selected task to a plain dash item.
 - `Delete`: delete after confirmation.
 - `Ctrl+Z`: safely undo the last Tasks-panel change when the affected pages have not changed.
 - `?`: show the contextual shortcut reference.
 
 The task editor opens beside the selected row and shows page locations with colon paths. Long task names wrap for readability, and the focused input has a vault-accent border. `Up` / `Down` cycle through fields. In vi mode, Task text begins in `NAV` with a vault-accent block cursor showing its position: use `h/j/k/l` or `w/b` to move, and `i` or `a` to enter `INSERT`. `Ctrl+Shift+J` / `Ctrl+Shift+K` cycle editor fields except while a tag, select, or **Move/File to** dropdown is active, when they navigate its choices. If the focused field has changed, the first `Esc` restores its value from when the editor opened and leaves the editor open; press `Esc` again to cancel the editor. In an unchanged Task text field, `Esc` leaves vi insert mode before it cancels the editor. `Ctrl+Enter` saves and advances, and `Ctrl+L` focuses the destination field. Date fields accept ISO dates, words such as `tomorrow` and `fri`, relative values such as `+3d`, and `clear`, or can be filled from the calendar button. Tags autocomplete from known vault-wide tags, and **Move/File to** searches the full page index even when Tasks is filtered. In the `D` and `S` date-option menus, vi mode supports `j/k` and `Ctrl+Shift+J/K`, with `Enter` to apply and `Esc` to cancel.
 
-In the main Markdown editor, vi navigation mode shows a pencil button when the mouse is over a task. Select it to open the same Task Editor for that line, or press `e` to edit the task on the cursor line. The button is hidden in vi insert mode.
+In the main Markdown editor, vi navigation mode shows a pencil button in the left rail when the mouse is over a task. Select it to open the same Task Editor for that line, or press `e` to edit the task on the cursor line. Press `r` to remove the task indicators: the task marker, tags, priority, and start/due dates are stripped and the line becomes a plain dash item. In the Tasks pane, use `R` on the focused task or choose **Remove Task Indicators** from its context menu. The button is hidden in vi insert mode.
 
 ## Process Quick Captures
 

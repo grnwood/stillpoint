@@ -78,6 +78,15 @@ def _clean_task_body(body: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+def remove_task_indicators(line: str) -> str:
+    """Convert a task line to a plain dash item without task metadata."""
+    match = TASK_LINE_RE.match(line)
+    if not match:
+        raise TaskConflictError("The selected source line is no longer a task.")
+    body = _clean_task_body(match.group("body") or "")
+    return f"{match.group('indent')}- {body}{match.group('newline')}"
+
+
 def rewrite_task_line(
     line: str,
     *,
@@ -199,6 +208,7 @@ def mutate_task(
     due: Optional[str] = None,
     destination: Optional[str] = None,
     delete: bool = False,
+    remove_indicators: bool = False,
 ) -> dict:
     source_path = _normalized_path(target.path)
     content = files.read_file(vault_root, source_path)
@@ -208,7 +218,9 @@ def mutate_task(
     block_end = _task_block_end(lines, line_index)
     original_tail = lines[line_index + 1 : block_end]
     updated_line = ""
-    if not delete:
+    if remove_indicators:
+        updated_line = remove_task_indicators(before_line)
+    elif not delete:
         updated_line = rewrite_task_line(
             before_line,
             text=text,
