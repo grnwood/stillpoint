@@ -407,6 +407,8 @@ class TaskQuickEditor(QDialog):
             Qt.Key_W: QTextCursor.NextWord,
             Qt.Key_B: QTextCursor.PreviousWord,
             Qt.Key_0: QTextCursor.StartOfLine,
+            Qt.Key_Q: QTextCursor.StartOfLine,
+            Qt.Key_Semicolon: QTextCursor.EndOfLine,
             Qt.Key_Dollar: QTextCursor.EndOfLine,
         }
         operation = cursor_moves.get(key)

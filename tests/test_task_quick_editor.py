@@ -284,6 +284,21 @@ def test_task_text_uses_vi_navigation_and_requires_insert_mode(qtbot, qapp) -> N
     assert editor.result() == 0
 
 
+def test_task_text_vi_q_and_semicolon_move_to_line_edges(qtbot) -> None:
+    editor = TaskQuickEditor({"text": "alpha beta"}, vi_mode=True)
+    qtbot.addWidget(editor)
+    editor.text_edit.setFocus()
+    cursor = editor.text_edit.textCursor()
+    cursor.setPosition(5)
+    editor.text_edit.setTextCursor(cursor)
+
+    QTest.keyClick(editor.text_edit, Qt.Key_Q)
+    assert editor.text_edit.textCursor().position() == 0
+
+    QTest.keyClick(editor.text_edit, Qt.Key_Semicolon)
+    assert editor.text_edit.textCursor().position() == len("alpha beta") - 1
+
+
 def test_tag_dropdown_vi_navigation_escape_reset_and_focus_handoff(qtbot, qapp) -> None:
     editor = TaskQuickEditor(
         {"text": "Call Sarah", "tags": ["work"]},
