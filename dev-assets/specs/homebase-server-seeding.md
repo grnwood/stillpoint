@@ -9,6 +9,7 @@ They let you:
 - create a Homebase vault directly on the server
 - seed an existing Homebase vault from a plaintext folder already on the server
 - dry-run the seeding process before writing anything
+- recover decryptable files from an encrypted server checkpoint into a new plaintext staging folder
 
 ## Scripts
 
@@ -16,17 +17,57 @@ The source files live in `tools/`:
 
 - [tools/homebase-seed-vault.py](/home/grnwood/code/stillpoint/tools/homebase-seed-vault.py)
 - [tools/homebase-create-and-seed-vault.py](/home/grnwood/code/stillpoint/tools/homebase-create-and-seed-vault.py)
+- [tools/homebase-recover-vault.py](/home/grnwood/code/stillpoint/tools/homebase-recover-vault.py)
 
 Shared logic lives in:
 
 - [tools/homebase_seed_lib.py](/home/grnwood/code/stillpoint/tools/homebase_seed_lib.py)
+- [tools/homebase_recover_lib.py](/home/grnwood/code/stillpoint/tools/homebase_recover_lib.py)
 
 When you build the server package with [packaging/sp-server.spec](/home/grnwood/code/stillpoint/packaging/sp-server.spec), the server bundle also ships runnable executables in `dist/stillpoint-server/tools/`:
 
 - `homebase-seed-vault`
 - `homebase-create-and-seed-vault`
+- `homebase-recover-vault`
 
 Those `tools/` entries are launcher wrappers. They invoke the packaged executables that live at the server bundle root so PyInstaller can still resolve its adjacent `_internal/` runtime directory.
+
+## Recover a Server Checkpoint
+
+The recovery command reads encrypted objects directly from the Homebase store. It never changes
+objects, manifests, checkpoints, or `refs/latest.json`. It creates a new plaintext staging directory
+and a JSON report next to it.
+
+Prefer passphrase files so secrets do not remain in shell history. Put one candidate passphrase on
+each line and restrict the file's permissions:
+
+```bash
+chmod 600 /root/homebase-passphrases.txt
+
+/opt/stillpoint/app/tools/homebase-recover-vault \
+  --vaults-root /opt/stillpoint/vaults \
+  --vault-id 123e4567-e89b-12d3-a456-426614174000 \
+  --output /opt/stillpoint/recovery/vault-123 \
+  --passphrase-file /root/homebase-passphrases.txt
+```
+
+In a source checkout, run `python3 tools/homebase-recover-vault.py` with the same arguments.
+Use `--passphrase` more than once to supply candidates directly, or `--checkpoint-id` to recover a
+retained checkpoint other than the current latest checkpoint.
+
+The output and report paths must not already exist and must be outside `--vaults-root`. Recovered
+files are created with private permissions. The JSON report records only candidate indexes, never
+passphrase values.
+
+Exit status is:
+
+- `0` when every manifest entry was recovered
+- `2` when a report was written but one or more entries could not be recovered
+- `1` for a fatal setup, manifest, or filesystem error
+
+Do not reseed from a partial recovery unless the report's missing files are acceptable. When the
+report has `"complete": true`, its `output_root` can be passed to `homebase-seed-vault --source`
+after separately backing up the encrypted Homebase vault.
 
 ## What the Seeder Does
 

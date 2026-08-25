@@ -23,6 +23,7 @@ ROOT = _find_root()
 MAIN = os.path.join(ROOT, "sp", "server", "api.py")
 HOMEBASE_SEED_TOOL = os.path.join(ROOT, "tools", "homebase-seed-vault.py")
 HOMEBASE_CREATE_AND_SEED_TOOL = os.path.join(ROOT, "tools", "homebase-create-and-seed-vault.py")
+HOMEBASE_RECOVER_TOOL = os.path.join(ROOT, "tools", "homebase-recover-vault.py")
 
 # Server-only import graph:
 # - sp.server.* (API, adapters, file ops, auth, state)
@@ -53,6 +54,7 @@ hidden = (
         "argon2",
         "_argon2_cffi_bindings",
         "tools.homebase_seed_lib",
+        "tools.homebase_recover_lib",
         "jose",
         "markdown",
         "multipart",
@@ -129,6 +131,7 @@ homebase_tool_hidden = (
         "argon2",
         "_argon2_cffi_bindings",
         "tools.homebase_seed_lib",
+        "tools.homebase_recover_lib",
         "sp.sync.crypto",
         "sp.sync.local_fs",
     ]
@@ -202,6 +205,40 @@ create_seed_exe = EXE(
     version=None,
 )
 
+recover_a = Analysis(
+    [HOMEBASE_RECOVER_TOOL],
+    pathex=[ROOT],
+    binaries=[],
+    datas=[],
+    hiddenimports=homebase_tool_hidden,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["PySide6", "tkinter", "pytest", "tests", "unittest"],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+recover_pyz = PYZ(recover_a.pure, recover_a.zipped_data, cipher=block_cipher)
+
+recover_exe = EXE(
+    recover_pyz,
+    recover_a.scripts,
+    recover_a.binaries,
+    recover_a.zipfiles,
+    recover_a.datas,
+    [],
+    name="homebase-recover-vault",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=True,
+    upx=True,
+    console=True,
+    icon=None,
+    version=None,
+)
+
 # Move convenience files to dist root (PyInstaller puts datas under _internal).
 dist_root = os.path.join("dist", "stillpoint-server")
 internal_dir = os.path.join(dist_root, "_internal")
@@ -227,6 +264,7 @@ os.makedirs(tools_root, exist_ok=True)
 for filename in (
     "homebase-seed-vault",
     "homebase-create-and-seed-vault",
+    "homebase-recover-vault",
 ):
     src = os.path.join("dist", filename)
     dst = os.path.join(tools_root, filename)
