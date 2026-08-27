@@ -6,6 +6,7 @@ Also covers the image path normalization to always use relative links.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
@@ -188,6 +189,35 @@ class TestImageSyncPull:
         }
         assert (vault_b / "First.md").read_text(encoding="utf-8") == "second version\n"
         assert (vault_b / "Second.md").read_text(encoding="utf-8") == "unchanged\n"
+
+    def test_cold_start_reuses_matching_local_files_without_object_downloads(self, tmp_path):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "Same.md").write_text("already local\n", encoding="utf-8")
+        (vault_a / "Changed.md").write_text("remote version\n", encoding="utf-8")
+
+        client = FakeClient()
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        checkpoint_id = _push_via_engine(engine_a, client)
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+
+        # Simulate copying an older plaintext vault and deleting .stillpoint:
+        # one file matches the remote snapshot and one file does not.
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        (vault_b / "Same.md").write_text("already local\n", encoding="utf-8")
+        (vault_b / "Changed.md").write_text("older local version\n", encoding="utf-8")
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine_b = HomebaseSyncEngine(cfg_b)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        applied, object_cache = engine_b._apply_remote_checkpoint(client, key, checkpoint_id)
+
+        changed_object_id = manifest["entries"]["Changed.md"]["object_id"]
+        assert client.get_object_calls == [changed_object_id]
+        assert "Same.md" not in applied
+        assert object_cache["Same.md"] == manifest["entries"]["Same.md"]["object_id"]
+        assert (vault_b / "Same.md").read_text(encoding="utf-8") == "already local\n"
 
     def test_pull_propagates_object_401_to_token_refresh_handler(self, tmp_path):
         vault_a = tmp_path / "vault_a"
@@ -404,6 +434,7 @@ class TestImageSyncPull:
         assert not (vault_b / "Notes" / "bad.md").exists()
         assert "Notes/bad.md" not in pulled_cache
         assert "Notes/good.md" in pulled_cache
+        assert engine_b._last_pull_incomplete is True
 
         # applied should include only successfully written entries.
         assert "Notes/good.md" in applied
@@ -412,10 +443,50 @@ class TestImageSyncPull:
         sync_errors = engine_b.list_sync_errors(limit=50)
         assert any(
             str(item.get("path") or "") == "Notes/bad.md"
-            and str(item.get("phase") or "") == "apply"
-            and "filename" in str(item.get("reason") or "").lower()
+            and str(item.get("phase") or "") == "path"
+            and "rename it from another client" in str(item.get("reason") or "").lower()
             for item in sync_errors
         )
+
+    def test_sync_retry_downloads_only_the_file_that_failed_to_apply(self, tmp_path, monkeypatch):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "bad.md").write_text("bad\n", encoding="utf-8")
+        (vault_a / "good.md").write_text("good\n", encoding="utf-8")
+        client = FakeClient()
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        checkpoint_id = _push_via_engine(engine_a, client)
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+        bad_object_id = manifest["entries"]["bad.md"]["object_id"]
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+        real_write = sync_engine.write_bytes_atomic
+        failed_once = False
+
+        def _fail_bad_once(full_path, data):
+            nonlocal failed_once
+            if full_path.name == "bad.md" and not failed_once:
+                failed_once = True
+                raise OSError(errno.ENAMETOOLONG, "File name too long")
+            return real_write(full_path, data)
+
+        monkeypatch.setattr("sp.sync.engine.write_bytes_atomic", _fail_bad_once)
+
+        engine_b._sync_once()
+        assert (vault_b / "good.md").read_text(encoding="utf-8") == "good\n"
+        assert not (vault_b / "bad.md").exists()
+
+        client.get_object_calls.clear()
+        engine_b._ignore_backoff_once = True
+        engine_b._sync_once()
+
+        assert client.get_object_calls == [bad_object_id]
+        assert (vault_b / "bad.md").read_text(encoding="utf-8") == "bad\n"
+        state = json.loads(engine_b._state_path.read_text(encoding="utf-8"))
+        assert state["homebase"]["last_seen_latest_checkpoint_id"] == checkpoint_id
 
     def test_sync_once_bootstraps_empty_client_even_when_checkpoint_was_marked_seen(self, tmp_path, monkeypatch):
         """An empty fresh client must pull the remote vault before publishing anything."""

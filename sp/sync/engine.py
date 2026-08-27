@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import errno
 import json
 import os
 import threading
@@ -133,6 +134,23 @@ def has_material_text_difference(local_text: str, remote_text: str) -> bool:
     if local_heading and remote_heading and local_heading == remote_heading:
         return False
     return True
+
+
+def _is_unrepresentable_path_error(exc: OSError) -> bool:
+    if getattr(exc, "errno", None) == errno.ENAMETOOLONG:
+        return True
+    if getattr(exc, "winerror", None) in {123, 206}:
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "file name too long",
+            "filename too long",
+            "path too long",
+            "filename, directory name, or volume label syntax is incorrect",
+        )
+    )
 
 
 @dataclass
@@ -788,7 +806,7 @@ class HomebaseSyncEngine:
                 self._save_object_cache(object_cache)
                 if self._last_pull_incomplete:
                     raise ValueError(
-                        "Homebase checkpoint pull was incomplete; missing objects will be retried"
+                        "Homebase checkpoint pull was incomplete; failed files will be retried"
                     )
                 hb["last_seen_latest_checkpoint_id"] = remote_head
                 hb["last_pulled_checkpoint_id"] = remote_head
@@ -1207,7 +1225,38 @@ class HomebaseSyncEngine:
         cached_unchanged = 0
         download_errors = 0
         apply_errors = 0
-        known_objects = known_object_cache if isinstance(known_object_cache, dict) else {}
+        known_objects = dict(known_object_cache) if isinstance(known_object_cache, dict) else {}
+        cold_local_matches = 0
+        # A copied/older vault may have no .stillpoint sync metadata even though
+        # many of its files already equal the remote checkpoint.  Homebase
+        # encryption is deterministic within a vault, so computing the local
+        # encrypted object id gives us a safe content comparison without first
+        # downloading the remote object.
+        for rel, meta in entries.items():
+            if not isinstance(meta, dict) or str(rel).startswith(".stillpoint/"):
+                continue
+            rel_key = self._canonical_rel_path(str(rel))
+            remote_object_id = str(meta.get("object_id") or "").strip().lower()
+            if not self._is_valid_object_id(remote_object_id):
+                continue
+            if str(known_objects.get(rel_key) or "").strip().lower() == remote_object_id:
+                continue
+            local_path = self._local_path_for_rel(rel_key)
+            if not local_path.is_file():
+                continue
+            try:
+                local_envelope = encrypt_bytes(key, read_bytes(local_path))
+                local_object_id = object_id_from_ciphertext(local_envelope)
+            except OSError:
+                continue
+            if local_object_id == remote_object_id:
+                known_objects[rel_key] = remote_object_id
+                cold_local_matches += 1
+        if cold_local_matches:
+            _log(
+                f"pull cold-start local matches={cold_local_matches}; "
+                "matching remote downloads skipped"
+            )
         relevant_entries = [
             (rel, meta)
             for rel, meta in entries.items()
@@ -1491,11 +1540,20 @@ class HomebaseSyncEngine:
                 # Keep pull progress moving when a specific local path cannot be
                 # represented on this platform (e.g., WinError 123).
                 pulled_cache.pop(rel_key, None)
+                self._last_pull_incomplete = True
                 apply_errors += 1
+                path_error = _is_unrepresentable_path_error(apply_exc)
+                if path_error:
+                    error_reason = (
+                        f"/{rel_key}: this remote path cannot be represented on the local filesystem; "
+                        f"rename it from another client ({apply_exc})"
+                    )
+                else:
+                    error_reason = f"/{rel_key}: {apply_exc}"
                 self._record_sync_error(
                     path=rel_key,
-                    phase="apply",
-                    reason=f"/{rel_key}: {apply_exc}",
+                    phase="path" if path_error else "apply",
+                    reason=error_reason,
                     object_id=object_id_text,
                 )
                 remaining_downloads = max(0, remaining_downloads - 1)
@@ -1521,7 +1579,7 @@ class HomebaseSyncEngine:
         _log(
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
-            f"cached_unchanged={cached_unchanged} "
+            f"cached_unchanged={cached_unchanged} cold_local_matches={cold_local_matches} "
             f"conflicts={conflicts} "
             f"download_errors={download_errors} apply_errors={apply_errors}"
         )
