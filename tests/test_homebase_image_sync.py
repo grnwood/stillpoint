@@ -621,6 +621,49 @@ class TestImageSyncPull:
         finally:
             engine.stop()
 
+    def test_schedule_does_not_hide_active_progress_or_postpone_pending_run(
+        self, tmp_path, monkeypatch
+    ):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        engine = HomebaseSyncEngine(_make_cfg(vault, push_debounce_seconds=3))
+        engine._set_status_locked(
+            state="syncing",
+            summary="Scanning local vault (25/100)...",
+            pending=False,
+        )
+        engine._sync_in_progress = True
+        monotonic_values = iter((100.0, 101.0))
+        monkeypatch.setattr(sync_engine.time, "monotonic", lambda: next(monotonic_values))
+
+        engine.schedule_sync("first filesystem scan")
+        first_deadline = engine._next_run_at
+        engine.schedule_sync("second filesystem scan")
+
+        status = engine.get_status()
+        assert first_deadline == 103.0
+        assert engine._next_run_at == first_deadline
+        assert status.summary == "Scanning local vault (25/100)..."
+        assert status.pending is True
+
+    def test_hibernated_auto_sync_still_runs_periodic_check(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        cfg = _make_cfg(vault, auto_sync=True, interval_seconds=0.02)
+        engine = HomebaseSyncEngine(cfg)
+        completed = threading.Event()
+
+        def _fake_sync_once(*_args, **_kwargs):
+            completed.set()
+
+        engine._sync_once = _fake_sync_once  # type: ignore[method-assign]
+        engine._hibernating = True
+        engine.start()
+        try:
+            assert completed.wait(timeout=1.0)
+        finally:
+            engine.stop()
+
     def test_sync_once_uploads_objects_in_parallel(self, tmp_path, monkeypatch):
         """Initial uploads should use multiple workers when configured."""
         vault = tmp_path / "vault"

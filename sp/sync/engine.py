@@ -275,6 +275,11 @@ class HomebaseSyncEngine:
         if self._thread and self._thread.is_alive():
             return
         self._stop = False
+        # Anchor the first periodic run to engine startup.  Previously the run
+        # loop recalculated a full interval after every timeout until some
+        # other event happened to complete the first cycle, so an otherwise
+        # quiet engine could wait forever for its initial interval sync.
+        self._last_interval_run_at = time.monotonic()
         self._thread = threading.Thread(target=self._run_loop, name="homebase-sync", daemon=True)
         self._thread.start()
         _log(
@@ -296,13 +301,29 @@ class HomebaseSyncEngine:
         delay = max(1, int(self.cfg.push_debounce_seconds))
         with self._cv:
             self._hibernating = False
-            self._next_run_at = time.monotonic() + delay
-            self._set_status_locked(
-                pending=True,
-                summary=f"Sync scheduled ({reason})",
-            )
+            candidate_run_at = time.monotonic() + delay
+            # Coalesce work without allowing a stream of filesystem events to
+            # postpone the pending cycle indefinitely.
+            if self._next_run_at is None:
+                self._next_run_at = candidate_run_at
+            else:
+                self._next_run_at = min(self._next_run_at, candidate_run_at)
+            if self._sync_in_progress:
+                # Keep the current phase/progress visible.  Replacing it with
+                # "Sync scheduled" made an active scan or transfer look stuck.
+                self._set_status_locked(pending=True)
+            elif self._sync_suspended:
+                self._set_status_locked(
+                    pending=True,
+                    summary=f"Sync paused; changes queued ({reason})",
+                )
+            else:
+                self._set_status_locked(
+                    pending=True,
+                    summary=f"Sync scheduled ({reason})",
+                )
             self._cv.notify_all()
-        _log(f"scheduled sync in {delay}s ({reason})")
+        _log(f"scheduled sync no later than {delay}s ({reason})")
 
     def suspend_sync(self, reason: str = "transaction") -> None:
         """Pause new cycles and wait for an active cycle to finish."""
@@ -331,7 +352,15 @@ class HomebaseSyncEngine:
             self._hibernating = False
             self._force_run = True
             self._ignore_backoff_once = True
-            self._set_status_locked(pending=True, summary=f"Sync requested ({reason})")
+            if self._sync_in_progress:
+                self._set_status_locked(pending=True)
+            elif self._sync_suspended:
+                self._set_status_locked(
+                    pending=True,
+                    summary=f"Sync paused; changes queued ({reason})",
+                )
+            else:
+                self._set_status_locked(pending=True, summary=f"Sync requested ({reason})")
             self._cv.notify_all()
         _log(f"sync now requested ({reason})")
 
@@ -659,9 +688,6 @@ class HomebaseSyncEngine:
                 if self._sync_suspended:
                     self._cv.wait(timeout=None)
                     continue
-                if self._hibernating and not self._force_run and self._next_run_at is None:
-                    self._cv.wait(timeout=None)
-                    continue
                 now = time.monotonic()
                 interval_due_in = None
                 if self.cfg.auto_sync:
@@ -813,16 +839,25 @@ class HomebaseSyncEngine:
             else:
                 _log(f"pull: no remote change latest={remote_head}")
 
+            self._set_status_locked(summary=f"Scanning local vault ({local_file_count} file(s))...")
             manifest = self._build_local_manifest()
-            current_scan = {
-                rel: {
+            manifest_entries = [
+                (rel, meta)
+                for rel, meta in manifest.get("entries", {}).items()
+                if isinstance(meta, dict)
+            ]
+            current_scan: dict[str, dict[str, Any]] = {}
+            scan_total = len(manifest_entries)
+            for scan_index, (rel, meta) in enumerate(manifest_entries, start=1):
+                current_scan[rel] = {
                     "size": int(meta.get("size", 0)),
                     "mtime": int(meta.get("mtime", 0)),
                     "content_sha256": sha256_file(self._local_path_for_rel(rel)),
                 }
-                for rel, meta in manifest.get("entries", {}).items()
-                if isinstance(meta, dict)
-            }
+                if scan_index == scan_total or scan_index % 25 == 0:
+                    self._set_status_locked(
+                        summary=f"Scanning local vault ({scan_index}/{scan_total})..."
+                    )
             unchanged_scan = previous_scan == current_scan
             _log(
                 f"scan complete files={len(current_scan)} unchanged_scan={unchanged_scan} "
@@ -840,7 +875,7 @@ class HomebaseSyncEngine:
                 if self._no_change_streak >= self._hibernate_after_checks:
                     self._hibernating = True
                     state_name = "hibernated"
-                    summary = "Hibernated (waiting for edits/page load)"
+                    summary = "Hibernated (periodic checks continue)"
                 self._set_status_locked(
                     state=state_name,
                     summary=summary,
