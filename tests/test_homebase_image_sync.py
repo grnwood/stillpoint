@@ -247,6 +247,52 @@ class TestImageSyncPull:
             for status in statuses
         )
 
+    def test_pull_downloads_in_parallel_up_to_configured_worker_limit(self, tmp_path):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        for index in range(8):
+            (vault_a / f"Page-{index}.md").write_text(f"page {index}\n", encoding="utf-8")
+
+        class SlowClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self._active_lock = threading.Lock()
+                self.active_downloads = 0
+                self.max_active_downloads = 0
+
+            def get_object(self, object_id: str) -> bytes:
+                with self._active_lock:
+                    self.active_downloads += 1
+                    self.max_active_downloads = max(
+                        self.max_active_downloads,
+                        self.active_downloads,
+                    )
+                try:
+                    time.sleep(0.05)
+                    return super().get_object(object_id)
+                finally:
+                    with self._active_lock:
+                        self.active_downloads -= 1
+
+        client = SlowClient()
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        checkpoint_id = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        cfg_b = _make_cfg(
+            vault_b,
+            device_id="device-b",
+            max_parallel_transfers=3,
+        )
+        engine_b = HomebaseSyncEngine(cfg_b)
+        key = derive_key_from_passphrase(cfg_b.passphrase, cfg_b.vault_id)
+
+        engine_b._apply_remote_checkpoint(client, key, checkpoint_id)
+
+        assert client.max_active_downloads == 3
+        assert len(client.get_object_calls) == 8
+
     def test_pull_continues_after_single_object_download_failure(self, tmp_path):
         """If one object is missing on the server, the remaining entries
         should still be downloaded rather than aborting the entire pull."""

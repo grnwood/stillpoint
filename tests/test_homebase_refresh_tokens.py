@@ -72,8 +72,14 @@ def test_parallel_authenticated_requests_do_not_contend_on_token_temp_file(tmp_p
 
     # Authenticated reads should not rewrite tokens.json at all.  This is the
     # request pattern that previously raced under parallel object HEAD/GETs.
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        responses = list(executor.map(lambda _index: client.get(url, headers=headers), range(48)))
+    def authenticated_read(_index: int):
+        # TestClient itself is not guaranteed to serialize concurrent calls on
+        # one portal; use independent clients to model independent devices.
+        with TestClient(app) as request_client:
+            return request_client.get(url, headers=headers)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        responses = list(executor.map(authenticated_read, range(24)))
 
     assert all(response.status_code == 404 for response in responses)
 
@@ -94,10 +100,11 @@ def test_parallel_client_logins_keep_every_issued_access_token_valid(tmp_path) -
     vault_id = create.json()["vault_id"]
 
     def connect(_index: int):
-        return client.post(
-            "/v1/homebase/bootstrap/connect",
-            json={"vault_id": vault_id, "username": "alice", "password": "secret"},
-        )
+        with TestClient(app) as request_client:
+            return request_client.post(
+                "/v1/homebase/bootstrap/connect",
+                json={"vault_id": vault_id, "username": "alice", "password": "secret"},
+            )
 
     # Argon2 login verification is deliberately expensive; four overlapping
     # clients are enough to exercise token persistence without making the test

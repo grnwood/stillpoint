@@ -1218,11 +1218,72 @@ class HomebaseSyncEngine:
             != str(meta.get("object_id") or "").strip().lower()
         ]
         remaining_downloads = len(relevant_entries)
+        download_outcomes: dict[str, tuple[Optional[bytes], Optional[Exception]]] = {}
         if remaining_downloads:
+            max_workers = max(1, int(self.cfg.max_parallel_transfers or 1))
+            worker_count = min(max_workers, remaining_downloads)
+            available_slots: SimpleQueue[int] = SimpleQueue()
+            for slot_index in range(worker_count):
+                available_slots.put(slot_index)
             self._set_status_locked(
                 summary=f"Pulling {remaining_downloads} object(s)...",
                 pending_downloads=remaining_downloads,
-                transfer_workers=["Idle"],
+                transfer_workers=["Idle"] * worker_count,
+            )
+
+            def _run_download(rel_key: str, object_id_text: str) -> tuple[Optional[bytes], Optional[Exception]]:
+                slot_index = available_slots.get()
+                try:
+                    self._update_transfer_worker(slot_index, f"GET {rel_key}")
+                    ciphertext = client.get_object(object_id_text)
+                    actual_object_id = object_id_from_ciphertext(ciphertext)
+                    if actual_object_id != object_id_text:
+                        raise ValueError(
+                            f"Homebase object integrity failed for '{rel_key}' "
+                            f"(expected {object_id_text}, received {actual_object_id})"
+                        )
+                    try:
+                        plaintext = decrypt_bytes(key, ciphertext)
+                    except CryptoError as exc:
+                        raise ValueError(
+                            f"Homebase decryption failed for '{rel_key}' "
+                            "(passphrase mismatch or corrupted object)"
+                        ) from exc
+                    return plaintext, None
+                except Exception as exc:
+                    return None, exc
+                finally:
+                    self._update_transfer_worker(slot_index, "Idle")
+                    available_slots.put(slot_index)
+
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="homebase-get",
+            ) as executor:
+                future_map = {}
+                for rel, meta in relevant_entries:
+                    rel_key = self._canonical_rel_path(str(rel))
+                    object_id_text = str(meta.get("object_id") or "").strip().lower()
+                    future = executor.submit(_run_download, rel_key, object_id_text)
+                    future_map[future] = rel_key
+                completed_downloads = 0
+                for future in as_completed(future_map):
+                    rel_key = future_map[future]
+                    plaintext, error = future.result()
+                    download_outcomes[rel_key] = (plaintext, error)
+                    completed_downloads += 1
+                    pending = max(0, remaining_downloads - completed_downloads)
+                    self._set_status_locked(
+                        summary=(
+                            f"Pulling {pending} object(s)..."
+                            if pending
+                            else "Applying pulled files..."
+                        ),
+                        pending_downloads=pending,
+                    )
+            _log(
+                f"object download phase complete workers={worker_count} "
+                f"queued={remaining_downloads}"
             )
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
@@ -1249,10 +1310,11 @@ class HomebaseSyncEngine:
                 unchanged += 1
                 _log(f"pull decision=cached-object-unchanged path={rel_key} object_id={object_id_text}")
                 continue
-            try:
-                self._update_transfer_worker(0, f"GET {rel_key}")
-                ciphertext = client.get_object(str(object_id))
-            except httpx.HTTPStatusError as dl_exc:
+            plaintext, dl_exc = download_outcomes.get(
+                rel_key,
+                (None, ValueError(f"Homebase download result missing for '{rel_key}'")),
+            )
+            if isinstance(dl_exc, httpx.HTTPStatusError):
                 # Authentication and server failures apply to the whole sync
                 # attempt.  Let the outer handler refresh on 401 (or back off)
                 # instead of recording a partial checkpoint as successfully
@@ -1260,7 +1322,7 @@ class HomebaseSyncEngine:
                 # valid entries can still be recovered during this pass.
                 status_code = dl_exc.response.status_code if dl_exc.response is not None else 0
                 if status_code != 404:
-                    raise
+                    raise dl_exc
                 # Don't abort the entire pull for a single missing object.
                 # Remove from pulled_cache so the next sync cycle retries.
                 pulled_cache.pop(rel_key, None)
@@ -1287,20 +1349,10 @@ class HomebaseSyncEngine:
                     f"object_id={object_id_text} error={dl_exc}"
                 )
                 continue
-            except (httpx.HTTPError, OSError):
-                raise
-            actual_object_id = object_id_from_ciphertext(ciphertext)
-            if actual_object_id != object_id_text:
-                raise ValueError(
-                    f"Homebase object integrity failed for '{rel}' "
-                    f"(expected {object_id_text}, received {actual_object_id})"
-                )
-            try:
-                plaintext = decrypt_bytes(key, ciphertext)
-            except CryptoError as exc:
-                raise ValueError(
-                    f"Homebase decryption failed for '{rel}' (passphrase mismatch or corrupted object)"
-                ) from exc
+            if dl_exc is not None:
+                raise dl_exc
+            if plaintext is None:
+                raise ValueError(f"Homebase download returned no data for '{rel_key}'")
             downloaded += 1
             remote_mtime = int(meta.get("mtime", 0) or 0)
             try:
