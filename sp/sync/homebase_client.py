@@ -94,7 +94,11 @@ class HomebaseClient:
     def has_object(self, object_id: str) -> bool:
         url = f"{self.base_url}/v1/homebase/{self.vault_id}/objects/{object_id}"
         resp = self.client.head(url)
-        exists = resp.status_code == 200
+        if resp.status_code == 404:
+            _log_client(f"HEAD {url} -> 404 exists=False")
+            return False
+        resp.raise_for_status()
+        exists = True
         _log_client(f"HEAD {url} -> {resp.status_code} exists={exists}")
         return exists
 

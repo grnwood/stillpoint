@@ -46,6 +46,7 @@ class FakeClient:
         self.objects: dict[str, bytes] = {}
         self.manifests: dict[str, bytes] = {}
         self.latest_checkpoint: str | None = None
+        self.get_object_calls: list[str] = []
 
     # -- reads ---------------------------------------------------------------
     def get_latest(self) -> dict:
@@ -57,6 +58,7 @@ class FakeClient:
         return self.manifests[manifest_id]
 
     def get_object(self, object_id: str) -> bytes:
+        self.get_object_calls.append(object_id)
         if object_id not in self.objects:
             # Simulate a real 404 like HomebaseClient.get_object would raise
             request = httpx.Request("GET", f"http://fake/objects/{object_id}")
@@ -147,6 +149,73 @@ class TestImageSyncPull:
             assert img_path.exists(), f"Image {img_path.name} missing on Device B"
             assert img_path.read_bytes() == data
 
+    def test_pull_fetches_only_objects_changed_since_known_checkpoint(self, tmp_path):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        first = vault_a / "First.md"
+        second = vault_a / "Second.md"
+        first.write_text("first version\n", encoding="utf-8")
+        second.write_text("unchanged\n", encoding="utf-8")
+
+        client = FakeClient()
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        first_checkpoint = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        key = derive_key_from_passphrase(engine_b.cfg.passphrase, engine_b.cfg.vault_id)
+        _applied, known_cache = engine_b._apply_remote_checkpoint(client, key, first_checkpoint)
+        assert len(client.get_object_calls) == 2
+
+        first.write_text("second version\n", encoding="utf-8")
+        second_checkpoint = _push_via_engine(engine_a, client)
+        second_manifest = json.loads(client.get_manifest(second_checkpoint))
+        changed_object_id = second_manifest["entries"]["First.md"]["object_id"]
+
+        client.get_object_calls.clear()
+        applied, updated_cache = engine_b._apply_remote_checkpoint(
+            client,
+            key,
+            second_checkpoint,
+            known_object_cache=known_cache,
+        )
+
+        assert client.get_object_calls == [changed_object_id]
+        assert applied == ["First.md"]
+        assert updated_cache == {
+            rel: meta["object_id"] for rel, meta in second_manifest["entries"].items()
+        }
+        assert (vault_b / "First.md").read_text(encoding="utf-8") == "second version\n"
+        assert (vault_b / "Second.md").read_text(encoding="utf-8") == "unchanged\n"
+
+    def test_pull_propagates_object_401_to_token_refresh_handler(self, tmp_path):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "Page.md").write_text("remote\n", encoding="utf-8")
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        client = FakeClient()
+        checkpoint = _push_via_engine(engine_a, client)
+
+        class UnauthorizedClient(FakeClient):
+            def get_manifest(self, manifest_id: str) -> bytes:
+                return client.get_manifest(manifest_id)
+
+            def get_object(self, object_id: str) -> bytes:
+                request = httpx.Request("GET", f"http://fake/objects/{object_id}")
+                response = httpx.Response(401, request=request)
+                raise httpx.HTTPStatusError("Unauthorized", request=request, response=response)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        key = derive_key_from_passphrase(engine_b.cfg.passphrase, engine_b.cfg.vault_id)
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            engine_b._apply_remote_checkpoint(UnauthorizedClient(), key, checkpoint)
+
+        assert exc_info.value.response.status_code == 401
+
     def test_pull_reports_live_download_worker_state(self, tmp_path):
         """Pull status should expose remaining downloads and current worker action."""
         vault_a = tmp_path / "vault_a"
@@ -221,6 +290,7 @@ class TestImageSyncPull:
 
         # The missing entry must NOT be in pulled_cache so next sync retries it.
         assert "Notes/paste_image_001.png" not in pulled_cache
+        assert engine_b._last_pull_incomplete is True
 
         sync_errors = engine_b.list_sync_errors(limit=50)
         assert any(
@@ -352,6 +422,9 @@ class TestImageSyncPull:
         pulled_page = vault_b / "Notes" / "Page.md"
         assert pulled_page.exists()
         assert pulled_page.read_text(encoding="utf-8") == "# Hello\n\nseeded from remote\n"
+        assert client.latest_checkpoint == checkpoint_id
+        adopted_state = json.loads(engine_b._state_path.read_text(encoding="utf-8"))
+        assert adopted_state["homebase"]["last_pushed_checkpoint_id"] == checkpoint_id
 
     def test_same_plaintext_retry_reuses_object_id(self, tmp_path):
         """Retrying an unchanged upload should not mint a second object id."""

@@ -6472,7 +6472,7 @@ class MainWindow(QMainWindow):
         self._update_homebase_status_badge(None)
         self._update_homebase_sync_action_state()
 
-    def _configure_homebase_sync_for_vault(self) -> None:
+    def _configure_homebase_sync_for_vault(self, *, recheck_remote: bool = False) -> None:
         self._shutdown_homebase_sync()
         local_vault_root = Path(self.vault_root) if self.vault_root and not self._remote_mode else None
         if local_vault_root is not None:
@@ -6542,6 +6542,8 @@ class MainWindow(QMainWindow):
                 f"debounce={cfg.push_debounce_seconds}s parallel={cfg.max_parallel_transfers}"
             )
             self._homebase_sync_engine = HomebaseSyncEngine(cfg)
+            if recheck_remote:
+                self._homebase_sync_engine.recheck_remote_checkpoint()
             self._homebase_sync_engine.start()
             self._homebase_status_poll_timer = QTimer(self)
             self._homebase_status_poll_timer.setInterval(1000)
@@ -8267,7 +8269,7 @@ class MainWindow(QMainWindow):
             config.save_homebase_username(str(username).strip())
             self._store_homebase_tokens(access_token, refresh_token)
             self._homebase_user_info_loaded = False
-            self._configure_homebase_sync_for_vault()
+            self._configure_homebase_sync_for_vault(recheck_remote=True)
             self._refresh_homebase_user_info()
             if self._homebase_sync_engine:
                 self._homebase_sync_engine.sync_now("auth reset")

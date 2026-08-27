@@ -6,6 +6,8 @@ import os
 import re
 import secrets
 import stat
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -109,15 +111,27 @@ def _write_bytes(path: Path, data: bytes, *, file_mode: int | None = None, dir_m
     path.parent.mkdir(parents=True, exist_ok=True)
     if dir_mode is not None:
         _chmod_path(path.parent, dir_mode)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-    if file_mode is not None:
-        _chmod_path(tmp, file_mode)
-    tmp.replace(path)
-    if file_mode is not None:
-        _chmod_path(path, file_mode)
+    # A fixed ``path.tmp`` name is unsafe when concurrent requests update the
+    # same file: one request can replace the temp file while another is about
+    # to chmod it.  Keep each writer's temporary file private, then atomically
+    # replace the destination.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+        if file_mode is not None:
+            _chmod_path(tmp, file_mode)
+        tmp.replace(path)
+        if file_mode is not None:
+            _chmod_path(path, file_mode)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -219,6 +233,17 @@ def register_homebase_routes(
 ) -> None:
     _log_server("routes registered")
     ph = PasswordHasher()
+    token_locks: dict[Path, threading.RLock] = {}
+    token_locks_guard = threading.Lock()
+
+    def _token_lock(base: Path) -> threading.RLock:
+        key = base.resolve()
+        with token_locks_guard:
+            lock = token_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                token_locks[key] = lock
+            return lock
 
     def _normalize_role(value: Optional[str]) -> str:
         role = str(value or "").strip().lower()
@@ -340,12 +365,14 @@ def register_homebase_routes(
     def _save_tokens(base: Path, tokens: dict[str, Any]) -> None:
         _write_private_json(_tokens_path(base), tokens)
 
-    def _cleanup_tokens(tokens: dict[str, Any]) -> None:
+    def _cleanup_tokens(tokens: dict[str, Any]) -> bool:
         now = _utc_now_epoch()
+        changed = False
         for key in ("access_tokens", "refresh_tokens"):
             bucket = tokens.get(key)
             if not isinstance(bucket, dict):
                 tokens[key] = {}
+                changed = True
                 continue
             expired = []
             for token, meta in bucket.items():
@@ -354,26 +381,29 @@ def register_homebase_routes(
                     expired.append(token)
             for token in expired:
                 bucket.pop(token, None)
+                changed = True
+        return changed
 
     def _issue_tokens(base: Path, username: str) -> dict[str, str]:
-        tokens = _load_tokens(base)
-        _cleanup_tokens(tokens)
-        now = _utc_now_epoch()
-        access = secrets.token_urlsafe(32)
-        refresh = secrets.token_urlsafe(40)
-        access_bucket = tokens.setdefault("access_tokens", {})
-        refresh_bucket = tokens.setdefault("refresh_tokens", {})
-        access_bucket[access] = {
-            "username": username,
-            "exp": now + _ACCESS_TTL_SECONDS,
-            "created_at": _utc_now_iso(),
-        }
-        refresh_bucket[refresh] = {
-            "username": username,
-            "exp": now + _REFRESH_TTL_SECONDS,
-            "created_at": _utc_now_iso(),
-        }
-        _save_tokens(base, tokens)
+        with _token_lock(base):
+            tokens = _load_tokens(base)
+            _cleanup_tokens(tokens)
+            now = _utc_now_epoch()
+            access = secrets.token_urlsafe(32)
+            refresh = secrets.token_urlsafe(40)
+            access_bucket = tokens.setdefault("access_tokens", {})
+            refresh_bucket = tokens.setdefault("refresh_tokens", {})
+            access_bucket[access] = {
+                "username": username,
+                "exp": now + _ACCESS_TTL_SECONDS,
+                "created_at": _utc_now_iso(),
+            }
+            refresh_bucket[refresh] = {
+                "username": username,
+                "exp": now + _REFRESH_TTL_SECONDS,
+                "created_at": _utc_now_iso(),
+            }
+            _save_tokens(base, tokens)
         return {
             "access_token": access,
             "refresh_token": refresh,
@@ -383,15 +413,20 @@ def register_homebase_routes(
     def _verify_access_token(base: Path, token: str) -> Optional[str]:
         if not token:
             return None
-        tokens = _load_tokens(base)
-        _cleanup_tokens(tokens)
-        bucket = tokens.get("access_tokens", {})
-        meta = bucket.get(token) if isinstance(bucket, dict) else None
-        username = None
-        if isinstance(meta, dict):
-            username = str(meta.get("username") or "").strip() or None
-        _save_tokens(base, tokens)
-        return username
+        with _token_lock(base):
+            tokens = _load_tokens(base)
+            changed = _cleanup_tokens(tokens)
+            bucket = tokens.get("access_tokens", {})
+            meta = bucket.get(token) if isinstance(bucket, dict) else None
+            username = None
+            if isinstance(meta, dict):
+                username = str(meta.get("username") or "").strip() or None
+            # Authentication is normally read-only.  Persist only when expired
+            # records were actually removed, avoiding a write on every object
+            # GET/HEAD and the contention that caused the production traceback.
+            if changed:
+                _save_tokens(base, tokens)
+            return username
 
     def _require_homebase_auth(vault_id: str, authorization: Optional[str] = Header(default=None)) -> dict[str, str]:
         base = _vault_base(vault_id)
@@ -526,34 +561,42 @@ def register_homebase_routes(
         if not refresh_token:
             raise HTTPException(status_code=400, detail="refresh_token is required")
         base = _vault_base(vault_id)
-        tokens = _load_tokens(base)
-        _cleanup_tokens(tokens)
-        refresh_bucket = tokens.get("refresh_tokens", {})
-        meta = refresh_bucket.get(refresh_token) if isinstance(refresh_bucket, dict) else None
-        username = str(meta.get("username") or "").strip() if isinstance(meta, dict) else ""
-        if not username:
+        with _token_lock(base):
+            tokens = _load_tokens(base)
+            _cleanup_tokens(tokens)
+            refresh_bucket = tokens.get("refresh_tokens", {})
+            meta = refresh_bucket.get(refresh_token) if isinstance(refresh_bucket, dict) else None
+            username = str(meta.get("username") or "").strip() if isinstance(meta, dict) else ""
+            if not username:
+                _save_tokens(base, tokens)
+                raise HTTPException(status_code=401, detail="Invalid refresh token")
+            if not _get_user_record(base, username):
+                refresh_bucket.pop(refresh_token, None)
+                _save_tokens(base, tokens)
+                raise HTTPException(status_code=401, detail="Invalid refresh token")
+            # Keep the refresh token reusable for its full TTL and issue only a
+            # new access token.  The old implementation called _issue_tokens(),
+            # which also stored an unreachable extra refresh token each time.
+            now = _utc_now_epoch()
+            refresh_bucket[refresh_token] = {
+                "username": username,
+                "exp": now + _REFRESH_TTL_SECONDS,
+                "created_at": _utc_now_iso(),
+            }
+            access = secrets.token_urlsafe(32)
+            access_bucket = tokens.setdefault("access_tokens", {})
+            access_bucket[access] = {
+                "username": username,
+                "exp": now + _ACCESS_TTL_SECONDS,
+                "created_at": _utc_now_iso(),
+            }
             _save_tokens(base, tokens)
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
-        if not _get_user_record(base, username):
-            refresh_bucket.pop(refresh_token, None)
-            _save_tokens(base, tokens)
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
-        # Keep refresh tokens reusable for their full TTL so auth can recover
-        # after restarts or concurrent refresh attempts. Extend the token window
-        # on successful use to preserve a 30-day inactivity timeout.
-        now = _utc_now_epoch()
-        refresh_bucket[refresh_token] = {
-            "username": username,
-            "exp": now + _REFRESH_TTL_SECONDS,
-            "created_at": _utc_now_iso(),
-        }
-        _save_tokens(base, tokens)
-        fresh = _issue_tokens(base, username)
-        fresh["refresh_token"] = refresh_token
         _log_server(f"POST /bootstrap/refresh vault_id={vault_id} username={username}")
         return {
             "vault_id": vault_id,
-            **fresh,
+            "access_token": access,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
         }
 
     @app.get("/v1/homebase/{vault_id}/users")

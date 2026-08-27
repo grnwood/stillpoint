@@ -190,6 +190,7 @@ class HomebaseSyncEngine:
         self._hibernate_after_checks = 3
         self._remote_updates_lock = threading.Lock()
         self._pending_remote_updates: list[str] = []
+        self._last_pull_incomplete = False
         self._sync_dir = self.cfg.vault_root / ".stillpoint" / "sync"
         self._state_path = self._sync_dir / "local_state.json"
         self._conflict_path = self._sync_dir / "conflict_log.json"
@@ -315,6 +316,17 @@ class HomebaseSyncEngine:
             self._set_status_locked(pending=True, summary=f"Sync requested ({reason})")
             self._cv.notify_all()
         _log(f"sync now requested ({reason})")
+
+    def recheck_remote_checkpoint(self) -> None:
+        """Force a manifest comparison without discarding the local diff cache."""
+        state = _read_json(self._state_path, self._default_state())
+        hb = state.setdefault("homebase", {})
+        hb["last_seen_latest_checkpoint_id"] = None
+        hb["last_error"] = None
+        hb["error_count"] = 0
+        hb["backoff_until"] = None
+        _write_json(self._state_path, state)
+        _log("remote checkpoint marked for recheck (local object cache preserved)")
 
     def reset_to_server_authoritative(self) -> None:
         """Reset local sync state and force local files to current server snapshot."""
@@ -769,12 +781,17 @@ class HomebaseSyncEngine:
                     client,
                     key,
                     remote_head,
+                    known_object_cache=object_cache,
                 )
                 self._queue_remote_updates(applied_paths)
-                hb["last_seen_latest_checkpoint_id"] = remote_head
-                hb["last_pulled_checkpoint_id"] = remote_head
                 object_cache = dict(pulled_object_cache)
                 self._save_object_cache(object_cache)
+                if self._last_pull_incomplete:
+                    raise ValueError(
+                        "Homebase checkpoint pull was incomplete; missing objects will be retried"
+                    )
+                hb["last_seen_latest_checkpoint_id"] = remote_head
+                hb["last_pulled_checkpoint_id"] = remote_head
             else:
                 _log(f"pull: no remote change latest={remote_head}")
 
@@ -876,6 +893,18 @@ class HomebaseSyncEngine:
                 envelope = encrypt_bytes(key, plaintext)
                 object_id = object_id_from_ciphertext(envelope)
                 meta["object_id"] = object_id
+                known_remote_object_id = str(object_cache.get(rel_key) or "").strip().lower()
+                if object_id == known_remote_object_id:
+                    # Deterministic encryption makes an equal object id proof
+                    # that the local bytes equal the latest known remote object.
+                    # If it was just pulled, its server presence is already
+                    # confirmed and a second HEAD would only repeat work.
+                    if needs_cache_verify and not pulled_remote and not client.has_object(object_id):
+                        _log(f"computed cached object missing on server path={rel_key} object_id={object_id}")
+                        verified_missing += 1
+                    else:
+                        reused_cached_count += 1
+                        continue
                 upload_jobs.append((rel_key, object_id, envelope))
 
             if upload_jobs:
@@ -937,8 +966,13 @@ class HomebaseSyncEngine:
                 oid = str(meta.get("object_id") or "").strip().lower()
                 if rel_key and self._is_valid_object_id(oid):
                     current_object_map[rel_key] = oid
-            if current_object_map == object_cache and hb.get("last_pushed_checkpoint_id"):
+            if current_object_map == object_cache and (hb.get("last_pushed_checkpoint_id") or remote_head):
                 hb["last_seen_latest_checkpoint_id"] = remote_head or hb.get("last_seen_latest_checkpoint_id")
+                if not hb.get("last_pushed_checkpoint_id") and remote_head:
+                    # Treat an exactly matching pulled checkpoint as the local
+                    # baseline.  Publishing an equivalent manifest with only a
+                    # new timestamp/device id creates needless checkpoint churn.
+                    hb["last_pushed_checkpoint_id"] = remote_head
                 hb["last_sync_at"] = _utc_now_iso()
                 hb["last_error"] = None
                 hb["error_count"] = 0
@@ -1153,8 +1187,11 @@ class HomebaseSyncEngine:
         client: HomebaseClient,
         key: bytes,
         checkpoint_id: str,
+        *,
+        known_object_cache: Optional[dict[str, str]] = None,
     ) -> tuple[list[str], dict[str, str]]:
         _log(f"pull begin checkpoint={checkpoint_id}")
+        self._last_pull_incomplete = False
         manifest_bytes = client.get_manifest(checkpoint_id)
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
@@ -1167,14 +1204,18 @@ class HomebaseSyncEngine:
         overwritten = 0
         unchanged = 0
         conflicts = 0
+        cached_unchanged = 0
         download_errors = 0
         apply_errors = 0
+        known_objects = known_object_cache if isinstance(known_object_cache, dict) else {}
         relevant_entries = [
             (rel, meta)
             for rel, meta in entries.items()
             if isinstance(meta, dict)
             and not str(rel).startswith(".stillpoint/")
             and meta.get("object_id")
+            and str(known_objects.get(self._canonical_rel_path(str(rel))) or "").strip().lower()
+            != str(meta.get("object_id") or "").strip().lower()
         ]
         remaining_downloads = len(relevant_entries)
         if remaining_downloads:
@@ -1194,13 +1235,36 @@ class HomebaseSyncEngine:
             rel_key = self._canonical_rel_path(str(rel))
             object_id_text = str(object_id).strip().lower()
             local_path = self._local_path_for_rel(rel_key)
+            if (
+                self._is_valid_object_id(object_id_text)
+                and str(known_objects.get(rel_key) or "").strip().lower() == object_id_text
+            ):
+                # Object ids are content-addressed encrypted bytes.  A matching
+                # id proves this path is unchanged from the client's known
+                # checkpoint, so there is nothing to download or decrypt.  A
+                # local edit (or deletion) is intentionally left for the push
+                # half of the cycle.
+                pulled_cache[rel_key] = object_id_text
+                cached_unchanged += 1
+                unchanged += 1
+                _log(f"pull decision=cached-object-unchanged path={rel_key} object_id={object_id_text}")
+                continue
             try:
                 self._update_transfer_worker(0, f"GET {rel_key}")
                 ciphertext = client.get_object(str(object_id))
-            except (httpx.HTTPStatusError, httpx.HTTPError, OSError) as dl_exc:
+            except httpx.HTTPStatusError as dl_exc:
+                # Authentication and server failures apply to the whole sync
+                # attempt.  Let the outer handler refresh on 401 (or back off)
+                # instead of recording a partial checkpoint as successfully
+                # seen.  A genuine missing object remains path-local so other
+                # valid entries can still be recovered during this pass.
+                status_code = dl_exc.response.status_code if dl_exc.response is not None else 0
+                if status_code != 404:
+                    raise
                 # Don't abort the entire pull for a single missing object.
                 # Remove from pulled_cache so the next sync cycle retries.
                 pulled_cache.pop(rel_key, None)
+                self._last_pull_incomplete = True
                 download_errors += 1
                 self._record_sync_error(
                     path=rel_key,
@@ -1223,6 +1287,8 @@ class HomebaseSyncEngine:
                     f"object_id={object_id_text} error={dl_exc}"
                 )
                 continue
+            except (httpx.HTTPError, OSError):
+                raise
             actual_object_id = object_id_from_ciphertext(ciphertext)
             if actual_object_id != object_id_text:
                 raise ValueError(
@@ -1403,6 +1469,7 @@ class HomebaseSyncEngine:
         _log(
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
+            f"cached_unchanged={cached_unchanged} "
             f"conflicts={conflicts} "
             f"download_errors={download_errors} apply_errors={apply_errors}"
         )
