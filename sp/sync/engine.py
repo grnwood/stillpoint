@@ -41,6 +41,7 @@ _HOMEBASECLIENT_LOG = log_enabled("homebaseclient")
 _ANSI_BLUE = "\033[94m"
 _ANSI_RED = "\033[91m"
 _ANSI_RESET = "\033[0m"
+_FULL_HASH_AUDIT_SECONDS = 24 * 60 * 60
 
 
 def _log(message: str) -> None:
@@ -215,6 +216,7 @@ class HomebaseSyncEngine:
         self._scan_path = self._sync_dir / "last_scan.json"
         self._object_cache_path = self._sync_dir / "object_cache.json"
         self._sync_errors_path = self._sync_dir / "sync_errors.json"
+        self._local_deletions_path = self._sync_dir / "local_deletions.json"
 
     def _canonical_rel_path(self, rel_path: str) -> str:
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
@@ -417,10 +419,12 @@ class HomebaseSyncEngine:
             )
             current_scan = {}
             for rel, full in self._iter_sync_files():
-                size, mtime = stat_file(full)
+                file_stat = full.stat()
                 current_scan[rel] = {
-                    "size": int(size),
-                    "mtime": int(mtime),
+                    "size": int(file_stat.st_size),
+                    "mtime": int(file_stat.st_mtime),
+                    "mtime_ns": int(getattr(file_stat, "st_mtime_ns", 0) or 0),
+                    "ctime_ns": int(getattr(file_stat, "st_ctime_ns", 0) or 0),
                     "content_sha256": sha256_file(full),
                 }
             _write_json(
@@ -429,6 +433,7 @@ class HomebaseSyncEngine:
                     "schema_version": 1,
                     "vault_id": self.cfg.vault_id,
                     "updated_at": _utc_now_iso(),
+                    "last_full_hash_epoch": float(time.time()),
                     "entries": current_scan,
                 },
             )
@@ -537,6 +542,77 @@ class HomebaseSyncEngine:
         # Show newest entries first in UI.
         sanitized.reverse()
         return sanitized
+
+    def _clear_sync_errors_for_paths(self, paths: set[str]) -> None:
+        cleaned_paths = {
+            self._canonical_rel_path(str(path or ""))
+            for path in paths
+            if self._canonical_rel_path(str(path or ""))
+        }
+        if not cleaned_paths:
+            return
+        payload = _read_json(self._sync_errors_path, {"errors": []})
+        errors = payload.get("errors")
+        if not isinstance(errors, list):
+            return
+        retained = [
+            item
+            for item in errors
+            if not isinstance(item, dict)
+            or self._canonical_rel_path(str(item.get("path") or "")) not in cleaned_paths
+        ]
+        if len(retained) == len(errors):
+            return
+        payload["errors"] = retained
+        _write_json(self._sync_errors_path, payload)
+
+    def _load_local_deletions(self) -> set[str]:
+        payload = _read_json(self._local_deletions_path, {"paths": []})
+        paths = payload.get("paths")
+        if not isinstance(paths, list):
+            return set()
+        return {
+            self._canonical_rel_path(str(path or ""))
+            for path in paths
+            if self._canonical_rel_path(str(path or ""))
+        }
+
+    def _save_local_deletions(self, paths: set[str]) -> None:
+        cleaned = sorted(
+            {
+                self._canonical_rel_path(str(path or ""))
+                for path in paths
+                if self._canonical_rel_path(str(path or ""))
+            }
+        )
+        _write_json(
+            self._local_deletions_path,
+            {
+                "schema_version": 1,
+                "vault_id": self.cfg.vault_id,
+                "updated_at": _utc_now_iso(),
+                "paths": cleaned,
+            },
+        )
+
+    def mark_remote_path_deleted(self, path: str) -> bool:
+        """Confirm that an absent local path should be removed from Homebase."""
+        rel_path = self._canonical_rel_path(str(path or ""))
+        if not rel_path or rel_path.startswith(".stillpoint/"):
+            return False
+        if ".." in Path(rel_path).parts:
+            return False
+        try:
+            if self._local_path_for_rel(rel_path).exists():
+                return False
+        except OSError:
+            # An unrepresentable path is necessarily absent for sync purposes.
+            pass
+        deletions = self._load_local_deletions()
+        deletions.add(rel_path)
+        self._save_local_deletions(deletions)
+        _log(f"local deletion confirmed path={rel_path}")
+        return True
 
     def resolve_conflict_entry(self, conflict_copy_path: str, resolution: str = "merged") -> bool:
         cleaned = str(conflict_copy_path or "").strip().replace("\\", "/").lstrip("/")
@@ -806,7 +882,25 @@ class HomebaseSyncEngine:
             object_cache = self._load_object_cache()
             scan_state = _read_json(self._scan_path, {"entries": {}})
             previous_scan = scan_state.get("entries") if isinstance(scan_state.get("entries"), dict) else {}
-            local_file_count = len(self._iter_sync_files())
+            local_files_before_pull = self._iter_sync_files()
+            local_file_count = len(local_files_before_pull)
+            local_paths_before_pull = {
+                self._canonical_rel_path(rel_path)
+                for rel_path, _full_path in local_files_before_pull
+            }
+            previously_scanned_paths = {
+                self._canonical_rel_path(str(rel_path or ""))
+                for rel_path in previous_scan
+                if self._canonical_rel_path(str(rel_path or ""))
+            }
+            detected_local_deletions = previously_scanned_paths - local_paths_before_pull
+            confirmed_local_deletions = self._load_local_deletions()
+            local_deletions = detected_local_deletions | confirmed_local_deletions
+            if detected_local_deletions:
+                _log(
+                    "local deletions detected from prior scan "
+                    f"count={len(detected_local_deletions)}"
+                )
             needs_bootstrap_pull = bool(
                 remote_head
                 and local_file_count == 0
@@ -826,6 +920,7 @@ class HomebaseSyncEngine:
                     key,
                     remote_head,
                     known_object_cache=object_cache,
+                    locally_deleted_paths=local_deletions,
                 )
                 self._queue_remote_updates(applied_paths)
                 object_cache = dict(pulled_object_cache)
@@ -839,8 +934,24 @@ class HomebaseSyncEngine:
             else:
                 _log(f"pull: no remote change latest={remote_head}")
 
-            self._set_status_locked(summary=f"Scanning local vault ({local_file_count} file(s))...")
-            manifest = self._build_local_manifest()
+            scan_now_epoch = float(time.time())
+            try:
+                prior_full_hash_epoch = float(scan_state.get("last_full_hash_epoch") or 0.0)
+            except (TypeError, ValueError):
+                prior_full_hash_epoch = 0.0
+            force_full_hash = bool(
+                prior_full_hash_epoch <= 0.0
+                or prior_full_hash_epoch > scan_now_epoch + 300.0
+                or (scan_now_epoch - prior_full_hash_epoch) >= _FULL_HASH_AUDIT_SECONDS
+            )
+            scan_file_items = self._iter_sync_files() if pulled_remote else local_files_before_pull
+            local_file_count = len(scan_file_items)
+            self._set_status_locked(summary=f"Checking local vault ({local_file_count} file(s))...")
+            scan_file_stats: dict[str, os.stat_result] = {}
+            manifest = self._build_local_manifest(
+                file_items=scan_file_items,
+                file_stats=scan_file_stats,
+            )
             manifest_entries = [
                 (rel, meta)
                 for rel, meta in manifest.get("entries", {}).items()
@@ -848,28 +959,80 @@ class HomebaseSyncEngine:
             ]
             current_scan: dict[str, dict[str, Any]] = {}
             scan_total = len(manifest_entries)
+            hashed_files = 0
+            reused_hashes = 0
             for scan_index, (rel, meta) in enumerate(manifest_entries, start=1):
+                full_path = self._local_path_for_rel(rel)
+                file_stat = scan_file_stats[rel]
+                mtime_ns = int(getattr(file_stat, "st_mtime_ns", 0) or 0)
+                ctime_ns = int(getattr(file_stat, "st_ctime_ns", 0) or 0)
+                previous_entry = previous_scan.get(rel)
+                reusable_hash = ""
+                if not force_full_hash and isinstance(previous_entry, dict):
+                    previous_hash = str(previous_entry.get("content_sha256") or "").strip().lower()
+                    try:
+                        metadata_matches = bool(
+                            int(previous_entry.get("size", -1)) == int(file_stat.st_size)
+                            and int(previous_entry.get("mtime_ns", -1)) == mtime_ns
+                            and int(previous_entry.get("ctime_ns", -1)) == ctime_ns
+                        )
+                    except (TypeError, ValueError):
+                        metadata_matches = False
+                    if self._is_valid_object_id(previous_hash) and metadata_matches:
+                        reusable_hash = previous_hash
+                if reusable_hash:
+                    content_hash = reusable_hash
+                    reused_hashes += 1
+                else:
+                    content_hash = sha256_file(full_path)
+                    hashed_files += 1
                 current_scan[rel] = {
-                    "size": int(meta.get("size", 0)),
+                    "size": int(file_stat.st_size),
                     "mtime": int(meta.get("mtime", 0)),
-                    "content_sha256": sha256_file(self._local_path_for_rel(rel)),
+                    "mtime_ns": mtime_ns,
+                    "ctime_ns": ctime_ns,
+                    "content_sha256": content_hash,
                 }
                 if scan_index == scan_total or scan_index % 25 == 0:
                     self._set_status_locked(
-                        summary=f"Scanning local vault ({scan_index}/{scan_total})..."
+                        summary=(
+                            f"Checking local vault ({scan_index}/{scan_total}; "
+                            f"{hashed_files} hashed)..."
+                        )
                     )
+            last_full_hash_epoch = scan_now_epoch if force_full_hash else prior_full_hash_epoch
+            current_scan_payload = {
+                "schema_version": 1,
+                "vault_id": self.cfg.vault_id,
+                "updated_at": _utc_now_iso(),
+                "last_full_hash_epoch": last_full_hash_epoch,
+                "entries": current_scan,
+            }
             unchanged_scan = previous_scan == current_scan
             _log(
                 f"scan complete files={len(current_scan)} unchanged_scan={unchanged_scan} "
+                f"hashed={hashed_files} reused_hashes={reused_hashes} "
+                f"full_audit={'yes' if force_full_hash else 'no'} "
                 f"had_last_push={bool(hb.get('last_pushed_checkpoint_id'))}"
             )
-            if unchanged_scan and hb.get("last_pushed_checkpoint_id") and not pulled_remote:
+            if (
+                unchanged_scan
+                and hb.get("last_pushed_checkpoint_id")
+                and not pulled_remote
+                and not confirmed_local_deletions
+            ):
                 last_sync_at = _utc_now_iso()
                 self._no_change_streak = min(
                     self._no_change_streak + 1,
                     self._hibernate_after_checks,
                 )
                 conflicts = self._conflict_count()
+                hb["last_sync_at"] = last_sync_at
+                hb["last_error"] = None
+                hb["error_count"] = 0
+                hb["backoff_until"] = None
+                _write_json(self._state_path, state)
+                _write_json(self._scan_path, current_scan_payload)
                 state_name = "idle"
                 summary = "Up to date"
                 if self._no_change_streak >= self._hibernate_after_checks:
@@ -1108,15 +1271,10 @@ class HomebaseSyncEngine:
                 hb["error_count"] = 0
                 hb["backoff_until"] = None
                 _write_json(self._state_path, state)
-                _write_json(
-                    self._scan_path,
-                    {
-                        "schema_version": 1,
-                        "vault_id": self.cfg.vault_id,
-                        "updated_at": _utc_now_iso(),
-                        "entries": current_scan,
-                    },
-                )
+                _write_json(self._scan_path, current_scan_payload)
+                if confirmed_local_deletions:
+                    self._save_local_deletions(set())
+                    self._clear_sync_errors_for_paths(confirmed_local_deletions)
                 conflicts = self._conflict_count()
                 self._set_status_locked(
                     state="idle",
@@ -1147,16 +1305,11 @@ class HomebaseSyncEngine:
             hb["error_count"] = 0
             hb["backoff_until"] = None
             _write_json(self._state_path, state)
-            _write_json(
-                self._scan_path,
-                {
-                    "schema_version": 1,
-                    "vault_id": self.cfg.vault_id,
-                    "updated_at": _utc_now_iso(),
-                    "entries": current_scan,
-                },
-            )
+            _write_json(self._scan_path, current_scan_payload)
             self._save_object_cache(current_object_map)
+            if confirmed_local_deletions:
+                self._save_local_deletions(set())
+                self._clear_sync_errors_for_paths(confirmed_local_deletions)
             conflicts = self._conflict_count()
             self._set_status_locked(
                 state="idle",
@@ -1294,13 +1447,21 @@ class HomebaseSyncEngine:
                 _log_token("refresh failed: request/transport exception")
             return False
 
-    def _build_local_manifest(self) -> dict[str, Any]:
+    def _build_local_manifest(
+        self,
+        *,
+        file_items: Optional[list[tuple[str, Path]]] = None,
+        file_stats: Optional[dict[str, os.stat_result]] = None,
+    ) -> dict[str, Any]:
         entries: dict[str, Any] = {}
-        for rel, full in self._iter_sync_files():
-            size, mtime = stat_file(full)
+        items = file_items if file_items is not None else self._iter_sync_files()
+        for rel, full in items:
+            file_stat = full.stat()
+            if file_stats is not None:
+                file_stats[rel] = file_stat
             entries[rel] = {
-                "size": size,
-                "mtime": mtime,
+                "size": int(file_stat.st_size),
+                "mtime": int(file_stat.st_mtime),
                 "kind": "file",
                 "object_id": "",
             }
@@ -1319,6 +1480,7 @@ class HomebaseSyncEngine:
         checkpoint_id: str,
         *,
         known_object_cache: Optional[dict[str, str]] = None,
+        locally_deleted_paths: Optional[set[str]] = None,
     ) -> tuple[list[str], dict[str, str]]:
         _log(f"pull begin checkpoint={checkpoint_id}")
         self._last_pull_incomplete = False
@@ -1338,6 +1500,11 @@ class HomebaseSyncEngine:
         download_errors = 0
         apply_errors = 0
         known_objects = dict(known_object_cache) if isinstance(known_object_cache, dict) else {}
+        local_deletions = {
+            self._canonical_rel_path(str(path or ""))
+            for path in (locally_deleted_paths or set())
+            if self._canonical_rel_path(str(path or ""))
+        }
         cold_local_matches = 0
         # A copied/older vault may have no .stillpoint sync metadata even though
         # many of its files already equal the remote checkpoint.  Homebase
@@ -1348,6 +1515,8 @@ class HomebaseSyncEngine:
             if not isinstance(meta, dict) or str(rel).startswith(".stillpoint/"):
                 continue
             rel_key = self._canonical_rel_path(str(rel))
+            if rel_key in local_deletions:
+                continue
             remote_object_id = str(meta.get("object_id") or "").strip().lower()
             if not self._is_valid_object_id(remote_object_id):
                 continue
@@ -1375,6 +1544,7 @@ class HomebaseSyncEngine:
             if isinstance(meta, dict)
             and not str(rel).startswith(".stillpoint/")
             and meta.get("object_id")
+            and self._canonical_rel_path(str(rel)) not in local_deletions
             and str(known_objects.get(self._canonical_rel_path(str(rel))) or "").strip().lower()
             != str(meta.get("object_id") or "").strip().lower()
         ]
@@ -1456,6 +1626,19 @@ class HomebaseSyncEngine:
                 continue
             rel_key = self._canonical_rel_path(str(rel))
             object_id_text = str(object_id).strip().lower()
+            if rel_key in local_deletions:
+                # The path existed in the last successful local scan, or the
+                # user explicitly confirmed removal after a path error.  Keep
+                # the remote id as the comparison baseline so the push half
+                # publishes a manifest without this entry.
+                if self._is_valid_object_id(object_id_text):
+                    pulled_cache[rel_key] = object_id_text
+                unchanged += 1
+                _log(
+                    f"pull decision=local-delete path={rel_key} "
+                    f"object_id={object_id_text}"
+                )
+                continue
             local_path = self._local_path_for_rel(rel_key)
             if (
                 self._is_valid_object_id(object_id_text)

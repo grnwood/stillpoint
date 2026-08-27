@@ -7101,8 +7101,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(detail_label)
 
         buttons = QHBoxLayout()
+        remove_remote_btn = QPushButton("Remove from Homebase", dialog)
+        remove_remote_btn.setEnabled(False)
         close_btn = QPushButton("Close", dialog)
         close_btn.clicked.connect(dialog.accept)
+        buttons.addWidget(remove_remote_btn)
         buttons.addStretch(1)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
@@ -7126,8 +7129,44 @@ class MainWindow(QMainWindow):
             if object_id:
                 lines.append(f"Object ID: {object_id}")
             detail_label.setText("\n".join(lines))
+            remove_remote_btn.setEnabled(bool(path and self._homebase_sync_engine))
+
+        def _remove_from_homebase() -> None:
+            item = list_widget.currentItem()
+            if item is None or not self._homebase_sync_engine:
+                return
+            entry = item.data(Qt.UserRole) or {}
+            path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            if not path:
+                return
+            answer = QMessageBox.question(
+                dialog,
+                "Remove from Homebase",
+                f"Publish the local deletion of /{path}?\n\n"
+                "This removes the path from the shared Homebase checkpoint on the next sync.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                marked = self._homebase_sync_engine.mark_remote_path_deleted(path)
+            except Exception as exc:
+                QMessageBox.critical(dialog, "Remove from Homebase", f"Could not record deletion: {exc}")
+                return
+            if not marked:
+                QMessageBox.warning(
+                    dialog,
+                    "Remove from Homebase",
+                    "The file still exists locally. Delete or move it locally, then try again.",
+                )
+                return
+            self._homebase_sync_engine.sync_now("confirmed local deletion")
+            self.statusBar().showMessage(f"Homebase removal queued for /{path}.", 5000)
+            dialog.accept()
 
         list_widget.currentItemChanged.connect(lambda _cur, _prev: _update_detail())
+        remove_remote_btn.clicked.connect(_remove_from_homebase)
         if list_widget.count():
             list_widget.setCurrentRow(0)
         fit_window_to_available_screen(dialog, QSize(900, 520), parent=self)
@@ -7817,6 +7856,8 @@ class MainWindow(QMainWindow):
             phase = "Pulling from Homebase"
         elif pending_uploads > 0:
             phase = "Uploading to Homebase"
+        elif "checking local vault" in summary.lower():
+            phase = "Checking local changes"
         elif "scanning local changes" in summary.lower():
             phase = "Scanning local changes"
         elif summary.lower().startswith("sync scheduled"):

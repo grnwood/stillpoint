@@ -38,6 +38,18 @@ def test_homebase_activity_snapshot_reports_upload_phase(main_window) -> None:
     assert "PUT Journal/2026/20/20.md" in details
 
 
+def test_homebase_activity_snapshot_reports_incremental_check_phase(main_window) -> None:
+    status = HomebaseSyncStatus(
+        state="syncing",
+        summary="Checking local vault (7500/7615; 1 hashed)...",
+    )
+
+    phase, details = MainWindow._homebase_activity_snapshot(main_window, status)
+
+    assert phase == "Checking local changes"
+    assert details == ["Checking local vault (7500/7615; 1 hashed)..."]
+
+
 def test_homebase_activity_snapshot_reports_backoff_phase(main_window) -> None:
     status = HomebaseSyncStatus(
         state="offline",

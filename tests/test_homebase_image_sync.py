@@ -448,6 +448,37 @@ class TestImageSyncPull:
             for item in sync_errors
         )
 
+    def test_confirmed_absent_path_is_removed_from_remote_checkpoint(self, tmp_path, monkeypatch):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "too-long.docx").write_bytes(b"remove me")
+        (vault_a / "keep.md").write_text("keep\n", encoding="utf-8")
+        client = FakeClient()
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a))
+        original_checkpoint = _push_via_engine(engine_a, client)
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        engine_b._record_sync_error(
+            path="too-long.docx",
+            phase="path",
+            reason="File name too long",
+        )
+        assert engine_b.mark_remote_path_deleted("too-long.docx") is True
+        engine_b._sync_once()
+
+        assert client.latest_checkpoint != original_checkpoint
+        latest_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        assert "too-long.docx" not in latest_manifest["entries"]
+        assert "keep.md" in latest_manifest["entries"]
+        assert not (vault_b / "too-long.docx").exists()
+        assert (vault_b / "keep.md").read_text(encoding="utf-8") == "keep\n"
+        assert engine_b._load_local_deletions() == set()
+        assert engine_b.list_sync_errors() == []
+
     def test_sync_retry_downloads_only_the_file_that_failed_to_apply(self, tmp_path, monkeypatch):
         vault_a = tmp_path / "vault_a"
         vault_a.mkdir()
@@ -754,6 +785,36 @@ class TestImageSyncPull:
 
         assert max_active >= 2
         assert any("Preparing" in str(status.summary) for status in seen_statuses)
+
+    def test_incremental_scan_hashes_only_changed_files(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        pages = []
+        for idx in range(5):
+            page = vault / f"Page{idx}.md"
+            page.write_text(f"content {idx}\n", encoding="utf-8")
+            pages.append(page)
+
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+        client = FakeClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+        engine._sync_once()
+
+        original_sha256_file = sync_engine.sha256_file
+        hashed_paths: list[Path] = []
+
+        def _counted_sha256_file(path: Path, *args, **kwargs) -> str:
+            hashed_paths.append(Path(path))
+            return original_sha256_file(path, *args, **kwargs)
+
+        monkeypatch.setattr(sync_engine, "sha256_file", _counted_sha256_file)
+
+        engine._sync_once()
+        assert hashed_paths == []
+
+        pages[2].write_text("changed content with a different size\n", encoding="utf-8")
+        engine._sync_once()
+        assert hashed_paths == [pages[2]]
 
     def test_sync_once_upload_count_drops_while_workers_are_active(self, tmp_path, monkeypatch):
         """The visible upload countdown should drop as workers claim jobs, not only on completion."""
