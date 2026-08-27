@@ -536,6 +536,63 @@ class TestImageSyncPull:
         assert engine_b._load_local_deletions() == set()
         assert engine_b.list_sync_errors() == []
 
+    def test_remote_deletion_removes_unchanged_file_in_second_client(self, tmp_path, monkeypatch):
+        client = FakeClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        deleted_a = vault_a / "shared.docx"
+        deleted_a.write_bytes(b"shared baseline")
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a, device_id="device-a"))
+        engine_a._sync_once()
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        engine_b._sync_once()
+        deleted_b = vault_b / "shared.docx"
+        assert deleted_b.read_bytes() == b"shared baseline"
+
+        deleted_a.unlink()
+        engine_a._sync_once()
+        deletion_checkpoint = client.latest_checkpoint
+        deletion_manifest = json.loads(client.get_manifest(deletion_checkpoint))
+        assert "shared.docx" not in deletion_manifest["entries"]
+
+        engine_b._sync_once()
+
+        assert not deleted_b.exists()
+        assert client.latest_checkpoint == deletion_checkpoint
+        final_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        assert "shared.docx" not in final_manifest["entries"]
+
+    def test_remote_deletion_preserves_file_changed_in_second_client(self, tmp_path, monkeypatch):
+        client = FakeClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        deleted_a = vault_a / "shared.docx"
+        deleted_a.write_bytes(b"shared baseline")
+        engine_a = HomebaseSyncEngine(_make_cfg(vault_a, device_id="device-a"))
+        engine_a._sync_once()
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        engine_b = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        engine_b._sync_once()
+        changed_b = vault_b / "shared.docx"
+        changed_b.write_bytes(b"locally changed on device b")
+
+        deleted_a.unlink()
+        engine_a._sync_once()
+        engine_b._sync_once()
+
+        assert changed_b.read_bytes() == b"locally changed on device b"
+        final_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        assert "shared.docx" in final_manifest["entries"]
+
     def test_sync_retry_downloads_only_the_file_that_failed_to_apply(self, tmp_path, monkeypatch):
         vault_a = tmp_path / "vault_a"
         vault_a.mkdir()

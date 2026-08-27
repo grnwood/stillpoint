@@ -1532,6 +1532,67 @@ class HomebaseSyncEngine:
             for path in (locally_deleted_paths or set())
             if self._canonical_rel_path(str(path or ""))
         }
+        remote_paths = {
+            self._canonical_rel_path(str(rel))
+            for rel, meta in entries.items()
+            if isinstance(meta, dict)
+            and not str(rel).startswith(".stillpoint/")
+            and self._is_valid_object_id(str(meta.get("object_id") or "").strip().lower())
+        }
+        remote_deleted_paths = set(known_objects) - remote_paths
+        applied_remote_deletions = 0
+        preserved_local_deletions = 0
+        for rel_key in sorted(remote_deleted_paths):
+            local_path = self._local_path_for_rel(rel_key)
+            try:
+                local_is_file = local_path.is_file()
+            except OSError:
+                local_is_file = False
+            if not local_is_file:
+                continue
+            try:
+                local_envelope = encrypt_bytes(key, read_bytes(local_path))
+                local_object_id = object_id_from_ciphertext(local_envelope)
+            except OSError as deletion_read_exc:
+                self._last_pull_incomplete = True
+                apply_errors += 1
+                self._record_sync_error(
+                    path=rel_key,
+                    phase="delete",
+                    reason=f"/{rel_key}: could not verify remote deletion ({deletion_read_exc})",
+                    object_id=str(known_objects.get(rel_key) or ""),
+                )
+                continue
+            baseline_object_id = str(known_objects.get(rel_key) or "").strip().lower()
+            if local_object_id != baseline_object_id:
+                # Both sides changed: the remote removed the baseline while
+                # this client edited it. Preserve the local file so it can be
+                # surfaced/published rather than destroying local work.
+                preserved_local_deletions += 1
+                _log(
+                    f"pull decision=preserve-local-vs-remote-delete path={rel_key} "
+                    f"baseline_object_id={baseline_object_id} local_object_id={local_object_id}"
+                )
+                continue
+            try:
+                local_path.unlink()
+            except OSError as deletion_exc:
+                self._last_pull_incomplete = True
+                apply_errors += 1
+                self._record_sync_error(
+                    path=rel_key,
+                    phase="delete",
+                    reason=f"/{rel_key}: could not apply remote deletion ({deletion_exc})",
+                    object_id=baseline_object_id,
+                )
+                continue
+            applied_remote_deletions += 1
+            applied_paths.append(rel_key)
+            resolved_error_paths.add(rel_key)
+            _log(
+                f"pull decision=remote-delete path={rel_key} "
+                f"baseline_object_id={baseline_object_id}"
+            )
         cold_local_matches = 0
         # A copied/older vault may have no .stillpoint sync metadata even though
         # many of its files already equal the remote checkpoint.  Homebase
@@ -1913,6 +1974,8 @@ class HomebaseSyncEngine:
             f"pull complete downloaded={downloaded} written_new={written_new} "
             f"overwritten={overwritten} unchanged={unchanged} "
             f"cached_unchanged={cached_unchanged} cold_local_matches={cold_local_matches} "
+            f"remote_deletions={applied_remote_deletions} "
+            f"preserved_local_deletions={preserved_local_deletions} "
             f"conflicts={conflicts} "
             f"download_errors={download_errors} apply_errors={apply_errors}"
         )
