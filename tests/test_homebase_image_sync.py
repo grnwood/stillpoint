@@ -719,6 +719,42 @@ class TestImageSyncPull:
         assert any(int(getattr(status, "pending_uploads", 0) or 0) > 0 for status in seen_statuses)
         assert any(len(getattr(status, "transfer_workers", []) or []) > 1 for status in seen_statuses)
 
+    def test_sync_once_prepares_local_objects_in_parallel(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        for idx in range(8):
+            (vault / f"Page{idx}.md").write_text(f"content {idx}\n", encoding="utf-8")
+
+        cfg = _make_cfg(vault, max_parallel_transfers=4)
+        seen_statuses = []
+        engine = HomebaseSyncEngine(cfg, status_callback=seen_statuses.append)
+        client = FakeClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **kwargs: client)
+
+        original_encrypt = sync_engine.encrypt_bytes
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+
+        def _slow_encrypt(key: bytes, plaintext: bytes) -> bytes:
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.02)
+                return original_encrypt(key, plaintext)
+            finally:
+                with active_lock:
+                    active -= 1
+
+        monkeypatch.setattr(sync_engine, "encrypt_bytes", _slow_encrypt)
+
+        engine._sync_once()
+
+        assert max_active >= 2
+        assert any("Preparing" in str(status.summary) for status in seen_statuses)
+
     def test_sync_once_upload_count_drops_while_workers_are_active(self, tmp_path, monkeypatch):
         """The visible upload countdown should drop as workers claim jobs, not only on completion."""
         vault = tmp_path / "vault_countdown"

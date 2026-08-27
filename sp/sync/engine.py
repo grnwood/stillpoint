@@ -912,6 +912,7 @@ class HomebaseSyncEngine:
             needs_cache_verify = not hb.get("last_pushed_checkpoint_id") or int(hb.get("error_count", 0)) > 0
             verified_missing = 0
             upload_jobs: list[tuple[str, str, bytes]] = []
+            preparation_jobs: list[tuple[str, str, str, dict[str, Any]]] = []
             for rel_path, meta in manifest.get("entries", {}).items():
                 if not isinstance(meta, dict):
                     continue
@@ -926,39 +927,110 @@ class HomebaseSyncEngine:
                     current_hash = str(current.get("content_sha256") or "").strip().lower()
                     if previous_hash and previous_hash == current_hash:
                         cached_object_id = str(object_cache.get(rel_key) or "").strip().lower()
-                if self._is_valid_object_id(cached_object_id):
+                if self._is_valid_object_id(cached_object_id) and (
+                    not needs_cache_verify or pulled_remote
+                ):
                     # The persisted content fingerprint proves that this path
                     # still contains the bytes represented by the cached id.
-                    # Also verify server presence when recovering from stale state.
-                    if (
-                        needs_cache_verify
-                        and not client.has_object(cached_object_id)
-                    ):
-                        _log(f"cached object missing on server path={rel_key} object_id={cached_object_id}")
-                        cached_object_id = ""
-                        verified_missing += 1
-                    else:
-                        meta["object_id"] = cached_object_id
-                        reused_cached_count += 1
-                        continue
-                full = self._local_path_for_rel(rel_path)
-                plaintext = read_bytes(full)
-                envelope = encrypt_bytes(key, plaintext)
-                object_id = object_id_from_ciphertext(envelope)
-                meta["object_id"] = object_id
-                known_remote_object_id = str(object_cache.get(rel_key) or "").strip().lower()
-                if object_id == known_remote_object_id:
-                    # Deterministic encryption makes an equal object id proof
-                    # that the local bytes equal the latest known remote object.
-                    # If it was just pulled, its server presence is already
-                    # confirmed and a second HEAD would only repeat work.
-                    if needs_cache_verify and not pulled_remote and not client.has_object(object_id):
-                        _log(f"computed cached object missing on server path={rel_key} object_id={object_id}")
-                        verified_missing += 1
-                    else:
-                        reused_cached_count += 1
-                        continue
-                upload_jobs.append((rel_key, object_id, envelope))
+                    meta["object_id"] = cached_object_id
+                    reused_cached_count += 1
+                    continue
+                preparation_jobs.append((rel_key, str(rel_path), cached_object_id, meta))
+
+            if preparation_jobs:
+                max_workers = max(1, int(self.cfg.max_parallel_transfers or 1))
+                worker_count = min(max_workers, len(preparation_jobs))
+                available_slots: SimpleQueue[int] = SimpleQueue()
+                for slot_index in range(worker_count):
+                    available_slots.put(slot_index)
+
+                self._set_status_locked(
+                    summary=f"Preparing {len(preparation_jobs)} local object(s)...",
+                    transfer_workers=["Idle"] * worker_count,
+                )
+
+                def _prepare_local_object(
+                    rel_key: str,
+                    rel_path: str,
+                    cached_object_id: str,
+                ) -> tuple[str, Optional[bytes], bool, bool]:
+                    slot_index = available_slots.get()
+                    known_missing = False
+                    try:
+                        if self._is_valid_object_id(cached_object_id):
+                            self._update_transfer_worker(slot_index, f"CHECK {rel_key}")
+                            if client.has_object(cached_object_id):
+                                return cached_object_id, None, True, False
+                            known_missing = True
+                            _log(
+                                "cached object missing on server "
+                                f"path={rel_key} object_id={cached_object_id}"
+                            )
+
+                        self._update_transfer_worker(slot_index, f"PREP {rel_key}")
+                        full = self._local_path_for_rel(rel_path)
+                        envelope = encrypt_bytes(key, read_bytes(full))
+                        object_id = object_id_from_ciphertext(envelope)
+                        known_remote_object_id = str(object_cache.get(rel_key) or "").strip().lower()
+                        if object_id == known_remote_object_id and not known_missing:
+                            # Deterministic encryption makes an equal object id
+                            # proof that the local bytes equal the cached object.
+                            if needs_cache_verify and not pulled_remote:
+                                self._update_transfer_worker(slot_index, f"CHECK {rel_key}")
+                                if not client.has_object(object_id):
+                                    known_missing = True
+                                    _log(
+                                        "computed cached object missing on server "
+                                        f"path={rel_key} object_id={object_id}"
+                                    )
+                                else:
+                                    return object_id, None, True, False
+                            else:
+                                return object_id, None, True, False
+                        return object_id, envelope, False, known_missing
+                    finally:
+                        self._update_transfer_worker(slot_index, "Idle")
+                        available_slots.put(slot_index)
+
+                with ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="homebase-prep",
+                ) as executor:
+                    future_map = {
+                        executor.submit(
+                            _prepare_local_object,
+                            rel_key,
+                            rel_path,
+                            cached_object_id,
+                        ): (rel_key, meta)
+                        for rel_key, rel_path, cached_object_id, meta in preparation_jobs
+                    }
+                    completed_preparations = 0
+                    for future in as_completed(future_map):
+                        rel_key, meta = future_map[future]
+                        object_id, envelope, reused, missing = future.result()
+                        meta["object_id"] = object_id
+                        if reused:
+                            reused_cached_count += 1
+                        elif envelope is not None:
+                            upload_jobs.append((rel_key, object_id, envelope))
+                        if missing:
+                            verified_missing += 1
+                        completed_preparations += 1
+                        if (
+                            completed_preparations == len(preparation_jobs)
+                            or completed_preparations % 25 == 0
+                        ):
+                            self._set_status_locked(
+                                summary=(
+                                    "Preparing local objects "
+                                    f"({completed_preparations}/{len(preparation_jobs)})..."
+                                )
+                            )
+                _log(
+                    f"object preparation phase complete workers={worker_count} "
+                    f"queued={len(preparation_jobs)} uploads={len(upload_jobs)}"
+                )
 
             if upload_jobs:
                 max_workers = max(1, int(self.cfg.max_parallel_transfers or 1))
@@ -1009,6 +1081,11 @@ class HomebaseSyncEngine:
                     f"queued={len(upload_jobs)} uploaded={upload_count} existing={existing_count}"
                 )
 
+            self._set_status_locked(
+                summary="Publishing manifest...",
+                pending_uploads=0,
+                transfer_workers=[],
+            )
             manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
             checkpoint_id = _manifest_id_bytes(manifest_bytes)
             current_object_map: dict[str, str] = {}
