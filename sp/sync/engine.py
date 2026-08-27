@@ -251,7 +251,13 @@ class HomebaseSyncEngine:
         """Resolve a manifest path, including the legacy root-page shorthand."""
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
         canonical = self.cfg.vault_root / rel_key
-        if canonical.exists():
+        try:
+            if canonical.exists():
+                return canonical
+        except OSError:
+            # Return the intended path so the caller's per-file error handling
+            # can report an unrepresentable component instead of aborting the
+            # entire checkpoint before other entries are applied.
             return canonical
         vault_name = self.cfg.vault_root.name
         if rel_key == f"{vault_name}/{vault_name}.md":
@@ -502,6 +508,22 @@ class HomebaseSyncEngine:
         if not isinstance(errors, list):
             errors = []
             payload["errors"] = errors
+        matching_attempts = 0
+        retained_errors: list[dict[str, Any]] = []
+        for item in errors:
+            if not isinstance(item, dict):
+                continue
+            same_error = bool(
+                self._canonical_rel_path(str(item.get("path") or "")) == rel_path
+                and str(item.get("phase") or "").strip().lower() == phase_text
+                and str(item.get("object_id") or "").strip().lower() == object_id_text
+            )
+            if same_error:
+                matching_attempts += max(1, int(item.get("attempts", 1) or 1))
+                continue
+            retained_errors.append(item)
+        errors = retained_errors
+        payload["errors"] = errors
         errors.append(
             {
                 "ts": _utc_now_iso(),
@@ -509,6 +531,7 @@ class HomebaseSyncEngine:
                 "phase": phase_text,
                 "reason": reason_text,
                 "object_id": object_id_text,
+                "attempts": matching_attempts + 1,
             }
         )
         max_entries = 500
@@ -535,6 +558,7 @@ class HomebaseSyncEngine:
                     "phase": str(item.get("phase") or "unknown").strip() or "unknown",
                     "reason": str(item.get("reason") or "").strip() or "Unknown error",
                     "object_id": str(item.get("object_id") or "").strip().lower(),
+                    "attempts": max(1, int(item.get("attempts", 1) or 1)),
                 }
             )
         if limit > 0:
@@ -853,7 +877,9 @@ class HomebaseSyncEngine:
                     last_error = str(hb.get("last_error") or "").strip()
                     self._set_status_locked(
                         state="offline",
-                        summary="Offline (retry backoff)",
+                        summary=f"Offline (retry in {remaining}s)",
+                        last_error=last_error or None,
+                        last_sync_at=str(hb.get("last_sync_at") or "").strip() or None,
                         pending=False,
                         transfer_workers=[],
                         pending_uploads=0,
@@ -1499,6 +1525,7 @@ class HomebaseSyncEngine:
         cached_unchanged = 0
         download_errors = 0
         apply_errors = 0
+        resolved_error_paths: set[str] = set()
         known_objects = dict(known_object_cache) if isinstance(known_object_cache, dict) else {}
         local_deletions = {
             self._canonical_rel_path(str(path or ""))
@@ -1523,7 +1550,11 @@ class HomebaseSyncEngine:
             if str(known_objects.get(rel_key) or "").strip().lower() == remote_object_id:
                 continue
             local_path = self._local_path_for_rel(rel_key)
-            if not local_path.is_file():
+            try:
+                local_is_file = local_path.is_file()
+            except OSError:
+                local_is_file = False
+            if not local_is_file:
                 continue
             try:
                 local_envelope = encrypt_bytes(key, read_bytes(local_path))
@@ -1706,6 +1737,7 @@ class HomebaseSyncEngine:
                     if self._is_valid_object_id(object_id_text):
                         pulled_cache[rel_key] = object_id_text
                     written_new += 1
+                    resolved_error_paths.add(rel_key)
                     applied_paths.append(str(rel))
                     remaining_downloads = max(0, remaining_downloads - 1)
                     self._set_status_locked(
@@ -1727,6 +1759,7 @@ class HomebaseSyncEngine:
                     if self._is_valid_object_id(object_id_text):
                         pulled_cache[rel_key] = object_id_text
                     unchanged += 1
+                    resolved_error_paths.add(rel_key)
                     continue
                 if str(rel_key).lower().endswith((".md", ".txt")):
                     try:
@@ -1738,6 +1771,7 @@ class HomebaseSyncEngine:
                     else:
                         if not has_material_text_difference(local_text, remote_text):
                             unchanged += 1
+                            resolved_error_paths.add(rel_key)
                             remaining_downloads = max(0, remaining_downloads - 1)
                             self._set_status_locked(
                                 summary=(
@@ -1763,6 +1797,7 @@ class HomebaseSyncEngine:
                     if self._is_valid_object_id(object_id_text):
                         pulled_cache[rel_key] = object_id_text
                     overwritten += 1
+                    resolved_error_paths.add(rel_key)
                     applied_paths.append(str(rel))
                     remaining_downloads = max(0, remaining_downloads - 1)
                     self._set_status_locked(
@@ -1782,6 +1817,7 @@ class HomebaseSyncEngine:
                     continue
                 prior_resolution = self._resolved_conflict_resolution(rel_key, checkpoint_id)
                 if prior_resolution == "keep-local":
+                    resolved_error_paths.add(rel_key)
                     _log(
                         f"pull decision=keep-local path={rel} local_mtime={local_mtime_i} "
                         f"remote_mtime={remote_mtime} remote_checkpoint={checkpoint_id} "
@@ -1866,6 +1902,8 @@ class HomebaseSyncEngine:
                     f"object_id={object_id_text} error={apply_exc}"
                 )
                 continue
+        if resolved_error_paths:
+            self._clear_sync_errors_for_paths(resolved_error_paths)
         self._set_status_locked(
             pending_downloads=0,
             transfer_workers=[],

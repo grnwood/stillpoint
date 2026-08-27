@@ -20,6 +20,7 @@ import pytest
 import sp.sync.engine as sync_engine
 from sp.sync.crypto import derive_key_from_passphrase, encrypt_bytes, object_id_from_ciphertext
 from sp.sync.engine import HomebaseSyncConfig, HomebaseSyncEngine, _write_json
+from sp.sync.local_fs import write_bytes_atomic
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +150,62 @@ class TestImageSyncPull:
             img_path = vault_b / "Notes" / f"paste_image_{i:03d}.png"
             assert img_path.exists(), f"Image {img_path.name} missing on Device B"
             assert img_path.read_bytes() == data
+
+    def test_atomic_write_supports_destination_at_name_max(self, tmp_path):
+        name_max = int(os.pathconf(tmp_path, "PC_NAME_MAX"))
+        destination = tmp_path / ("x" * name_max)
+
+        write_bytes_atomic(destination, b"content")
+
+        assert destination.read_bytes() == b"content"
+
+    def test_unrepresentable_local_path_lookup_does_not_abort_preflight(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        name_max = int(os.pathconf(vault, "PC_NAME_MAX"))
+        rel_path = "x" * (name_max + 1)
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+
+        assert engine._local_path_for_rel(rel_path) == vault / rel_path
+
+    def test_retry_backoff_restores_persisted_error_in_status(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+        retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60))
+        state = engine._default_state()
+        state["homebase"].update(
+            {
+                "last_error": "File name too long",
+                "last_sync_at": "2026-08-27T18:00:25Z",
+                "backoff_until": retry_at,
+            }
+        )
+        _write_json(engine._state_path, state)
+
+        engine._sync_once()
+
+        status = engine.get_status()
+        assert status.summary.startswith("Offline (retry in ")
+        assert status.last_error == "File name too long"
+        assert status.last_sync_at == "2026-08-27T18:00:25Z"
+
+    def test_repeated_sync_error_is_deduplicated_with_attempt_count(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+
+        for _attempt in range(3):
+            engine._record_sync_error(
+                path="too-long.docx",
+                phase="path",
+                reason="File name too long",
+                object_id="a" * 64,
+            )
+
+        errors = engine.list_sync_errors()
+        assert len(errors) == 1
+        assert errors[0]["attempts"] == 3
 
     def test_pull_fetches_only_objects_changed_since_known_checkpoint(self, tmp_path):
         vault_a = tmp_path / "vault_a"

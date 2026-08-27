@@ -63,6 +63,19 @@ def test_homebase_activity_snapshot_reports_backoff_phase(main_window) -> None:
     assert details == ["Offline (retry backoff)"]
 
 
+def test_homebase_activity_snapshot_reports_timed_retry_phase(main_window) -> None:
+    status = HomebaseSyncStatus(
+        state="offline",
+        summary="Offline (retry in 42s)",
+        last_error="File name too long",
+    )
+
+    phase, details = MainWindow._homebase_activity_snapshot(main_window, status)
+
+    assert phase == "Waiting to retry"
+    assert details == ["Offline (retry in 42s)"]
+
+
 def test_homebase_recovery_buttons_remain_outside_scrolling_body(main_window, monkeypatch) -> None:
     status = HomebaseSyncStatus(state="idle", summary="Up to date")
 

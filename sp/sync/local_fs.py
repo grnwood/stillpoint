@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterator, Optional
@@ -38,12 +39,22 @@ def read_bytes(full_path: Path) -> bytes:
 
 def write_bytes_atomic(full_path: Path, data: bytes) -> None:
     full_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = full_path.with_suffix(f"{full_path.suffix}.tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, full_path)
+    # A destination component may already be at the filesystem's NAME_MAX.
+    # Appending ".tmp" makes an otherwise valid path impossible to write, so
+    # use a short independent sibling name for the atomic staging file.
+    fd, tmp_name = tempfile.mkstemp(prefix=".sp-sync-", dir=str(full_path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, full_path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def bytes_equal(a: bytes, b: bytes) -> bool:

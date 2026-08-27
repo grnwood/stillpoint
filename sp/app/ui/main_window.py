@@ -7128,6 +7128,9 @@ class MainWindow(QMainWindow):
             ]
             if object_id:
                 lines.append(f"Object ID: {object_id}")
+            attempts = max(1, int(entry.get("attempts", 1) or 1))
+            if attempts > 1:
+                lines.append(f"Attempts: {attempts}")
             detail_label.setText("\n".join(lines))
             remove_remote_btn.setEnabled(bool(path and self._homebase_sync_engine))
 
@@ -7864,7 +7867,7 @@ class MainWindow(QMainWindow):
             phase = "Sync queued"
         elif summary.lower().startswith("sync requested"):
             phase = "Sync requested"
-        elif "retry backoff" in summary.lower():
+        elif "retry backoff" in summary.lower() or "retry in" in summary.lower():
             phase = "Waiting to retry"
         elif state == "offline":
             phase = "Offline"
