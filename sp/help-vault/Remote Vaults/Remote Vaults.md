@@ -61,7 +61,9 @@ Recommended workflow:
 4. Let StillPoint detect filesystem changes and refresh the tree.
 5. If Homebase is enabled, let sync push those local changes to the server.
 
-StillPoint seeds an `AGENTS.md` file at the vault root if that preference is enabled. That file teaches agents the StillPoint page structure, colon-link rules, and page-folder conventions.
+If agent workspace seeding is enabled, StillPoint adds a missing `AGENTS.md` plus token-free project MCP configuration for Codex and GitHub Copilot CLI. Existing files are never overwritten. The guidance teaches agents the StillPoint page structure, colon-link rules, and page-folder conventions, while the MCP configurations connect supported clients to the session-scoped bridge.
+
+When connected, the StillPoint MCP server gives an agent vault-aware search and page context, backlinks and child-page navigation, recent changes, structured task operations, dated journals, safe page patches, and dry-run page moves. Clients that support MCP resources can also read open tasks, recent changes, existing journals, pages, and page-context bundles. These operations preserve StillPoint semantics and provide conflict checks that raw filesystem edits do not.
 
 This makes Homebase a strong fit for:
 - AI-assisted research vault growth

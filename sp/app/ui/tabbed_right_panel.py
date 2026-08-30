@@ -46,6 +46,8 @@ class TabbedRightPanel(QWidget):
     openAiWindowRequested = Signal()
     openCalendarWindowRequested = Signal()
     openMapWindowRequested = Signal()
+    openTerminalWindowRequested = Signal()
+    terminalTabActivated = Signal()
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
@@ -73,6 +75,8 @@ class TabbedRightPanel(QWidget):
         
         # Create tab widget
         self.tabs = QTabWidget()
+        self.terminal_panel = None
+        self.terminal_index = None
         self.ai_chat_panel = None
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
@@ -450,6 +454,9 @@ class TabbedRightPanel(QWidget):
         elif widget == self.ai_chat_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(self.openAiWindowRequested.emit)
+        elif self.terminal_panel and widget == self.terminal_panel:
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self.openTerminalWindowRequested.emit)
         else:
             return
         global_pos = bar.mapToGlobal(pos)
@@ -460,6 +467,9 @@ class TabbedRightPanel(QWidget):
         self._sync_visible_panels()
         widget = self.tabs.currentWidget()
         if widget:
+            if self.terminal_panel and widget == self.terminal_panel:
+                self.terminalTabActivated.emit()
+                return
             if self.calendar_panel and widget == self.calendar_panel:
                 self._calendar_sync_timer.start()
                 try:
@@ -481,6 +491,20 @@ class TabbedRightPanel(QWidget):
             else:
                 # For other tabs, just set widget focus
                 widget.setFocus(Qt.OtherFocusReason)
+
+    def set_terminal_panel(self, panel: QWidget) -> None:
+        """Add the application-owned lazy terminal as a normal right-panel tab."""
+        if self.terminal_panel is panel and self.tabs.indexOf(panel) >= 0:
+            return
+        self.terminal_panel = panel
+        self.terminal_index = self.tabs.addTab(panel, "Terminal")
+
+    def reattach_terminal_panel(self, panel: QWidget, index: int) -> None:
+        """Restore the same terminal widget after its pop-out window closes."""
+        self.terminal_panel = panel
+        target = max(0, min(int(index), self.tabs.count()))
+        self.terminal_index = self.tabs.insertTab(target, panel, "Terminal")
+        self.tabs.setCurrentWidget(panel)
 
     def focus_ai_chat(self, page_path=None, create=False) -> None:
         """Switch to AI Chat tab and sync to the given page."""

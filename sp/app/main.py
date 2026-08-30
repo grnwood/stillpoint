@@ -446,6 +446,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     parser.add_argument("--excalidraw-webview", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mcp-bridge", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-url", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-title", default="StillPoint Excalidraw", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -879,6 +880,11 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+
+    if args.mcp_bridge:
+        from sp.app.mcp_bridge import run_stdio_bridge
+
+        raise SystemExit(run_stdio_bridge())
 
     if args.excalidraw_webview:
         if not args.excalidraw_webview_url:

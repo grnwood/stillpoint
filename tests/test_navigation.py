@@ -2,9 +2,8 @@
 import pytest
 from pathlib import Path
 from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy
-from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
-from PySide6.QtGui import QKeyEvent
-from PySide6.QtGui import QStandardItem
+from PySide6.QtCore import Qt, QTimer, QModelIndex
+from PySide6.QtGui import QGuiApplication, QStandardItem
 from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow
 
@@ -139,27 +138,76 @@ class TestHistoryNavigation:
         calls: list[tuple[str, bool]] = []
 
         monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
+        monkeypatch.setattr(main_window, "_activate_history_popup_selection", lambda: None)
 
-        handled = main_window.eventFilter(
-            main_window,
-            QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.ControlModifier),
-        )
+        main_window._cycle_history_shortcut(reverse=False)
 
-        assert handled is True
         assert calls == [("history", False)]
 
     def test_ctrl_shift_tab_cycles_recent_pages_backward(self, main_window, monkeypatch):
         calls: list[tuple[str, bool]] = []
 
         monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
+        monkeypatch.setattr(main_window, "_activate_history_popup_selection", lambda: None)
 
-        handled = main_window.eventFilter(
+        main_window._cycle_history_shortcut(reverse=True)
+
+        assert calls == [("history", True)]
+
+    def test_ctrl_tab_cycles_terminals_when_terminal_has_focus(self, main_window, monkeypatch):
+        cycles: list[bool] = []
+        monkeypatch.setattr(main_window._terminal_pane, "has_terminal_focus", lambda: True)
+        monkeypatch.setattr(
+            main_window._terminal_pane,
+            "cycle_terminal_switcher",
+            lambda *, reverse=False: cycles.append(reverse),
+        )
+        monkeypatch.setattr(
             main_window,
-            QKeyEvent(QEvent.KeyPress, Qt.Key_Backtab, Qt.ControlModifier | Qt.ShiftModifier),
+            "_cycle_popup",
+            lambda *_args, **_kwargs: pytest.fail("page picker should not open"),
         )
 
-        assert handled is True
-        assert calls == [("history", True)]
+        main_window._cycle_history_shortcut(reverse=False)
+        main_window._cycle_history_shortcut(reverse=True)
+
+        assert cycles == [False, True]
+
+    def test_ctrl_tab_picker_waits_for_control_release(self, main_window, monkeypatch):
+        activated: list[bool] = []
+        main_window._popup_mode = "history"
+        main_window._popup_items = ["/PageA/PageA.md"]
+        main_window._popup_index = 0
+        monkeypatch.setattr(
+            main_window,
+            "_activate_history_popup_selection",
+            lambda: activated.append(True),
+        )
+        monkeypatch.setattr(
+            QGuiApplication,
+            "queryKeyboardModifiers",
+            staticmethod(lambda: Qt.ControlModifier),
+        )
+
+        main_window._finish_history_switch_when_control_released()
+        assert activated == []
+
+        monkeypatch.setattr(
+            QGuiApplication,
+            "queryKeyboardModifiers",
+            staticmethod(lambda: Qt.NoModifier),
+        )
+        main_window._finish_history_switch_when_control_released()
+        assert activated == [True]
+
+    def test_history_switcher_is_an_in_window_overlay(self, main_window):
+        main_window._ensure_history_popup()
+
+        popup = main_window._history_popup
+        assert popup is not None
+        assert popup.isWindow() is False
+        assert popup.parentWidget() is main_window.centralWidget()
+        assert popup.testAttribute(Qt.WA_StyledBackground)
 
     def test_recent_history_chicklets_keep_journal_pages_when_nav_hides_journal(self, main_window):
         main_window._show_journal_in_nav = False

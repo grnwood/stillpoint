@@ -200,3 +200,17 @@ Topic/SubTopic/attachment.ext
 - Do not invent journal or date-based structures unless explicitly asked to create them.
 - If creating tasks, use the task syntax already present in the vault instead of inventing a new format.
 - Prefer additive, minimally destructive edits unless the user explicitly asks for broad rewrites or deletions.
+
+## StillPoint MCP
+
+When this workspace is opened in StillPoint's embedded terminal, StillPoint may provide a scoped MCP connection through the `STILLPOINT_MCP_URL` environment variable and the `stillpoint-mcp` stdio bridge command.
+
+- Prefer StillPoint MCP tools over shell or direct-file access whenever a matching vault-aware capability exists. In particular, use `vault.search` for requests to find vault knowledge, `page.context` to understand a topic, the structured `tasks.*` tools instead of parsing task markdown, and `page.patch` instead of rewriting a whole page.
+- Use `page.list_children`, `vault.backlinks`, and `vault.recent_changes` for tree, graph, and activity questions. Use `journal.open` for dated journals and `page.move` for page-tree rename or move operations.
+- Preview destructive or structural changes with `dry_run` first. Supply the revision or `mtime_ns` returned by a read when editing so StillPoint can reject stale writes rather than overwrite concurrent work.
+- StillPoint resources expose open tasks, recent changes, existing journal pages, page content, and page-context bundles to clients that support MCP resources.
+- StillPoint may seed token-free project configuration for Codex (`.codex/config.toml`) and GitHub Copilot CLI (`.mcp.json`). Both launch `stillpoint-mcp` and obtain temporary credentials only from the embedded terminal environment.
+- In Codex or Copilot CLI, use `/mcp` to verify that the `stillpoint` server is connected if its tools are not available.
+- Direct filesystem work remains available, but it must follow all page-layout and linking rules in this guide.
+- Never print, store, log, or copy `STILLPOINT_MCP_TOKEN` into a page, configuration file, shell history, or chat response.
+- The MCP credential is temporary, restricted to this vault and terminal session, and may be revoked when the terminal or vault closes.

@@ -979,6 +979,8 @@ from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
 from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
+from .terminal_pane import TerminalPane
+from sp.app.terminal_session import parse_shell_command
 from sp.app.capture_triage import list_quick_capture_chunks, process_quick_capture_chunk
 from sp.app.task_mutations import undo_file_mutation
 
@@ -2385,6 +2387,11 @@ class MainWindow(QMainWindow):
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
+        self._history_modifier_release_timer = QTimer(self)
+        self._history_modifier_release_timer.setInterval(25)
+        self._history_modifier_release_timer.timeout.connect(
+            self._finish_history_switch_when_control_released
+        )
         self._quick_vault_picker: Optional[QuickVaultPicker] = None
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
@@ -3022,6 +3029,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.history_bar)
         layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(container)
+        self._build_terminal_tab()
         self._position_toc_widget()
 
         # No overlay/indicator widgets; vi-mode is represented by editor cursor style
@@ -3149,6 +3157,20 @@ class MainWindow(QMainWindow):
         file_menu.addAction(delete_page_action)
         self._build_format_menu()
         view_menu = self.menuBar().addMenu("&View")
+        self._action_terminal = QAction("Terminal", self)
+        self._action_terminal.setShortcuts(
+            [
+                QKeySequence("Ctrl+Shift+Return"),
+                QKeySequence("Ctrl+Shift+Enter"),
+            ]
+        )
+        self._action_terminal.setShortcutContext(Qt.ApplicationShortcut)
+        self._action_terminal.setToolTip(
+            "Toggle focus between the embedded terminal and editor (Ctrl+Shift+Enter)"
+        )
+        self._action_terminal.triggered.connect(self._toggle_terminal_tab)
+        view_menu.addAction(self._action_terminal)
+        view_menu.addSeparator()
         view_mode_menu = view_menu.addMenu("View...")
         self._action_focus_mode = QAction("Focus Mode", self)
         self._action_focus_mode.setToolTip("Open in Focus Mode")
@@ -3183,6 +3205,12 @@ class MainWindow(QMainWindow):
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
+        self._action_terminal_window = QAction("Open Terminal Window", self)
+        self._action_terminal_window.setToolTip(
+            "Move the complete embedded terminal workspace into a separate window"
+        )
+        self._action_terminal_window.triggered.connect(self._open_terminal_window)
+        view_menu.addAction(self._action_terminal_window)
         tools_menu = self.menuBar().addMenu("&Tools")
         rebuild_index_action = QAction("Rebuild Vault Index", self)
         rebuild_index_action.setToolTip("Rebuild the vault database from disk (keeps bookmarks/kv/ai tables)")
@@ -3287,6 +3315,12 @@ class MainWindow(QMainWindow):
         ai_action.triggered.connect(self._focus_current_ai_chat)
         go_menu.addAction(ai_action)
 
+        self._action_go_terminal = QAction("Terminal", self)
+        self._action_go_terminal.setToolTip("Select and focus the active embedded terminal")
+        self._action_go_terminal.setEnabled(self._action_terminal.isEnabled())
+        self._action_go_terminal.triggered.connect(self._focus_terminal_tab)
+        go_menu.addAction(self._action_go_terminal)
+
         jump_action = QAction("Jump To Page… (Ctrl+J)", self)
         jump_action.setToolTip("Jump to a page (Ctrl+J)")
         jump_action.triggered.connect(self._jump_to_page)
@@ -3383,13 +3417,12 @@ class MainWindow(QMainWindow):
         self._setup_quick_capture_shortcut(show_error=False)
         self._focus_recent = ["editor", "tree", "left", "right"]
         self._app_focus_changed_slot = None
-        # Update focus borders and focus history when focus moves between widgets
+        # Update focus borders and focus history when focus moves between widgets.
+        # Do not install MainWindow as a QApplication-wide event filter: on
+        # Linux, PySide can crash natively when application event filters see
+        # QWebEngineView events. Objects that need filtering are wired directly.
         app = QApplication.instance()
         if app is not None:
-            try:
-                app.installEventFilter(self)
-            except Exception:
-                pass
             try:
                 self._app_focus_changed_slot = lambda _old, now: self._on_focus_changed(now)
                 app.focusChanged.connect(self._app_focus_changed_slot)
@@ -3993,6 +4026,12 @@ class MainWindow(QMainWindow):
         command_bar_universal = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         command_bar_universal.setContext(Qt.ApplicationShortcut)
         command_bar_universal.activated.connect(self._show_command_bar)
+        history_next = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        history_next.setContext(Qt.ApplicationShortcut)
+        history_next.activated.connect(lambda: self._cycle_history_shortcut(reverse=False))
+        history_previous = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        history_previous.setContext(Qt.ApplicationShortcut)
+        history_previous.activated.connect(lambda: self._cycle_history_shortcut(reverse=True))
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         if nav_back_mac is not None:
@@ -5597,13 +5636,33 @@ class MainWindow(QMainWindow):
                 action.setEnabled(True)
                 action.setToolTip(self._action_tooltips.get(action, label))
         self._action_open_vault_terminal.setText("Open Vault in Terminal")
-        self._action_open_vault_terminal.setEnabled(bool(self.vault_root))
+        terminal_available = bool(self.vault_root) and not self._remote_mode
+        self._action_open_vault_terminal.setEnabled(terminal_available)
         self._action_open_vault_terminal.setToolTip(
             self._action_tooltips.get(
                 self._action_open_vault_terminal,
                 "Open the current local vault in your system terminal",
             )
         )
+        if hasattr(self, "_action_terminal"):
+            self._action_terminal.setEnabled(terminal_available)
+        if hasattr(self, "_action_go_terminal"):
+            self._action_go_terminal.setEnabled(terminal_available)
+        if hasattr(self, "_action_terminal_window"):
+            self._action_terminal_window.setEnabled(terminal_available)
+        if hasattr(self, "_terminal_pane"):
+            terminal_index = self.right_panel.tabs.indexOf(self._terminal_pane)
+            if terminal_index >= 0:
+                self.right_panel.tabs.setTabEnabled(terminal_index, terminal_available)
+                self.right_panel.tabs.setTabToolTip(
+                    terminal_index,
+                    "Shell in the current vault" if terminal_available else "Terminal requires a local vault",
+                )
+                if not terminal_available and self.right_panel.tabs.currentIndex() == terminal_index:
+                    for index in range(self.right_panel.tabs.count()):
+                        if index != terminal_index and self.right_panel.tabs.isTabEnabled(index):
+                            self.right_panel.tabs.setCurrentIndex(index)
+                            break
         if hasattr(self, "_action_convert_vault_to_homebase"):
             can_convert = bool(self.vault_root) and not self._remote_mode and not self._is_homebase_mode_enabled()
             self._action_convert_vault_to_homebase.setVisible(not self._remote_mode)
@@ -5650,6 +5709,312 @@ class MainWindow(QMainWindow):
 
     def _open_vault_workspace_terminal(self) -> None:
         self._open_local_vault_terminal()
+
+    def _build_terminal_tab(self) -> None:
+        """Add the lightweight terminal placeholder to the right-panel tabs."""
+        self._terminal_detached_window = None
+        self._terminal_tab_activation_guard = False
+        self._terminal_previous_tab_index = self.right_panel.tabs.currentIndex()
+        self._terminal_pane = TerminalPane(
+            vault_root_provider=self._terminal_vault_root,
+            seed_agents=self._seed_agents_file_if_needed,
+            environment_provider=self._terminal_environment,
+            shell_provider=self._terminal_shell_command,
+            scrollback_provider=lambda: config.load_terminal_settings().get("scrollback", 10_000),
+            settings_provider=config.load_terminal_settings,
+            parent=self,
+        )
+        self._terminal_pane.openExternallyRequested.connect(self._open_local_vault_terminal)
+        self._terminal_pane.closePaneRequested.connect(self._close_terminal_surface)
+        self._terminal_pane.vaultChanged.connect(self._on_terminal_vault_changed)
+        self._terminal_pane.sessionCredentialReleased.connect(self._revoke_terminal_mcp_token)
+        self._terminal_pane.sessionFailed.connect(
+            lambda message: self.statusBar().showMessage(f"Embedded terminal unavailable: {message}", 6000)
+        )
+        self._terminal_pane.shellCommandChanged.connect(self._on_terminal_shell_command_changed)
+        self._terminal_pane.fontSizeChanged.connect(self._on_terminal_font_size_changed)
+        self._terminal_pane.activeTitleChanged.connect(self._update_terminal_surface_title)
+        self.right_panel.set_terminal_panel(self._terminal_pane)
+        self._update_terminal_surface_title(self._terminal_pane.active_title)
+        self.right_panel.terminalTabActivated.connect(self._on_terminal_tab_activated)
+        self.right_panel.openTerminalWindowRequested.connect(self._open_terminal_window)
+        self.right_panel.tabs.currentChanged.connect(self._on_right_panel_tab_changed_for_terminal)
+
+    def _terminal_vault_root(self) -> Optional[Path]:
+        if self._remote_mode or not self.vault_root:
+            return None
+        try:
+            root = Path(self.vault_root).expanduser().resolve()
+        except Exception:
+            return None
+        return root if root.is_dir() else None
+
+    def _terminal_shell_command(self) -> list[str]:
+        settings = config.load_terminal_settings()
+        return parse_shell_command(
+            settings.get("shell_executable") or "",
+            settings.get("shell_arguments") or [],
+        )
+
+    @staticmethod
+    def _save_terminal_settings_update(**updates) -> None:
+        settings = config.load_terminal_settings()
+        settings.update(updates)
+        config.save_terminal_settings(settings)
+
+    def _on_terminal_shell_command_changed(self, executable: str, arguments: object) -> None:
+        values = [str(value) for value in arguments] if isinstance(arguments, list) else []
+        self._save_terminal_settings_update(
+            shell_executable=str(executable or ""),
+            shell_arguments=values,
+        )
+        if self._terminal_pane.session_running:
+            self._terminal_pane.restart_session()
+
+    def _on_terminal_font_size_changed(self, size: int) -> None:
+        self._save_terminal_settings_update(font_size=max(6, min(72, int(size))))
+
+    def _update_terminal_surface_title(self, title: str) -> None:
+        label = f"Terminal · {title}" if title else "Terminal"
+        index = self.right_panel.tabs.indexOf(self._terminal_pane)
+        if index >= 0:
+            self.right_panel.tabs.setTabText(index, label)
+            self._refresh_right_minibar_tabs()
+        detached = getattr(self, "_terminal_detached_window", None)
+        if detached is not None:
+            detached.setWindowTitle(f"{label} — StillPoint")
+
+    def _terminal_environment(self) -> dict[str, str]:
+        environment: dict[str, str] = {}
+        provider = getattr(self, "_terminal_mcp_environment", None)
+        if callable(provider):
+            try:
+                environment.update(provider())
+            except Exception as exc:
+                self.statusBar().showMessage(f"StillPoint MCP unavailable: {exc}", 5000)
+        return environment
+
+    def _terminal_mcp_environment(self) -> dict[str, str]:
+        """Mint one vault-scoped MCP credential for the new shell session."""
+        response = self.http.post(
+            "/auth/mcp-token",
+            json={"ttl_seconds": 43200, "session_id": self._remote_context_id},
+        )
+        if not response.is_success:
+            detail = "Failed to create a StillPoint MCP session."
+            try:
+                detail = response.json().get("detail") or detail
+            except Exception:
+                pass
+            raise RuntimeError(detail)
+        payload = response.json()
+        token = str(payload.get("token") or "")
+        if not token:
+            raise RuntimeError("StillPoint did not return an MCP session token.")
+        from sp.app.mcp_bridge import ensure_bridge_launcher
+
+        launcher = ensure_bridge_launcher()
+        tokens = getattr(self, "_terminal_mcp_tokens", set())
+        tokens.add(token)
+        self._terminal_mcp_tokens = tokens
+        path_value = f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+        return {
+            "STILLPOINT_MCP_URL": f"{self._local_api_base.rstrip('/')}/mcp",
+            "STILLPOINT_MCP_TOKEN": token,
+            "STILLPOINT_MCP_VAULT": str(payload.get("vault") or ""),
+            "STILLPOINT_MCP_SESSION": self._remote_context_id,
+            "STILLPOINT_MCP_COMMAND": str(launcher),
+            "PATH": path_value,
+        }
+
+    def _revoke_terminal_mcp_token(self, released_token: str = "") -> None:
+        tokens = set(getattr(self, "_terminal_mcp_tokens", set()) or set())
+        legacy = str(getattr(self, "_terminal_mcp_token", "") or "")
+        if legacy:
+            tokens.add(legacy)
+        requested = str(released_token or "")
+        if requested:
+            tokens_to_revoke = {requested}
+            tokens.discard(requested)
+            self._terminal_mcp_tokens = tokens
+        else:
+            tokens_to_revoke = tokens
+            self._terminal_mcp_tokens = set()
+        self._terminal_mcp_token = None
+        if not tokens_to_revoke or not hasattr(self, "http"):
+            return
+        for token in tokens_to_revoke:
+            try:
+                self.http.post("/auth/mcp-token/revoke", json={"token": token}, timeout=2.0)
+            except Exception:
+                pass
+
+    def _on_terminal_vault_changed(self, path: str) -> None:
+        """Coalesce terminal-originated disk edits into a prompt index refresh."""
+        if self._remote_mode or not self.vault_root:
+            return
+        normalized = self._normalize_local_watch_path(path)
+        if normalized and normalized in self._recent_self_saved_paths:
+            return
+        self._homebase_tree_refresh_reason = "embedded terminal filesystem change"
+        if self._local_fs_ui_quiet_timer:
+            self._local_fs_ui_quiet_timer.start(750)
+        if self._is_homebase_mode_enabled() and self._homebase_sync_engine:
+            self._mark_homebase_unsynced_local_change()
+            if self._homebase_fs_sync_quiet_timer:
+                self._homebase_fs_sync_quiet_timer.start(20000)
+
+    def _prepare_terminal_activation(self) -> bool:
+        if self._terminal_vault_root() is None:
+            self.statusBar().showMessage("Open a local vault before starting the terminal.", 4000)
+            return False
+        try:
+            # A clean page is already on disk. Rewriting it here changes its
+            # mtime, which makes the filesystem monitor reload the editor a few
+            # moments after Terminal receives focus and steals that focus back.
+            self._save_dirty_page(reason="terminal focus")
+        except Exception:
+            return False
+        try:
+            still_dirty = bool(self._dirty_flag or self.editor.document().isModified())
+        except Exception:
+            still_dirty = bool(getattr(self, "_dirty_flag", False))
+        if still_dirty:
+            QMessageBox.warning(
+                self,
+                "Terminal Not Opened",
+                "The current page still has unsaved changes. Save or resolve them before opening the terminal.",
+            )
+            return False
+        return True
+
+    def _on_terminal_tab_activated(self) -> None:
+        if self._terminal_tab_activation_guard:
+            return
+        self._terminal_tab_activation_guard = True
+        try:
+            if not self._prepare_terminal_activation():
+                fallback = self._terminal_previous_tab_index
+                if 0 <= fallback < self.right_panel.tabs.count():
+                    self.right_panel.tabs.setCurrentIndex(fallback)
+                return
+            self._terminal_pane.start_session()
+            self._terminal_pane.focus_terminal()
+        finally:
+            self._terminal_tab_activation_guard = False
+
+    def _on_right_panel_tab_changed_for_terminal(self, index: int) -> None:
+        if self.right_panel.tabs.widget(index) is not self._terminal_pane:
+            self._terminal_previous_tab_index = index
+
+    def _toggle_terminal_tab(self) -> None:
+        detached = getattr(self, "_terminal_detached_window", None)
+        if detached is not None and detached.isVisible():
+            detached.raise_()
+            detached.activateWindow()
+            self._terminal_pane.focus_terminal()
+            return
+        terminal_index = self.right_panel.tabs.indexOf(self._terminal_pane)
+        if terminal_index < 0:
+            return
+        if self._is_right_panel_expanded() and self.right_panel.tabs.currentIndex() == terminal_index:
+            self.editor.setFocus(Qt.ShortcutFocusReason)
+            return
+        # Switching an already-visible right panel to Terminal must preserve
+        # the user's current splitter width. Expand only from the minibar.
+        if not self._is_right_panel_expanded():
+            self._set_right_panel_collapsed(False)
+        if self.right_panel.tabs.currentIndex() == terminal_index:
+            self._on_terminal_tab_activated()
+        else:
+            self.right_panel.tabs.setCurrentIndex(terminal_index)
+
+    def _focus_terminal_tab(self) -> None:
+        """Always reveal and focus Terminal; unlike its keyboard shortcut this is not a toggle."""
+        detached = getattr(self, "_terminal_detached_window", None)
+        if detached is not None and detached.isVisible():
+            detached.raise_()
+            detached.activateWindow()
+            self._terminal_pane.focus_terminal()
+            return
+        terminal_index = self.right_panel.tabs.indexOf(self._terminal_pane)
+        if terminal_index < 0:
+            return
+        # Expanding restores the last saved panel width.  Do not run that path
+        # when the panel is already visible: Go / Terminal should only change
+        # the selected tab and focus, never resize an existing panel.
+        if not self._is_right_panel_expanded():
+            self._set_right_panel_collapsed(False)
+        if self.right_panel.tabs.currentIndex() == terminal_index:
+            self._on_terminal_tab_activated()
+        else:
+            self.right_panel.tabs.setCurrentIndex(terminal_index)
+
+    def _close_terminal_surface(self) -> None:
+        detached = getattr(self, "_terminal_detached_window", None)
+        if detached is not None and detached.isVisible():
+            detached.close()
+            return
+        self._set_right_panel_collapsed(True)
+        self.editor.setFocus(Qt.ShortcutFocusReason)
+
+    def _open_terminal_window(self) -> None:
+        existing = getattr(self, "_terminal_detached_window", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            self._terminal_pane.focus_terminal()
+            return
+        if not self._prepare_terminal_activation():
+            return
+        index = self.right_panel.tabs.indexOf(self._terminal_pane)
+        if index < 0:
+            return
+        self._terminal_tab_popout_index = index
+        self.right_panel.tabs.removeTab(index)
+        self.right_panel.terminal_index = None
+
+        owner = self
+
+        class _TerminalWindow(QMainWindow):
+            def closeEvent(window_self, event) -> None:  # type: ignore[override]
+                panel = window_self.takeCentralWidget()
+                if panel is not None and owner.right_panel.tabs.indexOf(panel) < 0:
+                    owner.right_panel.reattach_terminal_panel(panel, owner._terminal_tab_popout_index)
+                    owner._update_terminal_surface_title(owner._terminal_pane.active_title)
+                    owner._refresh_right_minibar_tabs()
+                owner._terminal_detached_window = None
+                super().closeEvent(event)
+
+        window = _TerminalWindow()
+        active_terminal_title = self._terminal_pane.active_title
+        window.setWindowTitle(f"Terminal · {active_terminal_title} — StillPoint")
+        window.setAttribute(Qt.WA_DeleteOnClose, True)
+        window.setCentralWidget(self._terminal_pane)
+        window.resize(920, 620)
+        self._prepare_top_level_window(window)
+        self._register_detached_panel(window)
+        self._terminal_detached_window = window
+        self._refresh_right_minibar_tabs()
+        window.show()
+        # QTabWidget::removeTab leaves the page explicitly hidden. Reparenting
+        # it as a central widget does not clear that state automatically.
+        self._terminal_pane.show()
+        if not self._terminal_pane.terminal_switcher_active:
+            self._terminal_pane._session_stack.show()
+        self._terminal_pane.raise_()
+        window.raise_()
+        window.activateWindow()
+        self._terminal_pane.start_session()
+        self._terminal_pane.focus_terminal()
+
+    def _prepare_terminal_for_vault_change(self) -> None:
+        if not hasattr(self, "_terminal_pane"):
+            return
+        detached = getattr(self, "_terminal_detached_window", None)
+        if detached is not None:
+            detached.close()
+        self._terminal_pane.prepare_for_vault()
 
     def _shutdown_homebase_watcher(self) -> None:
         if self._local_fs_ui_quiet_timer:
@@ -5943,14 +6308,17 @@ class MainWindow(QMainWindow):
                 self._refresh_detached_task_panels()
                 self._refresh_detached_calendar_panels()
                 self._refresh_detached_link_panels(self.current_path)
-            if current_page_changed and self.current_path and self._is_editor_idle_for_remote_reload():
-                self._open_file(
-                    self.current_path,
-                    add_to_history=False,
-                    force=True,
-                    restore_history_cursor=True,
-                    sync_calendar=False,
-                )
+            if current_page_changed and self.current_path:
+                if self._is_editor_idle_for_remote_reload():
+                    self._open_file(
+                        self.current_path,
+                        add_to_history=False,
+                        force=True,
+                        restore_history_cursor=True,
+                        sync_calendar=False,
+                    )
+                else:
+                    self._resolve_external_editor_change(self.current_path)
             is_homebase_enabled = getattr(self, "_is_homebase_mode_enabled", None)
             homebase_enabled = bool(is_homebase_enabled()) if callable(is_homebase_enabled) else False
             if (indexed_paths or removed_paths or structure_changed) and homebase_enabled:
@@ -6126,10 +6494,11 @@ class MainWindow(QMainWindow):
         self._homebase_fs_signal_count += 1
 
     def _open_local_vault_terminal(self) -> None:
-        if not self.vault_root:
-            self.statusBar().showMessage("Open a vault first.", 3000)
+        root = self._terminal_vault_root()
+        if root is None:
+            self.statusBar().showMessage("Open a local vault first.", 3000)
             return
-        self._open_terminal_for_workspace(Path(self.vault_root), title="Open Vault in Terminal")
+        self._open_terminal_for_workspace(root, title="Open Vault in Terminal")
 
     def _update_periodic_search_sync_timer(self) -> None:
         """Enable/disable periodic local search index sync based on mode and preferences."""
@@ -6397,18 +6766,34 @@ class MainWindow(QMainWindow):
         return headers
 
     def _seed_agents_file_if_needed(self, workspace_root: Path) -> None:
+        """Seed missing, token-free agent guidance and MCP client configs."""
         try:
             if not config.load_seed_agents_workspace():
                 return
             workspace_root = workspace_root.expanduser()
             workspace_root.mkdir(parents=True, exist_ok=True)
-            agents_path = workspace_root / "AGENTS.md"
-            if agents_path.exists():
-                return
-            template_path = Path(__file__).resolve().parents[3] / "SP-vault-AGENTS.md"
-            if not template_path.exists():
-                return
-            agents_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+            template_root = Path(__file__).resolve().parents[3]
+            seeds = (
+                (template_root / "SP-vault-AGENTS.md", workspace_root / "AGENTS.md"),
+                (
+                    template_root / "SP-vault-codex-config.toml",
+                    workspace_root / ".codex" / "config.toml",
+                ),
+                (
+                    template_root / "SP-vault-copilot-mcp.json",
+                    workspace_root / ".mcp.json",
+                ),
+            )
+            for template_path, destination in seeds:
+                try:
+                    if destination.exists() or not template_path.exists():
+                        continue
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    # One existing or unwritable client configuration must not
+                    # prevent the remaining independent seeds from being tried.
+                    continue
         except Exception:
             pass
 
@@ -6811,6 +7196,69 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return True
+
+    def _resolve_external_editor_change(self, path: str) -> None:
+        """Keep concurrent disk and editor changes until the user chooses."""
+        if self._merge_dialog_open or not self.vault_root or path != self.current_path:
+            return
+        try:
+            disk_text = (Path(self.vault_root) / path.lstrip("/")).read_text(encoding="utf-8")
+            editor_text = self.editor.to_markdown()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Page changed on disk but could not be compared: {exc}", 6000)
+            return
+        if not has_material_text_difference(editor_text, disk_text):
+            self._last_saved_content = disk_text
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Page Changed on Disk")
+        box.setText("This page was changed by another program while the editor also has unsaved changes.")
+        box.setInformativeText("Compare both versions, reload the disk version, or keep the editor version.")
+        compare_button = box.addButton("Compare…", QMessageBox.ActionRole)
+        reload_button = box.addButton("Reload from Disk", QMessageBox.AcceptRole)
+        keep_button = box.addButton("Keep Editor Version", QMessageBox.DestructiveRole)
+        box.setDefaultButton(compare_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is reload_button:
+            self._open_file(
+                path,
+                add_to_history=False,
+                force=True,
+                restore_history_cursor=True,
+                sync_calendar=False,
+            )
+            return
+        if clicked is keep_button:
+            self._last_saved_content = disk_text
+            self._dirty_flag = True
+            self.editor.document().setModified(True)
+            self._update_dirty_indicator()
+            self.statusBar().showMessage("Keeping editor version; save to replace the disk version.", 5000)
+            return
+        if clicked is not compare_button:
+            return
+
+        dialog = MergeConflictDialog(editor_text, disk_text, path, parent=self)
+        self._merge_dialog_open = True
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return
+            merged = dialog.merged_text()
+        finally:
+            self._merge_dialog_open = False
+        self._suspend_dirty_tracking = True
+        try:
+            self.editor.replace_markdown_in_place(merged)
+        finally:
+            self._suspend_dirty_tracking = False
+        self._last_saved_content = disk_text
+        self._dirty_flag = True
+        self.editor.document().setModified(True)
+        self._update_dirty_indicator()
+        self.statusBar().showMessage("Merged external changes; save to write the result.", 5000)
 
     def _can_auto_reload_homebase_current_page(self) -> bool:
         now = time.monotonic()
@@ -8440,7 +8888,9 @@ class MainWindow(QMainWindow):
             headers = headers if headers else None
         else:
             auth = None
-            headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
+            headers = {"X-StillPoint-Window-Id": self._remote_context_id}
+            if local_auth_token:
+                headers["X-Local-UI-Token"] = local_auth_token
         return httpx.Client(
             base_url=base_url,
             timeout=timeout,
@@ -9882,6 +10332,7 @@ class MainWindow(QMainWindow):
         self.editor._push_paint_block()
         self._vault_switch_in_progress = True
         try:
+            self._prepare_terminal_for_vault_change()
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
             self._shutdown_homebase_sync()
@@ -15010,6 +15461,8 @@ class MainWindow(QMainWindow):
                 self.right_panel.ai_chat_panel.set_font_family(ai_family)
             if self._detached_ai_chat_panel:
                 self._detached_ai_chat_panel.set_font_family(ai_family)
+            if getattr(self, "_terminal_pane", None):
+                self._terminal_pane.refresh_preferences()
             # Apply vault read-only preference immediately
             self._apply_vault_read_only_pref()
             try:
@@ -17758,6 +18211,9 @@ class MainWindow(QMainWindow):
         elif widget == self.right_panel.ai_chat_panel:
             action = menu.addAction("Open in New Window")
             action.triggered.connect(lambda: self._open_ai_chat_window(detached_only=True))
+        elif widget == getattr(self.right_panel, "terminal_panel", None):
+            action = menu.addAction("Open in New Window")
+            action.triggered.connect(self._open_terminal_window)
         else:
             return
         menu.exec(bar.mapToGlobal(pos))
@@ -18741,6 +19197,8 @@ class MainWindow(QMainWindow):
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
         """Open and focus editor when a tree row is clicked."""
         self._cancel_tree_nav_open()
+        if self._homebase_tree_refresh_pending:
+            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
         if target == FILTER_BANNER:
             self._clear_nav_filter()
@@ -18956,6 +19414,8 @@ class MainWindow(QMainWindow):
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
         self._tree_arrow_focus_pending = True
         self._tree_keyboard_nav = True
+        if self._homebase_tree_refresh_pending:
+            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:
@@ -21963,8 +22423,14 @@ class MainWindow(QMainWindow):
 
     def _ensure_history_popup(self) -> None:
         if self._history_popup is None:
-            popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+            # Keep the switcher inside the main window.  A native Qt.Tool popup
+            # can leave an undamaged/stale rectangle behind on Linux when a
+            # QWebEngineView (the embedded terminal) is also visible.
+            popup_parent = self.centralWidget() or self
+            popup = QWidget(popup_parent)
+            popup.setObjectName("historySwitcherOverlay")
             popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            popup.setAttribute(Qt.WA_StyledBackground, True)
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._history_popup_label = QLabel(popup)
@@ -21989,7 +22455,7 @@ class MainWindow(QMainWindow):
         if accent:
             selected_bg = self._selection_bg_for_accent(accent)
         self._history_popup.setStyleSheet(
-            "QWidget { background: "
+            "QWidget#historySwitcherOverlay { background: "
             f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
             "border: 1px solid "
             f"{theme_value('main_window.picker_popup.border', '#666666')}; "
@@ -22055,7 +22521,11 @@ class MainWindow(QMainWindow):
         x = top_left.x() + editor_rect.width() // 2 - popup_width // 2
         y = top_left.y() + 24
         self._history_popup.resize(popup_width, popup_height)
-        self._history_popup.move(x, y)
+        popup_parent = self._history_popup.parentWidget()
+        position = QPoint(x, y)
+        if popup_parent is not None:
+            position = popup_parent.mapFromGlobal(position)
+        self._history_popup.move(position)
         self._history_popup.show()
         self._history_popup.raise_()
 
@@ -22082,6 +22552,29 @@ class MainWindow(QMainWindow):
                 delta = -1 if reverse else 1
                 self._popup_index = (self._popup_index + delta) % len(items)
         self._show_history_popup()
+
+    def _cycle_history_shortcut(self, *, reverse: bool) -> None:
+        """Cycle the visible MRU picker until the user releases Control."""
+        terminal = getattr(self, "_terminal_pane", None)
+        if terminal is not None and terminal.has_terminal_focus():
+            self._hide_history_popup()
+            terminal.cycle_terminal_switcher(reverse=reverse)
+            return
+        self._cycle_popup("history", reverse=reverse)
+        if self._popup_mode == "history":
+            # Polling the modifier avoids installing a QApplication-wide event
+            # filter, which is unsafe around QWebEngineView events on Linux.
+            self._history_modifier_release_timer.start()
+
+    def _finish_history_switch_when_control_released(self) -> None:
+        # keyboardModifiers() is event-cache based and can remain stuck at
+        # ControlModifier after QShortcut consumes Ctrl+Tab.  Query the window
+        # system's live state so release commits without another key press.
+        if QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier:
+            return
+        self._history_modifier_release_timer.stop()
+        if self._popup_mode == "history":
+            self._activate_history_popup_selection()
 
     def _activate_history_popup_selection(self) -> None:
         if not self._popup_items or self._popup_index < 0 or not self._popup_mode:
@@ -22113,11 +22606,16 @@ class MainWindow(QMainWindow):
             self._animate_or_flash_to_cursor(cursor)
 
     def _hide_history_popup(self) -> None:
+        self._history_modifier_release_timer.stop()
         self._popup_items = []
         self._popup_index = -1
         self._popup_mode = None
         if self._history_popup:
+            exposed = self._history_popup.geometry()
+            popup_parent = self._history_popup.parentWidget()
             self._history_popup.hide()
+            if popup_parent is not None:
+                popup_parent.update(exposed)
 
     def _split_link_anchor(self, target: str) -> tuple[str, Optional[str]]:
         if "#" not in target:
@@ -23206,18 +23704,13 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def _is_tree_navigation_activity(self, obj: object, event_type: QEvent.Type) -> bool:
+        """Identify tree events that may safely apply a pending model refresh."""
         tree_view = getattr(self, "tree_view", None)
         tree_viewport = tree_view.viewport() if tree_view is not None else None
         if obj not in (tree_view, tree_viewport):
             return False
-        # Use MouseButtonRelease (not Press) so the homebase tree flush fires *after*
-        # mouseReleaseEvent has already called indexAt() and emitted rowClicked.
-        # Triggering a tree rebuild between press and release causes indexAt() to return
-        # a different row than the one the user pressed, loading the wrong page.
         if event_type == QEvent.MouseButtonRelease:
             return True
-        # For keyboard/focus events: only trigger when no mouse button is held,
-        # so a click that also changes focus does not schedule a mid-click rebuild.
         if event_type in (QEvent.KeyPress, QEvent.FocusIn):
             return not bool(QApplication.mouseButtons() & Qt.LeftButton)
         return False
@@ -23234,27 +23727,6 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
                 QTimer.singleShot(0, self._sync_history_scroll_range)
                 QTimer.singleShot(0, self._update_history_scroll_buttons)
-        # Filesystem reconciliation runs in a worker, but rebuilding a Qt item
-        # model must stay on the GUI thread.  Do not let an editor key/focus
-        # event pay that GUI cost: apply the pending model update only when the
-        # user is about to use the navigation tree.
-        if (
-            self._homebase_tree_refresh_pending
-            and self._is_tree_navigation_activity(obj, event.type())
-        ):
-            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
-        if event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
-                self._show_command_bar()
-                return True
-            if event.key() in (Qt.Key_Tab, Qt.Key_Backtab) and (event.modifiers() & Qt.ControlModifier):
-                reverse = bool(event.modifiers() & Qt.ShiftModifier) or event.key() == Qt.Key_Backtab
-                self._cycle_popup("history", reverse=reverse)
-                return True
-        elif event.type() == QEvent.KeyRelease:
-            if event.key() == Qt.Key_Control and self._popup_items:
-                self._activate_history_popup_selection()
-                return True
         return super().eventFilter(obj, event)
 
 
@@ -23471,6 +23943,13 @@ class MainWindow(QMainWindow):
         self._search_sync.stop()
         self._link_update_poll_timer.stop()
         self.geometry_save_timer.stop()
+        try:
+            detached_terminal = getattr(self, "_terminal_detached_window", None)
+            if detached_terminal is not None:
+                detached_terminal.close()
+            self._terminal_pane.shutdown()
+        except Exception:
+            pass
         self._shutdown_homebase_sync()
 
         # Disconnect signals to prevent callbacks after window deletion
@@ -23481,10 +23960,6 @@ class MainWindow(QMainWindow):
         try:
             app = QApplication.instance()
             if app:
-                try:
-                    app.removeEventFilter(self)
-                except Exception:
-                    pass
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     if self._app_focus_changed_slot is not None:

@@ -1,0 +1,12 @@
+# StillPoint vault MCP integration for Codex.
+# Session credentials are forwarded from the embedded terminal environment and
+# are never stored in this file.
+
+[mcp_servers.stillpoint]
+command = "stillpoint-mcp"
+env_vars = [
+    "STILLPOINT_MCP_URL",
+    "STILLPOINT_MCP_TOKEN",
+    "STILLPOINT_MCP_SESSION",
+    "STILLPOINT_MCP_VAULT",
+]

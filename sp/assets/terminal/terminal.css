@@ -1,0 +1,19 @@
+html,
+body,
+#terminal {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #111318;
+}
+
+#terminal {
+  padding: 5px 6px 3px;
+}
+
+.xterm,
+.xterm-viewport {
+  height: 100%;
+}

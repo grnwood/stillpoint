@@ -228,6 +228,19 @@ def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dic
     return [build(target)]
 
 
+def ensure_journal_date(root: Path, day: date, template: str | None = None) -> tuple[Path, bool]:
+    """Ensure one dated journal page exists and return its path and creation flag."""
+    rel = Path("Journal") / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+    page_dir = root / rel
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_file = page_dir / f"{page_dir.name}{PAGE_SUFFIX}"
+    created = not page_file.exists()
+    if created:
+        content = template if template is not None else f"# {day:%A, %B %d, %Y}\n\n"
+        page_file.write_text(content, encoding="utf-8")
+    return page_file, created
+
+
 def ensure_journal_today(root: Path, template: str | None = None) -> tuple[Path, bool]:
     """Ensure today's journal page exists and return its file path and creation flag.
 
@@ -238,16 +251,7 @@ def ensure_journal_today(root: Path, template: str | None = None) -> tuple[Path,
     Returns:
         tuple[Path, bool]: (page file path, True if the page was created)
     """
-    today = dt.datetime.now()
-    rel = Path("Journal") / f"{today:%Y}" / f"{today:%m}" / f"{today:%d}"
-    page_dir = root / rel
-    page_dir.mkdir(parents=True, exist_ok=True)
-    page_file = page_dir / f"{page_dir.name}{PAGE_SUFFIX}"
-    created = not page_file.exists()
-    if created:
-        content = template if template is not None else f"# {today:%A, %B %d, %Y}\n\n"
-        page_file.write_text(content, encoding="utf-8")
-    return page_file, created
+    return ensure_journal_date(root, dt.datetime.now().date(), template=template)
 
 
 def list_files_modified_between(root: Path, start: date, end: date) -> List[Dict]:

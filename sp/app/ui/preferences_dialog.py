@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import shlex
 import sys
 import shutil
 
@@ -55,6 +56,9 @@ class PreferencesDialog(QDialog):
         app_instance = QApplication.instance()
         self._initial_app_font = QFont(app_instance.font()) if app_instance else QFont()
         self._font_families = sorted(QFontDatabase().families())
+        self._monospace_font_families = [
+            family for family in self._font_families if QFontDatabase.isFixedPitch(family)
+        ]
 
         root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(10, 10, 10, 10)
@@ -626,9 +630,53 @@ class PreferencesDialog(QDialog):
         self.enable_ai_agents_checkbox.setChecked(config.load_global_enable_ai_agents())
         self.enable_ai_agents_checkbox.stateChanged.connect(self._warn_restart_required)
         ai_layout.addWidget(self.enable_ai_agents_checkbox)
-        self.seed_agents_workspace_checkbox = QCheckBox("Add AGENTS.md to vault workspace when opening a terminal")
+        self.seed_agents_workspace_checkbox = QCheckBox(
+            "Add agent guidance and MCP client configs when opening a terminal"
+        )
         self.seed_agents_workspace_checkbox.setChecked(config.load_seed_agents_workspace())
         ai_layout.addWidget(self.seed_agents_workspace_checkbox)
+        terminal_settings = config.load_terminal_settings()
+        terminal_row = QHBoxLayout()
+        terminal_row.addWidget(QLabel("Terminal shell:"))
+        self.terminal_shell_edit = QLineEdit(terminal_settings.get("shell_executable") or "")
+        self.terminal_shell_edit.setPlaceholderText("Automatic platform default")
+        self.terminal_shell_edit.setToolTip("Optional shell executable for the embedded terminal")
+        terminal_row.addWidget(self.terminal_shell_edit, 1)
+        ai_layout.addLayout(terminal_row)
+        terminal_args_row = QHBoxLayout()
+        terminal_args_row.addWidget(QLabel("Shell arguments:"))
+        self.terminal_shell_args_edit = QLineEdit(
+            shlex.join(terminal_settings.get("shell_arguments") or [])
+        )
+        self.terminal_shell_args_edit.setPlaceholderText("Optional arguments")
+        terminal_args_row.addWidget(self.terminal_shell_args_edit, 1)
+        ai_layout.addLayout(terminal_args_row)
+        terminal_scrollback_row = QHBoxLayout()
+        terminal_scrollback_row.addWidget(QLabel("Terminal scrollback lines:"))
+        self.terminal_scrollback_spin = QSpinBox()
+        self.terminal_scrollback_spin.setRange(100, 200000)
+        self.terminal_scrollback_spin.setSingleStep(1000)
+        self.terminal_scrollback_spin.setValue(int(terminal_settings.get("scrollback", 10000)))
+        terminal_scrollback_row.addWidget(self.terminal_scrollback_spin, 1)
+        ai_layout.addLayout(terminal_scrollback_row)
+        terminal_font_row = QHBoxLayout()
+        terminal_font_row.addWidget(QLabel("Terminal font:"))
+        self.terminal_font_combo = self._build_monospace_font_combo("System monospace")
+        self._select_font(
+            self.terminal_font_combo,
+            str(terminal_settings.get("font_family") or "") or None,
+        )
+        terminal_font_row.addWidget(self.terminal_font_combo, 1)
+        ai_layout.addLayout(terminal_font_row)
+        terminal_font_size_row = QHBoxLayout()
+        terminal_font_size_row.addWidget(QLabel("Terminal font size:"))
+        self.terminal_font_size_spin = QSpinBox()
+        self.terminal_font_size_spin.setRange(6, 72)
+        configured_terminal_size = int(terminal_settings.get("font_size") or 0)
+        system_fixed_size = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).pointSize()
+        self.terminal_font_size_spin.setValue(configured_terminal_size or max(6, system_fixed_size or 10))
+        terminal_font_size_row.addWidget(self.terminal_font_size_spin, 1)
+        ai_layout.addLayout(terminal_font_size_row)
         quiet_row = QHBoxLayout()
         quiet_row.addWidget(QLabel("Local filesystem quiet time (s):"))
         self.local_filesystem_quiet_spin = QSpinBox()
@@ -1236,6 +1284,22 @@ class PreferencesDialog(QDialog):
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_enable_ai_agents(self.enable_ai_agents_checkbox.isChecked())
         config.save_seed_agents_workspace(self.seed_agents_workspace_checkbox.isChecked())
+        try:
+            shell_args = shlex.split(
+                self.terminal_shell_args_edit.text(),
+                posix=sys.platform != "win32",
+            )
+        except ValueError:
+            shell_args = []
+        config.save_terminal_settings(
+            {
+                "shell_executable": self.terminal_shell_edit.text().strip(),
+                "shell_arguments": shell_args,
+                "scrollback": self.terminal_scrollback_spin.value(),
+                "font_family": self._font_value(self.terminal_font_combo) or "",
+                "font_size": self.terminal_font_size_spin.value(),
+            }
+        )
         config.save_local_filesystem_quiet_seconds(self.local_filesystem_quiet_spin.value())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
@@ -1526,6 +1590,16 @@ class PreferencesDialog(QDialog):
         for family in self._font_families:
             combo.addItem(family, family)
         combo.setInsertPolicy(QComboBox.NoInsert)
+        return combo
+
+    def _build_monospace_font_combo(self, default_label: str) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem(default_label, "")
+        for family in self._monospace_font_families:
+            combo.addItem(family, family)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setToolTip("Installed fixed-width fonts reported by the operating system")
         return combo
     
     def _template_names(self) -> list[str]:
