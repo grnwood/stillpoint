@@ -14,6 +14,7 @@
     cursorAccent: "#111318",
     selectionBackground: "#365b7d"
   };
+  let bridge = null;
   const terminal = new Terminal(Object.assign({
     allowProposedApi: false,
     convertEol: false,
@@ -22,6 +23,14 @@
     cursorInactiveStyle: "block",
     fontFamily: "monospace",
     fontSize: 13,
+    linkHandler: {
+      activate: function (_event, uri) {
+        if (bridge) {
+          bridge.openExternalUrl(uri);
+        }
+      },
+      allowNonHttpProtocols: false
+    },
     minimumContrastRatio: 7,
     scrollback: 10000,
     theme: defaultTheme
@@ -32,7 +41,6 @@
   terminal.loadAddon(fitAddon);
   terminal.open(document.getElementById("terminal"));
 
-  let bridge = null;
   let resizeTimer = null;
 
   function fitAndNotify() {

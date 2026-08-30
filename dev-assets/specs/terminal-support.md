@@ -12,7 +12,7 @@ StillPoint does not launch Codex, Copilot, or another agent automatically. Users
 
 ## Goals
 
-- Focus the right-panel Terminal tab with `Ctrl+Shift+Enter`.
+- Toggle the right-panel Terminal tab with `Ctrl+Shift+Enter`.
 - Start the shell with the current local vault as its working directory.
 - Seed the vault-root `AGENTS.md` from `SP-vault-AGENTS.md` using the existing preference and seeding behavior.
 - Support interactive, full-screen TUIs on Linux, macOS, and Windows.
@@ -36,13 +36,14 @@ StillPoint does not launch Codex, Copilot, or another agent automatically. Users
 
 ### Opening and closing
 
-- `Ctrl+Shift+Enter` expands and selects the right-panel Terminal tab. If it is already selected, the shortcut returns focus to the editor.
+- `Ctrl+Shift+Enter` expands, selects, and focuses the right-panel Terminal tab. When the docked terminal already has focus, the shortcut collapses the right panel and returns focus to the editor. When Terminal is detached but minimized, behind another window, or inactive, the shortcut restores and raises that same detached window. When the detached window is already active, the shortcut closes it and reattaches the live terminal pane.
 - A **View > Terminal** menu item provides the same action.
 - **View > Open Terminal Window** and its matching command-palette entry move the complete terminal workspace into a separate window.
 - **Go > Terminal** and **Go / Terminal** in the command palette always reveal and focus the active terminal; they do not toggle focus back to the editor.
 - The Terminal tab follows the existing right-panel sizing, collapsing, minibar, selection, and context-menu semantics.
 - Collapsing the right panel or selecting another tab does not stop the shell.
 - **Open in New Window** moves and explicitly reveals the complete live terminal workspace—including its active-terminal selector, all session surfaces, and Ctrl+Tab switcher—inside a top-level window. Closing that window reattaches the same workspace to the right panel without restarting a shell.
+- The external terminal window restores its last saved size and screen position when created. Move and resize changes use the same preferences-backed geometry persistence as other detached windows, with an immediate final save when the window closes.
 - Closing the terminal session explicitly terminates the shell and its child process tree after confirmation when child processes are still active.
 - Closing the StillPoint window terminates its embedded terminal session. Sessions are not restored after an application restart.
 
@@ -303,10 +304,10 @@ This behavior applies to all external filesystem edits, not only edits believed 
 - StillPoint does not inspect, approve, or restrict commands typed into the terminal.
 - The working directory is resolved and validated before process creation.
 - No terminal-provided title, hyperlink, escape sequence, or OSC command may cause arbitrary application actions without explicit validation.
-- Opening file links or URLs from terminal output requires normal StillPoint URL/path validation and, where appropriate, user confirmation.
+- OSC-8 terminal hyperlinks must not use xterm's JavaScript `confirm()`/`window.open()` fallback. They cross the narrow QWebChannel bridge, accept only validated `http` and `https` URLs, and defer the operating-system browser launch until after the WebChannel callback returns. Local files and custom schemes are rejected.
 - Paste containing line breaks uses xterm.js bracketed-paste behavior. Optional paste confirmation for multiline commands may be added later but is not required for v1.
 - The bundled web content uses a restrictive policy and no remote network resources.
-- QWebChannel exposes only terminal input, sizing, clipboard, and lifecycle operations. It does not expose general Python or application object access.
+- QWebChannel exposes only terminal input, sizing, clipboard, validated external HTTP(S) URL requests, and lifecycle operations. It does not expose general Python or application object access.
 - MCP authorization is enforced by the server for every operation; possession of a local vault path is not treated as authentication.
 - A read-only StillPoint session never receives write-capable MCP credentials, although the OS may still permit direct filesystem writes. The UI must not describe the terminal itself as read-only or sandboxed.
 
@@ -408,7 +409,7 @@ The pane and shell must remain useful when MCP is disabled or unavailable.
 ### General
 
 - No terminal process, WebEngine initialization, or MCP token is created during application startup when the terminal is not used.
-- `Ctrl+Shift+Enter` selects and focuses the Terminal tab, and pressing it again returns focus to the editor.
+- `Ctrl+Shift+Enter` selects and focuses the Terminal tab; from a focused docked terminal it collapses the right panel. For a detached terminal it first restores and raises an inactive window, while invoking it from the active detached window closes that window and reattaches the pane.
 - The first shell starts in the exact current vault root.
 - Existing `AGENTS.md` files are never overwritten.
 - Selecting another tab, collapsing the right panel, and pop-out/reattach preserve the active session.

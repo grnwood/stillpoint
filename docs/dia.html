@@ -5,6 +5,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>StillPoint Diagramming</title>
+    <meta name="description" content="Create vault-aware diagrams with fully integrated Excalidraw, PlantUML, and Mermaid workflows, plus optional AI assistance that understands each format." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -31,9 +32,9 @@
           <a href="dia.html">Diagramming</a>
           <a href="uses.html">Use Cases</a>
           <a href="remote-vaults.html">Homebase</a>
-          <a href="ai.html">AI Infused</a>
+          <a href="ai.html">AI &amp; Agents</a>
           <a href="howitcompares.html">Comparisons</a>
-          <a href="power.html">Power</a>
+          <a href="power.html">Knowledge IDE</a>
         </nav>
       </div>
     </header>
@@ -42,95 +43,158 @@
       <section class="hero reveal" style="--d: 0.05s">
         <div>
           <span class="pill">Diagramming</span>
-          <h1>Diagrams that live next to your notes.</h1>
+          <h1>Draw inside the workspace where your knowledge lives.</h1>
           <p>
-            StillPoint ships with AI-powered PlantUML and Mermaid workflows so you can sketch
-            systems, workflows, and architecture without leaving the vault.
+            StillPoint gives you three first-class ways to diagram: the visual freedom of
+            Excalidraw, the precision of PlantUML, and the approachable text syntax of Mermaid.
+            Each stays connected to the notes, projects, and decisions it explains. Draw manually,
+            add AI when it helps, or ignore diagramming entirely when words are enough.
           </p>
         </div>
-        <div>
-          <img src="img/puml-full.png" alt="Diagram workspace in StillPoint" />
-          <img src="img/mermaid.png" alt="Mermaid editor in StillPoint" />
+        <div class="image-stack">
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox="img/embedded-excal.png"
+            data-lightbox-caption="A fully embedded Excalidraw canvas running with StillPoint's active vault context and optional AI drawing assistance."
+          >
+            <img src="img/embedded-excal.png" alt="Embedded Excalidraw editor with optional AI assistance inside StillPoint" />
+          </button>
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox="img/puml-full.png"
+            data-lightbox-caption="The built-in PlantUML workspace keeps editable diagram source, rendered output, and vault context together."
+          >
+            <img src="img/puml-full.png" alt="PlantUML diagram workspace in StillPoint" />
+          </button>
+          <button
+            class="lightbox-trigger"
+            type="button"
+            data-lightbox="img/mermaid.png"
+            data-lightbox-caption="The built-in Mermaid editor keeps text-based diagrams beside the notes and decisions they explain."
+          >
+            <img src="img/mermaid.png" alt="Mermaid diagram editor in StillPoint" />
+          </button>
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.15s">
-        <div class="eyebrow">PlantUML + Mermaid built in</div>
-        <h2>Stay in flow while you map the system.</h2>
+        <div class="eyebrow">Three diagramming modes</div>
+        <h2>Choose the form that fits the thought.</h2>
         <p>
-          PlantUML and Mermaid diagrams live beside your notes, tasks, and decisions. That
-          means your architecture drawings evolve with the actual work, not in a separate
-          tool you forget to update.
+          Move between a hands-on canvas and diagrams-as-code without leaving StillPoint. These are
+          complementary tools, not tiers: use one consistently or choose differently for each idea.
         </p>
         <div class="grid">
           <div class="card">
-            <h3>Text-based and durable</h3>
-            <p>Both formats are plain text, so they diff cleanly and stay future-proof.</p>
-          </div>
-          <div class="card">
-            <h3>Linked to context</h3>
-            <p>Connect a diagram to the page, meeting, or decision that created it.</p>
-          </div>
-          <div class="card">
-            <h3>Fast revisions</h3>
-            <p>Update the diagram when the work changes, not weeks later.</p>
-          </div>
-          <div class="card">
-            <h3>Template library included</h3>
+            <h3>Excalidraw</h3>
             <p>
-              Prebuilt templates for every supported diagram type keep you in flow instead of
-              hunting for syntax docs.
+              Work in a fully embedded visual canvas with shapes, arrows, text, freehand drawing,
+              frames, images, zoom, and undo. StillPoint saves a native <code>.excalidraw</code>
+              scene plus a PNG preview.
+            </p>
+          </div>
+          <div class="card">
+            <h3>PlantUML</h3>
+            <p>
+              Describe architecture, sequences, components, states, and other formal structures in
+              durable text, with editable source and rendered output together.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Mermaid</h3>
+            <p>
+              Write readable flowcharts, sequences, mindmaps, timelines, and more in a concise
+              syntax that remains easy to revise alongside Markdown notes.
             </p>
           </div>
         </div>
       </section>
 
-      <section class="section split reveal" style="--d: 0.25s">
-        <div>
-          <div class="eyebrow">AI powered</div>
-          <h2>Describe it once, refine it quickly.</h2>
-          <p>
-            The AI assistant can draft PlantUML from a quick prompt, then you iterate with
-            edits and notes. You stay in the same workspace, keeping diagrams and writing
-            aligned.
-          </p>
-          <p>
-            You can also chat with the AI to adjust a diagram and get a clean diff of exactly
-            what changed before applying it.
-          </p>
-          <p class="quote">
-            Draw the idea, then capture the reasoning right next to it.
-          </p>
+      <section class="section reveal" style="--d: 0.25s">
+        <div class="eyebrow">Vault-aware by design</div>
+        <h2>The diagram stays with the knowledge around it.</h2>
+        <p>
+          Whichever format you choose, the source lives in your vault beside the notes it supports.
+          StillPoint keeps editing, rendering, previews, and related context in one workspace so a
+          drawing does not become an orphaned artifact in another service.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>Source you can keep</h3>
+            <p>Excalidraw scenes, PlantUML source, and Mermaid source remain editable files rather than locked exports.</p>
+          </div>
+          <div class="card">
+            <h3>Connected to context</h3>
+            <p>Keep diagrams beside a project or meeting. Excalidraw can also link individual canvas elements directly to pages in the active vault.</p>
+          </div>
+          <div class="card">
+            <h3>Manual by default</h3>
+            <p>Every diagramming mode works without AI. Open the assistant only when generation, revision, or analysis would actually help.</p>
+          </div>
         </div>
-        <div class="table-wrap">
+      </section>
+
+      <section class="section reveal" style="--d: 0.35s">
+        <div class="eyebrow">Optional AI assistance</div>
+        <h2>AI understands the format you chose.</h2>
+        <p>
+          Ask the selected model to create, explain, or revise a diagram. StillPoint supplies
+          format-specific instructions and the current source: native scene structure for
+          Excalidraw, PlantUML syntax for PlantUML, and Mermaid syntax for Mermaid. The result stays
+          editable in its original format, and you remain in control of whether to apply it.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>Excalidraw-aware</h3>
+            <p>Generate or revise native canvas elements, analyze the scene, and discuss a compact summary without flattening the drawing into an image.</p>
+          </div>
+          <div class="card">
+            <h3>PlantUML-aware</h3>
+            <p>Draft formal diagrams from a prompt, refine the text source, preview the rendering, and review a clean diff before applying changes.</p>
+          </div>
+          <div class="card">
+            <h3>Mermaid-aware</h3>
+            <p>Create or adjust Mermaid diagrams using syntax suited to the requested diagram type while keeping the source readable.</p>
+          </div>
+          <div class="card">
+            <h3>Optional and reviewable</h3>
+            <p>Choose your AI server and model, inspect changes, and leave AI disabled entirely when you prefer to draw or write the source yourself.</p>
+          </div>
+        </div>
+        <div class="table-wrap" style="margin-top: 24px;">
           <table>
             <thead>
               <tr>
-                <th>Prompt</th>
-                <th>Outcome</th>
+                <th>Mode</th>
+                <th>Example request</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>"Sequence for client onboarding"</td>
-                <td>Generates a clean sequence diagram scaffold.</td>
+                <td>Excalidraw</td>
+                <td>"Draw an ATM transaction as a swimlane workflow."</td>
               </tr>
               <tr>
-                <td>"Architecture for event pipeline"</td>
-                <td>Creates a component diagram with the main services.</td>
+                <td>PlantUML</td>
+                <td>"Create a component diagram for this event pipeline."</td>
               </tr>
               <tr>
-                <td>"Flow for support escalation"</td>
-                <td>Outputs a workflow diagram you can refine.</td>
+                <td>Mermaid</td>
+                <td>"Turn these support steps into a readable flowchart."</td>
               </tr>
             </tbody>
           </table>
         </div>
+        <p class="quote">
+          Draw the idea, then capture the reasoning right next to it.
+        </p>
       </section>
 
-      <section class="section split reveal" style="--d: 0.35s">
+      <section class="section split reveal" style="--d: 0.45s">
         <div>
-          <div class="eyebrow">Example snippet</div>
+          <div class="eyebrow">Text diagram examples</div>
           <h2>Readable by humans, renderable by StillPoint.</h2>
           <div class="card">
 <pre><code>@startuml

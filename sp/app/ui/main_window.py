@@ -2336,6 +2336,8 @@ class MainWindow(QMainWindow):
         self._remote_vault_ref_path: Optional[str] = None
         self._app_state_changed_slot = None
         def _log_request(request):
+            if request.url.path == "/api/excalidraw/open-page/next":
+                return
             request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -2344,6 +2346,8 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
+            if response.request.url.path == "/api/excalidraw/open-page/next":
+                return
             started = response.request.extensions.get("sp_request_started_at")
             on_ui_thread = QThread.currentThread() == self.thread()
             if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
@@ -3166,7 +3170,7 @@ class MainWindow(QMainWindow):
         )
         self._action_terminal.setShortcutContext(Qt.ApplicationShortcut)
         self._action_terminal.setToolTip(
-            "Toggle focus between the embedded terminal and editor (Ctrl+Shift+Enter)"
+            "Toggle the embedded terminal (Ctrl+Shift+Enter)"
         )
         self._action_terminal.triggered.connect(self._toggle_terminal_tab)
         view_menu.addAction(self._action_terminal)
@@ -5907,9 +5911,31 @@ class MainWindow(QMainWindow):
         if self.right_panel.tabs.widget(index) is not self._terminal_pane:
             self._terminal_previous_tab_index = index
 
+    def _terminal_has_focus(self) -> bool:
+        focused = QApplication.focusWidget()
+        return bool(
+            focused
+            and (
+                focused is self._terminal_pane
+                or self._terminal_pane.isAncestorOf(focused)
+            )
+        )
+
+    @staticmethod
+    def _terminal_detached_has_focus(window: QMainWindow) -> bool:
+        """Return whether the detached terminal is the application's active window."""
+        try:
+            return bool(window.isActiveWindow() or QApplication.activeWindow() is window)
+        except RuntimeError:
+            return False
+
     def _toggle_terminal_tab(self) -> None:
         detached = getattr(self, "_terminal_detached_window", None)
-        if detached is not None and detached.isVisible():
+        if detached is not None:
+            if self._terminal_detached_has_focus(detached):
+                detached.close()
+                return
+            detached.showNormal()
             detached.raise_()
             detached.activateWindow()
             self._terminal_pane.focus_terminal()
@@ -5917,7 +5943,12 @@ class MainWindow(QMainWindow):
         terminal_index = self.right_panel.tabs.indexOf(self._terminal_pane)
         if terminal_index < 0:
             return
-        if self._is_right_panel_expanded() and self.right_panel.tabs.currentIndex() == terminal_index:
+        if (
+            self._is_right_panel_expanded()
+            and self.right_panel.tabs.currentIndex() == terminal_index
+            and self._terminal_has_focus()
+        ):
+            self._set_right_panel_collapsed(True)
             self.editor.setFocus(Qt.ShortcutFocusReason)
             return
         # Switching an already-visible right panel to Terminal must preserve
@@ -5993,6 +6024,7 @@ class MainWindow(QMainWindow):
         window.setCentralWidget(self._terminal_pane)
         window.resize(920, 620)
         self._prepare_top_level_window(window)
+        self._apply_geometry_persistence(window, "terminal_window")
         self._register_detached_panel(window)
         self._terminal_detached_window = window
         self._refresh_right_minibar_tabs()
@@ -8909,6 +8941,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         def _log_request(request):
+            if request.url.path == "/api/excalidraw/open-page/next":
+                return
             request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -8917,6 +8951,8 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
+            if response.request.url.path == "/api/excalidraw/open-page/next":
+                return
             started = response.request.extensions.get("sp_request_started_at")
             on_ui_thread = QThread.currentThread() == self.thread()
             if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
@@ -17540,8 +17576,14 @@ class MainWindow(QMainWindow):
                 target.installEventFilter(self)
 
             def eventFilter(self, obj, event):
-                if obj is self._target and event.type() in (QEvent.Resize, QEvent.Move, QEvent.Close):
-                    self._timer.start()
+                if obj is self._target:
+                    if event.type() == QEvent.Close:
+                        # WA_DeleteOnClose can destroy this timer before a
+                        # delayed save fires, so persist final geometry now.
+                        self._timer.stop()
+                        self._save()
+                    elif event.type() in (QEvent.Resize, QEvent.Move):
+                        self._timer.start()
                 return super().eventFilter(obj, event)
 
             def _save(self) -> None:
@@ -17780,6 +17822,7 @@ class MainWindow(QMainWindow):
                 self._alert("Excalidraw editor can only open .excalidraw files.")
                 return
             query = f"path={quote(rel_path, safe='')}"
+            query += f"&window_id={quote(self._remote_context_id, safe='')}"
             if self._local_auth_token:
                 query += f"&token={quote(self._local_auth_token, safe='')}"
             filter_path = getattr(self, "_nav_filter_path", None)
@@ -17882,6 +17925,15 @@ class MainWindow(QMainWindow):
     def _poll_excalidraw_open_page_request(self) -> None:
         if self._remote_mode or not self.http:
             return
+        processes = getattr(self, "_excalidraw_processes", None)
+        if processes is not None:
+            alive = [process for process in processes if process.poll() is None]
+            self._excalidraw_processes = alive
+            if not alive:
+                timer = getattr(self, "_excalidraw_open_page_timer", None)
+                if timer is not None:
+                    timer.stop()
+                return
         try:
             resp = self.http.get("/api/excalidraw/open-page/next")
             resp.raise_for_status()
@@ -19543,6 +19595,16 @@ class MainWindow(QMainWindow):
         self._apply_focus_borders()
 
     def _apply_focus_borders(self) -> None:
+        """Apply focus styling once, ignoring focus signals caused by styling."""
+        if getattr(self, "_applying_focus_borders", False):
+            return
+        self._applying_focus_borders = True
+        try:
+            self._apply_focus_borders_now()
+        finally:
+            self._applying_focus_borders = False
+
+    def _apply_focus_borders_now(self) -> None:
         """Apply a subtle border around the widget that currently has focus."""
         try:
             if getattr(self, '_suppress_focus_borders', False):

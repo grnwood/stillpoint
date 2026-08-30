@@ -167,6 +167,25 @@ def test_terminal_frontend_routes_keyboard_and_mouse_zoom_to_python() -> None:
     assert "bridge.adjustFontSize" in javascript
     assert 'event.key.toLowerCase() === "t"' in javascript
     assert "bridge.requestNewTerminal" in javascript
+    assert "linkHandler" in javascript
+    assert "bridge.openExternalUrl(uri)" in javascript
+
+
+def test_terminal_external_links_are_limited_to_http_and_https(qtbot) -> None:
+    from sp.app.ui.terminal_pane import TerminalBridge, safe_terminal_external_url
+
+    assert safe_terminal_external_url("https://example.com/path").toString() == "https://example.com/path"
+    assert safe_terminal_external_url("http://localhost:8000/") is not None
+    assert safe_terminal_external_url("javascript:alert(1)") is None
+    assert safe_terminal_external_url("file:///tmp/private") is None
+    assert safe_terminal_external_url("stillpoint://page/Notes") is None
+
+    bridge = TerminalBridge()
+    emitted: list[str] = []
+    bridge.externalUrlRequested.connect(emitted.append)
+    bridge.openExternalUrl("https://example.com/docs")
+    bridge.openExternalUrl("file:///tmp/private")
+    assert emitted == ["https://example.com/docs"]
 
 
 def test_terminal_shortcut_request_creates_and_focuses_new_session(qtbot, tmp_path, monkeypatch) -> None:
@@ -234,6 +253,52 @@ def test_terminal_toggle_preserves_visible_right_panel_width(main_window, monkey
 
     assert main_window.right_panel.tabs.currentWidget() is pane
     assert main_window.editor_split.sizes() == original_sizes
+
+
+def test_terminal_shortcut_collapses_focused_docked_terminal(main_window, monkeypatch) -> None:
+    pane = main_window._terminal_pane
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(main_window, "_terminal_has_focus", lambda: True)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: None)
+    main_window._set_right_panel_collapsed(False)
+    main_window.right_panel.tabs.setCurrentWidget(pane)
+
+    main_window._toggle_terminal_tab()
+
+    assert main_window._is_right_panel_expanded() is False
+    assert main_window.right_panel.tabs.currentWidget() is pane
+
+
+def test_terminal_shortcut_focuses_selected_terminal_before_collapsing(main_window, monkeypatch) -> None:
+    pane = main_window._terminal_pane
+    focused: list[bool] = []
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(main_window, "_terminal_has_focus", lambda: False)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: focused.append(True))
+    main_window._set_right_panel_collapsed(False)
+    main_window.right_panel.tabs.setCurrentWidget(pane)
+
+    main_window._toggle_terminal_tab()
+
+    assert main_window._is_right_panel_expanded() is True
+    assert focused
+
+
+def test_focus_border_styling_ignores_reentrant_focus_signal(main_window, monkeypatch) -> None:
+    applications: list[str] = []
+
+    def reentrant_style(style: str) -> None:
+        applications.append(style)
+        main_window._apply_focus_borders()
+
+    monkeypatch.setattr(main_window.right_panel.tabs, "setStyleSheet", reentrant_style)
+
+    main_window._apply_focus_borders()
+
+    assert len(applications) == 1
+    assert main_window._applying_focus_borders is False
 
 
 def test_terminal_dropdown_switches_the_visible_active_terminal(main_window, monkeypatch) -> None:
@@ -378,6 +443,88 @@ def test_terminal_popout_moves_and_reattaches_same_panel(main_window, monkeypatc
     QApplication.processEvents()
     assert main_window.right_panel.tabs.indexOf(pane) == original_index
     assert main_window._terminal_detached_window is None
+
+
+def test_terminal_popout_restores_and_saves_window_geometry(main_window, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMainWindow
+
+    pane = main_window._terminal_pane
+    reference = QMainWindow()
+    reference.resize(600, 450)
+    reference.move(83, 97)
+    geometry = reference.saveGeometry().toBase64().data().decode("ascii")
+    saved: list[tuple[str, str]] = []
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: None)
+    monkeypatch.setattr(
+        config,
+        "load_dialog_geometry",
+        lambda key: geometry if key == "terminal_window" else None,
+    )
+    monkeypatch.setattr(config, "save_dialog_geometry", lambda key, value: saved.append((key, value)))
+
+    main_window._open_terminal_window()
+    window = main_window._terminal_detached_window
+    assert window is not None
+    assert window.size() == reference.size()
+    # Window managers may translate saved client coordinates by the frame
+    # border while preserving the requested screen location.
+    assert (window.pos() - reference.pos()).manhattanLength() <= 4
+
+    window.move(121, 143)
+    window.resize(811, 577)
+    final_geometry = window.saveGeometry().toBase64().data().decode("ascii")
+    window.close()
+    QApplication.processEvents()
+
+    assert saved[-1] == ("terminal_window", final_geometry)
+    reference.close()
+
+
+def test_terminal_shortcut_closes_detached_window_and_reattaches(main_window, monkeypatch) -> None:
+    pane = main_window._terminal_pane
+    original_index = main_window.right_panel.tabs.indexOf(pane)
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(main_window, "_terminal_detached_has_focus", lambda _window: True)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: None)
+    main_window._open_terminal_window()
+    window = main_window._terminal_detached_window
+    assert window is not None and window.isVisible()
+
+    main_window._toggle_terminal_tab()
+    QApplication.processEvents()
+
+    assert main_window._terminal_detached_window is None
+    assert main_window.right_panel.tabs.indexOf(pane) == original_index
+
+
+def test_terminal_shortcut_restores_inactive_detached_window(main_window, monkeypatch) -> None:
+    pane = main_window._terminal_pane
+    focused: list[bool] = []
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: focused.append(True))
+    main_window._open_terminal_window()
+    window = main_window._terminal_detached_window
+    assert window is not None
+    focused.clear()
+    window.showMinimized()
+    QApplication.processEvents()
+    monkeypatch.setattr(main_window, "_terminal_detached_has_focus", lambda _window: False)
+
+    main_window._toggle_terminal_tab()
+    QApplication.processEvents()
+
+    assert main_window._terminal_detached_window is window
+    assert main_window.right_panel.tabs.indexOf(pane) == -1
+    assert window.isVisible()
+    assert not window.isMinimized()
+    assert focused
+
+    window.close()
+    QApplication.processEvents()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX PTY test")

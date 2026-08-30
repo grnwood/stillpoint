@@ -20,6 +20,14 @@ from .theme import theme_value
 from .webengine_env import configure_linux_webengine_env
 
 
+def safe_terminal_external_url(raw_url: str) -> Optional[QtCore.QUrl]:
+    """Return a browser-safe terminal hyperlink, rejecting local/custom schemes."""
+    url = QtCore.QUrl(str(raw_url or "").strip())
+    if not url.isValid() or url.scheme().casefold() not in {"http", "https"} or not url.host():
+        return None
+    return url
+
+
 def terminal_theme_from_palette(palette: QtGui.QPalette) -> dict[str, str]:
     """Build a readable xterm theme from StillPoint's active Qt palette."""
     background = palette.color(QtGui.QPalette.ColorRole.Base)
@@ -99,6 +107,7 @@ class TerminalBridge(QtCore.QObject):
     resized = QtCore.Signal(int, int)
     fontSizeAdjustmentRequested = QtCore.Signal(int)
     newTerminalRequested = QtCore.Signal()
+    externalUrlRequested = QtCore.Signal(str)
 
     @QtCore.Slot(int, int)
     def ready(self, columns: int, rows: int) -> None:
@@ -131,6 +140,11 @@ class TerminalBridge(QtCore.QObject):
     @QtCore.Slot()
     def requestNewTerminal(self) -> None:
         self.newTerminalRequested.emit()
+
+    @QtCore.Slot(str)
+    def openExternalUrl(self, url: str) -> None:
+        if safe_terminal_external_url(url) is not None:
+            self.externalUrlRequested.emit(url)
 
 
 class TerminalSessionPane(QtWidgets.QWidget):
@@ -458,6 +472,7 @@ class TerminalSessionPane(QtWidgets.QWidget):
         bridge.resized.connect(self._on_resize)
         bridge.fontSizeAdjustmentRequested.connect(self._adjust_font_size)
         bridge.newTerminalRequested.connect(self.newTerminalRequested)
+        bridge.externalUrlRequested.connect(self._open_external_url)
         channel = QWebChannel(page)
         channel.registerObject("terminalBridge", bridge)
         page.setWebChannel(channel)
@@ -488,6 +503,15 @@ class TerminalSessionPane(QtWidgets.QWidget):
         query.addQueryItem("options", json.dumps(self._frontend_options, separators=(",", ":")))
         terminal_url.setQuery(query)
         view.setUrl(terminal_url)
+
+    def _open_external_url(self, raw_url: str) -> None:
+        url = safe_terminal_external_url(raw_url)
+        if url is None:
+            return
+        # Leave the WebChannel callback before handing focus to another
+        # application. Opening synchronously from WebEngine can re-enter Qt's
+        # focus/style machinery on Linux.
+        QtCore.QTimer.singleShot(0, lambda target=QtCore.QUrl(url): QtGui.QDesktopServices.openUrl(target))
 
     def _on_frontend_loaded(self, ok: bool) -> None:
         if not ok:

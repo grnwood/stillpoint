@@ -56,7 +56,7 @@ These shortcuts will speed up your workflow:
 - `Shift+Enter` (task selected in Tasks or Calendar task list): Open task target and keep focus in the task list
 
 ### Panels
-- `Ctrl+Shift+Enter`: Select and focus the right-panel Terminal tab; press again to return focus to the editor
+- `Ctrl+Shift+Enter`: Reveal and focus Terminal; collapse a focused docked terminal; restore an inactive or minimized detached terminal; close and reattach an already-active detached terminal
 - `Ctrl+Shift+T`: Open and focus a new terminal when the Terminal surface has focus
 - `Ctrl+Shift+Space`: Cycle focus between panels
 - `F11`: Toggle fullscreen

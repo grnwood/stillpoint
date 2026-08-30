@@ -1341,6 +1341,11 @@ app.add_middleware(
 @app.middleware("http")
 async def bind_vault_context(request: Request, call_next):
     session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
+    if not session_id and request.url.path == "/excalidraw/edit":
+        # The initial WebEngine navigation cannot attach custom headers. Carry
+        # the owning StillPoint window id in the editor URL, then let the
+        # Excalidraw client send it as a header on subsequent API requests.
+        session_id = str(request.query_params.get("window_id") or "").strip()
     vault_token = None
     config_token = None
     if session_id:
