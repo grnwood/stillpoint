@@ -20,6 +20,7 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 
 from sp.app import config
 from sp.app import eventloop_diag
+from sp.app.resources import resource_candidates
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
@@ -63,31 +64,8 @@ def _debug_enabled(var_name: str) -> bool:
 
 
 def _resource_candidates(rel_path: str) -> list[str]:
-    """Return likely absolute paths for a bundled resource.
-
-    Handles PyInstaller onedir/onefile via sys._MEIPASS, alongside the
-    executable, and package-relative source layout. The first existing
-    path from this list should be used.
-    """
-    candidates: list[str] = []
-    # PyInstaller staging directory (onefile and onedir)
-    base = getattr(sys, "_MEIPASS", None)
-    if base:
-        candidates.append(os.path.join(base, rel_path))
-        # Some PyInstaller layouts stage package data under _internal
-        candidates.append(os.path.join(base, "_internal", rel_path))
-    # Next to the executable (dist root)
-    try:
-        exe_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
-        candidates.append(os.path.join(exe_dir, rel_path))
-        candidates.append(os.path.join(exe_dir, "_internal", rel_path))
-    except Exception:
-        pass
-    # Package-relative (developer mode)
-    pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    candidates.append(os.path.join(pkg_root, rel_path))
-    candidates.append(os.path.join(pkg_root, "sp", rel_path))
-    return candidates
+    """Return likely absolute paths for a bundled or source-tree resource."""
+    return resource_candidates(rel_path)
 
 
 def _set_windows_app_id() -> None:

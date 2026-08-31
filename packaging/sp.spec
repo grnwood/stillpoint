@@ -71,7 +71,8 @@ hidden = (
 _charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normalizer')
 hidden += _charset_hidden
 if sys.platform == 'win32':
-    hidden += collect_submodules('winpty')
+    _winpty_datas, _winpty_binaries, _winpty_hidden = collect_all('winpty')
+    hidden += _winpty_hidden
 
 STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION','0.99')
 
@@ -136,6 +137,9 @@ _assets_dir = os.path.join(ROOT, 'sp', 'assets')
 datas = _datas
 datas += _charset_datas
 binaries = _charset_binaries
+if sys.platform == 'win32':
+    datas += _winpty_datas
+    binaries += _winpty_binaries
 
 block_cipher = None
 

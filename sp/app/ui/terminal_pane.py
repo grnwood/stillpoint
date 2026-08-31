@@ -16,6 +16,7 @@ from sp.app.terminal_session import (
     create_terminal_session,
     default_shell_command,
 )
+from sp.app.resources import resource_candidates
 from .theme import theme_value
 from .webengine_env import configure_linux_webengine_env
 
@@ -357,7 +358,12 @@ class TerminalSessionPane(QtWidgets.QWidget):
 
     @staticmethod
     def _asset_directory() -> Path:
-        return Path(__file__).resolve().parents[2] / "assets" / "terminal"
+        for relative in ("sp/assets/terminal", "assets/terminal"):
+            for candidate in resource_candidates(relative):
+                asset_directory = Path(candidate)
+                if (asset_directory / "terminal.html").is_file():
+                    return asset_directory
+        return Path(resource_candidates("sp/assets/terminal")[0])
 
     def _settings(self) -> dict[str, object]:
         try:

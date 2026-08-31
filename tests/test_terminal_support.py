@@ -99,6 +99,17 @@ def test_terminal_pane_is_still_lazy_when_merely_shown(qtbot, tmp_path) -> None:
     assert pane.session_running is False
 
 
+def test_terminal_assets_resolve_from_pyinstaller_internal_layout(tmp_path, monkeypatch) -> None:
+    from sp.app.ui.terminal_pane import TerminalSessionPane
+
+    asset_dir = tmp_path / "_internal" / "sp" / "assets" / "terminal"
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "terminal.html").write_text("<!doctype html>", encoding="utf-8")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    assert TerminalSessionPane._asset_directory() == asset_dir
+
+
 def test_vault_agent_seeding_adds_missing_client_configs_without_secrets(
     main_window, tmp_path, monkeypatch
 ) -> None:
