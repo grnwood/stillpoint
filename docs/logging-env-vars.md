@@ -35,6 +35,14 @@ Set any area to `1` / `true` to enable, `0` / `false` to disable.
 - `SP_LOG_TERMINAL`
 - `SP_LOG_ALL`
 
+## Startup Feature Flags
+
+- `SP_DISABLE_TERMINAL=1` completely bypasses the embedded-terminal integration
+  for the current application process. No terminal pane, terminal menu items or
+  shortcuts, terminal diagnostics, terminal session backend, or terminal WebEngine
+  components are imported or initialized. Use it to compare large-vault performance
+  against a terminal-free startup.
+
 ## Recommended Quiet Defaults
 
 Leave all `SP_LOG_*` flags unset for normal usage. This keeps stdout focused on:

@@ -20,11 +20,11 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 
 from sp.app import config
 from sp.app import eventloop_diag
+from sp.app.feature_flags import terminal_integration_enabled
 from sp.app.resources import resource_candidates
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
-from sp.app.ui.terminal_pane import terminal_component_versions
 from sp.app.ui.webengine_env import configure_linux_webengine_env
 
 
@@ -911,8 +911,13 @@ def main() -> None:
     start_ts = time.time()
     _enable_faulthandler_log()
     _sp("Application starting.")
-    components = terminal_component_versions()
-    _sp("Terminal components: " + ", ".join(f"{name}={value}" for name, value in components.items()))
+    if terminal_integration_enabled():
+        from sp.app.ui.terminal_pane import terminal_component_versions
+
+        components = terminal_component_versions()
+        _sp("Terminal components: " + ", ".join(f"{name}={value}" for name, value in components.items()))
+    else:
+        _sp("Embedded terminal disabled by SP_DISABLE_TERMINAL.")
     config.init_settings()
     _ensure_user_template_files()
     _maybe_use_minimal_fonts()

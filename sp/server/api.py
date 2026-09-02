@@ -1717,11 +1717,10 @@ def auth_print_token(
     user: AuthModels.UserInfo = Depends(get_current_user),
 ) -> dict:
     """Issue a short-lived token for browser print access."""
-    if not AUTH_ENABLED:
-        return {"token": None, "expires_in": 0}
+    root = _get_vault_root()
     ttl = int(payload.ttl_seconds or 900)
     token = _create_token(
-        {"sub": user.username, "scope": "print"},
+        {"sub": user.username, "scope": "print", "vault_root": str(root)},
         timedelta(seconds=ttl),
     )
     return {"token": token, "expires_in": ttl}
@@ -4213,7 +4212,7 @@ async def print_page(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> HTMLResponse:
     await _require_print_user(request, token, credentials)
-    root = _get_vault_root()
+    root = _get_print_vault_root(token)
     if mode == "page":
         page_file = _resolve_page_file_for_print(root, path)
         html_body = _render_single_page_html(
@@ -4253,7 +4252,7 @@ async def print_css(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Response:
     await _require_print_user(request, token, credentials)
-    root = _get_vault_root()
+    root = _get_print_vault_root(token)
     css = _load_print_css(root)
     return Response(content=css, media_type="text/css")
 
@@ -4266,7 +4265,7 @@ async def asset_file(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> FileResponse:
     await _require_print_user(request, token, credentials)
-    root = _get_vault_root()
+    root = _get_print_vault_root(token)
     raw = (path or "").strip()
     root_resolved = root.resolve()
     normalized = raw
@@ -5871,13 +5870,18 @@ def _print_css_url(token: Optional[str]) -> str:
     return "/print.css"
 
 
-def _verify_print_token(token: str) -> AuthModels.UserInfo:
+def _decode_print_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid print token") from exc
     if payload.get("scope") != "print":
         raise HTTPException(status_code=401, detail="Invalid print token scope")
+    return payload
+
+
+def _verify_print_token(token: str) -> AuthModels.UserInfo:
+    payload = _decode_print_token(token)
     username = payload.get("sub") or "print"
     return AuthModels.UserInfo(username=username, is_admin=True)
 
@@ -6459,6 +6463,23 @@ def _get_vault_root() -> Path:
         return vault_state.get_root()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _get_print_vault_root(token: Optional[str]) -> Path:
+    """Resolve the vault captured in a signed browser-print token."""
+    if not token:
+        return _get_vault_root()
+    payload = _decode_print_token(token)
+    raw_root = str(payload.get("vault_root") or "").strip()
+    if not raw_root:
+        return _get_vault_root()
+    try:
+        root = Path(raw_root).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail="Print vault is unavailable") from exc
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Print vault is unavailable")
+    return root
 
 
 def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_ops: bool) -> str:

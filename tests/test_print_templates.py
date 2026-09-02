@@ -74,3 +74,14 @@ def test_print_css_contains_checkbox_and_underline_styles() -> None:
         assert "md-checkbox--checked::after" in css
         assert "mark" in css
         assert "text-decoration: underline" in css
+
+
+def test_print_token_resolves_its_captured_vault_without_request_context(tmp_path: Path) -> None:
+    from sp.server import api
+
+    token = api._create_token(
+        {"sub": "print-test", "scope": "print", "vault_root": str(tmp_path)},
+        api.timedelta(minutes=1),
+    )
+
+    assert api._get_print_vault_root(token) == tmp_path.resolve()

@@ -979,8 +979,10 @@ from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
 from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
-from .terminal_pane import TerminalPane
-from sp.app.terminal_session import parse_shell_command
+from sp.app.feature_flags import terminal_integration_enabled
+if terminal_integration_enabled():
+    from .terminal_pane import TerminalPane
+    from sp.app.terminal_session import parse_shell_command
 from sp.app.capture_triage import list_quick_capture_chunks, process_quick_capture_chunk
 from sp.app.task_mutations import undo_file_mutation
 
@@ -3034,7 +3036,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.history_bar)
         layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(container)
-        self._build_terminal_tab()
+        self._terminal_integration_enabled = terminal_integration_enabled()
+        if self._terminal_integration_enabled:
+            self._build_terminal_tab()
         self._position_toc_widget()
 
         # No overlay/indicator widgets; vi-mode is represented by editor cursor style
@@ -3064,10 +3068,11 @@ class MainWindow(QMainWindow):
         self._action_reorganize_vault.setEnabled(False)
         self._action_reorganize_vault.triggered.connect(self._open_vault_reorganization)
         vault_menu.addAction(self._action_reorganize_vault)
-        self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
-        self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
-        self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
-        vault_menu.addAction(self._action_open_vault_terminal)
+        if self._terminal_integration_enabled:
+            self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
+            self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
+            self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
+            vault_menu.addAction(self._action_open_vault_terminal)
         self._action_convert_vault_to_homebase = QAction("Convert This Vault to Homebase...", self)
         self._action_convert_vault_to_homebase.setToolTip(
             "Connect this local vault to Homebase and start syncing it"
@@ -3162,19 +3167,20 @@ class MainWindow(QMainWindow):
         file_menu.addAction(delete_page_action)
         self._build_format_menu()
         view_menu = self.menuBar().addMenu("&View")
-        self._action_terminal = QAction("Terminal", self)
-        self._action_terminal.setShortcuts(
-            [
-                QKeySequence("Ctrl+Shift+Return"),
-                QKeySequence("Ctrl+Shift+Enter"),
-            ]
-        )
-        self._action_terminal.setShortcutContext(Qt.ApplicationShortcut)
-        self._action_terminal.setToolTip(
-            "Toggle the embedded terminal (Ctrl+Shift+Enter)"
-        )
-        self._action_terminal.triggered.connect(self._toggle_terminal_tab)
-        view_menu.addAction(self._action_terminal)
+        if self._terminal_integration_enabled:
+            self._action_terminal = QAction("Terminal", self)
+            self._action_terminal.setShortcuts(
+                [
+                    QKeySequence("Ctrl+Shift+Return"),
+                    QKeySequence("Ctrl+Shift+Enter"),
+                ]
+            )
+            self._action_terminal.setShortcutContext(Qt.ApplicationShortcut)
+            self._action_terminal.setToolTip(
+                "Toggle the embedded terminal (Ctrl+Shift+Enter)"
+            )
+            self._action_terminal.triggered.connect(self._toggle_terminal_tab)
+            view_menu.addAction(self._action_terminal)
         view_menu.addSeparator()
         view_mode_menu = view_menu.addMenu("View...")
         self._action_focus_mode = QAction("Focus Mode", self)
@@ -3210,12 +3216,13 @@ class MainWindow(QMainWindow):
         ai_window_action = QAction("Open AI Chat Window", self)
         ai_window_action.triggered.connect(self._open_ai_chat_window)
         view_menu.addAction(ai_window_action)
-        self._action_terminal_window = QAction("Open Terminal Window", self)
-        self._action_terminal_window.setToolTip(
-            "Move the complete embedded terminal workspace into a separate window"
-        )
-        self._action_terminal_window.triggered.connect(self._open_terminal_window)
-        view_menu.addAction(self._action_terminal_window)
+        if self._terminal_integration_enabled:
+            self._action_terminal_window = QAction("Open Terminal Window", self)
+            self._action_terminal_window.setToolTip(
+                "Move the complete embedded terminal workspace into a separate window"
+            )
+            self._action_terminal_window.triggered.connect(self._open_terminal_window)
+            view_menu.addAction(self._action_terminal_window)
         tools_menu = self.menuBar().addMenu("&Tools")
         rebuild_index_action = QAction("Rebuild Vault Index", self)
         rebuild_index_action.setToolTip("Rebuild the vault database from disk (keeps bookmarks/kv/ai tables)")
@@ -3254,7 +3261,6 @@ class MainWindow(QMainWindow):
         self._action_tooltips = {
             self._action_new_vault: self._action_new_vault.toolTip(),
             self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
-            self._action_open_vault_terminal: self._action_open_vault_terminal.toolTip(),
             self._action_zim_import: self._action_zim_import.toolTip(),
             self._action_rebuild_index: self._action_rebuild_index.toolTip(),
             self._action_rebuild_search_index: self._action_rebuild_search_index.toolTip(),
@@ -3266,6 +3272,8 @@ class MainWindow(QMainWindow):
             self._action_homebase_sync_now: self._action_homebase_sync_now.toolTip(),
             self._action_homebase_reset_sync: self._action_homebase_reset_sync.toolTip(),
         }
+        if self._terminal_integration_enabled:
+            self._action_tooltips[self._action_open_vault_terminal] = self._action_open_vault_terminal.toolTip()
         self._apply_remote_mode_ui()
         self._setup_tray_icon()
         self._register_quick_capture_hook()
@@ -3320,11 +3328,12 @@ class MainWindow(QMainWindow):
         ai_action.triggered.connect(self._focus_current_ai_chat)
         go_menu.addAction(ai_action)
 
-        self._action_go_terminal = QAction("Terminal", self)
-        self._action_go_terminal.setToolTip("Select and focus the active embedded terminal")
-        self._action_go_terminal.setEnabled(self._action_terminal.isEnabled())
-        self._action_go_terminal.triggered.connect(self._focus_terminal_tab)
-        go_menu.addAction(self._action_go_terminal)
+        if self._terminal_integration_enabled:
+            self._action_go_terminal = QAction("Terminal", self)
+            self._action_go_terminal.setToolTip("Select and focus the active embedded terminal")
+            self._action_go_terminal.setEnabled(self._action_terminal.isEnabled())
+            self._action_go_terminal.triggered.connect(self._focus_terminal_tab)
+            go_menu.addAction(self._action_go_terminal)
 
         jump_action = QAction("Jump To Page… (Ctrl+J)", self)
         jump_action.setToolTip("Jump to a page (Ctrl+J)")
@@ -3593,7 +3602,7 @@ class MainWindow(QMainWindow):
     def _setup_eventloop_watchdog(self) -> None:
         """Log when the Qt event loop appears stalled (high timer drift)."""
         diag_enabled = eventloop_diag.enabled()
-        terminal_diag_enabled = log_enabled("terminal")
+        terminal_diag_enabled = self._terminal_integration_enabled and log_enabled("terminal")
         if not PAGE_LOGGING_ENABLED and not diag_enabled and not terminal_diag_enabled:
             return
         try:
@@ -5663,15 +5672,16 @@ class MainWindow(QMainWindow):
             else:
                 action.setEnabled(True)
                 action.setToolTip(self._action_tooltips.get(action, label))
-        self._action_open_vault_terminal.setText("Open Vault in Terminal")
         terminal_available = bool(self.vault_root) and not self._remote_mode
-        self._action_open_vault_terminal.setEnabled(terminal_available)
-        self._action_open_vault_terminal.setToolTip(
-            self._action_tooltips.get(
-                self._action_open_vault_terminal,
-                "Open the current local vault in your system terminal",
+        if hasattr(self, "_action_open_vault_terminal"):
+            self._action_open_vault_terminal.setText("Open Vault in Terminal")
+            self._action_open_vault_terminal.setEnabled(terminal_available)
+            self._action_open_vault_terminal.setToolTip(
+                self._action_tooltips.get(
+                    self._action_open_vault_terminal,
+                    "Open the current local vault in your system terminal",
+                )
             )
-        )
         if hasattr(self, "_action_terminal"):
             self._action_terminal.setEnabled(terminal_available)
         if hasattr(self, "_action_go_terminal"):
@@ -23531,13 +23541,6 @@ class MainWindow(QMainWindow):
         }
 
     def _get_print_token(self) -> Optional[str]:
-        try:
-            status = self.http.get("/auth/status")
-            if status.is_success and not status.json().get("enabled"):
-                return None
-        except Exception:
-            return None
-
         resp = self.http.post("/auth/print-token", json={"ttl_seconds": 900})
         if not resp.is_success:
             detail = "Failed to request print token."
@@ -24045,7 +24048,9 @@ class MainWindow(QMainWindow):
             detached_terminal = getattr(self, "_terminal_detached_window", None)
             if detached_terminal is not None:
                 detached_terminal.close()
-            self._terminal_pane.shutdown()
+            pane = getattr(self, "_terminal_pane", None)
+            if pane is not None:
+                pane.shutdown()
         except Exception:
             pass
         self._shutdown_homebase_sync()
