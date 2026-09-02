@@ -14,7 +14,9 @@ To install StillPoint with Start Menu and Desktop shortcuts:
 3. Follow the prompts
 
 The installer will:
-  ✓ Copy StillPoint to your user AppData folder
+  ✓ Copy StillPoint to %LOCALAPPDATA%\Programs\StillPoint
+  ✓ Fully replace older application binaries during upgrades
+  ✓ Remove obsolete StillPoint install locations and shortcuts
   ✓ Create a Start Menu entry
   ✓ Create a Desktop shortcut
   ✓ No admin rights required
@@ -48,6 +50,18 @@ UNINSTALL
 To uninstall:
 1. Delete: %LOCALAPPDATA%\Programs\StillPoint
 2. Remove shortcuts from Start Menu and Desktop
+
+UPGRADING AN OLDER INSTALL
+--------------------------
+
+The installer and PowerShell helper now share one install location. During the
+first upgrade they remove the older %LOCALAPPDATA%\StillPoint application
+directory and shortcuts that target it. Your vaults and preferences are stored
+outside the application directory and are preserved.
+
+Windows taskbar pins contain the old executable path. If an obsolete pin is
+found during migration, it is removed; pin the new StillPoint Start Menu entry
+again after installation.
 
 TROUBLESHOOTING
 ---------------

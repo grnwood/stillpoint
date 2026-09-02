@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.requests import Request
 from PySide6 import QtGui
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from sp.app import config
 from sp.app.mcp_bridge import ensure_bridge_launcher
@@ -110,6 +110,53 @@ def test_terminal_assets_resolve_from_pyinstaller_internal_layout(tmp_path, monk
     assert TerminalSessionPane._asset_directory() == asset_dir
 
 
+def test_terminal_manager_reuses_and_stops_one_vault_observer(qtbot, tmp_path) -> None:
+    from sp.app.ui.terminal_pane import TerminalPane
+
+    pane = TerminalPane(vault_root_provider=lambda: tmp_path, seed_agents=lambda _root: None)
+    qtbot.addWidget(pane)
+
+    pane._start_vault_observer(tmp_path.resolve())
+    observer = pane._vault_observer
+    assert observer is not None
+
+    pane._start_vault_observer(tmp_path.resolve())
+    assert pane._vault_observer is observer
+
+    pane._on_child_stopped()
+    assert pane._vault_observer is None
+    assert pane._vault_observer_root is None
+
+
+def test_terminal_component_manifest_reports_vendored_versions() -> None:
+    from sp.app.ui.terminal_pane import terminal_component_versions
+
+    versions = terminal_component_versions()
+
+    assert versions["xterm"] == "5.3.0"
+    assert versions["xterm-addon-fit"] == "0.8.0"
+    assert versions["pyside6"] != "unknown"
+    assert versions["watchdog"] != "unknown"
+
+
+def test_terminal_diagnostics_include_process_and_flow_state(qtbot, tmp_path, monkeypatch, capsys) -> None:
+    from sp.app.ui.terminal_pane import TerminalPane
+
+    monkeypatch.setenv("SP_LOG_TERMINAL", "1")
+    pane = TerminalPane(vault_root_provider=lambda: tmp_path, seed_agents=lambda _root: None)
+    qtbot.addWidget(pane)
+
+    pane.log_diagnostics("test snapshot", wake_cycles=3)
+
+    output = capsys.readouterr().err
+    assert output.startswith("[TerminalDiag] ")
+    snapshot = json.loads(output.removeprefix("[TerminalDiag] ").strip())
+    assert snapshot["reason"] == "test snapshot"
+    assert snapshot["wake_cycles"] == 3
+    assert snapshot["terminal_count"] == 1
+    assert snapshot["process"]["pid"] == os.getpid()
+
+
 def test_vault_agent_seeding_adds_missing_client_configs_without_secrets(
     main_window, tmp_path, monkeypatch
 ) -> None:
@@ -180,6 +227,93 @@ def test_terminal_frontend_routes_keyboard_and_mouse_zoom_to_python() -> None:
     assert "bridge.requestNewTerminal" in javascript
     assert "linkHandler" in javascript
     assert "bridge.openExternalUrl(uri)" in javascript
+
+
+def test_terminal_frontend_acknowledges_output_after_xterm_renders() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "sp"
+        / "assets"
+        / "terminal"
+        / "terminal.js"
+    ).read_text(encoding="utf-8")
+
+    assert "write: function (sequence, data)" in javascript
+    assert "terminal.write(data, function ()" in javascript
+    assert "bridge.acknowledgeOutput(sequence)" in javascript
+
+
+def test_terminal_bridge_forwards_output_acknowledgments(qtbot) -> None:
+    from sp.app.ui.terminal_pane import TerminalBridge
+
+    bridge = TerminalBridge()
+    acknowledged: list[int] = []
+    bridge.outputProcessed.connect(acknowledged.append)
+
+    bridge.acknowledgeOutput(17)
+
+    assert acknowledged == [17]
+
+
+def test_terminal_output_waits_for_frontend_ack_before_next_chunk(qtbot, tmp_path) -> None:
+    from sp.app.ui.terminal_pane import TerminalBridge, TerminalSessionPane
+
+    pane = TerminalSessionPane(
+        vault_root_provider=lambda: tmp_path,
+        seed_agents=lambda _root: None,
+    )
+    qtbot.addWidget(pane)
+    bridge = TerminalBridge()
+    bridge.outputProcessed.connect(pane._on_frontend_output_processed)
+    pane._bridge = bridge
+    delivered: list[tuple[int, str]] = []
+    bridge.outputData.connect(lambda sequence, data: delivered.append((sequence, data)))
+    generation = pane._session_generation
+
+    pane._queue_backend_output(generation, "first")
+    pane._flush_output()
+    pane._queue_backend_output(generation, "second")
+    pane._flush_output()
+
+    assert delivered == [(1, "first")]
+    assert pane.diagnostic_snapshot()["buffered_chars"] == len("firstsecond")
+
+    bridge.acknowledgeOutput(1)
+    pane._flush_output()
+    assert delivered == [(1, "first"), (2, "second")]
+
+    bridge.acknowledgeOutput(2)
+    assert pane.diagnostic_snapshot()["buffered_chars"] == 0
+
+
+def test_terminal_output_high_water_blocks_and_unblocks_pty_reader(qtbot, tmp_path) -> None:
+    from sp.app.ui.terminal_pane import TERMINAL_OUTPUT_HIGH_WATER, TerminalSessionPane
+
+    pane = TerminalSessionPane(
+        vault_root_provider=lambda: tmp_path,
+        seed_agents=lambda _root: None,
+    )
+    qtbot.addWidget(pane)
+    generation = pane._session_generation
+    with pane._output_flow_condition:
+        pane._output_buffered_size = TERMINAL_OUTPUT_HIGH_WATER
+    entered = threading.Event()
+
+    def produce() -> None:
+        entered.set()
+        pane._queue_backend_output(generation, "blocked")
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    assert entered.wait(1)
+    producer.join(timeout=0.05)
+    assert producer.is_alive()
+
+    pane._release_output_capacity(TERMINAL_OUTPUT_HIGH_WATER)
+    producer.join(timeout=1)
+    assert not producer.is_alive()
+    assert pane.diagnostic_snapshot()["buffered_chars"] == len("blocked")
+    pane.stop_session()
 
 
 def test_terminal_external_links_are_limited_to_http_and_https(qtbot) -> None:
@@ -493,11 +627,18 @@ def test_terminal_popout_restores_and_saves_window_geometry(main_window, monkeyp
     reference.close()
 
 
-def test_terminal_shortcut_closes_detached_window_and_reattaches(main_window, monkeypatch) -> None:
+def test_terminal_shortcut_surfaces_main_over_focused_detached_window_without_minimizing(
+    main_window, monkeypatch
+) -> None:
     pane = main_window._terminal_pane
-    original_index = main_window.right_panel.tabs.indexOf(pane)
+    surfaced: list[QMainWindow] = []
     monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
     monkeypatch.setattr(main_window, "_terminal_detached_has_focus", lambda _window: True)
+    monkeypatch.setattr(
+        main_window,
+        "_surface_window_preserving_state",
+        lambda window: surfaced.append(window),
+    )
     monkeypatch.setattr(pane, "start_session", lambda: None)
     monkeypatch.setattr(pane, "focus_terminal", lambda: None)
     main_window._open_terminal_window()
@@ -507,8 +648,13 @@ def test_terminal_shortcut_closes_detached_window_and_reattaches(main_window, mo
     main_window._toggle_terminal_tab()
     QApplication.processEvents()
 
-    assert main_window._terminal_detached_window is None
-    assert main_window.right_panel.tabs.indexOf(pane) == original_index
+    assert main_window._terminal_detached_window is window
+    assert not window.isMinimized()
+    assert main_window.right_panel.tabs.indexOf(pane) == -1
+    assert surfaced == [main_window]
+
+    window.close()
+    QApplication.processEvents()
 
 
 def test_terminal_shortcut_restores_inactive_detached_window(main_window, monkeypatch) -> None:
@@ -533,6 +679,29 @@ def test_terminal_shortcut_restores_inactive_detached_window(main_window, monkey
     assert window.isVisible()
     assert not window.isMinimized()
     assert focused
+
+    window.close()
+    QApplication.processEvents()
+
+
+def test_terminal_shortcut_preserves_inactive_detached_window_maximized(main_window, monkeypatch) -> None:
+    pane = main_window._terminal_pane
+    monkeypatch.setattr(main_window, "_prepare_terminal_activation", lambda: True)
+    monkeypatch.setattr(pane, "start_session", lambda: None)
+    monkeypatch.setattr(pane, "focus_terminal", lambda: None)
+    main_window._open_terminal_window()
+    window = main_window._terminal_detached_window
+    assert window is not None
+    window.showMaximized()
+    QApplication.processEvents()
+    assert window.isMaximized()
+    monkeypatch.setattr(main_window, "_terminal_detached_has_focus", lambda _window: False)
+
+    main_window._toggle_terminal_tab()
+    QApplication.processEvents()
+
+    assert main_window._terminal_detached_window is window
+    assert window.isMaximized()
 
     window.close()
     QApplication.processEvents()

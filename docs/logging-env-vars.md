@@ -31,6 +31,8 @@ Set any area to `1` / `true` to enable, `0` / `false` to disable.
 - `SP_LOG_DIAGRAMS`
 - `SP_LOG_UI_STATE`
 - `SP_LOG_PERFORMANCE`
+- `SP_LOG_EVENT_LOOP`
+- `SP_LOG_TERMINAL`
 - `SP_LOG_ALL`
 
 ## Recommended Quiet Defaults
@@ -63,6 +65,11 @@ export SP_LOG_EDITOR_MARKDOWN=1
 # Trace AI + RAG behavior
 export SP_LOG_AI_CHAT=1
 export SP_LOG_RAG_VECTOR=1
+
+# Record terminal memory, handles, output backlog, and resume snapshots
+export SP_LOG_TERMINAL=1
+# Optional periodic snapshot interval; values below 10 seconds are clamped
+export SP_TERMINAL_DIAG_INTERVAL_SECONDS=60
 ```
 
 ## Existing Non-Area Logging Env Vars

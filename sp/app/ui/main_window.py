@@ -2329,6 +2329,7 @@ class MainWindow(QMainWindow):
         self._event_loop_rate_window_started_at = time.monotonic()
         self._event_loop_last_wall_time = time.time()
         self._event_loop_sleep_timer: Optional[QTimer] = None
+        self._terminal_diag_timer: Optional[QTimer] = None
         self._excalidraw_open_page_timer: Optional[QTimer] = None
         self._homebase_fs_signal_count = 0
         self._homebase_fs_signal_window_started_at = time.monotonic()
@@ -3592,24 +3593,36 @@ class MainWindow(QMainWindow):
     def _setup_eventloop_watchdog(self) -> None:
         """Log when the Qt event loop appears stalled (high timer drift)."""
         diag_enabled = eventloop_diag.enabled()
-        if not PAGE_LOGGING_ENABLED and not diag_enabled:
+        terminal_diag_enabled = log_enabled("terminal")
+        if not PAGE_LOGGING_ENABLED and not diag_enabled and not terminal_diag_enabled:
             return
         try:
-            self._loop_timer = QElapsedTimer()
-            self._loop_timer.start()
-            self._loop_watchdog = QTimer(self)
-            self._loop_watchdog.setInterval(250)
-            self._loop_watchdog.timeout.connect(self._check_eventloop_drift)
-            self._loop_watchdog.start()
-            dispatcher = QAbstractEventDispatcher.instance()
-            if dispatcher:
-                dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
-                dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
-            if diag_enabled:
+            if PAGE_LOGGING_ENABLED or diag_enabled:
+                self._loop_timer = QElapsedTimer()
+                self._loop_timer.start()
+                self._loop_watchdog = QTimer(self)
+                self._loop_watchdog.setInterval(250)
+                self._loop_watchdog.timeout.connect(self._check_eventloop_drift)
+                self._loop_watchdog.start()
+                dispatcher = QAbstractEventDispatcher.instance()
+                if dispatcher:
+                    dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
+                    dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
+            if diag_enabled or terminal_diag_enabled:
                 self._event_loop_sleep_timer = QTimer(self)
                 self._event_loop_sleep_timer.setInterval(1000)
                 self._event_loop_sleep_timer.timeout.connect(self._check_eventloop_resume_gap)
                 self._event_loop_sleep_timer.start()
+            if terminal_diag_enabled:
+                interval_seconds = eventloop_diag.env_int("SP_TERMINAL_DIAG_INTERVAL_SECONDS", 60)
+                self._terminal_diag_timer = QTimer(self)
+                self._terminal_diag_timer.setInterval(max(10, interval_seconds) * 1000)
+                self._terminal_diag_timer.timeout.connect(
+                    lambda: self._log_terminal_diagnostics("periodic")
+                )
+                self._terminal_diag_timer.start()
+                self._log_terminal_diagnostics("diagnostics started")
+            if diag_enabled:
                 eventloop_diag.log_fd_target("mainwindow event-loop watchdog")
                 self._log_eventloop_timer_state("watchdog started")
         except Exception:
@@ -3664,7 +3677,7 @@ class MainWindow(QMainWindow):
             self._loop_timer.restart()
 
     def _check_eventloop_resume_gap(self) -> None:
-        if not eventloop_diag.enabled():
+        if not eventloop_diag.enabled() and not log_enabled("terminal"):
             return
         now = time.time()
         previous = getattr(self, "_event_loop_last_wall_time", now)
@@ -3673,10 +3686,21 @@ class MainWindow(QMainWindow):
         threshold = eventloop_diag.env_float("SP_EVENT_LOOP_RESUME_GAP_SECONDS", 10.0)
         if gap < threshold:
             return
-        eventloop_diag.log(f"possible suspend/resume or blocked UI gap_seconds={gap:.2f}")
-        eventloop_diag.log_fd_target("after resume gap")
-        self._log_eventloop_timer_state("after resume gap")
+        if eventloop_diag.enabled():
+            eventloop_diag.log(f"possible suspend/resume or blocked UI gap_seconds={gap:.2f}")
+            eventloop_diag.log_fd_target("after resume gap")
+            self._log_eventloop_timer_state("after resume gap")
+        self._log_terminal_diagnostics("after resume gap", gap_seconds=round(gap, 2))
         self._schedule_local_filesystem_scan("resume gap", force=True)
+
+    def _log_terminal_diagnostics(self, reason: str, **extra: object) -> None:
+        pane = getattr(self, "_terminal_pane", None)
+        if pane is None:
+            return
+        try:
+            pane.log_diagnostics(reason, **extra)
+        except Exception:
+            pass
 
     def _log_eventloop_timer_state(self, label: str) -> None:
         if not eventloop_diag.enabled():
@@ -5929,15 +5953,26 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             return False
 
+    @staticmethod
+    def _surface_window_preserving_state(window: QMainWindow) -> None:
+        """Raise a window without changing a normal or maximized layout."""
+        if window.isMinimized():
+            state = window.windowState() & ~Qt.WindowMinimized
+            window.setWindowState(state | Qt.WindowActive)
+        elif not window.isVisible():
+            window.show()
+        window.raise_()
+        window.activateWindow()
+
     def _toggle_terminal_tab(self) -> None:
         detached = getattr(self, "_terminal_detached_window", None)
         if detached is not None:
             if self._terminal_detached_has_focus(detached):
-                detached.close()
+                # Toggle foreground ownership between StillPoint's two windows
+                # without minimizing, resizing, closing, or reattaching either.
+                self._surface_window_preserving_state(self)
                 return
-            detached.showNormal()
-            detached.raise_()
-            detached.activateWindow()
+            self._surface_window_preserving_state(detached)
             self._terminal_pane.focus_terminal()
             return
         terminal_index = self.right_panel.tabs.indexOf(self._terminal_pane)
@@ -14313,6 +14348,7 @@ class MainWindow(QMainWindow):
             # Small cooldown after app re-activation to avoid immediate
             # Homebase auto-reload races with pending editor state changes.
             self._homebase_reload_not_before = time.monotonic() + 1.0
+            self._log_terminal_diagnostics("application activated")
             QTimer.singleShot(0, self._refresh_editor_visual_state_after_activation)
             if not self._check_current_file_for_external_change("app activated current page"):
                 self._schedule_local_filesystem_scan("app activated")

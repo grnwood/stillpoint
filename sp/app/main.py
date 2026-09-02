@@ -24,6 +24,7 @@ from sp.app.resources import resource_candidates
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
+from sp.app.ui.terminal_pane import terminal_component_versions
 from sp.app.ui.webengine_env import configure_linux_webengine_env
 
 
@@ -50,6 +51,7 @@ from sp.app.ui.webengine_env import configure_linux_webengine_env
 # SP_LOG_UI_STATE        - UI geometry/panel state details
 # SP_LOG_PERFORMANCE     - Timing/performance traces
 # SP_LOG_EVENT_LOOP      - Qt dispatcher/fd diagnostics for wakeup livelocks
+# SP_LOG_TERMINAL        - Terminal memory, output flow, and suspend/resume diagnostics
 # SP_LOG_ALL             - Enable all detailed areas
 #
 # Examples:
@@ -909,6 +911,8 @@ def main() -> None:
     start_ts = time.time()
     _enable_faulthandler_log()
     _sp("Application starting.")
+    components = terminal_component_versions()
+    _sp("Terminal components: " + ", ".join(f"{name}={value}" for name, value in components.items()))
     config.init_settings()
     _ensure_user_template_files()
     _maybe_use_minimal_fonts()

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import threading
+import time
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -17,8 +22,83 @@ from sp.app.terminal_session import (
     default_shell_command,
 )
 from sp.app.resources import resource_candidates
+from sp.logging_flags import log_enabled
 from .theme import theme_value
 from .webengine_env import configure_linux_webengine_env
+
+
+TERMINAL_OUTPUT_HIGH_WATER = 512_000
+TERMINAL_OUTPUT_CHUNK = 128_000
+
+
+@lru_cache(maxsize=1)
+def terminal_component_versions() -> dict[str, str]:
+    """Return the native and vendored terminal component versions."""
+    result: dict[str, str] = {}
+    for package, label in (("PySide6", "pyside6"), ("pywinpty", "pywinpty"), ("watchdog", "watchdog")):
+        try:
+            result[label] = version(package)
+        except PackageNotFoundError:
+            result[label] = "not-installed"
+    manifest = Path(__file__).resolve().parents[2] / "assets" / "vendor" / "xterm" / "VERSIONS.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        result["xterm"] = str(payload.get("xterm") or "unknown")
+        result["xterm-addon-fit"] = str(payload.get("xterm-addon-fit") or "unknown")
+    except (OSError, ValueError, TypeError):
+        result["xterm"] = "unknown"
+        result["xterm-addon-fit"] = "unknown"
+    return result
+
+
+def _process_memory_metrics() -> dict[str, int]:
+    """Collect low-cost current-process metrics without another dependency."""
+    metrics = {"pid": os.getpid(), "python_threads": threading.active_count()}
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCountersEx(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            counters = ProcessMemoryCountersEx()
+            counters.cb = ctypes.sizeof(counters)
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+                metrics["working_set_bytes"] = int(counters.WorkingSetSize)
+                metrics["private_bytes"] = int(counters.PrivateUsage)
+            handles = wintypes.DWORD()
+            if ctypes.windll.kernel32.GetProcessHandleCount(process, ctypes.byref(handles)):
+                metrics["handles"] = int(handles.value)
+        except Exception:
+            pass
+        return metrics
+    try:
+        values: dict[str, int] = {}
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            key, separator, raw = line.partition(":")
+            if separator and key in {"VmRSS", "VmSize"}:
+                values[key] = int(raw.strip().split()[0]) * 1024
+        if "VmRSS" in values:
+            metrics["working_set_bytes"] = values["VmRSS"]
+        if "VmSize" in values:
+            metrics["virtual_bytes"] = values["VmSize"]
+    except (OSError, ValueError, IndexError):
+        pass
+    return metrics
 
 
 def safe_terminal_external_url(raw_url: str) -> Optional[QtCore.QUrl]:
@@ -97,7 +177,7 @@ def terminal_theme_from_stillpoint() -> dict[str, str]:
 
 
 class TerminalBridge(QtCore.QObject):
-    outputData = QtCore.Signal(str)
+    outputData = QtCore.Signal(int, str)
     clearRequested = QtCore.Signal()
     focusRequested = QtCore.Signal()
     pasteData = QtCore.Signal(str)
@@ -109,6 +189,7 @@ class TerminalBridge(QtCore.QObject):
     fontSizeAdjustmentRequested = QtCore.Signal(int)
     newTerminalRequested = QtCore.Signal()
     externalUrlRequested = QtCore.Signal(str)
+    outputProcessed = QtCore.Signal(int)
 
     @QtCore.Slot(int, int)
     def ready(self, columns: int, rows: int) -> None:
@@ -147,6 +228,10 @@ class TerminalBridge(QtCore.QObject):
         if safe_terminal_external_url(url) is not None:
             self.externalUrlRequested.emit(url)
 
+    @QtCore.Slot(int)
+    def acknowledgeOutput(self, sequence: int) -> None:
+        self.outputProcessed.emit(int(sequence))
+
 
 class TerminalSessionPane(QtWidgets.QWidget):
     """One lazy terminal frontend and PTY session."""
@@ -156,7 +241,6 @@ class TerminalSessionPane(QtWidgets.QWidget):
     sessionFailed = QtCore.Signal(str)
     openExternallyRequested = QtCore.Signal()
     closePaneRequested = QtCore.Signal()
-    vaultChanged = QtCore.Signal(str)
     backendOutput = QtCore.Signal(int, str)
     backendExited = QtCore.Signal(int, object, str)
     backendError = QtCore.Signal(int, str)
@@ -204,9 +288,17 @@ class TerminalSessionPane(QtWidgets.QWidget):
         self._session_generation = 0
         self._session_mcp_token = ""
         self._active_argv: list[str] = []
-        self._vault_observer = None
         self._pending_output: list[str] = []
         self._pending_output_size = 0
+        self._output_flow_condition = threading.Condition()
+        self._output_buffered_size = 0
+        self._output_max_buffered_size = 0
+        self._output_total_size = 0
+        self._output_flow_closed = False
+        self._frontend_output_sequence = 0
+        self._frontend_output_in_flight: Optional[tuple[int, int, float]] = None
+        self._frontend_last_ack_at = 0.0
+        self._frontend_max_ack_ms = 0.0
         self._applying_theme = False
         self._output_timer = QtCore.QTimer(self)
         self._output_timer.setSingleShot(True)
@@ -247,6 +339,31 @@ class TerminalSessionPane(QtWidgets.QWidget):
             except Exception:
                 pass
         return self.command_line
+
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        with self._output_flow_condition:
+            buffered = self._output_buffered_size
+            max_buffered = self._output_max_buffered_size
+            total = self._output_total_size
+            flow_closed = self._output_flow_closed
+        in_flight = self._frontend_output_in_flight
+        ack_age_ms = None
+        if self._frontend_last_ack_at:
+            ack_age_ms = round((time.monotonic() - self._frontend_last_ack_at) * 1000.0, 1)
+        return {
+            "initialized": self.initialized,
+            "running": self.session_running,
+            "pid": self._session.pid if self._session is not None else None,
+            "command": self.running_command_line,
+            "buffered_chars": buffered,
+            "max_buffered_chars": max_buffered,
+            "pending_ui_chars": self._pending_output_size,
+            "frontend_in_flight_chars": in_flight[1] if in_flight else 0,
+            "frontend_ack_age_ms": ack_age_ms,
+            "frontend_max_ack_ms": round(self._frontend_max_ack_ms, 1),
+            "total_output_chars": total,
+            "flow_closed": flow_closed,
+        }
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -479,6 +596,7 @@ class TerminalSessionPane(QtWidgets.QWidget):
         bridge.fontSizeAdjustmentRequested.connect(self._adjust_font_size)
         bridge.newTerminalRequested.connect(self.newTerminalRequested)
         bridge.externalUrlRequested.connect(self._open_external_url)
+        bridge.outputProcessed.connect(self._on_frontend_output_processed)
         channel = QWebChannel(page)
         channel.registerObject("terminalBridge", bridge)
         page.setWebChannel(channel)
@@ -609,8 +727,9 @@ class TerminalSessionPane(QtWidgets.QWidget):
             columns, rows = self._last_dimensions
             self._session_generation += 1
             generation = self._session_generation
+            self._reset_output_flow(closed=False)
             session = create_terminal_session(
-                on_output=lambda data: self.backendOutput.emit(generation, data),
+                on_output=lambda data: self._queue_backend_output(generation, data),
                 on_exit=lambda code, reason: self.backendExited.emit(generation, code, reason),
                 on_error=lambda message: self.backendError.emit(generation, message),
             )
@@ -622,7 +741,6 @@ class TerminalSessionPane(QtWidgets.QWidget):
                 columns=columns,
             )
             self._session = session
-            self._start_vault_observer(root)
             self._start_requested = False
             self._status.setText(command_display(argv))
             self._restart_button.setEnabled(True)
@@ -631,38 +749,109 @@ class TerminalSessionPane(QtWidgets.QWidget):
         except Exception as exc:
             self._fail(str(exc))
 
+    def _queue_backend_output(self, generation: int, data: str) -> None:
+        """Apply backpressure before crossing from the PTY thread into Qt."""
+        if not data:
+            return
+        size = len(data)
+        with self._output_flow_condition:
+            while (
+                not self._output_flow_closed
+                and generation == self._session_generation
+                and self._output_buffered_size > 0
+                and self._output_buffered_size + size > TERMINAL_OUTPUT_HIGH_WATER
+            ):
+                self._output_flow_condition.wait(timeout=0.25)
+            if self._output_flow_closed or generation != self._session_generation:
+                return
+            self._output_buffered_size += size
+            self._output_total_size += size
+            self._output_max_buffered_size = max(
+                self._output_max_buffered_size,
+                self._output_buffered_size,
+            )
+        try:
+            self.backendOutput.emit(generation, data)
+        except RuntimeError:
+            self._release_output_capacity(size)
+
+    def _release_output_capacity(self, size: int) -> None:
+        with self._output_flow_condition:
+            self._output_buffered_size = max(0, self._output_buffered_size - max(0, int(size)))
+            self._output_flow_condition.notify_all()
+
+    def _reset_output_flow(self, *, closed: bool) -> None:
+        self._output_timer.stop()
+        self._pending_output.clear()
+        self._pending_output_size = 0
+        self._frontend_output_in_flight = None
+        with self._output_flow_condition:
+            self._output_buffered_size = 0
+            self._output_flow_closed = bool(closed)
+            self._output_flow_condition.notify_all()
+
     @QtCore.Slot(int, str)
     def _deliver_output(self, generation: int, data: str) -> None:
         if generation != self._session_generation:
             return
         self._pending_output.append(data)
         self._pending_output_size += len(data)
-        while self._pending_output_size > 2_000_000 and self._pending_output:
-            removed = self._pending_output.pop(0)
-            self._pending_output_size -= len(removed)
-        if not self._output_timer.isActive():
+        if self._frontend_output_in_flight is None and not self._output_timer.isActive():
             self._output_timer.start()
 
     def _flush_output(self) -> None:
-        if not self._pending_output:
+        if not self._pending_output or self._frontend_output_in_flight is not None:
             return
-        data = "".join(self._pending_output)
-        self._pending_output.clear()
-        self._pending_output_size = 0
-        if self._bridge:
-            self._bridge.outputData.emit(data)
+        chunks: list[str] = []
+        size = 0
+        while self._pending_output and size < TERMINAL_OUTPUT_CHUNK:
+            value = self._pending_output.pop(0)
+            chunks.append(value)
+            size += len(value)
+        self._pending_output_size = max(0, self._pending_output_size - size)
+        data = "".join(chunks)
+        if not self._bridge:
+            self._release_output_capacity(size)
+            return
+        self._frontend_output_sequence += 1
+        sequence = self._frontend_output_sequence
+        self._frontend_output_in_flight = (sequence, size, time.monotonic())
+        self._bridge.outputData.emit(sequence, data)
+
+    @QtCore.Slot(int)
+    def _on_frontend_output_processed(self, sequence: int) -> None:
+        in_flight = self._frontend_output_in_flight
+        if in_flight is None or int(sequence) != in_flight[0]:
+            return
+        _sequence, size, started_at = in_flight
+        elapsed_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+        self._frontend_last_ack_at = time.monotonic()
+        self._frontend_max_ack_ms = max(self._frontend_max_ack_ms, elapsed_ms)
+        self._frontend_output_in_flight = None
+        self._release_output_capacity(size)
+        if self._pending_output and not self._output_timer.isActive():
+            self._output_timer.start(0)
+
+    def _write_terminal_notice(self, data: str) -> None:
+        """Queue UI-only status text without charging PTY flow capacity."""
+        if not self._bridge or self._frontend_output_in_flight is not None:
+            return
+        self._frontend_output_sequence += 1
+        sequence = self._frontend_output_sequence
+        self._frontend_output_in_flight = (sequence, 0, time.monotonic())
+        self._bridge.outputData.emit(sequence, data)
 
     @QtCore.Slot(int, object, str)
     def _handle_backend_exit(self, generation: int, exit_code, reason: str) -> None:
         if generation != self._session_generation:
             return
         self._session = None
+        self._session_generation += 1
+        self._reset_output_flow(closed=True)
         self._release_session_credential()
         self._restart_button.setEnabled(True)
         code_text = "unknown" if exit_code is None else str(exit_code)
         self._status.setText(f"Exited ({code_text})")
-        if self._bridge:
-            self._bridge.outputData.emit(f"\r\n[StillPoint terminal {reason}; exit {code_text}]\r\n")
         self.sessionStopped.emit()
         self.sessionExited.emit(exit_code, reason)
 
@@ -670,8 +859,7 @@ class TerminalSessionPane(QtWidgets.QWidget):
     def _handle_backend_error(self, generation: int, message: str) -> None:
         if generation != self._session_generation:
             return
-        if self._bridge:
-            self._bridge.outputData.emit(f"\r\n[Terminal error: {message}]\r\n")
+        self._write_terminal_notice(f"\r\n[Terminal error: {message}]\r\n")
         self._status.setText("Terminal error")
 
     def _fail(self, message: str) -> None:
@@ -694,7 +882,7 @@ class TerminalSessionPane(QtWidgets.QWidget):
     def stop_session(self) -> None:
         session, self._session = self._session, None
         self._session_generation += 1
-        self._stop_vault_observer()
+        self._reset_output_flow(closed=True)
         if session:
             session.terminate()
             self._release_session_credential()
@@ -706,52 +894,6 @@ class TerminalSessionPane(QtWidgets.QWidget):
         token, self._session_mcp_token = self._session_mcp_token, ""
         if token:
             self.sessionCredentialReleased.emit(token)
-
-    def _start_vault_observer(self, root: Path) -> None:
-        self._stop_vault_observer()
-        try:
-            from watchdog.events import FileSystemEventHandler
-            from watchdog.observers import Observer
-        except Exception:
-            return
-        pane = self
-
-        class VaultEventHandler(FileSystemEventHandler):
-            def on_any_event(self, event) -> None:  # type: ignore[override]
-                if getattr(event, "event_type", "") == "opened":
-                    return
-                path = str(getattr(event, "dest_path", "") or getattr(event, "src_path", "") or "")
-                if not path:
-                    return
-                candidate = Path(path)
-                try:
-                    relative = candidate.resolve().relative_to(root.resolve())
-                except Exception:
-                    return
-                if ".stillpoint" in relative.parts or candidate.name == "AGENTS.md":
-                    return
-                if not getattr(event, "is_directory", False) and candidate.suffix.lower() not in {".md", ".txt"}:
-                    return
-                pane.vaultChanged.emit(path)
-
-        try:
-            observer = Observer()
-            observer.schedule(VaultEventHandler(), str(root), recursive=True)
-            observer.daemon = True
-            observer.start()
-            self._vault_observer = observer
-        except Exception:
-            self._vault_observer = None
-
-    def _stop_vault_observer(self) -> None:
-        observer, self._vault_observer = self._vault_observer, None
-        if observer is None:
-            return
-        try:
-            observer.stop()
-            observer.join(timeout=0.75)
-        except Exception:
-            pass
 
     def focus_terminal(self) -> None:
         if self._web_view is not None:
@@ -770,8 +912,7 @@ class TerminalSessionPane(QtWidgets.QWidget):
         self._stack.setCurrentWidget(self._placeholder)
         if self._bridge:
             self._bridge.clearRequested.emit()
-        self._pending_output.clear()
-        self._pending_output_size = 0
+        self._reset_output_flow(closed=True)
 
     def shutdown(self) -> None:
         self.stop_session()
@@ -816,6 +957,8 @@ class TerminalPane(QtWidgets.QWidget):
         self._settings_provider = settings_provider or (lambda: {})
         self._sessions: list[TerminalSessionPane] = []
         self._session_titles: list[str] = []
+        self._vault_observer = None
+        self._vault_observer_root: Optional[Path] = None
         self._counter = 0
         self._terminal_switch_index = -1
         self._terminal_switch_timer = QtCore.QTimer(self)
@@ -904,6 +1047,31 @@ class TerminalPane(QtWidgets.QWidget):
     def terminal_switcher_active(self) -> bool:
         switcher = getattr(self, "_terminal_switcher", None)
         return bool(switcher is not None and not switcher.isHidden())
+
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        observer_alive = False
+        if self._vault_observer is not None:
+            try:
+                observer_alive = bool(self._vault_observer.is_alive())
+            except Exception:
+                observer_alive = True
+        return {
+            "timestamp": time.time(),
+            "components": terminal_component_versions(),
+            "process": _process_memory_metrics(),
+            "terminal_count": len(self._sessions),
+            "running_count": sum(1 for session in self._sessions if session.session_running),
+            "vault_observer_alive": observer_alive,
+            "sessions": [session.diagnostic_snapshot() for session in self._sessions],
+        }
+
+    def log_diagnostics(self, reason: str, **extra: object) -> None:
+        if not log_enabled("terminal"):
+            return
+        payload = self.diagnostic_snapshot()
+        payload["reason"] = str(reason)
+        payload.update(extra)
+        print(f"[TerminalDiag] {json.dumps(payload, ensure_ascii=False, sort_keys=True)}", file=sys.stderr, flush=True)
 
     def _build_terminal_switcher(self) -> None:
         overlay = QtWidgets.QWidget(self)
@@ -1025,7 +1193,7 @@ class TerminalPane(QtWidgets.QWidget):
         self._sessions.append(child)
         self._session_titles.append(title)
         self._session_stack.addWidget(child)
-        child.sessionStarted.connect(self.sessionStarted)
+        child.sessionStarted.connect(self._on_child_started)
         child.sessionStopped.connect(self._on_child_stopped)
         child.sessionExited.connect(
             lambda _code, _reason, pane=child: self._on_child_exited(pane)
@@ -1033,7 +1201,6 @@ class TerminalPane(QtWidgets.QWidget):
         child.sessionFailed.connect(self.sessionFailed)
         child.openExternallyRequested.connect(self.openExternallyRequested)
         child.closePaneRequested.connect(self.closePaneRequested)
-        child.vaultChanged.connect(self.vaultChanged)
         child.fontSizeChanged.connect(self.fontSizeChanged)
         child.sessionCredentialReleased.connect(self.sessionCredentialReleased)
         child.newTerminalRequested.connect(lambda: self.new_terminal())
@@ -1044,8 +1211,67 @@ class TerminalPane(QtWidgets.QWidget):
         )
         return child
 
+    def _on_child_started(self) -> None:
+        root = self._vault_root_provider()
+        if root is not None:
+            self._start_vault_observer(Path(root).expanduser().resolve())
+        self.sessionStarted.emit()
+
+    def _start_vault_observer(self, root: Path) -> None:
+        """Start the one recursive vault observer shared by all terminals."""
+        if self._vault_observer is not None and self._vault_observer_root == root:
+            return
+        self._stop_vault_observer()
+        try:
+            from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
+        except Exception:
+            return
+        pane = self
+
+        class VaultEventHandler(FileSystemEventHandler):
+            def on_any_event(self, event) -> None:  # type: ignore[override]
+                if getattr(event, "event_type", "") == "opened":
+                    return
+                path = str(getattr(event, "dest_path", "") or getattr(event, "src_path", "") or "")
+                if not path:
+                    return
+                candidate = Path(path)
+                try:
+                    relative = candidate.resolve().relative_to(root)
+                except Exception:
+                    return
+                if ".stillpoint" in relative.parts or candidate.name == "AGENTS.md":
+                    return
+                if not getattr(event, "is_directory", False) and candidate.suffix.lower() not in {".md", ".txt"}:
+                    return
+                pane.vaultChanged.emit(path)
+
+        try:
+            observer = Observer()
+            observer.schedule(VaultEventHandler(), str(root), recursive=True)
+            observer.daemon = True
+            observer.start()
+            self._vault_observer = observer
+            self._vault_observer_root = root
+        except Exception:
+            self._vault_observer = None
+            self._vault_observer_root = None
+
+    def _stop_vault_observer(self) -> None:
+        observer, self._vault_observer = self._vault_observer, None
+        self._vault_observer_root = None
+        if observer is None:
+            return
+        try:
+            observer.stop()
+            observer.join(timeout=0.75)
+        except Exception:
+            pass
+
     def _on_child_stopped(self) -> None:
         if not any(session.session_running for session in self._sessions):
+            self._stop_vault_observer()
             self.sessionStopped.emit()
 
     def _on_child_exited(self, child: TerminalSessionPane) -> None:
@@ -1190,3 +1416,4 @@ class TerminalPane(QtWidgets.QWidget):
         self._terminal_switch_timer.stop()
         for session in list(self._sessions):
             session.shutdown()
+        self._stop_vault_observer()

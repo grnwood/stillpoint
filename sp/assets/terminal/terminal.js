@@ -102,7 +102,13 @@
   new ResizeObserver(fitAndNotify).observe(document.getElementById("terminal"));
 
   window.stillpointTerminal = {
-    write: function (data) { terminal.write(data); },
+    write: function (sequence, data) {
+      terminal.write(data, function () {
+        if (bridge) {
+          bridge.acknowledgeOutput(sequence);
+        }
+      });
+    },
     clear: function () { terminal.clear(); },
     focus: function () { terminal.focus(); },
     applyOptions: function (raw) {
