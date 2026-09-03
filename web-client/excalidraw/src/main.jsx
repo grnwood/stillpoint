@@ -30,7 +30,6 @@ function readParams() {
   return {
     path: params.get("path") || "",
     token: params.get("token") || "",
-    windowId: params.get("window_id") || "",
     filterPath: params.get("filter_path") || "",
     theme: params.get("theme") || "",
     themeVars: {
@@ -47,13 +46,10 @@ function readParams() {
   };
 }
 
-function apiHeaders(token, windowId) {
+function apiHeaders(token) {
   const headers = { "content-type": "application/json" };
   if (token) {
     headers["x-local-ui-token"] = token;
-  }
-  if (windowId) {
-    headers["x-stillpoint-window-id"] = windowId;
   }
   return headers;
 }
@@ -259,7 +255,7 @@ async function requestJson(url, options = {}) {
 }
 
 function App() {
-  const { path, token, windowId, filterPath, theme, themeVars } = useMemo(readParams, []);
+  const { path, token, filterPath, theme, themeVars } = useMemo(readParams, []);
   const [initialData, setInitialData] = useState(null);
   const [status, setStatus] = useState("Loading");
   const [error, setError] = useState("");
@@ -322,12 +318,12 @@ function App() {
       setStatus("Saving");
       await requestJson("/api/excalidraw", {
         method: "PUT",
-        headers: apiHeaders(token, windowId),
+        headers: apiHeaders(token),
         body: JSON.stringify({ path, scene }),
       });
       setStatus("Saved");
     },
-    [path, token, windowId],
+    [path, token],
   );
 
   const savePreview = useCallback(
@@ -364,14 +360,14 @@ function App() {
         const pngBase64 = await blobToDataUrl(blob);
         await requestJson("/api/excalidraw/preview", {
           method: "PUT",
-          headers: apiHeaders(token, windowId),
+          headers: apiHeaders(token),
           body: JSON.stringify({ path, png_base64: pngBase64 }),
         });
       } catch (err) {
         console.warn("[StillPoint Excalidraw] Preview export failed", err);
       }
     },
-    [path, token, windowId],
+    [path, token],
   );
 
   const queuePreview = useCallback(
@@ -445,7 +441,7 @@ function App() {
       };
     }
     requestJson(`/api/excalidraw?path=${encodeURIComponent(path)}`, {
-      headers: apiHeaders(token, windowId),
+      headers: apiHeaders(token),
     })
       .then((payload) => {
         if (!mountedRef.current) {
@@ -471,11 +467,11 @@ function App() {
       window.clearTimeout(saveTimerRef.current);
       window.clearTimeout(previewTimerRef.current);
     };
-  }, [aiConfig, path, theme, themeVars, token, windowId]);
+  }, [aiConfig, path, theme, themeVars, token]);
 
   useEffect(() => {
     requestJson("/api/excalidraw/ai/config", {
-      headers: apiHeaders(token, windowId),
+      headers: apiHeaders(token),
     })
       .then((payload) => {
         const nextConfig = {
@@ -491,18 +487,18 @@ function App() {
       .catch((err) => {
         console.warn("[StillPoint Excalidraw] Failed to load AI config", err);
       });
-  }, [token, windowId]);
+  }, [token]);
 
   const loadSummary = useCallback(async () => {
     if (!path) {
       return null;
     }
     const payload = await requestJson(`/api/excalidraw/summary?path=${encodeURIComponent(path)}`, {
-      headers: apiHeaders(token, windowId),
+      headers: apiHeaders(token),
     });
     setSummaryInfo(payload);
     return payload;
-  }, [path, token, windowId]);
+  }, [path, token]);
 
   useEffect(() => {
     loadSummary().catch((err) => {
@@ -640,7 +636,7 @@ function App() {
       try {
         await requestJson("/api/excalidraw/open-page", {
           method: "POST",
-          headers: apiHeaders(token, windowId),
+          headers: apiHeaders(token),
           body: JSON.stringify({ path: pagePath, source_path: path }),
         });
       } finally {
@@ -649,7 +645,7 @@ function App() {
         }, 700);
       }
     },
-    [path, token, windowId],
+    [path, token],
   );
 
   const linkSelectedElementToPage = useCallback(
@@ -689,7 +685,7 @@ function App() {
         params.set("filter_path", filterPath);
       }
       requestJson(`/api/pages/search?${params.toString()}`, {
-        headers: apiHeaders(token, windowId),
+        headers: apiHeaders(token),
         signal: controller.signal,
       })
         .then((payload) => {
@@ -711,7 +707,7 @@ function App() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [filterPath, pageLinkPanelOpen, pageQuery, selectedElement, selectedStillPointLink, token, windowId]);
+  }, [filterPath, pageLinkPanelOpen, pageQuery, selectedElement, selectedStillPointLink, token]);
 
   useEffect(() => {
     if (!api?.onPointerUp) {
@@ -818,7 +814,7 @@ function App() {
       }
       const payload = await requestJson("/api/excalidraw/summary", {
         method: "POST",
-        headers: apiHeaders(token, windowId),
+        headers: apiHeaders(token),
         body: JSON.stringify({
           path,
           scene,
@@ -835,7 +831,7 @@ function App() {
       }
       return payload;
     },
-    [aiModel, aiServer, analyzeDisabledReason, path, saveScene, stats.elements, stats.jsonBytes, token, windowId],
+    [aiModel, aiServer, analyzeDisabledReason, path, saveScene, stats.elements, stats.jsonBytes, token],
   );
 
   const handleAnalyzeSummary = useCallback(async () => {
@@ -894,7 +890,7 @@ function App() {
         setAiMessages((messages) => [...messages, makeAiMessage("system", "Waiting for full Excalidraw scene JSON")]);
         const payload = await requestJson("/api/excalidraw/ai", {
           method: "POST",
-          headers: apiHeaders(token, windowId),
+          headers: apiHeaders(token),
           body: JSON.stringify({
             path,
             prompt,
@@ -936,7 +932,7 @@ function App() {
         }, 1200);
       }
     },
-    [aiBusy, aiModel, aiPrompt, aiServer, applyScene, drawDisabledReason, path, queuePreview, rememberAiPrompt, saveScene, stats.elements, stats.jsonBytes, token, windowId],
+    [aiBusy, aiModel, aiPrompt, aiServer, applyScene, drawDisabledReason, path, queuePreview, rememberAiPrompt, saveScene, stats.elements, stats.jsonBytes, token],
   );
 
   const handleAnalyzeChatSubmit = useCallback(
@@ -969,7 +965,7 @@ function App() {
         setAiMessages((messages) => [...messages, makeAiMessage("system", "Waiting for an answer using the summary context")]);
         const payload = await requestJson("/api/excalidraw/chat", {
           method: "POST",
-          headers: apiHeaders(token, windowId),
+          headers: apiHeaders(token),
           body: JSON.stringify({
             path,
             prompt,
@@ -999,7 +995,7 @@ function App() {
         }, 1200);
       }
     },
-    [aiBusy, aiMessages, aiModel, aiPrompt, aiServer, chatDisabledReason, path, rememberAiPrompt, summaryStale, token, windowId],
+    [aiBusy, aiMessages, aiModel, aiPrompt, aiServer, chatDisabledReason, path, rememberAiPrompt, summaryStale, token],
   );
 
   const handleAiSubmit = aiMode === "draw" ? handleDrawSubmit : handleAnalyzeChatSubmit;

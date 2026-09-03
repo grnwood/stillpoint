@@ -200,3 +200,11 @@ Topic/SubTopic/attachment.ext
 - Do not invent journal or date-based structures unless explicitly asked to create them.
 - If creating tasks, use the task syntax already present in the vault instead of inventing a new format.
 - Prefer additive, minimally destructive edits unless the user explicitly asks for broad rewrites or deletions.
+
+## StillPoint MCP
+
+When the StillPoint desktop is running, external AI clients may connect through
+the `stillpoint --mcp-bridge` stdio server. Prefer its vault-aware search, page,
+task, journal, backlink, and move tools over direct file manipulation when a
+matching tool exists. Use returned `mtime_ns` values for writes, preview
+structural changes with `dry_run`, and never print or persist MCP credentials.

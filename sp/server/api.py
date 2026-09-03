@@ -84,7 +84,9 @@ from sp.app.capture_triage import (
 from sp.app.task_mutations import (
     TaskConflictError,
     TaskMutationTarget,
+    _append_under_tasks,
     mutate_task,
+    rewrite_task_line,
     undo_file_mutation,
 )
 from sp.app.ui.ai_api import build_api_request
@@ -354,6 +356,8 @@ SERVER_ADMIN_PASSWORD = os.getenv("SERVER_ADMIN_PASSWORD")
 
 password_hasher = PasswordHasher()
 security = HTTPBearer(auto_error=False)
+_MCP_TOKEN_LOCK = threading.RLock()
+_MCP_ACTIVE_TOKENS: dict[str, float] = {}
 
 _PRINT_TEMPLATES = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
@@ -411,6 +415,14 @@ class AuthModels:
 
     class PrintTokenRequest(BaseModel):
         ttl_seconds: int = Field(default=900, ge=60, le=3600)
+
+    class McpTokenRequest(BaseModel):
+        ttl_seconds: int = Field(default=43200, ge=60, le=43200)
+        session_id: Optional[str] = Field(default=None, max_length=128)
+        vault_path: Optional[str] = Field(default=None, max_length=4096)
+
+    class McpTokenRevokeRequest(BaseModel):
+        token: str = Field(..., min_length=16)
 
 
 def _create_token(data: dict, expires_delta: timedelta) -> str:
@@ -1330,11 +1342,6 @@ app.add_middleware(
 @app.middleware("http")
 async def bind_vault_context(request: Request, call_next):
     session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
-    if not session_id and request.url.path == "/excalidraw/edit":
-        # The initial WebEngine navigation cannot attach custom headers. Carry
-        # the owning StillPoint window id in the editor URL, then let the
-        # Excalidraw client send it as a header on subsequent API requests.
-        session_id = str(request.query_params.get("window_id") or "").strip()
     vault_token = None
     config_token = None
     if session_id:
@@ -1706,13 +1713,1007 @@ def auth_print_token(
     user: AuthModels.UserInfo = Depends(get_current_user),
 ) -> dict:
     """Issue a short-lived token for browser print access."""
-    root = _get_vault_root()
+    if not AUTH_ENABLED:
+        return {"token": None, "expires_in": 0}
     ttl = int(payload.ttl_seconds or 900)
     token = _create_token(
-        {"sub": user.username, "scope": "print", "vault_root": str(root)},
+        {"sub": user.username, "scope": "print"},
         timedelta(seconds=ttl),
     )
     return {"token": token, "expires_in": ttl}
+
+
+def _mcp_vault_id(root: Path) -> str:
+    return hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()
+
+
+@app.post("/auth/mcp-token")
+def auth_mcp_token(
+    payload: AuthModels.McpTokenRequest,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    """Issue a revocable MCP client token scoped to the active vault."""
+    root = _get_vault_root()
+    requested_path = str(payload.vault_path or "").strip()
+    session_id = str(payload.session_id or "")[:128]
+    if requested_path:
+        registered_root = vault_state.registered_root_for_path(requested_path)
+        if registered_root is None:
+            raise HTTPException(status_code=403, detail="Requested path is not inside an active StillPoint vault")
+        root = registered_root
+        if session_id:
+            vault_state.bind_session_root(session_id, str(root))
+    ttl = max(60, min(43200, int(payload.ttl_seconds or 43200)))
+    token_id = secrets.token_urlsafe(24)
+    expires_at = time.time() + ttl
+    claims = {
+        "sub": user.username,
+        "scope": "mcp",
+        "jti": token_id,
+        "vault": _mcp_vault_id(root),
+        "perm": "read_write" if user.can_write else "read",
+        "sid": session_id,
+    }
+    token = _create_token(claims, timedelta(seconds=ttl))
+    with _MCP_TOKEN_LOCK:
+        now = time.time()
+        stale = [key for key, expiry in _MCP_ACTIVE_TOKENS.items() if expiry <= now]
+        for key in stale:
+            _MCP_ACTIVE_TOKENS.pop(key, None)
+        _MCP_ACTIVE_TOKENS[token_id] = expires_at
+    return {"token": token, "expires_in": ttl, "vault": claims["vault"], "can_write": user.can_write}
+
+
+@app.post("/auth/mcp-token/revoke")
+def auth_mcp_token_revoke(
+    payload: AuthModels.McpTokenRevokeRequest,
+    _user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    """Revoke an MCP session credential before its JWT expiry."""
+    try:
+        claims = jwt.decode(payload.token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return {"ok": True}
+    token_id = str(claims.get("jti") or "")
+    if token_id:
+        with _MCP_TOKEN_LOCK:
+            _MCP_ACTIVE_TOKENS.pop(token_id, None)
+    return {"ok": True}
+
+
+_MCP_TOOLS = [
+    {
+        "name": "vault.read",
+        "description": "Read a StillPoint page with its canonical identity and revision. Prefer this over filesystem reads for vault pages.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Vault path or StillPoint colon link."},
+                "include_context": {"type": "boolean", "default": False},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vault.search",
+        "description": "Ranked full-text vault search returning canonical links, snippets, headings, tags, and revisions. Always use this for user requests to search or find knowledge in the StillPoint vault.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "path_prefix": {"type": ["string", "null"]},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vault.write",
+        "description": "Replace or append to a StillPoint page in the active vault.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "mode": {"type": "string", "enum": ["replace", "append"]},
+                "expected_mtime_ns": {"type": ["integer", "null"]},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vault.create_child",
+        "description": "Create a folder-backed child page beneath a StillPoint page.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "parent_path": {"type": "string"},
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["parent_path", "title", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "tasks.list",
+        "description": "List structured StillPoint tasks with stable IDs, source locations, dates, tags, priority, and status. Always use this instead of parsing task markdown.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": ["string", "null"]},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "status": {"type": "string", "enum": ["todo", "done", "all"]},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "daily.open",
+        "description": "Open a dated StillPoint journal page; defaults to today and creates it when needed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": ["string", "null"], "description": "today, yesterday, tomorrow, or YYYY-MM-DD"},
+                "create": {"type": "boolean", "default": True},
+                "template": {"type": ["string", "null"]},
+            },
+            "additionalProperties": False,
+        },
+    },
+]
+
+_MCP_TOOLS.extend(
+    [
+        {
+            "name": "page.context",
+            "description": "Get a high-value StillPoint context bundle: page content, ancestors, children, backlinks, outgoing links, headings, tags, tasks, attachments, and optional related search results. Prefer this when understanding or summarizing a topic.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "query": {"type": ["string", "null"]},
+                    "include_content": {"type": "boolean", "default": True},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "page.list_children",
+            "description": "List direct logical child pages with canonical paths and colon links.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "vault.backlinks",
+            "description": "Return pages that link to a StillPoint page, using the indexed vault graph rather than text matching.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "vault.recent_changes",
+            "description": "List recently edited StillPoint pages with canonical links and revisions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "page.patch",
+            "description": "Safely patch a StillPoint page using append, section replacement, or heading insertion with optional optimistic revision checking and dry-run preview. Prefer this over whole-file writes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "operation": {"type": "string", "enum": ["append", "replace", "replace_section", "insert_after_heading"]},
+                    "heading": {"type": ["string", "null"]},
+                    "expected_mtime_ns": {"type": ["integer", "null"]},
+                    "dry_run": {"type": "boolean", "default": False},
+                },
+                "required": ["path", "content", "operation"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "tasks.create",
+            "description": "Create a structured task under a page's Tasks section.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}, "text": {"type": "string"},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "start": {"type": ["string", "null"]}, "due": {"type": ["string", "null"]},
+                    "dry_run": {"type": "boolean", "default": False},
+                },
+                "required": ["path", "text"], "additionalProperties": False,
+            },
+        },
+        {
+            "name": "tasks.update",
+            "description": "Conflict-safe structured task update using the source location and expected task text returned by tasks.list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}, "line": {"type": "integer", "minimum": 1},
+                    "expected_text": {"type": "string"},
+                    "expected_status": {"type": "string", "enum": ["todo", "done"]},
+                    "text": {"type": ["string", "null"]},
+                    "status": {"type": ["string", "null"], "enum": ["todo", "done", None]},
+                    "priority": {"type": ["integer", "null"], "minimum": 0, "maximum": 3},
+                    "tags": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "start": {"type": ["string", "null"]}, "due": {"type": ["string", "null"]},
+                    "destination": {"type": ["string", "null"]},
+                    "delete": {"type": "boolean", "default": False},
+                    "remove_indicators": {"type": "boolean", "default": False},
+                    "dry_run": {"type": "boolean", "default": False},
+                },
+                "required": ["path", "line", "expected_text"], "additionalProperties": False,
+            },
+        },
+        {
+            "name": "tasks.complete",
+            "description": "Mark one conflict-checked StillPoint task complete or incomplete.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}, "line": {"type": "integer", "minimum": 1},
+                    "expected_text": {"type": "string"},
+                    "expected_status": {"type": "string", "enum": ["todo", "done"]},
+                    "done": {"type": "boolean", "default": True},
+                    "dry_run": {"type": "boolean", "default": False},
+                },
+                "required": ["path", "line", "expected_text"], "additionalProperties": False,
+            },
+        },
+        {
+            "name": "page.move",
+            "description": "Preview or atomically move/rename a StillPoint page tree, keeping matching page filenames and optionally rewriting incoming links.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_path": {"type": "string"}, "to_path": {"type": "string"},
+                    "rewrite_links": {"type": "boolean", "default": True},
+                    "expected_tree_version": {"type": ["integer", "null"]},
+                    "dry_run": {"type": "boolean", "default": True},
+                },
+                "required": ["from_path", "to_path"], "additionalProperties": False,
+            },
+        },
+    ]
+)
+
+_MCP_TOOLS.append(
+    {
+        "name": "journal.open",
+        "description": "Open or optionally create a dated journal page. Accepts today, yesterday, tomorrow, or an ISO date.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "default": "today"},
+                "create": {"type": "boolean", "default": True},
+                "template": {"type": ["string", "null"]},
+            },
+            "additionalProperties": False,
+        },
+    }
+)
+
+
+def _require_mcp_claims(
+    credentials: Optional[HTTPAuthorizationCredentials],
+    session_id: str = "",
+) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="MCP bearer token required")
+    try:
+        claims = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid MCP token") from exc
+    if claims.get("scope") != "mcp":
+        raise HTTPException(status_code=401, detail="Invalid MCP token scope")
+    token_session = str(claims.get("sid") or "")
+    if token_session and token_session != str(session_id or ""):
+        raise HTTPException(status_code=403, detail="MCP token belongs to another window session")
+    token_id = str(claims.get("jti") or "")
+    with _MCP_TOKEN_LOCK:
+        expires_at = _MCP_ACTIVE_TOKENS.get(token_id)
+    if not token_id or expires_at is None or expires_at <= time.time():
+        raise HTTPException(status_code=401, detail="MCP token is expired or revoked")
+    root = _get_vault_root()
+    if claims.get("vault") != _mcp_vault_id(root):
+        raise HTTPException(status_code=403, detail="MCP token belongs to another vault")
+    return claims
+
+
+def _mcp_user(claims: dict) -> AuthModels.UserInfo:
+    can_write = claims.get("perm") == "read_write"
+    return AuthModels.UserInfo(
+        username=str(claims.get("sub") or "mcp"),
+        is_admin=False,
+        can_write=can_write,
+        role="normal",
+        perm="read_write" if can_write else "read",
+    )
+
+
+def _mcp_page_path(path: str) -> str:
+    cleaned = str(path or "").strip().replace("\\", "/")
+    if not cleaned:
+        raise ValueError("path is required")
+    if cleaned.startswith(":"):
+        try:
+            return _colon_to_page_path(cleaned)
+        except HTTPException as exc:
+            raise ValueError(str(exc.detail)) from exc
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    return cleaned
+
+
+_MCP_INSTRUCTIONS = (
+    "For StillPoint vault search, page reads and writes, topic context, backlinks, page-tree navigation, "
+    "tasks, journal pages, recent changes, and page moves, prefer the StillPoint MCP tools over shell or "
+    "direct filesystem access. Use vault.search for requests to search or find vault knowledge, page.context "
+    "to understand a topic, structured task tools instead of parsing task markdown, and page.patch instead "
+    "of whole-file edits. Use filesystem tools only when no corresponding StillPoint capability exists. "
+    "Preview destructive or structural mutations with dry_run first and never expose MCP credentials."
+)
+
+
+def _mcp_existing_page(path: str) -> tuple[Path, str]:
+    root = _get_vault_root().resolve()
+    normalized = _mcp_page_path(path)
+    candidate = (root / normalized.lstrip("/")).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("path leaves the active vault") from exc
+    resolved = files._resolve_page_for_read(candidate)
+    if not resolved.is_file():
+        raise FileNotFoundError(normalized)
+    return resolved, f"/{resolved.relative_to(root).as_posix()}"
+
+
+def _mcp_colon_link(path: str) -> str:
+    colon = file_ops._path_to_colon(path)
+    return f"[:{colon}|{Path(path).stem}]" if colon else ""
+
+
+def _mcp_index_values(path: str) -> dict:
+    result: dict = {"title": Path(path).stem, "revision": None, "updated": None, "created": None}
+    db_path = config._vault_db_path()
+    if not db_path:
+        return result
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT title, rev, updated, created_at FROM pages WHERE path = ?",
+                (path,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = conn.execute("SELECT title, NULL, updated, created_at FROM pages WHERE path = ?", (path,)).fetchone()
+        if row:
+            result.update(title=row[0] or Path(path).stem, revision=row[1], updated=row[2], created=row[3])
+        result["tags"] = [
+            row[0] for row in conn.execute("SELECT tag FROM page_tags WHERE page = ? ORDER BY tag", (path,)).fetchall()
+        ]
+        result["backlinks"] = [
+            row[0] for row in conn.execute("SELECT DISTINCT from_path FROM links WHERE to_path = ? ORDER BY from_path", (path,)).fetchall()
+        ]
+        result["links"] = [
+            row[0] for row in conn.execute("SELECT DISTINCT to_path FROM links WHERE from_path = ? ORDER BY to_path", (path,)).fetchall()
+        ]
+        result["attachments"] = [
+            row[0]
+            for row in conn.execute(
+                "SELECT attachment_path FROM attachments WHERE page_path = ? ORDER BY attachment_path",
+                (path,),
+            ).fetchall()
+        ]
+    except sqlite3.OperationalError:
+        result.setdefault("tags", [])
+        result.setdefault("backlinks", [])
+        result.setdefault("links", [])
+        result.setdefault("attachments", [])
+    finally:
+        conn.close()
+    return result
+
+
+def _mcp_headings(content: str) -> list[dict]:
+    headings: list[dict] = []
+    for line_number, line in enumerate(content.splitlines(), 1):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match:
+            headings.append({"line": line_number, "level": len(match.group(1)), "text": match.group(2)})
+    return headings
+
+
+def _mcp_children(path: str) -> list[dict]:
+    resolved, canonical = _mcp_existing_page(path)
+    root = _get_vault_root().resolve()
+    page_dir = resolved.parent
+    children: list[dict] = []
+    for child in sorted(page_dir.iterdir(), key=lambda item: item.name.casefold()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        page_file = files._resolve_page_for_read(child)
+        if not page_file.is_file():
+            continue
+        child_path = f"/{page_file.relative_to(root).as_posix()}"
+        children.append({"path": child_path, "title": child.name, "colon_link": _mcp_colon_link(child_path)})
+    return children
+
+
+def _mcp_ancestors(path: str) -> list[dict]:
+    resolved, _canonical = _mcp_existing_page(path)
+    root = _get_vault_root().resolve()
+    ancestors: list[dict] = []
+    parent = resolved.parent.parent
+    while parent != root and root in parent.parents:
+        page_file = files._resolve_page_for_read(parent)
+        if page_file.is_file():
+            page_path = f"/{page_file.relative_to(root).as_posix()}"
+            ancestors.append({"path": page_path, "title": parent.name, "colon_link": _mcp_colon_link(page_path)})
+        parent = parent.parent
+    ancestors.reverse()
+    return ancestors
+
+
+def _mcp_page_record(path: str, *, include_content: bool = True, include_context: bool = False) -> dict:
+    resolved, canonical = _mcp_existing_page(path)
+    content = resolved.read_text(encoding="utf-8")
+    stat = resolved.stat()
+    record = {
+        "path": canonical,
+        "colon_link": _mcp_colon_link(canonical),
+        "mtime_ns": stat.st_mtime_ns,
+        **_mcp_index_values(canonical),
+    }
+    if include_content:
+        record["content"] = content
+    if include_context:
+        tasks = api_tasks(tags=None, include_done=True, include_ancestors=False, actionable_only=False).get("items", [])
+        record["backlink_pages"] = [
+            {"path": linked, "colon_link": _mcp_colon_link(linked), "title": Path(linked).stem}
+            for linked in record.get("backlinks", [])
+        ]
+        record["linked_pages"] = [
+            {"path": linked, "colon_link": _mcp_colon_link(linked), "title": Path(linked).stem}
+            for linked in record.get("links", [])
+        ]
+        record.update(
+            headings=_mcp_headings(content),
+            children=_mcp_children(canonical),
+            ancestors=_mcp_ancestors(canonical),
+            tasks=[task for task in tasks if task.get("path") == canonical],
+        )
+    return record
+
+
+def _mcp_enriched_search(arguments: dict) -> dict:
+    query = str(arguments.get("query") or "").strip()
+    limit = max(1, min(200, int(arguments.get("limit") or 20)))
+    path_prefix = arguments.get("path_prefix") or None
+    if path_prefix:
+        path_prefix = _mcp_page_path(str(path_prefix))
+    raw = api_search(q=query, subtree=path_prefix, limit=limit).get("results", [])
+    results: list[dict] = []
+    for item in raw:
+        path = str(item.get("path") or "")
+        values = _mcp_index_values(path)
+        rank = float(item.get("rank") or 0.0)
+        snippet = str(item.get("snippet") or "")
+        results.append(
+            {
+                **item,
+                "title": values.get("title") or Path(path).stem,
+                "colon_link": _mcp_colon_link(path),
+                "heading": next((h["text"] for h in _mcp_headings(snippet)), None),
+                "score": 1.0 / (1.0 + abs(rank)),
+                "revision": values.get("revision"),
+                "modified": values.get("updated"),
+                "tags": values.get("tags", []),
+            }
+        )
+    return {"query": query, "results": results, "count": len(results)}
+
+
+def _mcp_apply_patch(content: str, operation: str, patch: str, heading: Optional[str]) -> str:
+    if operation == "replace":
+        return patch
+    if operation == "append":
+        return content.rstrip("\n") + ("\n\n" if content.strip() else "") + patch.rstrip("\n") + "\n"
+    wanted = str(heading or "").strip().lstrip("#").strip().casefold()
+    if not wanted:
+        raise ValueError("heading is required for this patch operation")
+    lines = content.splitlines(keepends=True)
+    target = None
+    target_level = 0
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*(?:\r?\n)?$", line)
+        if match and match.group(2).strip().casefold() == wanted:
+            target, target_level = index, len(match.group(1))
+            break
+    if target is None:
+        raise ValueError(f"heading not found: {heading}")
+    patch_lines = [line + "\n" for line in patch.rstrip("\n").split("\n")] if patch else []
+    if operation == "insert_after_heading":
+        lines[target + 1 : target + 1] = patch_lines
+        return "".join(lines)
+    if operation == "replace_section":
+        end = len(lines)
+        for index in range(target + 1, len(lines)):
+            match = re.match(r"^(#{1,6})\s+", lines[index])
+            if match and len(match.group(1)) <= target_level:
+                end = index
+                break
+        lines[target + 1 : end] = patch_lines
+        return "".join(lines)
+    raise ValueError(f"unsupported patch operation: {operation}")
+
+
+def _mcp_patch_page(arguments: dict, claims: dict) -> dict:
+    record = _mcp_page_record(str(arguments.get("path") or ""), include_content=True)
+    old_content = str(record["content"])
+    operation = str(arguments.get("operation") or "replace")
+    new_content = _mcp_apply_patch(old_content, operation, str(arguments.get("content") or ""), arguments.get("heading"))
+    expected = arguments.get("expected_mtime_ns")
+    if expected is not None and int(expected) != int(record["mtime_ns"]):
+        raise ValueError(f"page changed: expected mtime {expected}, current mtime {record['mtime_ns']}")
+    preview = {
+        "path": record["path"], "operation": operation, "changed": new_content != old_content,
+        "before_chars": len(old_content), "after_chars": len(new_content), "mtime_ns": record["mtime_ns"],
+    }
+    if arguments.get("dry_run"):
+        return {**preview, "dry_run": True}
+    user = _mcp_user(claims)
+    if not user.can_write:
+        raise PermissionError("This MCP session is read-only")
+    header = f"mtime:{int(expected)}" if expected is not None else None
+    result = file_write(FileWritePayload(path=record["path"], content=new_content), if_match=header, user=user)
+    return {**preview, **result, "dry_run": False}
+
+
+def _mcp_task_target(arguments: dict) -> TaskMutationTarget:
+    return TaskMutationTarget(
+        path=_mcp_existing_page(str(arguments.get("path") or ""))[1],
+        line=max(1, int(arguments.get("line") or 1)),
+        expected_text=str(arguments.get("expected_text") or ""),
+        expected_status=str(arguments.get("expected_status") or "todo"),
+    )
+
+
+def _mcp_preview_task_update(target: TaskMutationTarget, arguments: dict) -> dict:
+    content = _mcp_page_record(target.path, include_content=True)["content"]
+    lines = str(content).splitlines(keepends=True)
+    index = target.line - 1
+    if index < 0 or index >= len(lines):
+        raise TaskConflictError("The task source line no longer exists.")
+    parsed = app_indexer.extract_tasks(target.path, lines[index].rstrip("\n"))
+    task = parsed[0] if parsed else None
+    if not task or str(task.get("text") or "").strip() != target.expected_text.strip() or str(task.get("status") or "todo") != target.expected_status:
+        raise TaskConflictError("The task changed or can no longer be found. Reload tasks and try again.")
+    if arguments.get("delete"):
+        after = ""
+    elif arguments.get("remove_indicators"):
+        from sp.app.task_mutations import remove_task_indicators
+        after = remove_task_indicators(lines[index])
+    else:
+        after = rewrite_task_line(
+            lines[index], text=arguments.get("text"), status=arguments.get("status"),
+            priority=arguments.get("priority"), tags=arguments.get("tags"),
+            start=arguments.get("start"), due=arguments.get("due"),
+        )
+    return {"path": target.path, "line": target.line, "before": lines[index].rstrip("\n"), "after": after.rstrip("\n")}
+
+
+def _mcp_update_task(arguments: dict, claims: dict) -> dict:
+    target = _mcp_task_target(arguments)
+    preview = _mcp_preview_task_update(target, arguments)
+    if arguments.get("dry_run"):
+        return {**preview, "dry_run": True}
+    if not _mcp_user(claims).can_write:
+        raise PermissionError("This MCP session is read-only")
+    destination = arguments.get("destination")
+    if destination:
+        destination = _mcp_existing_page(str(destination))[1]
+    result = mutate_task(
+        _get_vault_root(), target, text=arguments.get("text"), status=arguments.get("status"),
+        priority=arguments.get("priority"), tags=arguments.get("tags"), start=arguments.get("start"),
+        due=arguments.get("due"), destination=destination,
+        delete=bool(arguments.get("delete")), remove_indicators=bool(arguments.get("remove_indicators")),
+    )
+    _clear_task_cache()
+    return {"ok": True, "dry_run": False, "paths": result.get("paths", []), "line_hash": result.get("line_hash"), **preview}
+
+
+def _mcp_create_task(arguments: dict, claims: dict) -> dict:
+    record = _mcp_page_record(str(arguments.get("path") or ""), include_content=True)
+    text = str(arguments.get("text") or "").strip()
+    if not text:
+        raise ValueError("task text is required")
+    parts = [f"☐ {text}"]
+    priority = max(0, min(3, int(arguments.get("priority") or 0)))
+    if priority:
+        parts.append("!" * priority)
+    parts.extend("@" + str(tag).strip().lstrip("@") for tag in arguments.get("tags") or [] if str(tag).strip())
+    if arguments.get("start"):
+        Date.fromisoformat(str(arguments["start"]))
+        parts.append(f">{arguments['start']}")
+    if arguments.get("due"):
+        Date.fromisoformat(str(arguments["due"]))
+        parts.append(f"<{arguments['due']}")
+    task_line = " ".join(parts)
+    updated = _append_under_tasks(str(record["content"]), task_line)
+    if arguments.get("dry_run"):
+        return {"path": record["path"], "task": task_line, "dry_run": True}
+    user = _mcp_user(claims)
+    if not user.can_write:
+        raise PermissionError("This MCP session is read-only")
+    result = file_write(FileWritePayload(path=record["path"], content=updated), if_match=f"mtime:{record['mtime_ns']}", user=user)
+    _clear_task_cache()
+    return {"path": record["path"], "task": task_line, "dry_run": False, **result}
+
+
+def _mcp_parse_date(value: object) -> Date:
+    text = str(value or "today").strip().casefold()
+    today = Date.today()
+    if text == "today":
+        return today
+    if text == "yesterday":
+        return today - timedelta(days=1)
+    if text == "tomorrow":
+        return today + timedelta(days=1)
+    return Date.fromisoformat(text)
+
+
+def _mcp_open_journal(arguments: dict, claims: dict) -> dict:
+    day = _mcp_parse_date(arguments.get("date"))
+    root = _get_vault_root()
+    rel = Path("Journal") / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}" / f"{day:%d}{PAGE_SUFFIX}"
+    path = f"/{rel.as_posix()}"
+    existing = (root / rel).is_file()
+    created = False
+    if not existing and bool(arguments.get("create", True)):
+        if not _mcp_user(claims).can_write:
+            raise PermissionError("This MCP session is read-only")
+        target, created = files.ensure_journal_date(root, day, template=arguments.get("template"))
+        path = f"/{target.relative_to(root).as_posix()}"
+        content = target.read_text(encoding="utf-8")
+        app_indexer.index_page(path, content)
+    elif existing:
+        content = (root / rel).read_text(encoding="utf-8")
+    else:
+        return {"path": path, "date": day.isoformat(), "exists": False, "created": False}
+    return {"path": path, "colon_link": _mcp_colon_link(path), "date": day.isoformat(), "exists": True, "created": created, "content": content}
+
+
+def _mcp_move_preview(from_path: str, to_path: str) -> dict:
+    root = _get_vault_root().resolve()
+    source = _mcp_page_path(from_path)
+    destination = _mcp_page_path(to_path)
+    if Path(source).suffix.lower() in PAGE_SUFFIXES:
+        source = "/" + str(Path(source.lstrip("/")).parent).replace("\\", "/")
+    if Path(destination).suffix.lower() in PAGE_SUFFIXES:
+        destination = "/" + str(Path(destination.lstrip("/")).parent).replace("\\", "/")
+    ok, reason = file_ops.preflight(root, "move", source, destination)
+    page_map: dict[str, str] = {}
+    if ok:
+        src_dir = root / source.lstrip("/")
+        old_leaf, new_leaf = src_dir.name, Path(destination).name
+        for suffix in PAGE_SUFFIXES:
+            for page in src_dir.rglob(f"*{suffix}"):
+                old = f"/{page.relative_to(root).as_posix()}"
+                relative = page.relative_to(src_dir)
+                if relative.parent == Path(".") and page.stem == old_leaf:
+                    relative = Path(f"{new_leaf}{PAGE_SUFFIX}")
+                new = f"/{(Path(destination.lstrip('/')) / relative).as_posix()}"
+                page_map[old] = new
+    return {"from": source, "to": destination, "can_apply": ok, "reason": reason, "page_map": page_map, "tree_version": config.get_tree_version()}
+
+
+def _mcp_move_page(arguments: dict, claims: dict) -> dict:
+    preview = _mcp_move_preview(str(arguments.get("from_path") or ""), str(arguments.get("to_path") or ""))
+    expected = arguments.get("expected_tree_version")
+    if expected is not None and int(expected) != int(preview["tree_version"]):
+        raise ValueError(f"vault tree changed: expected version {expected}, current version {preview['tree_version']}")
+    if arguments.get("dry_run", True):
+        return {**preview, "dry_run": True}
+    if not preview["can_apply"]:
+        raise ValueError(str(preview["reason"] or "move preflight failed"))
+    if not _mcp_user(claims).can_write:
+        raise PermissionError("This MCP session is read-only")
+    root = _get_vault_root()
+    _require_no_reorganization_recovery(root)
+    with vault_reorg.structural_operation(root):
+        result = file_ops.move_folder(root, preview["from"], preview["to"], rewrite_links=bool(arguments.get("rewrite_links", True)))
+    touched: list[str] = []
+    if arguments.get("rewrite_links", True):
+        touched = file_ops.update_links_on_disk(root, result.get("page_map") or {})
+        for path in touched:
+            try:
+                app_indexer.index_page(path, _mcp_page_record(path, include_content=True)["content"])
+            except Exception:
+                pass
+    return {**result, "dry_run": False, "links_updated": touched}
+
+
+def _mcp_recent_changes(limit: int) -> dict:
+    pages = get_recent_pages(limit=max(1, min(200, limit)), user=_mcp_user({"sub": "mcp", "perm": "read_only"})).get("pages", [])
+    return {
+        "pages": [
+            {**page, "colon_link": _mcp_colon_link(str(page.get("path") or ""))}
+            for page in pages
+        ]
+    }
+
+
+def _mcp_resources() -> list[dict]:
+    today = Date.today().isoformat()
+    return [
+        {
+            "uri": "stillpoint://tasks/open",
+            "name": "Open StillPoint tasks",
+            "description": "The active vault's structured, incomplete tasks.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "stillpoint://recent/changes",
+            "name": "Recent StillPoint changes",
+            "description": "The most recently edited pages in the active vault.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": f"stillpoint://journal/{today}",
+            "name": "Today's StillPoint journal",
+            "description": "Today's journal page, if it exists. Reading this resource never creates it.",
+            "mimeType": "text/markdown",
+        },
+    ]
+
+
+def _mcp_resource_templates() -> list[dict]:
+    return [
+        {
+            "uriTemplate": "stillpoint://page/{path}",
+            "name": "StillPoint page",
+            "description": "Read one page by slash path or colon link, without creating it.",
+            "mimeType": "text/markdown",
+        },
+        {
+            "uriTemplate": "stillpoint://context/{path}",
+            "name": "StillPoint page context",
+            "description": "Read a structured page context bundle including graph, tree, headings, and tasks.",
+            "mimeType": "application/json",
+        },
+        {
+            "uriTemplate": "stillpoint://journal/{date}",
+            "name": "StillPoint journal date",
+            "description": "Read an existing journal page by ISO date; this resource never creates pages.",
+            "mimeType": "text/markdown",
+        },
+    ]
+
+
+def _mcp_read_resource(uri: str) -> dict:
+    parsed = urlparse(str(uri or ""))
+    if parsed.scheme != "stillpoint":
+        raise ValueError("unsupported resource URI")
+    kind = parsed.netloc.casefold()
+    value = unquote(parsed.path.lstrip("/"))
+    mime_type = "application/json"
+    if kind == "tasks" and value == "open":
+        output: object = api_tasks(
+            tags=None, status="todo", include_done=False, include_ancestors=False, actionable_only=False
+        )
+    elif kind == "recent" and value == "changes":
+        output = _mcp_recent_changes(50)
+    elif kind == "page":
+        record = _mcp_page_record(value, include_content=True)
+        output = record["content"]
+        mime_type = "text/markdown"
+    elif kind == "context":
+        output = _mcp_page_record(value, include_content=True, include_context=True)
+    elif kind == "journal":
+        output = _mcp_open_journal({"date": value, "create": False}, {"perm": "read_only", "sub": "resource"})
+        if not output.get("exists"):
+            raise FileNotFoundError(str(output.get("path") or value))
+        output = output["content"]
+        mime_type = "text/markdown"
+    else:
+        raise FileNotFoundError(uri)
+    text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+    return {"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
+
+
+def _mcp_call_tool(name: str, arguments: dict, claims: dict) -> dict:
+    arguments = arguments if isinstance(arguments, dict) else {}
+    root = _get_vault_root()
+    user = _mcp_user(claims)
+    if name == "vault.read":
+        return _mcp_page_record(
+            str(arguments.get("path") or ""),
+            include_content=True,
+            include_context=bool(arguments.get("include_context")),
+        )
+    if name == "vault.search":
+        return _mcp_enriched_search(arguments)
+    if name == "vault.write":
+        _resolved, path = _mcp_existing_page(str(arguments.get("path") or ""))
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        mode = str(arguments.get("mode") or "replace")
+        if mode not in {"replace", "append"}:
+            raise ValueError("mode must be replace or append")
+        return _mcp_patch_page(
+            {
+                "path": path, "content": content, "operation": mode,
+                "expected_mtime_ns": arguments.get("expected_mtime_ns"),
+                "dry_run": bool(arguments.get("dry_run")),
+            },
+            claims,
+        )
+    if name == "vault.create_child":
+        if not user.can_write:
+            raise PermissionError("This MCP session is read-only")
+        _parent_file, parent_canonical = _mcp_existing_page(str(arguments.get("parent_path") or ""))
+        parent_path = Path(parent_canonical.lstrip("/")).parent
+        title = str(arguments.get("title") or "").strip()
+        if not title or title in {".", ".."} or any(char in title for char in "/\\:"):
+            raise ValueError("title must be one valid page-name segment")
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        child = parent_path / title / f"{title}{PAGE_SUFFIX}"
+        path = f"/{child.as_posix()}"
+        result = file_write(FileWritePayload(path=path, content=content), if_match=None, user=user)
+        return {
+            "path": path,
+            "colon_link": _mcp_colon_link(path),
+            "parent_path": parent_canonical,
+            **result,
+        }
+    if name == "tasks.list":
+        status = str(arguments.get("status") or "all")
+        return api_tasks(
+            query=arguments.get("query"),
+            tags=arguments.get("tags"),
+            status=None if status == "all" else status,
+            include_done=None,
+            include_ancestors=False,
+            actionable_only=False,
+        )
+    if name in {"daily.open", "journal.open"}:
+        return _mcp_open_journal(arguments, claims)
+    if name == "page.context":
+        record = _mcp_page_record(
+            str(arguments.get("path") or ""),
+            include_content=bool(arguments.get("include_content", True)),
+            include_context=True,
+        )
+        if arguments.get("query"):
+            record["related"] = _mcp_enriched_search(
+                {"query": arguments["query"], "path_prefix": str(Path(record["path"]).parent), "limit": 10}
+            )["results"]
+        return record
+    if name == "page.list_children":
+        return {"children": _mcp_children(str(arguments.get("path") or ""))}
+    if name == "vault.backlinks":
+        record = _mcp_page_record(str(arguments.get("path") or ""), include_content=False)
+        return {
+            "path": record["path"],
+            "colon_link": record["colon_link"],
+            "backlinks": [
+                {"path": linked, "colon_link": _mcp_colon_link(linked), "title": Path(linked).stem}
+                for linked in record.get("backlinks", [])
+            ],
+        }
+    if name == "vault.recent_changes":
+        return _mcp_recent_changes(int(arguments.get("limit") or 20))
+    if name == "page.patch":
+        return _mcp_patch_page(arguments, claims)
+    if name == "tasks.create":
+        return _mcp_create_task(arguments, claims)
+    if name == "tasks.update":
+        return _mcp_update_task(arguments, claims)
+    if name == "tasks.complete":
+        return _mcp_update_task({**arguments, "status": "done" if arguments.get("done", True) else "todo"}, claims)
+    if name == "page.move":
+        return _mcp_move_page(arguments, claims)
+    raise KeyError(f"Unknown MCP tool: {name}")
+
+
+def _mcp_tool_result(output: dict, *, is_error: bool = False) -> dict:
+    text = json.dumps(output, ensure_ascii=False, default=str)
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": output,
+        "isError": bool(is_error),
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Minimal client-neutral MCP Streamable HTTP endpoint for external clients."""
+    session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
+    claims = _require_mcp_claims(credentials, session_id)
+    try:
+        message = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid MCP JSON request") from exc
+    if not isinstance(message, dict):
+        raise HTTPException(status_code=400, detail="MCP request must be an object")
+    request_id = message.get("id")
+    method = str(message.get("method") or "")
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    if request_id is None:
+        return Response(status_code=202)
+    if method == "initialize":
+        requested = str(params.get("protocolVersion") or "")
+        protocol = requested if requested in {"2024-11-05", "2025-03-26"} else "2025-03-26"
+        result = {
+            "protocolVersion": protocol,
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+            },
+            "serverInfo": {"name": "StillPoint", "version": STILLPOINT_VERSION},
+            "instructions": _MCP_INSTRUCTIONS,
+        }
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": _MCP_TOOLS}
+    elif method == "resources/list":
+        result = {"resources": _mcp_resources()}
+    elif method == "resources/templates/list":
+        result = {"resourceTemplates": _mcp_resource_templates()}
+    elif method == "resources/read":
+        try:
+            result = _mcp_read_resource(str(params.get("uri") or ""))
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            return {
+                "jsonrpc": "2.0", "id": request_id,
+                "error": {"code": -32002, "message": str(detail)},
+            }
+    elif method == "tools/call":
+        name = str(params.get("name") or "")
+        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        try:
+            result = _mcp_tool_result(_mcp_call_tool(name, arguments, claims))
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            result = _mcp_tool_result({"error": detail}, is_error=True)
+    else:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        }
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
 @app.get("/api/vaults")
@@ -3217,7 +4218,7 @@ async def print_page(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> HTMLResponse:
     await _require_print_user(request, token, credentials)
-    root = _get_print_vault_root(token)
+    root = _get_vault_root()
     if mode == "page":
         page_file = _resolve_page_file_for_print(root, path)
         html_body = _render_single_page_html(
@@ -3257,7 +4258,7 @@ async def print_css(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Response:
     await _require_print_user(request, token, credentials)
-    root = _get_print_vault_root(token)
+    root = _get_vault_root()
     css = _load_print_css(root)
     return Response(content=css, media_type="text/css")
 
@@ -3270,7 +4271,7 @@ async def asset_file(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> FileResponse:
     await _require_print_user(request, token, credentials)
-    root = _get_print_vault_root(token)
+    root = _get_vault_root()
     raw = (path or "").strip()
     root_resolved = root.resolve()
     normalized = raw
@@ -4875,18 +5876,13 @@ def _print_css_url(token: Optional[str]) -> str:
     return "/print.css"
 
 
-def _decode_print_token(token: str) -> dict:
+def _verify_print_token(token: str) -> AuthModels.UserInfo:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid print token") from exc
     if payload.get("scope") != "print":
         raise HTTPException(status_code=401, detail="Invalid print token scope")
-    return payload
-
-
-def _verify_print_token(token: str) -> AuthModels.UserInfo:
-    payload = _decode_print_token(token)
     username = payload.get("sub") or "print"
     return AuthModels.UserInfo(username=username, is_admin=True)
 
@@ -5468,23 +6464,6 @@ def _get_vault_root() -> Path:
         return vault_state.get_root()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _get_print_vault_root(token: Optional[str]) -> Path:
-    """Resolve the vault captured in a signed browser-print token."""
-    if not token:
-        return _get_vault_root()
-    payload = _decode_print_token(token)
-    raw_root = str(payload.get("vault_root") or "").strip()
-    if not raw_root:
-        return _get_vault_root()
-    try:
-        root = Path(raw_root).expanduser().resolve()
-    except (OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail="Print vault is unavailable") from exc
-    if not root.is_dir():
-        raise HTTPException(status_code=404, detail="Print vault is unavailable")
-    return root
 
 
 def _store_attachment(root: Path, page_path: str, upload: UploadFile, use_local_ops: bool) -> str:

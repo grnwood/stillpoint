@@ -5,7 +5,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>StillPoint Comparisons</title>
-    <meta name="description" content="See how StillPoint's notes-first Knowledge IDE differs from Obsidian, Notion, VS Code, Anytype, Zettlr, and other knowledge tools." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -14,13 +13,13 @@
     />
     <link rel="stylesheet" href="site.css" />
     <script src="site.js" defer></script>
-  </head>
+</head>
   <body>
     <header class="site-header">
       <div class="nav">
         <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
         <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
-        <nav class="nav-links">
+             <nav class="nav-links">
           <a href="index.html">Home</a>
           <a href="philo.html">Philosophy</a>
           <a href="cal.html">Journal</a>
@@ -32,10 +31,11 @@
           <a href="dia.html">Diagramming</a>
           <a href="uses.html">Use Cases</a>
           <a href="remote-vaults.html">Homebase</a>
-          <a href="ai.html">AI &amp; Agents</a>
+          <a href="ai.html">AI Infused</a>
           <a href="howitcompares.html">Comparisons</a>
-          <a href="power.html">Knowledge IDE</a>
+          <a href="power.html">Power</a>
         </nav>
+
       </div>
     </header>
 
@@ -43,93 +43,147 @@
       <section class="hero reveal" style="--d: 0.05s">
         <div>
           <span class="pill">Comparisons</span>
-          <h1>A notes app with a workbench built around it.</h1>
+          <h1>Writing, longevity, and ownership first.</h1>
           <p>
-            StillPoint starts with a normal vault folder full of plain Markdown files. Open a page
-            and write. When you need more, navigation, tasks, maps, diagrams, and optional AI
-            already understand the same workspace.
+            StillPoint is not trying to replace every tool. It is for people who want a calm,
+            local-first notebook that lasts.
           </p>
         </div>
         <div>
-          <img src="img/compare.png" alt="Comparing different approaches to a knowledge workspace" />
+          <img
+            src="img/compare.png"  
+            alt="Notebook pages"
+          />
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.15s">
-        <div class="card comparison-category-stillpoint comparison-stillpoint-summary">
-          <div class="comparison-category-choice"><span aria-hidden="true">✓</span> The StillPoint approach</div>
-          <h2>Plain notes. Integrated workbench.</h2>
-          <p>
-            Your Markdown files are the source of truth—not an export format or a database hidden
-            behind the application. StillPoint adds useful structure around those files without
-            asking you to give them up.
-          </p>
-          <div class="comparison-summary-grid">
-            <p><strong>Notes first.</strong> Pages, headings, links, and quick navigation stay at the center.</p>
-            <p><strong>Tools together.</strong> Journals, tasks, maps, diagrams, and local tools share vault context.</p>
-            <p><strong>Depth is optional.</strong> Use it as a focused notes app, then reach for AI only when useful.</p>
-          </div>
+        <h2>StillPoint vs Notion</h2>
+        <p>
+          Notion is a workspace platform. StillPoint is a personal notebook. Choose StillPoint if you want
+          a private place to write and think. Choose Notion if you need shared databases and
+          team dashboards.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th>StillPoint</th>
+                <th>Notion</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Where notes live</td>
+                <td>On your computer</td>
+                <td>In the cloud</td>
+              </tr>
+              <tr>
+                <td>Internet required</td>
+                <td>No</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>Accounts</td>
+                <td>None</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td>Data format</td>
+                <td>Plain text</td>
+                <td>Proprietary</td>
+              </tr>
+              <tr>
+                <td>Long-term ownership</td>
+                <td>Yours forever</td>
+                <td>Tied to the service</td>
+              </tr>
+              <tr>
+                <td>Best for</td>
+                <td>Writing and thinking</td>
+                <td>Databases and collaboration</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
       <section class="section reveal" style="--d: 0.25s">
-        <div class="eyebrow">How StillPoint differs</div>
-        <h2>Familiar alternatives, different centers of gravity.</h2>
-        <p>These are all capable tools. The distinction is what each one is designed around.</p>
-        <div class="grid comparison-differences">
-          <article class="card">
-            <h3>Compared with <a href="https://obsidian.md/">Obsidian</a></h3>
-            <p>Obsidian is an extensible local knowledge platform with a broad plugin ecosystem.</p>
-            <p class="stillpoint-difference"><strong>StillPoint:</strong> a more integrated, opinionated workbench whose core tools are designed to work together out of the box.</p>
-          </article>
-          <article class="card">
-            <h3>Compared with <a href="https://www.notion.com/product">Notion</a></h3>
-            <p>Notion centers shared pages, databases, structured workflows, and team collaboration.</p>
-            <p class="stillpoint-difference"><strong>StillPoint:</strong> a personal, local workspace where ordinary Markdown files remain the source of truth.</p>
-          </article>
-          <article class="card">
-            <h3>Compared with <a href="https://code.visualstudio.com/">VS Code</a></h3>
-            <p>VS Code is a programming environment that can be extended into a capable notes setup.</p>
-            <p class="stillpoint-difference"><strong>StillPoint:</strong> knowledge-native pages, links, journals, tasks, maps, diagrams, and optional in-app AI.</p>
-          </article>
-          <article class="card">
-            <h3>Compared with <a href="https://anytype.io/">Anytype</a></h3>
-            <p>Anytype organizes a local-first workspace around typed objects, properties, and relations.</p>
-            <p class="stillpoint-difference"><strong>StillPoint:</strong> ordinary folders and Markdown pages stay readable and useful to editors, scripts, and tools outside the app.</p>
-          </article>
-          <article class="card">
-            <h3>Compared with <a href="https://www.zettlr.com/">Zettlr</a></h3>
-            <p>Zettlr is especially strong for research writing, citations, Pandoc workflows, and publication.</p>
-            <p class="stillpoint-difference"><strong>StillPoint:</strong> an ongoing knowledge workspace for daily notes, projects, tasks, relationships, visual thinking, and local tools.</p>
-          </article>
+        <h2>StillPoint vs Obsidian</h2>
+        <p>
+          StillPoint and Obsidian both value local files and linked notes, but they feel different to
+          use. Choose StillPoint for a gentle, complete out-of-the-box experience. Choose Obsidian if
+          you enjoy customizing and tuning your tools.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th>StillPoint</th>
+                <th>Obsidian</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>First-time experience</td>
+                <td>Simple, gentle</td>
+                <td>Powerful, busy</td>
+              </tr>
+              <tr>
+                <td>Configuration needed</td>
+                <td>Minimal</td>
+                <td>Often extensive</td>
+              </tr>
+              <tr>
+                <td>Plugins</td>
+                <td>Built-in tools</td>
+                <td>Plugin-heavy</td>
+              </tr>
+              <tr>
+                <td>Writing focus</td>
+                <td>Central</td>
+                <td>Often secondary</td>
+              </tr>
+              <tr>
+                <td>Learning curve</td>
+                <td>Low</td>
+                <td>Medium to high</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
-      <section class="section reveal" style="--d: 0.35s">
-        <div class="eyebrow">More specialized choices</div>
-        <h2>The right center depends on the work.</h2>
-        <div class="card comparison-compact-alternatives">
+      <section class="section split reveal" style="--d: 0.35s">
+        <div>
+          <h2>StillPoint vs Evernote</h2>
           <p>
-            <a href="https://logseq.com/"><strong>Logseq</strong></a> centers blocks and outlines;
-            <a href="https://www.microsoft.com/microsoft-365/onenote/digital-note-taking-app"><strong>OneNote</strong></a> excels at ink and freeform capture;
-            <a href="https://evernote.com/"><strong>Evernote</strong></a> emphasizes capture and clipping; and
-            <a href="https://www.cursor.com/"><strong>Cursor</strong></a> centers AI-assisted software development.
+            Evernote stores notes for you, in a database. StillPoint stores notes with you, as plain
+            files you can keep for decades. If you want long-term ownership and offline access,
+            StillPoint is built for that.
           </p>
-          <p class="stillpoint-difference">
-            <strong>StillPoint centers durable notes:</strong> a calm writing surface that can grow into
-            a connected Knowledge IDE without requiring that deeper workflow.
+          <p class="quote">
+            StillPoint optimizes for trust and longevity, not feature sprawl.
           </p>
         </div>
-        <p class="quote">
-          Choose StillPoint when you want the simplicity of plain Markdown and the leverage of an
-          integrated knowledge workbench—without having to choose between them.
-        </p>
+        <div class="image-stack">
+          <img
+            src="https://media.idownloadblog.com/wp-content/uploads/2020/06/Copy-Paste-Link-to-Notes-iPhone.jpg"
+            alt="Notes app screenshot"
+          />
+          <img
+            src="https://www.workitdaily.com/media-library/woman-takes-notes-at-work.jpg?coordinates=0%2C0%2C0%2C1&height=800&id=32247315&quality=50&width=1200"
+            alt="Person writing notes"
+          />
+        </div>
       </section>
 
       <footer class="site-footer">
-        <span>Plain notes when you want them. A Knowledge IDE when you need it.</span>
+        <span>Choose the tool that fits your values.</span>
         <span>Docs for GitHub Pages · StillPoint</span>
-        <span><a href="philo.html#funding-support">Support the project</a></span>
+              <span><a href="philo.html#funding-support">Support the project</a></span>
       </footer>
     </main>
   </body>

@@ -51,6 +51,24 @@ Homebase supports account auth and user management APIs.
 - Use a **Local Vault** when you only need files on one machine.
 - Use a **Homebase Vault** when you want sync, offline-first behavior, and a stronger local-first trust boundary.
 
+## Coding Agents and TUIs
+StillPoint works especially well with coding agents and terminal workflows because the vault is a real local folder.
+
+Recommended workflow:
+1. Open the vault locally.
+2. Use `Vault -> Open Vault in Terminal`.
+3. Run your coding agent, TUI, or CLI tool in that vault root.
+4. Let StillPoint detect filesystem changes and refresh the tree.
+5. If Homebase is enabled, let sync push those local changes to the server.
+
+StillPoint seeds an `AGENTS.md` file at the vault root if that preference is enabled. That file teaches agents the StillPoint page structure, colon-link rules, and page-folder conventions.
+
+This makes Homebase a strong fit for:
+- AI-assisted research vault growth
+- script-driven imports
+- TUI note workflows
+- code-generated pages and attachments
+
 ## Setup Notes
 
 ### Local Vault

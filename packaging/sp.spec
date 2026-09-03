@@ -4,7 +4,6 @@
 #   (Set STILLPOINT_VERSION env var for version stamping if desired.)
 
 import os
-import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # Resolve project root regardless of where the spec file lives
@@ -87,11 +86,14 @@ _datas = [
     (os.path.join(ROOT, 'sp', 'app', 'calendar-day-insight-prompt.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'app', 'auto-rename-prompt.txt'), 'sp/app'),
     (os.path.join(ROOT, 'sp', 'help-vault'), 'sp/help-vault'),
+    (os.path.join(ROOT, 'SP-vault-codex-config.toml'), '.'),
+    (os.path.join(ROOT, 'SP-vault-copilot-mcp.json'), '.'),
     (os.path.join(ROOT, 'LICENSE'), '.'),
     (os.path.join(ROOT, 'NOTICE'), '.'),
 ]
 
 # Add platform-specific install scripts
+import sys
 if sys.platform == 'win32':
     _datas.extend([
         (os.path.join(ROOT, 'packaging', 'win32', 'install-win32.ps1'), '.'),

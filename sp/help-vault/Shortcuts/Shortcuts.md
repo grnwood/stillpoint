@@ -27,8 +27,8 @@ These shortcuts will speed up your workflow:
 - `Alt+Right`: Go forward
 - On macOS: `Cmd+[` goes back and `Cmd+]` goes forward
 - `Alt+Home`: Go to home page
-- `Ctrl+Tab`: Cycle forward through the held recent-page switcher; release Ctrl to select
-- `Ctrl+Shift+Tab`: Cycle backward through the held recent-page switcher; release Ctrl to select
+- `Ctrl+Tab`: Cycle forward through recent pages
+- `Ctrl+Shift+Tab`: Cycle backward through recent pages
 - `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
 - `Enter` (file nav selected): Open selected page and focus editor
 - `Shift+Enter` (file nav selected): Open selected page and keep focus in file nav

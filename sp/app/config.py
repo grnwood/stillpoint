@@ -1385,6 +1385,20 @@ def save_enable_ai_agents(enabled: bool) -> None:
     _update_global_config({"enable_ai_agents": bool(enabled)})
 
 
+def load_seed_agents_workspace(default: bool = True) -> bool:
+    """Return whether opening a vault workspace terminal should seed AGENTS.md."""
+    payload = _read_global_config()
+    val = payload.get("seed_agents_workspace")
+    if val is None:
+        return default
+    return bool(val)
+
+
+def save_seed_agents_workspace(enabled: bool) -> None:
+    """Persist whether opening a vault workspace terminal should seed AGENTS.md."""
+    _update_global_config({"seed_agents_workspace": bool(enabled)})
+
+
 def load_local_filesystem_quiet_seconds(default: int = 10) -> int:
     """Return the quiet-time debounce before local filesystem changes refresh the UI."""
     payload = _read_global_config()

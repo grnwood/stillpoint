@@ -45,6 +45,16 @@ class StateManager:
         with self._lock:
             return self._session_roots.get(session_key)
 
+    def registered_root_for_path(self, path: str) -> Optional[Path]:
+        """Return the deepest active vault containing ``path``, if any."""
+        candidate = Path(path).expanduser().resolve()
+        with self._lock:
+            roots = set(self._session_roots.values())
+            if self._state.root is not None:
+                roots.add(self._state.root)
+        matches = [root for root in roots if candidate == root or root in candidate.parents]
+        return max(matches, key=lambda root: len(root.parts)) if matches else None
+
     def push_context_root(self, root: Optional[Path]):
         normalized = root.expanduser().resolve() if isinstance(root, Path) else None
         return self._context_root.set(normalized)

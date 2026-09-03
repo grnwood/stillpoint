@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QIcon, QWheelEvent
@@ -16,14 +14,11 @@ from sp.app.plantuml_renderer import RenderResult as PlantumlRenderResult
 from sp.app.ui.attachments_panel import AttachmentsPanel
 from sp.app.ui import excalidraw_window
 from sp.app.ui.excalidraw_window import ExcalidrawWindow
-from sp.app.ui.main_window import MainWindow
 from sp.app.ui import mermaid_editor_window
 from sp.app.ui import webengine_env
 from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
 from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow, ZoomablePreviewLabel
 from sp.server import api as server_api
-from starlette.requests import Request
-from starlette.responses import Response
 
 
 def _wait_for(qapp, predicate, timeout: float = 2.0) -> None:
@@ -425,57 +420,6 @@ def test_excalidraw_poc_route_serves_minimal_local_page():
     assert response.status_code == 200
     assert "StillPoint Excalidraw POC" in content
     assert "foxnews" not in content.lower()
-
-
-def test_excalidraw_edit_query_binds_owning_window_vault(tmp_path: Path):
-    window_id = "excalidraw-test-window"
-    server_api.vault_state.bind_session_root(window_id, str(tmp_path))
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/excalidraw/edit",
-            "query_string": f"window_id={window_id}".encode("ascii"),
-            "headers": [],
-        }
-    )
-    roots: list[Path] = []
-
-    async def call_next(_request):
-        roots.append(server_api.vault_state.get_root())
-        return Response(status_code=200)
-
-    response = asyncio.run(server_api.bind_vault_context(request, call_next))
-
-    assert response.status_code == 200
-    assert roots == [tmp_path.resolve()]
-
-
-def test_excalidraw_poll_stops_after_last_child_process_exits():
-    class FinishedProcess:
-        @staticmethod
-        def poll():
-            return 0
-
-    class FakeTimer:
-        def __init__(self):
-            self.stopped = False
-
-        def stop(self):
-            self.stopped = True
-
-    timer = FakeTimer()
-    host = SimpleNamespace(
-        _remote_mode=False,
-        http=object(),
-        _excalidraw_processes=[FinishedProcess()],
-        _excalidraw_open_page_timer=timer,
-    )
-
-    MainWindow._poll_excalidraw_open_page_request(host)
-
-    assert host._excalidraw_processes == []
-    assert timer.stopped is True
 
 
 def test_excalidraw_api_loads_and_saves_scene(monkeypatch, tmp_path: Path):

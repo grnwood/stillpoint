@@ -1,0 +1,7 @@
+# Connect Codex to the currently running StillPoint desktop.
+# The bridge discovers the local API, uses the client's workspace as the vault,
+# and obtains a temporary vault-scoped token.
+
+[mcp_servers.stillpoint]
+command = "stillpoint"
+args = ["--mcp-bridge"]

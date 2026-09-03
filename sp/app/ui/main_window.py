@@ -11,6 +11,7 @@ import queue
 import shutil
 import socket
 import platform
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -2333,8 +2334,6 @@ class MainWindow(QMainWindow):
         self._remote_vault_ref_path: Optional[str] = None
         self._app_state_changed_slot = None
         def _log_request(request):
-            if request.url.path == "/api/excalidraw/open-page/next":
-                return
             request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -2343,8 +2342,6 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
-            if response.request.url.path == "/api/excalidraw/open-page/next":
-                return
             started = response.request.extensions.get("sp_request_started_at")
             on_ui_thread = QThread.currentThread() == self.thread()
             if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
@@ -2388,11 +2385,6 @@ class MainWindow(QMainWindow):
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None  # "history" or "heading"
-        self._history_modifier_release_timer = QTimer(self)
-        self._history_modifier_release_timer.setInterval(25)
-        self._history_modifier_release_timer.timeout.connect(
-            self._finish_history_switch_when_control_released
-        )
         self._quick_vault_picker: Optional[QuickVaultPicker] = None
         self._history_cursor_positions: dict[str, int] = {}
         self._history_scroll_positions: dict[str, int] = {}
@@ -3059,6 +3051,10 @@ class MainWindow(QMainWindow):
         self._action_reorganize_vault.setEnabled(False)
         self._action_reorganize_vault.triggered.connect(self._open_vault_reorganization)
         vault_menu.addAction(self._action_reorganize_vault)
+        self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
+        self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
+        self._action_open_vault_terminal.triggered.connect(self._open_vault_workspace_terminal)
+        vault_menu.addAction(self._action_open_vault_terminal)
         self._action_convert_vault_to_homebase = QAction("Convert This Vault to Homebase...", self)
         self._action_convert_vault_to_homebase.setToolTip(
             "Connect this local vault to Homebase and start syncing it"
@@ -3153,7 +3149,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(delete_page_action)
         self._build_format_menu()
         view_menu = self.menuBar().addMenu("&View")
-        view_menu.addSeparator()
         view_mode_menu = view_menu.addMenu("View...")
         self._action_focus_mode = QAction("Focus Mode", self)
         self._action_focus_mode.setToolTip("Open in Focus Mode")
@@ -3226,6 +3221,7 @@ class MainWindow(QMainWindow):
         self._action_tooltips = {
             self._action_new_vault: self._action_new_vault.toolTip(),
             self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
+            self._action_open_vault_terminal: self._action_open_vault_terminal.toolTip(),
             self._action_zim_import: self._action_zim_import.toolTip(),
             self._action_rebuild_index: self._action_rebuild_index.toolTip(),
             self._action_rebuild_search_index: self._action_rebuild_search_index.toolTip(),
@@ -3290,7 +3286,6 @@ class MainWindow(QMainWindow):
         ai_action = QAction("AI Chat", self)
         ai_action.triggered.connect(self._focus_current_ai_chat)
         go_menu.addAction(ai_action)
-
 
         jump_action = QAction("Jump To Page… (Ctrl+J)", self)
         jump_action.setToolTip("Jump to a page (Ctrl+J)")
@@ -3388,12 +3383,13 @@ class MainWindow(QMainWindow):
         self._setup_quick_capture_shortcut(show_error=False)
         self._focus_recent = ["editor", "tree", "left", "right"]
         self._app_focus_changed_slot = None
-        # Update focus borders and focus history when focus moves between widgets.
-        # Do not install MainWindow as a QApplication-wide event filter: on
-        # Linux, PySide can crash natively when application event filters see
-        # QWebEngineView events. Objects that need filtering are wired directly.
+        # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
         if app is not None:
+            try:
+                app.installEventFilter(self)
+            except Exception:
+                pass
             try:
                 self._app_focus_changed_slot = lambda _old, now: self._on_focus_changed(now)
                 app.focusChanged.connect(self._app_focus_changed_slot)
@@ -3562,23 +3558,21 @@ class MainWindow(QMainWindow):
         if not PAGE_LOGGING_ENABLED and not diag_enabled:
             return
         try:
-            if PAGE_LOGGING_ENABLED or diag_enabled:
-                self._loop_timer = QElapsedTimer()
-                self._loop_timer.start()
-                self._loop_watchdog = QTimer(self)
-                self._loop_watchdog.setInterval(250)
-                self._loop_watchdog.timeout.connect(self._check_eventloop_drift)
-                self._loop_watchdog.start()
-                dispatcher = QAbstractEventDispatcher.instance()
-                if dispatcher:
-                    dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
-                    dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
+            self._loop_timer = QElapsedTimer()
+            self._loop_timer.start()
+            self._loop_watchdog = QTimer(self)
+            self._loop_watchdog.setInterval(250)
+            self._loop_watchdog.timeout.connect(self._check_eventloop_drift)
+            self._loop_watchdog.start()
+            dispatcher = QAbstractEventDispatcher.instance()
+            if dispatcher:
+                dispatcher.aboutToBlock.connect(lambda: self._mark_eventloop("aboutToBlock"))
+                dispatcher.awake.connect(lambda: self._mark_eventloop("awake"))
             if diag_enabled:
                 self._event_loop_sleep_timer = QTimer(self)
                 self._event_loop_sleep_timer.setInterval(1000)
                 self._event_loop_sleep_timer.timeout.connect(self._check_eventloop_resume_gap)
                 self._event_loop_sleep_timer.start()
-            if diag_enabled:
                 eventloop_diag.log_fd_target("mainwindow event-loop watchdog")
                 self._log_eventloop_timer_state("watchdog started")
         except Exception:
@@ -3642,10 +3636,9 @@ class MainWindow(QMainWindow):
         threshold = eventloop_diag.env_float("SP_EVENT_LOOP_RESUME_GAP_SECONDS", 10.0)
         if gap < threshold:
             return
-        if eventloop_diag.enabled():
-            eventloop_diag.log(f"possible suspend/resume or blocked UI gap_seconds={gap:.2f}")
-            eventloop_diag.log_fd_target("after resume gap")
-            self._log_eventloop_timer_state("after resume gap")
+        eventloop_diag.log(f"possible suspend/resume or blocked UI gap_seconds={gap:.2f}")
+        eventloop_diag.log_fd_target("after resume gap")
+        self._log_eventloop_timer_state("after resume gap")
         self._schedule_local_filesystem_scan("resume gap", force=True)
 
     def _log_eventloop_timer_state(self, label: str) -> None:
@@ -4000,12 +3993,6 @@ class MainWindow(QMainWindow):
         command_bar_universal = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         command_bar_universal.setContext(Qt.ApplicationShortcut)
         command_bar_universal.activated.connect(self._show_command_bar)
-        history_next = QShortcut(QKeySequence("Ctrl+Tab"), self)
-        history_next.setContext(Qt.ApplicationShortcut)
-        history_next.activated.connect(lambda: self._cycle_history_shortcut(reverse=False))
-        history_previous = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
-        history_previous.setContext(Qt.ApplicationShortcut)
-        history_previous.activated.connect(lambda: self._cycle_history_shortcut(reverse=True))
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         if nav_back_mac is not None:
@@ -5609,6 +5596,14 @@ class MainWindow(QMainWindow):
             else:
                 action.setEnabled(True)
                 action.setToolTip(self._action_tooltips.get(action, label))
+        self._action_open_vault_terminal.setText("Open Vault in Terminal")
+        self._action_open_vault_terminal.setEnabled(bool(self.vault_root))
+        self._action_open_vault_terminal.setToolTip(
+            self._action_tooltips.get(
+                self._action_open_vault_terminal,
+                "Open the current local vault in your system terminal",
+            )
+        )
         if hasattr(self, "_action_convert_vault_to_homebase"):
             can_convert = bool(self.vault_root) and not self._remote_mode and not self._is_homebase_mode_enabled()
             self._action_convert_vault_to_homebase.setVisible(not self._remote_mode)
@@ -5652,6 +5647,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
         self._update_periodic_search_sync_timer()
+
+    def _open_vault_workspace_terminal(self) -> None:
+        self._open_local_vault_terminal()
 
     def _shutdown_homebase_watcher(self) -> None:
         if self._local_fs_ui_quiet_timer:
@@ -5945,17 +5943,14 @@ class MainWindow(QMainWindow):
                 self._refresh_detached_task_panels()
                 self._refresh_detached_calendar_panels()
                 self._refresh_detached_link_panels(self.current_path)
-            if current_page_changed and self.current_path:
-                if self._is_editor_idle_for_remote_reload():
-                    self._open_file(
-                        self.current_path,
-                        add_to_history=False,
-                        force=True,
-                        restore_history_cursor=True,
-                        sync_calendar=False,
-                    )
-                else:
-                    self._resolve_external_editor_change(self.current_path)
+            if current_page_changed and self.current_path and self._is_editor_idle_for_remote_reload():
+                self._open_file(
+                    self.current_path,
+                    add_to_history=False,
+                    force=True,
+                    restore_history_cursor=True,
+                    sync_calendar=False,
+                )
             is_homebase_enabled = getattr(self, "_is_homebase_mode_enabled", None)
             homebase_enabled = bool(is_homebase_enabled()) if callable(is_homebase_enabled) else False
             if (indexed_paths or removed_paths or structure_changed) and homebase_enabled:
@@ -6129,6 +6124,12 @@ class MainWindow(QMainWindow):
             self._homebase_fs_signal_count = 0
             self._homebase_fs_signal_window_started_at = now
         self._homebase_fs_signal_count += 1
+
+    def _open_local_vault_terminal(self) -> None:
+        if not self.vault_root:
+            self.statusBar().showMessage("Open a vault first.", 3000)
+            return
+        self._open_terminal_for_workspace(Path(self.vault_root), title="Open Vault in Terminal")
 
     def _update_periodic_search_sync_timer(self) -> None:
         """Enable/disable periodic local search index sync based on mode and preferences."""
@@ -6394,6 +6395,61 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return headers
+
+    def _seed_agents_file_if_needed(self, workspace_root: Path) -> None:
+        try:
+            if not config.load_seed_agents_workspace():
+                return
+            workspace_root = workspace_root.expanduser()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            agents_path = workspace_root / "AGENTS.md"
+            if agents_path.exists():
+                return
+            template_path = Path(__file__).resolve().parents[3] / "SP-vault-AGENTS.md"
+            if not template_path.exists():
+                return
+            agents_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _open_terminal_for_workspace(self, workspace_root: Path, *, title: str) -> None:
+        try:
+            folder = workspace_root.expanduser()
+            self._seed_agents_file_if_needed(folder)
+            folder.mkdir(parents=True, exist_ok=True)
+            system = platform.system()
+            if system == "Windows":
+                subprocess.Popen(
+                    ["cmd.exe", "/K", "cd", "/D", str(folder)],
+                    cwd=str(folder),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            elif system == "Darwin":
+                script = f'tell application "Terminal" to do script "cd {shlex.quote(str(folder))}"'
+                subprocess.Popen(["osascript", "-e", script])
+            else:
+                terminals = [
+                    ["gnome-terminal", "--working-directory", str(folder)],
+                    ["x-terminal-emulator", "--working-directory", str(folder)],
+                    ["konsole", "--workdir", str(folder)],
+                    ["xfce4-terminal", "--working-directory", str(folder)],
+                    ["alacritty", "--working-directory", str(folder)],
+                    ["kitty", "--directory", str(folder)],
+                    ["xterm", "-e", f"cd {shlex.quote(str(folder))} && exec $SHELL"],
+                ]
+                launched = False
+                for term_cmd in terminals:
+                    try:
+                        subprocess.Popen(term_cmd)
+                        launched = True
+                        break
+                    except FileNotFoundError:
+                        continue
+                if not launched:
+                    raise RuntimeError("No supported terminal application was found.")
+            self.statusBar().showMessage(f"Opened {title}.", 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, title, f"Could not open terminal: {exc}")
 
     def _shutdown_homebase_sync(self) -> None:
         self._shutdown_homebase_watcher()
@@ -6755,69 +6811,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return True
-
-    def _resolve_external_editor_change(self, path: str) -> None:
-        """Keep concurrent disk and editor changes until the user chooses."""
-        if self._merge_dialog_open or not self.vault_root or path != self.current_path:
-            return
-        try:
-            disk_text = (Path(self.vault_root) / path.lstrip("/")).read_text(encoding="utf-8")
-            editor_text = self.editor.to_markdown()
-        except Exception as exc:
-            self.statusBar().showMessage(f"Page changed on disk but could not be compared: {exc}", 6000)
-            return
-        if not has_material_text_difference(editor_text, disk_text):
-            self._last_saved_content = disk_text
-            return
-
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("Page Changed on Disk")
-        box.setText("This page was changed by another program while the editor also has unsaved changes.")
-        box.setInformativeText("Compare both versions, reload the disk version, or keep the editor version.")
-        compare_button = box.addButton("Compare…", QMessageBox.ActionRole)
-        reload_button = box.addButton("Reload from Disk", QMessageBox.AcceptRole)
-        keep_button = box.addButton("Keep Editor Version", QMessageBox.DestructiveRole)
-        box.setDefaultButton(compare_button)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is reload_button:
-            self._open_file(
-                path,
-                add_to_history=False,
-                force=True,
-                restore_history_cursor=True,
-                sync_calendar=False,
-            )
-            return
-        if clicked is keep_button:
-            self._last_saved_content = disk_text
-            self._dirty_flag = True
-            self.editor.document().setModified(True)
-            self._update_dirty_indicator()
-            self.statusBar().showMessage("Keeping editor version; save to replace the disk version.", 5000)
-            return
-        if clicked is not compare_button:
-            return
-
-        dialog = MergeConflictDialog(editor_text, disk_text, path, parent=self)
-        self._merge_dialog_open = True
-        try:
-            if dialog.exec() != QDialog.Accepted:
-                return
-            merged = dialog.merged_text()
-        finally:
-            self._merge_dialog_open = False
-        self._suspend_dirty_tracking = True
-        try:
-            self.editor.replace_markdown_in_place(merged)
-        finally:
-            self._suspend_dirty_tracking = False
-        self._last_saved_content = disk_text
-        self._dirty_flag = True
-        self.editor.document().setModified(True)
-        self._update_dirty_indicator()
-        self.statusBar().showMessage("Merged external changes; save to write the result.", 5000)
 
     def _can_auto_reload_homebase_current_page(self) -> bool:
         now = time.monotonic()
@@ -8447,9 +8440,7 @@ class MainWindow(QMainWindow):
             headers = headers if headers else None
         else:
             auth = None
-            headers = {"X-StillPoint-Window-Id": self._remote_context_id}
-            if local_auth_token:
-                headers["X-Local-UI-Token"] = local_auth_token
+            headers = {"X-Local-UI-Token": local_auth_token} if local_auth_token else None
         return httpx.Client(
             base_url=base_url,
             timeout=timeout,
@@ -8468,8 +8459,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         def _log_request(request):
-            if request.url.path == "/api/excalidraw/open-page/next":
-                return
             request.extensions["sp_request_started_at"] = time.perf_counter()
             try:
                 path = request.url.raw_path.decode("utf-8") if hasattr(request.url, "raw_path") else request.url.path
@@ -8478,8 +8467,6 @@ class MainWindow(QMainWindow):
             _log_api_client(f"{_ANSI_BLUE}[API] {request.method} {path}{_ANSI_RESET}")
 
         def _log_response(response):
-            if response.request.url.path == "/api/excalidraw/open-page/next":
-                return
             started = response.request.extensions.get("sp_request_started_at")
             on_ui_thread = QThread.currentThread() == self.thread()
             if isinstance(started, (int, float)) and self._remote_mode and on_ui_thread:
@@ -17102,14 +17089,8 @@ class MainWindow(QMainWindow):
                 target.installEventFilter(self)
 
             def eventFilter(self, obj, event):
-                if obj is self._target:
-                    if event.type() == QEvent.Close:
-                        # WA_DeleteOnClose can destroy this timer before a
-                        # delayed save fires, so persist final geometry now.
-                        self._timer.stop()
-                        self._save()
-                    elif event.type() in (QEvent.Resize, QEvent.Move):
-                        self._timer.start()
+                if obj is self._target and event.type() in (QEvent.Resize, QEvent.Move, QEvent.Close):
+                    self._timer.start()
                 return super().eventFilter(obj, event)
 
             def _save(self) -> None:
@@ -17348,7 +17329,6 @@ class MainWindow(QMainWindow):
                 self._alert("Excalidraw editor can only open .excalidraw files.")
                 return
             query = f"path={quote(rel_path, safe='')}"
-            query += f"&window_id={quote(self._remote_context_id, safe='')}"
             if self._local_auth_token:
                 query += f"&token={quote(self._local_auth_token, safe='')}"
             filter_path = getattr(self, "_nav_filter_path", None)
@@ -17451,15 +17431,6 @@ class MainWindow(QMainWindow):
     def _poll_excalidraw_open_page_request(self) -> None:
         if self._remote_mode or not self.http:
             return
-        processes = getattr(self, "_excalidraw_processes", None)
-        if processes is not None:
-            alive = [process for process in processes if process.poll() is None]
-            self._excalidraw_processes = alive
-            if not alive:
-                timer = getattr(self, "_excalidraw_open_page_timer", None)
-                if timer is not None:
-                    timer.stop()
-                return
         try:
             resp = self.http.get("/api/excalidraw/open-page/next")
             resp.raise_for_status()
@@ -18772,8 +18743,6 @@ class MainWindow(QMainWindow):
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
         """Open and focus editor when a tree row is clicked."""
         self._cancel_tree_nav_open()
-        if self._homebase_tree_refresh_pending:
-            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
         if target == FILTER_BANNER:
             self._clear_nav_filter()
@@ -18989,8 +18958,6 @@ class MainWindow(QMainWindow):
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
         self._tree_arrow_focus_pending = True
         self._tree_keyboard_nav = True
-        if self._homebase_tree_refresh_pending:
-            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
 
     # --- Focus toggle & visual indication ---------------------------
     def _toggle_focus_between_tree_and_editor(self) -> None:
@@ -19118,16 +19085,6 @@ class MainWindow(QMainWindow):
         self._apply_focus_borders()
 
     def _apply_focus_borders(self) -> None:
-        """Apply focus styling once, ignoring focus signals caused by styling."""
-        if getattr(self, "_applying_focus_borders", False):
-            return
-        self._applying_focus_borders = True
-        try:
-            self._apply_focus_borders_now()
-        finally:
-            self._applying_focus_borders = False
-
-    def _apply_focus_borders_now(self) -> None:
         """Apply a subtle border around the widget that currently has focus."""
         try:
             if getattr(self, '_suppress_focus_borders', False):
@@ -22008,13 +21965,8 @@ class MainWindow(QMainWindow):
 
     def _ensure_history_popup(self) -> None:
         if self._history_popup is None:
-            # Keep the switcher inside the main window to avoid native popup
-            # repaint artifacts on some Linux window managers.
-            popup_parent = self.centralWidget() or self
-            popup = QWidget(popup_parent)
-            popup.setObjectName("historySwitcherOverlay")
+            popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
             popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            popup.setAttribute(Qt.WA_StyledBackground, True)
             layout = QVBoxLayout(popup)
             layout.setContentsMargins(12, 8, 12, 8)
             self._history_popup_label = QLabel(popup)
@@ -22039,7 +21991,7 @@ class MainWindow(QMainWindow):
         if accent:
             selected_bg = self._selection_bg_for_accent(accent)
         self._history_popup.setStyleSheet(
-            "QWidget#historySwitcherOverlay { background: "
+            "QWidget { background: "
             f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
             "border: 1px solid "
             f"{theme_value('main_window.picker_popup.border', '#666666')}; "
@@ -22105,11 +22057,7 @@ class MainWindow(QMainWindow):
         x = top_left.x() + editor_rect.width() // 2 - popup_width // 2
         y = top_left.y() + 24
         self._history_popup.resize(popup_width, popup_height)
-        popup_parent = self._history_popup.parentWidget()
-        position = QPoint(x, y)
-        if popup_parent is not None:
-            position = popup_parent.mapFromGlobal(position)
-        self._history_popup.move(position)
+        self._history_popup.move(x, y)
         self._history_popup.show()
         self._history_popup.raise_()
 
@@ -22136,24 +22084,6 @@ class MainWindow(QMainWindow):
                 delta = -1 if reverse else 1
                 self._popup_index = (self._popup_index + delta) % len(items)
         self._show_history_popup()
-
-    def _cycle_history_shortcut(self, *, reverse: bool) -> None:
-        """Cycle the visible MRU picker until the user releases Control."""
-        self._cycle_popup("history", reverse=reverse)
-        if self._popup_mode == "history":
-            # Polling the modifier avoids installing a QApplication-wide event
-            # filter, which is unsafe around QWebEngineView events on Linux.
-            self._history_modifier_release_timer.start()
-
-    def _finish_history_switch_when_control_released(self) -> None:
-        # keyboardModifiers() is event-cache based and can remain stuck at
-        # ControlModifier after QShortcut consumes Ctrl+Tab.  Query the window
-        # system's live state so release commits without another key press.
-        if QGuiApplication.queryKeyboardModifiers() & Qt.ControlModifier:
-            return
-        self._history_modifier_release_timer.stop()
-        if self._popup_mode == "history":
-            self._activate_history_popup_selection()
 
     def _activate_history_popup_selection(self) -> None:
         if not self._popup_items or self._popup_index < 0 or not self._popup_mode:
@@ -22185,16 +22115,11 @@ class MainWindow(QMainWindow):
             self._animate_or_flash_to_cursor(cursor)
 
     def _hide_history_popup(self) -> None:
-        self._history_modifier_release_timer.stop()
         self._popup_items = []
         self._popup_index = -1
         self._popup_mode = None
         if self._history_popup:
-            exposed = self._history_popup.geometry()
-            popup_parent = self._history_popup.parentWidget()
             self._history_popup.hide()
-            if popup_parent is not None:
-                popup_parent.update(exposed)
 
     def _split_link_anchor(self, target: str) -> tuple[str, Optional[str]]:
         if "#" not in target:
@@ -23012,6 +22937,13 @@ class MainWindow(QMainWindow):
         }
 
     def _get_print_token(self) -> Optional[str]:
+        try:
+            status = self.http.get("/auth/status")
+            if status.is_success and not status.json().get("enabled"):
+                return None
+        except Exception:
+            return None
+
         resp = self.http.post("/auth/print-token", json={"ttl_seconds": 900})
         if not resp.is_success:
             detail = "Failed to request print token."
@@ -23276,13 +23208,18 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def _is_tree_navigation_activity(self, obj: object, event_type: QEvent.Type) -> bool:
-        """Identify tree events that may safely apply a pending model refresh."""
         tree_view = getattr(self, "tree_view", None)
         tree_viewport = tree_view.viewport() if tree_view is not None else None
         if obj not in (tree_view, tree_viewport):
             return False
+        # Use MouseButtonRelease (not Press) so the homebase tree flush fires *after*
+        # mouseReleaseEvent has already called indexAt() and emitted rowClicked.
+        # Triggering a tree rebuild between press and release causes indexAt() to return
+        # a different row than the one the user pressed, loading the wrong page.
         if event_type == QEvent.MouseButtonRelease:
             return True
+        # For keyboard/focus events: only trigger when no mouse button is held,
+        # so a click that also changes focus does not schedule a mid-click rebuild.
         if event_type in (QEvent.KeyPress, QEvent.FocusIn):
             return not bool(QApplication.mouseButtons() & Qt.LeftButton)
         return False
@@ -23299,6 +23236,27 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._update_bookmark_scroll_buttons)
                 QTimer.singleShot(0, self._sync_history_scroll_range)
                 QTimer.singleShot(0, self._update_history_scroll_buttons)
+        # Filesystem reconciliation runs in a worker, but rebuilding a Qt item
+        # model must stay on the GUI thread.  Do not let an editor key/focus
+        # event pay that GUI cost: apply the pending model update only when the
+        # user is about to use the navigation tree.
+        if (
+            self._homebase_tree_refresh_pending
+            and self._is_tree_navigation_activity(obj, event.type())
+        ):
+            QTimer.singleShot(0, self._flush_pending_homebase_tree_refresh)
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
+                self._show_command_bar()
+                return True
+            if event.key() in (Qt.Key_Tab, Qt.Key_Backtab) and (event.modifiers() & Qt.ControlModifier):
+                reverse = bool(event.modifiers() & Qt.ShiftModifier) or event.key() == Qt.Key_Backtab
+                self._cycle_popup("history", reverse=reverse)
+                return True
+        elif event.type() == QEvent.KeyRelease:
+            if event.key() == Qt.Key_Control and self._popup_items:
+                self._activate_history_popup_selection()
+                return True
         return super().eventFilter(obj, event)
 
 
@@ -23525,6 +23483,10 @@ class MainWindow(QMainWindow):
         try:
             app = QApplication.instance()
             if app:
+                try:
+                    app.removeEventFilter(self)
+                except Exception:
+                    pass
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     if self._app_focus_changed_slot is not None:

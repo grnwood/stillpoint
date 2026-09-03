@@ -251,73 +251,6 @@ a {
   font-size: 1.1rem;
 }
 
-.comparison-category-stillpoint {
-  position: relative;
-  border: 2px solid var(--accent-2);
-  background: linear-gradient(145deg, #f5fbf5 0%, #fffaf2 72%);
-  box-shadow: 0 14px 34px rgba(54, 91, 62, 0.15);
-}
-
-.comparison-category-choice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #365b3e;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
-}
-
-.comparison-category-choice span {
-  display: inline-grid;
-  width: 21px;
-  height: 21px;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--accent-2);
-  color: #fff;
-  font-size: 0.8rem;
-}
-
-.comparison-stillpoint-summary {
-  min-height: 0;
-  padding: clamp(24px, 4vw, 40px);
-}
-
-.comparison-stillpoint-summary h2 {
-  margin: 0;
-}
-
-.comparison-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(54, 91, 62, 0.2);
-}
-
-.comparison-summary-grid p {
-  margin: 0;
-}
-
-.comparison-differences .card {
-  min-height: 0;
-}
-
-.stillpoint-difference {
-  margin-top: auto;
-  padding: 10px 12px;
-  border-left: 3px solid var(--accent-2);
-  border-radius: 0 10px 10px 0;
-  background: #eef6ef;
-  color: #294830;
-}
-
-.comparison-compact-alternatives {
-  min-height: 0;
-}
-
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 1.2px;
@@ -530,9 +463,5 @@ th {
   .cta-row {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .comparison-summary-grid {
-    grid-template-columns: 1fr;
   }
 }

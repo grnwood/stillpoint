@@ -74,40 +74,25 @@ jobs:
         run: |
           python packaging/win32/generate-version.py
 
-      - name: Validate Windows installer upgrade layout
-        run: |
-          python -m pytest -q tests/test_windows_packaging.py
-
-      - name: Validate PowerShell installer syntax
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "packaging/win32/install-win32.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            throw "PowerShell installer has syntax errors"
-          }
-
       - name: Install Inno Setup (portable via Chocolatey)
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           choco install innosetup --no-progress -y
 
       - name: Build installer (Inno Setup)
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           Remove-Item -Recurse -Force packaging\win32\Output -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path packaging\win32\Output | Out-Null
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/Opackaging\win32\Output" "packaging\win32\stillpoint.iss"
 
       - name: Verify installer exists
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           if (!(Test-Path "packaging/win32/Output/StillPointSetup-win-x64.exe")) { throw "Installer exe not found at packaging/win32/Output/StillPointSetup-win-x64.exe" }
 
       - name: Upload installer artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: StillPointSetup

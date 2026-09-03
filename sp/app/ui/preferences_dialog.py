@@ -626,6 +626,9 @@ class PreferencesDialog(QDialog):
         self.enable_ai_agents_checkbox.setChecked(config.load_global_enable_ai_agents())
         self.enable_ai_agents_checkbox.stateChanged.connect(self._warn_restart_required)
         ai_layout.addWidget(self.enable_ai_agents_checkbox)
+        self.seed_agents_workspace_checkbox = QCheckBox("Add AGENTS.md to vault workspace when opening a terminal")
+        self.seed_agents_workspace_checkbox.setChecked(config.load_seed_agents_workspace())
+        ai_layout.addWidget(self.seed_agents_workspace_checkbox)
         quiet_row = QHBoxLayout()
         quiet_row.addWidget(QLabel("Local filesystem quiet time (s):"))
         self.local_filesystem_quiet_spin = QSpinBox()
@@ -1232,6 +1235,7 @@ class PreferencesDialog(QDialog):
             print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
         config.save_enable_ai_agents(self.enable_ai_agents_checkbox.isChecked())
+        config.save_seed_agents_workspace(self.seed_agents_workspace_checkbox.isChecked())
         config.save_local_filesystem_quiet_seconds(self.local_filesystem_quiet_spin.value())
         config.save_default_ai_server(self.default_server_combo.currentText() or None)
         config.save_default_ai_model(self.default_model_combo.currentText() or None)
@@ -1523,7 +1527,7 @@ class PreferencesDialog(QDialog):
             combo.addItem(family, family)
         combo.setInsertPolicy(QComboBox.NoInsert)
         return combo
-
+    
     def _template_names(self) -> list[str]:
         """Return available template names (stems) from built-in and user templates."""
         names: list[str] = []

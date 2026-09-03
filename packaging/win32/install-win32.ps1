@@ -38,7 +38,7 @@ if (Test-Path $PyInstallerExe) {
     $DistDir = $ScriptRoot
     $ExePathInDist = $PyInstallerExe
     $AssetsDir = Join-Path $ScriptRoot "_internal\sp\assets"
-    $CaptureDistDir = Join-Path $ScriptRoot "..\stillpoint-capture"
+    $CaptureDistDir = Join-Path $ScriptRoot "stillpoint-capture"
     $CaptureDistExists = Test-Path $CaptureDistDir
     if ($CaptureDistExists -and (Test-Path (Join-Path $CaptureDistDir $CaptureExeName))) {
         $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
@@ -68,42 +68,9 @@ else {
     exit 1
 }
 
-# One canonical per-user layout shared with the Inno installer.
+# Install location (user space)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
-$MainInstallDir = Join-Path $InstallDir "stillpoint"
 $CaptureInstallDir = Join-Path $InstallDir "stillpoint-capture"
-$LegacyInnoDir = Join-Path $env:LOCALAPPDATA $AppName
-$LegacyFlatExe = Join-Path $InstallDir $ExeName
-$HadLegacyInstall = (Test-Path $LegacyInnoDir) -or (Test-Path $LegacyFlatExe)
-
-# A previous installer could be switched into all-users mode. Do not create a
-# second per-user copy beside that elevated installation.
-$MachineUninstallKeys = @(
-    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E2D0C38B-BA4E-4C9D-9D75-2E6E7F9B6C7E}_is1",
-    "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{E2D0C38B-BA4E-4C9D-9D75-2E6E7F9B6C7E}_is1"
-)
-if ($MachineUninstallKeys | Where-Object { Test-Path $_ }) {
-    Write-Host "ERROR: An older all-users StillPoint installation is still registered." -ForegroundColor Red
-    Write-Host "Open Windows Settings > Apps > Installed apps, uninstall StillPoint, then run this installer again." -ForegroundColor Yellow
-    Write-Host "Your vaults and preferences will not be removed." -ForegroundColor Yellow
-    exit 1
-}
-
-# Updating from a script inside an installed tree would delete its own source
-# bundle before it could copy it. Require the newly downloaded build instead.
-$SourceFullPath = [IO.Path]::GetFullPath($DistDir).TrimEnd('\')
-$InstallFullPath = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
-$LegacyFullPath = [IO.Path]::GetFullPath($LegacyInnoDir).TrimEnd('\')
-function Test-PathAtOrBelow {
-    param([string]$Candidate, [string]$Root)
-    return $Candidate.Equals($Root, [StringComparison]::OrdinalIgnoreCase) -or
-        $Candidate.StartsWith($Root + '\', [StringComparison]::OrdinalIgnoreCase)
-}
-if ((Test-PathAtOrBelow $SourceFullPath $InstallFullPath) -or
-    (Test-PathAtOrBelow $SourceFullPath $LegacyFullPath)) {
-    Write-Host "ERROR: Run install-win32.ps1 from the newly downloaded build, not the installed copy." -ForegroundColor Red
-    exit 1
-}
 
 # Shortcuts
 $ShortcutName = "$AppName.lnk"
@@ -132,61 +99,6 @@ else {
     Write-Host " No assets\icon.ico or assets\icon.png found. Shortcuts will use exe icon." -ForegroundColor Yellow
 }
 
-# === REMOVE OLD APPLICATION BINARIES ===
-
-function Remove-InstalledPath {
-    param([string]$Path)
-    if (Test-Path $Path) {
-        Write-Host " Removing old application path: $Path"
-        Remove-Item -Recurse -Force $Path -ErrorAction Stop
-    }
-}
-
-try {
-    # Fully replace PyInstaller trees so removed modules and DLLs cannot survive
-    # an upgrade and form a mixed-version application.
-    Remove-InstalledPath $MainInstallDir
-    Remove-InstalledPath $CaptureInstallDir
-
-    # Remove the old Inno location and the old flat PowerShell layout. User
-    # settings and vaults are stored elsewhere and are not touched here.
-    Remove-InstalledPath $LegacyInnoDir
-    Remove-InstalledPath (Join-Path $InstallDir "_internal")
-    foreach ($LegacyFile in @(
-        $LegacyFlatExe,
-        (Join-Path $InstallDir "install-win32.ps1"),
-        (Join-Path $InstallDir "README.txt"),
-        (Join-Path $InstallDir "LICENSE"),
-        (Join-Path $InstallDir "NOTICE"),
-        (Join-Path $InstallDir "StillPoint.ico")
-    )) {
-        if (Test-Path $LegacyFile) {
-            Write-Host " Removing old application file: $LegacyFile"
-            Remove-Item -Force $LegacyFile -ErrorAction Stop
-        }
-    }
-}
-catch {
-    Write-Host "ERROR: Could not remove the previous StillPoint build." -ForegroundColor Red
-    Write-Host "Close StillPoint and StillPoint Capture, then run this installer again." -ForegroundColor Yellow
-    Write-Host $_.Exception.Message -ForegroundColor Yellow
-    exit 1
-}
-
-# If the helper migrated the historical Inno directory, remove only its stale
-# per-user uninstall registration. The helper itself remains a portable-style
-# install, as documented; a later Inno install will create a fresh entry.
-$LegacyUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E2D0C38B-BA4E-4C9D-9D75-2E6E7F9B6C7E}_is1"
-if ($HadLegacyInstall -and (Test-Path $LegacyUninstallKey)) {
-    $RegisteredLocation = (Get-ItemProperty $LegacyUninstallKey -ErrorAction SilentlyContinue).InstallLocation
-    if ($RegisteredLocation) {
-        $RegisteredFullPath = [IO.Path]::GetFullPath($RegisteredLocation).TrimEnd('\')
-        if ($RegisteredFullPath.Equals($LegacyFullPath, [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -Recurse -Force $LegacyUninstallKey -ErrorAction SilentlyContinue
-        }
-    }
-}
-
 # === CREATE INSTALL DIR ===
 
 if (-not (Test-Path $InstallDir)) {
@@ -195,14 +107,13 @@ if (-not (Test-Path $InstallDir)) {
 } else {
     Write-Host " Using existing install directory: $InstallDir"
 }
-New-Item -ItemType Directory -Force -Path $MainInstallDir | Out-Null
 
 # === COPY FILES FROM dist\ ===
 
-Write-Host " Copying files from $DistDir to $MainInstallDir"
-Copy-Item -Recurse -Force (Join-Path $DistDir "*") $MainInstallDir
+Write-Host " Copying files from $DistDir to $InstallDir"
+Copy-Item -Recurse -Force (Join-Path $DistDir "*") $InstallDir
 
-$InstalledExe = Join-Path $MainInstallDir $ExeName
+$InstalledExe = Join-Path $InstallDir $ExeName
 if (-not (Test-Path $InstalledExe)) {
     Write-Host "Something went wrong: installed exe not found at $InstalledExe" -ForegroundColor Red
     exit 1
@@ -215,7 +126,7 @@ $IconDest = $InstalledExe  # default: exe icon
 
 if ($IconSource) {
     $IconLeaf = Split-Path $IconSource -Leaf
-    $IconDest = Join-Path $MainInstallDir $IconLeaf
+    $IconDest = Join-Path $InstallDir $IconLeaf
 
     Write-Host " Copying icon to: $IconDest"
     Copy-Item -Force $IconSource $IconDest
@@ -242,30 +153,10 @@ if (-not (Test-Path $StartMenuDir)) {
 
 $StartMenuShortcutPath = Join-Path $StartMenuDir $ShortcutName
 
-# Remove shortcuts created by either historical layout before writing the
-# canonical targets. A legacy pin embeds the old executable path, so remove it
-# once during migration and let the user pin the new Start Menu entry.
-foreach ($OldShortcut in @(
-    $StartMenuShortcutPath,
-    (Join-Path $StartMenuDir "$AppName Quick Capture.lnk")
-)) {
-    Remove-Item -Force $OldShortcut -ErrorAction SilentlyContinue
-}
-Remove-Item -Recurse -Force (Join-Path $StartMenuDir $AppName) -ErrorAction SilentlyContinue
-if ($HadLegacyInstall) {
-    foreach ($PinnedDir in @(
-        (Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"),
-        (Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\StartMenu")
-    )) {
-        Get-ChildItem -Path $PinnedDir -Filter "$AppName*.lnk" -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-}
-
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($StartMenuShortcutPath)
 $Shortcut.TargetPath = $InstalledExe
-$Shortcut.WorkingDirectory = $MainInstallDir
+$Shortcut.WorkingDirectory = $InstallDir
 $Shortcut.WindowStyle = 1
 $Shortcut.IconLocation = $IconDest
 $Shortcut.Save()
@@ -291,12 +182,10 @@ if (Test-Path $InstalledCaptureExe) {
 if ($CreateDesktopShortcut) {
     $DesktopDir = [Environment]::GetFolderPath("Desktop")
     $DesktopShortcutPath = Join-Path $DesktopDir $ShortcutName
-    Remove-Item -Force $DesktopShortcutPath -ErrorAction SilentlyContinue
-    Remove-Item -Force (Join-Path $DesktopDir "$AppName Quick Capture.lnk") -ErrorAction SilentlyContinue
 
     $DesktopShortcut = $WshShell.CreateShortcut($DesktopShortcutPath)
     $DesktopShortcut.TargetPath = $InstalledExe
-    $DesktopShortcut.WorkingDirectory = $MainInstallDir
+    $DesktopShortcut.WorkingDirectory = $InstallDir
     $DesktopShortcut.WindowStyle = 1
     $DesktopShortcut.IconLocation = $IconDest
     $DesktopShortcut.Save()

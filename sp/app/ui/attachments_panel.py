@@ -731,6 +731,9 @@ class AttachmentsPanel(QWidget):
         delete_action.setEnabled(bool(selected))
         delete_action.triggered.connect(self._remove_selected_attachments)
         
+        terminal_action = menu.addAction("Open Terminal Here")
+        terminal_action.triggered.connect(self._open_terminal_here)
+        
         # Show context menu at cursor position
         menu.exec(self.attachments_list.mapToGlobal(pos))
 
@@ -950,3 +953,38 @@ class AttachmentsPanel(QWidget):
             self.attachmentsModified.emit("excalidraw created")
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to create file: {exc}")
+
+    def _open_terminal_here(self) -> None:
+        """Open a terminal in the attachments folder for the current page."""
+        if not self.current_page_path:
+            return
+
+        import subprocess
+        import platform
+        import shlex
+
+        folder_path = str(self.current_page_path.parent)
+
+        try:
+            system = platform.system()
+            if system == "Windows":
+                subprocess.Popen(["cmd.exe", "/K", "cd", "/D", folder_path], cwd=folder_path)
+            elif system == "Darwin":
+                # macOS: Use osascript to open Terminal.app
+                script = f'tell application "Terminal" to do script "cd {shlex.quote(folder_path)}"'
+                subprocess.Popen(["osascript", "-e", script])
+            else:
+                # Linux: Try common terminals
+                for term_cmd in [
+                    ["gnome-terminal", "--working-directory=" + folder_path],
+                    ["konsole", "--workdir", folder_path],
+                    ["xfce4-terminal", "--working-directory=" + folder_path],
+                    ["xterm", "-e", f"cd {shlex.quote(folder_path)} && exec $SHELL"]
+                ]:
+                    try:
+                        subprocess.Popen(term_cmd)
+                        break
+                    except FileNotFoundError:
+                        continue
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not open terminal: {e}")
