@@ -88,7 +88,7 @@ Try these first:
 6. Check network access and server availability.
 7. If needed, use `Vault -> Homebase -> Sync Now`.
 
-## Files Created in Terminal or by an Agent Do Not Appear
+## Files Created by Another Application Do Not Appear
 - **Symptom**: Files exist in the vault folder but the tree has not updated yet.
 - **Checks**:
 1. Wait for the local filesystem quiet period to complete.

@@ -64,6 +64,28 @@ class _ReconcileDummy:
         }
 
 
+def test_local_save_uses_loaded_mtime_as_write_precondition() -> None:
+    class _Dummy:
+        _remote_mode = False
+        _page_revisions = {
+            "/PageA/PageA.md": {"rev": 7, "mtime_ns": 1_234_567_890},
+        }
+
+    assert MainWindow._if_match_headers(_Dummy(), "/PageA/PageA.md") == {
+        "If-Match": "mtime:1234567890",
+    }
+
+
+def test_local_save_does_not_use_index_revision_without_mtime() -> None:
+    class _Dummy:
+        _remote_mode = False
+        _page_revisions = {
+            "/PageA/PageA.md": {"rev": 7, "mtime_ns": None},
+        }
+
+    assert MainWindow._if_match_headers(_Dummy(), "/PageA/PageA.md") is None
+
+
 def test_pending_tree_refresh_is_triggered_only_by_navigation_activity() -> None:
     viewport = object()
 

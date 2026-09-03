@@ -6,7 +6,6 @@ import time
 import os
 import re
 import itertools
-import shlex
 import hashlib
 import unicodedata
 from dataclasses import dataclass
@@ -2627,54 +2626,6 @@ class MarkdownEditor(QTextEdit):
         self._pending_heading_block_num = None
         self._pending_heading_level = None
         self._schedule_heading_outline()
-
-    def _open_terminal_here(self) -> None:
-        """Open OS-specific terminal at the directory of the current page."""
-        import subprocess
-        import platform
-        
-        if not self._vault_root or not self._current_path:
-            return
-        
-        try:
-            # Get the directory of the current page
-            page_file_path = self._vault_root / self._current_path.lstrip("/")
-            if page_file_path.is_file():
-                terminal_dir = page_file_path.parent
-            else:
-                terminal_dir = page_file_path
-            
-            # Make sure the directory exists
-            if not terminal_dir.exists():
-                terminal_dir = self._vault_root
-            
-            system = platform.system()
-            
-            if system == "Windows":
-                # Open Windows Terminal or cmd.exe
-                subprocess.Popen(["cmd.exe", "/K", "cd", "/D", str(terminal_dir)], 
-                               creationflags=subprocess.CREATE_NEW_CONSOLE)
-            elif system == "Darwin":  # macOS
-                # Use AppleScript to open Terminal.app
-                script = f'tell application "Terminal" to do script "cd {shlex.quote(str(terminal_dir))}"'
-                subprocess.Popen(["osascript", "-e", script])
-            else:  # Linux and others
-                # Try common Linux terminals in order of preference
-                terminals = [
-                    ["gnome-terminal", "--working-directory", str(terminal_dir)],
-                    ["konsole", "--workdir", str(terminal_dir)],
-                    ["xfce4-terminal", "--working-directory", str(terminal_dir)],
-                    ["xterm", "-e", f"cd {shlex.quote(str(terminal_dir))} && $SHELL"],
-                ]
-                
-                for term_cmd in terminals:
-                    try:
-                        subprocess.Popen(term_cmd)
-                        break
-                    except FileNotFoundError:
-                        continue
-        except Exception as e:
-            logger.warning(f"Failed to open terminal: {e}")
 
     def _move_text_via_jump_dialog(self) -> None:
         cursor = self.textCursor()
@@ -5734,9 +5685,6 @@ class MarkdownEditor(QTextEdit):
                 backlinks_action.triggered.connect(
                     lambda: self.backlinksRequested.emit(self._current_path or "")
                 )
-                terminal_action = nav_sub.addAction("Open Terminal Here")
-                terminal_action.triggered.connect(self._open_terminal_here)
-
                 move_sub = menu.addMenu("Move")
                 move_text_action = move_sub.addAction("Move Text…")
                 move_text_action.setEnabled(self.textCursor().hasSelection())
@@ -5820,9 +5768,6 @@ class MarkdownEditor(QTextEdit):
             )
             backlinks_action = nav_sub.addAction("Link Graph / Navigator")
             backlinks_action.triggered.connect(lambda: self.backlinksRequested.emit(self._current_path or ""))
-            terminal_action = nav_sub.addAction("Open Terminal Here")
-            terminal_action.triggered.connect(self._open_terminal_here)
-
             move_sub = menu.addMenu("Move")
             move_text_action = move_sub.addAction("Move Text…")
             move_text_action.setEnabled(self.textCursor().hasSelection())

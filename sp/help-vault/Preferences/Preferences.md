@@ -92,7 +92,6 @@ Note: Feature toggles may require reopening the vault or restarting the app.
 - **Default Model**: Chooses which model is preselected for chats.
 - **Refresh Models**: Reloads the available model list from the selected server.
 - **Enable AI Agents in chat**: Allows tool-using agent behavior in chat.
-- **Add agent guidance and MCP client configs when opening a terminal**: Seeds a missing `AGENTS.md`, Codex `.codex/config.toml`, and GitHub Copilot CLI `.mcp.json`. Existing files are never overwritten and session credentials are not stored in them.
 - **Local filesystem quiet time (s)**: Controls how long StillPoint waits after local file changes before refreshing the UI.
 - **Agent Tools table**: Edit tool examples and tool settings used by agents.
 

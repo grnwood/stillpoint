@@ -54,12 +54,6 @@ Templates help you create consistent pages quickly.
 - StillPoint saves automatically as you type.
 - Use `Ctrl+S` to force a save at any time.
 
-## Terminal and Coding Agent Workflow
-- Use `Vault -> Open Vault in Terminal` to open the actual vault folder in your system terminal.
-- Run coding agents, TUIs, scripts, or other local tools directly in that folder.
-- StillPoint understands the StillPoint page-folder structure and can refresh when files are created locally.
-- If Homebase is enabled, those local filesystem changes can sync to your other devices.
-
 ## Switching Vaults
 - Use Vault -> Open Vault in New Window to work in multiple vaults at once.
 

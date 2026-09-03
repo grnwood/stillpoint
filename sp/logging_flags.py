@@ -28,7 +28,6 @@ AREA_DEFAULTS: Dict[str, bool] = {
     "ui_state": False,
     "performance": False,
     "event_loop": False,
-    "terminal": False,
     "link_debug": True,
 }
 

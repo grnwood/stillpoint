@@ -154,25 +154,6 @@ class TestHistoryNavigation:
 
         assert calls == [("history", True)]
 
-    def test_ctrl_tab_cycles_terminals_when_terminal_has_focus(self, main_window, monkeypatch):
-        cycles: list[bool] = []
-        monkeypatch.setattr(main_window._terminal_pane, "has_terminal_focus", lambda: True)
-        monkeypatch.setattr(
-            main_window._terminal_pane,
-            "cycle_terminal_switcher",
-            lambda *, reverse=False: cycles.append(reverse),
-        )
-        monkeypatch.setattr(
-            main_window,
-            "_cycle_popup",
-            lambda *_args, **_kwargs: pytest.fail("page picker should not open"),
-        )
-
-        main_window._cycle_history_shortcut(reverse=False)
-        main_window._cycle_history_shortcut(reverse=True)
-
-        assert cycles == [False, True]
-
     def test_ctrl_tab_picker_waits_for_control_release(self, main_window, monkeypatch):
         activated: list[bool] = []
         main_window._popup_mode = "history"

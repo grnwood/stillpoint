@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QComboBox
 
 
@@ -46,20 +45,6 @@ def test_ai_model_help_controls_explain_their_scope(qtbot) -> None:
     assert "calendar AI insights" in dialog.operations_model_help_btn.toolTip()
     assert "Rename Auto (AI)" in dialog.operations_model_help_btn.toolTip()
     assert dialog.operations_model_help_btn.accessibleDescription() == dialog.operations_model_help_btn.toolTip()
-
-
-def test_terminal_font_preference_lists_only_system_monospace_fonts(qtbot) -> None:
-    from sp.app.ui.preferences_dialog import PreferencesDialog
-
-    dialog = PreferencesDialog()
-    qtbot.addWidget(dialog)
-
-    families = [
-        dialog.terminal_font_combo.itemData(index)
-        for index in range(1, dialog.terminal_font_combo.count())
-    ]
-    assert families
-    assert all(QFontDatabase.isFixedPitch(family) for family in families)
 
 
 def test_effective_theme_preference_prefers_vault_override(monkeypatch) -> None:

@@ -20,7 +20,6 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 
 from sp.app import config
 from sp.app import eventloop_diag
-from sp.app.feature_flags import terminal_integration_enabled
 from sp.app.resources import resource_candidates
 from sp.logging_flags import log_enabled
 
@@ -51,7 +50,6 @@ from sp.app.ui.webengine_env import configure_linux_webengine_env
 # SP_LOG_UI_STATE        - UI geometry/panel state details
 # SP_LOG_PERFORMANCE     - Timing/performance traces
 # SP_LOG_EVENT_LOOP      - Qt dispatcher/fd diagnostics for wakeup livelocks
-# SP_LOG_TERMINAL        - Terminal memory, output flow, and suspend/resume diagnostics
 # SP_LOG_ALL             - Enable all detailed areas
 #
 # Examples:
@@ -426,7 +424,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     parser.add_argument("--excalidraw-webview", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--mcp-bridge", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-url", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-title", default="StillPoint Excalidraw", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -861,11 +858,6 @@ def _enable_faulthandler_log() -> None:
 def main() -> None:
     args = _parse_args(sys.argv[1:])
 
-    if args.mcp_bridge:
-        from sp.app.mcp_bridge import run_stdio_bridge
-
-        raise SystemExit(run_stdio_bridge())
-
     if args.excalidraw_webview:
         if not args.excalidraw_webview_url:
             print("ERROR: --excalidraw-webview-url is required", file=sys.stderr)
@@ -911,13 +903,6 @@ def main() -> None:
     start_ts = time.time()
     _enable_faulthandler_log()
     _sp("Application starting.")
-    if terminal_integration_enabled():
-        from sp.app.ui.terminal_pane import terminal_component_versions
-
-        components = terminal_component_versions()
-        _sp("Terminal components: " + ", ".join(f"{name}={value}" for name, value in components.items()))
-    else:
-        _sp("Embedded terminal disabled by SP_DISABLE_TERMINAL.")
     config.init_settings()
     _ensure_user_template_files()
     _maybe_use_minimal_fonts()
