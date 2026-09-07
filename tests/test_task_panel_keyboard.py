@@ -171,6 +171,93 @@ def test_task_mutation_refreshes_are_debounced(qtbot, monkeypatch) -> None:
     assert refreshes == ["refresh"]
 
 
+def test_successful_sort_mutation_updates_row_in_place_during_grace(qtbot) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    task = _add_task(panel, text="Call Sarah")
+    item = panel.task_tree.currentItem()
+
+    panel._schedule_mutation_refresh()
+    panel._apply_optimistic_task_changes([task], {"status": "done"})
+
+    assert item is panel.task_tree.currentItem()
+    assert item.data(0, Qt.UserRole)["status"] == "done"
+    assert item.text(1).startswith("✓ ")
+    assert item.font(1).strikeOut() is True
+    assert panel.task_tree.isSortingEnabled() is False
+    assert panel._mutation_grace_active is True
+
+
+def test_optimistic_completed_task_is_removed_from_hidden_done_cache(qtbot) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    task = _add_task(panel)
+    cache_key = ("", (), False, True, True)
+    panel._api_task_cache[cache_key] = (1.0, [task])
+
+    panel._invalidate_api_task_requests(preserve_cached=True)
+    panel._apply_optimistic_task_changes([task], {"status": "done"})
+
+    assert panel._api_task_cache[cache_key] == (0.0, [])
+
+
+def test_task_mutation_discards_stale_inflight_results(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    cache_key = ("", (), False, True, True)
+    old_generation = panel._api_task_generation
+    panel._api_task_inflight[cache_key] = old_generation
+
+    panel._invalidate_api_task_requests()
+    new_generation = panel._api_task_generation
+    panel._api_task_inflight[cache_key] = new_generation
+    panel._api_task_result_queue.put(
+        ("ok", old_generation, cache_key, [{"id": "stale"}], 1.0)
+    )
+    panel._api_task_result_queue.put(
+        ("ok", new_generation, cache_key, [{"id": "fresh"}], 1.0)
+    )
+    scheduled_refreshes: list[int] = []
+    monkeypatch.setattr(
+        panel,
+        "_single_shot_ui",
+        lambda delay_ms, _callback: scheduled_refreshes.append(delay_ms),
+    )
+
+    panel._drain_remote_task_results()
+
+    assert panel._api_task_cache[cache_key][1] == [{"id": "fresh"}]
+    assert cache_key not in panel._api_task_inflight
+    assert scheduled_refreshes == [0]
+
+
+def test_task_refresh_accepts_qt_signal_payload(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    monkeypatch.setattr(panel, "_fetch_tasks_api", lambda *_args, **_kwargs: [])
+
+    panel._refresh_tasks(False)
+
+    assert panel.task_tree.topLevelItemCount() == 0
+
+
+def test_setting_vault_keeps_initial_task_request_current(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    cache_key = ("initial",)
+
+    def start_initial_refresh() -> None:
+        panel._api_task_inflight[cache_key] = panel._api_task_generation
+
+    monkeypatch.setattr(panel, "_apply_show_future_preference", start_initial_refresh)
+
+    panel.set_vault_root("/tmp/vault")
+
+    assert panel._api_task_inflight == {
+        cache_key: panel._api_task_generation,
+    }
+
+
 def test_task_context_menu_offers_remove_indicators(qtbot) -> None:
     panel = TaskPanel()
     qtbot.addWidget(panel)

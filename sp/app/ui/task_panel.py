@@ -320,8 +320,9 @@ class TaskPanel(QWidget):
         self._search_refresh_timer.timeout.connect(self._refresh_tasks)
         self._mutation_refresh_timer = QTimer(self)
         self._mutation_refresh_timer.setSingleShot(True)
-        self._mutation_refresh_timer.setInterval(120)
-        self._mutation_refresh_timer.timeout.connect(self._refresh_tasks)
+        self._mutation_refresh_timer.setInterval(650)
+        self._mutation_refresh_timer.timeout.connect(self._finish_mutation_grace)
+        self._mutation_grace_active = False
 
         self.tag_list = QListWidget()
         self.tag_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -586,9 +587,12 @@ class TaskPanel(QWidget):
         self._api_task_cache: dict[tuple, tuple[float, list[dict]]] = {}
         self._api_task_cache_ttl = 0.5
         self._remote_mode = False
-        self._api_task_inflight: set[tuple] = set()
+        self._api_task_generation = 0
+        self._api_task_inflight: dict[tuple, int] = {}
         self._api_task_error_until: dict[tuple, float] = {}
-        self._api_task_result_queue: queue.Queue[tuple[str, tuple, object, float]] = queue.Queue()
+        self._api_task_result_queue: queue.Queue[
+            tuple[str, int, tuple, object, float]
+        ] = queue.Queue()
         self._api_result_timer = QTimer(self)
         self._api_result_timer.setInterval(200)
         self._api_result_timer.timeout.connect(self._drain_remote_task_results)
@@ -2340,8 +2344,98 @@ class TaskPanel(QWidget):
         self._mutation_focus_task_id = None
 
     def _schedule_mutation_refresh(self) -> None:
-        """Coalesce rapid task mutations into one stable list reconstruction."""
+        """Keep changed rows pinned briefly, then reconcile and sort once."""
+        self._mutation_grace_active = True
+        self.task_tree.setSortingEnabled(False)
         self._mutation_refresh_timer.start()
+
+    def _finish_mutation_grace(self) -> None:
+        self._mutation_grace_active = False
+        self._refresh_tasks()
+
+    def _apply_optimistic_task_changes(self, tasks: list[dict], changes: dict) -> None:
+        """Reflect a successful mutation in place without moving its rows yet."""
+        task_ids = {str(task.get("id") or "") for task in tasks}
+        task_ids.discard("")
+        if not task_ids:
+            return
+
+        def update_task(task: dict) -> dict:
+            updated = dict(task)
+            for key in ("text", "status", "priority", "tags", "due"):
+                if key in changes and changes[key] is not None:
+                    updated[key] = changes[key]
+            if "start" in changes and changes["start"] is not None:
+                updated["start"] = changes["start"]
+                updated["starts"] = changes["start"]
+            if "status" in changes and changes["status"] is not None:
+                updated["actionable"] = changes["status"] != "done"
+            return updated
+
+        # Keep stale-while-revalidate rows consistent with the committed change,
+        # avoiding a flash of old data while the authoritative read is in flight.
+        for cache_key, (_cached_at, rows) in list(self._api_task_cache.items()):
+            updated_rows = [
+                update_task(row) if str(row.get("id") or "") in task_ids else row
+                for row in rows
+            ]
+            include_done = bool(cache_key[2]) if len(cache_key) > 2 else True
+            actionable_only = bool(cache_key[4]) if len(cache_key) > 4 else False
+            updated_rows = [
+                row
+                for row in updated_rows
+                if (include_done or row.get("status") != "done")
+                and (not actionable_only or bool(row.get("actionable", True)))
+            ]
+            self._api_task_cache[cache_key] = (0.0, updated_rows)
+
+        sort_change = any(
+            key in changes
+            for key in (
+                "status",
+                "priority",
+                "due",
+                "start",
+                "destination",
+                "delete",
+                "remove_indicators",
+            )
+        )
+        iterator = QTreeWidgetItemIterator(self.task_tree, QTreeWidgetItemIterator.All)
+        while iterator.value():
+            item = iterator.value()
+            task = item.data(0, Qt.UserRole) or {}
+            if str(task.get("id") or "") not in task_ids:
+                iterator += 1
+                continue
+            updated = update_task(task)
+            item.setData(0, Qt.UserRole, updated)
+            try:
+                level = max(0, int(updated.get("level") or 0))
+            except (TypeError, ValueError):
+                level = 0
+            marker = (
+                "✓"
+                if updated.get("status") == "done"
+                else ("↕" if sort_change else "✓")
+            )
+            item.setText(
+                1,
+                ("  " * level)
+                + f"{marker} {self._format_task_text(str(updated.get('text') or ''))}",
+            )
+            priority_text, _due_overdue = self._priority_time_label(updated)
+            item.setText(0, priority_text)
+            item.setText(2, str(updated.get("due") or ""))
+            if self._show_task_start_column:
+                item.setText(3, str(updated.get("starts") or updated.get("start") or ""))
+            done = updated.get("status") == "done"
+            for column in range(item.columnCount()):
+                font = item.font(column)
+                font.setStrikeOut(done)
+                item.setFont(column, font)
+            item.setForeground(1, QColor(self._effective_accent_color()))
+            iterator += 1
 
     def _apply_task_mutation(
         self,
@@ -2365,6 +2459,9 @@ class TaskPanel(QWidget):
         if paths:
             self.taskDatesWillApply.emit(paths)
         destination = self._normalize_destination(changes.pop("destination", None))
+        optimistic_changes = dict(changes)
+        if destination:
+            optimistic_changes["destination"] = destination
         try:
             if self._http_client:
                 payload = {
@@ -2398,15 +2495,19 @@ class TaskPanel(QWidget):
                     receipt["after"].update(result.get("after") or {})
                 self._last_undo_receipt = receipt
                 self._last_undo_id = None
-            self._api_task_cache.clear()
+            self._invalidate_api_task_requests(preserve_cached=True)
             self._last_refresh_signature = None
+            self._schedule_mutation_refresh()
+            try:
+                self._apply_optimistic_task_changes(tasks, optimistic_changes)
+            except Exception as exc:
+                print(f"[TASK_PANEL] Failed to apply mutation grace state: {exc}")
             if changed_paths:
                 self.taskDatesApplied.emit(list(dict.fromkeys(changed_paths)))
             self.statusRequested.emit(
                 f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo.",
                 5000,
             )
-            self._schedule_mutation_refresh()
             return True
         except Exception as exc:
             if restore_list_focus:
@@ -2533,7 +2634,7 @@ class TaskPanel(QWidget):
                 self._last_undo_id = None
             changed_paths = list(result.get("paths") or paths)
             self._advance_after_refresh = dialog.save_and_next
-            self._api_task_cache.clear()
+            self._invalidate_api_task_requests()
             self._last_refresh_signature = None
             self.taskDatesApplied.emit(changed_paths)
             self.statusRequested.emit("Triage item processed. Ctrl+Z to undo.", 5000)
@@ -2617,7 +2718,7 @@ class TaskPanel(QWidget):
             if paths:
                 self.taskDatesApplied.emit(paths)
             self.statusRequested.emit("Task change undone.", 4000)
-            self._api_task_cache.clear()
+            self._invalidate_api_task_requests()
             self._last_refresh_signature = None
             self._refresh_tasks()
         except Exception as exc:
@@ -3209,10 +3310,9 @@ class TaskPanel(QWidget):
     def clear(self) -> None:
         self._search_refresh_timer.stop()
         self._mutation_refresh_timer.stop()
+        self._mutation_grace_active = False
         self.active_tags.clear()
-        self._api_task_cache.clear()
-        self._api_task_inflight.clear()
-        self._api_task_error_until.clear()
+        self._invalidate_api_task_requests()
         self._last_refresh_signature = None
         self.tag_list.clear()
         self.task_tree.clear()
@@ -3374,7 +3474,10 @@ class TaskPanel(QWidget):
         self._restore_list_focus(preserve_current=True)
 
     @measure_performance("panel.tasks.refresh")
-    def _refresh_tasks(self) -> None:
+    def _refresh_tasks(self, *_signal_args) -> None:
+        """Refresh tasks, ignoring payloads from Qt signals such as toggled(bool)."""
+        if self._mutation_grace_active:
+            return
         data_started_at = performance_start()
         if self._triage_mode:
             self._refresh_triage()
@@ -4304,17 +4407,30 @@ class TaskPanel(QWidget):
             include_ancestors=include_ancestors,
             actionable_only=actionable_only,
         )
+
+    def _invalidate_api_task_requests(self, *, preserve_cached: bool = False) -> None:
+        """Invalidate cached and outstanding reads after task data changes."""
+        self._api_task_generation += 1
+        if preserve_cached:
+            self._api_task_cache = {
+                key: (0.0, rows)
+                for key, (_cached_at, rows) in self._api_task_cache.items()
+            }
+        else:
+            self._api_task_cache.clear()
+        self._api_task_inflight.clear()
+        self._api_task_error_until.clear()
     
     def set_vault_root(self, vault_root: str) -> None:
         """Set vault root for task filtering preferences."""
         self.vault_root = vault_root
-        self._apply_show_future_preference()
         self._task_context_dirty = True
         self._task_context_initialized = False
         self._last_refresh_signature = None
-        self._api_task_cache.clear()
-        self._api_task_inflight.clear()
-        self._api_task_error_until.clear()
+        self._invalidate_api_task_requests()
+        # Applying the preference performs the initial refresh. It must happen
+        # after invalidation so that request is part of the current generation.
+        self._apply_show_future_preference()
         self._set_ai_chat_enabled(False)
         if self._ai_chat_panel:
             try:
@@ -4324,9 +4440,7 @@ class TaskPanel(QWidget):
 
     def set_http_client(self, http_client) -> None:
         self._last_refresh_signature = None
-        self._api_task_cache.clear()
-        self._api_task_inflight.clear()
-        self._api_task_error_until.clear()
+        self._invalidate_api_task_requests()
         self._api_task_result_queue = queue.Queue()
         self._http_client = http_client
         self._vector_api = VectorAPIClient(http_client)
@@ -4342,14 +4456,13 @@ class TaskPanel(QWidget):
         if changed:
             self._search_refresh_timer.stop()
             self._last_refresh_signature = None
-            self._api_task_cache.clear()
-            self._api_task_inflight.clear()
-            self._api_task_error_until.clear()
+            self._invalidate_api_task_requests()
 
     def _queue_remote_task_fetch(self, cache_key: tuple, params: dict) -> None:
         if not self._http_client or cache_key in self._api_task_inflight:
             return
-        self._api_task_inflight.add(cache_key)
+        generation = self._api_task_generation
+        self._api_task_inflight[cache_key] = generation
         client = self._http_client
         args = dict(params)
 
@@ -4370,7 +4483,9 @@ class TaskPanel(QWidget):
                 payload = resp.json()
                 items = payload.get("items", [])
                 latency_ms = (time.perf_counter() - started) * 1000.0
-                self._api_task_result_queue.put(("ok", cache_key, items, latency_ms))
+                self._api_task_result_queue.put(
+                    ("ok", generation, cache_key, items, latency_ms)
+                )
             except Exception as exc:
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 exc_name = exc.__class__.__name__.lower()
@@ -4380,7 +4495,9 @@ class TaskPanel(QWidget):
                         "Client read timeout waiting for /api/tasks response "
                         "(request may not appear in server logs)"
                     )
-                self._api_task_result_queue.put(("error", cache_key, error_text, latency_ms))
+                self._api_task_result_queue.put(
+                    ("error", generation, cache_key, error_text, latency_ms)
+                )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -4388,11 +4505,20 @@ class TaskPanel(QWidget):
         had_success = False
         while True:
             try:
-                state, cache_key_obj, payload, latency_ms_obj = self._api_task_result_queue.get_nowait()
+                (
+                    state,
+                    generation,
+                    cache_key_obj,
+                    payload,
+                    latency_ms_obj,
+                ) = self._api_task_result_queue.get_nowait()
             except queue.Empty:
                 break
             cache_key = tuple(cache_key_obj)
-            self._api_task_inflight.discard(cache_key)
+            if self._api_task_inflight.get(cache_key) == generation:
+                self._api_task_inflight.pop(cache_key, None)
+            if generation != self._api_task_generation:
+                continue
             latency_ms = float(latency_ms_obj)
             if state == "ok":
                 items = payload if isinstance(payload, list) else []
