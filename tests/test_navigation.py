@@ -203,6 +203,47 @@ class TestHistoryNavigation:
 
         assert [btn.text() for btn in main_window.history_buttons] == ["Roles And Stuff"]
 
+    def test_recent_history_reuses_unchanged_chicklets(self, main_window):
+        main_window.page_history = ["/PageA/PageA.md", "/PageB/PageB.md"]
+        main_window._refresh_history_buttons()
+        original = {
+            str(btn.property("history_path")): btn
+            for btn in main_window.history_buttons
+        }
+
+        main_window.page_history.append("/PageC/PageC.md")
+        main_window._refresh_history_buttons()
+        refreshed = {
+            str(btn.property("history_path")): btn
+            for btn in main_window.history_buttons
+        }
+
+        assert refreshed["/PageA/PageA.md"] is original["/PageA/PageA.md"]
+        assert refreshed["/PageB/PageB.md"] is original["/PageB/PageB.md"]
+        assert "/PageC/PageC.md" in refreshed
+
+    def test_active_chicklet_update_only_restyles_old_and_new_paths(self, main_window, monkeypatch):
+        main_window.page_history = [
+            "/PageA/PageA.md",
+            "/PageB/PageB.md",
+            "/PageC/PageC.md",
+        ]
+        main_window._refresh_history_buttons()
+        main_window.current_path = "/PageA/PageA.md"
+        main_window._top_nav_active_path = main_window.current_path
+        styled: list[str] = []
+        monkeypatch.setattr(
+            main_window,
+            "_apply_history_button_style",
+            lambda _btn, path: styled.append(path),
+        )
+
+        main_window.current_path = "/PageB/PageB.md"
+        MainWindow._update_active_page_chicklets(main_window)
+
+        assert set(styled) == {"/PageA/PageA.md", "/PageB/PageB.md"}
+        assert "/PageC/PageC.md" not in styled
+
     def test_top_nav_chicklets_include_accent_hover_style(self, main_window):
         main_window._vault_accent_color = "#3B82F6"
         main_window.bookmarks = ["/PageA/PageA.md"]

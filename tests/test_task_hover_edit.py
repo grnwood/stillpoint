@@ -100,6 +100,39 @@ def test_vi_e_requests_editor_for_task_on_cursor_line(qtbot, qapp) -> None:
     assert requested == []
 
 
+def test_non_vi_ctrl_alt_e_requests_editor_for_task_on_cursor_line(qtbot, qapp) -> None:
+    editor = MarkdownEditor()
+    editor.set_markdown("Not a task\n- [ ] Call Sarah\n")
+    editor.set_task_hover_edit_enabled(True)
+    qtbot.addWidget(editor)
+    editor.show()
+    editor.setFocus()
+    requested: list[tuple[int, object]] = []
+    editor.taskEditRequested.connect(lambda block, anchor: requested.append((block, anchor)))
+
+    task_block = editor.document().findBlockByNumber(1)
+    editor.setTextCursor(QTextCursor(task_block))
+    QTest.keyClick(editor, Qt.Key_E, Qt.ControlModifier | Qt.AltModifier)
+
+    assert requested and requested[0][0] == 1
+
+
+def test_vi_space_toggles_task_on_cursor_line(qtbot, qapp) -> None:
+    editor = MarkdownEditor()
+    editor.set_markdown("- [ ] Call Sarah\n")
+    qtbot.addWidget(editor)
+    editor.set_vi_mode_enabled(True)
+    editor.show()
+    editor.setFocus()
+
+    editor.setTextCursor(QTextCursor(editor.document().firstBlock()))
+    QTest.keyClick(editor, Qt.Key_Space)
+    assert editor.to_markdown().splitlines()[0] == "- [x] Call Sarah"
+
+    QTest.keyClick(editor, Qt.Key_Space)
+    assert editor.to_markdown().splitlines()[0] == "- [ ] Call Sarah"
+
+
 def test_vi_r_removes_task_indicators_and_strips_metadata(qtbot, qapp) -> None:
     editor = MarkdownEditor()
     editor.set_markdown(

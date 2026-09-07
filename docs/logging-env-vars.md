@@ -70,5 +70,7 @@ export SP_LOG_RAG_VECTOR=1
 These are not area toggles but still affect logging/output behavior:
 
 - `SP_DISABLE_FAULTHANDLER` (disable crash dump capture)
+- `SP_PERFORMANCE_PROFILE_PATH` (JSONL destination for page-load and interaction performance spans)
+- `SP_PAGE_PROFILE_PATH` (legacy page-load JSONL destination, used as a fallback)
 - `STILLPOINT_FAULTHANDLER_LOG` (faulthandler log path)
 - `UVICORN_LOG_LEVEL` (embedded uvicorn verbosity)

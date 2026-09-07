@@ -13,8 +13,10 @@ import tempfile
 import subprocess
 from pathlib import Path
 
+_MODULE_IMPORT_STARTED_AT = time.perf_counter()
+
 import uvicorn
-from PySide6.QtCore import Qt, QtMsgType, qInstallMessageHandler
+from PySide6.QtCore import Qt, QtMsgType, QTimer, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon, QPalette, QColor
 
@@ -23,6 +25,7 @@ from sp.app import eventloop_diag
 from sp.logging_flags import log_enabled
 
 from sp.app.ui.main_window import MainWindow
+from sp.app.ui.page_load_logger import emit_performance_span
 from sp.app.ui.webengine_env import configure_linux_webengine_env
 
 
@@ -747,8 +750,6 @@ def _start_api_server(host: str, preferred_port: int | None) -> tuple[int, uvico
             print(f"\nERROR: API server failed to start within {max_wait} seconds", file=sys.stderr)
         sys.exit(1)
     
-    # Give the server a moment to fully initialize
-    time.sleep(0.1)
     return port, server, server_admin_password
 
 
@@ -852,6 +853,21 @@ def _startup(msg: str) -> None:
     if log_enabled("startup"):
         _sp(msg)
 
+
+def _record_startup_phase(name: str, started_at: float, startup_started_at: float) -> float:
+    """Record a startup phase in both human and structured opt-in logs."""
+    ended_at = time.perf_counter()
+    duration_ms = (ended_at - started_at) * 1000.0
+    elapsed_ms = (ended_at - startup_started_at) * 1000.0
+    _startup(f"Timing {name}: {duration_ms:.1f} ms (elapsed {elapsed_ms:.1f} ms).")
+    emit_performance_span(
+        f"startup.{name}",
+        started_at,
+        ended_at=ended_at,
+        fields={"elapsed_startup_ms": round(elapsed_ms, 3)},
+    )
+    return ended_at
+
 _FAULTHANDLER_FILE = None
 
 
@@ -922,6 +938,10 @@ def main() -> None:
         _run_webserver_mode(args)
         return
 
+    startup_started_at = _MODULE_IMPORT_STARTED_AT
+    phase_started_at = _record_startup_phase(
+        "module_import", startup_started_at, startup_started_at
+    )
     configure_linux_webengine_env()
     try:
         QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
@@ -940,6 +960,9 @@ def main() -> None:
     qInstallMessageHandler(_qt_message_handler)
     local_ui_token = secrets.token_urlsafe(32)
     _write_local_ui_token(local_ui_token)
+    phase_started_at = _record_startup_phase(
+        "bootstrap", phase_started_at, startup_started_at
+    )
     # Start API server (this will set password and import api module)
     port, server, server_admin_password = _start_api_server(args.host, args.port)
     _write_local_api_base(args.host, port)
@@ -947,6 +970,9 @@ def main() -> None:
     from sp.server import api as api_module
     api_module.set_local_ui_token(local_ui_token)
     _sp(f"API server started on {args.host}:{port}.")
+    phase_started_at = _record_startup_phase(
+        "embedded_api", phase_started_at, startup_started_at
+    )
     eventloop_diag.install_qtimer_probe()
     qt_app = eventloop_diag.create_application(sys.argv)
     eventloop_diag.install_ui_method_probe()
@@ -958,6 +984,9 @@ def main() -> None:
     _apply_startup_theme_palette(qt_app)
     # Set window/app icon if available (especially needed on Linux)
     _set_app_icon(qt_app)
+    phase_started_at = _record_startup_phase(
+        "qt_application", phase_started_at, startup_started_at
+    )
     # Ensure server shutdown when the UI exits
     def _request_server_exit() -> None:
         eventloop_diag.log("QApplication aboutToQuit: requesting embedded API server exit")
@@ -969,14 +998,30 @@ def main() -> None:
         local_auth_token=local_ui_token,
         embedded_server_admin_password=server_admin_password
     )
+    phase_started_at = _record_startup_phase(
+        "main_window", phase_started_at, startup_started_at
+    )
     window.resize(1200, 800)
     windows = getattr(qt_app, "_stillpoint_windows", [])
     windows.append(window)
     qt_app._stillpoint_windows = windows
     vault_hint = args.vault_ref or args.vault or _parse_vault_arg(sys.argv[1:])
     try:
-        if window.startup(vault_hint=vault_hint, force_select=args.select_vault):
+        started = window.startup(vault_hint=vault_hint, force_select=args.select_vault)
+        phase_started_at = _record_startup_phase(
+            "vault_setup", phase_started_at, startup_started_at
+        )
+        if started:
             window.show()
+            phase_started_at = _record_startup_phase(
+                "window_show", phase_started_at, startup_started_at
+            )
+            QTimer.singleShot(
+                0,
+                lambda shown_at=phase_started_at: _record_startup_phase(
+                    "first_event_loop", shown_at, startup_started_at
+                ),
+            )
             _sp("Main window open.")
             rc = qt_app.exec()
             uptime = time.time() - start_ts

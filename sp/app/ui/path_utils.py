@@ -1,9 +1,29 @@
 """Utilities for converting between filesystem paths and colon notation."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
+import re
+
 from sp.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 from sp.logging_flags import log_enabled
+
+
+def format_journal_day_label(path: str) -> str | None:
+    """Format a canonical Journal day page like the Recent Pages chicklet."""
+    try:
+        normalized = str(path or "").strip().lstrip("/").replace(":", "/")
+        match = re.search(
+            r"(?i)(?:^|/)journal/(\d{4})/(\d{2})/(\d{2})"
+            r"(?:/\3(?:\.[^/]+)?)?(?:\.[^/]+)?$",
+            normalized,
+        )
+        if not match:
+            return None
+        year, month, day = (int(value) for value in match.groups())
+        return date(year, month, day).strftime("%d-%b-%y")
+    except (TypeError, ValueError):
+        return None
 
 
 def trace_link_decision(location: str, **values: object) -> None:

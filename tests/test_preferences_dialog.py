@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QScrollArea
 
 
 def test_markdown_image_max_width_defaults_to_900_and_persists(monkeypatch, tmp_path) -> None:
@@ -27,6 +27,27 @@ def test_preferences_dialog_loads_markdown_image_max_width_default(qtbot, monkey
     qtbot.addWidget(dialog)
 
     assert dialog.markdown_image_max_width_combo.currentData() == 900
+
+
+def test_preferences_dialog_keeps_actions_visible_when_height_is_constrained(qtbot, qapp) -> None:
+    from sp.app.ui.preferences_dialog import PreferencesDialog
+
+    dialog = PreferencesDialog()
+    qtbot.addWidget(dialog)
+    dialog.resize(640, 320)
+    dialog.show()
+    qapp.processEvents()
+
+    current_page = dialog.stack.currentWidget()
+    ok_button = dialog.button_box.button(QDialogButtonBox.Ok)
+
+    assert isinstance(current_page, QScrollArea)
+    assert current_page.verticalScrollBar().maximum() > 0
+    assert dialog.height() == 320
+    assert dialog.button_box.isVisibleTo(dialog)
+    assert ok_button is not None
+    assert ok_button.isVisibleTo(dialog)
+    assert dialog.button_box.geometry().bottom() <= dialog.button_box.parentWidget().height()
 
 
 def test_ai_model_help_controls_explain_their_scope(qtbot) -> None:

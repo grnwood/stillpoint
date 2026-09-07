@@ -60,6 +60,7 @@ from .ai_chat_panel import (
 from .date_insert_dialog import DateInsertDialog
 from .path_utils import colon_to_path, path_to_colon
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
+from .page_load_logger import emit_performance_span, measure_performance, performance_start
 from .task_style import (
     contrast_text_color,
     due_colors_from_task,
@@ -80,6 +81,27 @@ PRINT_LINK_PATTERN = re.compile(
     r"(?P<md>\[(?P<md_label>[^\]]+)\]\((?P<md_url>[^\s)]+)\))|"
     r"(?P<wiki>\[(?P<wiki_link>[^\]|]+)\|(?P<wiki_label>[^\]]+)\])"
 )
+
+
+def _shortcut_table_html(title: str, rows: list[tuple[str, str]]) -> str:
+    """Build compact rich text for the task-list shortcut popup."""
+    body = "".join(
+        "<tr>"
+        f"<td style='padding:4px 14px 4px 0; white-space:nowrap;'><b>{html.escape(key)}</b></td>"
+        f"<td style='padding:4px 0;'>{html.escape(action)}</td>"
+        "</tr>"
+        for key, action in rows
+    )
+    return (
+        f"<h3 style='margin:0 0 4px 0;'>{html.escape(title)}</h3>"
+        "<p style='margin:0 0 10px 0;'>These keys apply while the task list has focus.</p>"
+        "<table cellspacing='0' cellpadding='0'>"
+        "<tr>"
+        "<th align='left' style='padding:3px 14px 5px 0;'>Key</th>"
+        "<th align='left' style='padding:3px 0 5px 0;'>Action</th>"
+        "</tr>"
+        f"{body}</table>"
+    )
 
 
 class TaskDateQuickMenu(QMenu):
@@ -279,6 +301,10 @@ class TaskPanel(QWidget):
         self._triage_items: list[dict] = []
         self._advance_after_refresh = False
         self._focus_after_removed_task: Optional[dict] = None
+        self._restore_list_focus_after_mutation = False
+        self._mutation_focus_index = 0
+        self._mutation_focus_task_id: Optional[str] = None
+        self._mutation_scroll_value = 0
         self._last_undo_id: Optional[str] = None
         self._last_undo_receipt: Optional[dict] = None
 
@@ -292,6 +318,10 @@ class TaskPanel(QWidget):
         self._search_refresh_timer = QTimer(self)
         self._search_refresh_timer.setSingleShot(True)
         self._search_refresh_timer.timeout.connect(self._refresh_tasks)
+        self._mutation_refresh_timer = QTimer(self)
+        self._mutation_refresh_timer.setSingleShot(True)
+        self._mutation_refresh_timer.setInterval(120)
+        self._mutation_refresh_timer.timeout.connect(self._refresh_tasks)
 
         self.tag_list = QListWidget()
         self.tag_list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -2270,9 +2300,60 @@ class TaskPanel(QWidget):
                 pass
         QMessageBox.warning(self, "Task update blocked", message)
 
-    def _apply_task_mutation(self, tasks: list[dict], **changes) -> bool:
+    def _prepare_list_focus_restore(self) -> None:
+        """Remember the keyboard position across a task-list rebuild."""
+        ordered = self._visible_items()
+        current = self.task_tree.currentItem()
+        self._mutation_scroll_value = self.task_tree.verticalScrollBar().value()
+        self._mutation_focus_task_id = None
+        if current is not None:
+            task = current.data(0, Qt.UserRole) or {}
+            if task:
+                self._remember_task_selection(task)
+                self._mutation_focus_task_id = str(task.get("id") or "") or None
+        try:
+            self._mutation_focus_index = max(0, ordered.index(current))
+        except ValueError:
+            self._mutation_focus_index = 0
+        self._restore_list_focus_after_mutation = True
+
+    def _restore_list_focus(self, *, preserve_current: bool = False) -> None:
+        """Keep task commands chained even when the selected row disappeared."""
+        if not self._restore_list_focus_after_mutation:
+            return
+        ordered = self._visible_items()
+        current = self.task_tree.currentItem()
+        current_task = current.data(0, Qt.UserRole) if current is not None else {}
+        current_id = str((current_task or {}).get("id") or "") or None
+        selected_task_survived = bool(
+            self._mutation_focus_task_id and current_id == self._mutation_focus_task_id
+        )
+        if not preserve_current and not selected_task_survived and ordered:
+            current = ordered[min(self._mutation_focus_index, len(ordered) - 1)]
+            self.task_tree.setCurrentItem(current)
+        scroll_bar = self.task_tree.verticalScrollBar()
+        scroll_bar.setValue(
+            max(scroll_bar.minimum(), min(self._mutation_scroll_value, scroll_bar.maximum()))
+        )
+        self.task_tree.setFocus(Qt.OtherFocusReason)
+        self._restore_list_focus_after_mutation = False
+        self._mutation_focus_task_id = None
+
+    def _schedule_mutation_refresh(self) -> None:
+        """Coalesce rapid task mutations into one stable list reconstruction."""
+        self._mutation_refresh_timer.start()
+
+    def _apply_task_mutation(
+        self,
+        tasks: list[dict],
+        *,
+        restore_list_focus: bool = True,
+        **changes,
+    ) -> bool:
         if not tasks:
             return False
+        if restore_list_focus:
+            self._prepare_list_focus_restore()
         if changes.get("destination") or changes.get("delete"):
             selected_ids = {str(task.get("id") or "") for task in tasks}
             tasks = [
@@ -2325,9 +2406,12 @@ class TaskPanel(QWidget):
                 f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo.",
                 5000,
             )
-            self._single_shot_ui(80, self._refresh_tasks)
+            self._schedule_mutation_refresh()
             return True
         except Exception as exc:
+            if restore_list_focus:
+                self._restore_list_focus_after_mutation = False
+                self._mutation_focus_task_id = None
             self._show_mutation_error(exc)
             return False
 
@@ -2369,6 +2453,7 @@ class TaskPanel(QWidget):
         self._advance_after_refresh = dialog.save_and_next
         return self._apply_task_mutation(
             [task],
+            restore_list_focus=parent is None,
             text=values["text"],
             status=values["status"],
             priority=values["priority"],
@@ -2414,6 +2499,7 @@ class TaskPanel(QWidget):
         paths = [str(capture.get("path") or "")]
         if destination:
             paths.append(destination)
+        self._prepare_list_focus_restore()
         self.taskDatesWillApply.emit(paths)
         try:
             payload = {
@@ -2453,6 +2539,8 @@ class TaskPanel(QWidget):
             self.statusRequested.emit("Triage item processed. Ctrl+Z to undo.", 5000)
             self._refresh_tasks()
         except Exception as exc:
+            self._restore_list_focus_after_mutation = False
+            self._mutation_focus_task_id = None
             self._show_mutation_error(exc)
 
     def _search_destination_pages(self, query: str) -> list[str]:
@@ -2508,6 +2596,7 @@ class TaskPanel(QWidget):
     def _undo_last_mutation(self) -> None:
         if not self._last_undo_id and not self._last_undo_receipt:
             return
+        self._prepare_list_focus_restore()
         try:
             if self._http_client and self._last_undo_id:
                 response = self._http_client.post(f"/api/tasks/undo/{self._last_undo_id}")
@@ -2532,6 +2621,8 @@ class TaskPanel(QWidget):
             self._last_refresh_signature = None
             self._refresh_tasks()
         except Exception as exc:
+            self._restore_list_focus_after_mutation = False
+            self._mutation_focus_task_id = None
             self._show_mutation_error(exc)
 
     def _selected_task_data(self) -> list[dict]:
@@ -2630,20 +2721,43 @@ class TaskPanel(QWidget):
 
     def _show_task_shortcuts(self) -> None:
         if self._triage_mode:
-            text = (
-                "Triage shortcuts\n\nE/F2  Edit capture\nA  Make Task\nF  File as Note\n"
-                "N  Keep as Note\nDelete  Delete\nCtrl+Enter  Process and advance\n"
-                "Ctrl+Z  Undo last change\nEsc  Return to Tasks"
-            )
+            title = "Triage shortcuts"
+            rows = [
+                ("E / F2", "Edit capture"),
+                ("A", "Make task"),
+                ("F", "File as note"),
+                ("N", "Keep as note"),
+                ("Delete", "Delete capture"),
+                ("Ctrl+Enter", "Process and advance"),
+                ("Ctrl+Z", "Undo last change"),
+                ("Esc", "Return to Tasks"),
+            ]
         else:
-            text = (
-                "Task shortcuts\n\nSpace  Complete/reopen\nE/F2  Edit\nD  Due date\n"
-                "S  Start date\n[ / ]  Due date ±1 day\nShift+[ / ]  ±1 week\n"
-                "P  Cycle priority\nT  Edit tags\nM  Edit move destination\n"
-                "R  Remove task indicators\nCtrl+Z  Undo last change\n"
-                "Enter  Open source\n/  Search"
-            )
-        QMessageBox.information(self, "Tasks keyboard shortcuts", text)
+            title = "Task shortcuts"
+            rows = [
+                ("Space", "Complete or reopen"),
+                ("E / F2", "Edit task"),
+                ("D / S", "Edit due date / start date"),
+                ("[ / ]", "Move due date back / forward one day"),
+                ("Shift+[ / ]", "Move due date back / forward one week"),
+                ("P", "Cycle priority"),
+                ("T", "Edit tags"),
+                ("M", "Edit move destination"),
+                ("R", "Remove task indicators"),
+                ("Delete", "Delete after confirmation"),
+                ("Ctrl+Z", "Undo last task change"),
+                ("Enter", "Open source and focus editor"),
+                ("Shift+Enter", "Open source and keep list focus"),
+                ("/", "Focus task search"),
+                ("?", "Show this reference"),
+            ]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Tasks keyboard shortcuts")
+        box.setTextFormat(Qt.RichText)
+        box.setText(_shortcut_table_html(title, rows))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def eventFilter(self, obj, event):
         if getattr(self, "tag_list", None):
@@ -3094,6 +3208,7 @@ class TaskPanel(QWidget):
 
     def clear(self) -> None:
         self._search_refresh_timer.stop()
+        self._mutation_refresh_timer.stop()
         self.active_tags.clear()
         self._api_task_cache.clear()
         self._api_task_inflight.clear()
@@ -3256,10 +3371,14 @@ class TaskPanel(QWidget):
                 target_index = min(1, len(visible) - 1)
             self.task_tree.setCurrentItem(self.task_tree.topLevelItem(target_index))
         self._advance_after_refresh = False
+        self._restore_list_focus(preserve_current=True)
 
+    @measure_performance("panel.tasks.refresh")
     def _refresh_tasks(self) -> None:
+        data_started_at = performance_start()
         if self._triage_mode:
             self._refresh_triage()
+            emit_performance_span("panel.tasks.data", data_started_at, fields={"triage": True})
             return
         self._set_task_filter_controls_enabled(True)
         self.task_tree.setSortingEnabled(True)
@@ -3398,11 +3517,19 @@ class TaskPanel(QWidget):
                     tag_source_map.setdefault(task.get("id") or task.get("path"), task)
                 self._tag_source_tasks = list(tag_source_map.values())
 
+        emit_performance_span(
+            "panel.tasks.data",
+            data_started_at,
+            fields={"task_rows": len(tasks)},
+        )
+        tree_started_at = performance_start()
         self.task_tree.clear()
         self._visible_tasks = []
         if not tasks:
             self._refresh_tags()
             self._update_summary_footer([])
+            self._restore_list_focus()
+            emit_performance_span("panel.tasks.tree_build", tree_started_at, fields={"visible_tasks": 0})
             return
         task_map = {task["id"]: task for task in tasks}
         visible_ids: set[str] = set()
@@ -3503,9 +3630,15 @@ class TaskPanel(QWidget):
                 self.task_tree.scrollToItem(ordered[next_index])
                 self._advance_after_refresh = False
         self._restore_focus_after_removed_task(items_by_id)
+        self._restore_list_focus()
         self._refresh_tags()
         self._update_summary_footer(visible_tasks)
         self._single_shot_ui(0, self._reset_horizontal_scroll)
+        emit_performance_span(
+            "panel.tasks.tree_build",
+            tree_started_at,
+            fields={"visible_tasks": len(visible_tasks)},
+        )
 
     def _filter_tasks_to_tag_groups(self, tasks: list[dict], tag_groups: list[set[str]]) -> list[dict]:
         """Apply tag filtering for OR-within-prefix semantics."""
@@ -3778,6 +3911,7 @@ class TaskPanel(QWidget):
         apply_start: bool,
         apply_due: bool,
     ) -> None:
+        self._prepare_list_focus_restore()
         affected_paths = sorted(
             {
                 "/" + str(t.get("path") or "").strip().lstrip("/")
@@ -4095,7 +4229,8 @@ class TaskPanel(QWidget):
                 break
         if target:
             self.task_tree.setCurrentItem(target)
-            self.task_tree.scrollToItem(target)
+            if not self._restore_list_focus_after_mutation:
+                self.task_tree.scrollToItem(target)
 
     def _restore_focus_after_removed_task(
         self,

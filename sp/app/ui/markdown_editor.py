@@ -83,7 +83,13 @@ from .path_utils import (
     should_use_full_target_label, trace_link_decision,
 )
 from .heading_utils import heading_slug
-from .page_load_logger import PageLoadLogger
+from .page_load_logger import (
+    PageLoadLogger,
+    PERFORMANCE_LOGGING_ENABLED,
+    emit_performance_span,
+    measure_performance,
+    performance_start,
+)
 from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
@@ -1709,6 +1715,11 @@ class MarkdownEditor(QTextEdit):
         self._auth_prompt: Optional[Callable[[], bool]] = None
         self._vi_mode_active: bool = False
         self._vi_cursor_style: str = "line"
+        try:
+            self._vault_accent_color: Optional[str] = config.load_vault_accent_color()
+        except Exception:
+            self._vault_accent_color = None
+        self._vi_cursor_color_cache: Optional[tuple[str, QColor, QColor]] = None
         self._vi_default_cursor_width: int = max(1, self.cursorWidth())
         try:
             self._vi_block_cursor_width: int = max(2, self.fontMetrics().horizontalAdvance("M"))
@@ -1760,6 +1771,7 @@ class MarkdownEditor(QTextEdit):
         self._hr_block_margin_px: int = 6
         self._enforce_display_guard: bool = False
         self._last_heading_block_num: Optional[int] = None
+        self._pending_keystroke_paint: Optional[tuple[float, int, int]] = None
         # CRITICAL STATE: These track headings being edited (sentinel temporarily removed)
         # MUST be cleared on file load, document clear, or any operation that changes document identity
         # If these are not cleared, stray sentinel characters can corrupt the editor display
@@ -1793,16 +1805,23 @@ class MarkdownEditor(QTextEdit):
         self._heading_timer.setInterval(250)
         self._heading_timer.setSingleShot(True)
         self._heading_timer.timeout.connect(self._emit_heading_outline)
-        self.textChanged.connect(self._schedule_heading_outline)
         self._hr_timer = QTimer(self)
         self._hr_timer.setInterval(120)
         self._hr_timer.setSingleShot(True)
-        self._hr_timer.timeout.connect(self._refresh_hr_selections)
+        self._hr_timer.timeout.connect(self._refresh_pending_hr_selections)
+        self._document_scan_timer = QTimer(self)
+        self._document_scan_timer.setInterval(140)
+        self._document_scan_timer.setSingleShot(True)
+        self._document_scan_timer.timeout.connect(self._flush_document_change_scans)
+        self._pending_edit_heading_refresh = False
         self._hr_retry_timer = QTimer(self)
         self._hr_retry_timer.setInterval(75)
         self._hr_retry_timer.setSingleShot(True)
         self._hr_retry_timer.timeout.connect(self._retry_refresh_hr)
         self._hr_refresh_retry_token: Optional[int] = None
+        self._hr_refresh_retry_blocks: Optional[set[int]] = None
+        self._pending_hr_block_numbers: set[int] = set()
+        self._hr_applying_block_formats = False
         self._hr_resize_timer = QTimer(self)
         self._hr_resize_timer.setInterval(120)
         self._hr_resize_timer.setSingleShot(True)
@@ -1812,9 +1831,10 @@ class MarkdownEditor(QTextEdit):
         # Qt's SVG image plugin can crash in native paint on some Linux setups.
         # Keep raster inline images enabled and allow opting back in for SVG.
         self._enable_inline_svg = os.getenv("SP_ENABLE_INLINE_SVG", "0") in ("1", "true", "True")
-        # Always refresh HR selections on text changes so editing/deleting a
-        # "---" line immediately clears stale background and block margins.
-        self.textChanged.connect(self._schedule_hr_selections)
+        # Track exact changed blocks for outline invalidation and incremental HR
+        # decoration. Programmatic page loads are guarded and explicitly issue
+        # one full refresh after document population.
+        self.document().contentsChange.connect(self._on_document_contents_change)
         # Timer for CamelCase link conversion; explicitly started on key triggers
         self._camel_refresh_timer = QTimer(self)
         self._camel_refresh_timer.setInterval(120)
@@ -1910,6 +1930,8 @@ class MarkdownEditor(QTextEdit):
         for timer_name in (
             "_heading_timer",
             "_hr_timer",
+            "_document_scan_timer",
+            "_hr_retry_timer",
             "_hr_resize_timer",
             "_camel_refresh_timer",
             "_vi_activation_timer",
@@ -2734,7 +2756,7 @@ class MarkdownEditor(QTextEdit):
 
     def _complete_page_load_logging(self, label: str, load_token: Optional[int] = None) -> None:
         if self._page_load_logger and (load_token is None or load_token == self._post_load_logger_token):
-            self._page_load_logger.end(label)
+            self._page_load_logger.complete_phase("images", label)
             self._page_load_logger = None
             self._post_load_logger_token = 0
 
@@ -2840,7 +2862,6 @@ class MarkdownEditor(QTextEdit):
             try:
                 self.document().clear()
                 self.textChanged.disconnect(self._enforce_display_symbols)
-                self.textChanged.disconnect(self._schedule_heading_outline)
                 # Always defer highlighting during load for better performance
                 highlighter_disabled = True
                 self.highlighter.setDocument(None)
@@ -2872,7 +2893,6 @@ class MarkdownEditor(QTextEdit):
                     restore_cursor_after_load(len(display))
                 self._mark_page_load("document populated", load_token)
                 self.textChanged.connect(self._enforce_display_symbols)
-                self.textChanged.connect(self._schedule_heading_outline)
                 if highlighter_disabled:
                     self.highlighter.setDocument(self.document())
                     # Attaching schedules Qt's normal rehighlight pass.  Do not
@@ -2942,8 +2962,10 @@ class MarkdownEditor(QTextEdit):
                     total = self.highlighter._timing_total * 1000.0
                     print(f"[MD_TIMING] Highlighter: blocks={self.highlighter._timing_blocks} total={total:.1f}ms avg={avg:.2f}ms")
             self.highlighter.enable_timing(False)
-            self._mark_page_load("editor focus ready", load_token)
-            self.setFocus()
+            # Loading content must not decide which pane owns keyboard focus.
+            # Navigation callers already apply their Enter/Shift+Enter focus
+            # policy explicitly, and an editor that already owns focus keeps it.
+            self._mark_page_load("editor render complete", load_token)
         finally:
             # Restore normal cursor after page load
             QGuiApplication.restoreOverrideCursor()
@@ -3044,7 +3066,6 @@ class MarkdownEditor(QTextEdit):
             self.setUpdatesEnabled(False)
             try:
                 self.textChanged.disconnect(self._enforce_display_symbols)
-                self.textChanged.disconnect(self._schedule_heading_outline)
             except Exception:
                 pass
             self.document().clear()
@@ -3053,7 +3074,6 @@ class MarkdownEditor(QTextEdit):
             self.setUpdatesEnabled(True)
             try:
                 self.textChanged.connect(self._enforce_display_symbols)
-                self.textChanged.connect(self._schedule_heading_outline)
             except Exception:
                 pass
             del doc_blocker
@@ -4989,6 +5009,12 @@ class MarkdownEditor(QTextEdit):
         return True
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if PERFORMANCE_LOGGING_ENABLED and not event.isAutoRepeat():
+            self._pending_keystroke_paint = (
+                time.perf_counter(),
+                int(event.key()),
+                int(self.document().revision()),
+            )
         if self._dialog_block_input:
             event.ignore()
             return
@@ -5106,6 +5132,12 @@ class MarkdownEditor(QTextEdit):
                 prefer_above = False
             global_point = viewport.mapToGlobal(cursor_rect.bottomLeft())
             self.vaultPickerRequested.emit(global_point, prefer_above)
+            event.accept()
+            return
+        # Universal task-editor shortcut. A bare `e` is reserved for vi navigation
+        # mode because it would interfere with normal typing outside vi mode.
+        if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() == Qt.Key_E:
+            self._request_task_edit_at_cursor()
             event.accept()
             return
         # Markdown formatting shortcuts and undo/redo (Ctrl+Z/Ctrl+Y)
@@ -7463,6 +7495,20 @@ class MarkdownEditor(QTextEdit):
         self._hide_task_hover_edit_button()
         self.taskEditRequested.emit(int(block_number), anchor)
 
+    def _request_task_edit_at_cursor(self) -> bool:
+        """Request the task editor for the cursor line when it is a task."""
+        cursor = self.textCursor()
+        is_task, _indent, _state, _content = self._is_task_line(cursor.block().text())
+        if not is_task:
+            self._status_message("Cursor is not on a task.")
+            return False
+        if self._read_only_mode:
+            self._status_message("Vault is read-only; editing is disabled.")
+            return False
+        anchor = self.viewport().mapToGlobal(self.cursorRect(cursor).bottomRight())
+        self._request_task_edit(cursor.blockNumber(), anchor)
+        return True
+
     def _schedule_vi_activation(self) -> None:
         if not self._vi_pending_activation or not self._vi_feature_enabled:
             return
@@ -7718,15 +7764,19 @@ class MarkdownEditor(QTextEdit):
             if self._vi_remove_task_indicators_at_cursor():
                 self._vi_last_edit = self._vi_remove_task_indicators_at_cursor
             return True
-        if key == Qt.Key_E and not shift and self._task_hover_edit_enabled:
+        if key == Qt.Key_Space and not shift:
             is_task, _indent, _state, _content = self._is_task_line(cursor.block().text())
             if is_task:
                 if read_only:
                     return _block_vi_edit()
-                anchor = self.viewport().mapToGlobal(self.cursorRect(cursor).bottomRight())
-                self._request_task_edit(cursor.blockNumber(), anchor)
+                self.toggle_task_state()
             else:
                 self._status_message("Cursor is not on a task.")
+            return True
+        if key == Qt.Key_E and not shift and self._task_hover_edit_enabled:
+            if read_only:
+                return _block_vi_edit()
+            self._request_task_edit_at_cursor()
             return True
         if key == Qt.Key_N:
             self.search_repeat_last(reverse=False)
@@ -8316,6 +8366,16 @@ class MarkdownEditor(QTextEdit):
         if not self._dialog_block_input:
             self.setFocus()
 
+    def set_vault_accent_color(self, accent: Optional[str]) -> None:
+        """Update editor visuals that derive from the active vault accent."""
+        normalized = (accent or "").strip() or None
+        # Clear even when the literal accent is unchanged: a theme reload can
+        # change the fallback color while no vault-specific accent is selected.
+        self._vault_accent_color = normalized
+        self._vi_cursor_color_cache = None
+        if self._vi_mode_active:
+            self._update_vi_cursor()
+
     def _maybe_update_vi_cursor(self) -> None:
         if (
             self._cursor_events_blocked
@@ -8440,12 +8500,16 @@ class MarkdownEditor(QTextEdit):
         self.setExtraSelections(existing)
 
     def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
-        accent_value = config.load_vault_accent_color() or theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff").name()
+        accent_value = self._vault_accent_color or theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff").name()
+        cached = self._vi_cursor_color_cache
+        if cached is not None and cached[0] == accent_value:
+            return QColor(cached[1]), QColor(cached[2])
         accent = QColor(accent_value)
         if not accent.isValid():
             accent = QColor("#b259ff")
         luminance = (0.299 * accent.red()) + (0.587 * accent.green()) + (0.114 * accent.blue())
         foreground = QColor("#111111" if luminance >= 160 else "#ffffff")
+        self._vi_cursor_color_cache = (accent_value, QColor(accent), QColor(foreground))
         return accent, foreground
 
     def eventFilter(self, obj, event):  # type: ignore[override]
@@ -8456,9 +8520,36 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             viewport = None
         if viewport is not None and obj is viewport:
+            if event.type() == QEvent.Paint and self._pending_keystroke_paint is not None:
+                started_at, key, revision = self._pending_keystroke_paint
+                self._pending_keystroke_paint = None
+                ended_at = time.perf_counter()
+                path = self._current_path
+                fields = {
+                    "key": key,
+                    "revision_before": revision,
+                    "revision_at_paint": int(self.document().revision()),
+                    "document_blocks": int(self.document().blockCount()),
+                }
+                # Capture the timestamp now, but defer JSON/file I/O until this
+                # paint event has been dispatched so profiling does not add to
+                # the latency it is measuring.
+                QTimer.singleShot(
+                    0,
+                    lambda start=started_at, end=ended_at, page=path, data=fields: emit_performance_span(
+                        "editor.keystroke_to_paint_start",
+                        start,
+                        path=page,
+                        fields=data,
+                        ended_at=end,
+                    ),
+                )
             if self._cursor_events_blocked or self._display_guard or self._suppress_vi_cursor or self._in_mode_window_transition():
                 return super().eventFilter(obj, event)
-            if event.type() in (QEvent.Paint, QEvent.UpdateRequest, QEvent.FocusIn, QEvent.FocusOut):
+            # Cursor movement and mode/accent changes already update the extra
+            # selection. Rebuilding it from Paint/UpdateRequest can recursively
+            # schedule more viewport work on every frame.
+            if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
                 if self._vi_mode_active:
                     self._update_vi_cursor()
         return super().eventFilter(obj, event)
@@ -8593,77 +8684,213 @@ class MarkdownEditor(QTextEdit):
             return
         self._heading_timer.start()
 
+    @staticmethod
+    def _block_can_affect_outline(text: str) -> bool:
+        stripped = (text or "").lstrip()
+        if not stripped:
+            return False
+        if stripped.strip() in ("---", "***", "___"):
+            return True
+        return bool(heading_level_from_char(stripped[0]) or HEADING_MARK_PATTERN.match(text))
+
+    def _changed_block_numbers(
+        self,
+        position: int,
+        chars_added: int,
+        *,
+        include_neighbors: bool = True,
+    ) -> set[int]:
+        doc = self.document()
+        if doc is None or doc.blockCount() <= 0:
+            return set()
+        max_position = max(0, doc.characterCount() - 1)
+        start = doc.findBlock(min(max(0, position), max_position))
+        end_position = min(max_position, max(0, position) + max(1, chars_added))
+        end = doc.findBlock(end_position)
+        if not start.isValid():
+            start = doc.firstBlock()
+        if not end.isValid():
+            end = start
+        neighbor = 1 if include_neighbors else 0
+        first_number = max(0, start.blockNumber() - neighbor)
+        last_number = min(doc.blockCount() - 1, end.blockNumber() + neighbor)
+        return set(range(first_number, last_number + 1))
+
+    def _on_document_contents_change(self, position: int, chars_removed: int, chars_added: int) -> None:
+        """Invalidate only document-derived UI state affected by an edit."""
+        if (
+            self._display_guard
+            or self._hanging_indent_guard
+            or self._hr_applying_block_formats
+            or self._mutations_blocked()
+        ):
+            return
+        changed_blocks = self._changed_block_numbers(position, chars_added)
+        if not changed_blocks:
+            return
+        self._pending_hr_block_numbers.update(changed_blocks)
+
+        doc = self.document()
+        exact_changed_blocks = self._changed_block_numbers(
+            position,
+            chars_added,
+            include_neighbors=False,
+        )
+        cached_outline_blocks = {
+            max(0, int(entry.get("line", 1)) - 1)
+            for entry in self._heading_outline
+        }
+        changed_can_create_outline = any(
+            self._block_can_affect_outline(doc.findBlockByNumber(number).text())
+            for number in exact_changed_blocks
+            if doc.findBlockByNumber(number).isValid()
+        )
+        block_structure_changed = int(doc.blockCount()) != int(self._last_block_count)
+        cached_outline_touched = bool(cached_outline_blocks.intersection(exact_changed_blocks))
+        later_outline_shifted = chars_added != chars_removed and any(
+            int(entry.get("position", 0)) >= position for entry in self._heading_outline
+        )
+        if (
+            block_structure_changed
+            or cached_outline_touched
+            or changed_can_create_outline
+            or later_outline_shifted
+        ):
+            self._pending_edit_heading_refresh = True
+        # One trailing-edge callback handles both derived views after a typing
+        # burst instead of waking separate HR and outline timers.
+        self._document_scan_timer.start()
+
+    def _flush_document_change_scans(self) -> None:
+        refresh_heading = self._pending_edit_heading_refresh
+        self._pending_edit_heading_refresh = False
+        self._refresh_pending_hr_selections()
+        if refresh_heading:
+            self._emit_heading_outline()
+
     def _schedule_hr_selections(self) -> None:
         if self._mutations_blocked():
             return
-        if self._hr_timer.isActive():
-            return
+        if not self._pending_hr_block_numbers:
+            self._pending_hr_block_numbers.update(
+                self._changed_block_numbers(self.textCursor().position(), 0)
+            )
+        # Restarting makes this a trailing-edge debounce for rapid typing.
         self._hr_timer.start()
 
-    def _refresh_hr_selections(self, load_token: Optional[int] = None) -> None:
+    def _refresh_pending_hr_selections(self) -> None:
+        block_numbers = set(self._pending_hr_block_numbers)
+        self._pending_hr_block_numbers.clear()
+        if block_numbers:
+            self._refresh_hr_selections(block_numbers=block_numbers)
+
+    def _refresh_hr_selections(
+        self,
+        load_token: Optional[int] = None,
+        *,
+        block_numbers: Optional[set[int]] = None,
+    ) -> None:
         if not self._is_current_load_token(load_token):
             self._hr_refresh_retry_pending = False
             self._hr_refresh_retry_token = None
+            self._hr_refresh_retry_blocks = None
             return
         if self._mutations_blocked():
-            self._schedule_hr_retry(load_token)
+            self._schedule_hr_retry(load_token, block_numbers)
             return
         if self._post_load_paint_guard_active():
-            self._schedule_hr_retry(load_token)
+            self._schedule_hr_retry(load_token, block_numbers)
             return
         self._hr_refresh_retry_pending = False
         self._hr_refresh_retry_token = None
+        self._hr_refresh_retry_blocks = None
         doc = self.document()
         if doc is None:
             return
+        scan_started_at = performance_start()
         selections: list[QTextEdit.ExtraSelection] = []
-        block = doc.begin()
-        while block.isValid():
-            is_hr = block.text().strip() in ("---", "***", "___")
-            if is_hr:
-                cursor = QTextCursor(block)
-                # Do NOT select text — FullWidthSelection only paints across
-                # the entire viewport when the cursor has no active selection.
-                sel = QTextEdit.ExtraSelection()
-                sel.cursor = cursor
-                fmt = sel.format
-                # Use the line color as background; the thin FixedHeight block
-                # renders as a full-width horizontal rule without any custom
-                # paintEvent overlay (avoids QPainter segfaults on Win/Linux).
-                fmt.setBackground(self._hr_line_color)
-                fmt.setProperty(QTextFormat.FullWidthSelection, True)
-                fmt.setProperty(self._HR_EXTRA_KEY, True)
-                selections.append(sel)
-                block_fmt = block.blockFormat()
-                needs_update = (
-                    int(block_fmt.topMargin()) != self._hr_block_margin_px
-                    or int(block_fmt.bottomMargin()) != self._hr_block_margin_px
-                )
-                if needs_update:
-                    block_fmt.setTopMargin(self._hr_block_margin_px)
-                    block_fmt.setBottomMargin(self._hr_block_margin_px)
-                    cursor.setBlockFormat(block_fmt)
-            else:
-                block_fmt = block.blockFormat()
-                needs_clear = (
-                    block_fmt.topMargin()
-                    or block_fmt.bottomMargin()
-                )
-                if needs_clear:
+        if block_numbers is None:
+            scan_numbers = list(range(doc.blockCount()))
+            self._pending_hr_block_numbers.clear()
+        else:
+            scan_numbers = sorted(
+                number for number in block_numbers if 0 <= number < doc.blockCount()
+            )
+        self._hr_applying_block_formats = True
+        try:
+            for number in scan_numbers:
+                block = doc.findBlockByNumber(number)
+                if not block.isValid():
+                    continue
+                is_hr = block.text().strip() in ("---", "***", "___")
+                if is_hr:
                     cursor = QTextCursor(block)
-                    block_fmt.setTopMargin(0)
-                    block_fmt.setBottomMargin(0)
-                    cursor.setBlockFormat(block_fmt)
-            block = block.next()
-        existing = [s for s in self.extraSelections() if s.format.property(self._HR_EXTRA_KEY) is None]
-        existing.extend(selections)
-        self.setExtraSelections(existing)
+                    # Do NOT select text — FullWidthSelection only paints across
+                    # the entire viewport when the cursor has no active selection.
+                    sel = QTextEdit.ExtraSelection()
+                    sel.cursor = cursor
+                    fmt = sel.format
+                    fmt.setBackground(self._hr_line_color)
+                    fmt.setProperty(QTextFormat.FullWidthSelection, True)
+                    fmt.setProperty(self._HR_EXTRA_KEY, True)
+                    selections.append(sel)
+                    block_fmt = block.blockFormat()
+                    needs_update = (
+                        int(block_fmt.topMargin()) != self._hr_block_margin_px
+                        or int(block_fmt.bottomMargin()) != self._hr_block_margin_px
+                    )
+                    if needs_update:
+                        block_fmt.setTopMargin(self._hr_block_margin_px)
+                        block_fmt.setBottomMargin(self._hr_block_margin_px)
+                        cursor.setBlockFormat(block_fmt)
+                else:
+                    block_fmt = block.blockFormat()
+                    if block_fmt.topMargin() or block_fmt.bottomMargin():
+                        cursor = QTextCursor(block)
+                        block_fmt.setTopMargin(0)
+                        block_fmt.setBottomMargin(0)
+                        cursor.setBlockFormat(block_fmt)
 
-    def _schedule_hr_retry(self, load_token: Optional[int] = None) -> None:
+            existing: list[QTextEdit.ExtraSelection] = []
+            for selection in self.extraSelections():
+                if selection.format.property(self._HR_EXTRA_KEY) is None:
+                    existing.append(selection)
+                    continue
+                if block_numbers is not None:
+                    selection_block = selection.cursor.block()
+                    if selection_block.isValid() and selection_block.blockNumber() not in block_numbers:
+                        existing.append(selection)
+            existing.extend(selections)
+            self.setExtraSelections(existing)
+        finally:
+            self._hr_applying_block_formats = False
+        if scan_started_at is not None:
+            emit_performance_span(
+                "editor.horizontal_rule_scan",
+                scan_started_at,
+                path=self._current_path,
+                fields={
+                    "document_blocks": int(doc.blockCount()),
+                    "horizontal_rules": len(selections),
+                    "scanned_blocks": len(scan_numbers),
+                    "incremental": block_numbers is not None,
+                },
+            )
+
+    def _schedule_hr_retry(
+        self,
+        load_token: Optional[int] = None,
+        block_numbers: Optional[set[int]] = None,
+    ) -> None:
         if self._hr_refresh_retry_pending:
+            if self._hr_refresh_retry_blocks is not None and block_numbers is not None:
+                self._hr_refresh_retry_blocks.update(block_numbers)
+            else:
+                self._hr_refresh_retry_blocks = None
             return
         self._hr_refresh_retry_pending = True
         self._hr_refresh_retry_token = load_token
+        self._hr_refresh_retry_blocks = None if block_numbers is None else set(block_numbers)
         self._hr_retry_timer.start()
 
     def _retry_refresh_hr(self, load_token: Optional[int] = None) -> None:
@@ -8676,7 +8903,9 @@ class MarkdownEditor(QTextEdit):
             return
         self._hr_refresh_retry_pending = False
         self._hr_refresh_retry_token = None
-        self._refresh_hr_selections(load_token=retry_token)
+        retry_blocks = self._hr_refresh_retry_blocks
+        self._hr_refresh_retry_blocks = None
+        self._refresh_hr_selections(load_token=retry_token, block_numbers=retry_blocks)
 
     def apply_hr_line_height(self) -> None:
         """Reload HR line height from preferences and refresh the display."""
@@ -8692,7 +8921,9 @@ class MarkdownEditor(QTextEdit):
         cursor.setBlockCharFormat(fmt)
         self.setCurrentCharFormat(fmt)
 
+    @measure_performance("editor.heading_outline_scan")
     def _emit_heading_outline(self) -> None:
+        self._pending_edit_heading_refresh = False
         outline: list[dict] = []
         block = self.document().firstBlock()
         while block.isValid():
@@ -8733,6 +8964,7 @@ class MarkdownEditor(QTextEdit):
                     )
             block = block.next()
         self._heading_outline = outline
+        self._last_block_count = self.document().blockCount()
         self.headingsChanged.emit(outline)
 
     def jump_to_anchor(self, anchor: str) -> bool:
@@ -9013,19 +9245,13 @@ class MarkdownEditor(QTextEdit):
         if self._block_count_guard or self._processing_inline_trigger or self._display_guard:
             return
         self._block_count_guard = True
-        current_count = self.document().blockCount()
-        if hasattr(self, '_last_block_count') and self._last_block_count != current_count:
-            # Block structure changed - persistent cache doesn't need invalidation (content-based)
-            # But rehighlight to ensure UI consistency
-            try:
-                if self._is_alive(self.highlighter):
-                    self.highlighter.rehighlight()
-            except RuntimeError:
-                # Highlighter can be deleted during teardown; skip safely.
-                pass
-        self._last_block_count = current_count
-        self._block_count_guard = False
-        # All caret/line/block logic removed; only cache invalidation and block count update remain
+        try:
+            # QSyntaxHighlighter automatically invalidates the changed blocks.
+            # Calling rehighlight() here adds a second, whole-document pass to a
+            # common typing operation whenever Enter/Backspace changes line count.
+            self._last_block_count = self.document().blockCount()
+        finally:
+            self._block_count_guard = False
 
     def _restore_cursor_position(self, position: int) -> None:
         cursor = self.textCursor()
@@ -9919,6 +10145,7 @@ class MarkdownEditor(QTextEdit):
             self._render_images_retry_pending = False
             return
         if self._disable_inline_images:
+            self._complete_page_load_logging("inline images disabled", load_token)
             return
         if self._mutations_blocked():
             if not self._render_images_retry_pending:

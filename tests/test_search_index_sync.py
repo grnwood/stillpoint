@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import QObject
 
+from sp.app import config
+from sp.server import search_index
 from sp.app.ui.search_index_sync import PeriodicSearchIndexSync
 
 
@@ -40,6 +43,41 @@ class _ImmediateThread:
 
     def start(self):
         self._target()
+
+
+def test_search_index_sync_defaults_to_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(config, "_read_global_config", lambda: {})
+
+    assert config.load_global_feature_keep_search_index_sync_enabled() is True
+
+
+def test_search_index_sync_respects_explicit_disabled_preference(monkeypatch) -> None:
+    monkeypatch.setattr(
+        config,
+        "_read_global_config",
+        lambda: {"feature_keep_search_index_sync_enabled": False},
+    )
+
+    assert config.load_global_feature_keep_search_index_sync_enabled() is False
+
+
+def test_vault_index_rebuild_preserves_full_text_search(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "settings.db"
+    with sqlite3.connect(db_path) as conn:
+        config._ensure_schema(conn)
+        search_index.upsert_page(conn, "/Durable.md", 1, "durable search sentinel")
+
+    monkeypatch.setattr(
+        config,
+        "_connect_to_vault_db",
+        lambda: sqlite3.connect(db_path),
+    )
+
+    config.rebuild_index_from_disk(tmp_path)
+
+    with sqlite3.connect(db_path) as conn:
+        results = search_index.search_pages(conn, "sentinel")
+        assert [result["path"] for result in results] == ["/Durable.md"]
 
 
 def _build_sync(*, enabled: bool, remote: bool, vault_root: str | None, db_path: str | None):

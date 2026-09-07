@@ -49,7 +49,9 @@ Tasks live directly in your pages, so planning and notes stay together.
 
 - Type `()` then space to create a new task
 - Type `(x)` then space to create a completed task
-- Press `F12` on a task line to toggle complete/incomplete
+- Press `F12` on a task line to toggle complete/incomplete in any editor mode
+- Press `Ctrl+Alt+E` on a task line to open the Task Editor in any editor mode
+- In vi navigation mode, use `Space` to toggle complete/incomplete or `e` to open the Task Editor
 - Add task tags with `@tagname` (example: `@errands`, `@email`)
 
 You can also add date markers in task text:

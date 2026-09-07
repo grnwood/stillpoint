@@ -33,6 +33,7 @@ from sp.app import config
 from sp.server.adapters.files import strip_page_suffix
 from .path_utils import path_to_colon
 from .theme import apply_menu_theme, theme_value
+from .page_load_logger import measure_performance
 
 
 @dataclass
@@ -947,6 +948,7 @@ class LinkNavigatorPanel(QWidget):
         if not self._applying_theme and event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
             self.apply_theme()
 
+    @measure_performance("panel.links.refresh")
     def refresh(self, page_path: Optional[str] = None, *, preserve_zoom: bool = False) -> None:
         if page_path is not None:
             self.current_page = page_path

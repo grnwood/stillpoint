@@ -39,6 +39,10 @@ _PAGE_RESULT_CACHE_LIMIT = 64
 _PAGE_CACHE_ROOT: Optional[Path] = None
 _LAST_DB_REPAIR_NOTICE: Optional[str] = None
 _ACTIVE_ROOT_CONTEXT: ContextVar[Optional[Path]] = ContextVar("sp_config_active_root", default=None)
+_GLOBAL_CONFIG_CACHE: Optional[dict[str, Any]] = None
+_GLOBAL_CONFIG_CACHE_PATH: Optional[Path] = None
+_GLOBAL_CONFIG_CACHE_SIGNATURE: Optional[tuple[int, int]] = None
+_GLOBAL_CONFIG_CACHE_LOCK = RLock()
 
 
 def _invalidate_page_cache() -> None:
@@ -155,12 +159,34 @@ def init_settings() -> None:
 
 def _read_global_config() -> dict:
     """Return the parsed global config, or an empty dict on error/missing."""
-    if not GLOBAL_CONFIG.exists():
-        return {}
+    global _GLOBAL_CONFIG_CACHE
+    global _GLOBAL_CONFIG_CACHE_PATH
+    global _GLOBAL_CONFIG_CACHE_SIGNATURE
+    path = GLOBAL_CONFIG
     try:
-        return json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+        stat = path.stat()
+        signature: Optional[tuple[int, int]] = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        signature = None
+    with _GLOBAL_CONFIG_CACHE_LOCK:
+        if (
+            _GLOBAL_CONFIG_CACHE is not None
+            and _GLOBAL_CONFIG_CACHE_PATH == path
+            and _GLOBAL_CONFIG_CACHE_SIGNATURE == signature
+        ):
+            return dict(_GLOBAL_CONFIG_CACHE)
+        payload: dict[str, Any] = {}
+        if signature is not None:
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (json.JSONDecodeError, OSError):
+                pass
+        _GLOBAL_CONFIG_CACHE = payload
+        _GLOBAL_CONFIG_CACHE_PATH = path
+        _GLOBAL_CONFIG_CACHE_SIGNATURE = signature
+        return dict(payload)
 
 
 def _homebase_vault_metadata_path(vault_root: str | Path) -> Path:
@@ -1795,7 +1821,7 @@ def save_feature_homebase_vaults_enabled(enabled: bool) -> None:
     _update_global_config({"feature_homebase_vaults_enabled": bool(enabled)})
 
 
-def load_global_feature_keep_search_index_sync_enabled(default: bool = False) -> bool:
+def load_global_feature_keep_search_index_sync_enabled(default: bool = True) -> bool:
     """Return whether periodic search-index sync is enabled globally."""
     payload = _read_global_config()
     val = payload.get("feature_keep_search_index_sync_enabled")
@@ -3428,19 +3454,22 @@ def save_dialog_geometry(dialog_name: str, geometry: str) -> None:
 
 def _update_global_config(updates: dict) -> None:
     """Merge updates into global config file."""
-    existing = {}
-    if GLOBAL_CONFIG.exists():
+    global _GLOBAL_CONFIG_CACHE
+    global _GLOBAL_CONFIG_CACHE_PATH
+    global _GLOBAL_CONFIG_CACHE_SIGNATURE
+    with _GLOBAL_CONFIG_CACHE_LOCK:
+        existing = _read_global_config()
+        existing.update(updates)
         try:
-            existing = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    existing.update(updates)
-    try:
-        GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        GLOBAL_CONFIG.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    except OSError:
-        # Read-only environments (e.g., tests/sandboxes) should not crash callers.
-        return
+            GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            GLOBAL_CONFIG.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            stat = GLOBAL_CONFIG.stat()
+        except OSError:
+            # Read-only environments (e.g., tests/sandboxes) should not crash callers.
+            return
+        _GLOBAL_CONFIG_CACHE = existing
+        _GLOBAL_CONFIG_CACHE_PATH = GLOBAL_CONFIG
+        _GLOBAL_CONFIG_CACHE_SIGNATURE = (stat.st_mtime_ns, stat.st_size)
 
 
 def load_font_size(default: int = 14) -> int:
@@ -4040,17 +4069,25 @@ def update_link_paths(path_map: dict[str, str]) -> None:
 def rebuild_index_from_disk(root: Path, keep_tables: Optional[set[str]] = None) -> None:
     """Drop and recreate vault index tables, preserving selected tables.
 
-    Keeps bookmarks, kv, and any ai* tables by default.
+    Keeps bookmarks, kv, the full-text page-search index, and any ai* tables by
+    default. Search is maintained independently from the derived vault metadata
+    index and must remain usable after an ordinary vault rebuild.
     """
     keep: set[str] = {t.lower() for t in (keep_tables or set())}
-    keep.update({"bookmarks", "kv"})
+    keep.update({"bookmarks", "kv", "pages_search_index"})
     conn = _connect_to_vault_db()
     try:
         tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        # Always preserve ai* tables
+        # Preserve the FTS5 virtual table together with all of its SQLite-managed
+        # shadow tables (pages_search_fts_data, _idx, _content, and so on).
         for name in tables:
-            if name.lower().startswith("ai"):
-                keep.add(name.lower())
+            normalized_name = name.lower()
+            if (
+                normalized_name.startswith("ai")
+                or normalized_name == "pages_search_fts"
+                or normalized_name.startswith("pages_search_fts_")
+            ):
+                keep.add(normalized_name)
         to_drop = [name for name in tables if name.lower() not in keep]
         with conn:
             for name in to_drop:

@@ -7,7 +7,11 @@ from PySide6.QtGui import QAction, QImage, QKeySequence, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
-from sp.app.quickcapture_common import QUICK_CAPTURE_SECTION_TITLE, append_quick_capture_section
+from sp.app.quickcapture_common import (
+    QUICK_CAPTURE_SECTION_TITLE,
+    append_quick_capture_section,
+    quick_capture_destination_options,
+)
 from sp.app.quickcapture import _build_quick_capture_entry as build_quick_capture_entry
 from sp.app.quickcapture import _append_quick_capture_section as append_desktop_capture
 from sp.app.quickcapture_lite import _build_quick_capture_entry as build_quick_capture_entry_lite
@@ -203,6 +207,25 @@ def test_quick_capture_ctrl_p_cycles_destination_without_leaving_input(qtbot) ->
     assert overlay.input.hasFocus()
     assert overlay.input.textCursor().position() == cursor_position
     assert print_calls == []
+
+
+def test_standalone_destination_options_match_configured_and_recent_pages() -> None:
+    options, selected = quick_capture_destination_options(
+        "custom",
+        ":INBOX",
+        [
+            {"page_mode": "custom", "page_ref": ":PROJECTS:ALPHA"},
+            {"page_mode": "custom", "page_ref": ":INBOX"},
+            {"page_mode": "today", "page_ref": ""},
+        ],
+    )
+
+    assert selected == {"label": "INBOX", "page_mode": "custom", "page_ref": ":INBOX"}
+    assert options == [
+        {"label": "Today's Journal", "page_mode": "today", "page_ref": None},
+        {"label": "INBOX", "page_mode": "custom", "page_ref": ":INBOX"},
+        {"label": "PROJECTS / ALPHA", "page_mode": "custom", "page_ref": ":PROJECTS:ALPHA"},
+    ]
 
 
 def test_quick_capture_pasted_image_has_thumbnail(qtbot) -> None:

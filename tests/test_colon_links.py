@@ -11,7 +11,15 @@ from sp.app.ui.path_utils import (
     strip_root_prefix,
     normalize_link_target,
     should_use_full_target_label,
+    format_journal_day_label,
 )
+
+
+def test_format_journal_day_label_matches_recent_page_chicklets():
+    assert format_journal_day_label("/Journal/2026/04/28/28.md") == "28-Apr-26"
+    assert format_journal_day_label("Journal:2026:04:28") == "28-Apr-26"
+    assert format_journal_day_label("/Projects/28/28.md") is None
+    assert format_journal_day_label("/Journal/2026/04/28/Notes/Notes.md") is None
 
 
 class TestPathToColon:

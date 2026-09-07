@@ -355,10 +355,10 @@ class ModeWindow(QMainWindow):
         except Exception:
             pass
         self.editor.set_context(self._vault_root, self._page_path)
-        # Drop expensive per-editor textChanged handlers on the overlay to avoid re-entrant processing
+        # Avoid duplicate symbol enforcement on the overlay. Derived outline/HR
+        # state now uses the editor's coalesced document-change invalidation.
         try:
             self.editor.textChanged.disconnect(self.editor._enforce_display_symbols)
-            self.editor.textChanged.disconnect(self.editor._schedule_heading_outline)
         except Exception:
             pass
         # Keep lightweight symbol enforcement (bullet/checkbox/heading line transforms) active in the overlay

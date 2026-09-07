@@ -10,6 +10,7 @@ from sp.app.quickcapture_common import (
     QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE,
     append_quick_capture_section,
     format_attachment_link,
+    quick_capture_destination_options,
     resolve_attachment_placeholders,
 )
 from sp.app.ui.quick_capture_overlay import QuickCaptureOverlay
@@ -29,11 +30,18 @@ def _prompt_overlay(
     vault_options: Optional[list[dict[str, str]]] = None,
     selected_vault: Optional[str] = None,
     show_vault_picker: bool = False,
-) -> tuple[Optional[str], list[dict], Optional[str]]:
+    destination_options: list[dict],
+    selected_destination: dict,
+) -> tuple[Optional[str], list[dict], Optional[str], dict]:
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    result: dict[str, object] = {"text": None, "attachments": [], "vault_path": selected_vault}
+    result: dict[str, object] = {
+        "text": None,
+        "attachments": [],
+        "vault_path": selected_vault,
+        "destination": dict(selected_destination),
+    }
 
     def _on_capture(text: str, attachments: list[dict], vault_path: Optional[str]) -> None:
         result["text"] = text
@@ -42,11 +50,24 @@ def _prompt_overlay(
             result["vault_path"] = vault_path
         app.quit()
 
+    def _on_capture_with_destination(
+        text: str,
+        attachments: list[dict],
+        vault_path: Optional[str],
+        destination: dict,
+    ) -> dict:
+        _on_capture(text, attachments, vault_path)
+        result["destination"] = dict(destination)
+        return {"ok": True, "destination": destination.get("label")}
+
     overlay = QuickCaptureOverlay(
         parent=None,
         on_capture=_on_capture,
         vault_options=vault_options if show_vault_picker else None,
         selected_vault=selected_vault,
+        destination_options=destination_options,
+        selected_destination=selected_destination,
+        on_capture_with_destination=_on_capture_with_destination,
     )
     overlay.finished.connect(app.quit)
     overlay.show()
@@ -58,6 +79,7 @@ def _prompt_overlay(
         result.get("text"),
         result.get("attachments") or [],
         result.get("vault_path"),
+        dict(result.get("destination") or selected_destination),
     )
 
 
@@ -376,16 +398,23 @@ def run_quick_capture_lite(
     capture_text = _parse_hotkey_text(text)
     attachments: list[dict] = []
     selected_vault = path
+    page_mode, page_ref = _resolve_page_mode(page)
     if not capture_text:
         options = _local_vault_options()
-        capture_text, attachments, selected_vault = _prompt_overlay(
+        destination_options, selected_destination = quick_capture_destination_options(
+            page_mode, page_ref, config.load_quick_capture_history()
+        )
+        capture_text, attachments, selected_vault, selected_destination = _prompt_overlay(
             vault_options=options,
             selected_vault=path,
             show_vault_picker=vault is None,
+            destination_options=destination_options,
+            selected_destination=selected_destination,
         )
+        page_mode = str(selected_destination.get("page_mode") or "today")
+        page_ref = selected_destination.get("page_ref")
     if not capture_text:
         return 0
-    page_mode, page_ref = _resolve_page_mode(page)
     if page_mode == "custom" and not page_ref:
         print("Quick Capture error: custom page not configured.")
         return 1

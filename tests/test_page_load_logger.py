@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 
-from sp.app.ui.page_load_logger import PageLoadLogger
+from sp.app.ui.page_load_logger import PageLoadLogger, emit_performance_span, measure_performance
 
 
 def _records(stream: io.StringIO) -> list[dict]:
@@ -51,3 +51,94 @@ def test_page_load_logger_output_failure_never_breaks_navigation() -> None:
     logger = PageLoadLogger("/Page/Page.md", enabled=True, stream=BrokenStream())
     logger.mark("still safe")
     logger.end()
+
+
+def test_page_load_logger_summary_is_single_shot() -> None:
+    stream = io.StringIO()
+    logger = PageLoadLogger("/Page/Page.md", enabled=True, stream=stream)
+
+    logger.end("first completion")
+    logger.mark("late image step")
+    logger.end("second completion")
+
+    records = _records(stream)
+    assert sum(record["type"] == "page_load_summary" for record in records) == 1
+    assert all(record.get("label") != "late image step" for record in records)
+
+
+def test_page_load_logger_waits_for_both_async_phases() -> None:
+    stream = io.StringIO()
+    logger = PageLoadLogger("/Page/Page.md", enabled=True, stream=stream)
+
+    logger.complete_phase("images", "images complete")
+    assert not any(record["type"] == "page_load_summary" for record in _records(stream))
+
+    logger.complete_phase("secondary", "secondary complete")
+    records = _records(stream)
+    assert sum(record["type"] == "page_load_summary" for record in records) == 1
+    assert [record.get("label") for record in records if record["type"] == "page_load_step"][-2:] == [
+        "images complete",
+        "secondary complete",
+    ]
+
+
+def test_performance_span_emits_structured_duration() -> None:
+    stream = io.StringIO()
+
+    emit_performance_span(
+        "panel.tasks.refresh",
+        10.0,
+        path="/Page/Page.md",
+        fields={"rows": 12},
+        enabled=True,
+        stream=stream,
+        ended_at=10.025,
+    )
+
+    assert _records(stream) == [
+        {
+            "type": "performance_span",
+            "name": "panel.tasks.refresh",
+            "duration_ms": 25.0,
+            "path": "/Page/Page.md",
+            "rows": 12,
+        }
+    ]
+
+
+def test_performance_decorator_has_disabled_fast_path(monkeypatch) -> None:
+    monkeypatch.setattr("sp.app.ui.page_load_logger.PERFORMANCE_LOGGING_ENABLED", False)
+    calls: list[str] = []
+
+    @measure_performance("test.operation")
+    def operation() -> str:
+        calls.append("called")
+        return "result"
+
+    assert operation() == "result"
+    assert calls == ["called"]
+
+
+def test_performance_decorator_emits_when_enabled(monkeypatch) -> None:
+    records: list[dict] = []
+    ticks = iter((20.0, 20.012))
+    monkeypatch.setattr("sp.app.ui.page_load_logger.PERFORMANCE_LOGGING_ENABLED", True)
+    monkeypatch.setattr("sp.app.ui.page_load_logger.time.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr(
+        "sp.app.ui.page_load_logger._emit_payload",
+        lambda payload, _stream=None: records.append(payload),
+    )
+
+    @measure_performance("test.operation")
+    def operation() -> str:
+        return "result"
+
+    assert operation() == "result"
+    assert records == [
+        {
+            "type": "performance_span",
+            "name": "test.operation",
+            "duration_ms": 12.0,
+            "operation": "test_performance_decorator_emits_when_enabled.<locals>.operation",
+        }
+    ]

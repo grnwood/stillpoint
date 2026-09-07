@@ -99,6 +99,11 @@ def _extract_page_tags(content: str) -> list[str]:
     return tags
 
 
+def extract_page_tags(content: str) -> list[str]:
+    """Return the unique page tags represented by Markdown content."""
+    return sorted(set(_extract_page_tags(content)))
+
+
 def index_page(path: str, content: str) -> bool:
     """Index page metadata into the per-vault database.
 
@@ -112,7 +117,7 @@ def index_page(path: str, content: str) -> bool:
     if prev == digest:
         return False
 
-    tags = sorted(set(_extract_page_tags(content)))
+    tags = extract_page_tags(content)
     link_targets = _extract_link_targets(content, path)
     # Automatically add a link from the parent page to this page if it is a child
     parent = Path(path).parent
@@ -311,6 +316,28 @@ def extract_tasks(path: str, content: str) -> List[dict]:
         task["actionable"] = task["status"] != "done" and not has_open_descendants(task)
 
     return tasks
+
+
+def changed_page_metadata(path: str, before: str, after: str) -> Set[str]:
+    """Return indexed metadata categories whose effective values changed.
+
+    This is intentionally content based rather than hash based: callers can use
+    the result to avoid rebuilding panels when a save only changes ordinary
+    prose. The index itself still receives the complete page content.
+    """
+    if before == after:
+        return set()
+
+    changed: Set[str] = set()
+    if extract_page_tags(before) != extract_page_tags(after):
+        changed.add("tags")
+    if _extract_link_targets(before, path) != _extract_link_targets(after, path):
+        changed.add("links")
+    if extract_tasks(path, before) != extract_tasks(path, after):
+        changed.add("tasks")
+    if derive_title(path, before) != derive_title(path, after):
+        changed.add("title")
+    return changed
 
 
 def _first_match(pattern: re.Pattern[str], text: str) -> str | None:

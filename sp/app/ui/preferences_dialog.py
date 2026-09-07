@@ -6,8 +6,9 @@ import re
 import sys
 import shutil
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QWidget,
     QFileDialog,
@@ -42,6 +45,7 @@ from PySide6.QtCore import QUrl
 from sp.app import config
 from sp.logging_flags import log_enabled
 from . import theme as theme_module
+from .screen_positioning import fit_window_to_available_screen
 
 
 class PreferencesDialog(QDialog):
@@ -51,7 +55,7 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self.setModal(True)
-        self.resize(450, 250)
+        self.setSizeGripEnabled(True)
         app_instance = QApplication.instance()
         self._initial_app_font = QFont(app_instance.font()) if app_instance else QFont()
         self._font_families = sorted(QFontDatabase().families())
@@ -61,18 +65,21 @@ class PreferencesDialog(QDialog):
         root_layout.setSpacing(12)
 
         self.section_list = QListWidget()
-        self.section_list.setFixedWidth(180)
+        self.section_list.setMinimumWidth(140)
+        self.section_list.setMaximumWidth(180)
+        self.section_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.section_list.setSpacing(2)
         root_layout.addWidget(self.section_list, 0)
 
         self.stack = QStackedWidget()
         right_container = QVBoxLayout()
+        right_container.setContentsMargins(0, 0, 0, 0)
         right_container.addWidget(self.stack, 1)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        right_container.addWidget(btn_box, 0, Qt.AlignRight)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        right_container.addWidget(self.button_box, 0, Qt.AlignRight)
 
         wrapper = QWidget()
         wrapper.setLayout(right_container)
@@ -82,6 +89,12 @@ class PreferencesDialog(QDialog):
         if self.section_list.count():
             self.section_list.setCurrentRow(0)
         self.section_list.currentRowChanged.connect(self.stack.setCurrentIndex)
+        fit_window_to_available_screen(
+            self,
+            QSize(820, 680),
+            parent=parent,
+            margin=24,
+        )
 
     def _build_sections(self) -> None:
         """Create a two-panel layout with section list on the left and pages on the right."""
@@ -96,7 +109,14 @@ class PreferencesDialog(QDialog):
             layout = QVBoxLayout(page)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(8)
-            self.stack.addWidget(page)
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            scroll_area.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll_area.setWidget(page)
+            self.stack.addWidget(scroll_area)
             return layout
 
         def add_divider(layout: QVBoxLayout) -> None:
@@ -164,7 +184,7 @@ class PreferencesDialog(QDialog):
         general_layout.addWidget(self.feature_homebase_vaults_checkbox)
         self.feature_keep_search_index_sync_checkbox = QCheckBox("Keep search index in sync periodically")
         self.feature_keep_search_index_sync_checkbox.setChecked(
-            config.load_global_feature_keep_search_index_sync_enabled(default=False)
+            config.load_global_feature_keep_search_index_sync_enabled(default=True)
         )
         general_layout.addWidget(self.feature_keep_search_index_sync_checkbox)
         self.feature_remember_cursor_position_checkbox = QCheckBox("Remember and restore last cursor position")

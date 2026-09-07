@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QTreeWidgetItem
 
-from sp.app.ui.task_panel import TaskDateQuickMenu, TaskPanel
+from sp.app.ui.task_panel import TaskDateQuickMenu, TaskPanel, _shortcut_table_html
 
 
 def _add_task(
@@ -45,6 +45,20 @@ def test_space_toggles_selected_task_from_keyboard(qtbot, monkeypatch) -> None:
     QTest.keyClick(panel.task_tree, Qt.Key_Space)
 
     assert calls == [([task], {"status": "done"})]
+
+
+def test_task_shortcut_reference_is_a_two_column_table() -> None:
+    markup = _shortcut_table_html(
+        "Task shortcuts",
+        [("Space", "Complete or reopen"), ("Shift+Enter", "Keep list focus")],
+    )
+
+    assert "<table" in markup
+    assert ">Key</th>" in markup
+    assert ">Action</th>" in markup
+    assert "Space" in markup
+    assert "Shift+Enter" in markup
+    assert "while the task list has focus" in markup
 
 
 def test_e_opens_keyboard_editor(qtbot, monkeypatch) -> None:
@@ -112,6 +126,49 @@ def test_r_advances_to_next_task_and_restores_tree_focus(qtbot, monkeypatch) -> 
     assert panel.task_tree.currentItem() is second_item
     assert focus_calls == [Qt.OtherFocusReason]
     assert panel._focus_after_removed_task is None
+
+
+def test_task_mutation_restores_same_list_position_when_row_disappears(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    _add_task(panel, line=3, text="First")
+    _add_task(panel, line=4, text="Second")
+    third = _add_task(panel, line=5, text="Third")
+    second_item = panel.task_tree.topLevelItem(1)
+    panel.task_tree.setCurrentItem(second_item)
+    scroll_values: list[int] = []
+    monkeypatch.setattr(
+        panel.task_tree.verticalScrollBar(),
+        "setValue",
+        lambda value: scroll_values.append(value),
+    )
+    panel._prepare_list_focus_restore()
+
+    panel.task_tree.takeTopLevelItem(1)
+    focus_calls: list[object] = []
+    monkeypatch.setattr(panel.task_tree, "setFocus", lambda reason: focus_calls.append(reason))
+    panel._restore_list_focus()
+
+    assert panel.task_tree.currentItem().data(0, Qt.UserRole) == third
+    assert focus_calls == [Qt.OtherFocusReason]
+    assert scroll_values == [0]
+    assert panel._restore_list_focus_after_mutation is False
+
+
+def test_task_mutation_refreshes_are_debounced(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    refreshes: list[str] = []
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda: refreshes.append("refresh"))
+    panel._mutation_refresh_timer.timeout.disconnect()
+    panel._mutation_refresh_timer.timeout.connect(panel._refresh_tasks)
+    panel._mutation_refresh_timer.setInterval(1)
+
+    panel._schedule_mutation_refresh()
+    panel._schedule_mutation_refresh()
+    QTest.qWait(20)
+
+    assert refreshes == ["refresh"]
 
 
 def test_task_context_menu_offers_remove_indicators(qtbot) -> None:

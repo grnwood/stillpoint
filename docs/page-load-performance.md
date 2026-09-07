@@ -5,6 +5,26 @@ population, syntax highlighting, inline-image decoding, indexing, and right-pane
 refreshes. Optimizing only the HTTP request or Markdown parser can therefore hide
 the actual stall. Measure the entire click-to-next-event-loop cycle first.
 
+## Current stopping point (2026-09-07)
+
+The latest real-use trace contained 18 completed page loads. Editable-text
+latency was p50 31.8 ms, p95 84.3 ms, and 84.3 ms worst case; no load exceeded
+100 ms. Top navigation and normal editor painting were also consistently fast.
+This meets the warm-load target with useful margin, matches the application's
+subjectively crisp behavior, and is the stopping point for the current pass.
+
+Full secondary hydration remained slower on two pages (935 ms and 1,089 ms),
+but the editor was already usable after 71 ms and 46 ms respectively. The delay
+was primarily Link Navigator work: one refresh took 591 ms, while another page
+caused several same-path refreshes totaling roughly 770 ms. This is a deferred
+candidate, not a reason to disturb the fast first-paint path. If users notice
+it, coalesce same-path refresh requests, skip hidden panels, and reuse one link
+query result across visible embedded and detached panels.
+
+Further page-load tuning should resume only for a repeatable user-visible
+regression, a stability issue, or a representative trace that misses the targets
+below.
+
 ## Capture a full trace
 
 Run the desktop application with structured performance logging enabled:

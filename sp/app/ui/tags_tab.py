@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from PySide6.QtCore import Qt, Signal, QRect, QSize
-from PySide6.QtGui import QCursor
+from PySide6.QtCore import QEvent, Qt, Signal, QRect, QSize, QTimer
+from PySide6.QtGui import QColor, QCursor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
-from .path_utils import path_to_colon
+from .path_utils import format_journal_day_label, path_to_colon
+from .page_load_logger import measure_performance
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import strip_page_suffix
 
@@ -117,45 +118,118 @@ from PySide6.QtCore import QPoint
 class TagChicklet(QPushButton):
     """A clickable tag button."""
     
-    def __init__(self, tag: str, parent=None):
+    def __init__(self, tag: str, parent=None, accent_color: str | None = None):
         super().__init__(f"#{tag}", parent)
         self.tag = tag
         self.selected = False
+        self._accent_color = accent_color
         self.setCheckable(True)
         self.setStyleSheet(self._get_style())
         self.toggled.connect(self._on_toggled)
+
+    def set_accent_color(self, accent_color: str | None) -> None:
+        """Update the selected-state color to the active vault accent."""
+        self._accent_color = accent_color
+        self.setStyleSheet(self._get_style())
+
+    @staticmethod
+    def _contrast_text(color: QColor) -> str:
+        """Choose whichever of black or white has the stronger WCAG contrast."""
+        channels = []
+        for value in (color.redF(), color.greenF(), color.blueF()):
+            channels.append(
+                value / 12.92
+                if value <= 0.04045
+                else ((value + 0.055) / 1.055) ** 2.4
+            )
+        luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        black_contrast = (luminance + 0.05) / 0.05
+        white_contrast = 1.05 / (luminance + 0.05)
+        return "#111111" if black_contrast >= white_contrast else "#ffffff"
+
+    def _selected_colors(self) -> tuple[str, str, str]:
+        color = QColor(self._accent_color) if self._accent_color else self.palette().color(QPalette.Highlight)
+        if not color.isValid():
+            color = self.palette().color(QPalette.Highlight)
+        background = color.name()
+        foreground = self._contrast_text(color)
+        hover = (
+            color.lighter(112).name()
+            if color.lightness() < 150
+            else color.darker(108).name()
+        )
+        return background, foreground, hover
+
+    def _selected_focus_colors(self) -> tuple[str, str]:
+        """Give a selected chip an unmistakable filled keyboard-focus state."""
+        color = QColor(self._accent_color) if self._accent_color else self.palette().color(QPalette.Highlight)
+        if not color.isValid():
+            color = self.palette().color(QPalette.Highlight)
+        focused = color.lighter(140) if color.lightness() < 150 else color.darker(135)
+        return focused.name(), self._contrast_text(focused)
+
+    def _focus_ring_color(self) -> str:
+        background, _foreground, _hover = self._selected_colors()
+        return background
+
+    def _unselected_hover_colors(self) -> tuple[str, str]:
+        background = self.palette().color(QPalette.Button)
+        hover = (
+            background.lighter(125)
+            if background.lightness() < 150
+            else background.darker(112)
+        )
+        foreground = self._contrast_text(hover)
+        return hover.name(), foreground
     
     def _get_style(self):
         """Get stylesheet for chicklet based on selection state."""
         if self.selected:
-            return """
-                QPushButton {
-                    background-color: #4CAF50;
-                    color: white;
-                    border: 2px solid #45a049;
+            background, foreground, hover = self._selected_colors()
+            hover_text = self._contrast_text(QColor(hover))
+            focus_background, focus_text = self._selected_focus_colors()
+            return f"""
+                QPushButton {{
+                    background-color: {background};
+                    color: {foreground};
+                    border: 2px solid {background};
                     border-radius: 12px;
                     padding: 4px 12px;
                     margin: 2px;
                     font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #45a049;
-                }
+                }}
+                QPushButton:hover {{
+                    background-color: {hover};
+                    color: {hover_text};
+                }}
+                QPushButton:focus {{
+                    background-color: {focus_background};
+                    color: {focus_text};
+                    border: 2px solid {focus_background};
+                }}
             """
         else:
-            return """
-                QPushButton {
+            focus_ring = self._focus_ring_color()
+            hover, hover_text = self._unselected_hover_colors()
+            return f"""
+                QPushButton {{
                     background-color: palette(button);
                     color: palette(buttonText);
                     border: 2px solid palette(dark);
                     border-radius: 12px;
                     padding: 4px 12px;
                     margin: 2px;
-                }
-                QPushButton:hover {
-                    background-color: palette(midlight);
+                }}
+                QPushButton:hover {{
+                    background-color: {hover};
+                    color: {hover_text};
                     border: 2px solid palette(dark);
-                }
+                }}
+                QPushButton:focus {{
+                    border: 3px solid {focus_ring};
+                    padding: 3px 11px;
+                    font-weight: bold;
+                }}
             """
     
     def _on_toggled(self, checked: bool):
@@ -177,7 +251,13 @@ class TagsTab(QWidget):
         self.tag_chicklets = {}  # tag -> TagChicklet widget
         self.selected_tags = set()  # Currently selected tags
         self._tags_loaded = False  # Track if tags have been loaded
+        self._tags_stale = False
         self._pending_new_tags: set[str] = set()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(120)
+        self._refresh_timer.timeout.connect(self._refresh_stale_tags)
+        self._vault_accent_color: str | None = None
         self._nav_filter_prefix = None
         self._filter_label = None
         self._clear_filter_cb = None
@@ -193,6 +273,8 @@ class TagsTab(QWidget):
         
         # Create scrollable area for tag chicklets with flow layout
         scroll_area = QScrollArea()
+        self.tags_scroll_area = scroll_area
+        scroll_area.setObjectName("tagsChipArea")
         scroll_area.setWidgetResizable(True)
         scroll_area.setMinimumHeight(60)
         scroll_area.setFrameShape(QFrame.StyledPanel)
@@ -215,6 +297,11 @@ class TagsTab(QWidget):
         tags_label.setStyleSheet("font-weight: bold;")
         header_layout.addWidget(tags_label)
 
+        self.focus_indicator = QLabel()
+        self.focus_indicator.setObjectName("tagsFocusIndicator")
+        self.focus_indicator.hide()
+        header_layout.addWidget(self.focus_indicator)
+
         header_layout.addStretch()
 
         # Refresh button
@@ -236,6 +323,7 @@ class TagsTab(QWidget):
         self.tag_search.setPlaceholderText("Search tags...")
         self.tag_search.setClearButtonEnabled(True)
         self.tag_search.textChanged.connect(self._filter_tags)
+        self.tag_search.installEventFilter(self)
         
         tags_panel = QWidget()
         tags_panel_layout = QVBoxLayout()
@@ -256,7 +344,7 @@ class TagsTab(QWidget):
         self.results_tree.setHeaderHidden(True)
         self.results_tree.setRootIsDecorated(True)
         self.results_tree.itemDoubleClicked.connect(self._on_result_double_clicked)
-        self.results_tree.keyPressEvent = self._on_results_key_press
+        self.results_tree.installEventFilter(self)
         results_layout.addWidget(self.results_tree, 1)
 
         # Status label
@@ -283,6 +371,7 @@ class TagsTab(QWidget):
         layout.addWidget(splitter, 1)
         
         self.setLayout(layout)
+        self._apply_focus_visuals()
     
     def focus_search(self):
         """Public method to focus the search bar."""
@@ -293,7 +382,6 @@ class TagsTab(QWidget):
         """Handle focus in event - auto-focus the search bar."""
         super().focusInEvent(event)
         # Use QTimer to defer focus until focus change completes
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.focus_search)
     
     def keyPressEvent(self, event):
@@ -324,6 +412,142 @@ class TagsTab(QWidget):
         
         # Call parent implementation for other keys
         super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        """Provide a predictable search -> tags -> pages keyboard path."""
+        if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+            QTimer.singleShot(0, self._apply_focus_visuals)
+            return super().eventFilter(watched, event)
+        if event.type() != QEvent.KeyPress:
+            return super().eventFilter(watched, event)
+        key = event.key()
+        mods = event.modifiers() & ~Qt.KeypadModifier
+        shift = bool(mods & Qt.ShiftModifier)
+        other_mods = mods & ~Qt.ShiftModifier
+
+        if watched is self.results_tree:
+            self._on_results_key_press(event)
+            return True
+
+        if watched is self.tag_search and key in (Qt.Key_Tab, Qt.Key_Backtab) and not other_mods:
+            if not shift and key != Qt.Key_Backtab:
+                chicklets = self._visible_chicklets()
+                if chicklets:
+                    chicklets[0].setFocus(Qt.TabFocusReason)
+                    return True
+                if self._focus_first_result():
+                    return True
+
+        if isinstance(watched, TagChicklet):
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and not mods:
+                checked = not watched.isChecked()
+                watched.setChecked(checked)
+                self._on_tag_clicked(watched.tag, checked)
+                event.accept()
+                return True
+            if (
+                self._is_vi_mode()
+                and not mods
+                and key in (Qt.Key_H, Qt.Key_J, Qt.Key_K, Qt.Key_L)
+            ):
+                self._move_chicklet_focus(
+                    watched,
+                    backwards=key in (Qt.Key_H, Qt.Key_K),
+                )
+                event.accept()
+                return True
+            if key in (Qt.Key_Tab, Qt.Key_Backtab) and not other_mods:
+                backwards = shift or key == Qt.Key_Backtab
+                self._move_chicklet_focus(watched, backwards=backwards)
+                return True
+
+        return super().eventFilter(watched, event)
+
+    def _visible_chicklets(self) -> list[TagChicklet]:
+        return [
+            chicklet
+            for chicklet in self.tag_chicklets.values()
+            if not chicklet.isHidden()
+        ]
+
+    def _focus_first_result(self) -> bool:
+        if self.results_tree.topLevelItemCount() <= 0:
+            return False
+        item = self.results_tree.currentItem() or self.results_tree.topLevelItem(0)
+        self.results_tree.setCurrentItem(item)
+        self.results_tree.setFocus(Qt.TabFocusReason)
+        return True
+
+    def _move_chicklet_focus(self, current: TagChicklet, *, backwards: bool) -> None:
+        chicklets = self._visible_chicklets()
+        try:
+            index = chicklets.index(current)
+        except ValueError:
+            index = -1
+        if backwards:
+            if index > 0:
+                chicklets[index - 1].setFocus(Qt.BacktabFocusReason)
+            else:
+                self.tag_search.setFocus(Qt.BacktabFocusReason)
+            return
+        if 0 <= index < len(chicklets) - 1:
+            chicklets[index + 1].setFocus(Qt.TabFocusReason)
+            return
+        if not self._focus_first_result():
+            self.tag_search.setFocus(Qt.TabFocusReason)
+
+    def _focus_colors(self) -> tuple[str, str]:
+        accent = QColor(self._vault_accent_color) if self._vault_accent_color else self.palette().color(QPalette.Highlight)
+        if not accent.isValid():
+            accent = self.palette().color(QPalette.Highlight)
+        text = "#111111" if accent.lightness() >= 150 else "#ffffff"
+        return accent.name(), text
+
+    def _apply_focus_visuals(self) -> None:
+        """Highlight the focused Tags section and name its keyboard target."""
+        accent, accent_text = self._focus_colors()
+        inactive = self.palette().color(QPalette.Mid).name()
+        focused = QApplication.focusWidget()
+        search_has_focus = focused is self.tag_search
+        tag_has_focus = isinstance(focused, TagChicklet) and focused in self.tag_chicklets.values()
+        pages_have_focus = bool(
+            focused is self.results_tree or self.results_tree.isAncestorOf(focused)
+        )
+
+        self.tag_search.setStyleSheet(
+            "QLineEdit {"
+            " border: 2px solid "
+            f"{accent if search_has_focus else inactive}; border-radius: 3px; padding: 2px;"
+            "}"
+        )
+        self.tags_scroll_area.setStyleSheet(
+            "QScrollArea#tagsChipArea {"
+            " border: 2px solid "
+            f"{accent if tag_has_focus else inactive}; border-radius: 3px;"
+            "}"
+        )
+        self.results_tree.setStyleSheet(
+            "QTreeWidget {"
+            " border: 2px solid "
+            f"{accent if pages_have_focus else inactive}; border-radius: 3px;"
+            "}"
+        )
+
+        if search_has_focus:
+            label = "FOCUS · SEARCH"
+        elif tag_has_focus:
+            label = f"FOCUS · #{focused.tag}"
+        elif pages_have_focus:
+            label = "FOCUS · PAGES"
+        else:
+            self.focus_indicator.hide()
+            return
+        self.focus_indicator.setText(label)
+        self.focus_indicator.setStyleSheet(
+            f"background: {accent}; color: {accent_text}; border-radius: 3px; "
+            "padding: 1px 5px; font-size: 10px; font-weight: bold;"
+        )
+        self.focus_indicator.show()
     
     def _filter_tags(self, search_text: str):
         """Filter visible tags based on search text and auto-select exact matches."""
@@ -390,10 +614,16 @@ class TagsTab(QWidget):
         self.results_tree.clear()
         self.status_label.setText("Select tags to filter pages")
     
+    @measure_performance("panel.tags.load")
     def _load_tags(self):
         """Load all tags from the database and create chicklets."""
         try:
             from sp.app import config
+            if not self._vault_accent_color:
+                try:
+                    self.set_vault_accent_color(config.load_vault_accent_color())
+                except Exception:
+                    pass
             conn = config._get_conn()
             should_close = False
             if not conn:
@@ -412,9 +642,13 @@ class TagsTab(QWidget):
             if log_enabled("ui_state"):
                 print(f"[TagsTab] Query returned {len(rows)} tags from database")
             
-            # Clear existing chicklets
-            for chicklet in self.tag_chicklets.values():
-                chicklet.deleteLater()
+            # Remove both widgets and their layout items so repeated live refreshes
+            # do not leave dead entries accumulating in the flow layout.
+            while self.tags_layout.count():
+                item = self.tags_layout.takeAt(0)
+                chicklet = item.widget() if item is not None else None
+                if chicklet is not None:
+                    chicklet.deleteLater()
             self.tag_chicklets.clear()
             
             # Create chicklets for each tag
@@ -456,6 +690,7 @@ class TagsTab(QWidget):
         
         self._refresh_results()
     
+    @measure_performance("panel.tags.results_refresh")
     def _refresh_results(self):
         """Refresh the results list based on selected tags."""
         if not self.selected_tags:
@@ -529,10 +764,11 @@ class TagsTab(QWidget):
                 # Extract leaf node from path
                 leaf_name = path.rstrip("/").split("/")[-1] if "/" in path else path
                 leaf_name = strip_page_suffix(leaf_name)
+                display_name = format_journal_day_label(path) or leaf_name
                 
                 # Create item for the page path
                 path_item = QTreeWidgetItem(self.results_tree)
-                path_item.setText(0, leaf_name)
+                path_item.setText(0, display_name)
                 path_item.setToolTip(0, path_to_colon(path))  # Full path in tooltip
                 path_item.setData(0, Qt.UserRole, path)
                 path_item.setData(0, Qt.UserRole + 1, 0)  # line number
@@ -573,24 +809,37 @@ class TagsTab(QWidget):
             event.accept()
             return
         
-        # Handle Ctrl+Enter to load page and focus editor
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+        # Enter loads and focuses the editor; Shift+Enter previews while keeping
+        # keyboard focus in this result list.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             current_item = self.results_tree.currentItem()
             if current_item:
                 path = current_item.data(0, Qt.UserRole)
                 line = current_item.data(0, Qt.UserRole + 1) or 0
                 if path:
-                    self.pageNavigationWithEditorFocusRequested.emit(path, line)
+                    if event.modifiers() & Qt.ShiftModifier:
+                        self.pageNavigationRequested.emit(path, line)
+                    else:
+                        self.pageNavigationWithEditorFocusRequested.emit(path, line)
                 event.accept()
                 return
-        
-        # Handle regular Enter to load page but keep focus on results
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            current_item = self.results_tree.currentItem()
-            if current_item:
-                self._on_result_double_clicked(current_item, 0)
-                event.accept()
-                return
+
+        if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            current_row = self.results_tree.indexOfTopLevelItem(self.results_tree.currentItem())
+            backwards = event.key() == Qt.Key_Backtab or bool(event.modifiers() & Qt.ShiftModifier)
+            if backwards:
+                if current_row > 0:
+                    self.results_tree.setCurrentItem(self.results_tree.topLevelItem(current_row - 1))
+                else:
+                    chicklets = self._visible_chicklets()
+                    if chicklets:
+                        chicklets[-1].setFocus(Qt.BacktabFocusReason)
+                    else:
+                        self.tag_search.setFocus(Qt.BacktabFocusReason)
+            elif current_row < self.results_tree.topLevelItemCount() - 1:
+                self.results_tree.setCurrentItem(self.results_tree.topLevelItem(current_row + 1))
+            event.accept()
+            return
         
         # Handle Ctrl+Shift+J or Down arrow - move down
         if ((event.key() == Qt.Key_J and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
@@ -653,11 +902,15 @@ class TagsTab(QWidget):
     def showEvent(self, event):
         """Load tags when tab becomes visible for the first time and focus search bar."""
         super().showEvent(event)
-        if not self._tags_loaded:
+        if not self._tags_loaded or self._tags_stale:
             if log_enabled("ui_state"):
-                print("[TagsTab] Tab shown for first time, loading tags...")
+                print("[TagsTab] Tab shown or stale, loading tags...")
             self._load_tags()
             self._tags_loaded = True
+            self._tags_stale = False
+            self.selected_tags.intersection_update(self.tag_chicklets)
+            if self.selected_tags:
+                self._refresh_results()
         # Auto-focus the search bar
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.focus_search)
@@ -671,6 +924,31 @@ class TagsTab(QWidget):
         self.results_tree.clear()
         self.status_label.setText("Select tags to filter pages")
         self._tags_loaded = True
+        self._tags_stale = False
+        self._refresh_timer.stop()
+
+    def mark_tags_stale(self) -> None:
+        """Refresh tag summaries soon when visible, or upon the next reveal."""
+        self._tags_stale = True
+        if self.isVisible():
+            self._refresh_timer.start()
+
+    def _refresh_stale_tags(self) -> None:
+        if not self._tags_stale or not self.isVisible():
+            return
+        self._load_tags()
+        self._tags_loaded = True
+        self._tags_stale = False
+        self.selected_tags.intersection_update(self.tag_chicklets)
+        if self.selected_tags:
+            self._refresh_results()
+
+    def set_vault_accent_color(self, accent_color: str | None) -> None:
+        """Apply the active vault accent to selected tag chicklets."""
+        self._vault_accent_color = accent_color
+        for chicklet in self.tag_chicklets.values():
+            chicklet.set_accent_color(accent_color)
+        self._apply_focus_visuals()
 
     def set_navigation_filter(
         self,
@@ -746,9 +1024,14 @@ class TagsTab(QWidget):
         self._filter_tags(self.tag_search.text())
 
     def _add_tag_chicklet(self, tag: str, count_label: str | int = 0) -> None:
-        chicklet = TagChicklet(tag, self.tags_container)
+        chicklet = TagChicklet(
+            tag,
+            self.tags_container,
+            accent_color=self._vault_accent_color,
+        )
         suffix = f"{count_label}" if isinstance(count_label, int) else count_label
         chicklet.setToolTip(f"#{tag} ({suffix})")
         chicklet.clicked.connect(lambda checked, t=tag: self._on_tag_clicked(t, checked))
+        chicklet.installEventFilter(self)
         self.tags_layout.addWidget(chicklet)
         self.tag_chicklets[tag] = chicklet

@@ -50,13 +50,19 @@ These shortcuts will speed up your workflow:
 - In vi mode, `h/j/k/l` also navigate the calendar, `Shift` plus arrows or vi keys extends a date range, `t` jumps to today, `/` moves into headings and subpages, and `Esc` returns focus to the calendar grid
 
 ### Tasks
-- `F12`: Toggle task completion
+- `F12` (cursor on a task in the editor): Toggle task completion in any editor mode
+- `Ctrl+Alt+E` (cursor on a task in the editor): Open the Task Editor in any editor mode
+- `Space` / `E` (cursor on a task in editor vi navigation mode): Toggle completion / open the Task Editor
 - `Ctrl+\`: Focus tasks search
 - `Enter` (task selected in Tasks or Calendar task list): Open task target and focus editor
 - `Shift+Enter` (task selected in Tasks or Calendar task list): Open task target and keep focus in the task list
 
 ### Panels
 - `Ctrl+Shift+Space`: Cycle focus between panels
+- In Tags, `Tab` moves from search through matching tag chips and then through page results; `Shift+Tab` moves back
+- On a focused tag chip, `Enter` or `Space` toggles the tag filter
+- In vi mode, `h/k` and `j/l` move backward and forward through matching tag chips
+- In Tags page results, `Enter` opens the page and focuses the editor; `Shift+Enter` opens it while keeping focus in Tags
 - `F11`: Toggle fullscreen
 - In the Map tab, `Ctrl+Enter` opens the selected node and focuses the editor; `Shift+Enter` opens it and keeps focus in the Map
 - In the Map tab, `Alt+Up` / `Alt+Down` zoom in/out around the selected node (Map-active scope)

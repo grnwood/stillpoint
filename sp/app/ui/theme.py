@@ -40,8 +40,9 @@ def _theme_dir() -> Path:
     return Path.home() / ".stillpoint" / "themes"
 
 
-def _resolve_theme_path() -> Path:
-    theme_name = config.load_effective_theme_preference()
+def _resolve_theme_path(theme_name: str | None = None) -> Path:
+    if theme_name is None:
+        theme_name = config.load_effective_theme_preference()
     if not theme_name or theme_name == "default":
         return _default_theme_path()
     candidate = Path(theme_name)
@@ -77,7 +78,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def _load_theme() -> dict[str, Any]:
     global _THEME_CACHE, _THEME_CACHE_PATH
     theme_name = config.load_effective_theme_preference()
-    path = _resolve_theme_path()
+    path = _resolve_theme_path(theme_name)
     if _THEME_CACHE is not None and _THEME_CACHE_PATH == path:
         return _THEME_CACHE
     base_path = _bundled_theme_path(theme_name)

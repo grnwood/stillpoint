@@ -116,3 +116,57 @@ def test_quickcapture_lite_vault_options_include_homebase_profiles(monkeypatch) 
 
     options = quickcapture_lite._local_vault_options()
     assert any(opt.get("path") == "/vaults/hybrid" for opt in options)
+
+
+def test_quickcapture_lite_uses_destination_selected_in_overlay(tmp_path: Path, monkeypatch) -> None:
+    from sp.app import quickcapture_lite
+
+    selected = {"label": "Projects", "page_mode": "custom", "page_ref": ":Projects"}
+    captures: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(quickcapture_lite.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture_lite, "_resolve_local_vault_path", lambda _vault: str(tmp_path))
+    monkeypatch.setattr(quickcapture_lite, "_resolve_page_mode", lambda _page: ("today", None))
+    monkeypatch.setattr(quickcapture_lite, "_local_vault_options", lambda: [])
+    monkeypatch.setattr(quickcapture_lite.config, "load_quick_capture_history", lambda: [])
+    monkeypatch.setattr(
+        quickcapture_lite,
+        "_prompt_overlay",
+        lambda **_kwargs: ("file this", [], str(tmp_path), selected),
+    )
+    monkeypatch.setattr(
+        quickcapture_lite,
+        "_capture_to_files",
+        lambda _root, mode, ref, _text, _attachments: captures.append((mode, ref)),
+    )
+
+    assert quickcapture_lite.run_quick_capture_lite(vault=None, page=None, text=None) == 0
+    assert captures == [("custom", ":Projects")]
+
+
+def test_quickcapture_fallback_uses_destination_selected_in_overlay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from sp.app import quickcapture
+
+    selected = {"label": "Projects", "page_mode": "custom", "page_ref": ":Projects"}
+    captures: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(quickcapture.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture, "_parse_hotkey_text", lambda _text: None)
+    monkeypatch.setattr(quickcapture, "_resolve_page_mode", lambda _page: ("today", None))
+    monkeypatch.setattr(quickcapture, "_show_overlay_via_api", lambda _base, _token: False)
+    monkeypatch.setattr(quickcapture.config, "load_quick_capture_history", lambda: [])
+    monkeypatch.setattr(
+        quickcapture,
+        "_prompt_overlay",
+        lambda **_kwargs: ("file this", [], selected),
+    )
+    monkeypatch.setattr(quickcapture, "_resolve_vault_path", lambda _vault: tmp_path)
+    monkeypatch.setattr(quickcapture, "_capture_via_api", lambda _base, _token, _payload: False)
+    monkeypatch.setattr(
+        quickcapture,
+        "_capture_to_files",
+        lambda _root, mode, ref, _text, _attachments: captures.append((mode, ref)),
+    )
+
+    assert quickcapture.run_quick_capture(vault=None, page=None, text=None) == 0
+    assert captures == [("custom", ":Projects")]

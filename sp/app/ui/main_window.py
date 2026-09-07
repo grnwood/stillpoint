@@ -965,7 +965,7 @@ from .folder_template_dialog import FolderTemplateDialog
 from .merge_conflict_dialog import MergeConflictDialog
 from .path_utils import (
     colon_to_path, path_to_colon, ensure_root_colon_link,
-    should_use_full_target_label, trace_link_decision,
+    format_journal_day_label, should_use_full_target_label, trace_link_decision,
 )
 from .date_insert_dialog import DateInsertDialog, JournalDateJumpDialog
 from .open_vault_dialog import OpenVaultDialog, AddHomebaseVaultDialog, _persist_homebase_passphrase_settings
@@ -973,13 +973,20 @@ from .vault_preferences_dialog import VaultPreferencesDialog
 from .quick_capture_overlay import QuickCaptureOverlay
 from .quick_capture_processor import QuickCaptureProcessorDialog
 from .page_editor_window import PageEditorWindow
-from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
+from .page_load_logger import (
+    PageLoadLogger,
+    PAGE_LOGGING_ENABLED,
+    emit_performance_span,
+    measure_performance,
+    performance_start,
+)
 from .mode_window import ModeWindow
 from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
 from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
 from sp.app.capture_triage import list_quick_capture_chunks, process_quick_capture_chunk
+from sp.app.quickcapture_common import quick_capture_destination_options
 from sp.app.task_mutations import undo_file_mutation
 
 
@@ -2290,6 +2297,17 @@ class MainWindow(QMainWindow):
         self._remote_feedback_timer = QTimer(self)
         self._remote_feedback_timer.setSingleShot(True)
         self._remote_feedback_timer.timeout.connect(self._hide_remote_feedback)
+        # Task commands can arrive rapidly while the task pane retains keyboard
+        # focus.  Coalesce their current-page reloads so the editor only repaints
+        # once after the short command burst.
+        self._pending_task_editor_reload_paths: set[str] = set()
+        self._pending_task_editor_reload_started_at: Optional[float] = None
+        self._task_editor_reload_timer = QTimer(self)
+        self._task_editor_reload_timer.setSingleShot(True)
+        self._task_editor_reload_timer.setInterval(180)
+        self._task_editor_reload_timer.timeout.connect(self._flush_task_editor_reload)
+        self._pending_top_nav_refresh: Optional[tuple[str, bool]] = None
+        self._top_nav_active_path: Optional[str] = None
         self._remote_user_is_admin: bool = False
         self._remote_user_can_write: bool = True
         self._user_read_only: bool = False
@@ -2297,6 +2315,15 @@ class MainWindow(QMainWindow):
         self._homebase_user_can_write: bool = True
         self._homebase_user_info_loaded: bool = False
         self._homebase_user_info_refreshing: bool = False
+        self._homebase_user_info_refresh_generation: int = 0
+        self._homebase_user_info_result_queue: queue.Queue[
+            tuple[int, Optional[dict[str, Any]], str]
+        ] = queue.Queue()
+        self._homebase_user_info_result_timer = QTimer(self)
+        self._homebase_user_info_result_timer.setInterval(50)
+        self._homebase_user_info_result_timer.timeout.connect(
+            self._drain_homebase_user_info_results
+        )
         self._homebase_session_passphrases: dict[str, str] = {}
         self._homebase_passphrase_prompt_in_progress: bool = False
         self._homebase_passphrase_prompted_vaults: set[str] = set()
@@ -2607,7 +2634,7 @@ class MainWindow(QMainWindow):
         self._last_editor_activity = 0.0
         self._search_sync = PeriodicSearchIndexSync(
             self,
-            is_enabled=lambda: config.load_global_feature_keep_search_index_sync_enabled(default=False),
+            is_enabled=lambda: config.load_global_feature_keep_search_index_sync_enabled(default=True),
             is_remote_mode=lambda: self._remote_mode,
             get_vault_root=lambda: self.vault_root,
             get_db_path=config._vault_db_path,
@@ -3382,6 +3409,7 @@ class MainWindow(QMainWindow):
         self._register_shortcuts()
         self._setup_quick_capture_shortcut(show_error=False)
         self._focus_recent = ["editor", "tree", "left", "right"]
+        self._focus_stylesheet_cache: dict[str, str] = {}
         self._app_focus_changed_slot = None
         # Update focus borders and focus history when focus moves between widgets
         app = QApplication.instance()
@@ -4331,7 +4359,6 @@ class MainWindow(QMainWindow):
                     local_path = str(profile.get("path") or "").strip()
                     self._switch_api_base(self._local_api_base, is_remote=False, verify_tls=True)
                     if local_path and self._set_vault(local_path, vault_name=profile.get("name")):
-                        self._apply_homebase_profile(profile)
                         self._update_user_management_ui()
                         self._restore_recent_history()
                         QTimer.singleShot(100, self._auto_load_initial_file)
@@ -6452,6 +6479,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, title, f"Could not open terminal: {exc}")
 
     def _shutdown_homebase_sync(self) -> None:
+        self._homebase_user_info_refresh_generation += 1
+        self._homebase_user_info_refreshing = False
+        self._homebase_user_info_result_timer.stop()
         self._shutdown_homebase_watcher()
         if self._homebase_status_poll_timer:
             try:
@@ -8724,10 +8754,22 @@ class MainWindow(QMainWindow):
         is_admin = bool(info.get("is_admin") or role == "admin")
         can_write = info.get("can_write")
         if can_write is None:
-            can_write = role == "admin" or perm in ("read_write", "read+write", "write", "readwrite")
+            can_write = role == "admin" or perm in (
+                "read_write",
+                "read+write",
+                "write",
+                "readwrite",
+            )
         self._apply_remote_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
 
-    def _homebase_request(self, method: str, path: str, payload: Optional[dict] = None) -> httpx.Response:
+    def _homebase_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[dict] = None,
+        *,
+        expected_user_info_generation: Optional[int] = None,
+    ) -> httpx.Response:
         base_url = config.load_homebase_remote_url().strip().rstrip("/")
         vault_id = (config.load_homebase_vault_id() or "").strip()
         if not base_url or not vault_id:
@@ -8781,6 +8823,14 @@ class MainWindow(QMainWindow):
                     f"{method} {path}: refresh response missing tokens; re-auth required"
                 )
                 return resp
+            if (
+                expected_user_info_generation is not None
+                and expected_user_info_generation != self._homebase_user_info_refresh_generation
+            ):
+                _log_homebase_client(
+                    f"{method} {path}: discarding refreshed tokens for an obsolete vault generation"
+                )
+                return resp
             _log_homebase_client(
                 f"{method} {path}: refresh returned "
                 f"access={_token_state(access)} refresh={_token_state(refreshed)}"
@@ -8799,38 +8849,79 @@ class MainWindow(QMainWindow):
         return resp
 
     def _refresh_homebase_user_info(self) -> None:
+        """Fetch Homebase permissions without blocking the Qt event loop."""
         if not self._is_homebase_mode_enabled():
             return
         if self._homebase_user_info_refreshing:
             return
         self._homebase_user_info_refreshing = True
-        try:
-            _log_homebase_client("refresh user info: requesting /auth/me")
-            resp = self._homebase_request("GET", "/auth/me")
-            if resp.status_code != 200:
-                _log_homebase_client(f"refresh user info: /auth/me status={resp.status_code}")
-                return
+        self._homebase_user_info_refresh_generation += 1
+        generation = self._homebase_user_info_refresh_generation
+        self._homebase_user_info_result_timer.start()
+
+        def fetch() -> None:
+            info: Optional[dict[str, Any]] = None
+            message = ""
             try:
-                info = resp.json()
-            except Exception:
-                _log_homebase_client("refresh user info: /auth/me returned invalid JSON")
-                return
-            role = str(info.get("role") or "").strip().lower()
-            perm = str(info.get("perm") or "").strip().lower()
-            is_admin = bool(info.get("role") == "admin" or info.get("is_admin"))
-            can_write = info.get("can_write")
-            if can_write is None:
-                can_write = role == "admin" or perm in ("read_write", "read+write", "write", "readwrite")
-            self._apply_homebase_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
-            self._homebase_user_info_loaded = True
-            _log_homebase_client(
-                "refresh user info: success "
-                f"role={role or '<none>'} perm={perm or '<none>'} "
-                f"is_admin={bool(is_admin)} can_write={bool(can_write)}"
+                _log_homebase_client("refresh user info: requesting /auth/me")
+                resp = self._homebase_request(
+                    "GET",
+                    "/auth/me",
+                    expected_user_info_generation=generation,
+                )
+                if resp.status_code != 200:
+                    message = f"/auth/me status={resp.status_code}"
+                else:
+                    parsed = resp.json()
+                    if isinstance(parsed, dict):
+                        info = parsed
+                    else:
+                        message = "/auth/me returned invalid JSON"
+            except Exception as exc:
+                message = f"/auth/me failed ({type(exc).__name__}: {exc})"
+            self._homebase_user_info_result_queue.put((generation, info, message))
+
+        threading.Thread(
+            target=fetch,
+            name="stillpoint-homebase-user-info",
+            daemon=True,
+        ).start()
+
+    def _drain_homebase_user_info_results(self) -> None:
+        latest: Optional[tuple[Optional[dict[str, Any]], str]] = None
+        while True:
+            try:
+                generation, info, message = self._homebase_user_info_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if generation == self._homebase_user_info_refresh_generation:
+                latest = (info, message)
+        if latest is None:
+            return
+        self._homebase_user_info_refreshing = False
+        self._homebase_user_info_result_timer.stop()
+        info, message = latest
+        if info is None:
+            _log_homebase_client(f"refresh user info: {message or 'no result'}")
+            return
+        role = str(info.get("role") or "").strip().lower()
+        perm = str(info.get("perm") or "").strip().lower()
+        is_admin = bool(info.get("role") == "admin" or info.get("is_admin"))
+        can_write = info.get("can_write")
+        if can_write is None:
+            can_write = role == "admin" or perm in (
+                "read_write",
+                "read+write",
+                "write",
+                "readwrite",
             )
-            self._update_user_management_ui()
-        finally:
-            self._homebase_user_info_refreshing = False
+        self._homebase_user_info_loaded = True
+        self._apply_homebase_user_permissions(can_write=bool(can_write), is_admin=bool(is_admin))
+        _log_homebase_client(
+            "refresh user info: success "
+            f"role={role or '<none>'} perm={perm or '<none>'} "
+            f"is_admin={bool(is_admin)} can_write={bool(can_write)}"
+        )
 
     def _setup_remote_auth(self, username: str, password: str, remember: bool) -> bool:
         """Setup authentication for a vault that doesn't have it configured yet."""
@@ -9487,6 +9578,9 @@ class MainWindow(QMainWindow):
         self.editor.set_ai_actions_enabled(new_ai)
         if new_tags and self.tags_tab is None:
             self.tags_tab = TagsTab(http_client=self.http)
+            self.tags_tab.set_vault_accent_color(
+                getattr(self, "_vault_accent_color", None)
+            )
             self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
             self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
             self.left_tab_widget.insertTab(1, self.tags_tab, "Tags")
@@ -9557,6 +9651,10 @@ class MainWindow(QMainWindow):
         accent = self._current_vault_accent_color()
         self._vault_accent_color = accent
         try:
+            self.editor.set_vault_accent_color(accent)
+        except Exception:
+            pass
+        try:
             self.right_panel.set_vault_accent_color(accent)
         except Exception:
             pass
@@ -9565,7 +9663,12 @@ class MainWindow(QMainWindow):
                 self.toc_widget.set_vault_accent_color(accent)
         except Exception:
             pass
-        self._update_active_page_chicklets()
+        try:
+            if self.tags_tab:
+                self.tags_tab.set_vault_accent_color(accent)
+        except Exception:
+            pass
+        self._update_active_page_chicklets(force_all=True)
         self._apply_focus_borders()
         try:
             self._refresh_editor_visual_state_after_activation()
@@ -9683,7 +9786,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self._update_active_page_chicklets()
+            self._update_active_page_chicklets(force_all=True)
         except Exception:
             pass
         try:
@@ -9834,13 +9937,14 @@ class MainWindow(QMainWindow):
         text_fg = app_palette.color(QPalette.Text).name()
         selected_bg = app_palette.color(QPalette.Highlight).name()
         selected_fg = app_palette.color(QPalette.HighlightedText).name()
+        hover_fg = self._badge_text_for_background(alt_bg)
         border = pane_border or theme_value("main_window.tree.header_border", "#555555")
         return (
-            f"QTabWidget::pane {{ border: 1px solid {border}; background: {base_bg}; }}"
+            f"QTabWidget::pane {{ border: 2px solid {border}; background: {base_bg}; }}"
             f"QTabBar::tab {{ background: {base_bg}; color: {text_fg}; "
             f"border: 1px solid {border}; padding: 6px 10px; margin-right: 2px; }}"
             f"QTabBar::tab:selected {{ background: {selected_bg}; color: {selected_fg}; }}"
-            f"QTabBar::tab:!selected:hover {{ background: {alt_bg}; }}"
+            f"QTabBar::tab:!selected:hover {{ background: {alt_bg}; color: {hover_fg}; }}"
         )
 
     def _ensure_config_active_vault_context(self) -> None:
@@ -9881,6 +9985,17 @@ class MainWindow(QMainWindow):
     def _set_vault(self, directory: str, vault_name: Optional[str] = None) -> bool:
         self.editor._push_paint_block()
         self._vault_switch_in_progress = True
+        setup_phase_started_at = performance_start()
+
+        def finish_setup_phase(name: str, **fields: Any) -> None:
+            nonlocal setup_phase_started_at
+            emit_performance_span(
+                f"vault.setup.{name}",
+                setup_phase_started_at,
+                fields={"remote": bool(self._remote_mode), **fields},
+            )
+            setup_phase_started_at = performance_start()
+
         try:
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
@@ -9894,6 +10009,7 @@ class MainWindow(QMainWindow):
             config.set_active_vault(None)
             # Persist history before clearing
             self._persist_recent_history()
+            finish_setup_phase("previous_state")
             prefer_read_only = False
             if self._remote_mode:
                 try:
@@ -9911,6 +10027,7 @@ class MainWindow(QMainWindow):
                     prefer_read_only = config.load_vault_force_read_only()
                 except Exception:
                     prefer_read_only = False
+            finish_setup_phase("config_context")
             try:
                 self._apply_feature_overrides()
             except Exception:
@@ -9929,6 +10046,7 @@ class MainWindow(QMainWindow):
                     )
             except Exception:
                 self._ai_chat_store = None
+            finish_setup_phase("features_ai")
             if self._remote_mode:
                 self._read_only = prefer_read_only
                 self._vault_lock_path = None
@@ -9936,8 +10054,10 @@ class MainWindow(QMainWindow):
                 self._apply_read_only_state()
             else:
                 if not self._check_and_acquire_vault_lock(directory, prefer_read_only=prefer_read_only):
+                    finish_setup_phase("lock", result="cancelled")
                     return False
             self.right_panel.clear_tasks()
+            finish_setup_phase("lock_and_task_reset")
             try:
                 resp = self.http.post("/api/vault/select", json={"path": directory})
                 if resp.status_code == 401 and self._remote_mode:
@@ -9945,12 +10065,14 @@ class MainWindow(QMainWindow):
                         resp = self.http.post("/api/vault/select", json={"path": directory})
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
+                finish_setup_phase("api_select", result="error")
                 self._alert_api_error(exc, "Failed to set vault")
                 self._release_vault_lock()
                 return False
             self.vault_root = resp.json().get("root")
             self._remote_vault_ref_path = remote_ref_path if self._remote_mode else None
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
+            finish_setup_phase("api_select", result="ok")
             if self._remote_mode:
                 self._undo_cache_path = None
                 self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
@@ -9958,6 +10080,7 @@ class MainWindow(QMainWindow):
                 self._init_persisted_undo_cache_for_vault()
             if self._remote_mode:
                 if not self._ensure_remote_auth_for_vault():
+                    finish_setup_phase("root_index_state", result="auth_cancelled")
                     self.statusBar().showMessage("Login required to access this vault.", 4000)
                     return False
             else:
@@ -9975,11 +10098,16 @@ class MainWindow(QMainWindow):
                         QMessageBox.Yes,
                     )
                     if reply != QMessageBox.Yes:
+                        finish_setup_phase("root_index_state", result="index_cancelled")
                         self.statusBar().showMessage("Vault open cancelled (no index).", 4000)
                         self.vault_root = None
                         self.vault_root_name = None
                         return False
                     index_dir_missing = True
+            finish_setup_phase(
+                "root_index_state",
+                index_missing=bool(index_dir_missing),
+            )
             if self.vault_root:
                 homebase_profile = None
                 if not self._remote_mode:
@@ -9998,7 +10126,8 @@ class MainWindow(QMainWindow):
                     # For local vaults, use the vault directory itself
                     config.set_active_vault(self.vault_root)
                     self._show_db_repair_notice()
-                
+                finish_setup_phase("index_context")
+
                 if self._remote_mode:
                     config.save_last_vault(
                         self._encode_remote_ref(self.api_base, self._remote_vault_ref_path or directory)
@@ -10014,6 +10143,10 @@ class MainWindow(QMainWindow):
                     self._apply_homebase_profile(homebase_profile)
                 else:
                     self._configure_homebase_sync_for_vault()
+                finish_setup_phase(
+                    "profile_services",
+                    homebase=bool(homebase_profile),
+                )
                 try:
                     self.refresh_tree_button.setEnabled(True)
                 except Exception:
@@ -10061,14 +10194,18 @@ class MainWindow(QMainWindow):
                 self._prepare_vault_switch_ui_reset()
                 self.statusBar().showMessage(f"Vault: {self.vault_root}")
                 self._update_window_title()
+                finish_setup_phase("preferences_history")
                 self._apply_vault_accent_visuals()
+                finish_setup_phase("theme")
                 self._restore_nav_filter_state()
                 self._populate_vault_tree()
+                finish_setup_phase("navigation")
 
                 # Check if index is empty and rebuild if needed
                 needs_index = index_dir_missing or config.is_vault_index_empty()
                 if needs_index:
                     self._reindex_vault(show_progress=True)
+                finish_setup_phase("index", rebuilt=bool(needs_index))
 
                 self._load_bookmarks()
                 if self.vault_root:
@@ -10078,15 +10215,18 @@ class MainWindow(QMainWindow):
                             self.right_panel.attachments_panel.set_remote_vault_root(self.vault_root)
                         except Exception:
                             pass
+                finish_setup_phase("panels")
 
                 # Restore window geometry and splitter positions
                 self._restore_geometry()
-                
+                finish_setup_phase("geometry")
+
                 # Register this process's window for tray menu (cross-process)
                 self._register_process_window()
                 self._apply_remote_mode_ui()
                 self._update_periodic_search_sync_timer()
-                
+                finish_setup_phase("services")
+
                 return True
         finally:
             self._vault_switch_in_progress = False
@@ -10577,6 +10717,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _prepare_top_nav_chicklet(btn: QPushButton, kind: str) -> None:
+        if (
+            str(btn.property("topNavChicklet") or "") == "true"
+            and str(btn.property("topNavChickletKind") or "") == kind
+        ):
+            return
         btn.setFlat(True)
         btn.setFocusPolicy(Qt.NoFocus)
         btn.setProperty("topNavChicklet", "true")
@@ -10667,7 +10812,8 @@ class MainWindow(QMainWindow):
         style += " }"
         if not is_filtered and not is_active:
             style += self._top_nav_hover_style()
-        btn.setStyleSheet(style)
+        if btn.styleSheet() != style:
+            btn.setStyleSheet(style)
 
     def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
         self._prepare_top_nav_chicklet(btn, "history")
@@ -10706,21 +10852,64 @@ class MainWindow(QMainWindow):
         style += " }"
         if not is_active:
             style += self._top_nav_hover_style()
-        btn.setStyleSheet(style)
+        if btn.styleSheet() != style:
+            btn.setStyleSheet(style)
 
-    def _update_active_page_chicklets(self) -> None:
-        for path, btn in self.bookmark_buttons.items():
+    @measure_performance("top_nav.active_chicklets")
+    def _update_active_page_chicklets(self, *, force_all: bool = False) -> None:
+        """Restyle only chicklets whose active state can have changed."""
+        current_path = self.current_path
+        previous_path = getattr(self, "_top_nav_active_path", None)
+        changed_paths = {path for path in (previous_path, current_path) if path}
+
+        if force_all or previous_path is None:
+            bookmark_items = list(self.bookmark_buttons.items())
+            history_items = list(self.history_buttons)
+        else:
+            bookmark_items = [
+                (path, self.bookmark_buttons[path])
+                for path in changed_paths
+                if path in self.bookmark_buttons
+            ]
+            history_items = [
+                btn
+                for btn in self.history_buttons
+                if str(btn.property("history_path") or "") in changed_paths
+            ]
+
+        active_bookmark = None
+        for path, btn in bookmark_items:
             self._apply_bookmark_button_style(btn, path)
-            if self.current_path and path == self.current_path:
-                self._ensure_bookmark_button_visible(btn)
-                QTimer.singleShot(0, lambda b=btn: self._ensure_bookmark_button_visible(b))
-        for btn in self.history_buttons:
+            if current_path and path == current_path:
+                active_bookmark = btn
+
+        active_history = None
+        for btn in history_items:
             history_path = str(btn.property("history_path") or "")
             if history_path:
                 self._apply_history_button_style(btn, history_path)
-                if self.current_path and history_path == self.current_path:
-                    self._ensure_history_button_visible(btn)
-                    QTimer.singleShot(0, lambda b=btn: self._ensure_history_button_visible(b))
+                if current_path and history_path == current_path:
+                    active_history = btn
+
+        self._top_nav_active_path = current_path
+        if active_bookmark is not None:
+            QTimer.singleShot(0, lambda b=active_bookmark: self._ensure_bookmark_button_visible(b))
+        if active_history is not None:
+            QTimer.singleShot(0, lambda b=active_history: self._ensure_history_button_visible(b))
+
+    def _flush_pending_top_nav_refresh(self, expected_path: str) -> None:
+        """Apply navigation-strip visuals after the page's guarded first paint."""
+        pending = self._pending_top_nav_refresh
+        if pending is None:
+            return
+        path, rebuild_history = pending
+        if path != expected_path or path != self.current_path:
+            return
+        self._pending_top_nav_refresh = None
+        if rebuild_history:
+            self._refresh_history_buttons()
+        else:
+            self._update_active_page_chicklets()
 
     def _ensure_history_button_visible(self, btn: Optional[QPushButton]) -> None:
         if btn is None or not getattr(self, "history_scroll_area", None):
@@ -10961,18 +11150,9 @@ class MainWindow(QMainWindow):
         page_name = Path(source_path).stem
         self.statusBar().showMessage(f"Reordered bookmark: {page_name}", 2000)
 
+    @measure_performance("top_nav.history_rebuild")
     def _refresh_history_buttons(self) -> None:
-        """Refresh the history buttons in the toolbar (last 10 pages visited)."""
-        # Clear existing buttons
-        for btn in self.history_buttons:
-            self.history_layout.removeWidget(btn)
-            btn.deleteLater()
-        self.history_buttons.clear()
-        try:
-            self.history_scroll_area.horizontalScrollBar().setValue(0)
-        except Exception:
-            pass
-        
+        """Reconcile the recent-history strip without recreating unchanged buttons."""
         # Get last 25 items from history (most recent last)
         recent_history = self.page_history[-18:] if len(self.page_history) > 18 else self.page_history[:]
 
@@ -10993,31 +11173,51 @@ class MainWindow(QMainWindow):
                 unique_history.append(page_path)
         unique_history.reverse()  # Restore original order (oldest to newest)
 
-        # Add buttons for each history item
+        existing_by_path = {
+            str(btn.property("history_path") or ""): btn
+            for btn in self.history_buttons
+            if str(btn.property("history_path") or "")
+        }
+        desired_buttons: list[QPushButton] = []
+
         for page_path in unique_history:
             page_name = self._history_leaf_label(page_path)
+            btn = existing_by_path.pop(page_path, None)
+            if btn is None:
+                btn = QPushButton(page_name)
+                btn.setProperty("history_path", page_path)
+                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
+                btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, p=page_path, b=btn: self._show_history_context_menu(pos, p, b)
+                )
+            elif btn.text() != page_name:
+                btn.setText(page_name)
+            tooltip = path_to_colon(page_path) or page_path
+            if btn.toolTip() != tooltip:
+                btn.setToolTip(tooltip)
+            desired_buttons.append(btn)
 
-            # Create button with border styling
-            btn = QPushButton(page_name)
-            btn.setProperty("history_path", page_path)
-            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            self._apply_history_button_style(btn, page_path)
-            btn.setToolTip(path_to_colon(page_path) or page_path)
-            btn.clicked.connect(lambda checked=False, p=page_path: self._open_history_page(p))
-            btn.setContextMenuPolicy(Qt.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda pos, p=page_path, b=btn: self._show_history_context_menu(pos, p, b))
+        membership_changed = bool(existing_by_path) or desired_buttons != self.history_buttons
+        for btn in existing_by_path.values():
+            self.history_layout.removeWidget(btn)
+            btn.deleteLater()
 
-            # Store button
-            self.history_buttons.append(btn)
+        if membership_changed:
+            for index, btn in enumerate(desired_buttons):
+                if self.history_layout.indexOf(btn) != index:
+                    self.history_layout.removeWidget(btn)
+                    self.history_layout.insertWidget(index, btn)
+            self.history_buttons = desired_buttons
+            self._update_history_strip_width()
+            self._sync_history_scroll_range()
+            self._update_history_scroll_buttons()
 
-            # Add to layout
-            self.history_layout.addWidget(btn)
-        self._update_history_strip_width()
-        self._sync_history_scroll_range()
-        self._update_history_scroll_buttons()
-        QTimer.singleShot(0, self._update_history_strip_width)
-        QTimer.singleShot(0, self._sync_history_scroll_range)
-        QTimer.singleShot(0, self._update_history_scroll_buttons)
+        # New buttons need initial styling; reused buttons only need old/new active states.
+        for btn in desired_buttons:
+            if not btn.styleSheet():
+                self._apply_history_button_style(btn, str(btn.property("history_path") or ""))
         self._update_active_page_chicklets()
 
     def _open_history_page(self, page_path: str) -> None:
@@ -11960,6 +12160,7 @@ class MainWindow(QMainWindow):
             _log_navigation(f"{_ANSI_BLUE}[TREE] Failed to get folder count: {exc}{_ANSI_RESET}")
             return 0
 
+    @measure_performance("vault.tree_population")
     def _populate_vault_tree(self) -> None:
         self._cancel_inline_editor()
         if not self.vault_root:
@@ -12587,21 +12788,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Failed to open page: {path}", 8000)
             self._remove_deleted_paths_from_history(path)
             return
-        
-        # Add to page history only after successful read
-        if add_to_history and self._is_history_path_allowed(path) and path != self.current_path:
-            # Remove any forward history when opening a new page
-            if self.history_index < len(self.page_history) - 1:
-                self.page_history = self.page_history[:self.history_index + 1]
-            # Add new page if not duplicate of last
-            if not self.page_history or self.page_history[-1] != path:
-                self.page_history.append(path)
-                self.history_index = len(self.page_history) - 1
-                if log_enabled("navigation"):
-                    print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
-                # Refresh history buttons
-                self._refresh_history_buttons()
-        
+
         payload = resp.json()
         content = payload.get("content", "")
         rev = payload.get("rev")
@@ -12616,6 +12803,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 content_len = len(content or "")
             tracer.mark(f"api read complete bytes={content_len}")
+
+        # Add to page history only after successful read
+        history_buttons_changed = False
+        if add_to_history and self._is_history_path_allowed(path) and path != self.current_path:
+            # Remove any forward history when opening a new page
+            if self.history_index < len(self.page_history) - 1:
+                self.page_history = self.page_history[:self.history_index + 1]
+            # Add new page if not duplicate of last
+            if not self.page_history or self.page_history[-1] != path:
+                self.page_history.append(path)
+                self.history_index = len(self.page_history) - 1
+                if log_enabled("navigation"):
+                    print(f"[HISTORY] Added to history: {path}, history_index={self.history_index}, total={len(self.page_history)}")
+                history_buttons_changed = True
+
         self._refresh_editor_context(path)
         if tracer:
             tracer.mark("editor context set")
@@ -12625,7 +12827,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.current_path = path
-        self._update_active_page_chicklets()
+        self._pending_top_nav_refresh = (path, history_buttons_changed)
         self._suspend_autosave = True
         self._suspend_cursor_history = True
         self._suspend_dirty_tracking = True
@@ -12802,9 +13004,7 @@ class MainWindow(QMainWindow):
         if tracer:
             tracer.mark(f"deferred index refresh {'+ tasks' if updated else '(no task changes)'}")
 
-        self.right_panel.refresh_links(path)
         self._refresh_detached_link_panels(path)
-        self._save_panel_visibility()
         self.editor.refresh_heading_outline()
         self._sync_nav_tree_to_active_page()
         if config.has_active_vault():
@@ -12820,8 +13020,9 @@ class MainWindow(QMainWindow):
             active=self.right_panel.is_active_chat_for_page(path),
         )
         self._refresh_detached_map_panels(path or None)
+        self._flush_pending_top_nav_refresh(path)
         if tracer:
-            tracer.end("secondary hydration complete")
+            tracer.complete_phase("secondary", "secondary hydration complete")
 
     def _if_match_headers(self, path: str) -> Optional[dict[str, str]]:
         info = self._page_revisions.get(path)
@@ -12876,35 +13077,78 @@ class MainWindow(QMainWindow):
             return detail
         return None
 
+    @measure_performance("save.finalize")
     def _finalize_save(self, path: str, content: str, resp_payload: dict, message: str) -> None:
+        metadata_started_at = performance_start()
         previous_saved_content = self._last_saved_content
         was_virtual = path in self.virtual_pages
         content_changed = previous_saved_content is None or content != previous_saved_content
+        metadata_changes = (
+            indexer.changed_page_metadata(path, previous_saved_content or "", content)
+            if content_changed
+            else set()
+        )
+        if was_virtual:
+            metadata_changes.update(("tags", "links", "tasks", "title"))
+        emit_performance_span(
+            "save.metadata_diff",
+            metadata_started_at,
+            path=path,
+            fields={"metadata_changes": sorted(metadata_changes)},
+        )
         if content_changed or was_virtual:
             self._mark_homebase_unsynced_local_change()
             self._mark_recent_self_saved_path(path)
+        panels_started_at = performance_start()
         if config.has_active_vault():
-            indexer.index_page(path, content)
-            self.right_panel.refresh_tasks()
-            self.right_panel.refresh_links(path)
-            self._refresh_detached_task_panels()
-            self._refresh_detached_calendar_panels()
-            self._refresh_detached_link_panels(path)
+            index_started_at = performance_start()
+            index_updated = indexer.index_page(path, content)
+            if index_started_at is not None:
+                emit_performance_span(
+                    "save.index_page",
+                    index_started_at,
+                    path=path,
+                    fields={
+                        "content_bytes": len(content.encode("utf-8")),
+                        "index_updated": bool(index_updated),
+                        "metadata_changes": sorted(metadata_changes),
+                    },
+                )
+            if "tasks" in metadata_changes:
+                self.right_panel.refresh_tasks()
+                self._refresh_detached_task_panels()
+            if "links" in metadata_changes or "title" in metadata_changes:
+                self.right_panel.refresh_links(path)
+                self._refresh_detached_link_panels(path)
+            if "tasks" in metadata_changes or (content_changed and path.startswith("/Journal/")):
+                self._refresh_detached_calendar_panels()
+            if "tags" in metadata_changes and self.tags_tab:
+                self.tags_tab.mark_tags_stale()
+        emit_performance_span(
+            "save.affected_panels",
+            panels_started_at,
+            path=path,
+            fields={"metadata_changes": sorted(metadata_changes)},
+        )
         self._last_saved_content = content
         self._update_page_revision(path, resp_payload)
+        history_started_at = performance_start()
         try:
             if self._feature_remember_cursor_position_enabled:
                 self._history_cursor_positions[path] = self.editor.textCursor().position()
             self._persist_recent_history()
         except Exception:
             pass
+        emit_performance_span("save.history_persistence", history_started_at, path=path)
         try:
             self.editor.document().setModified(False)
         except Exception:
             pass
         self._dirty_flag = False
         self._update_dirty_indicator()
+        undo_started_at = performance_start()
         self._capture_undo_snapshot(path, content, source="save")
+        emit_performance_span("save.undo_snapshot", undo_started_at, path=path)
 
         if was_virtual:
             self.virtual_pages.discard(path)
@@ -14133,14 +14377,17 @@ class MainWindow(QMainWindow):
                 ),
             )
         
-        # Return focus to search results tree only if the user hasn't moved to the search box
+        # Return focus to the originating left-panel results when navigation was
+        # requested without editor focus (for example, Shift+Enter in Tags).
         def _maybe_refocus_results() -> None:
-            if not self.search_tab:
-                return
             try:
-                if self.search_tab.search_entry.hasFocus():
+                current_tab = self.left_tab_widget.currentWidget()
+                if self.tags_tab and current_tab is self.tags_tab:
+                    self.tags_tab.results_tree.setFocus()
                     return
-                if self.left_tab_widget.currentWidget() != self.search_tab:
+                if not self.search_tab or current_tab is not self.search_tab:
+                    return
+                if self.search_tab.search_entry.hasFocus():
                     return
                 self.search_tab.results_tree.setFocus()
             except Exception:
@@ -14174,7 +14421,7 @@ class MainWindow(QMainWindow):
             )
         
         # Focus editor instead of returning to search results
-        QTimer.singleShot(100, lambda: self.editor.setFocus())
+        QTimer.singleShot(100, self._focus_editor)
 
     def _current_editor_load_token(self) -> Optional[int]:
         try:
@@ -15697,13 +15944,11 @@ class MainWindow(QMainWindow):
         def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> dict:
             return _on_capture_with_destination(text, attachments, _vault_path, selected_destination)
 
-        selected_destination = {
-            "label": "Today's Journal"
-            if target.get("page_mode") == "today"
-            else self._quick_capture_destination_label(str(target.get("page_ref") or "")),
-            "page_mode": target.get("page_mode") or "today",
-            "page_ref": target.get("page_ref"),
-        }
+        destination_options, selected_destination = quick_capture_destination_options(
+            str(target.get("page_mode") or "today"),
+            target.get("page_ref"),
+            config.load_quick_capture_history(),
+        )
 
         def _on_capture_with_destination(
             text: str,
@@ -15733,33 +15978,6 @@ class MainWindow(QMainWindow):
             )
             config.add_quick_capture_history(receipt)
             return receipt
-
-        destination_options = [{"label": "Today's Journal", "page_mode": "today", "page_ref": None}]
-        seen_custom_refs: set[str] = set()
-        configured_ref = str(target.get("page_ref") or "").strip()
-        if configured_ref:
-            seen_custom_refs.add(configured_ref)
-            destination_options.append(
-                {
-                    "label": self._quick_capture_destination_label(configured_ref),
-                    "page_mode": "custom",
-                    "page_ref": configured_ref,
-                }
-            )
-        for entry in config.load_quick_capture_history():
-            page_ref = str(entry.get("page_ref") or "").strip()
-            if entry.get("page_mode") != "custom" or not page_ref or page_ref in seen_custom_refs:
-                continue
-            seen_custom_refs.add(page_ref)
-            destination_options.append(
-                {
-                    "label": self._quick_capture_destination_label(page_ref),
-                    "page_mode": "custom",
-                    "page_ref": page_ref,
-                }
-            )
-            if len(destination_options) >= 10:
-                break
 
         def _on_undo(capture_id: str) -> dict:
             if target.get("kind") != "local":
@@ -16041,16 +16259,6 @@ class MainWindow(QMainWindow):
         current_name = Path(self.vault_root).name if self.vault_root else vault_name
         return f"Vault: {vault_name if config.load_quick_capture_vault() else current_name}"
 
-    @staticmethod
-    def _quick_capture_destination_label(page_ref: str) -> str:
-        cleaned = str(page_ref or "").strip()
-        if not cleaned:
-            return "Custom page"
-        if cleaned.startswith(":"):
-            return " / ".join(part.replace("_", " ") for part in cleaned.split(":") if part)
-        normalized = cleaned.replace("\\", "/").rstrip("/")
-        name = Path(normalized).stem
-        return name.replace("_", " ") or cleaned
         try:
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
         except Exception:
@@ -16575,18 +16783,10 @@ class MainWindow(QMainWindow):
         if not targets:
             return
         if self.current_path in targets:
-            try:
-                if self._dirty_flag or self.editor.document().isModified():
-                    self._save_current_file(auto=True, reason="task date post-apply")
-            except Exception:
-                pass
-            self._open_file(
-                self.current_path,
-                add_to_history=False,
-                force=True,
-                restore_history_cursor=True,
-                sync_calendar=False,
-            )
+            if getattr(self, "_pending_task_editor_reload_started_at", None) is None:
+                self._pending_task_editor_reload_started_at = performance_start()
+            self._pending_task_editor_reload_paths.update(targets)
+            self._task_editor_reload_timer.start()
         for win in list(getattr(self, "_page_windows", [])):
             try:
                 src = self._normalize_editor_path(str(getattr(win, "_source_path", "") or ""))
@@ -16603,6 +16803,47 @@ class MainWindow(QMainWindow):
                 win._load_content()
             except Exception:
                 pass
+
+    def _flush_task_editor_reload(self) -> None:
+        """Apply coalesced task edits to the open editor without a visible clear."""
+        targets = set(self._pending_task_editor_reload_paths)
+        self._pending_task_editor_reload_paths.clear()
+        started_at = getattr(self, "_pending_task_editor_reload_started_at", None)
+        self._pending_task_editor_reload_started_at = None
+        path = self.current_path
+        if not path or path not in targets:
+            return
+        focused = QApplication.focusWidget()
+        updates_were_enabled = self.editor.updatesEnabled()
+        if updates_were_enabled:
+            self.editor.setUpdatesEnabled(False)
+        try:
+            self._open_file(
+                path,
+                add_to_history=False,
+                force=True,
+                restore_history_cursor=True,
+                sync_calendar=False,
+            )
+        finally:
+            if updates_were_enabled:
+                self.editor.setUpdatesEnabled(True)
+                self.editor.update()
+        emit_performance_span(
+            "task_mutation.to_editor_reload",
+            started_at,
+            path=path,
+            fields={"coalesced_paths": len(targets)},
+        )
+        if focused is not None:
+            def _restore_task_command_focus(widget=focused) -> None:
+                try:
+                    if widget.isVisible() and widget.isEnabled():
+                        widget.setFocus(Qt.OtherFocusReason)
+                except RuntimeError:
+                    pass
+
+            QTimer.singleShot(0, _restore_task_command_focus)
 
     def _open_link_from_panel(self, path: str, keep_focus: bool = False) -> None:
         if not path:
@@ -18706,7 +18947,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         elif focus_target == "editor":
-            self.editor.setFocus()
+            self._focus_editor()
 
     def _activate_tree_selection(self, *, focus_editor: bool) -> None:
         self._tree_enter_focus = True
@@ -18752,7 +18993,13 @@ class MainWindow(QMainWindow):
                 self._skip_next_selection_open = True
             self._request_tree_open(target, focus_target="editor")
 
+    @measure_performance("navigation.focus_handoff")
     def _focus_editor(self) -> None:
+        try:
+            if self.editor.hasFocus():
+                return
+        except Exception:
+            pass
         try:
             self.raise_()
         except Exception:
@@ -19120,14 +19367,14 @@ class MainWindow(QMainWindow):
         editor_selection_text = editor_palette.color(QPalette.HighlightedText).name()
         if editor_has:
             editor_style = (
-                f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:3px; "
+                f"QTextEdit {{ border: 2px solid {focus_border}; border-radius:3px; "
                 f"background: {base_color}; color: {text_color}; "
                 f"selection-background-color: {editor_selection_bg}; "
                 f"selection-color: {editor_selection_text}; }}"
             )
         else:
             editor_style = (
-                "QTextEdit { border: 1px solid transparent; "
+                "QTextEdit { border: 2px solid transparent; "
                 f"background: {base_color}; color: {text_color}; "
                 f"selection-background-color: {editor_selection_bg}; "
                 f"selection-color: {editor_selection_text}; }}"
@@ -19167,30 +19414,45 @@ class MainWindow(QMainWindow):
             )
         left_style = self._tab_widget_theme_style(focus_border if left_has else None)
         right_style = self._tab_widget_theme_style(focus_border if right_has else None)
-        # Preserve existing styles by appending (simple approach)
+        # Qt reparses and repolishes a widget subtree on setStyleSheet(). Focus
+        # can move several times inside one pane, so only apply effective changes.
         try:
-            self.editor.setStyleSheet(editor_style)
+            self._set_cached_focus_stylesheet("editor", self.editor, editor_style)
+        except RuntimeError:
+            pass  # Widget may have been deleted
+        tree_style_changed = False
+        try:
+            tree_style_changed = self._set_cached_focus_stylesheet("tree", self.tree_view, tree_style)
+        except RuntimeError:
+            pass  # Widget may have been deleted
+        if tree_style_changed:
+            try:
+                viewport = self.tree_view.viewport()
+                viewport.setPalette(tree_palette)
+                viewport.setAutoFillBackground(True)
+                viewport.update()
+            except RuntimeError:
+                pass  # Widget may have been deleted
+        try:
+            self._set_cached_focus_stylesheet("left", self.left_tab_widget, left_style)
         except RuntimeError:
             pass  # Widget may have been deleted
         try:
-            self.tree_view.setStyleSheet(tree_style)
+            self._set_cached_focus_stylesheet("right", self.right_panel.tabs, right_style)
         except RuntimeError:
             pass  # Widget may have been deleted
-        try:
-            viewport = self.tree_view.viewport()
-            viewport.setPalette(tree_palette)
-            viewport.setAutoFillBackground(True)
-            viewport.update()
-        except RuntimeError:
-            pass  # Widget may have been deleted
-        try:
-            self.left_tab_widget.setStyleSheet(left_style)
-        except RuntimeError:
-            pass  # Widget may have been deleted
-        try:
-            self.right_panel.tabs.setStyleSheet(right_style)
-        except RuntimeError:
-            pass  # Widget may have been deleted
+
+    def _set_cached_focus_stylesheet(self, key: str, widget: QWidget, stylesheet: str) -> bool:
+        """Apply a focus stylesheet only when its effective value changed."""
+        cache = getattr(self, "_focus_stylesheet_cache", None)
+        if cache is None:
+            cache = {}
+            self._focus_stylesheet_cache = cache
+        if cache.get(key) == stylesheet and widget.styleSheet() == stylesheet:
+            return False
+        widget.setStyleSheet(stylesheet)
+        cache[key] = stylesheet
+        return True
 
     def _goto_line(self, line: int, select_line: bool = False) -> None:
         # Convert line number (1-indexed) to block number (0-indexed)
@@ -21707,7 +21969,6 @@ class MainWindow(QMainWindow):
         self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index -= 1
-        self._refresh_history_buttons()
         target_path = self.page_history[self.history_index]
         if log_enabled("navigation"):
             print(f"[HISTORY] Navigate back: index {self.history_index+1} -> {self.history_index}, opening: {target_path}")
@@ -21716,7 +21977,7 @@ class MainWindow(QMainWindow):
             self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
-        QTimer.singleShot(0, self.editor.setFocus)
+        QTimer.singleShot(0, self._focus_editor)
 
     def _navigate_history_forward(self) -> None:
         """Navigate to next page in history (Alt+Right)."""
@@ -21725,7 +21986,6 @@ class MainWindow(QMainWindow):
         self._exit_vi_insert_on_activate()
         self._remember_history_cursor()
         self.history_index += 1
-        self._refresh_history_buttons()
         target_path = self.page_history[self.history_index]
         if log_enabled("navigation"):
             print(f"[HISTORY] Navigate forward: index {self.history_index-1} -> {self.history_index}, opening: {target_path}")
@@ -21734,7 +21994,7 @@ class MainWindow(QMainWindow):
             self._open_file(target_path, add_to_history=False, restore_history_cursor=True)
         finally:
             self._suspend_selection_open = False
-        QTimer.singleShot(0, self.editor.setFocus)
+        QTimer.singleShot(0, self._focus_editor)
     
     def _reload_page_preserve_cursor(self, path: str) -> None:
         """Reload a page while keeping its last known cursor position."""
@@ -23698,27 +23958,7 @@ class MainWindow(QMainWindow):
         return cleaned.replace("_", " ")
 
     def _format_journal_history_label(self, path: str) -> Optional[str]:
-        try:
-            normalized = path.strip().lstrip("/")
-            normalized = normalized.replace(":", "/")
-            match = re.search(
-                r"(?i)(?:^|/)journal/(\d{4})/(\d{2})/(\d{2})(?:/\3(?:\.[^/]+)?)?(?:\.[^/]+)?$",
-                normalized,
-            )
-            if not match:
-                return None
-            year, month, day_file = match.group(1), match.group(2), match.group(3)
-            day_stem = Path(day_file).stem
-            if not (year.isdigit() and month.isdigit() and day_stem.isdigit()):
-                return None
-            y = int(year)
-            m = int(month)
-            d = int(day_stem)
-            from datetime import date
-            dt = date(y, m, d)
-            return dt.strftime("%d-%b-%y")
-        except Exception:
-            return None
+        return format_journal_day_label(path)
 
     def _recent_history_display_label(self, path: str) -> str:
         base_label = self._history_leaf_label(path)
