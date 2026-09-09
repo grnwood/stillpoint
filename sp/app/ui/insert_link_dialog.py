@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from .path_utils import path_to_colon, normalize_link_target, trace_link_decision
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
+from .keyboard_shortcuts import is_vi_navigation_chord
 import html
 import re
 
@@ -462,9 +463,9 @@ class InsertLinkDialog(QDialog):
                     previous_focus.setFocus()
                 event.accept()
                 return
-        # Handle Ctrl+Shift+J/K for vi insert mode
+        # Handle the platform vi navigation chord.
         mods = event.modifiers() & ~Qt.KeypadModifier
-        if event.key() == Qt.Key_J and (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+        if event.key() == Qt.Key_J and is_vi_navigation_chord(mods):
             current_row = self.list_widget.currentRow()
             if current_row < self.list_widget.count() - 1:
                 self.list_widget.setCurrentRow(current_row + 1)
@@ -472,7 +473,7 @@ class InsertLinkDialog(QDialog):
                 self.list_widget.setCurrentRow(0)  # Wrap to top
             event.accept()
             return
-        elif event.key() == Qt.Key_K and (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+        elif event.key() == Qt.Key_K and is_vi_navigation_chord(mods):
             current_row = self.list_widget.currentRow()
             if current_row > 0:
                 self.list_widget.setCurrentRow(current_row - 1)

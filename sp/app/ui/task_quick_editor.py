@@ -27,6 +27,7 @@ from .date_insert_dialog import DateInsertDialog
 from .path_utils import path_to_colon
 from .screen_positioning import clamp_popup_top_left, popup_available_geometry
 from .theme import theme_value
+from .keyboard_shortcuts import is_vi_navigation_chord, vi_navigation_sequences
 
 
 def parse_date_shortcut(value: str, *, today: Optional[date] = None) -> str:
@@ -254,12 +255,13 @@ class TaskQuickEditor(QDialog):
         focus_destination.activated.connect(self.destination.setFocus)
         self._shortcuts = [save_next, save_next_enter, focus_destination]
         if self._vi_mode:
-            destination_next = QShortcut(QKeySequence("Ctrl+Shift+J"), self)
+            forward_sequence, backward_sequence = vi_navigation_sequences()
+            destination_next = QShortcut(QKeySequence(forward_sequence), self)
             destination_next.setContext(Qt.WidgetWithChildrenShortcut)
             destination_next.activated.connect(
                 lambda: self._handle_vi_focus_or_dropdown(1)
             )
-            destination_previous = QShortcut(QKeySequence("Ctrl+Shift+K"), self)
+            destination_previous = QShortcut(QKeySequence(backward_sequence), self)
             destination_previous.setContext(Qt.WidgetWithChildrenShortcut)
             destination_previous.activated.connect(
                 lambda: self._handle_vi_focus_or_dropdown(-1)
@@ -729,9 +731,7 @@ class TaskQuickEditor(QDialog):
                 vi_dropdown_key = (
                     self._vi_mode
                     and key in (Qt.Key_J, Qt.Key_K)
-                    and bool(modifiers & Qt.ControlModifier)
-                    and bool(modifiers & Qt.ShiftModifier)
-                    and not bool(modifiers & (Qt.AltModifier | Qt.MetaModifier))
+                    and is_vi_navigation_chord(modifiers)
                 )
                 if vi_dropdown_key:
                     self._move_tag_completion_selection(1 if key == Qt.Key_J else -1)
@@ -755,9 +755,7 @@ class TaskQuickEditor(QDialog):
                 vi_dropdown_key = (
                     self._vi_mode
                     and key in (Qt.Key_J, Qt.Key_K)
-                    and bool(modifiers & Qt.ControlModifier)
-                    and bool(modifiers & Qt.ShiftModifier)
-                    and not bool(modifiers & (Qt.AltModifier | Qt.MetaModifier))
+                    and is_vi_navigation_chord(modifiers)
                 )
                 if key in (Qt.Key_Down, Qt.Key_Up) or vi_dropdown_key:
                     moving_down = key in (Qt.Key_Down, Qt.Key_J)
@@ -781,9 +779,7 @@ class TaskQuickEditor(QDialog):
                 and self._vi_mode
                 and self._destination_browsing
                 and key in (Qt.Key_J, Qt.Key_K)
-                and bool(modifiers & Qt.ControlModifier)
-                and bool(modifiers & Qt.ShiftModifier)
-                and not bool(modifiers & (Qt.AltModifier | Qt.MetaModifier))
+                and is_vi_navigation_chord(modifiers)
             )
             if destination_vi_key:
                 self._handle_vi_focus_or_dropdown(1 if key == Qt.Key_J else -1)

@@ -50,6 +50,7 @@ from sp.app import config
 from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
+from .keyboard_shortcuts import is_vi_navigation_chord, vi_navigation_sequences
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import (
     AIChatPanel,
@@ -112,7 +113,7 @@ class TaskDateQuickMenu(QMenu):
         self._use_vi_keys = bool(use_vi_keys)
         self._vi_shortcuts: list[QShortcut] = []
         if self._use_vi_keys:
-            for sequence, direction in (("Ctrl+Shift+J", 1), ("Ctrl+Shift+K", -1)):
+            for sequence, direction in zip(vi_navigation_sequences(), (1, -1)):
                 shortcut = QShortcut(QKeySequence(sequence), self)
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
                 shortcut.activated.connect(lambda step=direction: self._move_active(step))
@@ -133,9 +134,7 @@ class TaskDateQuickMenu(QMenu):
         chord_vi = (
             self._use_vi_keys
             and key in (Qt.Key_J, Qt.Key_K)
-            and bool(modifiers & Qt.ControlModifier)
-            and bool(modifiers & Qt.ShiftModifier)
-            and not bool(modifiers & (Qt.AltModifier | Qt.MetaModifier))
+            and is_vi_navigation_chord(modifiers)
         )
         if plain_vi or chord_vi:
             self._move_active(1 if key == Qt.Key_J else -1)

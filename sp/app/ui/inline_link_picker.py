@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from .path_utils import path_to_colon, normalize_link_target, ensure_root_colon_link
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
+from .keyboard_shortcuts import is_vi_navigation_chord
 import html
 
 if TYPE_CHECKING:
@@ -344,18 +345,11 @@ class InlineLinkPickerOverlay(QDialog):
                 self._move_selection(1)
                 return True
             
-            # Handle Ctrl+Shift+J/K for navigation (always available, not just vi mode)
-            has_ctrl = bool(mods & Qt.ControlModifier)
-            has_shift = bool(mods & Qt.ShiftModifier)
-            has_alt = bool(mods & Qt.AltModifier)
-            has_meta = bool(mods & Qt.MetaModifier)
-            
-            # Check for Ctrl+Shift+J (down) - only these two modifiers
-            if key == Qt.Key_J and has_ctrl and has_shift and not has_alt and not has_meta:
+            # Handle the platform vi navigation chord (always available).
+            if key == Qt.Key_J and is_vi_navigation_chord(mods):
                 self._move_selection(1)
                 return True
-            # Check for Ctrl+Shift+K (up) - only these two modifiers
-            elif key == Qt.Key_K and has_ctrl and has_shift and not has_alt and not has_meta:
+            elif key == Qt.Key_K and is_vi_navigation_chord(mods):
                 self._move_selection(-1)
                 return True
             

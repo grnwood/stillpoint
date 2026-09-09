@@ -39,6 +39,7 @@ from sp.app import config
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .screen_positioning import fit_window_to_available_screen, popup_available_geometry
+from .keyboard_shortcuts import is_vi_navigation_chord
 
 _LOGGING = log_enabled("diagrams")
 
@@ -277,8 +278,8 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         if not self._vi_feature_enabled:
             return super().keyPressEvent(event)
 
-        # Ctrl+Shift+J/K -> Page Down / Page Up
-        if mods == (Qt.ControlModifier | Qt.ShiftModifier) and key in (Qt.Key_J, Qt.Key_K):
+        # Platform vi chord + J/K -> Page Down / Page Up
+        if is_vi_navigation_chord(mods) and key in (Qt.Key_J, Qt.Key_K):
             bar = self.verticalScrollBar()
             step = max(1, bar.pageStep())
             bar.setValue(bar.value() + (step if key == Qt.Key_J else -step))

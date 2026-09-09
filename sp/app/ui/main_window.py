@@ -5408,13 +5408,58 @@ class MainWindow(QMainWindow):
 
         src_version = self._help_vault_version(src)
         user_version = self._help_vault_version(user_root) if user_root.exists() else -1
-        if user_root.exists() and user_version >= src_version:
-            return user_root
+        if not user_root.exists() or user_version < src_version:
+            if user_root.exists():
+                shutil.rmtree(user_root)
+            shutil.copytree(src, user_root)
 
-        if user_root.exists():
-            shutil.rmtree(user_root)
-        shutil.copytree(src, user_root)
+        self._populate_platform_shortcuts(user_root, src)
         return user_root
+
+    @staticmethod
+    def _populate_platform_shortcuts(user_root: Path, template_root: Path) -> None:
+        """Write platform-appropriate modifier labels into the copied shortcuts page."""
+        template_path = template_root / "Shortcuts" / "Shortcuts.md"
+        target_path = user_root / "Shortcuts" / "Shortcuts.md"
+        if not template_path.exists() or not target_path.exists():
+            return
+
+        is_macos = platform.system() == "Darwin"
+        platform_name = "macos" if is_macos else "windows-linux"
+        marker = f"<!-- StillPoint shortcut platform: {platform_name}; revision: 5 -->"
+        current = target_path.read_text(encoding="utf-8")
+        if marker in current:
+            return
+        content = template_path.read_text(encoding="utf-8")
+
+        if is_macos:
+            content = content.replace("Ctrl", "Cmd").replace("Alt", "Option")
+            content = (
+                content.replace("Cmd+Shift+Tab", "Ctrl+Shift+Tab")
+                .replace("Cmd+Tab", "Ctrl+Tab")
+                .replace("Cmd+Shift+J", "Cmd+J")
+                .replace("Cmd+Shift+K", "Cmd+K")
+            )
+            content = content.replace(
+                "<!-- StillPoint shortcut platform notice -->",
+                "> **macOS:** `Cmd` is the primary modifier and `Option` is the alternate modifier.",
+            )
+            content = content.replace("<!-- StillPoint shortcut macos-only:start -->\n", "")
+            content = content.replace("<!-- StillPoint shortcut macos-only:end -->\n", "")
+            content = content.replace("<!-- StillPoint shortcut macos-only:start -->", "")
+            content = content.replace("<!-- StillPoint shortcut macos-only:end -->", "")
+        else:
+            content = content.replace(
+                "<!-- StillPoint shortcut platform notice -->",
+                "> **Windows and Linux:** `Ctrl` is the primary modifier and `Alt` is the alternate modifier.",
+            )
+            while "<!-- StillPoint shortcut macos-only:start -->" in content:
+                start = content.index("<!-- StillPoint shortcut macos-only:start -->")
+                end = content.index("<!-- StillPoint shortcut macos-only:end -->", start)
+                content = content[:start] + content[end + len("<!-- StillPoint shortcut macos-only:end -->"):].lstrip("\n")
+
+        content = content.replace("<!-- StillPoint shortcut platform: template -->", marker)
+        target_path.write_text(content, encoding="utf-8")
 
     @staticmethod
     def _help_vault_version(root: Path) -> int:

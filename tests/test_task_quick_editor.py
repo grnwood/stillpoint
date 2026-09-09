@@ -8,6 +8,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QPlainTextEdit
 
 from sp.app.ui import task_quick_editor
+from sp.app.ui.keyboard_shortcuts import vi_navigation_sequences
 from sp.app.ui.task_quick_editor import TaskQuickEditor, parse_date_shortcut
 
 
@@ -189,19 +190,20 @@ def test_vi_shortcuts_navigate_destination_dropdown(qtbot, qapp) -> None:
     QTest.keyClicks(editor.destination, "lau")
 
     popup = editor._destination_completer.popup()
-    modifiers = Qt.ControlModifier | Qt.ShiftModifier
+    forward_sequence, backward_sequence = vi_navigation_sequences()
+    modifiers = Qt.MetaModifier if forward_sequence == "Meta+J" else Qt.ControlModifier | Qt.ShiftModifier
     assert not popup.currentIndex().isValid()
 
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in editor._shortcuts}
-    assert "Ctrl+Shift+J" in shortcuts
-    assert "Ctrl+Shift+K" in shortcuts
+    assert forward_sequence in shortcuts
+    assert backward_sequence in shortcuts
 
-    shortcuts["Ctrl+Shift+J"].activated.emit()
+    shortcuts[forward_sequence].activated.emit()
     assert popup.isVisible()
     assert popup.currentIndex().row() == 0
     QTest.keyClick(editor.destination, Qt.Key_J, modifiers)
     assert popup.currentIndex().row() == 1
-    shortcuts["Ctrl+Shift+K"].activated.emit()
+    shortcuts[backward_sequence].activated.emit()
     assert popup.currentIndex().row() == 0
 
     QTest.keyClick(editor.destination, Qt.Key_Return)
@@ -212,11 +214,12 @@ def test_vi_shortcuts_cycle_fields_when_destination_dropdown_is_inactive(qtbot) 
     editor = TaskQuickEditor({"text": "Call Sarah"}, vi_mode=True)
     qtbot.addWidget(editor)
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in editor._shortcuts}
+    forward_sequence, backward_sequence = vi_navigation_sequences()
 
     editor.text_edit.setFocus()
-    shortcuts["Ctrl+Shift+J"].activated.emit()
+    shortcuts[forward_sequence].activated.emit()
     assert editor.status.hasFocus()
-    shortcuts["Ctrl+Shift+K"].activated.emit()
+    shortcuts[backward_sequence].activated.emit()
     assert editor.text_edit.hasFocus()
 
 
@@ -240,7 +243,8 @@ def test_escape_resets_destination_then_vi_shortcuts_cycle_fields(qtbot, qapp) -
     assert editor._destination_browsing is False
 
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in editor._shortcuts}
-    shortcuts["Ctrl+Shift+K"].activated.emit()
+    _, backward_sequence = vi_navigation_sequences()
+    shortcuts[backward_sequence].activated.emit()
     assert editor.tags.hasFocus()
 
 
@@ -315,14 +319,15 @@ def test_tag_dropdown_vi_navigation_escape_reset_and_focus_handoff(qtbot, qapp) 
     assert not popup.currentIndex().isValid()
 
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in editor._shortcuts}
-    shortcuts["Ctrl+Shift+J"].activated.emit()
+    forward_sequence, backward_sequence = vi_navigation_sequences()
+    shortcuts[forward_sequence].activated.emit()
     assert popup.currentIndex().row() == 0
 
     QTest.keyClick(editor.tags, Qt.Key_Escape)
     assert editor.tags.text() == "@work"
     assert not popup.isVisible()
 
-    shortcuts["Ctrl+Shift+K"].activated.emit()
+    shortcuts[backward_sequence].activated.emit()
     assert editor.due.hasFocus()
 
 
@@ -332,15 +337,16 @@ def test_combo_dropdown_vi_navigation_escape_reset_and_focus_handoff(qtbot) -> N
     editor.status.setFocus()
     editor.status.showPopup()
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in editor._shortcuts}
+    forward_sequence, _ = vi_navigation_sequences()
 
-    shortcuts["Ctrl+Shift+J"].activated.emit()
+    shortcuts[forward_sequence].activated.emit()
     assert editor.status.currentIndex() == 1
 
     QTest.keyClick(editor.status.view(), Qt.Key_Escape)
     assert editor.status.currentIndex() == 0
     assert editor.status.hasFocus()
 
-    shortcuts["Ctrl+Shift+J"].activated.emit()
+    shortcuts[forward_sequence].activated.emit()
     assert editor.priority.hasFocus()
 
 

@@ -78,6 +78,7 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import Shiboken
 from markdown import markdown as render_markdown
+from .keyboard_shortcuts import is_vi_navigation_chord
 from .path_utils import (
     path_to_colon, colon_to_path, ensure_root_colon_link,
     should_use_full_target_label, trace_link_decision,
@@ -5044,7 +5045,7 @@ class MarkdownEditor(QTextEdit):
                 self._task_tag_suggest_overlay.move_selection(delta)
                 event.accept()
                 return
-            if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() in (Qt.Key_J, Qt.Key_K):
+            if is_vi_navigation_chord(mods) and event.key() in (Qt.Key_J, Qt.Key_K):
                 delta = 1 if event.key() == Qt.Key_J else -1
                 self._task_tag_suggest_overlay.move_selection(delta)
                 event.accept()
@@ -5072,7 +5073,7 @@ class MarkdownEditor(QTextEdit):
                 self._tag_suggest_overlay.move_selection(delta)
                 event.accept()
                 return
-            if mods == (Qt.ControlModifier | Qt.ShiftModifier) and event.key() in (Qt.Key_J, Qt.Key_K):
+            if is_vi_navigation_chord(mods) and event.key() in (Qt.Key_J, Qt.Key_K):
                 delta = 1 if event.key() == Qt.Key_J else -1
                 self._tag_suggest_overlay.move_selection(delta)
                 event.accept()

@@ -1,5 +1,8 @@
 # Shortcuts
 
+<!-- StillPoint shortcut platform: template -->
+<!-- StillPoint shortcut platform notice -->
+
 ## Essential Shortcuts
 These shortcuts will speed up your workflow:
 
@@ -25,10 +28,15 @@ These shortcuts will speed up your workflow:
 ### Navigation
 - `Alt+Left`: Go back
 - `Alt+Right`: Go forward
+<!-- StillPoint shortcut macos-only:start -->
 - On macOS: `Cmd+[` goes back and `Cmd+]` goes forward
+<!-- StillPoint shortcut macos-only:end -->
 - `Alt+Home`: Go to home page
 - `Ctrl+Tab`: Cycle forward through recent pages
 - `Ctrl+Shift+Tab`: Cycle backward through recent pages
+<!-- StillPoint shortcut macos-only:start -->
+- Use `Cmd+J` / `Cmd+K` for vi navigation controls
+<!-- StillPoint shortcut macos-only:end -->
 - `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
 - `Enter` (file nav selected): Open selected page and focus editor
 - `Shift+Enter` (file nav selected): Open selected page and keep focus in file nav
@@ -121,7 +129,9 @@ If VI mode is enabled:
 - `m`: Move selected text to another location, or move the current page when nothing is selected
 - `Ctrl+Shift+L`: Copy link or heading (also stores it for `p`)
 - `Alt+h/j/k/l`: History navigation (back/forward/down/up)
+<!-- StillPoint shortcut macos-only:start -->
 - On macOS, prefer `Cmd+[` / `Cmd+]` for back/forward outside vi mode because `Option+Left/Right` is reserved for word-wise cursor movement
+<!-- StillPoint shortcut macos-only:end -->
 - With a selection: `-`, `*`, `>` apply list or quote styles
 - While file nav is focused: `j/k` move down/up, `h/l` collapse/expand
 

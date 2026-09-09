@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from .path_utils import format_journal_day_label, path_to_colon
 from .page_load_logger import measure_performance
+from .keyboard_shortcuts import is_vi_navigation_chord
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import strip_page_suffix
 
@@ -396,9 +397,8 @@ class TagsTab(QWidget):
             event.accept()
             return
         
-        # Handle Ctrl+Shift+J/K or arrow keys - focus results tree if it has items
-        if ((event.key() == Qt.Key_J and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
-            (event.key() == Qt.Key_K and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+        # Handle the platform vi navigation chord or arrow keys.
+        if ((event.key() in (Qt.Key_J, Qt.Key_K) and is_vi_navigation_chord(event.modifiers())) or
             event.key() == Qt.Key_Down or event.key() == Qt.Key_Up):
             if self.results_tree.topLevelItemCount() > 0:
                 # Focus the results tree and select first item if nothing selected
@@ -841,8 +841,8 @@ class TagsTab(QWidget):
             event.accept()
             return
         
-        # Handle Ctrl+Shift+J or Down arrow - move down
-        if ((event.key() == Qt.Key_J and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+        # Handle the platform vi forward chord or Down arrow.
+        if ((event.key() == Qt.Key_J and is_vi_navigation_chord(event.modifiers())) or
             event.key() == Qt.Key_Down):
             current_row = self.results_tree.indexOfTopLevelItem(self.results_tree.currentItem())
             if current_row < self.results_tree.topLevelItemCount() - 1:
@@ -851,8 +851,8 @@ class TagsTab(QWidget):
             event.accept()
             return
         
-        # Handle Ctrl+Shift+K or Up arrow - move up
-        if ((event.key() == Qt.Key_K and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)) or
+        # Handle the platform vi backward chord or Up arrow.
+        if ((event.key() == Qt.Key_K and is_vi_navigation_chord(event.modifiers())) or
             event.key() == Qt.Key_Up):
             current_row = self.results_tree.indexOfTopLevelItem(self.results_tree.currentItem())
             if current_row > 0:
