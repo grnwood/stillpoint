@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QListWidgetItem
 
@@ -559,6 +560,14 @@ def test_jump_to_journal_date_opens_selected_day(main_window, monkeypatch) -> No
     assert captured["vault_accent_color"] == getattr(main_window, "_vault_accent_color", None)
     assert captured["vault_root"] == main_window.vault_root
     assert opened == [(2026, 3, 12)]
+
+
+def test_jump_to_journal_date_menu_action_owns_application_shortcut(main_window) -> None:
+    action = main_window._action_jump_date
+
+    assert action.text() == "Jump To Journal Date…"
+    assert action.shortcut() == QKeySequence("Ctrl+Alt+D")
+    assert action.shortcutContext() == Qt.ApplicationShortcut
 
 
 def test_jump_to_journal_date_ignores_cancel(main_window, monkeypatch) -> None:
