@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import QStandardItem
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow
 
@@ -136,29 +137,33 @@ class TestHistoryNavigation:
         assert main_window.current_path == "/PageA/PageA.md"
 
     def test_ctrl_tab_cycles_recent_pages_forward(self, main_window, monkeypatch):
-        calls: list[tuple[str, bool]] = []
+        # History cycling is now a real QShortcut (registered at construction time
+        # so it can preempt Cocoa's default Ctrl+Tab key-view navigation on macOS),
+        # so we verify the wiring by locating and activating the shortcut object
+        # rather than simulating a raw KeyPress through eventFilter.
+        from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
 
+        calls: list[tuple[str, bool]] = []
         monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
 
-        handled = main_window.eventFilter(
-            main_window,
-            QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.ControlModifier),
-        )
+        forward_seq, _ = history_cycle_sequences()
+        shortcuts = main_window.findChildren(QShortcut)
+        forward = next(s for s in shortcuts if s.key().toString() == QKeySequence(forward_seq).toString())
+        forward.activated.emit()
 
-        assert handled is True
         assert calls == [("history", False)]
 
     def test_ctrl_shift_tab_cycles_recent_pages_backward(self, main_window, monkeypatch):
-        calls: list[tuple[str, bool]] = []
+        from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
 
+        calls: list[tuple[str, bool]] = []
         monkeypatch.setattr(main_window, "_cycle_popup", lambda mode, reverse=False: calls.append((mode, reverse)))
 
-        handled = main_window.eventFilter(
-            main_window,
-            QKeyEvent(QEvent.KeyPress, Qt.Key_Backtab, Qt.ControlModifier | Qt.ShiftModifier),
-        )
+        _, backward_seq = history_cycle_sequences()
+        shortcuts = main_window.findChildren(QShortcut)
+        backward = next(s for s in shortcuts if s.key().toString() == QKeySequence(backward_seq).toString())
+        backward.activated.emit()
 
-        assert handled is True
         assert calls == [("history", True)]
 
     def test_recent_history_chicklets_keep_journal_pages_when_nav_hides_journal(self, main_window):
@@ -345,7 +350,10 @@ class TestHistoryNavigation:
 
         assert len(calls) == 1
 
-    def test_heading_picker_allows_plain_vi_keys_in_filter(self, main_window, qapp):
+    def test_heading_picker_allows_plain_vi_keys_in_filter(self, main_window, qapp, monkeypatch):
+        # Force the Windows/Linux vi-navigation chord so this test is deterministic
+        # regardless of host OS (macOS uses Meta+J/K - see test_keyboard_shortcuts.py).
+        monkeypatch.setattr("sp.app.ui.keyboard_shortcuts.platform.system", lambda: "Linux")
         main_window._toc_headings = [
             {"title": "Alpha", "line": 1, "level": 1, "position": 0},
             {"title": "Beta", "line": 2, "level": 1, "position": 10},

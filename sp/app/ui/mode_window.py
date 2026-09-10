@@ -79,6 +79,7 @@ def _load_one_shot_prompt() -> str:
     _ONE_SHOT_PROMPT_CACHE = default_prompt
     return default_prompt
 from .markdown_editor import MarkdownEditor
+from .keyboard_shortcuts import is_vi_navigation_chord
 from .date_insert_dialog import DateInsertDialog
 from .find_replace_bar import FindReplaceBar
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
@@ -1305,7 +1306,7 @@ class ModeWindow(QMainWindow):
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                    if is_vi_navigation_chord(ev.modifiers()):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)
@@ -1342,6 +1343,7 @@ class ModeWindow(QMainWindow):
         popup.move(clamp_popup_top_left(QPoint(x, y), size, screen))
         popup.show()
         popup.raise_()
+        popup.activateWindow()
         filter_edit.setFocus()
         self._heading_picker = popup
 

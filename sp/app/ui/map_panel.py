@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
+from .keyboard_shortcuts import is_vi_navigation_chord
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .theme import apply_menu_theme, theme_color, theme_value
 
@@ -402,7 +403,7 @@ class _MapContentTooltip(QFrame):
                 if (
                     config.load_vi_mode_enabled()
                     and event.key() in (Qt.Key_J, Qt.Key_K)
-                    and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+                    and is_vi_navigation_chord(event.modifiers())
                 ):
                     if event.key() == Qt.Key_J:
                         self.page_forward()
@@ -459,7 +460,7 @@ class _MapContentTooltip(QFrame):
         if (
             config.load_vi_mode_enabled()
             and event.key() in (Qt.Key_J, Qt.Key_K)
-            and event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier)
+            and is_vi_navigation_chord(event.modifiers())
         ):
             if event.key() == Qt.Key_J:
                 self.page_forward()
@@ -2602,7 +2603,7 @@ class MapPanel(QWidget):
         if (
             config.load_vi_mode_enabled()
             and key in (Qt.Key_J, Qt.Key_K)
-            and mods == (Qt.ControlModifier | Qt.ShiftModifier)
+            and is_vi_navigation_chord(mods)
         ):
             if key == Qt.Key_J:
                 self._content_tooltip.page_forward()

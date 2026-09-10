@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QImage, QKeySequence, QTextDocument
+from PySide6.QtGui import QAction, QFont, QImage, QKeySequence, QTextDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
@@ -392,4 +392,10 @@ def test_capture_metadata_comment_is_hidden_by_highlighter(qtbot) -> None:
         if span.start <= comment_start < span.start + span.length
     ]
     assert hidden
-    assert hidden[-1].format.fontPointSize() < 0.1
+    hidden_format = hidden[-1].format
+    # Hidden text uses a transparent foreground with collapsed letter-spacing
+    # rather than a near-zero font size (which macOS ignores during selection
+    # painting - see MarkdownHighlighter.hidden_format).
+    assert hidden_format.foreground().color().alpha() == 0
+    assert hidden_format.fontLetterSpacingType() == QFont.SpacingType.PercentageSpacing
+    assert hidden_format.fontLetterSpacing() <= 1

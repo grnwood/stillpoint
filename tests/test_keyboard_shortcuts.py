@@ -8,7 +8,11 @@ def test_vi_navigation_chord_uses_command_without_shift_on_macos(monkeypatch) ->
 
     assert keyboard_shortcuts.vi_navigation_sequences() == ("Meta+J", "Meta+K")
     assert keyboard_shortcuts.is_vi_navigation_chord(Qt.MetaModifier)
-    assert not keyboard_shortcuts.is_vi_navigation_chord(Qt.MetaModifier | Qt.ShiftModifier)
+    # An incidental Shift (Windows/Linux muscle memory) is tolerated on macOS.
+    assert keyboard_shortcuts.is_vi_navigation_chord(Qt.MetaModifier | Qt.ShiftModifier)
+    # Physical Cmd (Qt.ControlModifier on macOS) must never match, to avoid
+    # colliding with the Cmd+J "Jump to Page" shortcut.
+    assert not keyboard_shortcuts.is_vi_navigation_chord(Qt.ControlModifier)
 
 
 def test_vi_navigation_chord_uses_control_shift_on_windows_linux(monkeypatch) -> None:

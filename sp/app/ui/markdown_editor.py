@@ -543,7 +543,7 @@ class AIActionOverlay(QWidget):
                 delta = 1 if event.key() == Qt.Key_Down else -1
                 self._move_selection(delta)
                 return True
-            if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+            if is_vi_navigation_chord(event.modifiers() & ~Qt.KeypadModifier):
                 if event.key() == Qt.Key_J:
                     self._move_selection(1)
                     return True
@@ -776,7 +776,7 @@ class TagSuggestOverlay(QWidget):
                 delta = -1 if event.key() == Qt.Key_Up else 1
                 self.move_selection(delta)
                 return True
-            if event.key() in (Qt.Key_J, Qt.Key_K) and mods == (Qt.ControlModifier | Qt.ShiftModifier):
+            if event.key() in (Qt.Key_J, Qt.Key_K) and is_vi_navigation_chord(mods):
                 delta = 1 if event.key() == Qt.Key_J else -1
                 self.move_selection(delta)
                 return True
@@ -877,8 +877,15 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hidden_format = QTextCharFormat()
         transparent = QColor(0, 0, 0, 0)
         self.hidden_format.setForeground(transparent)
-        # Tiny size so hidden sentinels don't create visible gaps
-        self.hidden_format.setFontPointSize(0.01)
+        # Tiny size so hidden sentinels don't create visible gaps.
+        # Note: a sub-1pt size (e.g. 0.01) alone collapses width when unselected,
+        # but macOS's Cocoa/CoreText selection paint path ignores fractional
+        # point sizes below 1pt and re-renders the run at full size, revealing
+        # raw link markup whenever it's part of a selection or search highlight.
+        # 1pt + near-zero letter-spacing collapses reliably in both states.
+        self.hidden_format.setFontPointSize(1)
+        self.hidden_format.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
+        self.hidden_format.setFontLetterSpacing(1)
 
         self._heading_multipliers = (1.9, 1.6, 1.35, 1.2, 1.08)
         self.heading_styles: list[QTextCharFormat] = []
@@ -5187,7 +5194,7 @@ class MarkdownEditor(QTextEdit):
             event.accept()
             return
 
-        if (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier):
+        if is_vi_navigation_chord(event.modifiers() & ~Qt.KeypadModifier):
             if event.key() == Qt.Key_K:
                 self._vi_page_up()
                 event.accept()

@@ -43,4 +43,4 @@ Use the Map tab while editing the page so structure and writing evolve together.
 - `Space` folds or unfolds the selected node. On the root/title node, it hides or shows the H1 branches.
 - `Esc` collapses the map back to the root/title node and centers it.
 - In the note popup, `Up` / `Down` scroll by line and `Left` / `Right` close the popup.
-- In VI mode, `j` / `k` scroll the popup by line, `Ctrl+Shift+J` / `Ctrl+Shift+K` scroll by page, and `h` / `l` close the popup.
+- In VI mode, `j` / `k` scroll the popup by line, `Ctrl+Shift+J` / `Ctrl+Shift+K` (on macOS: `Control+J` / `Control+K`) scroll by page, and `h` / `l` close the popup.

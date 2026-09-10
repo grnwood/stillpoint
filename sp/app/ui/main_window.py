@@ -950,6 +950,11 @@ class RemoteVaultSelectDialog(QDialog):
         return self._create_new
 
 from .markdown_editor import HEADING_MAX_LEVEL, MarkdownEditor
+from .keyboard_shortcuts import (
+    is_vi_navigation_chord,
+    history_cycle_modifier_release_key,
+    history_cycle_sequences,
+)
 from .tabbed_right_panel import TabbedRightPanel
 from .task_panel import TaskPanel
 from .link_navigator_panel import LinkNavigatorPanel
@@ -1678,6 +1683,7 @@ class QuickVaultPicker(QWidget):
         self.move(top_left)
         self.show()
         self.raise_()
+        self.activateWindow()
         if target_path:
             self._select_current_page(target_path)
         self.tree.setFocus(Qt.OtherFocusReason)
@@ -1966,7 +1972,7 @@ class QuickVaultPicker(QWidget):
             if key in (Qt.Key_Return, Qt.Key_Enter):
                 self._activate_index(self.tree.currentIndex())
                 return True
-            if mods in (Qt.NoModifier, Qt.ControlModifier | Qt.ShiftModifier):
+            if mods == Qt.NoModifier or is_vi_navigation_chord(mods):
                 if key in (Qt.Key_J, Qt.Key_Down):
                     self._move_selection(1)
                     return True
@@ -2140,7 +2146,7 @@ class MenuCommandBar(QWidget):
                 delta = 1 if event.key() == Qt.Key_Down else -1
                 self._move_selection(delta)
                 return True
-            if event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+            if is_vi_navigation_chord(event.modifiers()):
                 if event.key() == Qt.Key_J:
                     self._move_selection(1)
                     return True
@@ -4021,6 +4027,22 @@ class MainWindow(QMainWindow):
         command_bar_universal = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
         command_bar_universal.setContext(Qt.ApplicationShortcut)
         command_bar_universal.activated.connect(self._show_command_bar)
+        command_bar_mac_physical_ctrl = None
+        if platform.system() == "Darwin":
+            # "Ctrl+Shift+P" above resolves to Cmd+Shift+P on macOS (Qt's Ctrl/Cmd
+            # swap), which is awkward for home-row use. Also bind the physical
+            # Control+Shift+P chord ("Meta" text = physical Control on macOS) to
+            # the same action, matching Option+G ergonomics.
+            command_bar_mac_physical_ctrl = QShortcut(QKeySequence("Meta+Shift+P"), self)
+            command_bar_mac_physical_ctrl.setContext(Qt.ApplicationShortcut)
+            command_bar_mac_physical_ctrl.activated.connect(self._show_command_bar)
+        history_forward_seq, history_backward_seq = history_cycle_sequences()
+        history_cycle_forward = QShortcut(QKeySequence(history_forward_seq), self)
+        history_cycle_forward.setContext(Qt.ApplicationShortcut)
+        history_cycle_forward.activated.connect(lambda: self._cycle_popup("history", reverse=False))
+        history_cycle_backward = QShortcut(QKeySequence(history_backward_seq), self)
+        history_cycle_backward.setContext(Qt.ApplicationShortcut)
+        history_cycle_backward.activated.connect(lambda: self._cycle_popup("history", reverse=True))
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         if nav_back_mac is not None:
@@ -11823,7 +11845,7 @@ class MainWindow(QMainWindow):
                     if ev.key() == Qt.Key_Up and not ev.modifiers():
                         list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), -1))
                         return True
-                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                    if is_vi_navigation_chord(ev.modifiers()):
                         if ev.key() == Qt.Key_J:
                             list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
                             return True
@@ -11858,6 +11880,7 @@ class MainWindow(QMainWindow):
         popup.move(clamp_popup_top_left(QPoint(x, y), size, screen_geo))
         popup.show()
         popup.raise_()
+        popup.activateWindow()
         filter_edit.setFocus()
         self._link_relations_picker = popup
 
@@ -12028,7 +12051,7 @@ class MainWindow(QMainWindow):
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                    if is_vi_navigation_chord(ev.modifiers()):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)
@@ -12061,6 +12084,7 @@ class MainWindow(QMainWindow):
         popup.move(top_left)
         popup.show()
         popup.raise_()
+        popup.activateWindow()
         filter_edit.setFocus()
         self._heading_picker = popup
 
@@ -23554,12 +23578,13 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key_G and (event.modifiers() & Qt.AltModifier):
                 self._show_command_bar()
                 return True
-            if event.key() in (Qt.Key_Tab, Qt.Key_Backtab) and (event.modifiers() & Qt.ControlModifier):
-                reverse = bool(event.modifiers() & Qt.ShiftModifier) or event.key() == Qt.Key_Backtab
-                self._cycle_popup("history", reverse=reverse)
-                return True
+            # Recent-page cycling (Ctrl+Tab/Ctrl+Shift+Tab) is handled by the
+            # QShortcut objects registered in _register_shortcuts, not here:
+            # Cocoa's default text-view key bindings claim Control+Tab for its
+            # own key-view navigation before a plain KeyPress reaches filters,
+            # but QShortcut is matched earlier through Qt's own shortcut map.
         elif event.type() == QEvent.KeyRelease:
-            if event.key() == Qt.Key_Control and self._popup_items:
+            if event.key() == history_cycle_modifier_release_key() and self._popup_items:
                 self._activate_history_popup_selection()
                 return True
         return super().eventFilter(obj, event)

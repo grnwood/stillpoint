@@ -308,6 +308,10 @@ def test_ctrl_shift_j_scrolls_selected_note_popup_by_page_in_vi_mode(
     qapp: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Ctrl+Shift+J/K is the Windows/Linux vi-navigation chord; force that
+    # platform so this test is deterministic regardless of the host OS
+    # (macOS uses Meta+J/K instead - see test_keyboard_shortcuts.py).
+    monkeypatch.setattr("sp.app.ui.keyboard_shortcuts.platform.system", lambda: "Linux")
     monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
     panel = MapPanel()
     long_body = "\n".join(f"line {idx}" for idx in range(40))

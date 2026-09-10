@@ -39,6 +39,7 @@ from PySide6.QtCore import QSize
 
 from .find_replace_bar import FindReplaceBar
 from .markdown_editor import MarkdownEditor, MARKDOWN_IMAGE_WIDTH_OPTIONS
+from .keyboard_shortcuts import is_vi_navigation_chord
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
@@ -1198,7 +1199,7 @@ class PageEditorWindow(QMainWindow):
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+                    if is_vi_navigation_chord(ev.modifiers()):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)
@@ -1230,6 +1231,7 @@ class PageEditorWindow(QMainWindow):
         popup.move(top_left)
         popup.show()
         popup.raise_()
+        popup.activateWindow()
         filter_edit.setFocus()
         self._heading_picker = popup
         _page_editor_log(f"[PageEditor] Filterable picker shown with {list_widget.count()} headings")

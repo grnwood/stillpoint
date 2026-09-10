@@ -35,7 +35,8 @@ These shortcuts will speed up your workflow:
 - `Ctrl+Tab`: Cycle forward through recent pages
 - `Ctrl+Shift+Tab`: Cycle backward through recent pages
 <!-- StillPoint shortcut macos-only:start -->
-- Use `Cmd+J` / `Cmd+K` for vi navigation controls
+- On macOS: `Control+Tab` / `Control+Shift+Tab` (the physical Control key, not Command) cycle recent pages, since Cmd+Tab is reserved by macOS for app switching
+- Use `Control+J` / `Control+K` (the physical Control key, not Command) for vi navigation controls
 <!-- StillPoint shortcut macos-only:end -->
 - `Alt+PgUp` / `Alt+PgDown`: Move file-nav selection up/down
 - `Enter` (file nav selected): Open selected page and focus editor
@@ -45,6 +46,9 @@ These shortcuts will speed up your workflow:
 - `\` (file nav focused): Collapse the whole tree
 - `Ctrl+Alt+T`: Open heading picker
 - `Ctrl+Shift+P`: Open command bar
+<!-- StillPoint shortcut macos-only:start -->
+- On macOS: `Control+Shift+P` (the physical Control key, not Command) also opens the command bar, same as `Option+G`
+<!-- StillPoint shortcut macos-only:end -->
 - `Ctrl+L`: Insert link
 - `Ctrl+Shift+L`: Insert link to new page
 
@@ -83,7 +87,7 @@ These shortcuts will speed up your workflow:
 - In the Map tab, `Space` folds or unfolds the selected node; on the root/title node it hides or shows the H1 branches
 - In the Map tab, `Esc` collapses the map back to the root/title node and centers it
 - In an open Map note popup, `Up` / `Down` scroll by line and `Left` / `Right` close the popup
-- In an open Map note popup with VI mode enabled, `j` / `k` scroll by line, `Ctrl+Shift+J` / `Ctrl+Shift+K` scroll by page, and `h` / `l` close the popup
+- In an open Map note popup with VI mode enabled, `j` / `k` scroll by line, `Ctrl+Shift+J` / `Ctrl+Shift+K` (on macOS: `Control+J` / `Control+K`) scroll by page, and `h` / `l` close the popup
 
 ### Special
 - `Ctrl+.`: Open preferences
