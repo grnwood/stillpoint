@@ -1,14 +1,70 @@
 import pytest
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QKeyEvent, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QKeyEvent, QPalette, QWheelEvent
+from PySide6.QtWidgets import QApplication, QScrollArea
 
-from sp.app.ui.map_panel import MapPanel
+from sp.app.ui.map_panel import MapPanel, ZoomablePreviewLabel
 
 
 def _node_by_label(panel: MapPanel, label: str):
     assert panel._latest_root is not None
     return next(node for node in panel._collect_nodes(panel._latest_root) if node.label == label)
+
+
+def _wheel_event(*, pixel_x: int = 0, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier) -> QWheelEvent:
+    return QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(pixel_x, pixel_y),
+        QPoint(0, angle_y),
+        Qt.NoButton,
+        modifiers,
+        Qt.ScrollUpdate,
+        False,
+    )
+
+
+def test_map_trackpad_pans_and_mouse_wheel_zooms(qtbot) -> None:
+    area = QScrollArea()
+    label = ZoomablePreviewLabel()
+    label.resize(1000, 1000)
+    area.setWidget(label)
+    area.resize(200, 200)
+    qtbot.addWidget(area)
+    area.show()
+    area.horizontalScrollBar().setValue(200)
+    area.verticalScrollBar().setValue(200)
+    zooms: list[float] = []
+    label.zoomRequested.connect(lambda steps, _anchor: zooms.append(steps))
+
+    label.wheelEvent(_wheel_event(pixel_x=-12, pixel_y=-30))
+
+    assert area.horizontalScrollBar().value() == 212
+    assert area.verticalScrollBar().value() == 230
+    assert zooms == []
+
+    label.wheelEvent(_wheel_event(angle_y=120))
+
+    assert zooms == [1.0]
+
+
+def test_map_scroll_area_yields_arrow_keys_to_preview(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## One\n\n## Two\n")
+    one = _node_by_label(panel, "One")
+    two = _node_by_label(panel, "Two")
+    panel._set_selected_node(one)
+
+    assert panel.scroll_area.focusPolicy() == Qt.NoFocus
+    assert panel.scroll_area.viewport().focusPolicy() == Qt.NoFocus
+    assert panel.scroll_area.focusProxy() is panel.preview_label
+
+    qapp.sendEvent(
+        panel.preview_label,
+        QKeyEvent(QEvent.KeyPress, Qt.Key_Down, Qt.KeypadModifier),
+    )
+
+    assert panel._selected_node_id == two.node_id
 
 
 def test_detached_reorder_rebuilds_same_parent_siblings(qapp: QApplication) -> None:

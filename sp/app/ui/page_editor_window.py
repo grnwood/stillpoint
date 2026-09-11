@@ -201,6 +201,7 @@ class PageEditorWindow(QMainWindow):
         self._geometry_timer = QTimer(self)
         self._geometry_timer.setInterval(400)
         self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.timeout.connect(self._save_geometry)
 
         # Status badges
         self._dirty_status_label = QLabel("")

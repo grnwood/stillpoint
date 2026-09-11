@@ -17138,6 +17138,10 @@ class MainWindow(QMainWindow):
             window.setWindowIcon(get_app_icon())
         except Exception:
             pass
+        close_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Close), window)
+        close_shortcut.setContext(Qt.WindowShortcut)
+        close_shortcut.activated.connect(window.close)
+        window._close_window_shortcut = close_shortcut  # type: ignore[attr-defined]
 
     def _open_task_panel_window(self) -> None:
         if not self._feature_tasks_enabled:
@@ -17230,7 +17234,6 @@ class MainWindow(QMainWindow):
                 p.refresh(),
             ),
         )
-
     def _open_link_panel_window(self) -> None:
         if not self._feature_link_navigator_enabled:
             return
@@ -17307,6 +17310,7 @@ class MainWindow(QMainWindow):
                 self._get_editor_text_for_path(self.current_path),
             ) if self.current_path else p.clear_content(),
         )
+        QTimer.singleShot(0, lambda p=panel: p.preview_label.setFocus(Qt.OtherFocusReason))
 
     def _open_ai_chat_window(self, *, detached_only: bool = False) -> None:
         if not config.load_enable_ai_chats():
@@ -17437,13 +17441,6 @@ class MainWindow(QMainWindow):
                 verify_tls=self._verify_tls,
                 parent=None,
             )
-            try:
-                window.setWindowFlag(Qt.Window, True)
-                window.setWindowFlag(Qt.Tool, False)
-                window.setAttribute(Qt.WA_NativeWindow, True)
-                window.setWindowModality(Qt.NonModal)
-            except Exception:
-                pass
             window.show()
             self._page_windows.append(window)
             window.destroyed.connect(lambda: self._page_windows.remove(window) if window in self._page_windows else None)

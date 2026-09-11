@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, Signal, QVariantAnimation, QEasingCurve, QTimer
-from PySide6.QtGui import QColor, QFont, QBrush, QKeyEvent, QPalette, QPen, QPainter, QPolygonF
+from PySide6.QtGui import QColor, QFont, QBrush, QKeyEvent, QNativeGestureEvent, QPalette, QPen, QPainter, QPolygonF
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.server.adapters.files import strip_page_suffix
 from .path_utils import path_to_colon
+from .canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from .theme import apply_menu_theme, theme_value
 from .page_load_logger import measure_performance
 
@@ -204,6 +205,7 @@ class GalaxyGraphView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setMouseTracking(True)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -258,24 +260,53 @@ class GalaxyGraphView(QGraphicsView):
             self.apply_theme()
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
-        if event.modifiers() & Qt.ShiftModifier:
-            delta = event.angleDelta().y()
-            if delta:
-                self.horizontalScrollBar().setValue(
-                    self.horizontalScrollBar().value() - (int(delta / 120) * 40)
-                )
-                event.accept()
-                return
-        delta = event.angleDelta().y()
-        if delta == 0:
+        action = wheel_action(event)
+        if action.is_zoom:
+            self._apply_zoom_steps(action.zoom_steps)
+            event.accept()
             return
-        factor = 1.15 if delta > 0 else 0.87
-        self._zoom = max(0.2, min(4.0, self._zoom * factor))
+        if action.is_pan:
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - round(action.pan.x())
+            )
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - round(action.pan.y())
+            )
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def _apply_zoom_steps(self, steps: float) -> None:
+        target = max(0.2, min(4.0, self._zoom * zoom_factor(steps)))
+        if math.isclose(target, self._zoom):
+            return
+        factor = target / self._zoom
+        self._zoom = target
         self.scale(factor, factor)
         self._update_label_visibility()
 
+    def _handle_native_zoom(self, event) -> bool:
+        if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
+            value = event.value()
+            if value:
+                self._apply_zoom_steps(native_zoom_steps(value))
+                event.accept()
+                return True
+        return False
+
+    def event(self, event):  # type: ignore[override]
+        if self._handle_native_zoom(event):
+            return True
+        return super().event(event)
+
+    def viewportEvent(self, event) -> bool:  # type: ignore[override]
+        # Native gestures target QAbstractScrollArea's viewport on macOS.
+        if self._handle_native_zoom(event):
+            return True
+        return super().viewportEvent(event)
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.RightButton:
+        if event.button() in (Qt.MiddleButton, Qt.RightButton):
             self._is_panning = True
             self._pan_start_pos = self._event_global_pos(event)
             self.setCursor(Qt.ClosedHandCursor)
@@ -311,7 +342,7 @@ class GalaxyGraphView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.RightButton and self._is_panning:
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self._is_panning:
             self._is_panning = False
             self._pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
@@ -330,7 +361,7 @@ class GalaxyGraphView(QGraphicsView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         key = event.key()
-        mods = event.modifiers()
+        mods = event.modifiers() & ~Qt.KeypadModifier
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods in (Qt.NoModifier, Qt.ShiftModifier):
             if self._activate_selected_node(keep_focus=mods == Qt.ShiftModifier):
                 event.accept()

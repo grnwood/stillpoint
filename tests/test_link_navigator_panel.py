@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtWidgets import QMenu
 from PySide6.QtTest import QTest
 
@@ -12,6 +12,19 @@ from sp.app.ui.ai_chat_panel import AIChatPanel
 from sp.app.ui.calendar_panel import CalendarPanel
 from sp.app.ui.link_navigator_panel import GalaxyGraphView, LinkNavigatorPanel, _NodeData
 from sp.app.ui.tabbed_right_panel import TabbedRightPanel
+
+
+def _wheel_event(*, pixel_x: int = 0, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier) -> QWheelEvent:
+    return QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(pixel_x, pixel_y),
+        QPoint(0, angle_y),
+        Qt.NoButton,
+        modifiers,
+        Qt.ScrollUpdate,
+        False,
+    )
 
 
 def test_link_graph_keyboard_navigation_and_activation(qtbot, qapp) -> None:
@@ -188,6 +201,33 @@ def test_link_graph_blank_left_click_requests_menu_and_right_click_pans(qtbot, q
 
     QTest.mouseRelease(view.viewport(), Qt.RightButton, pos=QPoint(10, 10))
     assert view._is_panning is False
+
+    QTest.mousePress(view.viewport(), Qt.MiddleButton, pos=QPoint(10, 10))
+    assert view._is_panning is True
+    QTest.mouseRelease(view.viewport(), Qt.MiddleButton, pos=QPoint(10, 10))
+    assert view._is_panning is False
+
+
+def test_link_graph_trackpad_pans_and_mouse_wheel_zooms(qtbot, qapp) -> None:
+    view = GalaxyGraphView()
+    qtbot.addWidget(view)
+    view.resize(240, 180)
+    view.setSceneRect(0, 0, 2000, 2000)
+    view.show()
+    view.centerOn(1000, 1000)
+    qapp.processEvents()
+    old_x = view.horizontalScrollBar().value()
+    old_y = view.verticalScrollBar().value()
+
+    view.wheelEvent(_wheel_event(pixel_x=-12, pixel_y=-30))
+
+    assert view.horizontalScrollBar().value() == old_x + 12
+    assert view.verticalScrollBar().value() == old_y + 30
+    assert view._zoom == 1.0
+
+    view.wheelEvent(_wheel_event(angle_y=120))
+
+    assert view._zoom == 1.1
 
 
 def test_link_graph_uses_vault_accent_and_readable_active_label(qtbot) -> None:

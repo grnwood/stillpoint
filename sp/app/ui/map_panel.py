@@ -27,14 +27,15 @@ from sp.app import config
 from sp.logging_flags import log_enabled
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
 from .keyboard_shortcuts import is_vi_navigation_chord
+from .canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .theme import apply_menu_theme, theme_color, theme_value
 
 
 class ZoomablePreviewLabel(QLabel):
-    """Preview label with wheel or gesture zoom and drag-to-pan."""
+    """Preview label with native trackpad, wheel, and drag navigation."""
 
-    zoomRequested = Signal(int, object)
+    zoomRequested = Signal(float, object)
 
     def __init__(self):
         super().__init__()
@@ -43,43 +44,46 @@ class ZoomablePreviewLabel(QLabel):
         self.grabGesture(Qt.PinchGesture)
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
-        # Shift + mouse wheel for horizontal scrolling
-        if event.modifiers() & Qt.ShiftModifier:
-            delta = event.angleDelta().y()
-            if delta:
-                parent = self.parent()
-                while parent:
-                    if isinstance(parent, QScrollArea):
-                        parent.horizontalScrollBar().setValue(
-                            parent.horizontalScrollBar().value() - (int(delta / 120) * 40)
-                        )
-                        event.accept()
-                        return
-                    parent = parent.parent()
-        # Mouse wheel controls zoom (Lucidchart style)
-        delta = event.angleDelta().y()
-        if delta:
-            self.zoomRequested.emit(1 if delta > 0 else -1, QPointF(event.position()))
+        action = wheel_action(event)
+        if action.is_zoom:
+            self.zoomRequested.emit(action.zoom_steps, QPointF(event.position()))
             event.accept()
             return
+        if action.is_pan:
+            area = self._scroll_area()
+            if area is not None:
+                area.horizontalScrollBar().setValue(
+                    area.horizontalScrollBar().value() - round(action.pan.x())
+                )
+                area.verticalScrollBar().setValue(
+                    area.verticalScrollBar().value() - round(action.pan.y())
+                )
+                event.accept()
+                return
         super().wheelEvent(event)
 
-    def nativeEvent(self, eventType, message):  # type: ignore[override]
-        return super().nativeEvent(eventType, message)
+    def _scroll_area(self) -> Optional[QScrollArea]:
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parent()
+        return None
 
     def event(self, event):  # type: ignore[override]
         if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
             value = event.value()
             if value:
-                self.zoomRequested.emit(1 if value > 0 else -1, QPointF(event.position()))
+                self.zoomRequested.emit(native_zoom_steps(value), QPointF(event.position()))
                 event.accept()
                 return True
         return super().event(event)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         pixmap = self.pixmap()
-        # Right-click drag for panning (Lucidchart style)
-        if event.button() == Qt.RightButton and pixmap:
+        # Middle drag is conventional canvas panning; retain right drag for
+        # compatibility with the previous behavior.
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and pixmap:
             self.is_panning = True
             self.pan_start_pos = event.globalPos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -102,8 +106,8 @@ class ZoomablePreviewLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        # Right-click drag for panning (Lucidchart style)
-        if event.button() == Qt.RightButton and self.is_panning:
+        # Finish either supported drag-to-pan gesture.
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self.is_panning:
             self.is_panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
@@ -883,6 +887,11 @@ class MapPanel(QWidget):
         self.scroll_area.setWidgetResizable(False)
         self.scroll_area.setAlignment(Qt.AlignCenter)
         self.scroll_area.setWidget(self.preview_label)
+        # QScrollArea otherwise consumes plain arrow keys to pan on macOS.
+        # Keep keyboard focus on the map preview where arrows select nodes.
+        self.scroll_area.setFocusPolicy(Qt.NoFocus)
+        self.scroll_area.viewport().setFocusPolicy(Qt.NoFocus)
+        self.scroll_area.setFocusProxy(self.preview_label)
         return self.scroll_area
 
     def set_content(self, page_path: Optional[str], markdown_text: str) -> None:
@@ -1191,11 +1200,11 @@ class MapPanel(QWidget):
         self._update_detached_mode_controls()
         self._update_filter_controls()
 
-    def _adjust_zoom(self, delta: int, anchor: object = None) -> None:
+    def _adjust_zoom(self, delta: float, anchor: object = None) -> None:
         if not self._svg_content:
             return
         old_zoom = self._zoom_factor
-        new_zoom = max(0.2, min(4.0, self._zoom_factor + (0.1 * delta)))
+        new_zoom = max(0.2, min(4.0, self._zoom_factor * zoom_factor(delta)))
         if abs(new_zoom - old_zoom) < 1e-9:
             return
         viewport_anchor = None
@@ -2970,7 +2979,10 @@ class MapPanel(QWidget):
         if self._content_tooltip.isVisible() and not self._tooltip_pinned:
             self._cancel_hover_tooltip()
         key = event.key()
-        mods = event.modifiers()
+        # macOS/Qt may tag physical arrow keys as keypad navigation. Treat
+        # that flag as incidental so arrows behave like the same keys on
+        # other platforms.
+        mods = event.modifiers() & ~Qt.KeypadModifier
         if self._handle_selected_note_popup_keypress(key, mods):
             event.accept()
             return
@@ -3092,6 +3104,8 @@ class MapPanel(QWidget):
             else:
                 self._cancel_hover_tooltip()
         if watched is self.preview_label and isinstance(event, QMouseEvent):
+            if event.type() == event.Type.MouseButtonPress:
+                self.preview_label.setFocus(Qt.MouseFocusReason)
             if self._draft_heading is not None and event.type() == event.Type.MouseButtonPress:
                 event.accept()
                 return True
