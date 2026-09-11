@@ -121,6 +121,26 @@ def test_close_event_blocks_paint_before_destruction(qapp) -> None:
     )
 
 
+def test_prepare_for_shutdown_disables_native_updates_before_teardown(qapp) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor)
+    editor.set_markdown("# Title\n\nSome content\n")
+    _drain_events(wait_ms=20, rounds=4)
+    load_generation = editor.current_load_token()
+
+    editor.prepare_for_shutdown()
+
+    assert editor._editor_alive is False
+    assert editor._suppress_paint is True
+    assert editor.updatesEnabled() is False
+    assert editor.viewport().updatesEnabled() is False
+    assert editor.current_load_token() == load_generation + 1
+    assert editor._load_in_flight_token == 0
+    assert editor._teardown_done is True
+    assert editor.highlighter.document() is None
+    editor.close()
+
+
 def test_editor_paint_suppressed_when_hidden_without_explicit_close(qapp) -> None:
     """hideEvent must set _suppress_paint=True to guard against late WM_PAINT.
 

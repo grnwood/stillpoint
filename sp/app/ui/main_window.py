@@ -23785,6 +23785,15 @@ class MainWindow(QMainWindow):
                     return
             except Exception:
                 pass
+        # Block native QTextEdit painting before saves and cleanup begin. On
+        # macOS, Command-Q may otherwise deliver a final expose event while the
+        # document layout or syntax highlighter is entering teardown.
+        self.setProperty("_sp_closing", True)
+        try:
+            if getattr(self, "editor", None):
+                self.editor.prepare_for_shutdown()
+        except Exception:
+            pass
         # Invalidate hydration callbacks before child Qt objects enter their
         # native destruction sequence.
         self._page_hydration_generation += 1

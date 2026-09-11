@@ -1629,8 +1629,7 @@ class PageEditorWindow(QMainWindow):
         self.setProperty("_sp_closing", True)
         try:
             if getattr(self, "editor", None):
-                self.editor._suppress_paint = True
-                self.editor._editor_alive = False
+                self.editor.prepare_for_shutdown()
         except Exception:
             pass
         # Autosave on close if dirty and writable

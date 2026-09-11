@@ -1979,16 +1979,39 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             pass
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]
+    def prepare_for_shutdown(self) -> None:
+        """Stop native painting before the host window begins its close sequence.
+
+        Cocoa can dispatch a final expose/paint while top-level windows are being
+        closed for Command-Q.  QTextEdit painting during document/highlighter
+        teardown can fault below Python, so make the editor non-paintable before
+        the host performs saves, network cleanup, or native window destruction.
+        """
+        self._suppress_paint = True
+        self._editor_alive = False
+        self._pending_image_hydration = None
+        self._load_generation += 1
+        self._load_in_flight_token = 0
+        try:
+            self.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
+            viewport = self.viewport()
+            if viewport is not None:
+                viewport.setUpdatesEnabled(False)
+        except Exception:
+            pass
         self._teardown_editor()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
         # Mark the editor as no longer alive *before* calling Qt's close/destroy
         # chain.  On Windows, QTextEdit::paintEvent can be dispatched during the
         # close sequence (while the document and viewport are in a partially-freed
         # state), which causes an access violation (fatal crash).  Setting these
         # flags here ensures paintEvent bails out early for the entire close cycle,
         # complementing the _on_editor_destroyed signal handler which fires later.
-        self._editor_alive = False
-        self._suppress_paint = True
+        self.prepare_for_shutdown()
         super().closeEvent(event)
 
     def _apply_theme_palette(self) -> None:
