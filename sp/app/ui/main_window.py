@@ -2261,6 +2261,31 @@ def logNav(message: str) -> None:
     _log_navigation(f"[Nav] {message}")
 
 
+class _DetachedWindowCloseFilter(QObject):
+    """Close a detached window before an app-wide shortcut can claim Cmd/Ctrl+W."""
+
+    def __init__(self, target: QMainWindow) -> None:
+        super().__init__(target)
+        self._target = target
+
+    def eventFilter(self, watched, event):  # type: ignore[override]
+        if event.type() != QEvent.ShortcutOverride or event.key() != Qt.Key_W:
+            return False
+        if not isinstance(watched, QWidget) or watched.window() is not self._target:
+            return False
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        close_modifiers = {Qt.ControlModifier}
+        if sys.platform == "darwin":
+            # Qt normally maps Command to ControlModifier, but accepting Meta
+            # as well covers native/plugin configurations that do not swap it.
+            close_modifiers.add(Qt.MetaModifier)
+        if modifiers not in close_modifiers:
+            return False
+        event.accept()
+        self._target.close()
+        return True
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -17138,10 +17163,15 @@ class MainWindow(QMainWindow):
             window.setWindowIcon(get_app_icon())
         except Exception:
             pass
-        close_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Close), window)
+        close_shortcut = QShortcut(QKeySequence("Ctrl+W"), window)
         close_shortcut.setContext(Qt.WindowShortcut)
         close_shortcut.activated.connect(window.close)
         window._close_window_shortcut = close_shortcut  # type: ignore[attr-defined]
+        close_filter = _DetachedWindowCloseFilter(window)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(close_filter)
+        window._close_window_filter = close_filter  # type: ignore[attr-defined]
 
     def _open_task_panel_window(self) -> None:
         if not self._feature_tasks_enabled:

@@ -43,8 +43,9 @@ from .keyboard_shortcuts import is_vi_navigation_chord
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
-from .path_utils import should_use_full_target_label, trace_link_decision
-from sp.app import config
+from .path_utils import colon_to_path, path_to_colon, should_use_full_target_label, trace_link_decision
+from .task_quick_editor import TaskQuickEditor
+from sp.app import config, indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
@@ -136,6 +137,7 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_font_point_size(self._font_size)
         self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         self.editor.set_vi_mode_enabled(config.load_vi_mode_enabled())
+        self.editor.set_task_hover_edit_enabled(True)
         self.editor.set_read_only_mode(self._read_only)
         self.editor.set_ai_shortcuts_enabled(False)
         self.editor.linkActivated.connect(self._forward_link_to_main)
@@ -146,6 +148,8 @@ class PageEditorWindow(QMainWindow):
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self.editor.aiInlinePromptRequested.connect(self._open_inline_ai_prompt)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
+        self.editor.taskEditRequested.connect(self._edit_task_from_page_editor)
+        self._task_editor: Optional[TaskQuickEditor] = None
         self._find_bar = FindReplaceBar(self)
         self._find_bar.findNextRequested.connect(self._on_find_next_requested)
         self._find_bar.replaceRequested.connect(self._on_replace_requested)
@@ -271,6 +275,158 @@ class PageEditorWindow(QMainWindow):
             if self._auth_prompt():
                 resp = self.http.post(path, json=payload)
         return resp
+
+    def _api_get(self, path: str, *, params: Optional[dict] = None) -> httpx.Response:
+        """GET with one remote re-auth retry on 401."""
+        resp = self.http.get(path, params=params)
+        if resp.status_code == 401 and self._remote_mode and self._auth_prompt:
+            if self._auth_prompt():
+                resp = self.http.get(path, params=params)
+        return resp
+
+    def _task_destination_pages(self, query: str) -> list[str]:
+        """Search destinations using this window's server connection."""
+        term = str(query or "").strip().lstrip(":")
+        if not term:
+            return []
+        try:
+            response = self._api_get("/api/pages/search", params={"q": term, "limit": 40})
+            response.raise_for_status()
+            pages = response.json().get("pages", [])
+        except Exception:
+            return []
+        results: list[str] = []
+        for page in pages:
+            raw_path = str(page.get("path") or "") if isinstance(page, dict) else str(page or "")
+            colon_path = path_to_colon(raw_path)
+            if colon_path:
+                results.append(f":{colon_path.lstrip(':')}")
+        return list(dict.fromkeys(results))
+
+    def _task_editor_known_tags(self) -> list[str]:
+        """Load tag completions without borrowing the main window's task panel."""
+        try:
+            response = self._api_get("/tags")
+            response.raise_for_status()
+            entries = response.json().get("tags", [])
+        except Exception:
+            return []
+        tags: set[str] = set()
+        for entry in entries:
+            value = entry.get("tag") if isinstance(entry, dict) else entry
+            cleaned = str(value or "").lstrip("@").strip()
+            if cleaned:
+                tags.add(cleaned)
+        return sorted(tags, key=str.casefold)
+
+    def _normalize_task_destination(self, destination: Optional[str]) -> Optional[str]:
+        cleaned = str(destination or "").strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("/"):
+            return cleaned
+        return colon_to_path(cleaned, Path(self.vault_root).name)
+
+    @staticmethod
+    def _task_mutation_error(exc: Exception) -> str:
+        message = str(exc)
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                message = str(response.json().get("detail") or message)
+            except Exception:
+                pass
+        return message
+
+    def _edit_task_from_page_editor(self, block_number: int, anchor_pos) -> None:
+        """Edit one task using state and network ownership local to this window."""
+        if self._read_only:
+            QMessageBox.information(self, "Edit Task", "Cannot edit tasks while this window is read-only.")
+            return
+
+        if self._is_dirty():
+            self._save_current_file(auto=True, reason="edit inline task")
+            if self._is_dirty():
+                QMessageBox.warning(self, "Edit Task", "Save the page before editing this task.")
+                return
+
+        try:
+            lines = self.editor.to_markdown().splitlines()
+            line_index = int(block_number)
+            if line_index < 0 or line_index >= len(lines):
+                raise ValueError("The selected task line is no longer available.")
+            parsed = indexer.extract_tasks(self._source_path, lines[line_index])
+            if not parsed:
+                raise ValueError("The selected line is no longer a task.")
+            task = dict(parsed[0])
+            task["path"] = self._source_path
+            task["line"] = line_index + 1
+            task["id"] = f"{self._source_path}:{line_index + 1}"
+        except Exception as exc:
+            QMessageBox.warning(self, "Edit Task", str(exc))
+            return
+
+        dialog = TaskQuickEditor(
+            task,
+            self,
+            known_tags=self._task_editor_known_tags(),
+            page_search=self._task_destination_pages,
+            anchor_pos=anchor_pos if isinstance(anchor_pos, QPoint) else None,
+            vi_mode=bool(self._vi_enabled),
+            vault_accent_color=getattr(self.editor, "_vault_accent_color", None),
+        )
+        # Keep this editor modal only to its detached page window. The main
+        # window remains independently usable and cannot become the owner.
+        dialog.setWindowModality(Qt.WindowModal)
+        self._task_editor = dialog
+        self.editor.push_focus_lost_suppression()
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return
+            values = dialog.values()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Task update blocked", str(exc))
+            return
+        finally:
+            self.editor.pop_focus_lost_suppression()
+            self._task_editor = None
+
+        payload = {
+            "targets": [
+                {
+                    "path": self._source_path,
+                    "line": line_index + 1,
+                    "expected_text": str(task.get("text") or ""),
+                    "expected_status": str(task.get("status") or "todo"),
+                }
+            ],
+            "text": values["text"],
+            "status": values["status"],
+            "priority": values["priority"],
+            "tags": values["tags"],
+            "start": values["start"],
+            "due": values["due"],
+            "destination": self._normalize_task_destination(values.get("destination")),
+        }
+        try:
+            response = self._api_post("/api/tasks/mutate", payload)
+            response.raise_for_status()
+            response.json()
+        except Exception as exc:
+            QMessageBox.warning(self, "Task update blocked", self._task_mutation_error(exc))
+            return
+
+        self._load_content()
+        block = self.editor.document().findBlockByNumber(line_index)
+        if block.isValid():
+            self.editor.setTextCursor(QTextCursor(block))
+            self.editor.ensureCursorVisible()
+        try:
+            self._open_in_main(self._source_path, force=True, refresh_only=True)
+        except Exception:
+            pass
+        self.statusBar().showMessage("Task updated", 3000)
+        QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
     def _apply_theme_palette(self) -> None:
         bg = theme_value("page_editor_window.base.bg", None)
