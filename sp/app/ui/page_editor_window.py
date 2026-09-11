@@ -198,6 +198,7 @@ class PageEditorWindow(QMainWindow):
         self.editor.headingPickerRequested.connect(self._handle_heading_picker_request)
 
         self._build_toolbar()
+        self._install_close_window_action()
         self._load_content()
         self._update_title()
         self._size_and_center(parent)
@@ -267,6 +268,28 @@ class PageEditorWindow(QMainWindow):
         # Install event filter to catch Control key release for popup navigation
         self.installEventFilter(self)
         self.editor.installEventFilter(self)
+
+    def _install_close_window_action(self) -> None:
+        """Expose a real per-window Close command, including the macOS menu."""
+        action = QAction("Close Window", self)
+        action.setShortcut(QKeySequence("Ctrl+W"))
+        action.setShortcutContext(Qt.WindowShortcut)
+        action.setMenuRole(QAction.MenuRole.NoRole)
+        action.triggered.connect(self.close)
+        self.addAction(action)
+        if sys.platform == "darwin":
+            file_menu = self.menuBar().addMenu("&File")
+            file_menu.addAction(action)
+        self._close_window_action = action
+
+    @staticmethod
+    def _is_close_window_key(event) -> bool:
+        if event.key() != Qt.Key_W:
+            return False
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if modifiers == Qt.ControlModifier:
+            return True
+        return sys.platform == "darwin" and modifiers == Qt.MetaModifier
 
     def _api_post(self, path: str, payload: dict) -> httpx.Response:
         """POST with one remote re-auth retry on 401."""
@@ -1766,10 +1789,17 @@ class PageEditorWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Handle Ctrl key release to activate heading popup selection."""
         if event.type() == QEvent.ShortcutOverride:
+            if self._is_close_window_key(event):
+                event.accept()
+                return True
             if obj is self.editor and event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
                 event.accept()
                 return True
         if event.type() == QEvent.KeyPress:
+            if self._is_close_window_key(event):
+                self.close()
+                event.accept()
+                return True
             if obj is self.editor and event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_H:
                 self._show_find_bar(replace=True, backwards=False)
                 event.accept()
