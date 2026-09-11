@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QMenu
@@ -199,8 +200,20 @@ def apply_qt_palette(app: QApplication) -> None:
     selection_bg = str(theme_value("markdown_editor.base.selection_bg", "#2f4c74"))
     selection_text = str(theme_value("markdown_editor.base.selection_text", "#ffffff"))
     window_bg = str(theme_value("page_editor_window.base.bg", base_bg))
+    # On macOS, native window chrome and toolbars follow Qt's color-scheme hint,
+    # not just the application palette. Keep that hint aligned with the selected
+    # StillPoint theme so an explicit light theme does not retain dark title-bar
+    # and toolbar rendering from the host appearance (and vice versa).
+    window_color = QColor(window_bg)
+    if window_color.isValid():
+        scheme = Qt.ColorScheme.Light if window_color.lightness() >= 128 else Qt.ColorScheme.Dark
+        try:
+            app.styleHints().setColorScheme(scheme)
+        except (AttributeError, RuntimeError):
+            # setColorScheme is unavailable on older Qt versions.
+            pass
     pal = app.palette()
-    pal.setColor(QPalette.ColorRole.Window, QColor(window_bg))
+    pal.setColor(QPalette.ColorRole.Window, window_color)
     pal.setColor(QPalette.ColorRole.Base, QColor(base_bg))
     pal.setColor(QPalette.ColorRole.AlternateBase, QColor(base_bg))
     pal.setColor(QPalette.ColorRole.Button, QColor(window_bg))

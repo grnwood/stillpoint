@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
 
 
@@ -166,6 +167,27 @@ def test_open_vault_dialog_focuses_list_on_show(qtbot, monkeypatch) -> None:
     QApplication.processEvents()
 
     assert QApplication.focusWidget() is dlg.local_list_widget
+
+
+def test_open_vault_dialog_enter_opens_selected_vault(qtbot, monkeypatch) -> None:
+    from sp.app.ui.open_vault_dialog import OpenVaultDialog
+    from sp.app import config
+
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
+    monkeypatch.setattr(config, "load_default_vault", lambda: None)
+    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: False)
+    monkeypatch.setattr(config, "mark_vault_last_opened", lambda _key: None)
+
+    vault = {"name": "Local Vault", "path": "/tmp/local-vault"}
+    dlg = OpenVaultDialog(vaults=[vault])
+    qtbot.addWidget(dlg)
+    dlg.show()
+    dlg.local_list_widget.setFocus()
+
+    QTest.keyClick(dlg.local_list_widget, Qt.Key_Return)
+
+    assert dlg.result() == QDialog.Accepted
+    assert dlg.selected_vault() == {**vault, "id": vault["path"]}
 
 
 def test_open_vault_dialog_close_without_remote_worker_does_not_crash(qtbot, monkeypatch) -> None:

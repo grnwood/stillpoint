@@ -61,6 +61,52 @@ def test_task_shortcut_reference_is_a_two_column_table() -> None:
     assert "while the task list has focus" in markup
 
 
+def test_navigation_filter_options_are_grouped_in_single_status_menu(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    refreshes: list[bool] = []
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda *_args: refreshes.append(True))
+
+    panel.set_navigation_filter("/Projects/Alpha", refresh=False)
+
+    assert panel._filter_status_btn.isVisibleTo(panel)
+    assert panel._filter_status_btn.text() == "Filtered"
+    assert panel._filter_status_btn.menu() is panel._filter_status_menu
+    assert [action.text() for action in panel._filter_status_menu.actions()] == [
+        "Limit tasks to navigation filter",
+        "Include Journal tasks",
+        "",
+        "Clear navigation filter",
+    ]
+    assert panel._filter_scope_action.isChecked()
+    assert panel._include_journal_action.isChecked() == panel._default_include_journal()
+
+    panel._include_journal_action.setChecked(False)
+
+    assert panel._include_journal is False
+    assert "Journal tasks are excluded" in panel._filter_status_btn.toolTip()
+    assert refreshes == [True]
+
+
+def test_filter_status_menu_can_disable_task_scope_and_clear_navigation_filter(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda *_args: None)
+    clear_requests: list[bool] = []
+    panel.filterClearRequested.connect(lambda: clear_requests.append(True))
+    panel.set_navigation_filter("/Projects/Alpha", refresh=False)
+
+    panel._filter_scope_action.setChecked(False)
+
+    assert panel._nav_filter_enabled is False
+    assert panel._filter_status_btn.text() == "Filter off"
+    assert panel._include_journal_action.isEnabled() is False
+
+    panel._clear_filter_action.trigger()
+
+    assert clear_requests == [True]
+
+
 def test_e_opens_keyboard_editor(qtbot, monkeypatch) -> None:
     panel = TaskPanel()
     qtbot.addWidget(panel)

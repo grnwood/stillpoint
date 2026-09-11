@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
+
 from sp.app import main as app_main
+from sp.app.ui import theme
 
 
 def test_ensure_user_theme_files_seeds_missing_files_in_existing_dir(tmp_path, monkeypatch) -> None:
@@ -47,6 +52,48 @@ def test_apply_startup_theme_defaults_preserves_explicit_selection(qapp, monkeyp
 
     app_main._apply_startup_theme_defaults(qapp)
     assert saved == []
+
+
+@pytest.mark.parametrize(
+    ("window_bg", "expected_scheme"),
+    [("#ffffff", Qt.ColorScheme.Light), ("#161c24", Qt.ColorScheme.Dark)],
+)
+def test_apply_qt_palette_aligns_native_color_scheme(window_bg, expected_scheme, monkeypatch) -> None:
+    values = {
+        "markdown_editor.base.bg": window_bg,
+        "markdown_editor.base.text": "#202020",
+        "markdown_editor.base.selection_bg": "#4488cc",
+        "markdown_editor.base.selection_text": "#ffffff",
+        "page_editor_window.base.bg": window_bg,
+    }
+    monkeypatch.setattr(theme, "theme_value", lambda path, default=None: values.get(path, default))
+
+    class _StyleHints:
+        scheme = None
+
+        def setColorScheme(self, scheme) -> None:
+            self.scheme = scheme
+
+    class _Application:
+        def __init__(self) -> None:
+            self.hints = _StyleHints()
+            self.applied_palette = None
+
+        def styleHints(self):
+            return self.hints
+
+        def palette(self):
+            return QPalette()
+
+        def setPalette(self, palette) -> None:
+            self.applied_palette = palette
+
+    app = _Application()
+
+    theme.apply_qt_palette(app)
+
+    assert app.hints.scheme == expected_scheme
+    assert app.applied_palette.color(QPalette.ColorRole.Window).name() == window_bg
 
 
 def _write_template_tree(root: Path) -> None:

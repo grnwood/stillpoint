@@ -1,13 +1,33 @@
 """Tests for page navigation (history and hierarchy)."""
-import pytest
 from pathlib import Path
-from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy
+from types import SimpleNamespace
+
+import pytest
+from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy, QToolBar
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import QStandardItem
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow
+
+
+def test_macos_main_toolbar_is_compact_and_centers_icon_controls(qapp, monkeypatch):
+    monkeypatch.setattr("sp.app.ui.main_window.platform.system", lambda: "Darwin")
+    toolbar = QToolBar()
+    host = SimpleNamespace(toolbar=toolbar)
+
+    MainWindow._configure_main_toolbar_geometry(host)
+    style = MainWindow._main_toolbar_stylesheet(host)
+
+    assert toolbar.iconSize().width() == 18
+    assert toolbar.iconSize().height() == 18
+    assert toolbar.minimumHeight() == 34
+    assert toolbar.maximumHeight() == 34
+    assert host._toolbar_height == 28
+    assert "min-width: 28px" in style
+    assert "min-height: 28px" in style
+    assert 'QToolButton[navFilterToggle="true"]' in style
 
 
 class TestHistoryNavigation:

@@ -429,6 +429,20 @@ class AddHomebaseVaultDialog(QDialog):
         return self._result
 
 
+class _VaultListWidget(QListWidget):
+    """List widget with platform-independent keyboard activation."""
+
+    enterPressed = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and modifiers == Qt.NoModifier:
+            self.enterPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class OpenVaultDialog(QDialog):
     """Dialog for selecting, adding, and managing vaults."""
     @staticmethod
@@ -524,7 +538,8 @@ class OpenVaultDialog(QDialog):
         local_layout = QVBoxLayout(self._local_tab)
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(6)
-        self.local_list_widget = QListWidget()
+        self.local_list_widget = _VaultListWidget()
+        self.local_list_widget.enterPressed.connect(self._accept_current)
         self.local_list_widget.itemDoubleClicked.connect(self._accept_current)
         self.local_list_widget.currentItemChanged.connect(self._on_selection_changed)
         local_layout.addWidget(self.local_list_widget, 1)

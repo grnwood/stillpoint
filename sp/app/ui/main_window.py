@@ -3710,9 +3710,61 @@ class MainWindow(QMainWindow):
         eventloop_diag.log(f"{label}: timers={' | '.join(parts) if parts else 'none'}")
 
     # --- UI wiring -----------------------------------------------------
+    def _configure_main_toolbar_geometry(self) -> None:
+        """Keep the main toolbar compact and its icon controls centered."""
+        self.toolbar.setIconSize(QSize(18, 18))
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.toolbar.setFloatable(False)
+        if platform.system() == "Darwin":
+            # The native macOS toolbar style otherwise reserves a tall control
+            # row and paints SVG icons toward its top edge.
+            self._toolbar_height = 28
+            self.toolbar.setFixedHeight(34)
+        else:
+            self._toolbar_height = self.toolbar.iconSize().height() + 8
+
+    def _main_toolbar_stylesheet(self) -> str:
+        filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
+        filter_active_border = filter_active.name()
+        filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 72)"
+        filter_fill_hover = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 110)"
+        mac_compact_style = ""
+        if platform.system() == "Darwin":
+            mac_compact_style = (
+                "QToolBar { padding: 3px 6px; spacing: 4px; }"
+                "QToolBar QToolButton { min-width: 28px; max-width: 28px; "
+                "min-height: 28px; max-height: 28px; padding: 0px; margin: 0px; }"
+                "QToolBar::separator { width: 1px; height: 20px; margin: 4px 5px; }"
+            )
+        return (
+            mac_compact_style
+            + "QToolButton[text=\"+\"] { "
+            "color: "
+            f"{theme_value('main_window.toolbar.bookmark_color', '#4A90E2')}; "
+            "font-size: "
+            f"{theme_value('main_window.toolbar.bookmark_size_pt', 20)}pt; "
+            "font-weight: "
+            f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
+            "}"
+            "QToolButton[navFilterToggle=\"true\"] { "
+            "border: 1px solid transparent; border-radius: 5px; padding: 0px; "
+            "}"
+            "QToolButton[navFilterToggle=\"true\"]:checked { "
+            "border: 1px solid "
+            f"{filter_active_border}; "
+            "background: "
+            f"{filter_fill_soft}; "
+            "}"
+            "QToolButton[navFilterToggle=\"true\"]:checked:hover { "
+            "background: "
+            f"{filter_fill_hover}; "
+            "}"
+        )
+
     def _build_toolbar(self) -> None:
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
+        self._configure_main_toolbar_geometry()
         icon_color = self._main_icon_color()
 
         home_icon = self._load_icon(self._find_asset("home.svg"), icon_color, size=18)
@@ -3828,7 +3880,6 @@ class MainWindow(QMainWindow):
         self.bookmark_container = QWidget()
         self.bookmark_container.setObjectName("bookmarkContainer")
         self.bookmark_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._toolbar_height = self.toolbar.iconSize().height() + 8
         self.bookmark_container.setMinimumHeight(self._toolbar_height)
         self.bookmark_container.setMaximumHeight(self._toolbar_height)
         self.bookmark_scroll_area.setMinimumHeight(self._toolbar_height)
@@ -3862,35 +3913,7 @@ class MainWindow(QMainWindow):
         # Store default style to restore later
         self._default_toolbar_stylesheet = self.toolbar.styleSheet()
 
-        filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
-        filter_active_border = filter_active.name()
-        filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 72)"
-        filter_fill_hover = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 110)"
-        
-        # Apply blue color to bookmark button via stylesheet
-        self.toolbar.setStyleSheet(
-            "QToolButton[text=\"+\"] { "
-            "color: "
-            f"{theme_value('main_window.toolbar.bookmark_color', '#4A90E2')}; "
-            "font-size: "
-            f"{theme_value('main_window.toolbar.bookmark_size_pt', 20)}pt; "
-            "font-weight: "
-            f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
-            "}"
-            "QToolButton[navFilterToggle=\"true\"] { "
-            "border: 1px solid transparent; border-radius: 4px; padding: 2px; "
-            "}"
-            "QToolButton[navFilterToggle=\"true\"]:checked { "
-            "border: 1px solid "
-            f"{filter_active_border}; "
-            "background: "
-            f"{filter_fill_soft}; "
-            "}"
-            "QToolButton[navFilterToggle=\"true\"]:checked:hover { "
-            "background: "
-            f"{filter_fill_hover}; "
-            "}"
-        )
+        self.toolbar.setStyleSheet(self._main_toolbar_stylesheet())
         self._sync_filter_toolbar_toggle(bool(getattr(self, "_nav_filter_path", None)))
 
     def _open_vault_on_disk(self):
@@ -9823,33 +9846,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            filter_active = theme_color("main_window.filter_badge.bg", "#c62828")
-            filter_active_border = filter_active.name()
-            filter_fill_soft = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 48)"
-            filter_fill_hover = f"rgba({filter_active.red()}, {filter_active.green()}, {filter_active.blue()}, 110)"
-            self.toolbar.setStyleSheet(
-                "QToolButton[text=\"+\"] { "
-                "color: "
-                f"{theme_value('main_window.toolbar.bookmark_color', '#4A90E2')}; "
-                "font-size: "
-                f"{theme_value('main_window.toolbar.bookmark_size_pt', 20)}pt; "
-                "font-weight: "
-                f"{theme_value('main_window.toolbar.bookmark_weight', 'bold')}; "
-                "}"
-                "QToolButton[navFilterToggle=\"true\"] { "
-                "border: 1px solid transparent; border-radius: 4px; padding: 2px; "
-                "}"
-                "QToolButton[navFilterToggle=\"true\"]:checked { "
-                "border: 1px solid "
-                f"{filter_active_border}; "
-                "background: "
-                f"{filter_fill_soft}; "
-                "}"
-                "QToolButton[navFilterToggle=\"true\"]:checked:hover { "
-                "background: "
-                f"{filter_fill_hover}; "
-                "}"
-            )
+            self.toolbar.setStyleSheet(self._main_toolbar_stylesheet())
         except Exception:
             pass
         try:

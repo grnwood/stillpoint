@@ -12,13 +12,12 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QSize, QTimer, QByteArray, QUrl, QDate, QPoint, QSignalBlocker
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QDesktopServices, QPalette, QShortcut
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap, QDesktopServices, QPalette, QShortcut
 from PySide6.QtGui import QCursor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -447,28 +446,34 @@ class TaskPanel(QWidget):
         self.task_tree.header().sectionResized.connect(lambda *_: self._header_save_timer.start())
 
         sidebar = QVBoxLayout()
-        # Tags row with filter indicators
+        # Tags row with a compact navigation-filter status menu.
         tags_row = QHBoxLayout()
         tags_row.addWidget(QLabel("Tags"))
-        self.filter_label = QLabel("Filtered")
-        self.filter_label.setVisible(False)
-        self.filter_label.setCursor(Qt.PointingHandCursor)
-        self.filter_label.setToolTip("Click to clear navigation filter")
-        self.filter_label.mousePressEvent = lambda event: self._on_filter_label_clicked(event)
         tags_row.addSpacing(6)
-        tags_row.addWidget(self.filter_label)
-        self.filter_checkbox = QCheckBox()
-        self.filter_checkbox.setChecked(True)
-        self.filter_checkbox.setVisible(False)
-        self.filter_checkbox.setToolTip("Limit tasks to the filtered navigation subtree.")
-        self.filter_checkbox.toggled.connect(self._on_filter_checkbox_toggled)
-        tags_row.addWidget(self.filter_checkbox)
-        self.journal_checkbox = QCheckBox("Journal?")
-        self.journal_checkbox.setChecked(True)
-        self.journal_checkbox.setVisible(False)
-        self.journal_checkbox.setToolTip("Include tasks from the Journal subtree while filtered.")
-        self.journal_checkbox.toggled.connect(self._on_journal_checkbox_toggled)
-        tags_row.addWidget(self.journal_checkbox)
+        self._filter_status_btn = QToolButton(self)
+        self._filter_status_btn.setText("Filtered")
+        self._filter_status_btn.setCursor(Qt.PointingHandCursor)
+        self._filter_status_btn.setPopupMode(QToolButton.InstantPopup)
+        self._filter_status_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._filter_status_btn.setVisible(False)
+        self._filter_status_menu = QMenu(self._filter_status_btn)
+        apply_menu_theme(self._filter_status_menu, self)
+        self._filter_scope_action = QAction("Limit tasks to navigation filter", self)
+        self._filter_scope_action.setCheckable(True)
+        self._filter_scope_action.setChecked(True)
+        self._filter_scope_action.toggled.connect(self._on_filter_scope_toggled)
+        self._filter_status_menu.addAction(self._filter_scope_action)
+        self._include_journal_action = QAction("Include Journal tasks", self)
+        self._include_journal_action.setCheckable(True)
+        self._include_journal_action.setChecked(True)
+        self._include_journal_action.toggled.connect(self._on_include_journal_toggled)
+        self._filter_status_menu.addAction(self._include_journal_action)
+        self._filter_status_menu.addSeparator()
+        self._clear_filter_action = QAction("Clear navigation filter", self)
+        self._clear_filter_action.triggered.connect(self._request_filter_clear)
+        self._filter_status_menu.addAction(self._clear_filter_action)
+        self._filter_status_btn.setMenu(self._filter_status_menu)
+        tags_row.addWidget(self._filter_status_btn)
         tags_row.addStretch(1)
         sidebar.addLayout(tags_row)
         sidebar.addWidget(self.tag_list)
@@ -744,72 +749,83 @@ class TaskPanel(QWidget):
             self._include_journal = self._default_include_journal()
         self._update_filter_indicator()
 
-    def _on_filter_checkbox_toggled(self, checked: bool) -> None:
+    def _on_filter_scope_toggled(self, checked: bool) -> None:
         if not self._nav_filter_prefix:
-            self.filter_checkbox.blockSignals(True)
-            self.filter_checkbox.setChecked(True)
-            self.filter_checkbox.blockSignals(False)
+            self._filter_scope_action.blockSignals(True)
+            self._filter_scope_action.setChecked(True)
+            self._filter_scope_action.blockSignals(False)
             return
         self._nav_filter_enabled = bool(checked)
         self._update_filter_indicator()
         self._refresh_tasks()
 
-    def _on_filter_label_clicked(self, event) -> None:
-        """Request clearing the navigation filter when the label is clicked."""
+    def _request_filter_clear(self) -> None:
+        """Request clearing the navigation filter from the status menu."""
         if not self._allow_filter_clear:
             return
         self.filterClearRequested.emit()
 
-    def _on_journal_checkbox_toggled(self, checked: bool) -> None:
+    def _on_include_journal_toggled(self, checked: bool) -> None:
         if not self._nav_filter_prefix:
-            self.journal_checkbox.blockSignals(True)
-            self.journal_checkbox.setChecked(True)
-            self.journal_checkbox.blockSignals(False)
+            self._include_journal_action.blockSignals(True)
+            self._include_journal_action.setChecked(True)
+            self._include_journal_action.blockSignals(False)
             return
         self._include_journal = bool(checked)
+        self._update_filter_indicator()
         self._refresh_tasks()
 
     def _update_filter_indicator(self) -> None:
         active = bool(self._nav_filter_prefix)
-        self.filter_label.setVisible(active)
-        self.filter_checkbox.setVisible(active)
-        self.journal_checkbox.setVisible(active)
+        self._filter_status_btn.setVisible(active)
+        self._filter_scope_action.setVisible(active)
+        self._include_journal_action.setVisible(active)
+        self._clear_filter_action.setVisible(active)
         if not active:
-            self.filter_label.setStyleSheet("")
-            self.filter_checkbox.blockSignals(True)
-            self.filter_checkbox.setChecked(True)
-            self.filter_checkbox.blockSignals(False)
-            self.journal_checkbox.blockSignals(True)
-            self.journal_checkbox.setChecked(self._default_include_journal())
-            self.journal_checkbox.blockSignals(False)
-            self.journal_checkbox.setEnabled(False)
+            self._filter_status_btn.setStyleSheet("")
+            self._filter_scope_action.blockSignals(True)
+            self._filter_scope_action.setChecked(True)
+            self._filter_scope_action.blockSignals(False)
+            self._include_journal_action.blockSignals(True)
+            self._include_journal_action.setChecked(self._default_include_journal())
+            self._include_journal_action.blockSignals(False)
+            self._include_journal_action.setEnabled(False)
             self._nav_filter_enabled = True
             self._include_journal = self._default_include_journal()
             return
         display_path = path_to_colon(self._nav_filter_prefix) or self._nav_filter_prefix
-        if self._allow_filter_clear:
-            self.filter_label.setToolTip(f"{display_path} (click to clear)")
-            self.filter_label.setCursor(Qt.PointingHandCursor)
-        else:
-            self.filter_label.setToolTip(display_path)
-            self.filter_label.setCursor(Qt.ArrowCursor)
-        self.filter_checkbox.blockSignals(True)
-        self.filter_checkbox.setChecked(self._nav_filter_enabled)
-        self.filter_checkbox.blockSignals(False)
-        self.journal_checkbox.blockSignals(True)
-        self.journal_checkbox.setChecked(self._include_journal)
-        self.journal_checkbox.blockSignals(False)
-        self.journal_checkbox.setEnabled(self._nav_filter_enabled)
+        journal_status = "included" if self._include_journal else "excluded"
+        task_scope_status = "limited to" if self._nav_filter_enabled else "not limited to"
+        self._filter_status_btn.setText("Filtered" if self._nav_filter_enabled else "Filter off")
+        self._filter_status_btn.setToolTip(
+            f"Tasks are {task_scope_status} {display_path}; Journal tasks are {journal_status}."
+        )
+        self._filter_scope_action.blockSignals(True)
+        self._filter_scope_action.setChecked(self._nav_filter_enabled)
+        self._filter_scope_action.blockSignals(False)
+        self._include_journal_action.blockSignals(True)
+        self._include_journal_action.setChecked(self._include_journal)
+        self._include_journal_action.blockSignals(False)
+        self._include_journal_action.setEnabled(self._nav_filter_enabled)
+        self._clear_filter_action.setEnabled(self._allow_filter_clear)
         if self._nav_filter_enabled:
-            self.filter_label.setStyleSheet(
-                "color: "
+            self._filter_status_btn.setStyleSheet(
+                "QToolButton { color: "
                 f"{theme_value('task_panel.filter_badge.text', '#ffffff')}; "
                 "background-color: "
                 f"{theme_value('task_panel.filter_badge.bg', '#c62828')}; "
-                "padding: 1px 6px; border-radius: 4px;"
+                "border: none; padding: 2px 15px 2px 7px; border-radius: 6px; }"
+                "QToolButton::menu-indicator { subcontrol-position: right center; "
+                "subcontrol-origin: padding; right: 3px; }"
             )
         else:
-            self.filter_label.setStyleSheet("")
+            palette = self.palette()
+            text = palette.color(QPalette.ColorRole.Text).name()
+            border = palette.color(QPalette.ColorRole.Mid).name()
+            self._filter_status_btn.setStyleSheet(
+                f"QToolButton {{ color: {text}; background: transparent; "
+                f"border: 1px solid {border}; padding: 1px 14px 1px 6px; border-radius: 6px; }}"
+            )
 
     def set_filter_clear_enabled(self, enabled: bool) -> None:
         self._allow_filter_clear = bool(enabled)
@@ -881,9 +897,7 @@ class TaskPanel(QWidget):
             self.search,
             self.tag_list,
             self.task_tree,
-            self.filter_label,
-            self.filter_checkbox,
-            self.journal_checkbox,
+            self._filter_status_btn,
             self.show_completed,
             self.show_future,
             self.show_actionable,
@@ -1257,6 +1271,9 @@ class TaskPanel(QWidget):
             self._copy_btn.setIcon(self._load_svg_icon("copy.svg", QSize(20, 20)))
         if getattr(self, "_ai_toggle_btn", None):
             self._ai_toggle_btn.setIcon(self._load_ai_icon())
+        if getattr(self, "_filter_status_menu", None):
+            apply_menu_theme(self._filter_status_menu, self)
+            self._update_filter_indicator()
         self._apply_header_button_styles()
 
     def _apply_header_button_styles(self) -> None:
