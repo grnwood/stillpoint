@@ -1154,6 +1154,11 @@ class ReorganizationOperationPayload(BaseModel):
     destination_parent: str
     new_name: str
     operation_type: str = "move"
+    operation_id: str = ""
+    placement_mode: str = "last"
+    placement_sibling_path: str = ""
+    placement_explicit: bool = False
+    scope_root: str = "/"
 
 
 class ReorganizationPlanPayload(BaseModel):
@@ -2950,15 +2955,33 @@ def reindex_status(job_id: str) -> dict:
 
 
 @app.get("/api/vault/tree")
-def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = False) -> dict:
+def vault_tree(
+    path: str = "/",
+    recursive: bool = True,
+    include_journal: bool = False,
+    depth: int | None = None,
+) -> dict:
     root = vault_state.get_root()
     version = config.get_tree_version()
     normalized_path = _normalize_tree_path(path)
-    tree = _get_cached_tree(root, normalized_path, recursive, include_journal, version)
+    bounded_depth = max(1, min(int(depth), 8)) if depth is not None else None
+    tree = (
+        _get_cached_tree(root, normalized_path, recursive, include_journal, version)
+        if bounded_depth is None
+        else None
+    )
     cache_hit = tree is not None
     if not cache_hit:
         try:
-            tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+            if bounded_depth is None:
+                tree = files.list_dir(root, subpath=normalized_path, recursive=recursive)
+            else:
+                tree = files.list_dir(
+                    root,
+                    subpath=normalized_path,
+                    recursive=recursive,
+                    max_depth=bounded_depth,
+                )
         except FileNotFoundError as exc:
             _raise_file_http(404, f"List directory failed for {normalized_path}", exc)
         except FileAccessError as exc:
@@ -2975,10 +2998,11 @@ def vault_tree(path: str = "/", recursive: bool = True, include_journal: bool = 
         _sort_tree_nodes(tree, order_map)
         if normalized_path == "/" and tree:
             _log_api(f"{_ANSI_BLUE}[API] Root tree order after sort: {[n.get('name') for n in tree[:5]]}{_ANSI_RESET}")
-        _set_cached_tree(root, normalized_path, recursive, include_journal, version, tree)
+        if bounded_depth is None:
+            _set_cached_tree(root, normalized_path, recursive, include_journal, version, tree)
     _log_api(
         f"{_ANSI_BLUE}[API] GET /api/vault/tree path={normalized_path} recursive={recursive} "
-        f"version={version} cached={cache_hit}{_ANSI_RESET}"
+        f"depth={bounded_depth} version={version} cached={cache_hit}{_ANSI_RESET}"
     )
     return {"root": str(root), "tree": tree, "version": version}
 

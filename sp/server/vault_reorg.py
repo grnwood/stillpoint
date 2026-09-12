@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -334,7 +334,87 @@ def _resolve_final_destinations(operations: list[dict[str, Any]]) -> None:
         resolve(idx)
 
 
-def _plan_token(tree_version: int, operations: Iterable[dict[str, Any]]) -> str:
+def _resolve_final_folder(path: str, operations: list[dict[str, Any]]) -> str:
+    """Resolve an original folder path through the complete staged move set."""
+    resolved = file_ops._normalize_folder_path(path)
+    for op in operations:
+        if op.get("reorder_only"):
+            continue
+        source = op["source_path"]
+        destination = op["destination_path"]
+        if resolved == source or resolved.startswith(source.rstrip("/") + "/"):
+            resolved = _rebase_folder(resolved, source, destination)
+    return resolved
+
+
+def _calculate_final_sibling_orders(
+    move_operations: list[dict[str, Any]],
+    page_map: dict[str, str],
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Return complete final page orders for parents with explicit placement."""
+    explicit = [op for op in move_operations if op.get("placement_explicit")]
+    if not explicit:
+        return {}, []
+    db_path = config._vault_db_path()
+    if not db_path:
+        return {}, [{"row": None, "message": "The vault index is unavailable for sibling ordering."}]
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        rows = conn.execute(
+            "SELECT path, parent_path, display_order FROM pages WHERE COALESCE(deleted, 0) = 0"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    grouped: dict[str, list[tuple[int, str]]] = {}
+    for page_path, _parent_path, display_order in rows:
+        final_page = page_map.get(page_path, page_path)
+        final_parent = config._parent_folder_for_page(final_page)
+        order_value = int(display_order) if display_order is not None else 2**31 - 1
+        grouped.setdefault(final_parent, []).append((order_value, final_page))
+    ordered_by_parent = {
+        parent: [path for _order, path in sorted(items, key=lambda item: (item[0], item[1].casefold()))]
+        for parent, items in grouped.items()
+    }
+
+    errors: list[dict[str, Any]] = []
+    affected: set[str] = set()
+    for op in sorted(explicit, key=lambda item: item["row"]):
+        parent = op["final_destination_parent"]
+        order = ordered_by_parent.setdefault(parent, [])
+        source_page = config.folder_to_page_path(op["destination_path"])
+        if source_page not in order:
+            errors.append(
+                {"row": op["row"], "message": "The ordered source is not an indexed page under its final parent."}
+            )
+            continue
+        order.remove(source_page)
+        mode = op.get("placement_mode", "last")
+        if mode == "first":
+            insert_at = 0
+        elif mode == "last":
+            insert_at = len(order)
+        else:
+            sibling = op.get("final_placement_sibling_path") or ""
+            sibling_page = config.folder_to_page_path(sibling) if sibling else ""
+            if not sibling_page or sibling_page not in order:
+                errors.append(
+                    {"row": op["row"], "message": "The placement sibling is not under the final destination parent."}
+                )
+                order.append(source_page)
+                continue
+            sibling_index = order.index(sibling_page)
+            insert_at = sibling_index if mode == "before" else sibling_index + 1
+        order.insert(insert_at, source_page)
+        affected.add(parent)
+    return {parent: ordered_by_parent[parent] for parent in sorted(affected)}, errors
+
+
+def _plan_token(
+    tree_version: int,
+    operations: Iterable[dict[str, Any]],
+    content_fingerprints: dict[str, str] | None = None,
+) -> str:
     stable = [
         {
             "operation_type": op.get("operation_type", "move"),
@@ -342,12 +422,36 @@ def _plan_token(tree_version: int, operations: Iterable[dict[str, Any]]) -> str:
             "destination_parent": op["destination_parent"],
             "new_name": op["new_name"],
             "destination_path": op["destination_path"],
+            "placement_mode": op.get("placement_mode", "last"),
+            "placement_sibling_path": op.get("placement_sibling_path", ""),
+            "final_placement_sibling_path": op.get("final_placement_sibling_path", ""),
+            "placement_explicit": bool(op.get("placement_explicit")),
             "journal_reference_action": op.get("journal_reference_action", "none"),
         }
         for op in operations
     ]
-    payload = json.dumps({"tree_version": tree_version, "operations": stable}, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        {
+            "tree_version": tree_version,
+            "operations": stable,
+            "content_fingerprints": content_fingerprints or {},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_content_bytes(root: Path, page_path: str) -> bytes:
+    absolute = root / page_path.lstrip("/")
+    with file_content_lock(absolute):
+        return absolute.read_bytes()
+
+
+def _restore_content_bytes(root: Path, page_path: str, content: bytes) -> None:
+    absolute = root / page_path.lstrip("/")
+    with file_content_lock(absolute):
+        file_ops._atomic_replace_bytes(absolute, content, tag="reorg-restore")
 
 
 def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_version: int | None = None) -> dict[str, Any]:
@@ -362,6 +466,18 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
         source = file_ops._normalize_folder_path(str(raw.get("from") or raw.get("source_path") or ""))
         parent = file_ops._normalize_folder_path(str(raw.get("destination_parent") or "/"))
         raw_name = str(raw.get("new_name") or "").strip()
+        placement_mode = str(raw.get("placement_mode") or "last").strip().lower()
+        placement_sibling = str(raw.get("placement_sibling_path") or "").strip()
+        placement_explicit = bool(raw.get("placement_explicit", False))
+        scope_root = file_ops._normalize_folder_path(str(raw.get("scope_root") or "/"))
+        if placement_mode not in {"first", "last", "before", "after"}:
+            errors.append({"row": row, "message": "Unknown sibling placement mode."})
+            placement_mode = "last"
+        if placement_mode in {"before", "after"} and not placement_sibling:
+            errors.append({"row": row, "message": "Choose a sibling for relative placement."})
+        normalized_sibling = (
+            file_ops._normalize_folder_path(placement_sibling) if placement_sibling else ""
+        )
         if operation_type not in {"move", "add_reference"}:
             errors.append({"row": row, "message": "Unknown reorganization operation."})
             operation_type = "move"
@@ -392,6 +508,11 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
                 "new_name": name,
                 "raw_destination_path": destination,
                 "destination_path": destination,
+                "operation_id": str(raw.get("operation_id") or ""),
+                "placement_mode": placement_mode,
+                "placement_sibling_path": normalized_sibling,
+                "placement_explicit": placement_explicit,
+                "scope_root": scope_root,
             }
         )
     move_operations = [op for op in operations if op["operation_type"] == "move"]
@@ -411,6 +532,15 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
         _resolve_final_destinations(move_operations)
     except ReorganizationError as exc:
         errors.append({"row": None, "message": str(exc)})
+    for op in move_operations:
+        op["final_destination_parent"] = file_ops._parent_folder_path(op["destination_path"])
+        op["reorder_only"] = bool(
+            op["destination_path"] == op["source_path"] and op.get("placement_explicit")
+        )
+        sibling = op.get("placement_sibling_path") or ""
+        op["final_placement_sibling_path"] = (
+            _resolve_final_folder(sibling, move_operations) if sibling else ""
+        )
     destinations = [op["destination_path"] for op in move_operations]
     if len(destinations) != len(set(destinations)):
         errors.append({"row": None, "message": "Multiple rows have the same final destination."})
@@ -424,7 +554,7 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
         source_dir = file_ops._resolve_folder(root, source)
         if not source_dir.exists():
             errors.append({"row": row, "message": "Source no longer exists."})
-        if destination == source:
+        if destination == source and not op.get("reorder_only"):
             errors.append({"row": row, "message": "Destination is unchanged."})
         if destination.startswith(source + "/"):
             errors.append({"row": row, "message": "Cannot move a page into its own subtree."})
@@ -494,6 +624,8 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
             conn = sqlite3.connect(db_path, check_same_thread=False)
             try:
                 for op in move_operations:
+                    if op.get("reorder_only"):
+                        continue
                     source_page = config.folder_to_page_path(op["source_path"])
                     rows = conn.execute(
                         "SELECT path FROM pages WHERE COALESCE(deleted, 0) = 0 AND (path = ? OR path LIKE ?)",
@@ -505,13 +637,45 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
                         )
             finally:
                 conn.close()
-    token = _plan_token(current_version, operations) if not errors else ""
+    final_sibling_orders: dict[str, list[str]] = {}
+    if not errors:
+        final_sibling_orders, placement_errors = _calculate_final_sibling_orders(
+            move_operations, page_map
+        )
+        errors.extend(placement_errors)
+    link_rewrite_sources: list[str] = []
+    content_fingerprints: dict[str, str] = {}
+    if not errors:
+        try:
+            planned_link_updates = file_ops.plan_link_updates(root, page_map) if page_map else {}
+            link_rewrite_sources = sorted(planned_link_updates)
+            content_paths = set(link_rewrite_sources)
+            content_paths.update(
+                op["journal_page_path"]
+                for op in operations
+                if op.get("journal_reference_action") == "append"
+            )
+            content_paths.update(
+                op["reference_target_page"]
+                for op in reference_operations
+                if op.get("reference_target_page")
+            )
+            for path in sorted(content_paths):
+                raw = _read_content_bytes(root, path)
+                content_fingerprints[path] = hashlib.sha256(raw).hexdigest()
+        except Exception as exc:
+            errors.append({"row": None, "message": f"Unable to fingerprint affected page content: {exc}"})
+    token = _plan_token(current_version, operations, content_fingerprints) if not errors else ""
     return {
         "ok": not errors,
         "errors": errors,
         "operations": operations,
         "execution_order": execution_order,
         "page_map": page_map,
+        "final_sibling_orders": final_sibling_orders,
+        "link_rewrite_sources": link_rewrite_sources,
+        "link_rewrite_count": len(link_rewrite_sources),
+        "content_fingerprints": content_fingerprints,
         "tree_version": current_version,
         "tree_version_changed": tree_version_changed,
         "plan_token": token,
@@ -553,7 +717,11 @@ def _append_section_entries(page_path: Path, heading: str, entries: list[str]) -
         result = newline.join(lines)
         if text.endswith(("\n", "\r")):
             result += newline
-        page_path.write_bytes(result.encode("utf-8"))
+        file_ops._atomic_replace_bytes(
+            page_path,
+            result.encode("utf-8"),
+            tag="reorg-content",
+        )
 
 
 def _append_moved_page_links(page_path: Path, links: list[tuple[str, str]]) -> None:
@@ -588,10 +756,60 @@ def _write_manifest(root: Path, payload: dict[str, Any]) -> Path:
     directory = root / ".stillpoint"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "reorg-recovery.json"
-    temporary = directory / "reorg-recovery.json.tmp"
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    file_ops._atomic_replace_bytes(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"),
+        tag="reorg-manifest",
+    )
     return path
+
+
+def _display_order_snapshot() -> dict[str, int | None]:
+    db_path = config._vault_db_path()
+    if not db_path:
+        return {}
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        return {
+            str(path): (int(order) if order is not None else None)
+            for path, order in conn.execute("SELECT path, display_order FROM pages").fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _restore_display_orders(snapshot: dict[str, Any]) -> None:
+    if not snapshot:
+        return
+    db_path = config._vault_db_path()
+    if not db_path:
+        return
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        with conn:
+            conn.executemany(
+                "UPDATE pages SET display_order = ? WHERE path = ?",
+                ((order, path) for path, order in snapshot.items()),
+            )
+        config.invalidate_display_order_cache()
+    finally:
+        conn.close()
+
+
+def _reindex_content_pages(root: Path, page_paths: Iterable[str]) -> None:
+    """Synchronize canonical and search indexes after content write or restore."""
+    from sp.app import indexer as app_indexer
+
+    db_path = config._vault_db_path()
+    for page_path in sorted(set(page_paths)):
+        content = (root / page_path.lstrip("/")).read_text(encoding="utf-8")
+        app_indexer.index_page(page_path, content)
+        if db_path:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                search_index.upsert_page(conn, page_path, 0, content)
+            finally:
+                conn.close()
 
 
 def commit_plan(
@@ -618,25 +836,48 @@ def commit_plan(
                 if op.get("operation_type") == "add_reference"
             }
         )
-        content_backup_pages = sorted(set(journal_pages) | set(reference_target_pages))
-        journal_backups = {
-            path: base64.b64encode((root / path.lstrip("/")).read_bytes()).decode("ascii")
-            for path in content_backup_pages
-        }
-        manifest: dict[str, Any] = {
-            "status": "running",
-            "tree_version": tree_version,
-            "operations": operations,
-            "completed": [],
-            "journal_backups": journal_backups,
-        }
-        manifest_path = _write_manifest(root, manifest)
+        content_backup_pages = sorted(
+            set(journal_pages)
+            | set(reference_target_pages)
+            | set(checked.get("link_rewrite_sources") or [])
+        )
+        content_lock_stack = ExitStack()
+        try:
+            for page_path in content_backup_pages:
+                content_lock_stack.enter_context(
+                    file_content_lock(root / page_path.lstrip("/"))
+                )
+            for page_path, expected_hash in (checked.get("content_fingerprints") or {}).items():
+                current = (root / page_path.lstrip("/")).read_bytes()
+                if hashlib.sha256(current).hexdigest() != expected_hash:
+                    raise ReorganizationError(
+                        f"Affected page content changed after validation: {page_path}"
+                    )
+            content_backups = {
+                path: base64.b64encode((root / path.lstrip("/")).read_bytes()).decode("ascii")
+                for path in content_backup_pages
+            }
+            display_order_backups = _display_order_snapshot()
+            manifest: dict[str, Any] = {
+                "status": "running",
+                "tree_version": tree_version,
+                "operations": operations,
+                "completed": [],
+                "content_backups": content_backups,
+                "display_order_backups": display_order_backups,
+            }
+            manifest_path = _write_manifest(root, manifest)
+        except Exception:
+            content_lock_stack.close()
+            raise
         completed: list[tuple[str, str]] = []
         combined_map: dict[str, str] = {}
         display_orders: dict[str, int] = {}
         try:
             for index in checked["execution_order"]:
                 op = operations[index]
+                if op.get("reorder_only"):
+                    continue
                 current_source = op["source_path"]
                 current_destination = op["raw_destination_path"]
                 result = file_ops.move_folder(root, current_source, current_destination, rewrite_links=False)
@@ -645,6 +886,13 @@ def commit_plan(
                 display_orders.update(result.get("display_orders") or {})
                 manifest["completed"] = completed
                 _write_manifest(root, manifest)
+
+            final_sibling_orders = dict(checked.get("final_sibling_orders") or {})
+            for parent_path, page_order in final_sibling_orders.items():
+                config.reorder_pages(parent_path, list(page_order))
+                display_orders.update({path: idx for idx, path in enumerate(page_order)})
+            if final_sibling_orders and not completed:
+                config.bump_tree_version()
 
             append_by_page: dict[str, list[tuple[str, str]]] = {}
             for op in operations:
@@ -666,38 +914,31 @@ def commit_plan(
                     note=op["new_name"],
                 )
 
+            link_updates = file_ops.plan_link_updates(root, combined_map)
+            rewritten_link_pages = file_ops.apply_link_updates(root, link_updates)
             config.update_link_paths(combined_map)
-            touched_content_pages = sorted(set(append_by_page) | set(reference_target_pages))
-            for day_page in touched_content_pages:
-                try:
-                    content = (root / day_page.lstrip("/")).read_text(encoding="utf-8")
-                    from sp.app import indexer as app_indexer
-
-                    app_indexer.index_page(day_page, content)
-                    db_path = config._vault_db_path()
-                    if db_path:
-                        conn = sqlite3.connect(db_path, check_same_thread=False)
-                        try:
-                            search_index.upsert_page(conn, day_page, 0, content)
-                        finally:
-                            conn.close()
-                except Exception:
-                    pass
+            touched_content_pages = sorted(
+                set(append_by_page) | set(reference_target_pages) | set(rewritten_link_pages)
+            )
+            _reindex_content_pages(root, touched_content_pages)
             manifest["status"] = "completed"
             _write_manifest(root, manifest)
             try:
                 manifest_path.unlink()
             except OSError:
                 pass
-            return {
+            result = {
                 "ok": True,
                 "page_map": combined_map,
                 "display_orders": display_orders,
                 "journal_paths": sorted(append_by_page),
                 "touched_paths": touched_content_pages,
+                "link_rewrite_count": len(rewritten_link_pages),
                 "version": config.get_tree_version(),
                 "operations": operations,
             }
+            content_lock_stack.close()
+            return result
         except Exception as exc:
             rollback_errors: list[str] = []
             for old_folder, new_folder in reversed(completed):
@@ -705,15 +946,29 @@ def commit_plan(
                     file_ops.move_folder(root, new_folder, old_folder, rewrite_links=False)
                 except Exception as rollback_exc:
                     rollback_errors.append(f"{new_folder} -> {old_folder}: {rollback_exc}")
-            for day_page, encoded in journal_backups.items():
+            try:
+                _restore_display_orders(display_order_backups)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"restore sibling order: {rollback_exc}")
+            for day_page, encoded in content_backups.items():
                 try:
-                    (root / day_page.lstrip("/")).write_bytes(base64.b64decode(encoded))
+                    _restore_content_bytes(root, day_page, base64.b64decode(encoded))
                 except Exception as rollback_exc:
                     rollback_errors.append(f"restore {day_page}: {rollback_exc}")
+            if not rollback_errors:
+                try:
+                    _reindex_content_pages(root, content_backups)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"restore content indexes: {rollback_exc}")
             manifest["status"] = "recovery_required" if rollback_errors else "rolled_back"
             manifest["error"] = str(exc)
             manifest["rollback_errors"] = rollback_errors
-            _write_manifest(root, manifest)
+            try:
+                _write_manifest(root, manifest)
+            except Exception as manifest_exc:
+                rollback_errors.append(f"write recovery manifest: {manifest_exc}")
+            finally:
+                content_lock_stack.close()
             if not rollback_errors:
                 try:
                     manifest_path.unlink()
@@ -757,11 +1012,21 @@ def recover_incomplete(root: Path) -> dict[str, Any]:
                 file_ops.move_folder(root, str(new_folder), str(old_folder), rewrite_links=False)
             except Exception as exc:
                 errors.append(f"{new_folder} -> {old_folder}: {exc}")
-        for day_page, encoded in (manifest.get("journal_backups") or {}).items():
+        try:
+            _restore_display_orders(dict(manifest.get("display_order_backups") or {}))
+        except Exception as exc:
+            errors.append(f"restore sibling order: {exc}")
+        backups = manifest.get("content_backups") or manifest.get("journal_backups") or {}
+        for day_page, encoded in backups.items():
             try:
-                (root / str(day_page).lstrip("/")).write_bytes(base64.b64decode(encoded))
+                _restore_content_bytes(root, str(day_page), base64.b64decode(encoded))
             except Exception as exc:
                 errors.append(f"restore {day_page}: {exc}")
+        if not errors:
+            try:
+                _reindex_content_pages(root, backups)
+            except Exception as exc:
+                errors.append(f"restore content indexes: {exc}")
         if errors:
             manifest["status"] = "recovery_required"
             manifest["rollback_errors"] = errors

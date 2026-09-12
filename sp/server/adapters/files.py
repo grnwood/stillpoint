@@ -167,13 +167,19 @@ def write_file(root: Path, path: str, content: str) -> None:
         target.write_text(content, encoding="utf-8")
 
 
-def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dict]:
+def list_dir(
+    root: Path,
+    subpath: str = "/",
+    recursive: bool = True,
+    max_depth: int | None = None,
+) -> List[Dict]:
     """List directories under the given subpath.
 
     Args:
         root: vault root
         subpath: vault-relative folder ("/" for root)
         recursive: when False, only include direct children and mark has_children
+        max_depth: optional bounded recursive depth, relative to ``subpath``
     """
     _ensure_page_scaffold(root)
     try:
@@ -183,7 +189,9 @@ def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dic
     if not target.exists() or not target.is_dir():
         return []
 
-    def build(directory: Path) -> Dict:
+    bounded_depth = max(0, int(max_depth)) if max_depth is not None else None
+
+    def build(directory: Path, depth: int = 0) -> Dict:
         page_name = directory.name if directory != root else root.name
         rel_dir = directory.relative_to(root).as_posix() if directory != root else ""
         children = []
@@ -192,8 +200,8 @@ def list_dir(root: Path, subpath: str = "/", recursive: bool = True) -> List[Dic
                 continue
             if child.name.startswith("."):
                 continue
-            if recursive:
-                children.append(build(child))
+            if recursive and (bounded_depth is None or depth + 1 < bounded_depth):
+                children.append(build(child, depth + 1))
             else:
                 grand_dirs = [
                     d

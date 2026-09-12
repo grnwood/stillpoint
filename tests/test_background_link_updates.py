@@ -64,6 +64,28 @@ def test_rename_link_rewrite_preserves_custom_label(tmp_path) -> None:
     assert page.read_text(encoding="utf-8") == "[New_Name:New_Name|My custom label]\n"
 
 
+def test_link_rewrite_updates_markdown_and_plain_colon_without_touching_prose(tmp_path) -> None:
+    root = tmp_path / "vault"
+    page = root / "Ref" / "Ref.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "[custom](/Old/Old.md#section)\n:Old\nThe word Old is ordinary prose.\n",
+        encoding="utf-8",
+    )
+
+    touched = file_ops.update_links_on_disk(
+        root,
+        {"/Old/Old.md": "/Topics/Old/Old.md"},
+    )
+
+    assert touched == ["/Ref/Ref.md"]
+    assert page.read_text(encoding="utf-8") == (
+        "[custom](/Topics/Old/Old.md#section)\n"
+        ":Topics:Old\n"
+        "The word Old is ordinary prose.\n"
+    )
+
+
 def test_window_serializes_background_link_update_jobs(main_window, monkeypatch) -> None:
     posted: list[dict] = []
     statuses = [

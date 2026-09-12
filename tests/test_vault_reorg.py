@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -696,3 +697,293 @@ def test_homebase_sync_is_suspended_only_during_reorganization_commit(main_windo
         ("dirty",),
         ("resume", "vault reorganization", True),
     ]
+
+
+def test_reorganization_reorders_siblings_without_moving_files(reorg_vault) -> None:
+    _write_page(reorg_vault, "/Parent", "# Parent\n")
+    page_a = _write_page(reorg_vault, "/Parent/A", "# A\n")
+    page_b = _write_page(reorg_vault, "/Parent/B", "# B\n")
+    config.reorder_pages("/Parent", [page_b, page_a])
+    operation = {
+        "from": "/Parent/A",
+        "destination_parent": "/Parent",
+        "new_name": "A",
+        "placement_mode": "before",
+        "placement_sibling_path": "/Parent/B",
+        "placement_explicit": True,
+    }
+
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, [operation], config.get_tree_version()
+    )
+
+    assert preflight["ok"] is True
+    assert preflight["operations"][0]["reorder_only"] is True
+    assert preflight["final_sibling_orders"]["/Parent"] == [page_a, page_b]
+
+    result = vault_reorg.commit_plan(
+        reorg_vault,
+        [operation],
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    assert (reorg_vault / "Parent" / "A" / "A.md").exists()
+    assert (reorg_vault / "Parent" / "B" / "B.md").exists()
+    order_map = config.fetch_display_order_map()
+    assert order_map[page_a] < order_map[page_b]
+    assert result["page_map"] == {}
+
+
+def test_reorganization_rewrites_markdown_links_inside_commit(reorg_vault) -> None:
+    source_page = _write_page(reorg_vault, "/Old", "# Old\n")
+    ref_page = _write_page(reorg_vault, "/Ref", "# Ref\n\n[Old|Old]\n", links=[source_page])
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    operation = {"from": "/Old", "destination_parent": "/Topics", "new_name": "Old"}
+
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, [operation], config.get_tree_version()
+    )
+
+    assert preflight["ok"] is True
+    assert ref_page in preflight["link_rewrite_sources"]
+
+    result = vault_reorg.commit_plan(
+        reorg_vault,
+        [operation],
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    content = (reorg_vault / ref_page.lstrip("/")).read_text(encoding="utf-8")
+    assert "[Topics:Old|Old]" in content
+    assert result["link_rewrite_count"] >= 1
+    assert ref_page in result["touched_paths"]
+
+
+def test_commit_rejects_content_changed_after_preflight(reorg_vault) -> None:
+    source_page = _write_page(reorg_vault, "/Old", "# Old\n")
+    ref_page = _write_page(reorg_vault, "/Ref", "# Ref\n\n[Old|Old]\n", links=[source_page])
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    operation = {"from": "/Old", "destination_parent": "/Topics", "new_name": "Old"}
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, [operation], config.get_tree_version()
+    )
+
+    ref_file = reorg_vault / ref_page.lstrip("/")
+    ref_file.write_text(ref_file.read_text(encoding="utf-8") + "new editor content\n", encoding="utf-8")
+
+    with pytest.raises(vault_reorg.ReorganizationError, match="changed"):
+        vault_reorg.commit_plan(
+            reorg_vault,
+            [operation],
+            tree_version=preflight["tree_version"],
+            plan_token=preflight["plan_token"],
+        )
+
+    assert (reorg_vault / "Old" / "Old.md").exists()
+    assert not (reorg_vault / "Topics" / "Old" / "Old.md").exists()
+
+
+def test_failed_link_phase_restores_content_and_link_index(reorg_vault, monkeypatch) -> None:
+    source_page = _write_page(reorg_vault, "/Old", "# Old\n")
+    ref_page = _write_page(reorg_vault, "/Ref", "# Ref\n\n[Old|Old]\n", links=[source_page])
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    operation = {"from": "/Old", "destination_parent": "/Topics", "new_name": "Old"}
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, [operation], config.get_tree_version()
+    )
+    monkeypatch.setattr(
+        config,
+        "update_link_paths",
+        lambda _path_map: (_ for _ in ()).throw(RuntimeError("link index failure")),
+    )
+
+    with pytest.raises(vault_reorg.ReorganizationError, match="link index failure"):
+        vault_reorg.commit_plan(
+            reorg_vault,
+            [operation],
+            tree_version=preflight["tree_version"],
+            plan_token=preflight["plan_token"],
+        )
+
+    assert (reorg_vault / ref_page.lstrip("/")).read_text(encoding="utf-8") == "# Ref\n\n[Old|Old]\n"
+    assert (reorg_vault / "Old" / "Old.md").exists()
+    db_path = config._vault_db_path()
+    assert db_path is not None
+    conn = sqlite3.connect(db_path)
+    try:
+        targets = {
+            row[0]
+            for row in conn.execute(
+                "SELECT to_path FROM links WHERE from_path = ?", (ref_page,)
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert source_page in targets
+
+
+def test_tree_workspace_stages_outside_scope_and_undoes(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def get(self, path, params=None):
+            assert path == "/api/vault/tree"
+            return _Response(
+                {
+                    "version": 4,
+                    "tree": [
+                        {
+                            "path": "/",
+                            "name": "Vault",
+                            "children": [
+                                {
+                                    "path": "/Journal",
+                                    "name": "Journal",
+                                    "children": [
+                                        {
+                                            "path": "/Journal/2026/09/12",
+                                            "name": "12",
+                                            "children": [
+                                                {
+                                                    "path": "/Journal/2026/09/12/Idea",
+                                                    "name": "Idea",
+                                                    "children": [],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {"path": "/Projects", "name": "Projects", "children": []},
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+
+    window.open_tree_scope("/Journal/2026/09/12")
+    assert window.mode_tabs.currentIndex() == 1
+    assert "/Journal/2026/09/12/Idea" in window.tree_canvas._nodes
+    window._stage_tree_operation(
+        "/Journal/2026/09/12/Idea", "/Projects", "last", ""
+    )
+
+    assert window._plan[0]["destination_parent"] == "/Projects"
+    assert window._plan[0]["scope_root"] == "/Journal/2026/09/12"
+    assert window.undo_btn.isEnabled() is True
+    assert window._undo_plan() is True
+    assert window._plan == []
+    assert window._redo_plan() is True
+    assert window._plan[0]["destination_parent"] == "/Projects"
+    window._plan_history.reset()
+
+
+def test_tree_staging_ancestor_atomically_replaces_descendant(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def get(self, path, params=None):
+            assert path == "/api/vault/tree"
+            return _Response(
+                {
+                    "version": 5,
+                    "tree": [
+                        {
+                            "path": "/",
+                            "name": "Vault",
+                            "children": [
+                                {
+                                    "path": "/Parent",
+                                    "name": "Parent",
+                                    "children": [
+                                        {
+                                            "path": "/Parent/Child",
+                                            "name": "Child",
+                                            "children": [],
+                                        }
+                                    ],
+                                },
+                                {"path": "/Projects", "name": "Projects", "children": []},
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+
+    window._stage_tree_operation("/Parent/Child", "/Projects", "last", "")
+    window._stage_tree_operation("/Parent", "/Projects", "last", "")
+
+    assert [op["source_path"] for op in window._plan] == ["/Parent"]
+    ancestor_id = window._plan[0]["operation_id"]
+    assert window._undo_plan() is True
+    assert [op["source_path"] for op in window._plan] == ["/Parent/Child"]
+    assert window._redo_plan() is True
+    assert [op["source_path"] for op in window._plan] == ["/Parent"]
+    assert window._plan[0]["operation_id"] == ancestor_id
+    window._plan_history.reset()
+
+
+def test_contextual_tree_open_uses_bounded_scope_before_full_search(qtbot) -> None:
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get(self, path, params=None):
+            assert path == "/api/vault/tree"
+            self.calls.append(dict(params or {}))
+            requested = str((params or {}).get("path") or "/")
+            return _Response(
+                {
+                    "version": 6,
+                    "tree": [
+                        {
+                            "path": requested,
+                            "name": Path(requested.rstrip("/")).name or "Vault",
+                            "children": [],
+                        }
+                    ],
+                }
+            )
+
+    http = Http()
+    window = VaultReorgWindow(
+        http_client=http,
+        vault_name="Test",
+        read_only=False,
+        initial_tree_scope="/Projects/StillPoint",
+    )
+    qtbot.addWidget(window)
+
+    assert http.calls == [
+        {"include_journal": "true", "path": "/Projects/StillPoint", "depth": 4}
+    ]
+    assert window.mode_tabs.currentIndex() == 1
+    assert window._tree_payload_complete is False
+
+    window.mode_tabs.setCurrentIndex(0)
+
+    assert http.calls[-1] == {"include_journal": "true", "path": "/"}
+    assert window._tree_payload_complete is True

@@ -21,6 +21,22 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def test_bounded_tree_listing_stops_at_requested_depth(tmp_path: Path) -> None:
+    from sp.server.adapters import files
+
+    (tmp_path / "A" / "B" / "C").mkdir(parents=True)
+
+    tree = files.list_dir(tmp_path, recursive=True, max_depth=2)
+
+    root = tree[0]
+    node_a = root["children"][0]
+    node_b = node_a["children"][0]
+    assert node_a["path"] == "/A"
+    assert node_b["path"] == "/A/B"
+    assert node_b["children"] == []
+    assert node_b["has_children"] is True
+
 def _make_vault_db(tmp_path: Path, pages: list[dict]) -> Path:
     """Create a minimal vault database and return the db file path."""
     sp_dir = tmp_path / ".stillpoint"

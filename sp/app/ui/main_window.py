@@ -3107,7 +3107,9 @@ class MainWindow(QMainWindow):
         self._action_reorganize_vault = QAction("Reorganize Vault…", self)
         self._action_reorganize_vault.setToolTip("Find, stage, and apply page moves across the vault")
         self._action_reorganize_vault.setEnabled(False)
-        self._action_reorganize_vault.triggered.connect(self._open_vault_reorganization)
+        self._action_reorganize_vault.triggered.connect(
+            lambda checked=False: self._open_vault_reorganization()
+        )
         vault_menu.addAction(self._action_reorganize_vault)
         self._action_open_vault_terminal = QAction("Open Vault in Terminal", self)
         self._action_open_vault_terminal.setToolTip("Open the current local vault in your system terminal")
@@ -4541,7 +4543,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Recovery Failed", str(exc))
         return required
 
-    def _open_vault_reorganization(self) -> None:
+    def _open_vault_reorganization(self, scope_path: Optional[str] = None) -> None:
         if not self.vault_root:
             self.statusBar().showMessage("Select a vault before reorganizing pages.", 4000)
             return
@@ -4549,6 +4551,8 @@ class MainWindow(QMainWindow):
         if existing is not None:
             try:
                 existing.set_vault_accent_color(self._effective_tree_accent_color())
+                if scope_path:
+                    existing.open_tree_scope(scope_path)
                 existing.showMaximized()
                 existing.raise_()
                 existing.activateWindow()
@@ -4561,6 +4565,7 @@ class MainWindow(QMainWindow):
             http_client=self.http,
             vault_name=self.vault_root_name or Path(self.vault_root).name,
             read_only=self._read_only,
+            initial_tree_scope=scope_path,
             vault_accent_color=self._effective_tree_accent_color(),
             before_commit=self._prepare_for_vault_reorganization,
             begin_commit=self._begin_vault_reorganization_commit,
@@ -4630,8 +4635,13 @@ class MainWindow(QMainWindow):
         if self.current_path and (self.current_path in path_map.values() or self.current_path in touched_paths):
             self._open_file(self.current_path, add_to_history=False, force=True)
         self._populate_vault_tree()
-        if self.rewrite_backlinks_on_move and path_map:
-            self._queue_background_link_update(path_map)
+        # Reorganization commits rewrite Markdown links transactionally on the
+        # server. Do not enqueue the ordinary preference-controlled rewrite a
+        # second time.
+        try:
+            self.right_panel.refresh_links(self.current_path)
+        except Exception:
+            pass
         count = len(data.get("operations") or [])
         self.statusBar().showMessage(f"Reorganized {count} page(s).", 5000)
 
@@ -19783,6 +19793,10 @@ class MainWindow(QMainWindow):
                 open_window_action = menu.addAction("Open in Editor Window")
                 open_window_action.triggered.connect(lambda checked=False, p=path: self._open_page_editor_window(p))
             add_menu_section("Organize")
+            reorg_subtree_action = menu.addAction("Reorganize this subtree…")
+            reorg_subtree_action.triggered.connect(
+                lambda checked=False, p=path: self._open_vault_reorganization(p)
+            )
             if path != "/":
                 rename_action = menu.addAction("Rename")
                 rename_action.triggered.connect(
