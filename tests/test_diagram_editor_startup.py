@@ -264,6 +264,37 @@ def test_mermaid_linux_inline_uses_split_preview_without_webengine_import(monkey
     assert imports == []
 
 
+def test_mermaid_macos_inline_uses_split_preview_without_webengine_import(monkeypatch):
+    imports: list[str] = []
+    monkeypatch.setattr(mermaid_editor_window.sys, "platform", "darwin")
+    monkeypatch.setenv("SP_ENABLE_MERMAID_WEB_PREVIEW", "1")
+    monkeypatch.delenv("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE", raising=False)
+    monkeypatch.setattr(mermaid_editor_window, "_QWEBENGINE_VIEW_CLASS", None)
+    monkeypatch.setattr(mermaid_editor_window, "_QWEBENGINE_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "PySide6.QtWebEngineWidgets":
+            imports.append(name)
+            raise AssertionError("Mermaid should not import in-process WebEngine on macOS by default")
+        return original_import(name, globals, locals, fromlist, level)
+
+    original_import = __import__
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    assert mermaid_editor_window._should_use_web_preview() is False
+    assert imports == []
+
+
+def test_mermaid_macos_allows_explicit_inprocess_webengine_opt_in(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(mermaid_editor_window.sys, "platform", "darwin")
+    monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setenv("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE", "1")
+    monkeypatch.setattr(mermaid_editor_window, "_load_qwebengine_view_class", lambda: sentinel)
+
+    assert mermaid_editor_window._should_use_web_preview() is True
+
+
 def test_mermaid_inline_default_is_enabled(monkeypatch):
     monkeypatch.setattr("sp.app.config._read_global_config", lambda: {})
 

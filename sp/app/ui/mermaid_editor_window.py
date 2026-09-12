@@ -119,7 +119,12 @@ def _inline_preview_preference_enabled() -> bool:
 def _should_use_web_preview() -> bool:
     if not _inline_preview_preference_enabled():
         return False
-    if sys.platform.startswith("linux") and not _truthy_env("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE"):
+    # Qt WebEngine can terminate the entire application with a native crash
+    # while constructing QWebEngineView on Linux and macOS.  Python cannot
+    # catch that failure, so keep it out of the main process by default on
+    # those platforms.  The opt-in remains useful for known-good Qt installs.
+    unsafe_inprocess_platform = sys.platform.startswith("linux") or sys.platform == "darwin"
+    if unsafe_inprocess_platform and not _truthy_env("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE"):
         return False
     if _load_qwebengine_view_class() is None:
         return False
