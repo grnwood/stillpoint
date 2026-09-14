@@ -4371,23 +4371,23 @@ def reorder_pages(parent_path: str, page_order: list[str]) -> None:
     print(f"[DB] Reordering {len(page_order)} pages under {parent_path}")
     
     # First pass: ensure all pages exist in database
-    root = _vault_db_path()
+    root = _current_active_root()
     if root:
-        root = Path(root).parent  # Get vault root from .stillpoint path
+        root = Path(root)
         for page_path in page_order:
             # Check if page exists in database
             existing = conn.execute("SELECT path FROM pages WHERE path = ?", (page_path,)).fetchone()
             if not existing:
-                # Page not in database, try to index it
-                print(f"[DB] Indexing missing page: {page_path}")
+                # Page metadata can lag behind a filesystem move.  Create the
+                # canonical row before assigning its display order; the normal
+                # content indexer will fill in tags, links, and tasks.
+                print(f"[DB] Adding missing page metadata: {page_path}")
                 try:
-                    # Try to get the page file to index it
                     file_path = root / page_path.lstrip("/")
                     if file_path.exists():
-                        # Index this page
-                        index_page(page_path, indexlinks=False)
+                        ensure_page_entry(page_path)
                 except Exception as e:
-                    print(f"[DB] Failed to index {page_path}: {e}")
+                    print(f"[DB] Failed to add {page_path}: {e}")
     
     with conn:
         # Update display_order for each page to match its position in the list
@@ -4398,6 +4398,7 @@ def reorder_pages(parent_path: str, page_order: list[str]) -> None:
                 (idx, page_path)
             )
     conn.commit()
+    invalidate_display_order_cache()
     print(f"[DB] Reorder committed")
 
 

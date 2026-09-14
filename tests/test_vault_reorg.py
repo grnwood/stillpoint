@@ -284,6 +284,133 @@ def test_batch_orders_move_into_page_before_rehoming_that_page(reorg_vault) -> N
     assert result["page_map"][page_b] == "/Topics/A/B/B.md"
 
 
+@pytest.mark.parametrize("child_first", [False, True])
+def test_nested_source_can_leave_a_staged_ancestor(
+    reorg_vault, child_first: bool
+) -> None:
+    page_a = _write_page(reorg_vault, "/A", "# A\n[:A:B:C|C]\n")
+    page_b = _write_page(reorg_vault, "/A/B", "# B\n")
+    page_c = _write_page(reorg_vault, "/A/B/C", "# C\n")
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    _write_page(reorg_vault, "/Archive", "# Archive\n")
+    ref_page = _write_page(
+        reorg_vault,
+        "/Ref",
+        "# Ref\n[:A|A]\n[:A:B|B]\n[:A:B:C|C]\n[A:B|Relative B]\n",
+        links=[page_a, page_b, page_c],
+    )
+    parent_move = {"from": "/A", "destination_parent": "/Topics", "new_name": "A"}
+    child_move = {"from": "/A/B", "destination_parent": "/Archive", "new_name": "B"}
+    operations = [child_move, parent_move] if child_first else [parent_move, child_move]
+
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, operations, config.get_tree_version()
+    )
+
+    child_row = 0 if child_first else 1
+    parent_row = 1 if child_first else 0
+    assert preflight["ok"] is True
+    assert preflight["execution_order"] == [child_row, parent_row]
+    assert preflight["page_map"] == {
+        page_a: "/Topics/A/A.md",
+        page_b: "/Archive/B/B.md",
+        page_c: "/Archive/B/C/C.md",
+    }
+
+    result = vault_reorg.commit_plan(
+        reorg_vault,
+        operations,
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    assert (reorg_vault / "Topics" / "A" / "A.md").exists()
+    assert not (reorg_vault / "Topics" / "A" / "B").exists()
+    assert (reorg_vault / "Archive" / "B" / "B.md").exists()
+    assert (reorg_vault / "Archive" / "B" / "C" / "C.md").exists()
+    assert result["page_map"] == preflight["page_map"]
+    ref_content = (reorg_vault / ref_page.lstrip("/")).read_text(encoding="utf-8")
+    assert "[:Topics:A|A]" in ref_content
+    assert "[:Archive:B|B]" in ref_content
+    assert "[:Archive:B:C|C]" in ref_content
+    assert "[Archive:B|Relative B]" in ref_content
+    moved_parent_content = (
+        reorg_vault / "Topics" / "A" / "A.md"
+    ).read_text(encoding="utf-8")
+    assert "[:Archive:B:C|C]" in moved_parent_content
+
+
+def test_nested_source_can_change_levels_inside_a_staged_ancestor(reorg_vault) -> None:
+    page_a = _write_page(reorg_vault, "/A", "# A\n")
+    page_b = _write_page(reorg_vault, "/A/B", "# B\n")
+    page_c = _write_page(reorg_vault, "/A/C", "# C\n")
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    operations = [
+        {"from": "/A", "destination_parent": "/Topics", "new_name": "A"},
+        {"from": "/A/B", "destination_parent": "/A/C", "new_name": "B"},
+    ]
+
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, operations, config.get_tree_version()
+    )
+
+    assert preflight["ok"] is True
+    assert preflight["execution_order"] == [1, 0]
+    assert preflight["page_map"] == {
+        page_a: "/Topics/A/A.md",
+        page_b: "/Topics/A/C/B/B.md",
+        page_c: "/Topics/A/C/C.md",
+    }
+
+    vault_reorg.commit_plan(
+        reorg_vault,
+        operations,
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    assert (reorg_vault / "Topics" / "A" / "A.md").exists()
+    assert (reorg_vault / "Topics" / "A" / "C" / "C.md").exists()
+    assert (reorg_vault / "Topics" / "A" / "C" / "B" / "B.md").exists()
+
+
+def test_reorganization_rewrites_links_to_unindexed_descendants(reorg_vault) -> None:
+    page_a = _write_page(reorg_vault, "/A", "# A\n")
+    child_file = reorg_vault / "A" / "B" / "B.md"
+    child_file.parent.mkdir(parents=True)
+    child_file.write_text("# B\n", encoding="utf-8")
+    ref_page = _write_page(
+        reorg_vault,
+        "/Ref",
+        "# Ref\n[:A|A]\n[:A:B|B]\n",
+        links=[page_a],
+    )
+    _write_page(reorg_vault, "/Topics", "# Topics\n")
+    operations = [
+        {"from": "/A", "destination_parent": "/Topics", "new_name": "A"}
+    ]
+
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, operations, config.get_tree_version()
+    )
+
+    assert preflight["ok"] is True
+    assert preflight["page_map"]["/A/B/B.md"] == "/Topics/A/B/B.md"
+
+    result = vault_reorg.commit_plan(
+        reorg_vault,
+        operations,
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    assert result["page_map"]["/A/B/B.md"] == "/Topics/A/B/B.md"
+    assert (reorg_vault / "Topics" / "A" / "B" / "B.md").exists()
+    ref_content = (reorg_vault / ref_page.lstrip("/")).read_text(encoding="utf-8")
+    assert "[:Topics:A|A]" in ref_content
+    assert "[:Topics:A:B|B]" in ref_content
+
+
 def test_batch_can_use_a_destination_vacated_by_an_earlier_move(reorg_vault) -> None:
     page_a = _write_page(reorg_vault, "/A", "# A\n")
     page_b = _write_page(reorg_vault, "/B", "# B\n")
@@ -735,6 +862,56 @@ def test_reorganization_reorders_siblings_without_moving_files(reorg_vault) -> N
     assert result["page_map"] == {}
 
 
+def test_explicit_placement_repairs_missing_source_page_metadata(reorg_vault) -> None:
+    _write_page(reorg_vault, "/Roadmap", "# Roadmap\n")
+    first_thoughts = _write_page(
+        reorg_vault, "/Roadmap/First Thoughts", "# First Thoughts\n"
+    )
+    source_page = _write_page(
+        reorg_vault,
+        "/Roadmap/RoadmapSub1/RoadmapSub2",
+        "# RoadmapSub2\n",
+    )
+    db_path = config._vault_db_path()
+    assert db_path is not None
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute("DELETE FROM pages WHERE path = ?", (source_page,))
+    finally:
+        conn.close()
+
+    operation = {
+        "from": "/Roadmap/RoadmapSub1/RoadmapSub2",
+        "destination_parent": "/Roadmap",
+        "new_name": "RoadmapSub2",
+        "placement_mode": "after",
+        "placement_sibling_path": "/Roadmap/First Thoughts",
+        "placement_explicit": True,
+    }
+    preflight = vault_reorg.preflight_plan(
+        reorg_vault, [operation], config.get_tree_version()
+    )
+
+    destination_page = "/Roadmap/RoadmapSub2/RoadmapSub2.md"
+    assert preflight["ok"] is True
+    assert preflight["final_sibling_orders"]["/Roadmap"] == [
+        first_thoughts,
+        destination_page,
+    ]
+
+    vault_reorg.commit_plan(
+        reorg_vault,
+        [operation],
+        tree_version=preflight["tree_version"],
+        plan_token=preflight["plan_token"],
+    )
+
+    assert (reorg_vault / destination_page.lstrip("/")).exists()
+    order_map = config.fetch_display_order_map()
+    assert order_map[first_thoughts] < order_map[destination_page]
+
+
 def test_reorganization_rewrites_markdown_links_inside_commit(reorg_vault) -> None:
     source_page = _write_page(reorg_vault, "/Old", "# Old\n")
     ref_page = _write_page(reorg_vault, "/Ref", "# Ref\n\n[Old|Old]\n", links=[source_page])
@@ -881,6 +1058,7 @@ def test_tree_workspace_stages_outside_scope_and_undoes(qtbot, monkeypatch) -> N
 
     assert window._plan[0]["destination_parent"] == "/Projects"
     assert window._plan[0]["scope_root"] == "/Journal/2026/09/12"
+    assert window._plan[0]["placement_explicit"] is False
     assert window.undo_btn.isEnabled() is True
     assert window._undo_plan() is True
     assert window._plan == []
@@ -889,9 +1067,151 @@ def test_tree_workspace_stages_outside_scope_and_undoes(qtbot, monkeypatch) -> N
     window._plan_history.reset()
 
 
-def test_tree_staging_ancestor_atomically_replaces_descendant(qtbot, monkeypatch) -> None:
-    from PySide6.QtWidgets import QMessageBox
+def test_tree_node_double_click_renames_inline_as_one_undoable_command(qtbot) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
 
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def get(self, path, params=None):
+            assert path == "/api/vault/tree"
+            return _Response(
+                {
+                    "version": 8,
+                    "tree": [
+                        {
+                            "path": "/",
+                            "name": "Vault",
+                            "children": [
+                                {
+                                    "path": "/Roadmap",
+                                    "name": "Roadmap",
+                                    "children": [],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+    window.show()
+    window.tree_canvas.fit_tree()
+    QApplication.processEvents()
+
+    node = window.tree_canvas._nodes["/Roadmap"]
+    click_pos = window.tree_canvas.mapFromScene(node.sceneBoundingRect().center())
+    QTest.mouseDClick(
+        window.tree_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=click_pos,
+    )
+    editor = window.tree_canvas._inline_rename_editor
+    assert editor is not None
+    QTest.keyClicks(editor, "Product Roadmap")
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+
+    assert len(window._plan) == 1
+    assert window._plan[0]["source_path"] == "/Roadmap"
+    assert window._plan[0]["new_name"] == "Product Roadmap"
+    assert window.tree_canvas._nodes["/Roadmap"].text_item.text() == "Product Roadmap"
+    assert window.tree_canvas._ghosts["/Roadmap"].text_item.text() == "Product Roadmap  (staged)"
+
+    ghost = window.tree_canvas._ghosts["/Roadmap"]
+    click_pos = window.tree_canvas.mapFromScene(ghost.sceneBoundingRect().center())
+    QTest.mouseDClick(
+        window.tree_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=click_pos,
+    )
+    editor = window.tree_canvas._inline_rename_editor
+    assert editor is not None
+    QTest.keyClicks(editor, "Delivery Roadmap")
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+
+    assert window._plan[0]["new_name"] == "Delivery Roadmap"
+    assert window.tree_canvas._nodes["/Roadmap"].text_item.text() == "Delivery Roadmap"
+    assert window.tree_canvas._ghosts["/Roadmap"].text_item.text() == "Delivery Roadmap  (staged)"
+
+    node = window.tree_canvas._nodes["/Roadmap"]
+    click_pos = window.tree_canvas.mapFromScene(node.sceneBoundingRect().center())
+    QTest.mouseDClick(
+        window.tree_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=click_pos,
+    )
+    editor = window.tree_canvas._inline_rename_editor
+    assert editor is not None
+    QTest.keyClicks(editor, "Canceled Name")
+    QTest.keyClick(editor, Qt.Key.Key_Escape)
+
+    assert window._plan[0]["new_name"] == "Delivery Roadmap"
+    assert window._undo_plan() is True
+    assert window._plan[0]["new_name"] == "Product Roadmap"
+    assert window._undo_plan() is True
+    assert window._plan == []
+    window._plan_history.reset()
+
+
+def test_tree_drag_release_can_rebuild_scene_without_using_deleted_node(qtbot) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def get(self, path, params=None):
+            assert path == "/api/vault/tree"
+            return _Response(
+                {
+                    "version": 9,
+                    "tree": [
+                        {
+                            "path": "/",
+                            "name": "Vault",
+                            "children": [
+                                {"path": "/Source", "name": "Source", "children": []},
+                                {"path": "/Target", "name": "Target", "children": []},
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+    window.show()
+    window.tree_canvas.fit_tree()
+    QApplication.processEvents()
+
+    source = window.tree_canvas._nodes["/Source"]
+    target = window.tree_canvas._nodes["/Target"]
+    source_pos = window.tree_canvas.mapFromScene(source.sceneBoundingRect().center())
+    target_pos = window.tree_canvas.mapFromScene(target.sceneBoundingRect().center())
+    QTest.mousePress(
+        window.tree_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=source_pos,
+    )
+    QTest.mouseMove(window.tree_canvas.viewport(), target_pos, delay=20)
+    QTest.mouseRelease(
+        window.tree_canvas.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=target_pos,
+    )
+    QApplication.processEvents()
+
+    assert len(window._plan) == 1
+    assert window._plan[0]["source_path"] == "/Source"
+    assert window._plan[0]["destination_parent"] == "/Target"
+    window._plan_history.reset()
+
+
+def test_tree_staging_keeps_independent_ancestor_and_descendant_moves(qtbot) -> None:
     from sp.app.ui.vault_reorg_window import VaultReorgWindow
 
     class Http:
@@ -923,24 +1243,31 @@ def test_tree_staging_ancestor_atomically_replaces_descendant(qtbot, monkeypatch
                 }
             )
 
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
-    )
     window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
     qtbot.addWidget(window)
 
     window._stage_tree_operation("/Parent/Child", "/Projects", "last", "")
-    window._stage_tree_operation("/Parent", "/Projects", "last", "")
+    window._stage_tree_operation("/Parent", "/", "last", "")
 
-    assert [op["source_path"] for op in window._plan] == ["/Parent"]
-    ancestor_id = window._plan[0]["operation_id"]
+    assert [op["source_path"] for op in window._plan] == [
+        "/Parent/Child",
+        "/Parent",
+    ]
     assert window._undo_plan() is True
     assert [op["source_path"] for op in window._plan] == ["/Parent/Child"]
     assert window._redo_plan() is True
-    assert [op["source_path"] for op in window._plan] == ["/Parent"]
-    assert window._plan[0]["operation_id"] == ancestor_id
+    assert [op["source_path"] for op in window._plan] == [
+        "/Parent/Child",
+        "/Parent",
+    ]
+
+    window._plan_history.reset()
+    window._stage_tree_operation("/Parent", "/Projects", "last", "")
+    window._stage_tree_operation("/Parent/Child", "/", "last", "")
+    assert [op["source_path"] for op in window._plan] == [
+        "/Parent",
+        "/Parent/Child",
+    ]
     window._plan_history.reset()
 
 

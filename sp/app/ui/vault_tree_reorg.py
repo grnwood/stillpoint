@@ -10,10 +10,12 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsPathItem,
+    QGraphicsProxyWidget,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
+    QLineEdit,
 )
 
 
@@ -25,6 +27,35 @@ _JOURNAL_CONTAINER_RE = re.compile(
 def is_protected_tree_path(path: str) -> bool:
     normalized = (path or "/").rstrip("/") or "/"
     return normalized == "/" or bool(_JOURNAL_CONTAINER_RE.fullmatch(normalized))
+
+
+class _InlineRenameEdit(QLineEdit):
+    commitRequested = Signal()
+    cancelRequested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._resolved = False
+
+    def resolve(self) -> None:
+        self._resolved = True
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key.Key_Escape:
+            self._resolved = True
+            self.cancelRequested.emit()
+            event.accept()
+            return
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            self.commitRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        super().focusOutEvent(event)
+        if not self._resolved:
+            self.commitRequested.emit()
 
 
 class _TreeNodeItem(QGraphicsRectItem):
@@ -101,13 +132,24 @@ class _TreeNodeItem(QGraphicsRectItem):
         if self.movable:
             self.canvas._preview_drop(self, event.scenePos())
 
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if self.movable:
+            self.canvas._begin_inline_rename(self.path, host=self, text_item=self.text_item)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         moved = bool(
             self._press_scene_pos
             and (event.scenePos() - self._press_scene_pos).manhattanLength() >= 8
         )
-        if moved and self.movable:
-            self.canvas._complete_drop(self, event.scenePos())
+        release_scene_pos = QPointF(event.scenePos())
+        canvas = self.canvas
+        movable = self.movable
+        # moveRequested is delivered synchronously and its handler rebuilds the
+        # scene.  Finish all work on this C++ graphics item before that signal
+        # can delete it.
         self.setPos(self._home_pos)
         self.setCursor(
             Qt.CursorShape.OpenHandCursor
@@ -116,6 +158,43 @@ class _TreeNodeItem(QGraphicsRectItem):
         )
         self._press_scene_pos = None
         super().mouseReleaseEvent(event)
+        if moved and movable:
+            canvas._complete_drop(self, release_scene_pos)
+
+
+class _StagedGhostItem(QGraphicsRectItem):
+    def __init__(
+        self,
+        *,
+        canvas: "VaultTreeCanvas",
+        source_path: str,
+        name: str,
+        accent: QColor,
+    ) -> None:
+        super().__init__(0, 0, 178, 38)
+        self.canvas = canvas
+        self.source_path = source_path
+        self.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 36)))
+        self.setPen(QPen(accent, 1.5, Qt.PenStyle.DashLine))
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.text_item = QGraphicsSimpleTextItem(f"{name}  (staged)", self)
+        self.text_item.setBrush(QBrush(accent))
+        self.text_item.setPos(8, 9)
+        self.setZValue(5)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.canvas._select_path(self.source_path)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        self.canvas._begin_inline_rename(
+            self.source_path,
+            host=self,
+            text_item=self.text_item,
+        )
+        event.accept()
 
 
 class VaultTreeCanvas(QGraphicsView):
@@ -123,6 +202,7 @@ class VaultTreeCanvas(QGraphicsView):
 
     nodeSelected = Signal(str)
     moveRequested = Signal(str, str, str)  # source, target, child|before|after
+    renameRequested = Signal(str, str)  # source, new leaf name
     statusChanged = Signal(str)
 
     MAX_RENDERED_NODES = 700
@@ -142,9 +222,15 @@ class VaultTreeCanvas(QGraphicsView):
         self._scope_root = "/"
         self._plan: list[dict[str, Any]] = []
         self._nodes: dict[str, _TreeNodeItem] = {}
+        self._ghosts: dict[str, _StagedGhostItem] = {}
         self._selected_path: Optional[str] = None
         self._drop_target: Optional[_TreeNodeItem] = None
         self._read_only = False
+        self._inline_rename_editor: Optional[_InlineRenameEdit] = None
+        self._inline_rename_proxy: Optional[QGraphicsProxyWidget] = None
+        self._inline_rename_path: Optional[str] = None
+        self._inline_rename_host: Optional[QGraphicsRectItem] = None
+        self._inline_rename_text_item: Optional[QGraphicsSimpleTextItem] = None
 
     @property
     def scope_root(self) -> str:
@@ -193,10 +279,12 @@ class VaultTreeCanvas(QGraphicsView):
         return str(node.get("name") or Path(path.rstrip("/")).name or "Vault root")
 
     def rebuild(self) -> None:
+        self._discard_inline_rename()
         previous_selection = self._selected_path
         scene = self.scene()
         scene.clear()
         self._nodes.clear()
+        self._ghosts.clear()
         self._drop_target = None
         scope_node = self._find_payload_node(self._scope_root)
         if scope_node is None and self._scope_root == "/":
@@ -209,8 +297,8 @@ class VaultTreeCanvas(QGraphicsView):
             message.setBrush(self.palette().text())
             return
 
-        staged_sources = {
-            str(op.get("source_path") or "")
+        staged_by_source = {
+            str(op.get("source_path") or ""): op
             for op in self._plan
             if op.get("operation_type", "move") == "move"
         }
@@ -260,9 +348,12 @@ class VaultTreeCanvas(QGraphicsView):
             item = _TreeNodeItem(
                 canvas=self,
                 path=path,
-                label=self._node_label(node),
+                label=str(
+                    staged_by_source.get(path, {}).get("new_name")
+                    or self._node_label(node)
+                ),
                 protected=protected,
-                staged=path in staged_sources,
+                staged=path in staged_by_source,
                 movable=not protected and not self._read_only,
             )
             item.setPos(positions[path])
@@ -282,18 +373,18 @@ class VaultTreeCanvas(QGraphicsView):
             if target_item is not None:
                 offset = ghost_offsets.get(destination, 0)
                 ghost_offsets[destination] = offset + 1
-                ghost = QGraphicsRectItem(0, 0, 178, 38)
-                ghost.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 36)))
-                ghost.setPen(QPen(accent, 1.5, Qt.PenStyle.DashLine))
+                ghost = _StagedGhostItem(
+                    canvas=self,
+                    source_path=source,
+                    name=name,
+                    accent=accent,
+                )
                 ghost.setPos(
                     target_item.pos().x() + self.X_GAP,
                     target_item.pos().y() + offset * 44,
                 )
-                text = QGraphicsSimpleTextItem(f"{name}  (staged)", ghost)
-                text.setBrush(QBrush(accent))
-                text.setPos(8, 9)
-                ghost.setZValue(5)
                 scene.addItem(ghost)
+                self._ghosts[source] = ghost
             elif source_item is not None:
                 portal = QGraphicsSimpleTextItem(f"↗ moves outside scope → {destination}")
                 portal.setBrush(QBrush(QColor("#b97819")))
@@ -314,10 +405,101 @@ class VaultTreeCanvas(QGraphicsView):
         if previous_selection in self._nodes:
             self._select_path(previous_selection)
 
+    def _begin_inline_rename(
+        self,
+        path: str,
+        *,
+        host: Optional[QGraphicsRectItem] = None,
+        text_item: Optional[QGraphicsSimpleTextItem] = None,
+    ) -> None:
+        if self._read_only or is_protected_tree_path(path):
+            return
+        if self._inline_rename_editor is not None:
+            self._finish_inline_rename(accept=True)
+        rename_host = host or self._nodes.get(path)
+        if rename_host is None:
+            return
+        staged = next(
+            (op for op in self._plan if str(op.get("source_path") or "") == path),
+            None,
+        )
+        current_name = str(
+            (staged or {}).get("new_name")
+            or Path(path.rstrip("/")).name
+        )
+        editor = _InlineRenameEdit()
+        editor.setText(current_name)
+        editor.selectAll()
+        editor.setFrame(True)
+        editor.setToolTip("Enter accepts the staged rename; Escape cancels it")
+        proxy = self.scene().addWidget(editor)
+        proxy.setParentItem(rename_host)
+        proxy.setPos(7, 3)
+        proxy.resize(rename_host.rect().width() - 14, 24)
+        proxy.setZValue(20)
+        rename_text = text_item or getattr(rename_host, "text_item", None)
+        if rename_text is not None:
+            rename_text.setVisible(False)
+        self._inline_rename_editor = editor
+        self._inline_rename_proxy = proxy
+        self._inline_rename_path = path
+        self._inline_rename_host = rename_host
+        self._inline_rename_text_item = rename_text
+        editor.commitRequested.connect(lambda: self._finish_inline_rename(accept=True))
+        editor.cancelRequested.connect(lambda: self._finish_inline_rename(accept=False))
+        editor.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _discard_inline_rename(self) -> None:
+        editor = self._inline_rename_editor
+        proxy = self._inline_rename_proxy
+        text_item = self._inline_rename_text_item
+        if editor is not None:
+            editor.resolve()
+        self._inline_rename_editor = None
+        self._inline_rename_proxy = None
+        self._inline_rename_path = None
+        self._inline_rename_host = None
+        self._inline_rename_text_item = None
+        if text_item is not None:
+            text_item.setVisible(True)
+        if proxy is not None and proxy.scene() is not None:
+            self.scene().removeItem(proxy)
+            proxy.deleteLater()
+
+    def _finish_inline_rename(self, *, accept: bool) -> None:
+        editor = self._inline_rename_editor
+        path = self._inline_rename_path
+        if editor is None or not path:
+            return
+        name = editor.text().strip()
+        original_name = str(
+            next(
+                (
+                    op.get("new_name")
+                    for op in self._plan
+                    if str(op.get("source_path") or "") == path
+                ),
+                "",
+            )
+            or Path(path.rstrip("/")).name
+        )
+        if accept and not name:
+            self.statusChanged.emit("A page name cannot be empty.")
+            editor.selectAll()
+            editor.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self._discard_inline_rename()
+        if accept and name != original_name:
+            self.renameRequested.emit(path, name)
+        elif not accept:
+            self.statusChanged.emit("Rename canceled.")
+
     def _select_path(self, path: str) -> None:
         self._selected_path = path
         for node_path, item in self._nodes.items():
             item.setSelected(node_path == path)
+        for source_path, ghost in self._ghosts.items():
+            ghost.setSelected(source_path == path)
         self.nodeSelected.emit(path)
 
     def _node_at(self, scene_pos: QPointF, *, exclude: Optional[_TreeNodeItem] = None) -> Optional[_TreeNodeItem]:

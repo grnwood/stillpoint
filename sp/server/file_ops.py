@@ -340,13 +340,14 @@ def _link_replacements(path_map: dict[str, str]) -> list[tuple[str, str]]:
                     if (duplicated_old, duplicated_new) not in seen_pairs:
                         replacements.append((duplicated_old, duplicated_new))
                         seen_pairs.add((duplicated_old, duplicated_new))
-            # For root-level pages (no colons in old path), also add :PageName format
-            if ":" not in old_colon:
-                old_with_colon = f":{old_colon}"
-                new_with_colon = f":{new_colon}"
-                if (old_with_colon, new_with_colon) not in seen_pairs:
-                    replacements.append((old_with_colon, new_with_colon))
-                    seen_pairs.add((old_with_colon, new_with_colon))
+            # StillPoint stores rooted links with a leading colon at every
+            # depth (for example :Projects:Roadmap), while relative links omit
+            # it.  Rewrite both spellings from the same final path map.
+            old_with_colon = f":{old_colon.lstrip(':')}"
+            new_with_colon = f":{new_colon.lstrip(':')}"
+            if (old_with_colon, new_with_colon) not in seen_pairs:
+                replacements.append((old_with_colon, new_with_colon))
+                seen_pairs.add((old_with_colon, new_with_colon))
     # Rewrite leading-colon spellings before their bare equivalents. Otherwise
     # a root-page wiki rewrite can create a suffix that the later ``:Page``
     # replacement sees again (for example Old -> Topics:Old -> Topics:Topics:Old).

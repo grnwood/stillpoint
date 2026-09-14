@@ -281,8 +281,10 @@ not alter the plan.
 
 Dropping a staged node again edits its existing operation rather than adding a
 duplicate. Dragging an ancestor after one of its descendants has been staged
-must offer to remove the now-redundant descendant operation; it must never leave
-an ambiguous double move in the plan.
+keeps both operations when the descendant has its own destination. Likewise, a
+descendant remains independently editable after an ancestor is staged. The plan
+represents final-tree intent: preflight assigns each page to its most-specific
+staged source and schedules descendant extraction before its ancestor moves.
 
 ### Sibling ordering
 
@@ -335,8 +337,7 @@ Every user-level mutation of the plan creates one reversible command:
 - changing its outside-scope destination;
 - changing its name;
 - changing sibling placement or order;
-- accepting the removal of redundant descendant operations when staging an
-  ancestor;
+- staging an ancestor or descendant that overlaps another staged subtree;
 - removing one row or a multi-row selection; and
 - clearing the complete plan.
 
@@ -844,7 +845,7 @@ must remain the only layer that resolves absolute paths and mutates vault files.
   unsupported swaps, and placement anchors under the wrong final parent.
 - Resolve one deterministic final tree and execution order regardless of mode.
 - Undo and redo every supported plan mutation from both Search and Tree.
-- Treat batch staging, multi-row removal, ancestor replacement, and Clear Plan
+- Treat batch staging, multi-row removal, overlapping subtree edits, and Clear Plan
   as indivisible history commands.
 - Coalesce an accepted inline rename and exclude canceled/hover-only edits.
 - Clear redo after a new mutation following Undo.

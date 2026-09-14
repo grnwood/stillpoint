@@ -448,6 +448,7 @@ class VaultReorgWindow(QDialog):
         self.tree_canvas = VaultTreeCanvas()
         self.tree_canvas.nodeSelected.connect(self._tree_node_selected)
         self.tree_canvas.moveRequested.connect(self._tree_canvas_move_requested)
+        self.tree_canvas.renameRequested.connect(self._tree_inline_rename_requested)
         self.tree_canvas.statusChanged.connect(self._tree_status_changed)
         self.tree_fit_btn.clicked.connect(self.tree_canvas.fit_tree)
         split.addWidget(self.tree_canvas)
@@ -730,11 +731,19 @@ class VaultReorgWindow(QDialog):
             destination_parent = target
             placement_mode = "last"
             sibling = ""
+            placement_explicit = False
         else:
             destination_parent = self._tree_parent_path(target)
             placement_mode = placement
             sibling = target
-        self._stage_tree_operation(source, destination_parent, placement_mode, sibling)
+            placement_explicit = True
+        self._stage_tree_operation(
+            source,
+            destination_parent,
+            placement_mode,
+            sibling,
+            placement_explicit=placement_explicit,
+        )
 
     def _tree_move_to_picker_destination(self) -> None:
         item = self.tree_destination_tree.currentItem()
@@ -745,6 +754,7 @@ class VaultReorgWindow(QDialog):
             str(item.data(0, _PATH_ROLE) or "/"),
             "last",
             "",
+            placement_explicit=False,
         )
 
     def _tree_move_relative_to_picker(self, placement_mode: str) -> None:
@@ -759,6 +769,7 @@ class VaultReorgWindow(QDialog):
             self._tree_parent_path(sibling),
             placement_mode,
             sibling,
+            placement_explicit=True,
         )
 
     def _stage_tree_operation(
@@ -769,47 +780,13 @@ class VaultReorgWindow(QDialog):
         placement_sibling_path: str,
         *,
         new_name: Optional[str] = None,
+        placement_explicit: Optional[bool] = None,
     ) -> None:
         if self.read_only or is_protected_tree_path(source):
             return
         if destination_parent == source or destination_parent.startswith(source.rstrip("/") + "/"):
             QMessageBox.information(self, "Invalid Destination", "A page cannot move into its own subtree.")
             return
-        staged_ancestor = next(
-            (
-                op
-                for op in self._plan
-                if op.get("operation_type", "move") == "move"
-                and op.get("source_path")
-                and source.startswith(str(op["source_path"]).rstrip("/") + "/")
-            ),
-            None,
-        )
-        if staged_ancestor is not None:
-            QMessageBox.information(
-                self,
-                "Already Included",
-                f"{source} is already included in the staged move of "
-                f"{staged_ancestor.get('source_path')}.",
-            )
-            return
-        redundant_descendants = [
-            op
-            for op in self._plan
-            if op.get("operation_type", "move") == "move"
-            and str(op.get("source_path") or "").startswith(source.rstrip("/") + "/")
-        ]
-        if redundant_descendants:
-            answer = QMessageBox.question(
-                self,
-                "Replace Descendant Moves?",
-                f"Moving {source} already includes {len(redundant_descendants)} staged descendant "
-                "change(s). Remove those redundant changes and stage the ancestor move?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
         outside = bool(
             self._tree_scope_root != "/"
             and destination_parent != self._tree_scope_root
@@ -826,16 +803,10 @@ class VaultReorgWindow(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         final_name = (new_name if new_name is not None else Path(source.rstrip("/")).name).strip()
+        if placement_explicit is None:
+            placement_explicit = placement_mode in {"first", "before", "after"}
 
         def mutate(plan: list[dict]) -> None:
-            plan[:] = [
-                op
-                for op in plan
-                if not (
-                    op.get("operation_type", "move") == "move"
-                    and str(op.get("source_path") or "").startswith(source.rstrip("/") + "/")
-                )
-            ]
             existing = next((op for op in plan if op.get("source_path") == source), None)
             values = {
                 "operation_id": str(
@@ -847,7 +818,7 @@ class VaultReorgWindow(QDialog):
                 "new_name": final_name,
                 "placement_mode": placement_mode,
                 "placement_sibling_path": placement_sibling_path,
-                "placement_explicit": True,
+                "placement_explicit": placement_explicit,
                 "scope_root": self._tree_scope_root,
                 "created_from": "tree",
                 "source_tree_version": self._tree_version,
@@ -876,6 +847,10 @@ class VaultReorgWindow(QDialog):
         name, accepted = QInputDialog.getText(self, "Rename Staged Page", "New page name:", text=current_name)
         if not accepted:
             return
+        self._tree_inline_rename_requested(source, name)
+
+    def _tree_inline_rename_requested(self, source: str, name: str) -> None:
+        existing = next((op for op in self._plan if op.get("source_path") == source), None)
         destination = str(existing.get("destination_parent") if existing else self._tree_parent_path(source))
         self._stage_tree_operation(
             source,
@@ -883,6 +858,7 @@ class VaultReorgWindow(QDialog):
             str(existing.get("placement_mode") if existing else "last"),
             str(existing.get("placement_sibling_path") if existing else ""),
             new_name=name,
+            placement_explicit=bool(existing.get("placement_explicit")) if existing else False,
         )
 
     def _tree_revert_selected(self) -> None:

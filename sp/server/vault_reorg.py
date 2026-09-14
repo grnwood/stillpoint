@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from sp.app import config
 from sp.server import file_ops, search_index
-from sp.server.adapters.files import PAGE_SUFFIX, file_content_lock
+from sp.server.adapters.files import PAGE_SUFFIX, PAGE_SUFFIXES, file_content_lock
 
 
 _VAULT_LOCKS: dict[str, threading.RLock] = {}
@@ -272,11 +272,17 @@ def search_candidates(
 def _topological_order(operations: list[dict[str, Any]]) -> list[int]:
     edges: dict[int, set[int]] = {idx: set() for idx in range(len(operations))}
     for idx, op in enumerate(operations):
+        if op.get("reorder_only"):
+            continue
         for other_idx, other in enumerate(operations):
-            if idx == other_idx:
+            if idx == other_idx or other.get("reorder_only"):
                 continue
+            # Extract or reposition a descendant before moving its ancestor;
+            # afterward its original source path no longer exists.
+            if op["source_path"].startswith(other["source_path"].rstrip("/") + "/"):
+                edges[idx].add(other_idx)
             # A destination occupied by another source must be vacated first.
-            if op["destination_path"] == other["source_path"]:
+            if op["raw_destination_path"] == other["source_path"]:
                 edges[other_idx].add(idx)
             # Moving into a source subtree must happen before that subtree moves.
             if op["destination_parent"] == other["source_path"] or op["destination_parent"].startswith(
@@ -284,8 +290,8 @@ def _topological_order(operations: list[dict[str, Any]]) -> list[int]:
             ):
                 edges[idx].add(other_idx)
             # A parent created by another move must exist first.
-            if op["destination_parent"] == other["destination_path"] or op["destination_parent"].startswith(
-                other["destination_path"] + "/"
+            if op["destination_parent"] == other["raw_destination_path"] or op["destination_parent"].startswith(
+                other["raw_destination_path"] + "/"
             ):
                 edges[other_idx].add(idx)
     indegree = {idx: 0 for idx in edges}
@@ -319,11 +325,19 @@ def _resolve_final_destinations(operations: list[dict[str, Any]]) -> None:
         resolving.add(index)
         op = operations[index]
         destination = op["raw_destination_path"]
-        for other_index, other in enumerate(operations):
-            source = other["source_path"]
-            if destination.startswith(source + "/"):
-                other_final = resolve(other_index)
-                destination = _rebase_folder(destination, source, other_final)
+        containers = [
+            (len(other["source_path"]), other_index, other)
+            for other_index, other in enumerate(operations)
+            if destination.startswith(other["source_path"].rstrip("/") + "/")
+        ]
+        if containers:
+            _length, other_index, other = max(containers, key=lambda item: item[0])
+            other_final = resolve(other_index)
+            destination = _rebase_folder(
+                destination,
+                other["source_path"],
+                other_final,
+            )
         op["destination_path"] = destination
         op["final_destination_path"] = destination
         resolving.remove(index)
@@ -337,17 +351,23 @@ def _resolve_final_destinations(operations: list[dict[str, Any]]) -> None:
 def _resolve_final_folder(path: str, operations: list[dict[str, Any]]) -> str:
     """Resolve an original folder path through the complete staged move set."""
     resolved = file_ops._normalize_folder_path(path)
-    for op in operations:
-        if op.get("reorder_only"):
-            continue
-        source = op["source_path"]
-        destination = op["destination_path"]
-        if resolved == source or resolved.startswith(source.rstrip("/") + "/"):
-            resolved = _rebase_folder(resolved, source, destination)
-    return resolved
+    matches = [
+        op
+        for op in operations
+        if not op.get("reorder_only")
+        and (
+            resolved == op["source_path"]
+            or resolved.startswith(op["source_path"].rstrip("/") + "/")
+        )
+    ]
+    if not matches:
+        return resolved
+    op = max(matches, key=lambda item: len(item["source_path"]))
+    return _rebase_folder(resolved, op["source_path"], op["destination_path"])
 
 
 def _calculate_final_sibling_orders(
+    root: Path,
     move_operations: list[dict[str, Any]],
     page_map: dict[str, str],
 ) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
@@ -384,10 +404,22 @@ def _calculate_final_sibling_orders(
         order = ordered_by_parent.setdefault(parent, [])
         source_page = config.folder_to_page_path(op["destination_path"])
         if source_page not in order:
-            errors.append(
-                {"row": op["row"], "message": "The ordered source is not an indexed page under its final parent."}
-            )
-            continue
+            # The filesystem tree can legitimately be ahead of the derived
+            # page index.  Keep explicit placement usable in that state;
+            # reorder_pages() indexes the page after the folder move.
+            original_page = config.folder_to_page_path(op["source_path"])
+            original_file = root / original_page.lstrip("/")
+            legacy_file = original_file.with_suffix(".txt")
+            if original_file.exists() or legacy_file.exists():
+                order.append(source_page)
+            else:
+                errors.append(
+                    {
+                        "row": op["row"],
+                        "message": "Only a page-backed node can have an explicit sibling position.",
+                    }
+                )
+                continue
         order.remove(source_page)
         mode = op.get("placement_mode", "last")
         if mode == "first":
@@ -523,11 +555,6 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
     reference_pairs = [(op["source_path"], op["destination_parent"]) for op in reference_operations]
     if len(reference_pairs) != len(set(reference_pairs)):
         errors.append({"row": None, "message": "The plan contains duplicate Journal references."})
-    for idx, source in enumerate(sources):
-        for other_idx, other in enumerate(sources):
-            if idx != other_idx and source.startswith(other + "/"):
-                errors.append({"row": move_operations[idx]["row"], "message": "A staged ancestor already includes this page."})
-                break
     try:
         _resolve_final_destinations(move_operations)
     except ReorganizationError as exc:
@@ -535,7 +562,7 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
     for op in move_operations:
         op["final_destination_parent"] = file_ops._parent_folder_path(op["destination_path"])
         op["reorder_only"] = bool(
-            op["destination_path"] == op["source_path"] and op.get("placement_explicit")
+            op["raw_destination_path"] == op["source_path"] and op.get("placement_explicit")
         )
         sibling = op.get("placement_sibling_path") or ""
         op["final_placement_sibling_path"] = (
@@ -551,6 +578,7 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
         row = op["row"]
         source = op["source_path"]
         destination = op["destination_path"]
+        execution_destination = op["raw_destination_path"]
         source_dir = file_ops._resolve_folder(root, source)
         if not source_dir.exists():
             errors.append({"row": row, "message": "Source no longer exists."})
@@ -558,8 +586,12 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
             errors.append({"row": row, "message": "Destination is unchanged."})
         if destination.startswith(source + "/"):
             errors.append({"row": row, "message": "Cannot move a page into its own subtree."})
-        destination_dir = file_ops._resolve_folder(root, destination)
-        if destination_dir.exists() and destination not in source_set:
+        destination_dir = file_ops._resolve_folder(root, execution_destination)
+        if (
+            not op.get("reorder_only")
+            and destination_dir.exists()
+            and execution_destination not in source_set
+        ):
             errors.append({"row": row, "message": "Destination already exists."})
         parent = op["destination_parent"]
         parent_exists = file_ops._resolve_folder(root, parent).exists()
@@ -623,24 +655,58 @@ def preflight_plan(root: Path, raw_operations: list[dict[str, Any]], tree_versio
         if db_path:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             try:
-                for op in move_operations:
-                    if op.get("reorder_only"):
-                        continue
+                moving = [op for op in move_operations if not op.get("reorder_only")]
+                affected_paths: set[str] = set()
+                for op in moving:
                     source_page = config.folder_to_page_path(op["source_path"])
-                    rows = conn.execute(
-                        "SELECT path FROM pages WHERE COALESCE(deleted, 0) = 0 AND (path = ? OR path LIKE ?)",
-                        (source_page, op["source_path"].rstrip("/") + "/%"),
-                    ).fetchall()
-                    for (old_path,) in rows:
-                        page_map[old_path] = config._rebase_page_path(
-                            old_path, op["source_path"], op["destination_path"]
-                        )
+                    affected_paths.update(
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT path FROM pages "
+                            "WHERE COALESCE(deleted, 0) = 0 AND (path = ? OR path LIKE ?)",
+                            (source_page, op["source_path"].rstrip("/") + "/%"),
+                        ).fetchall()
+                    )
+                    # The filesystem is authoritative for structural work.
+                    # Include real pages even when the derived metadata index
+                    # is stale or incomplete, otherwise links to those pages
+                    # cannot be rewritten.
+                    source_dir = file_ops._resolve_folder(root, op["source_path"])
+                    if source_dir.exists():
+                        for suffix in PAGE_SUFFIXES:
+                            for page_file in source_dir.rglob(f"*{suffix}"):
+                                if (
+                                    suffix != PAGE_SUFFIX
+                                    and page_file.with_suffix(PAGE_SUFFIX).exists()
+                                ):
+                                    continue
+                                affected_paths.add(
+                                    f"/{page_file.relative_to(root).as_posix()}"
+                                )
+                for old_path in sorted(affected_paths):
+                    folder = _folder_for_page(old_path)
+                    matches = [
+                        op
+                        for op in moving
+                        if folder == op["source_path"]
+                        or folder.startswith(op["source_path"].rstrip("/") + "/")
+                    ]
+                    if not matches:
+                        continue
+                    # A separately staged descendant leaves the ancestor's
+                    # subtree and therefore owns its pages' final mapping.
+                    op = max(matches, key=lambda item: len(item["source_path"]))
+                    page_map[old_path] = config._rebase_page_path(
+                        old_path,
+                        op["source_path"],
+                        op["destination_path"],
+                    )
             finally:
                 conn.close()
     final_sibling_orders: dict[str, list[str]] = {}
     if not errors:
         final_sibling_orders, placement_errors = _calculate_final_sibling_orders(
-            move_operations, page_map
+            root, move_operations, page_map
         )
         errors.extend(placement_errors)
     link_rewrite_sources: list[str] = []
@@ -887,6 +953,15 @@ def commit_plan(
                 manifest["completed"] = completed
                 _write_manifest(root, manifest)
 
+            final_page_map = dict(checked.get("page_map") or {})
+            for old_path, new_path in combined_map.items():
+                expected = final_page_map.get(old_path)
+                if expected is not None and expected != new_path:
+                    raise ReorganizationError(
+                        f"Executed path differs from validated plan: {old_path}"
+                    )
+                final_page_map.setdefault(old_path, new_path)
+
             final_sibling_orders = dict(checked.get("final_sibling_orders") or {})
             for parent_path, page_order in final_sibling_orders.items():
                 config.reorder_pages(parent_path, list(page_order))
@@ -914,9 +989,9 @@ def commit_plan(
                     note=op["new_name"],
                 )
 
-            link_updates = file_ops.plan_link_updates(root, combined_map)
+            link_updates = file_ops.plan_link_updates(root, final_page_map)
             rewritten_link_pages = file_ops.apply_link_updates(root, link_updates)
-            config.update_link_paths(combined_map)
+            config.update_link_paths(final_page_map)
             touched_content_pages = sorted(
                 set(append_by_page) | set(reference_target_pages) | set(rewritten_link_pages)
             )
@@ -929,7 +1004,7 @@ def commit_plan(
                 pass
             result = {
                 "ok": True,
-                "page_map": combined_map,
+                "page_map": final_page_map,
                 "display_orders": display_orders,
                 "journal_paths": sorted(append_by_page),
                 "touched_paths": touched_content_pages,
