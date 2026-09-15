@@ -23,6 +23,20 @@ from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .keyboard_shortcuts import is_vi_navigation_chord
 import html
 import re
+import unicodedata
+
+
+def _clean_link_target_text(value: str | None) -> str:
+    """Strip invisible clipboard formatting that can hide an HTTP scheme."""
+    return "".join(
+        ch
+        for ch in (value or "").strip()
+        if unicodedata.category(ch) not in {"Cc", "Cf", "Cs"}
+    ).strip()
+
+
+def _is_http_target(value: str | None) -> bool:
+    return bool(re.match(r"(?i)^https?://", _clean_link_target_text(value)))
 
 
 class HTMLDelegate(QStyledItemDelegate):
@@ -187,10 +201,11 @@ class InsertLinkDialog(QDialog):
 
         # Editing existing link: pre-fill target and label
         if initial_link_target:
+            clean_initial_target = _clean_link_target_text(initial_link_target)
             normalized_initial_target = (
-                initial_link_target.strip()
-                if initial_link_target.strip().startswith(("http://", "https://", "HTTP://", "HTTPS://"))
-                else normalize_link_target(initial_link_target)
+                clean_initial_target
+                if _is_http_target(clean_initial_target)
+                else normalize_link_target(clean_initial_target)
             )
         if initial_link_label:
             initial_label_clean = self._prepare_selected_text(initial_link_label) or None
@@ -322,9 +337,9 @@ class InsertLinkDialog(QDialog):
             return self._create_new_target
         if self._accepted_target:
             return self._accepted_target
-        text = self.search.text().strip()
+        text = _clean_link_target_text(self.search.text())
         # Don't normalize HTTP URLs
-        if text.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
+        if _is_http_target(text):
             return text or None
         if self._launched_with_selection and text == self._seeded_text:
             return text or None
@@ -383,8 +398,10 @@ class InsertLinkDialog(QDialog):
             return
         self._accepted_target = None
         # If typing an HTTP URL, skip page search
-        text = self.search.text().strip()
-        if text.startswith(("http://", "https://")):
+        text = _clean_link_target_text(self.search.text())
+        if _is_http_target(text):
+            self._create_new_selected = False
+            self._create_new_target = None
             self.list_widget.clear()
             # Auto-populate link name with URL if not manually edited
             if not self._link_name_manually_edited:
@@ -542,7 +559,7 @@ class InsertLinkDialog(QDialog):
 
     def _refresh(self) -> None:
         """Refresh the list of pages based on search term."""
-        term = self.search.text().strip()
+        term = _clean_link_target_text(self.search.text())
         if not term:
             self.list_widget.clear()
             self._accepted_target = None
@@ -569,7 +586,7 @@ class InsertLinkDialog(QDialog):
         existing_exact = False
         create_target = ""
         create_target_base = ""
-        if term and not term.startswith(("http://", "https://")):
+        if term and not _is_http_target(term):
             create_target = self._generate_create_target(search_term)
             if anchor and create_target and "#" not in create_target:
                 create_target = f"{create_target}{anchor}"
@@ -600,7 +617,7 @@ class InsertLinkDialog(QDialog):
                 display_text=display_text,
             )
 
-        if term and not term.startswith(("http://", "https://")) and not existing_exact:
+        if term and not _is_http_target(term) and not existing_exact:
             current_location = self._current_page_display()
             create_text = (
                 f"<i>Create new page '{html.escape(term)}' at '{html.escape(current_location)}'</i>"

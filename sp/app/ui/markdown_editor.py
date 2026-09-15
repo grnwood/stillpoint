@@ -3591,8 +3591,9 @@ class MarkdownEditor(QTextEdit):
         if not colon_path:
             return
         
-        is_http_url = colon_path.startswith(("http://", "https://"))
-        target = self._normalize_external_link(colon_path) if is_http_url else ensure_root_colon_link(colon_path)
+        clean_target = self._strip_problematic_control_chars(colon_path).strip()
+        is_http_url = bool(re.match(r"(?i)^https?://", clean_target))
+        target = self._normalize_external_link(clean_target) if is_http_url else ensure_root_colon_link(clean_target)
         trace_link_decision(
             "sp/app/ui/markdown_editor.py:insert_link:start",
             colon_path=colon_path,
@@ -4073,7 +4074,7 @@ class MarkdownEditor(QTextEdit):
             text = text.split(LINK_SENTINEL, 1)[0]
         text = self._strip_problematic_control_chars(text).strip()
         # Guard against leaked wiki delimiter when copying/pasting displayed [url|] links.
-        if text.startswith(("http://", "https://")) and text.endswith("|"):
+        if re.match(r"(?i)^https?://", text) and text.endswith("|"):
             text = text.rstrip("|")
         return text
 
@@ -4189,12 +4190,31 @@ class MarkdownEditor(QTextEdit):
 
     def _wrap_plain_http_links(self, text: str) -> str:
         """Convert bare HTTP(S) URLs into wiki format [url|] to enable sentinel rendering."""
-        if not text or "http" not in text:
+        if not text or "http" not in text.lower():
             return text
 
-        pattern = re.compile(rf"(?<!\[)(?<!\()(?<!\|)(https?://[^\s<>\[\]\(\){LINK_SENTINEL}]+)")
+        pattern = re.compile(
+            rf"(?<!\[)(?<!\()(?<!\|)(https?://[^\s<>\[\]\(\){LINK_SENTINEL}]+)",
+            re.IGNORECASE,
+        )
+        protected_spans = sorted(
+            [match.span() for match in WIKI_LINK_STORAGE_PATTERN.finditer(text)]
+            + [match.span() for match in WIKI_LINK_DISPLAY_PATTERN.finditer(text)]
+        )
+        protected_index = 0
 
         def repl(match: re.Match[str]) -> str:
+            nonlocal protected_index
+            while (
+                protected_index < len(protected_spans)
+                and protected_spans[protected_index][1] <= match.start()
+            ):
+                protected_index += 1
+            if (
+                protected_index < len(protected_spans)
+                and protected_spans[protected_index][0] <= match.start() < protected_spans[protected_index][1]
+            ):
+                return match.group(0)
             url = match.group(1)
             normalized = self._normalize_external_link(url)
             return f"[{normalized}|]"

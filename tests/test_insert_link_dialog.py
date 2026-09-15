@@ -55,6 +55,21 @@ def test_selected_colon_path_preserves_http(qapp):
     dialog.close()
 
 
+def test_selected_http_path_strips_invisible_clipboard_prefix(qapp):
+    dialog = InsertLinkDialog(selected_text="Link label", current_page_path="/Projects/Projects.md")
+    dialog.search.setText("New Page")
+    qapp.processEvents()
+    assert dialog.should_create_new_page() is True
+
+    dialog.search.setText("\u200bhttps://example.com/wiki/Page")
+    qapp.processEvents()
+
+    assert dialog.selected_colon_path() == "https://example.com/wiki/Page"
+    assert dialog.should_create_new_page() is False
+    assert dialog.list_widget.count() == 0
+    dialog.close()
+
+
 def test_link_name_manual_edit_stops_auto_populate(qapp):
     dialog = InsertLinkDialog()
 

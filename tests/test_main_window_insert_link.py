@@ -40,6 +40,23 @@ class _FakeInsertLinkDialogCreateAnchorWithAutoLabel:
         return True
 
 
+class _FakeInsertExternalLinkDialog:
+    def __init__(self, *args, **kwargs):
+        self.search = type("_Search", (), {"setFocus": lambda self: None})()
+
+    def exec(self):
+        return QDialog.Accepted
+
+    def selected_colon_path(self):
+        return "\u200bhttps://acme.atlassian.net/wiki/spaces/OM/pages/6570344460/0.1+Enterprise+Integration+Architecture"
+
+    def selected_link_name(self):
+        return "this is link text"
+
+    def should_create_new_page(self):
+        return False
+
+
 def _build_main_window(qapp, monkeypatch):
     monkeypatch.setattr("sp.app.ui.main_window.config.has_active_vault", lambda: True)
     monkeypatch.setattr("sp.app.ui.main_window.config.load_vi_mode_enabled", lambda: False)
@@ -92,4 +109,27 @@ def test_insert_link_create_new_with_anchor_and_auto_label_omits_label(qapp, mon
     win._insert_link()
 
     assert "Dealing with [:Journal:2026:06:23#dk-questions|:Journal:2026:06:23#dk-questions]" in win.editor.to_markdown()
+    win.close()
+
+
+def test_insert_external_link_over_selection_survives_reload(qapp, monkeypatch):
+    monkeypatch.setattr(
+        "sp.app.ui.main_window.InsertLinkDialog",
+        _FakeInsertExternalLinkDialog,
+    )
+    win = _build_main_window(qapp, monkeypatch)
+    win.editor.setPlainText("this is link text")
+    cursor = win.editor.textCursor()
+    cursor.select(QTextCursor.Document)
+    win.editor.setTextCursor(cursor)
+    monkeypatch.setattr(win, "_save_current_file", lambda *args, **kwargs: None)
+
+    win._insert_link()
+
+    url = "https://acme.atlassian.net/wiki/spaces/OM/pages/6570344460/0.1+Enterprise+Integration+Architecture"
+    expected = f"[{url}|this is link text]\n"
+    assert win.editor.to_markdown() == expected
+    win.editor.set_markdown(win.editor.to_markdown())
+    qapp.processEvents()
+    assert win.editor.to_markdown() == expected
     win.close()

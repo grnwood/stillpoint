@@ -106,6 +106,31 @@ def test_insert_external_link_keeps_full_url(editor):
     assert f"[{url}|]" in editor.to_markdown()
 
 
+def test_insert_external_link_with_invisible_prefix_is_stable_across_reload(editor, qapp):
+    url = "https://acme.atlassian.net/wiki/spaces/OM/pages/6570344460/0.1+Enterprise+Integration+Architecture"
+    expected = f"[{url}|this is link text]\n"
+    editor.setPlainText("")
+
+    editor.insert_link(f"\u200b{url}", "this is link text")
+    assert editor.to_markdown() == expected
+
+    editor.set_markdown(editor.to_markdown())
+    qapp.processEvents()
+    assert editor.to_markdown() == expected
+
+    editor.set_markdown(editor.to_markdown())
+    qapp.processEvents()
+    assert editor.to_markdown() == expected
+
+
+def test_plain_url_wrapper_does_not_nest_urls_inside_existing_links(editor):
+    external = "[https://example.com/wiki/Page|Label]"
+    malformed_internal = "[:Page:https://example.com/wiki/Page|Label]"
+
+    assert editor._wrap_plain_http_links(external) == external
+    assert editor._wrap_plain_http_links(malformed_internal) == malformed_internal
+
+
 def test_normalize_external_link_strips_sentinels(editor):
     url = "https://sample.example/path+Part"
     raw = f"{url}{LINK_SENTINEL}extra label{LINK_SENTINEL}"
@@ -889,16 +914,16 @@ def test_paste_markdown_link_with_escaped_label_chars_normalizes_to_wiki(editor)
     mime = QMimeData()
     source = (
         r"*   Growth pressures and complexity driving OMS/Inventory modernization    "
-        r"[\[DigiKey OM...ry SOW v01 \| Word\]]"
-        r"(https://capgemininar.sharepoint.com/sites/DigiKey-RFSOMSImplementation/_layouts/15/Doc.aspx?sourcedoc=%7BC72E4E80-CFB0-4EFE-A1E4-AE923093889B%7D&file=DigiKey%20OMS%20Design%20%26%20Discovery%20SOW%20v01.docx&action=default&mobileredirect=true&DefaultItemOpen=1)"
+        r"[\[acme OM...ry SOW v01 \| Word\]]"
+        r"(https://capgemininar.sharepoint.com/sites/acme-RFSOMSImplementation/_layouts/15/Doc.aspx?sourcedoc=%7BC72E4E80-CFB0-4EFE-A1E4-AE923093889B%7D&file=acme%20OMS%20Design%20%26%20Discovery%20SOW%20v01.docx&action=default&mobileredirect=true&DefaultItemOpen=1)"
     )
     mime.setText(source)
     editor.insertFromMimeData(mime)
 
     markdown = editor.to_markdown()
-    assert "[https://capgemininar.sharepoint.com/sites/DigiKey-RFSOMSImplementation/" in markdown
-    assert "|DigiKey OM...ry SOW v01 | Word]" in markdown
-    assert r"[\[DigiKey OM...ry SOW v01 \| Word\]](" not in markdown
+    assert "[https://capgemininar.sharepoint.com/sites/acme-RFSOMSImplementation/" in markdown
+    assert "|acme OM...ry SOW v01 | Word]" in markdown
+    assert r"[\[acme OM...ry SOW v01 \| Word\]](" not in markdown
 
 
 def test_copy_line_under_cursor_preserves_internal_link_markdown(editor):
