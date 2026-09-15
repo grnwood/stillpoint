@@ -4,9 +4,31 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 import re
+import unicodedata
 
 from sp.server.adapters.files import PAGE_SUFFIX, strip_page_suffix
 from sp.logging_flags import log_enabled
+
+
+def clean_link_target_text(value: str | None) -> str:
+    """Normalize clipboard text used as a link target, including Markdown autolinks."""
+    cleaned = "".join(
+        ch
+        for ch in (value or "").strip()
+        if unicodedata.category(ch) not in {"Cc", "Cf", "Cs"}
+    ).strip()
+    markdown_link = re.fullmatch(
+        r"\[(?:\\.|[^\]\n])*\]\(\s*(?P<url>https?://.+)\s*\)",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if markdown_link:
+        return markdown_link.group("url").strip()
+    return cleaned
+
+
+def is_http_link_target(value: str | None) -> bool:
+    return bool(re.match(r"(?i)^https?://", clean_link_target_text(value)))
 
 
 def format_journal_day_label(path: str) -> str | None:

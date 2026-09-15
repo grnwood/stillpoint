@@ -70,6 +70,19 @@ def test_selected_http_path_strips_invisible_clipboard_prefix(qapp):
     dialog.close()
 
 
+def test_selected_http_path_unwraps_markdown_autolink(qapp):
+    dialog = InsertLinkDialog(selected_text="Link label")
+    url = "https://acme.atlassian.net/wiki/spaces/OM/pages/1234567890/Page"
+    dialog.search.setText(f"[{url}]({url})")
+    qapp.processEvents()
+
+    assert dialog.selected_colon_path() == url
+    assert dialog.selected_link_name() == "Link label"
+    assert dialog.should_create_new_page() is False
+    assert dialog.list_widget.count() == 0
+    dialog.close()
+
+
 def test_link_name_manual_edit_stops_auto_populate(qapp):
     dialog = InsertLinkDialog()
 

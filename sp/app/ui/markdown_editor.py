@@ -80,8 +80,9 @@ from shiboken6 import Shiboken
 from markdown import markdown as render_markdown
 from .keyboard_shortcuts import is_vi_navigation_chord
 from .path_utils import (
-    path_to_colon, colon_to_path, ensure_root_colon_link,
-    should_use_full_target_label, trace_link_decision,
+    clean_link_target_text, colon_to_path, ensure_root_colon_link,
+    is_http_link_target, path_to_colon, should_use_full_target_label,
+    trace_link_decision,
 )
 from .heading_utils import heading_slug
 from .page_load_logger import (
@@ -3591,8 +3592,8 @@ class MarkdownEditor(QTextEdit):
         if not colon_path:
             return
         
-        clean_target = self._strip_problematic_control_chars(colon_path).strip()
-        is_http_url = bool(re.match(r"(?i)^https?://", clean_target))
+        clean_target = clean_link_target_text(colon_path)
+        is_http_url = is_http_link_target(clean_target)
         target = self._normalize_external_link(clean_target) if is_http_url else ensure_root_colon_link(clean_target)
         trace_link_decision(
             "sp/app/ui/markdown_editor.py:insert_link:start",
@@ -4072,7 +4073,7 @@ class MarkdownEditor(QTextEdit):
         text = (link or "").strip()
         if LINK_SENTINEL in text:
             text = text.split(LINK_SENTINEL, 1)[0]
-        text = self._strip_problematic_control_chars(text).strip()
+        text = clean_link_target_text(text)
         # Guard against leaked wiki delimiter when copying/pasting displayed [url|] links.
         if re.match(r"(?i)^https?://", text) and text.endswith("|"):
             text = text.rstrip("|")

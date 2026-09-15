@@ -123,6 +123,19 @@ def test_insert_external_link_with_invisible_prefix_is_stable_across_reload(edit
     assert editor.to_markdown() == expected
 
 
+def test_insert_markdown_autolink_target_is_stable_across_reload(editor, qapp):
+    url = "https://acme.atlassian.net/wiki/spaces/OM/pages/1234567890/Page"
+    expected = f"[{url}|this is link text]\n"
+    editor.setPlainText("")
+
+    editor.insert_link(f"[{url}]({url})", "this is link text")
+    assert editor.to_markdown() == expected
+
+    editor.set_markdown(editor.to_markdown())
+    qapp.processEvents()
+    assert editor.to_markdown() == expected
+
+
 def test_plain_url_wrapper_does_not_nest_urls_inside_existing_links(editor):
     external = "[https://example.com/wiki/Page|Label]"
     malformed_internal = "[:Page:https://example.com/wiki/Page|Label]"
