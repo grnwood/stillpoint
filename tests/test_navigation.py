@@ -3,9 +3,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QSizePolicy, QToolBar
+from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QMessageBox, QSizePolicy, QToolBar
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QTextCursor
 from PySide6.QtGui import QStandardItem
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtTest import QTest
@@ -185,6 +185,65 @@ class TestHistoryNavigation:
         backward.activated.emit()
 
         assert calls == [("history", True)]
+
+    def test_recent_page_switch_forces_save_before_replacing_editor(self, main_window, monkeypatch):
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Unsaved change")
+        QApplication.processEvents()
+
+        calls = []
+
+        def fake_save(*args, **kwargs):
+            calls.append(kwargs)
+            main_window._last_saved_content = main_window.editor.to_markdown()
+            main_window._dirty_flag = False
+            main_window.editor.document().setModified(False)
+
+        monkeypatch.setattr(main_window, "_save_current_file", fake_save)
+
+        main_window._open_file("/PageB/PageB.md")
+        assert calls == [
+            {
+                "auto": True,
+                "reason": "page switch",
+                "force": True,
+                "allow_when_suspended": True,
+            }
+        ]
+        assert main_window.current_path == "/PageB/PageB.md"
+
+    def test_recent_page_switch_stays_put_when_save_fails(self, main_window, monkeypatch):
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Unsaved change")
+        QApplication.processEvents()
+        monkeypatch.setattr(main_window, "_save_current_file", lambda *args, **kwargs: None)
+
+        main_window._open_file("/PageB/PageB.md")
+        assert main_window.current_path == "/PageA/PageA.md"
+        assert "action was cancelled" in main_window.statusBar().currentMessage()
+
+    def test_edit_page_source_saves_before_opening_external_editor(self, main_window, monkeypatch):
+        events = []
+        monkeypatch.setattr(
+            main_window,
+            "_save_before_page_transition",
+            lambda reason: events.append(("save", reason)) or True,
+        )
+        monkeypatch.setattr(
+            QDesktopServices,
+            "openUrl",
+            lambda url: events.append(("open", url.toLocalFile())) or True,
+        )
+        monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.Cancel)
+
+        main_window._view_page_source("/PageA/PageA.md")
+
+        assert events[0] == ("save", "edit page source")
+        assert events[1][0] == "open"
 
     def test_recent_history_chicklets_keep_journal_pages_when_nav_hides_journal(self, main_window):
         main_window._show_journal_in_nav = False
@@ -642,11 +701,18 @@ class TestTreeClickGuard:
         assert main_window._pending_selection is None
         assert main_window._deferred_nav_tree_refresh_target is None
 
-    def test_command_bar_contains_page_move_and_locate_actions(self, main_window):
-        labels = {label for label, _action in main_window._collect_menu_actions()}
+    def test_command_bar_contains_save_page_move_and_locate_actions(self, main_window, monkeypatch):
+        entries = dict(main_window._collect_menu_actions())
 
-        assert "File / Move Page…" in labels
-        assert "Go / Locate in Page Tree" in labels
+        assert "File / Save" in entries
+        assert entries["File / Save"].shortcut() == QKeySequence(QKeySequence.Save)
+        assert "File / Move Page…" in entries
+        assert "Go / Locate in Page Tree" in entries
+
+        calls = []
+        monkeypatch.setattr(main_window, "_save_current_file", lambda **kwargs: calls.append(kwargs))
+        entries["File / Save"].trigger()
+        assert calls == [{"auto": False, "reason": "manual save"}]
 
 
 if __name__ == "__main__":

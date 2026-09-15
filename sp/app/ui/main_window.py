@@ -3089,6 +3089,15 @@ class MainWindow(QMainWindow):
         # Vault menu (now left of File)
         vault_menu = self.menuBar().addMenu("&Vault")
         file_menu = self.menuBar().addMenu("F&ile")
+        self._action_save = QAction("&Save", self)
+        self._action_save.setShortcut(QKeySequence.Save)
+        self._action_save.setShortcutContext(Qt.ApplicationShortcut)
+        self._action_save.setToolTip("Save the current page")
+        self._action_save.triggered.connect(
+            lambda checked=False: self._save_current_file(auto=False, reason="manual save")
+        )
+        file_menu.addAction(self._action_save)
+        file_menu.addSeparator()
         open_vault_new_win_action = QAction("Open Vault in New Window", self)
         open_vault_new_win_action.setToolTip("Launch a separate StillPoint process for a vault")
         open_vault_new_win_action.triggered.connect(lambda checked=False: self._select_vault(spawn_new_process=True))
@@ -3972,8 +3981,6 @@ class MainWindow(QMainWindow):
             self._alert(f"Could not open template folder: {tmpl_dir}")
 
     def _register_shortcuts(self) -> None:
-        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        save_shortcut.activated.connect(lambda: self._save_current_file(reason="manual save"))
         zoom_in = QShortcut(QKeySequence.ZoomIn, self)
         zoom_out = QShortcut(QKeySequence.ZoomOut, self)
         zoom_in.setContext(Qt.ApplicationShortcut)
@@ -7337,7 +7344,7 @@ class MainWindow(QMainWindow):
         *,
         resolution: str,
         applied_mtime: Optional[int] = None,
-    ) -> bool:
+    ) -> None:
         if not self.vault_root:
             return False
         path_rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
@@ -12826,7 +12833,7 @@ class MainWindow(QMainWindow):
         cursor_at_end: bool = False,
         restore_history_cursor: bool = False,
         sync_calendar: bool = True,
-    ) -> None:
+    ) -> bool:
         if path:
             path = self._normalize_root_page_path(path)
         self._clear_pending_tree_open()
@@ -12861,7 +12868,8 @@ class MainWindow(QMainWindow):
         tracer = PageLoadLogger(path) if PAGE_LOGGING_ENABLED else None
         # Save current page if dirty before switching
         if self.current_path and path != self.current_path:
-            self._save_dirty_page(reason="page switch")
+            if not self._save_before_page_transition(reason="page switch"):
+                return
         
         # Clean up current page if it's an unchanged virtual page
         if self.current_path and self.current_path in self.virtual_pages:
@@ -13912,6 +13920,24 @@ class MainWindow(QMainWindow):
         # If Qt reports clean but we still think dirty, ensure badge reflects it
         if getattr(self, "_dirty_flag", False):
             self._update_dirty_indicator()
+
+    def _save_before_page_transition(self, reason: str) -> bool:
+        """Persist pending edits before replacing or externally editing a page."""
+        if not self.current_path or self._read_only or not self._is_editor_dirty():
+            return True
+        self._save_current_file(
+            auto=True,
+            reason=reason,
+            force=True,
+            allow_when_suspended=True,
+        )
+        if not self._is_editor_dirty():
+            return True
+        self.statusBar().showMessage(
+            "Could not save the current page; the action was cancelled to protect your changes.",
+            8000,
+        )
+        return False
 
     def _open_journal_today(self) -> None:
         if not self.vault_root:
@@ -19843,6 +19869,8 @@ class MainWindow(QMainWindow):
     def _view_page_source(self, file_path: str) -> None:
         """Open the given page's txt file in the OS editor, show modal, and reload on OK."""
         if not self.vault_root:
+            return
+        if not self._save_before_page_transition(reason="edit page source"):
             return
         try:
             from PySide6.QtGui import QDesktopServices
