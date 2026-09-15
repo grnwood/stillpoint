@@ -17,6 +17,13 @@ def clean_link_target_text(value: str | None) -> str:
         for ch in (value or "").strip()
         if unicodedata.category(ch) not in {"Cc", "Cf", "Cs"}
     ).strip()
+    wiki_link = re.fullmatch(
+        r"\[(?P<url>https?://(?:\\.|[^\]|])*)\|(?:\\.|[^\]])*\]",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if wiki_link:
+        return wiki_link.group("url").strip()
     markdown_link = re.fullmatch(
         r"\[(?:\\.|[^\]\n])*\]\(\s*(?P<url>https?://.+)\s*\)",
         cleaned,

@@ -49,7 +49,7 @@ class _FakeInsertExternalLinkDialog:
 
     def selected_colon_path(self):
         url = "https://acme.atlassian.net/wiki/spaces/OM/pages/6570344460/0.1+Enterprise+Integration+Architecture"
-        return f"[{url}]({url})"
+        return f"[{url}|]"
 
     def selected_link_name(self):
         return "this is link text"
