@@ -97,6 +97,8 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     launch.launch(tmp_path)
     assert captured["command"][1:3] == ["-m", "sp.app.folder_navigator"]
+    source_root = str(Path(launch.__file__).resolve().parents[3])
+    assert captured["kwargs"]["env"]["PYTHONPATH"].split(os.pathsep)[0] == source_root
     if os.name != "nt":
         assert captured["kwargs"]["start_new_session"]
     monkeypatch.setattr(__import__("sys"), "frozen", True, raising=False)
