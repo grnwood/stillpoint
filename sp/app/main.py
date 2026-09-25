@@ -895,6 +895,9 @@ def _enable_faulthandler_log() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--folder-navigator":
+        from sp.app.folder_navigator.window import main as folder_navigator_main
+        raise SystemExit(folder_navigator_main(sys.argv[2:]))
     args = _parse_args(sys.argv[1:])
 
     if args.mcp_bridge:
