@@ -46,9 +46,11 @@ Type: filesandordirs; Name: "{localappdata}\StillPoint"
 
 ; Remove old launch points before [Icons] recreates the canonical shortcuts.
 Type: files; Name: "{userprograms}\StillPoint.lnk"
+Type: files; Name: "{userprograms}\StillPoint Folder Navigator.lnk"
 Type: files; Name: "{userprograms}\StillPoint Capture.lnk"
 Type: filesandordirs; Name: "{userprograms}\StillPoint"
 Type: files; Name: "{userdesktop}\StillPoint.lnk"
+Type: files; Name: "{userdesktop}\StillPoint Folder Navigator.lnk"
 Type: files; Name: "{userdesktop}\StillPoint Capture.lnk"
 
 ; A taskbar/Start pin stores its old executable path. Unpin it once during
@@ -66,8 +68,10 @@ Source: "..\..\dist\stillpoint-capture\*"; DestDir: "{app}\stillpoint-capture"; 
 
 [Icons]
 Name: "{userprograms}\StillPoint"; Filename: "{app}\stillpoint\stillpoint.exe"
+Name: "{userprograms}\StillPoint Folder Navigator"; Filename: "{app}\stillpoint\stillpoint.exe"; Parameters: "--folder-navigator"; IconFilename: "{app}\stillpoint\_internal\sp\assets\icons\FolderNavigator.ico"
 Name: "{userprograms}\StillPoint Capture"; Filename: "{app}\stillpoint-capture\stillpoint-capture.exe"
 Name: "{userdesktop}\StillPoint"; Filename: "{app}\stillpoint\stillpoint.exe"; Tasks: desktopicon
+Name: "{userdesktop}\StillPoint Folder Navigator"; Filename: "{app}\stillpoint\stillpoint.exe"; Parameters: "--folder-navigator"; IconFilename: "{app}\stillpoint\_internal\sp\assets\icons\FolderNavigator.ico"; Tasks: desktopicon
 Name: "{userdesktop}\StillPoint Capture"; Filename: "{app}\stillpoint-capture\stillpoint-capture.exe"; Tasks: desktopicon
 
 [Tasks]

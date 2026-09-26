@@ -15,7 +15,7 @@ from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeyEvent, QSyntaxHighlighter, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
 from sp.app import config
 from sp.app.ui.markdown_editor import MarkdownEditor
@@ -98,10 +98,31 @@ class SourceEditor(QPlainTextEdit):
             return
         self.setCursorWidth(2 if self._vi_cursor_style in {"line", "bar"} else 8)
 
-    def _move(self, operation: QTextCursor.MoveOperation) -> None:
+    def _move(self, operation: QTextCursor.MoveOperation, *, select: bool = False) -> None:
         cursor = self.textCursor()
-        cursor.movePosition(operation)
+        cursor.movePosition(
+            operation,
+            QTextCursor.MoveMode.KeepAnchor if select else QTextCursor.MoveMode.MoveAnchor,
+        )
         self.setTextCursor(cursor)
+
+    def _vi_copy(self) -> None:
+        cursor = QTextCursor(self.textCursor())
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+        QApplication.clipboard().setText(cursor.selectedText().replace("\u2029", "\n"))
+
+    def _vi_cut(self) -> None:
+        if self.isReadOnly():
+            return
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            cursor.movePosition(
+                QTextCursor.MoveOperation.NextCharacter,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.setTextCursor(cursor)
+        self.cut()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt API
         if not self._vi_feature_enabled:
@@ -131,6 +152,15 @@ class SourceEditor(QPlainTextEdit):
             super().keyPressEvent(event)
             return
 
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if shift and key in (Qt.Key.Key_N, Qt.Key.Key_U):
+            self._move(
+                QTextCursor.MoveOperation.Down if key == Qt.Key.Key_N
+                else QTextCursor.MoveOperation.Up,
+                select=True,
+            )
+            self._pending_g = False
+            return
         moves = {
             Qt.Key.Key_H: QTextCursor.MoveOperation.Left,
             Qt.Key.Key_Left: QTextCursor.MoveOperation.Left,
@@ -146,7 +176,7 @@ class SourceEditor(QPlainTextEdit):
             Qt.Key.Key_B: QTextCursor.MoveOperation.PreviousWord,
         }
         if key in moves:
-            self._move(moves[key])
+            self._move(moves[key], select=shift)
             self._pending_g = False
             return
         if key == Qt.Key.Key_G:
@@ -174,10 +204,12 @@ class SourceEditor(QPlainTextEdit):
             cursor.insertBlock()
             self.setTextCursor(cursor)
             self._set_vi_insert_mode(True)
-        elif key == Qt.Key.Key_X and not self.isReadOnly():
-            cursor = self.textCursor()
-            cursor.deleteChar()
-            self.setTextCursor(cursor)
+        elif key == Qt.Key.Key_C and not shift:
+            self._vi_copy()
+        elif key == Qt.Key.Key_X and not shift:
+            self._vi_cut()
+        elif key == Qt.Key.Key_P and not shift and not self.isReadOnly():
+            self.paste()
 
 
 def configure_markdown_editor(editor: MarkdownEditor, path: Path) -> None:

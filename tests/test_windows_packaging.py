@@ -32,6 +32,9 @@ def test_inno_shortcuts_only_target_the_canonical_bundle() -> None:
     assert stillpoint_icons
     assert all("{app}\\stillpoint" in line for line in stillpoint_icons)
     assert "{app}\\stillpoint\\stillpoint.exe" in script
+    assert "StillPoint Folder Navigator" in script
+    assert 'Parameters: "--folder-navigator"' in script
+    assert "FolderNavigator.ico" in script
 
 
 def test_powershell_installer_matches_and_replaces_the_canonical_layout() -> None:
@@ -49,6 +52,8 @@ def test_powershell_installer_matches_and_replaces_the_canonical_layout() -> Non
     assert "Close StillPoint and StillPoint Capture" in script
     assert "$MachineUninstallKeys" in script
     assert "older all-users StillPoint installation" in script
+    assert '$FolderNavigatorShortcut.Arguments = "--folder-navigator"' in script
+    assert 'icons\\\\FolderNavigator.ico' in script
 
 
 def test_install_cleanup_does_not_target_stillpoint_user_data() -> None:

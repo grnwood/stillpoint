@@ -9,6 +9,7 @@ PACKAGE CONTENTS
 ----------------
 
 - StillPoint.app
+- StillPoint Folder Navigator.app (folder-badged companion launcher)
 - stillpoint-capture (helper binary)
 - README.txt (this file)
 
@@ -16,7 +17,9 @@ INSTALL
 -------
 
 1. Unzip the download.
-2. Move StillPoint.app to /Applications (recommended).
+2. Move StillPoint.app and StillPoint Folder Navigator.app to /Applications
+   (recommended). Keep the two apps beside each other so the companion launcher
+   can start Folder Navigator with its distinct Dock and app-switcher icon.
 
 FIRST RUN (GUI METHOD)
 ----------------------
@@ -25,6 +28,7 @@ FIRST RUN (GUI METHOD)
 2. Right-click StillPoint.app.
 3. Click Open.
 4. Confirm Open in the macOS prompt.
+5. Repeat for StillPoint Folder Navigator.app the first time you use it.
 
 FIRST RUN (TERMINAL METHOD)
 ---------------------------
@@ -32,6 +36,7 @@ FIRST RUN (TERMINAL METHOD)
 If Gatekeeper still blocks launch, clear quarantine:
 
   xattr -dr com.apple.quarantine /Applications/StillPoint.app
+  xattr -dr com.apple.quarantine "/Applications/StillPoint Folder Navigator.app"
   open /Applications/StillPoint.app
 
 SYSTEM-WIDE HOTKEY FOR stillpoint-capture

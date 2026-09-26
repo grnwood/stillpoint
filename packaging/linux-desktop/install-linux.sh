@@ -20,7 +20,9 @@ BIN_LINK="/usr/local/bin/stillpoint"
 CAPTURE_INSTALL_DIR="/opt/stillpoint-capture"
 CAPTURE_LINK="/usr/local/bin/stillpoint-capture"
 ICON_TARGET="/usr/share/icons/stillpoint.png"
+FOLDER_NAV_ICON_TARGET="/usr/share/icons/stillpoint-folder-navigator.png"
 DESKTOP_FILE="/usr/share/applications/stillpoint.desktop"
+FOLDER_NAV_DESKTOP_FILE="/usr/share/applications/stillpoint-folder-navigator.desktop"
 
 echo "📦 Installing $APP_NAME..."
 
@@ -44,6 +46,7 @@ else
 fi
 
 ICON_SOURCE="$DIST_DIR/_internal/sp/assets/icons/linux-png/stillpoint-512x512.png"
+FOLDER_NAV_ICON_SOURCE="$DIST_DIR/_internal/sp/assets/icons/linux-png/folder-navigator-512x512.png"
 CAPTURE_DIST_DIR="$SCRIPT_DIR/../stillpoint-capture"
 if [[ -d "$SCRIPT_DIR/$CAPTURE_NAME" ]]; then
     CAPTURE_DIST_DIR="$SCRIPT_DIR/$CAPTURE_NAME"
@@ -83,6 +86,13 @@ else
     echo "ℹ️  No icon found at $ICON_SOURCE — skipping icon install"
 fi
 
+if [[ -f "$FOLDER_NAV_ICON_SOURCE" ]]; then
+    echo "➡️  Installing Folder Navigator icon to $FOLDER_NAV_ICON_TARGET"
+    cp "$FOLDER_NAV_ICON_SOURCE" "$FOLDER_NAV_ICON_TARGET"
+else
+    echo "ℹ️  No Folder Navigator icon found at $FOLDER_NAV_ICON_SOURCE — skipping icon install"
+fi
+
 # --- Desktop entry ---
 echo "➡️  Creating desktop entry at $DESKTOP_FILE"
 
@@ -101,6 +111,23 @@ EOF
 
 chmod 644 "$DESKTOP_FILE"
 
+echo "➡️  Creating Folder Navigator desktop entry at $FOLDER_NAV_DESKTOP_FILE"
+
+cat > "$FOLDER_NAV_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=StillPoint Folder Navigator
+Comment=Browse and edit an ordinary folder with StillPoint
+Exec=$INSTALL_DIR/$EXEC_NAME --folder-navigator
+Icon=$FOLDER_NAV_ICON_TARGET
+Terminal=false
+Categories=Office;TextEditor;Utility;FileManager;
+StartupNotify=true
+StartupWMClass=stillpoint-folder-navigator
+EOF
+
+chmod 644 "$FOLDER_NAV_DESKTOP_FILE"
+
 # Update desktop database
 if command -v update-desktop-database &> /dev/null; then
     echo "➡️  Updating desktop database..."
@@ -112,5 +139,6 @@ echo "🎉 $APP_NAME installed successfully!"
 echo ""
 echo "Launch from:"
 echo "  • Applications menu → StillPoint"
+echo "  • Applications menu → StillPoint Folder Navigator"
 echo "  • Terminal: stillpoint"
 echo ""

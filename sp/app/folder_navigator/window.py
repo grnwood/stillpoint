@@ -26,7 +26,13 @@ from .core import (MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES, MAX_EDIT_BYTES, M
     read_text, walk_files)
 from .catalog import CatalogError, FolderCatalog
 from .editors import MarkdownEditor, SourceEditor, configure_markdown_editor, configure_source_editor
+from .icon import (
+    configure_folder_navigator_application,
+    configure_folder_navigator_process,
+    get_folder_navigator_icon,
+)
 from .launch import launch
+from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_color, theme_value
 
 
@@ -60,6 +66,7 @@ class FolderModel(QFileSystemModel):
 
 class NavigatorTree(QTreeView):
     openFile = Signal(str, bool)
+    openFileAndFocus = Signal(str, bool)
     escapePressed = Signal()
 
     def __init__(self, parent=None):
@@ -94,7 +101,8 @@ class NavigatorTree(QTreeView):
             if index.isValid() and model.isDir(index):
                 self.setExpanded(index, not self.isExpanded(index))
             elif index.isValid():
-                self.openFile.emit(model.filePath(index), True)
+                signal = self.openFileAndFocus if mods == Qt.ShiftModifier else self.openFile
+                signal.emit(model.filePath(index), True)
             return
         super().keyPressEvent(event)
 
@@ -281,6 +289,7 @@ class HeadingPicker(QDialog):
         layout.addWidget(self.results)
         self.query.textChanged.connect(self._refresh)
         self.query.installEventFilter(self)
+        self.results.installEventFilter(self)
         self.results.itemActivated.connect(lambda *_: self._accept_current())
         self.results.itemDoubleClicked.connect(lambda *_: self._accept_current())
         self._refresh()
@@ -309,7 +318,7 @@ class HeadingPicker(QDialog):
             self.accept()
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        if obj is self.query and event.type() == QEvent.KeyPress:
+        if obj in (self.query, self.results) and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Down, Qt.Key_Up):
                 self._move(1 if event.key() == Qt.Key_Down else -1)
                 return True
@@ -348,6 +357,9 @@ class Tab(QWidget):
             if markdown:
                 from sp.app.ui.markdown_editor import MarkdownEditor
                 self.editor = MarkdownEditor()
+                # Previewing from the folder tree must not let deferred Vi-mode
+                # activation pull focus away from filesystem navigation.
+                self.editor.setProperty("suppressViFocus", True)
                 configure_markdown_editor(self.editor, path)
                 if root is not None:
                     self.editor.set_context(str(root), str(path.relative_to(root)))
@@ -639,6 +651,9 @@ class Picker(QDialog):
 class Window(QMainWindow):
     def __init__(self, root: Path):
         super().__init__()
+        icon = get_folder_navigator_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.root = root.resolve(strict=True)
         self.scope = self.root
         self.catalog: set[Path] = set()
@@ -687,7 +702,10 @@ class Window(QMainWindow):
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
-        self.tree.openFile.connect(self._open_tree_file)
+        self.tree.openFile.connect(
+            lambda path, pinned: self.open_file(Path(path), pinned=pinned)
+        )
+        self.tree.openFileAndFocus.connect(self._open_tree_file)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1125,12 +1143,24 @@ class Window(QMainWindow):
                     lambda point, prefer_above, t=tab: self._show_heading_picker(t, point, prefer_above)
                 )
             tab.editor.document().modificationChanged.connect(lambda dirty, t=tab: self._modified(t, dirty))
+            # Markdown's initial display formatting can toggle Qt's modified
+            # flag after the file is loaded. Clear only formatting-only changes;
+            # never clear the flag once the text differs from disk.
+            for delay in (0, 100):
+                QTimer.singleShot(delay, lambda t=tab: self._clear_initial_formatting_dirty(t))
             if line:
                 self._reveal_editor_line(tab, line)
         self.recent.insert(0, path)
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
         self._update_welcome()
+
+    @staticmethod
+    def _clear_initial_formatting_dirty(tab):
+        if (tab.editor and tab.loaded
+                and tab.text_for_save() == tab.loaded.text
+                and tab.editor.document().isModified()):
+            tab.editor.document().setModified(False)
 
     def _focus_tree_from_editor(self, tab):
         """Return vi navigation to the file that owns the focused editor."""
@@ -1830,7 +1860,9 @@ class Window(QMainWindow):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    configure_folder_navigator_process()
     app = QApplication.instance() or QApplication([sys.argv[0]])
+    configure_folder_navigator_application(app)
     try:
         from sp.app.ui.theme import apply_qt_palette
         apply_qt_palette(app)

@@ -8417,7 +8417,7 @@ class MarkdownEditor(QTextEdit):
         self.setCursorWidth(self._vi_block_cursor_width if active else self._vi_default_cursor_width)
         self._update_vi_cursor()
         # Ensure editor focus when vi mode is toggled and no dialog is open
-        if not self._dialog_block_input:
+        if not self._dialog_block_input and not self.property("suppressViFocus"):
             self.setFocus()
 
     def set_vault_accent_color(self, accent: Optional[str]) -> None:

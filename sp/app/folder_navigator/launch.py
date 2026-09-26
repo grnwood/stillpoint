@@ -18,6 +18,14 @@ def launch(root: Path) -> subprocess.Popen:
     command = ([sys.executable, "--folder-navigator", str(root.resolve())]
                if frozen else
                [sys.executable, "-m", "sp.app.folder_navigator", str(root.resolve())])
+    if frozen and sys.platform == "darwin":
+        try:
+            main_bundle = Path(sys.executable).resolve().parents[2]
+            navigator_bundle = main_bundle.parent / "StillPoint Folder Navigator.app"
+            if main_bundle.suffix == ".app" and navigator_bundle.is_dir():
+                command = ["open", "-na", str(navigator_bundle), "--args", str(root.resolve())]
+        except (IndexError, OSError):
+            pass
     env = os.environ.copy()
     try:
         from sp.app.config import load_effective_theme_preference

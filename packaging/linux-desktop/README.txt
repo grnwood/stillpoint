@@ -14,7 +14,7 @@ Option 1: System-wide Install (Recommended)
 
   This will:
   ✓ Install StillPoint to /opt/stillpoint
-  ✓ Create a launcher in your applications menu
+  ✓ Create StillPoint and Folder Navigator launchers in your applications menu
   ✓ Add 'stillpoint' command to your PATH
   ✓ Install the desktop icon
 
@@ -42,6 +42,7 @@ AFTER INSTALLATION
 
 Launch from:
   - Applications menu → Accessories → StillPoint
+  - Applications menu → StillPoint Folder Navigator
   - Terminal: stillpoint
   - Or search for "StillPoint" in your app launcher
 

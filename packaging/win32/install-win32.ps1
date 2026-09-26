@@ -107,6 +107,7 @@ if ((Test-PathAtOrBelow $SourceFullPath $InstallFullPath) -or
 
 # Shortcuts
 $ShortcutName = "$AppName.lnk"
+$FolderNavigatorShortcutName = "$AppName Folder Navigator.lnk"
 $CreateDesktopShortcut = $true
 
 Write-Host "Installing $AppName from: $DistDir"
@@ -119,6 +120,7 @@ $IconSource = $null
 
 $IconIco = Join-Path $AssetsDir "icons\\StillPoint.ico"
 $IconPng = Join-Path $AssetsDir "icons\\linux-png\\stillpoint-512x512.png"
+$FolderNavigatorIcon = Join-Path $AssetsDir "icons\\FolderNavigator.ico"
 
 if (Test-Path $IconIco) {
     $IconSource = $IconIco
@@ -221,6 +223,13 @@ if ($IconSource) {
     Copy-Item -Force $IconSource $IconDest
 }
 
+$FolderNavigatorIconDest = $IconDest
+if (Test-Path $FolderNavigatorIcon) {
+    $FolderNavigatorIconDest = Join-Path $MainInstallDir "FolderNavigator.ico"
+    Write-Host " Copying Folder Navigator icon to: $FolderNavigatorIconDest"
+    Copy-Item -Force $FolderNavigatorIcon $FolderNavigatorIconDest
+}
+
 # === COPY QUICK CAPTURE (if present) ===
 
 if ($CaptureDistExists) {
@@ -272,6 +281,17 @@ $Shortcut.Save()
 
 Write-Host " Start Menu shortcut created: $StartMenuShortcutPath"
 
+$FolderNavigatorShortcutPath = Join-Path $StartMenuDir $FolderNavigatorShortcutName
+Remove-Item -Force $FolderNavigatorShortcutPath -ErrorAction SilentlyContinue
+$FolderNavigatorShortcut = $WshShell.CreateShortcut($FolderNavigatorShortcutPath)
+$FolderNavigatorShortcut.TargetPath = $InstalledExe
+$FolderNavigatorShortcut.Arguments = "--folder-navigator"
+$FolderNavigatorShortcut.WorkingDirectory = $MainInstallDir
+$FolderNavigatorShortcut.WindowStyle = 1
+$FolderNavigatorShortcut.IconLocation = $FolderNavigatorIconDest
+$FolderNavigatorShortcut.Save()
+Write-Host " Folder Navigator shortcut created: $FolderNavigatorShortcutPath"
+
 # Quick Capture shortcut (Start Menu only)
 if (Test-Path $InstalledCaptureExe) {
     $CaptureShortcutPath = Join-Path $StartMenuDir "$AppName Quick Capture.lnk"
@@ -302,6 +322,17 @@ if ($CreateDesktopShortcut) {
     $DesktopShortcut.Save()
 
     Write-Host " Desktop shortcut created: $DesktopShortcutPath"
+
+    $FolderNavigatorDesktopShortcutPath = Join-Path $DesktopDir $FolderNavigatorShortcutName
+    Remove-Item -Force $FolderNavigatorDesktopShortcutPath -ErrorAction SilentlyContinue
+    $FolderNavigatorDesktopShortcut = $WshShell.CreateShortcut($FolderNavigatorDesktopShortcutPath)
+    $FolderNavigatorDesktopShortcut.TargetPath = $InstalledExe
+    $FolderNavigatorDesktopShortcut.Arguments = "--folder-navigator"
+    $FolderNavigatorDesktopShortcut.WorkingDirectory = $MainInstallDir
+    $FolderNavigatorDesktopShortcut.WindowStyle = 1
+    $FolderNavigatorDesktopShortcut.IconLocation = $FolderNavigatorIconDest
+    $FolderNavigatorDesktopShortcut.Save()
+    Write-Host " Desktop Folder Navigator shortcut created: $FolderNavigatorDesktopShortcutPath"
 
     if (Test-Path $InstalledCaptureExe) {
         $QuickCaptureShortcutName = "$AppName Quick Capture.lnk"

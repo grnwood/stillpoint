@@ -17,8 +17,8 @@ The installer will:
   ✓ Copy StillPoint to %LOCALAPPDATA%\Programs\StillPoint
   ✓ Fully replace older application binaries during upgrades
   ✓ Remove obsolete StillPoint install locations and shortcuts
-  ✓ Create a Start Menu entry
-  ✓ Create a Desktop shortcut
+  ✓ Create StillPoint and Folder Navigator Start Menu entries
+  ✓ Create StillPoint and Folder Navigator Desktop shortcuts
   ✓ No admin rights required
 
 MANUAL START (Without Installing)

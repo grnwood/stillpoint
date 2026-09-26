@@ -114,6 +114,32 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
     assert captured["command"][1] == "--folder-navigator"
 
 
+def test_frozen_macos_launch_uses_companion_app(tmp_path, monkeypatch):
+    from sp.app.folder_navigator import launch
+
+    main_executable = tmp_path / "StillPoint.app" / "Contents" / "MacOS" / "StillPoint"
+    main_executable.parent.mkdir(parents=True)
+    main_executable.touch()
+    companion = tmp_path / "StillPoint Folder Navigator.app"
+    companion.mkdir()
+    root = tmp_path / "folder"
+    root.mkdir()
+    captured = {}
+
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: captured.update(
+        command=command, kwargs=kwargs
+    ))
+    monkeypatch.setattr(launch.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(launch.sys, "platform", "darwin")
+    monkeypatch.setattr(launch.sys, "executable", str(main_executable))
+
+    launch.launch(root)
+
+    assert captured["command"] == [
+        "open", "-na", str(companion), "--args", str(root.resolve())
+    ]
+
+
 def test_sqlite_catalog_is_persistent_scoped_and_excludes_metadata(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -342,6 +368,31 @@ def test_markdown_tabs_use_stillpoint_editor_and_heading_picker(tmp_path, monkey
     window.close()
 
 
+def test_heading_picker_supports_platform_vi_navigation_chord(app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import HeadingPicker
+
+    picker = HeadingPicker([
+        (1, "First", 1),
+        (2, "Second", 5),
+        (2, "Third", 9),
+    ])
+    picker.show()
+    picker.query.setFocus()
+    assert picker.results.currentRow() == 0
+
+    QTest.keyClick(picker.query, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+    assert picker.results.currentRow() == 1
+    QTest.keyClick(picker.query, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier)
+    assert picker.results.currentRow() == 0
+
+    picker.results.setFocus()
+    QTest.keyClick(picker.results, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+    assert picker.results.currentRow() == 1
+    picker.reject()
+
+
 def test_source_tabs_use_pygments_and_global_vi_setting(tmp_path, monkeypatch, app):
     import sp.app.folder_navigator.editors as editors
     from sp.app.folder_navigator.window import Window
@@ -424,7 +475,7 @@ def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
     window.close()
 
 
-def test_tree_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, monkeypatch, app):
+def test_tree_shift_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     import sp.app.folder_navigator.editors as editors
@@ -441,7 +492,7 @@ def test_tree_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, monkeyp
     window.tree.setCurrentIndex(index)
     window.tree.setFocus()
 
-    QTest.keyClick(window.tree, Qt.Key_Return)
+    QTest.keyClick(window.tree, Qt.Key_Return, Qt.ShiftModifier)
     app.processEvents()
 
     editor = window.active_tab().editor
@@ -449,6 +500,54 @@ def test_tree_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, monkeyp
     assert editor._vi_cursor_style == "line"
     assert editor.cursorWidth() == 2
     editor.document().setModified(False)
+    window.close()
+
+
+def test_markdown_tree_preview_and_plain_enter_keep_folder_focus(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n", encoding="utf-8")
+    second.write_text("# Second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.tree.setFocus()
+
+    for path in (first, second):
+        index = window.model.index(str(path))
+        window.tree.setCurrentIndex(index)
+        app.processEvents()
+        assert window.tree.hasFocus()
+        assert window.active_tab().path == path
+        assert not window.active_tab().dirty
+
+    QTest.keyClick(window.tree, Qt.Key_Return)
+    app.processEvents()
+    assert window.tree.hasFocus()
+    assert window.active_tab().pinned
+    assert window.tabs.count() == 1
+    for tab in window.all_tabs():
+        tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.icon import get_folder_navigator_icon
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    icon = get_folder_navigator_icon()
+    window = Window(tmp_path)
+
+    assert not icon.isNull()
+    assert not get_folder_navigator_icon().isNull()
+    assert not window.windowIcon().isNull()
     window.close()
 
 
@@ -469,7 +568,7 @@ def test_vi_escape_returns_editor_focus_to_selected_file(
     index = window.model.index(str(source))
     window.tree.setCurrentIndex(index)
     window.tree.setFocus()
-    QTest.keyClick(window.tree, Qt.Key_Return)
+    QTest.keyClick(window.tree, Qt.Key_Return, Qt.ShiftModifier)
     app.processEvents()
 
     editor = window.active_tab().editor
@@ -517,6 +616,56 @@ def test_source_editor_page_navigation_and_vi_page_chords(tmp_path, monkeypatch,
     assert chord_down_block > 0
     QTest.keyClick(editor, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier)
     assert editor.textCursor().blockNumber() < chord_down_block
+    editor.close()
+
+
+def test_source_editor_vi_selection_and_clipboard_commands(monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    editor = editors.SourceEditor("sample.py")
+    editors.configure_source_editor(editor)
+    editor.setPlainText("abc\ndef\nghi")
+    editor.show()
+    editor.moveCursor(QTextCursor.Start)
+    editor.setFocus()
+
+    QTest.keyClick(editor, Qt.Key_Right, Qt.ShiftModifier)
+    assert editor.textCursor().selectedText() == "a"
+    QTest.keyClick(editor, Qt.Key_C)
+    assert app.clipboard().text() == "a"
+    QTest.keyClick(editor, Qt.Key_X)
+    assert editor.toPlainText() == "bc\ndef\nghi"
+    QTest.keyClick(editor, Qt.Key_P)
+    assert editor.toPlainText() == "abc\ndef\nghi"
+
+    editor.moveCursor(QTextCursor.Start)
+    QTest.keyClick(editor, Qt.Key_N, Qt.ShiftModifier)
+    assert editor.textCursor().hasSelection()
+    assert "abc" in editor.textCursor().selectedText()
+    QTest.keyClick(editor, Qt.Key_U, Qt.ShiftModifier)
+    assert not editor.textCursor().hasSelection()
+    editor.close()
+
+
+def test_source_editor_native_shift_arrow_selection_without_vi(monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: False)
+    editor = editors.SourceEditor("sample.txt")
+    editors.configure_source_editor(editor)
+    editor.setPlainText("native selection")
+    editor.show()
+    editor.moveCursor(QTextCursor.Start)
+    editor.setFocus()
+    QTest.keyClick(editor, Qt.Key_Right, Qt.ShiftModifier)
+    assert editor.textCursor().selectedText() == "n"
     editor.close()
 
 
