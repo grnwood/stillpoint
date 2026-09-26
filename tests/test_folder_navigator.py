@@ -422,3 +422,183 @@ def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
     assert (view.original.width(), view.original.height()) == (1000, 2000)
     assert view.zoom < 1.0
     window.close()
+
+
+def test_tree_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    monkeypatch.setattr(editors.config, "load_vi_cursor_style", lambda: "line")
+    source = tmp_path / "sample.py"
+    source.write_text("print('focused')\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    index = window.model.index(str(source))
+    window.tree.setCurrentIndex(index)
+    window.tree.setFocus()
+
+    QTest.keyClick(window.tree, Qt.Key_Return)
+    app.processEvents()
+
+    editor = window.active_tab().editor
+    assert editor.hasFocus()
+    assert editor._vi_cursor_style == "line"
+    assert editor.cursorWidth() == 2
+    editor.document().setModified(False)
+    window.close()
+
+
+@pytest.mark.parametrize("suffix", [".py", ".md"])
+def test_vi_escape_returns_editor_focus_to_selected_file(
+        tmp_path, monkeypatch, app, suffix):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    source = tmp_path / f"sample{suffix}"
+    source.write_text("editor focus\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    index = window.model.index(str(source))
+    window.tree.setCurrentIndex(index)
+    window.tree.setFocus()
+    QTest.keyClick(window.tree, Qt.Key_Return)
+    app.processEvents()
+
+    editor = window.active_tab().editor
+    assert editor.hasFocus()
+
+    # Escape leaves insert mode first; the next Escape returns to file navigation.
+    QTest.keyClick(editor, Qt.Key_I)
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.processEvents()
+    assert editor.hasFocus()
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.processEvents()
+
+    assert window.tree.hasFocus()
+    assert window.tree.currentIndex() == index
+    editor.document().setModified(False)
+    window.close()
+
+
+def test_source_editor_page_navigation_and_vi_page_chords(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    editor = editors.SourceEditor("sample.py")
+    editors.configure_source_editor(editor)
+    editor.resize(500, 180)
+    editor.setPlainText("\n".join(f"line {number}" for number in range(200)))
+    editor.show()
+    editor.moveCursor(QTextCursor.Start)
+    editor.setFocus()
+    app.processEvents()
+
+    QTest.keyClick(editor, Qt.Key_PageDown)
+    page_down_block = editor.textCursor().blockNumber()
+    assert page_down_block > 0
+    QTest.keyClick(editor, Qt.Key_PageUp)
+    assert editor.textCursor().blockNumber() < page_down_block
+
+    editor.moveCursor(QTextCursor.Start)
+    QTest.keyClick(editor, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+    chord_down_block = editor.textCursor().blockNumber()
+    assert chord_down_block > 0
+    QTest.keyClick(editor, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier)
+    assert editor.textCursor().blockNumber() < chord_down_block
+    editor.close()
+
+
+def test_source_editor_vi_slash_opens_find_bar(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    source = tmp_path / "sample.txt"
+    source.write_text("find this text\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source)
+    tab = window.active_tab()
+    tab.editor.setFocus()
+
+    QTest.keyClick(tab.editor, Qt.Key_Slash)
+    app.processEvents()
+
+    assert not tab.find_bar.isHidden()
+    assert tab.find_query.hasFocus()
+    assert tab.text_for_save() == "find this text\n"
+    tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_folder_and_editor_panels_show_active_focus_border(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "sample.txt"
+    source.write_text("focus borders\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source)
+    app.processEvents()
+
+    window.tree.setFocus()
+    app.processEvents()
+    assert "2px solid transparent" not in window.rail.styleSheet()
+    assert "2px solid transparent" in window.tabs.styleSheet()
+
+    window.active_tab().editor.setFocus()
+    app.processEvents()
+    assert "2px solid transparent" in window.rail.styleSheet()
+    assert "2px solid transparent" not in window.tabs.styleSheet()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_specialized_editor_labels_are_extension_specific():
+    from sp.app.folder_navigator.window import Window
+
+    assert Window._specialized_editor_label(Path("diagram.puml")) == "Open PlantUML Editor"
+    assert Window._specialized_editor_label(Path("diagram.MMD")) == "Open Mermaid Editor"
+    assert Window._specialized_editor_label(Path("board.excalidraw")) == "Open Excalidraw"
+    assert Window._specialized_editor_label(Path("notes.md")) is None
+
+
+def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, app):
+    import sp.app.ui.plantuml_editor_window as plantuml_editor
+    from PySide6.QtWidgets import QMainWindow
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    diagram = tmp_path / "diagram.puml"
+    diagram.write_text("@startuml\n@enduml\n", encoding="utf-8")
+    opened = []
+
+    class FakePlantUMLEditor(QMainWindow):
+        def __init__(self, file_path, parent=None):
+            super().__init__(parent)
+            opened.append(file_path)
+
+    monkeypatch.setattr(plantuml_editor, "PlantUMLEditorWindow", FakePlantUMLEditor)
+    window = Window(tmp_path)
+    window._open_specialized_editor(diagram)
+
+    assert opened == [str(diagram)]
+    assert len(window.specialized_editor_windows) == 1
+    window.specialized_editor_windows[0].close()
+    window.close()

@@ -1681,6 +1681,7 @@ class MarkdownEditor(QTextEdit):
     printPageRequested = Signal(str)  # Request printing the current page
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
+    viNavigationEscapePressed = Signal()  # Unused Esc while in vi navigation mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     vaultPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     bookmarkPickerRequested = Signal()  # Request bookmark quick picker
@@ -7756,6 +7757,7 @@ class MarkdownEditor(QTextEdit):
                     return True
             if self._handle_escape_clear_empty_line():
                 return True
+            self.viNavigationEscapePressed.emit()
             return True
         if key == Qt.Key_G:
             if shift:

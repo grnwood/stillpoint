@@ -375,6 +375,8 @@ class Tab(QWidget):
             find_shortcut = QShortcut(QKeySequence.Find, self.editor)
             find_shortcut.activated.connect(self._show_find)
             self.find_shortcut = find_shortcut
+            if isinstance(self.editor, SourceEditor):
+                self.editor.findRequested.connect(self._show_find)
             if self.editor.isReadOnly():
                 self.show_notice("Read-only file: editing and saving are disabled")
             layout.addWidget(self.editor)
@@ -399,6 +401,7 @@ class Tab(QWidget):
     def _show_find(self):
         self.find_bar.show()
         self.find_query.setFocus()
+        self.find_query.selectAll()
 
     def _replace_current(self):
         if not self.editor or self.editor.isReadOnly() or not self.find_query.text():
@@ -660,6 +663,7 @@ class Window(QMainWindow):
         self.bridge = Bridge(self)
         self.search_cancel = threading.Event()
         self.search_generation = 0
+        self.specialized_editor_windows: list[QMainWindow] = []
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
         self.setWindowTitle(f"{self.root.name} — Folder Navigator")
@@ -683,7 +687,7 @@ class Window(QMainWindow):
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
-        self.tree.openFile.connect(lambda path, pin: self.open_file(Path(path), pinned=pin))
+        self.tree.openFile.connect(self._open_tree_file)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -716,9 +720,11 @@ class Window(QMainWindow):
         search_layout.addWidget(self.search_results)
         self.search_input.returnPressed.connect(self.run_search)
         self.rail = QTabWidget()
+        self.rail.setObjectName("folderNavigatorRail")
         self.rail.addTab(self.tree, "Folder")
         self.rail.addTab(search_page, "Search")
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("folderNavigatorEditors")
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -771,6 +777,10 @@ class Window(QMainWindow):
         self.tree.header().sectionMoved.connect(lambda *_: self.layout_save_timer.start(500))
         self.tree.header().sortIndicatorChanged.connect(lambda *_: self.layout_save_timer.start(500))
         self._make_actions()
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
+        self._apply_focus_borders()
         self._render_bookmarks()
         self._restore()
         self.model.directoryLoaded.connect(lambda _: self._schedule_refresh())
@@ -781,6 +791,37 @@ class Window(QMainWindow):
             return json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+
+    def _on_focus_changed(self, _old, _current):
+        self._apply_focus_borders()
+
+    def _apply_focus_borders(self):
+        """Highlight the active navigator pane like StillPoint's main window."""
+        try:
+            focused = self.focusWidget()
+            folder_has_focus = focused is self.rail or (
+                focused is not None and self.rail.isAncestorOf(focused)
+            )
+            editor_has_focus = focused is self.tabs or (
+                focused is not None and self.tabs.isAncestorOf(focused)
+            )
+        except RuntimeError:
+            return
+        focus_border = (
+            theme_value("main_window.focus_border.filtered", "#D9534F")
+            if self.scope != self.root and folder_has_focus
+            else theme_value("main_window.focus_border.default", "#4A90E2")
+        )
+        self.rail.setStyleSheet(
+            "QTabWidget#folderNavigatorRail::pane { "
+            f"border: 2px solid {focus_border if folder_has_focus else 'transparent'}; "
+            "border-radius: 3px; }"
+        )
+        self.tabs.setStyleSheet(
+            "QTabWidget#folderNavigatorEditors::pane { "
+            f"border: 2px solid {focus_border if editor_has_focus else 'transparent'}; "
+            "border-radius: 3px; }"
+        )
 
     @staticmethod
     def _encode_qt_state(value):
@@ -1008,6 +1049,13 @@ class Window(QMainWindow):
         if current.isValid() and not self.model.isDir(current):
             self.open_file(Path(self.model.filePath(current)))
 
+    def _open_tree_file(self, path, pinned):
+        """Open a tree selection and hand keyboard control to its editor."""
+        self.open_file(Path(path), pinned=pinned)
+        tab = self.active_tab()
+        if tab and tab.editor:
+            tab.editor.setFocus(Qt.OtherFocusReason)
+
     def open_file(self, path: Path, pinned=False, line=None):
         if not path.is_file() or not inside(self.root, path):
             self.statusBar().showMessage(f"Unavailable or outside root: {path}", 12000)
@@ -1067,6 +1115,9 @@ class Window(QMainWindow):
         self.tabs.setTabToolTip(index, str(path.parent))
         self.tabs.setCurrentIndex(index)
         if tab.editor:
+            tab.editor.viNavigationEscapePressed.connect(
+                lambda t=tab: self._focus_tree_from_editor(t)
+            )
             if isinstance(tab.editor, MarkdownEditor):
                 tab.editor.setProperty("folderNavigatorMarkdown", True)
                 tab.editor.installEventFilter(self)
@@ -1080,6 +1131,11 @@ class Window(QMainWindow):
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
         self._update_welcome()
+
+    def _focus_tree_from_editor(self, tab):
+        """Return vi navigation to the file that owns the focused editor."""
+        if tab is self.active_tab():
+            self.reveal_tree(tab.path)
 
     def _reveal_editor_line(self, tab, line):
         """Select, flash, and scroll a search target into view."""
@@ -1407,6 +1463,9 @@ class Window(QMainWindow):
             menu.addAction("Open", lambda: self.open_file(path))
             menu.addAction("Open in New Tab", lambda: self.open_file(path, pinned=True))
             menu.addAction("Keep Open", lambda: self.keep_open(self._index_for(path)))
+            specialized_label = self._specialized_editor_label(path)
+            if specialized_label:
+                menu.addAction(specialized_label, lambda: self._open_specialized_editor(path))
         menu.addAction("Remove Bookmark" if str(path) in self._bookmarks() else "Bookmark", lambda: self.toggle_bookmark(path))
         menu.addAction("Reveal in File Manager", lambda: self.reveal(path))
         if not folder:
@@ -1415,6 +1474,46 @@ class Window(QMainWindow):
         menu.addAction("Copy Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    @staticmethod
+    def _specialized_editor_label(path):
+        return {
+            ".puml": "Open PlantUML Editor",
+            ".mmd": "Open Mermaid Editor",
+            ".excalidraw": "Open Excalidraw",
+        }.get(Path(path).suffix.casefold())
+
+    def _open_specialized_editor(self, path):
+        """Open a diagram in the matching standalone StillPoint editor."""
+        path = Path(path)
+        try:
+            suffix = path.suffix.casefold()
+            if suffix == ".puml":
+                from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
+                window = PlantUMLEditorWindow(str(path), parent=None)
+            elif suffix == ".mmd":
+                from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
+                window = MermaidEditorWindow(str(path), parent=None)
+            elif suffix == ".excalidraw":
+                from sp.app.ui.excalidraw_window import ExcalidrawWindow
+                window = ExcalidrawWindow(str(path), parent=None)
+            else:
+                return
+            window.setWindowFlag(Qt.Window, True)
+            window.setWindowFlag(Qt.Tool, False)
+            window.setWindowModality(Qt.NonModal)
+            self.specialized_editor_windows.append(window)
+            window.destroyed.connect(
+                lambda _=None, item=window: self.specialized_editor_windows.remove(item)
+                if item in self.specialized_editor_windows else None
+            )
+            window.show()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Could not open diagram editor",
+                f"Could not open {path.name} in its StillPoint editor:\n{exc}",
+            )
 
     def _tab_menu(self, point):
         index = self.tabs.tabBar().tabAt(point)

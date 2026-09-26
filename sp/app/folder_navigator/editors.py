@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QPlainTextEdit
 
 from sp.app import config
 from sp.app.ui.markdown_editor import MarkdownEditor
+from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 
 
 class PygmentsHighlighter(QSyntaxHighlighter):
@@ -60,6 +61,8 @@ class SourceEditor(QPlainTextEdit):
     """A lightweight syntax-highlighted editor with optional Vim navigation."""
 
     viInsertModeChanged = Signal(bool)
+    viNavigationEscapePressed = Signal()
+    findRequested = Signal()
 
     def __init__(self, filename: str | Path = "", parent=None) -> None:
         super().__init__(parent)
@@ -107,6 +110,15 @@ class SourceEditor(QPlainTextEdit):
 
         key = event.key()
         modifiers = event.modifiers()
+        if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            super().keyPressEvent(event)
+            return
+        if (self._vi_feature_enabled and is_vi_navigation_chord(modifiers)
+                and key in (Qt.Key.Key_J, Qt.Key.Key_K)):
+            page_key = Qt.Key.Key_PageDown if key == Qt.Key.Key_J else Qt.Key.Key_PageUp
+            page_event = QKeyEvent(event.type(), page_key, Qt.KeyboardModifier.NoModifier)
+            super().keyPressEvent(page_event)
+            return
         if self._vi_insert_mode:
             if key == Qt.Key.Key_Escape:
                 self._set_vi_insert_mode(False)
@@ -145,7 +157,13 @@ class SourceEditor(QPlainTextEdit):
                 self._pending_g = True
             return
         self._pending_g = False
-        if key == Qt.Key.Key_I:
+        if (key == Qt.Key.Key_Escape
+                and modifiers & ~Qt.KeyboardModifier.KeypadModifier
+                == Qt.KeyboardModifier.NoModifier):
+            self.viNavigationEscapePressed.emit()
+        elif key == Qt.Key.Key_Slash:
+            self.findRequested.emit()
+        elif key == Qt.Key.Key_I:
             self._set_vi_insert_mode(True)
         elif key == Qt.Key.Key_A:
             self._move(QTextCursor.MoveOperation.Right)
