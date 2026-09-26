@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtGui import QTextFormat
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor, QTextFormat
+from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.editors import SourceEditor
 
@@ -55,3 +57,36 @@ def test_source_editor_insert_mode_clears_navigation_cursor(qtbot) -> None:
     assert _cursor_selections(editor, editor._VI_LINE_EXTRA_KEY) == []
     assert _cursor_selections(editor, editor._VI_BLOCK_EXTRA_KEY) == []
     assert editor.cursorWidth() == editor._default_cursor_width
+
+
+def test_source_editor_vi_d_deletes_current_line(qtbot) -> None:
+    editor = SourceEditor("sample.py")
+    qtbot.addWidget(editor)
+    editor.setPlainText("one\ntwo\nthree")
+    cursor = editor.textCursor()
+    cursor.setPosition(len("one\n"))
+    editor.setTextCursor(cursor)
+    editor.set_vi_mode_enabled(True)
+
+    QTest.keyClick(editor, Qt.Key_D)
+
+    assert editor.toPlainText() == "one\nthree"
+
+
+def test_source_editor_vi_d_deletes_selection(qtbot) -> None:
+    editor = SourceEditor("sample.py")
+    qtbot.addWidget(editor)
+    editor.setPlainText("one two three")
+    cursor = editor.textCursor()
+    cursor.setPosition(len("one "))
+    cursor.movePosition(
+        QTextCursor.MoveOperation.Right,
+        QTextCursor.MoveMode.KeepAnchor,
+        len("two "),
+    )
+    editor.setTextCursor(cursor)
+    editor.set_vi_mode_enabled(True)
+
+    QTest.keyClick(editor, Qt.Key_D)
+
+    assert editor.toPlainText() == "one three"

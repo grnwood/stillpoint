@@ -199,6 +199,22 @@ class SourceEditor(QPlainTextEdit):
             self.setTextCursor(cursor)
         self.cut()
 
+    def _vi_delete_selection_or_line(self) -> None:
+        """Delete the selection, or the current line when nothing is selected."""
+        if self.isReadOnly():
+            return
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        if cursor.hasSelection():
+            cursor.removeSelectedText()
+        else:
+            cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+            cursor.removeSelectedText()
+            if not cursor.atEnd():
+                cursor.deleteChar()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt API
         if not self._vi_feature_enabled:
             super().keyPressEvent(event)
@@ -279,6 +295,8 @@ class SourceEditor(QPlainTextEdit):
             cursor.insertBlock()
             self.setTextCursor(cursor)
             self._set_vi_insert_mode(True)
+        elif key == Qt.Key.Key_D and not shift:
+            self._vi_delete_selection_or_line()
         elif key == Qt.Key.Key_C and not shift:
             self._vi_copy()
         elif key == Qt.Key.Key_X and not shift:

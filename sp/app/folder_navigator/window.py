@@ -15,7 +15,7 @@ import threading
 
 from PySide6.QtCore import (QDir, QEvent, QFileInfo, QFileSystemWatcher, QObject,
                             QPoint, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QDesktopServices, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QImageReader, QKeySequence, QPalette,
     QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QFileIconProvider, QFileSystemModel, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -33,7 +33,11 @@ from .icon import (
     get_folder_navigator_icon,
 )
 from .launch import launch
-from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
+from sp.app.ui.keyboard_shortcuts import (
+    history_cycle_modifier_release_key,
+    history_cycle_sequences,
+    is_vi_navigation_chord,
+)
 from sp.app.ui.theme import theme_color, theme_value
 
 
@@ -716,6 +720,10 @@ class Window(QMainWindow):
         self.markdown_preview_timer.timeout.connect(self._refresh_pending_markdown_preview)
         self.pending_markdown_preview = None
         self.specialized_editor_windows: list[QMainWindow] = []
+        self.tab_switcher = None
+        self.tab_switcher_list = None
+        self.tab_switcher_paths = []
+        self.tab_switcher_index = -1
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
         self.setWindowTitle(f"{self.root.name} — Folder Navigator")
@@ -832,6 +840,7 @@ class Window(QMainWindow):
         self._make_actions()
         app = QApplication.instance()
         if app is not None:
+            app.installEventFilter(self)
             app.focusChanged.connect(self._on_focus_changed)
         self._apply_focus_borders()
         self._render_bookmarks()
@@ -1061,8 +1070,8 @@ class Window(QMainWindow):
         add(go_menu, "Markdown Headings…", self._show_active_heading_picker, "Ctrl+Alt+T")
         add(go_menu, "Quick Open", self.quick_open, "Ctrl+P" if sys.platform != "darwin" else "Meta+P")
         add(go_menu, "Folder Picker", self.folder_picker, "Ctrl+Alt+V")
-        add(go_menu, "Next Tab", lambda: self.cycle_tab(1), "Ctrl+Tab")
-        add(go_menu, "Previous Tab", lambda: self.cycle_tab(-1), "Ctrl+Shift+Tab")
+        add(go_menu, "Next Tab", lambda: self._cycle_tab_popup(False))
+        add(go_menu, "Previous Tab", lambda: self._cycle_tab_popup(True))
         add(go_menu, "Command Bar", self.command_bar, "Alt+G")
         self.clear_filter_action = add(go_menu, "Remove Filter", self.clear_filter)
         self.clear_filter_action.setEnabled(self.scope != self.root)
@@ -1073,6 +1082,13 @@ class Window(QMainWindow):
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(self.command_bar)
             self.command_bar_shortcuts.append(shortcut)
+        forward_sequence, backward_sequence = history_cycle_sequences()
+        self.tab_cycle_shortcuts = []
+        for sequence, reverse in ((forward_sequence, False), (backward_sequence, True)):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(lambda backwards=reverse: self._cycle_tab_popup(backwards))
+            self.tab_cycle_shortcuts.append(shortcut)
         close_shortcut = QShortcut(QKeySequence.Close, self)
         close_shortcut.activated.connect(lambda: self.close_tab(self.tabs.currentIndex()))
         self.mru = []
@@ -1361,6 +1377,11 @@ class Window(QMainWindow):
             self._reveal_editor_line(tab, picker.selected_line)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if (event.type() == QEvent.KeyRelease
+                and event.key() == history_cycle_modifier_release_key()
+                and self.tab_switcher_paths):
+            self._activate_tab_switcher_selection()
+            return True
         if (event.type() == QEvent.KeyPress
                 and obj.property("folderNavigatorMarkdown")
                 and event.key() == Qt.Key_T
@@ -1390,6 +1411,11 @@ class Window(QMainWindow):
         index = self.tabs.indexOf(tab)
         if index >= 0:
             self.tabs.setTabText(index, ("● " if dirty else "") + tab.path.name)
+            color = (
+                QColor(str(theme_value("main_window.badge.dirty_bg", "#e57373")))
+                if dirty else self.tabs.tabBar().palette().color(QPalette.WindowText)
+            )
+            self.tabs.tabBar().setTabTextColor(index, color)
             tab.setAccessibleName(f"{tab.path.name}{', unsaved changes' if dirty else ''}")
 
     def keep_open(self, index):
@@ -1415,6 +1441,80 @@ class Window(QMainWindow):
         finally:
             self._cycling_tabs = False
         self.statusBar().showMessage(f"Tab switcher: {target.name}", 1800)
+
+    def _ensure_tab_switcher(self):
+        if self.tab_switcher is not None:
+            return
+        popup = QWidget(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(12, 8, 12, 8)
+        title = QLabel("Recent tabs", popup)
+        title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(title)
+        self.tab_switcher_list = QListWidget(popup)
+        layout.addWidget(self.tab_switcher_list)
+        popup_bg = theme_value("main_window.picker_popup.bg", "rgba(32,32,32,240)")
+        popup_border = theme_value("main_window.picker_popup.border", "#666666")
+        list_text = theme_value("main_window.picker_popup.list_text", "#f5f5f5")
+        selected_bg = theme_value("main_window.picker_popup.list_selected_bg", "rgba(90,161,255,80)")
+        popup.setStyleSheet(f"""
+            QWidget {{ background: {popup_bg}; border: 1px solid {popup_border}; border-radius: 6px; }}
+            QListWidget {{ background: transparent; color: {list_text}; border: none; }}
+            QListWidget::item {{ padding: 4px 6px; }}
+            QListWidget::item:selected {{ background: {selected_bg}; }}
+        """)
+        self.tab_switcher = popup
+
+    def _recent_tab_candidates(self):
+        current = self.active_tab()
+        current_path = current.path if current else None
+        return [path for path in self.mru
+                if path != current_path and self._index_for(path) >= 0]
+
+    def _cycle_tab_popup(self, reverse=False):
+        paths = self._recent_tab_candidates()
+        if not paths:
+            return
+        if not self.tab_switcher_paths or not self.tab_switcher or not self.tab_switcher.isVisible():
+            self.tab_switcher_paths = paths
+            self.tab_switcher_index = 0
+        else:
+            self.tab_switcher_paths = paths
+            delta = -1 if reverse else 1
+            self.tab_switcher_index = (self.tab_switcher_index + delta) % len(paths)
+        self._show_tab_switcher()
+
+    def _show_tab_switcher(self):
+        self._ensure_tab_switcher()
+        self.tab_switcher_list.clear()
+        for path in self.tab_switcher_paths:
+            try:
+                parent = path.parent.relative_to(self.root)
+                label = f"{path.name}  —  {parent if str(parent) != '.' else self.root.name}"
+            except ValueError:
+                label = path.name
+            self.tab_switcher_list.addItem(label)
+        self.tab_switcher_list.setCurrentRow(self.tab_switcher_index)
+        area = self.tabs.rect()
+        origin = self.tabs.mapToGlobal(area.topLeft())
+        width = min(max(420, self.tab_switcher.sizeHint().width()), max(420, area.width() - 40))
+        height = min(max(220, self.tab_switcher.sizeHint().height()), max(220, area.height() - 48))
+        self.tab_switcher.resize(width, height)
+        self.tab_switcher.move(origin.x() + (area.width() - width) // 2, origin.y() + 24)
+        self.tab_switcher.show()
+        self.tab_switcher.raise_()
+
+    def _activate_tab_switcher_selection(self):
+        if not self.tab_switcher_paths or self.tab_switcher_index < 0:
+            return
+        target = self.tab_switcher_paths[self.tab_switcher_index]
+        self.tab_switcher.hide()
+        self.tab_switcher_paths = []
+        self.tab_switcher_index = -1
+        index = self._index_for(target)
+        if index >= 0:
+            self.tabs.setCurrentIndex(index)
 
     def _review_dirty(self, tabs):
         dirty = [t for t in tabs if t.dirty]

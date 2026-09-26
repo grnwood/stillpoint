@@ -943,3 +943,71 @@ def test_inline_new_file_escape_cancels(tmp_path, monkeypatch, app):
     assert window.new_file_edit is None
     assert not (tmp_path / "cancel.txt").exists()
     window.close()
+
+
+def test_recent_tab_switcher_waits_for_modifier_release(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.keyboard_shortcuts import history_cycle_modifier_release_key
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    paths = [tmp_path / name for name in ("first.txt", "second.txt", "third.txt")]
+    for path in paths:
+        path.write_text(path.stem, encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    for path in paths:
+        window.open_file(path, pinned=True)
+
+    assert window.active_tab().path == paths[2]
+    window._cycle_tab_popup(False)
+    assert window.tab_switcher.isVisible()
+    assert window.tab_switcher_paths[window.tab_switcher_index] == paths[1]
+    assert window.active_tab().path == paths[2]
+
+    window._cycle_tab_popup(False)
+    assert window.tab_switcher_paths[window.tab_switcher_index] == paths[0]
+    assert window.active_tab().path == paths[2]
+
+    release = QKeyEvent(
+        QEvent.KeyRelease,
+        history_cycle_modifier_release_key(),
+        Qt.NoModifier,
+    )
+    assert window.eventFilter(window, release)
+    assert window.active_tab().path == paths[0]
+    assert not window.tab_switcher.isVisible()
+    for tab in window.all_tabs():
+        tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_dirty_tab_uses_attention_color_until_clean(tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QColor, QPalette
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.theme import theme_value
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "notes.txt"
+    path.write_text("clean", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+    index = window.tabs.indexOf(tab)
+
+    tab.editor.document().setModified(False)
+    tab.editor.insertPlainText(" changed")
+    app.processEvents()
+    assert window.tabs.tabText(index).startswith("● ")
+    assert window.tabs.tabBar().tabTextColor(index) == QColor(
+        str(theme_value("main_window.badge.dirty_bg", "#e57373"))
+    )
+
+    tab.editor.document().setModified(False)
+    app.processEvents()
+    assert window.tabs.tabText(index) == path.name
+    assert window.tabs.tabBar().tabTextColor(index) == window.tabs.tabBar().palette().color(
+        QPalette.WindowText
+    )
+    window.close()
