@@ -2527,6 +2527,8 @@ class MainWindow(QMainWindow):
         # Bookmarks
         self.bookmarks: list[str] = []
         self.bookmark_buttons: dict[str, QPushButton] = {}
+        self.folder_bookmarks: list[str] = []
+        self.folder_bookmark_buttons: dict[str, QPushButton] = {}
         self._bookmark_drag_source_path: Optional[str] = None
         self._bookmark_drag_insert_index: Optional[int] = None
         self._bookmark_drag_divider: Optional[QFrame] = None
@@ -3092,6 +3094,13 @@ class MainWindow(QMainWindow):
         open_folder_navigator = QAction("Open Folder Navigator…", self)
         open_folder_navigator.triggered.connect(self._open_folder_navigator)
         file_menu.addAction(open_folder_navigator)
+        bookmark_folder_navigator = QAction("Bookmark Folder Navigator…", self)
+        bookmark_folder_navigator.setToolTip(
+            "Choose a folder, add it to this vault's bookmark bar, and open it"
+        )
+        bookmark_folder_navigator.triggered.connect(self._bookmark_folder_navigator)
+        file_menu.addAction(bookmark_folder_navigator)
+        self._action_bookmark_folder_navigator = bookmark_folder_navigator
         self._action_save = QAction("&Save", self)
         self._action_save.setShortcut(QKeySequence.Save)
         self._action_save.setShortcutContext(Qt.ApplicationShortcut)
@@ -3877,6 +3886,19 @@ class MainWindow(QMainWindow):
             self.bookmark_button.setText("+")
             # We'll apply color via stylesheet after adding to toolbar
         self.toolbar.addAction(self.bookmark_button)
+        try:
+            bookmark_tool_button = self.toolbar.widgetForAction(self.bookmark_button)
+            if isinstance(bookmark_tool_button, QToolButton):
+                bookmark_menu = QMenu(bookmark_tool_button)
+                bookmark_menu.addAction("Toggle Current Page Bookmark", self._add_bookmark)
+                bookmark_menu.addAction("Bookmark Folder Navigator…", self._bookmark_folder_navigator)
+                bookmark_tool_button.setMenu(bookmark_menu)
+                bookmark_tool_button.setPopupMode(QToolButton.MenuButtonPopup)
+                bookmark_tool_button.setToolTip(
+                    "Toggle current page bookmark; use the arrow to bookmark a folder navigator"
+                )
+        except Exception:
+            pass
 
         print_action = QAction("Print Page", self)
         print_action.setToolTip("Print or export current page to PDF (Ctrl+P)")
@@ -4184,16 +4206,49 @@ class MainWindow(QMainWindow):
 
     def _open_folder_navigator(self) -> None:
         """Launch a detached companion that does not depend on this window or API."""
-        selected = QFileDialog.getExistingDirectory(self, "Open Folder Navigator")
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Open Folder Navigator",
+            str(Path.home()),
+        )
         if not selected:
             return
+        self._launch_folder_navigator(Path(selected))
+
+    def _launch_folder_navigator(self, root: Path) -> bool:
+        """Launch Folder Navigator at *root* and report whether startup succeeded."""
         try:
             from sp.app.folder_navigator.launch import launch
-            process = launch(Path(selected))
+            process = launch(root)
             self._monitor_folder_navigator(process)
+            return True
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not launch Folder Navigator",
                                 f"{exc}\nCheck the selected folder and installation, then try again.")
+            return False
+
+    def _bookmark_folder_navigator(self) -> None:
+        """Choose, persist, and open a Folder Navigator root for this vault."""
+        initial = self.folder_bookmarks[0] if self.folder_bookmarks else str(Path.home())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Bookmark Folder Navigator",
+            initial,
+        )
+        if not selected:
+            return
+        try:
+            path = str(Path(selected).expanduser().resolve())
+        except (OSError, RuntimeError):
+            path = str(Path(selected).expanduser().absolute())
+        if path not in self.folder_bookmarks:
+            self.folder_bookmarks.append(path)
+            config.save_folder_bookmarks(self.folder_bookmarks)
+            self._refresh_bookmark_buttons()
+            self.statusBar().showMessage(f"Bookmarked folder navigator: {Path(path).name}", 3000)
+        else:
+            self.statusBar().showMessage(f"Folder navigator already bookmarked: {Path(path).name}", 3000)
+        self._launch_folder_navigator(Path(path))
 
     def _monitor_folder_navigator(self, process) -> None:
         """Watch a detached navigator without tying its lifetime to StillPoint."""
@@ -10488,6 +10543,7 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             return
         self.bookmarks = config.load_bookmarks()
+        self.folder_bookmarks = config.load_folder_bookmarks()
         self._refresh_bookmark_buttons()
 
     def _restore_nav_filter_state(self) -> None:
@@ -10660,6 +10716,10 @@ class MainWindow(QMainWindow):
             self.bookmark_layout.removeWidget(btn)
             btn.deleteLater()
         self.bookmark_buttons.clear()
+        for btn in list(self.folder_bookmark_buttons.values()):
+            self.bookmark_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.folder_bookmark_buttons.clear()
         
         # Add buttons for each bookmark
         for bookmark_path in self.bookmarks:
@@ -10682,6 +10742,37 @@ class MainWindow(QMainWindow):
             self.bookmark_buttons[bookmark_path] = btn
             
             # Add to layout
+            self.bookmark_layout.addWidget(btn)
+
+        folder_icon = self._load_icon(
+            self._find_asset("folder.svg"),
+            self._main_icon_color(),
+            size=14,
+        )
+        if not folder_icon:
+            folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        for folder_path in self.folder_bookmarks:
+            path = Path(folder_path)
+            missing = not path.is_dir()
+            label = path.name or str(path)
+            btn = QPushButton(("⚠ " if missing else "") + label)
+            btn.setProperty("folderBookmark", "true")
+            btn.setAccessibleName(f"Folder Navigator bookmark: {label}")
+            btn.setIcon(folder_icon)
+            btn.setIconSize(QSize(14, 14))
+            tooltip = f"Folder Navigator: {folder_path}"
+            if missing:
+                tooltip += " — folder is missing (right-click to remove)"
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(
+                lambda checked=False, p=folder_path: self._open_folder_bookmark(p)
+            )
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, p=folder_path, b=btn: self._show_folder_bookmark_context_menu(pos, p, b)
+            )
+            self._apply_folder_bookmark_button_style(btn)
+            self.folder_bookmark_buttons[folder_path] = btn
             self.bookmark_layout.addWidget(btn)
         self._update_bookmark_filter_highlights()
         self._update_bookmark_strip_width()
@@ -10967,6 +11058,23 @@ class MainWindow(QMainWindow):
         if btn.styleSheet() != style:
             btn.setStyleSheet(style)
 
+    def _apply_folder_bookmark_button_style(self, btn: QPushButton) -> None:
+        """Style external folder shortcuts like bookmarks without page-active state."""
+        self._prepare_top_nav_chicklet(btn, "bookmark")
+        normal_bg, normal_text = self._top_nav_normal_button_colors("bookmark")
+        normal_border = theme_value("main_window.bookmark.normal_border", "#555555")
+        normal_border = self._top_nav_border_for_background(str(normal_border), normal_bg)
+        style = (
+            "QPushButton[topNavChicklet=\"true\"] { "
+            "border-width: 1px; border-style: solid; "
+            f"border-color: {normal_border}; "
+            f"background: {normal_bg}; color: {normal_text}; "
+            "padding: 2px 6px; border-radius: 3px; outline: 0px; }"
+            + self._top_nav_hover_style()
+        )
+        if btn.styleSheet() != style:
+            btn.setStyleSheet(style)
+
     def _apply_history_button_style(self, btn: QPushButton, history_path: str) -> None:
         self._prepare_top_nav_chicklet(btn, "history")
         is_active = bool(self.current_path and history_path == self.current_path)
@@ -11147,7 +11255,8 @@ class MainWindow(QMainWindow):
         spacing = self.bookmark_layout.spacing()
         total = 0
         count = 0
-        for btn in self.bookmark_buttons.values():
+        buttons = list(self.bookmark_buttons.values()) + list(self.folder_bookmark_buttons.values())
+        for btn in buttons:
             try:
                 total += btn.sizeHint().width()
                 count += 1
@@ -11538,6 +11647,47 @@ class MainWindow(QMainWindow):
     def _open_bookmark(self, path: str) -> None:
         """Open a bookmarked page."""
         self._open_file(path)
+
+    def _open_folder_bookmark(self, folder_path: str) -> None:
+        """Open a bookmarked external folder in Folder Navigator."""
+        path = Path(folder_path)
+        if not path.is_dir():
+            self.statusBar().showMessage(f"Bookmarked folder is missing: {folder_path}", 12000)
+            return
+        self._launch_folder_navigator(path)
+
+    def _show_folder_bookmark_context_menu(
+        self,
+        pos: QPoint,
+        folder_path: str,
+        button: QWidget,
+    ) -> None:
+        """Show actions for an external Folder Navigator bookmark."""
+        menu = QMenu(self)
+        open_action = menu.addAction("Open Folder Navigator")
+        open_action.setEnabled(Path(folder_path).is_dir())
+        open_action.triggered.connect(lambda: self._open_folder_bookmark(folder_path))
+        reveal_action = menu.addAction("Reveal in File Manager")
+        reveal_action.setEnabled(Path(folder_path).is_dir())
+        reveal_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
+        )
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(lambda: self._remove_folder_bookmark(folder_path))
+        menu.exec(button.mapToGlobal(pos))
+
+    def _remove_folder_bookmark(self, folder_path: str) -> None:
+        """Remove an external folder shortcut from this vault's bookmark bar."""
+        if folder_path not in self.folder_bookmarks:
+            return
+        self.folder_bookmarks.remove(folder_path)
+        config.save_folder_bookmarks(self.folder_bookmarks)
+        self._refresh_bookmark_buttons()
+        self.statusBar().showMessage(
+            f"Removed folder navigator bookmark: {Path(folder_path).name}",
+            3000,
+        )
 
     def _show_bookmark_context_menu(self, pos: QPoint, bookmark_path: str, button: QWidget) -> None:
         """Show context menu for bookmark with Remove option."""

@@ -2606,6 +2606,42 @@ def save_bookmarks(paths: list[str]) -> None:
         )
 
 
+def load_folder_bookmarks() -> list[str]:
+    """Load vault-scoped Folder Navigator roots in display order."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.execute("SELECT path FROM folder_bookmarks ORDER BY position")
+        return [row[0] for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        return []
+
+
+def save_folder_bookmarks(paths: list[str]) -> None:
+    """Persist vault-scoped Folder Navigator roots in display order."""
+    conn = _get_conn()
+    if not conn:
+        return
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            value = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            value = str(Path(path).expanduser().absolute())
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    with conn:
+        conn.execute("DELETE FROM folder_bookmarks")
+        conn.executemany(
+            "INSERT INTO folder_bookmarks(path, position) VALUES(?, ?)",
+            ((path, idx) for idx, path in enumerate(normalized)),
+        )
+
+
 def load_show_journal() -> bool:
     """Load show_journal setting. Defaults to False (hidden)."""
     conn = _get_conn()
@@ -4068,12 +4104,12 @@ def update_link_paths(path_map: dict[str, str]) -> None:
 def rebuild_index_from_disk(root: Path, keep_tables: Optional[set[str]] = None) -> None:
     """Drop and recreate vault index tables, preserving selected tables.
 
-    Keeps bookmarks, kv, the full-text page-search index, and any ai* tables by
-    default. Search is maintained independently from the derived vault metadata
-    index and must remain usable after an ordinary vault rebuild.
+    Keeps page/folder bookmarks, kv, the full-text page-search index, and any
+    ai* tables by default. Search is maintained independently from the derived
+    vault metadata index and must remain usable after an ordinary vault rebuild.
     """
     keep: set[str] = {t.lower() for t in (keep_tables or set())}
-    keep.update({"bookmarks", "kv", "pages_search_index"})
+    keep.update({"bookmarks", "folder_bookmarks", "kv", "pages_search_index"})
     conn = _connect_to_vault_db()
     try:
         tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
@@ -5386,6 +5422,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag);
         CREATE TABLE IF NOT EXISTS bookmarks (
+            path TEXT PRIMARY KEY,
+            position INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS folder_bookmarks (
             path TEXT PRIMARY KEY,
             position INTEGER
         );

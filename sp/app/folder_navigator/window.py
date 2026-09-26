@@ -733,6 +733,7 @@ class Window(QMainWindow):
         self.state = self.settings.setdefault(str(self.root), {})
         self.model = FolderModel(self.root, self)
         self.tree = NavigatorTree()
+        self._suppress_tree_preview = False
         try:
             global_settings = json.loads((Path.home() / ".stillpoint_config.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1115,6 +1116,8 @@ class Window(QMainWindow):
         return next((i for i, tab in enumerate(self.all_tabs()) if tab.path == path), -1)
 
     def _tree_selected(self, current, previous):
+        if self._suppress_tree_preview:
+            return
         self._cancel_pending_tree_markdown()
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
@@ -1216,6 +1219,13 @@ class Window(QMainWindow):
         self.tabs.setTabToolTip(index, str(path.parent))
         self.tabs.setCurrentIndex(index)
         if tab.editor:
+            # Folder Navigator owns a deliberately small editor context menu.
+            # In particular, Markdown tabs must not expose StillPoint page,
+            # link-graph, AI, or vault-navigation actions here.
+            tab.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+            tab.editor.customContextMenuRequested.connect(
+                lambda point, t=tab: self._show_editor_context_menu(t, point)
+            )
             tab.editor.viNavigationEscapePressed.connect(
                 lambda t=tab: self._focus_tree_from_editor(t)
             )
@@ -1543,10 +1553,29 @@ class Window(QMainWindow):
             tab.deleteLater()
             self._watch_files()
             self._update_welcome()
+            self._focus_tree_when_tabs_empty()
 
     def _update_welcome(self):
         self.welcome.setVisible(self.tabs.count() == 0)
         self.tabs.setVisible(self.tabs.count() > 0)
+
+    def _focus_tree_when_tabs_empty(self):
+        """Return keyboard/vi navigation to the folder tree after the last close."""
+        if self.tabs.count() != 0:
+            return
+        self._suppress_tree_preview = True
+        self.rail.setCurrentIndex(0)
+        self.tree.setFocus(Qt.OtherFocusReason)
+        QTimer.singleShot(0, self._focus_tree_if_still_empty)
+
+    def _focus_tree_if_still_empty(self):
+        if self.tabs.count() == 0:
+            self.rail.setCurrentIndex(0)
+            self.tree.setFocus(Qt.OtherFocusReason)
+        QTimer.singleShot(0, self._resume_tree_preview)
+
+    def _resume_tree_preview(self):
+        self._suppress_tree_preview = False
 
     def save_active(self):
         if self.active_tab():
@@ -1873,8 +1902,25 @@ class Window(QMainWindow):
         menu.addAction("Close Tabs to the Right", lambda: self._close_indices(list(range(index + 1, self.tabs.count()))))
         menu.addAction("Close Saved Tabs", lambda: self._close_indices([i for i, tab in enumerate(self.all_tabs()) if not tab.dirty]))
         menu.addAction("Keep Open", lambda: self.keep_open(index))
-        menu.addAction("Reveal in Folder Tree", lambda: self.reveal_tree(self.tabs.widget(index).path))
+        menu.addAction("Reveal in Folder", lambda: self.reveal_tree(self.tabs.widget(index).path))
         menu.exec(self.tabs.tabBar().mapToGlobal(point))
+
+    def _create_editor_context_menu(self, tab, point):
+        """Build the same compact edit menu for Markdown and source editors."""
+        if not tab or not tab.editor:
+            return None
+        menu = tab.editor.createStandardContextMenu(point)
+        if menu.actions() and not menu.actions()[-1].isSeparator():
+            menu.addSeparator()
+        reveal_action = menu.addAction("Reveal in Folder")
+        reveal_action.triggered.connect(lambda: self.reveal_tree(tab.path))
+        return menu
+
+    def _show_editor_context_menu(self, tab, point):
+        menu = self._create_editor_context_menu(tab, point)
+        if menu is None:
+            return
+        menu.exec(tab.editor.viewport().mapToGlobal(point))
 
     def _close_indices(self, indices):
         tabs = [self.tabs.widget(i) for i in indices]
@@ -1885,6 +1931,7 @@ class Window(QMainWindow):
             tab.deleteLater()
         self._watch_files()
         self._update_welcome()
+        self._focus_tree_when_tabs_empty()
 
     def system_open(self, path):
         if not inside(self.root, path):

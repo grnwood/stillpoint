@@ -91,6 +91,71 @@ def test_preview_pinning_and_stale_restore(tmp_path, monkeypatch, app):
     window.close()
 
 
+def test_closing_last_tab_returns_focus_to_folder_tree(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "notes.txt"
+    path.write_text("notes")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(path, pinned=True)
+    window.active_tab().editor.setFocus()
+    window.active_tab().editor.document().setModified(False)
+
+    window.close_tab(0)
+    app.processEvents()
+
+    assert window.tabs.count() == 0
+    assert window.rail.currentIndex() == 0
+    assert window.tree.hasFocus()
+    window.close()
+
+
+def test_editor_context_menu_is_shared_and_reveals_file(
+        tmp_path, monkeypatch, app) -> None:
+    from PySide6.QtCore import QPoint, Qt
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    markdown_path = nested / "notes.md"
+    source_path = nested / "notes.py"
+    markdown_path.write_text("# Notes\n")
+    source_path.write_text("print('notes')\n")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(markdown_path, pinned=True)
+    window.open_file(source_path, pinned=True)
+    app.processEvents()
+
+    markdown_tab, source_tab = window.all_tabs()
+    assert markdown_tab.editor.contextMenuPolicy() == Qt.CustomContextMenu
+    assert source_tab.editor.contextMenuPolicy() == Qt.CustomContextMenu
+    markdown_menu = window._create_editor_context_menu(markdown_tab, QPoint())
+    source_menu = window._create_editor_context_menu(source_tab, QPoint())
+    markdown_actions = [action.text().replace("&", "") for action in markdown_menu.actions()]
+    source_actions = [action.text().replace("&", "") for action in source_menu.actions()]
+
+    assert markdown_actions == source_actions
+    assert markdown_actions[-1] == "Reveal in Folder"
+    assert not ({"Page", "Navigate", "Move", "AI Actions"} & set(markdown_actions))
+
+    markdown_menu.actions()[-1].trigger()
+    app.processEvents()
+    current = window.tree.currentIndex()
+    assert Path(window.model.filePath(current)) == markdown_path
+    assert window.tree.hasFocus()
+    assert window.tree.isExpanded(window.model.index(str(nested)))
+
+    markdown_tab.editor.document().setModified(False)
+    source_tab.editor.document().setModified(False)
+    markdown_menu.deleteLater()
+    source_menu.deleteLater()
+    window.close()
+
+
 def test_child_process_is_detached(tmp_path, monkeypatch):
     from sp.app.folder_navigator import launch
     captured = {}
