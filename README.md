@@ -13,6 +13,7 @@ StillPoint is a local-first, markdown note system with a PySide6 desktop app and
 <img src="docs/img/full-notebook-app.png"/>
 
 - Fast tree navigation, history popup, and heading switcher.
+- Ranger-inspired Folder Navigator for browsing and editing codebases or ordinary folders without turning them into StillPoint vaults.
 - Markdown editor with formatting shortcuts, task parsing, inline images, and inline link triggers (`//` quick link, `[[` inline AI prompt).
 - Journaling workflows with date navigation and templates.
 
@@ -90,6 +91,32 @@ Key UI features:
 - Task tags use `@tag` and stay scoped to tasks.
 - Tag picker: type `/# ` in the editor to browse existing page tags and insert one.
 - Task tag picker: type `/@ ` on a task line to browse existing task tags and insert one.
+
+## Folder Navigator
+
+Folder Navigator is StillPoint's detached, keyboard-first companion for ordinary folders. It is useful when your notes, decisions, and tasks belong in a StillPoint vault, but the files you are working with—a source repository, client delivery folder, research collection, or configuration tree—need to remain in their existing layout.
+
+It is inspired by fast terminal file browsers such as Ranger, while using a native tree, tabs, previews, and StillPoint's editor conventions. Opening a folder does not import it, convert it to StillPoint's page-folder structure, or add its contents to the vault index.
+
+From the desktop app, use **File → Open Folder Navigator…**. The navigator launches as a separate process with its own folder-badged StillPoint icon, so it can be identified in the task switcher and can remain open after the main StillPoint window closes. Use **File → Bookmark Folder Navigator…** to pin a folder shortcut to the current vault's bookmark bar.
+
+The companion includes:
+
+- Lazy filesystem browsing, subtree filtering, hidden-file controls, and per-folder state.
+- Preview and pinned tabs for Markdown, source code, other text files, images, and PDFs when supported by the packaged Qt build.
+- Syntax highlighting, Markdown heading navigation, find, explicit save/save-all, and external-change conflict checks.
+- Filename Quick Open (`Ctrl+P` / `Cmd+P`) backed by a filename-only `.sp_folder/catalog.sqlite3` cache. File contents are not placed in this cache.
+- On-demand filename and text-content search; no persistent content index is created.
+- StillPoint vi navigation settings, including `h/j/k/l` in the folder tree and `Escape` from editor navigation mode to return to the current file in the tree.
+- Bookmarks for files and folders inside the current root, plus vault-scoped shortcuts that launch commonly used Folder Navigator roots from StillPoint.
+
+For source checkouts, the companion can also be launched directly:
+
+```bash
+python -m sp.app.folder_navigator /path/to/folder
+```
+
+See the built-in **Folder Navigator** help page for the complete workflow and shortcuts.
 
 ## Graph / Project Mode
 

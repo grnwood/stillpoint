@@ -65,11 +65,15 @@ You do not need to memorize everything at once. A strong starter flow is:
 As these become habits, navigation feels much faster and more focused.
 
 ## Bookmarks Bar
-The top toolbar includes bookmarks so important pages are always one click away.
+The top toolbar includes bookmarks so important pages and working folders are always one click away.
 - Use `Ctrl+Alt+B` to add or remove a bookmark for the current page.
+- Use the bookmark button's arrow or `File -> Bookmark Folder Navigator…` to pin an external working folder to the current vault. The folder chip reopens Folder Navigator at that folder.
+- Right-click a folder chip to reveal it in your file manager or remove the shortcut. Folder shortcuts store only the path and stay scoped to this vault.
 - Use bookmarks for your daily start points (for example: Today page, active project, weekly review).
 - The bookmark strip can scroll left/right when you have many saved pages.
 - Bookmarks are great for staying on point across sessions.
+
+Folder shortcuts launch a separate companion rather than navigating the current vault. See [:Folder-Navigator|Folder Navigator] for the complete external-folder workflow.
 
 ## Tags
 Tags help group related pages.

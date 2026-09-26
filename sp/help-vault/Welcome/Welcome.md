@@ -25,6 +25,8 @@ StillPoint helps answer practical questions quickly:
 - How are ideas connected? (Link graph and backlinks)
 - Advanced: ask AI to search your vault and draft summaries
 
+When the work itself lives outside your vault, Folder Navigator lets you browse a codebase or ordinary folder in a StillPoint-style, keyboard-first window. The external folder keeps its existing structure while your notes, journal, tasks, and links remain in the vault that serves as your home base.
+
 ## How to Use This Help Vault
 - Each topic is a page (folder/page).
 - Click pages in the left navigation to explore.
@@ -47,6 +49,7 @@ You can enable or disable most panels in Preferences.
 ## Help Topics
 - [:Getting-Started|Getting Started] - Create/open vaults and learn the basics.
 - [:Navigation|Navigation] - Move through your vault and locate content quickly.
+- [:Folder-Navigator|Folder Navigator] - Browse and edit codebases or ordinary folders without turning them into vaults.
 - [:Editor|Editor] - Write, link, and structure your notes.
 - [:Tasks|Tasks] - Track and manage to-dos.
 - [:Calendar|Calendar] - Journal navigation and date browsing.

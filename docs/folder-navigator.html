@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script src="ga.js"></script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="StillPoint Folder Navigator is a Ranger-inspired, keyboard-first companion for browsing codebases and ordinary folders without turning them into a notes vault."
+    />
+    <title>StillPoint Folder Navigator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+        <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="mindmap.html">Mindmap</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="remote-vaults.html">Homebase</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+          <a href="folder-navigator.html">Folder Navigator</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">Folder Navigator</span>
+          <h1>Your notes are home base. Your files can stay where they are.</h1>
+          <p>
+            You are working in your StillPoint vault, keeping the decisions, tasks, and running
+            story of a project. But the project itself is a codebase, a client folder, or a tree
+            of files that should not become a notes vault. Folder Navigator gives that work a
+            StillPoint-shaped window of its own.
+          </p>
+          <div class="cta-row">
+            <a class="button primary" href="#how-it-works">See how it fits</a>
+            <a class="button ghost" href="uses.html">Explore use cases</a>
+          </div>
+        </div>
+        <div class="navigator-illustration" role="img" aria-label="Folder Navigator with a project tree beside a source editor">
+          <div class="navigator-titlebar">
+            <span class="navigator-mark" aria-hidden="true">⌑</span>
+            <span>sample-project — Folder Navigator</span>
+          </div>
+          <div class="navigator-workspace">
+            <div class="navigator-tree" aria-hidden="true">
+              <strong>sample-project</strong>
+              <span>▾ src</span>
+              <span class="tree-indent">app.py</span>
+              <span class="tree-indent active">routes.py</span>
+              <span>▸ tests</span>
+              <span>README.md</span>
+            </div>
+            <div class="navigator-editor" aria-hidden="true">
+              <div class="navigator-tab">routes.py</div>
+              <code><i>def</i> project_notes():</code>
+              <code>&nbsp;&nbsp;&nbsp;&nbsp;<b>return</b> <em>"StillPoint"</em></code>
+              <code></code>
+              <code><i># code here, context nearby</i></code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="how-it-works" style="--d: 0.15s">
+        <div class="eyebrow">A sidecar workspace</div>
+        <h2>Stay in your system without putting everything inside it.</h2>
+        <p>
+          StillPoint remains the place where the project makes sense: meeting notes, design
+          choices, questions, tasks, and the daily trail. Folder Navigator sits beside it for the
+          project files themselves. It opens the folder as-is, in a separate window with a
+          distinct folder-badged icon, and leaves the structure untouched.
+        </p>
+        <div class="workflow-strip">
+          <div class="workflow-step">
+            <span>1</span>
+            <h3>Think in your vault</h3>
+            <p>Keep the durable context, plans, and decisions in StillPoint.</p>
+          </div>
+          <div class="workflow-step">
+            <span>2</span>
+            <h3>Open the working folder</h3>
+            <p>Launch a codebase or ordinary folder without importing or converting it.</p>
+          </div>
+          <div class="workflow-step">
+            <span>3</span>
+            <h3>Move through both naturally</h3>
+            <p>Browse and edit files, then return to the notes that explain the work.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.22s">
+        <div>
+          <div class="eyebrow">Ranger-inspired</div>
+          <h2>Fast with a keyboard, comfortable with a mouse.</h2>
+          <p>
+            Folder Navigator takes its cue from keyboard-first file browsers such as Ranger. Move
+            through the folder tree with familiar vi keys, jump to a file with Quick Open, search
+            names and text, and keep related files in tabs. If vi mode is not your thing, the
+            native tree, menus, and mouse interactions work exactly as expected.
+          </p>
+          <p class="quote">
+            It feels like StillPoint because the point is not another tool. The point is keeping
+            your flow.
+          </p>
+        </div>
+        <div class="grid compact-grid">
+          <div class="card">
+            <h3>Quick Open</h3>
+            <p>Find a file by name or path without unfolding the whole tree.</p>
+          </div>
+          <div class="card">
+            <h3>Code and Markdown</h3>
+            <p>Edit readable text with syntax color, headings, find, and vi navigation.</p>
+          </div>
+          <div class="card">
+            <h3>Search on demand</h3>
+            <p>Search filenames and file contents when you need them, without a content index.</p>
+          </div>
+          <div class="card">
+            <h3>Safe, explicit saves</h3>
+            <p>Unsaved tabs are obvious, and disk conflicts are reviewed before anything is replaced.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.3s">
+        <div class="eyebrow">Made for real folders</div>
+        <h2>Useful wherever the surrounding files matter.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>A codebase beside project notes</h3>
+            <p>
+              Keep architecture notes and decisions in your vault while browsing source,
+              configuration, tests, and README files in their repository.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Client work without another vault</h3>
+            <p>
+              Review a delivery folder while your call notes, commitments, and follow-ups remain
+              connected in StillPoint.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Research in its original shape</h3>
+            <p>
+              Explore Markdown, text, images, and PDFs in a collected folder without reorganizing
+              the material just to look through it.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.38s">
+        <div>
+          <div class="eyebrow">A quick way back</div>
+          <h2>Pin the folders that belong with a vault.</h2>
+          <p>
+            Add a Folder Navigator shortcut to a StillPoint vault's bookmark bar. One click
+            reopens the external working folder, while the folder icon makes it clear that you are
+            launching files—not navigating to another note page.
+          </p>
+          <p>
+            Inside Folder Navigator, you can separately bookmark important files and subfolders,
+            filter the tree to the part you care about, and restore your working tabs the next time
+            that root opens.
+          </p>
+        </div>
+        <div class="boundary-card">
+          <h3>What does not happen</h3>
+          <ul>
+            <li>The folder is not imported into your vault.</li>
+            <li>Its layout is not converted to StillPoint pages.</li>
+            <li>Its contents are not added to your vault's AI or search index.</li>
+            <li>The window does not need StillPoint's server to keep running.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section reveal" style="--d: 0.45s">
+        <div class="eyebrow">Start from StillPoint</div>
+        <h2>Open a folder and keep going.</h2>
+        <p>
+          Choose <strong>File → Open Folder Navigator…</strong> for a one-off workspace, or
+          <strong>File → Bookmark Folder Navigator…</strong> to pin a folder to the current
+          vault. Each root opens independently and can stay open even when the main StillPoint
+          window closes.
+        </p>
+        <div class="cta-row">
+          <a class="button primary" href="https://github.com/grnwood/StillPoint/releases">Get StillPoint</a>
+          <a class="button ghost" href="https://github.com/grnwood/StillPoint">View the project</a>
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        <span>Your vault for context. Your folders in place.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+        <span><a href="philo.html#funding-support">Support the project</a></span>
+      </footer>
+    </main>
+  </body>
+</html>
