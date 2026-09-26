@@ -559,12 +559,14 @@ def test_markdown_tree_preview_and_plain_enter_keep_folder_focus(tmp_path, monke
     first.write_text("# First\n", encoding="utf-8")
     second.write_text("# Second\n", encoding="utf-8")
     window = Window(tmp_path)
+    window.tree_markdown_open_delay_ms = 20
     window.show()
     window.tree.setFocus()
 
     for path in (first, second):
         index = window.model.index(str(path))
         window.tree.setCurrentIndex(index)
+        QTest.qWait(30)
         app.processEvents()
         assert window.tree.hasFocus()
         assert window.active_tab().path == path
@@ -591,23 +593,23 @@ def test_markdown_preview_render_is_debounced_during_tree_flybys(
     first.write_text("# First\n", encoding="utf-8")
     second.write_text("# Second\n", encoding="utf-8")
     window = Window(tmp_path)
+    window.tree_markdown_open_delay_ms = 80
     window.markdown_preview_delay_ms = 80
     window.show()
     window.tree.setFocus()
 
     window.tree.setCurrentIndex(window.model.index(str(first)))
-    first_tab = window.active_tab()
-    assert not first_tab.property("folderMarkdownRendered")
+    assert window.active_tab() is None
     window.tree.setCurrentIndex(window.model.index(str(second)))
-    second_tab = window.active_tab()
-    assert second_tab is not first_tab
-    assert not second_tab.property("folderMarkdownRendered")
+    assert window.active_tab() is None
 
-    QTest.qWait(120)
+    QTest.qWait(300)
     app.processEvents()
 
+    second_tab = window.active_tab()
     assert window.tree.hasFocus()
-    assert window.tabs.indexOf(first_tab) < 0
+    assert second_tab.path == second
+    assert window.tabs.count() == 1
     assert second_tab.property("folderMarkdownRendered")
     assert not second_tab.editor.toPlainText().startswith("#")
     assert second_tab.text_for_save().startswith("# Second")
@@ -828,4 +830,50 @@ def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, a
     assert opened == [str(diagram)]
     assert len(window.specialized_editor_windows) == 1
     window.specialized_editor_windows[0].close()
+    window.close()
+
+
+def test_inline_new_file_creates_and_opens_editor(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    window = Window(tmp_path)
+    window.show()
+    window._begin_new_file(folder, window.model.index(str(folder)))
+    edit = window.new_file_edit
+
+    QTest.keyClicks(edit, "new-note.txt")
+    QTest.keyClick(edit, Qt.Key_Return)
+    app.processEvents()
+
+    created = folder / "new-note.txt"
+    assert created.is_file()
+    assert window.new_file_edit is None
+    assert window.active_tab().path == created
+    assert window.active_tab().pinned
+    assert window.active_tab().editor.hasFocus()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_inline_new_file_escape_cancels(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window.show()
+    window._begin_new_file(tmp_path, window.model.index(str(tmp_path)))
+    edit = window.new_file_edit
+    QTest.keyClicks(edit, "cancel.txt")
+    QTest.keyClick(edit, Qt.Key_Escape)
+    app.processEvents()
+
+    assert window.new_file_edit is None
+    assert not (tmp_path / "cancel.txt").exists()
     window.close()

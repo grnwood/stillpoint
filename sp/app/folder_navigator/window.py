@@ -13,7 +13,8 @@ import subprocess
 import sys
 import threading
 
-from PySide6.QtCore import QDir, QFileInfo, QFileSystemWatcher, QObject, Qt, QTimer, QUrl, Signal, QEvent
+from PySide6.QtCore import (QDir, QEvent, QFileInfo, QFileSystemWatcher, QObject,
+                            QPoint, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QDesktopServices, QImageReader, QKeySequence, QPalette,
     QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -113,6 +114,16 @@ class NavigatorTree(QTreeView):
                 self.openFile.emit(self.model().filePath(index), True)
                 return
         super().mousePressEvent(event)
+
+
+class InlineFileNameEdit(QLineEdit):
+    canceled = Signal()
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if event.key() == Qt.Key_Escape:
+            self.canceled.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class SearchResultsList(QListWidget):
@@ -691,6 +702,13 @@ class Window(QMainWindow):
         self.bridge = Bridge(self)
         self.search_cancel = threading.Event()
         self.search_generation = 0
+        self.new_file_edit = None
+        self.new_file_directory = None
+        self.tree_markdown_open_delay_ms = 140
+        self.tree_markdown_open_timer = QTimer(self)
+        self.tree_markdown_open_timer.setSingleShot(True)
+        self.tree_markdown_open_timer.timeout.connect(self._open_pending_tree_markdown)
+        self.pending_tree_markdown_path = None
         self.markdown_preview_delay_ms = 200
         self.markdown_preview_timer = QTimer(self)
         self.markdown_preview_timer.setSingleShot(True)
@@ -720,9 +738,7 @@ class Window(QMainWindow):
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
-        self.tree.openFile.connect(
-            lambda path, pinned: self.open_file(Path(path), pinned=pinned)
-        )
+        self.tree.openFile.connect(self._open_tree_file_keep_focus)
         self.tree.openFileAndFocus.connect(self._open_tree_file)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
@@ -1082,13 +1098,38 @@ class Window(QMainWindow):
         return next((i for i, tab in enumerate(self.all_tabs()) if tab.path == path), -1)
 
     def _tree_selected(self, current, previous):
+        self._cancel_pending_tree_markdown()
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
         if current.isValid() and not self.model.isDir(current):
-            self.open_file(Path(self.model.filePath(current)))
+            path = Path(self.model.filePath(current))
+            if path.suffix.casefold() in (".md", ".markdown"):
+                self.pending_tree_markdown_path = path
+                self.tree_markdown_open_timer.start(self.tree_markdown_open_delay_ms)
+            else:
+                self.open_file(path)
+
+    def _cancel_pending_tree_markdown(self):
+        self.tree_markdown_open_timer.stop()
+        self.pending_tree_markdown_path = None
+
+    def _open_pending_tree_markdown(self):
+        path = self.pending_tree_markdown_path
+        self.pending_tree_markdown_path = None
+        if path is None:
+            return
+        index = self.tree.currentIndex()
+        if (index.isValid() and not self.model.isDir(index)
+                and Path(self.model.filePath(index)) == path):
+            self.open_file(path)
+
+    def _open_tree_file_keep_focus(self, path, pinned):
+        self._cancel_pending_tree_markdown()
+        self.open_file(Path(path), pinned=pinned)
 
     def _open_tree_file(self, path, pinned):
         """Open a tree selection and hand keyboard control to its editor."""
+        self._cancel_pending_tree_markdown()
         self.open_file(Path(path), pinned=pinned)
         tab = self.active_tab()
         if tab and tab.editor:
@@ -1164,7 +1205,7 @@ class Window(QMainWindow):
                 tab.editor.setProperty("folderNavigatorMarkdown", True)
                 tab.editor.installEventFilter(self)
                 tab.editor.headingPickerRequested.connect(
-                    lambda point, prefer_above, t=tab: self._show_heading_picker(t, point, prefer_above)
+                    lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
                 )
             tab.editor.document().modificationChanged.connect(lambda dirty, t=tab: self._modified(t, dirty))
             # Markdown's initial display formatting can toggle Qt's modified
@@ -1206,10 +1247,15 @@ class Window(QMainWindow):
 
     @staticmethod
     def _clear_initial_formatting_dirty(tab):
-        if (tab.editor and tab.loaded
-                and tab.text_for_save() == tab.loaded.text
-                and tab.editor.document().isModified()):
-            tab.editor.document().setModified(False)
+        try:
+            if (tab.editor and tab.loaded
+                    and tab.text_for_save() == tab.loaded.text
+                    and tab.editor.document().isModified()):
+                tab.editor.document().setModified(False)
+        except RuntimeError:
+            # A fast preview replacement may delete the tab before this queued
+            # formatting-only dirty-state cleanup runs.
+            pass
 
     def _focus_tree_from_editor(self, tab):
         """Return vi navigation to the file that owns the focused editor."""
@@ -1251,11 +1297,36 @@ class Window(QMainWindow):
         if not tab or not tab.markdown or not tab.editor:
             self.statusBar().showMessage("Heading navigation is available for Markdown files", 3000)
             return
-        rect = tab.editor.cursorRect()
-        point = tab.editor.viewport().mapToGlobal(rect.bottomLeft())
-        self._show_heading_picker(tab, point, False)
+        self._show_heading_picker(tab)
 
-    def _show_heading_picker(self, tab, global_point=None, prefer_above=False):
+    def _position_heading_picker(self, tab, picker):
+        """Center the picker in the editor viewport and keep it on-screen."""
+        viewport = tab.editor.viewport()
+        viewport_top_left = viewport.mapToGlobal(QPoint(0, 0))
+        viewport_center = viewport_top_left + viewport.rect().center()
+        screen = QApplication.screenAt(viewport_center) or self.screen()
+        available = screen.availableGeometry() if screen else self.frameGeometry()
+        margin = 12
+        width = min(
+            520,
+            max(280, viewport.width() - 48),
+            max(1, available.width() - (margin * 2)),
+        )
+        height = min(
+            360,
+            max(200, viewport.height() - 48),
+            max(1, available.height() - (margin * 2)),
+        )
+        picker.resize(width, height)
+        x = viewport_center.x() - (width // 2)
+        y = viewport_center.y() - (height // 2)
+        min_x = available.left() + margin
+        min_y = available.top() + margin
+        max_x = max(min_x, available.right() - margin - width + 1)
+        max_y = max(min_y, available.bottom() - margin - height + 1)
+        picker.move(max(min_x, min(x, max_x)), max(min_y, min(y, max_y)))
+
+    def _show_heading_picker(self, tab):
         if not tab or not tab.markdown or not tab.editor:
             return
         source = tab.text_for_save()
@@ -1272,8 +1343,7 @@ class Window(QMainWindow):
             self.statusBar().showMessage("This Markdown file has no headings", 3000)
             return
         picker = HeadingPicker(headings, self)
-        if global_point is not None:
-            picker.move(global_point)
+        self._position_heading_picker(tab, picker)
         if picker.exec() == QDialog.Accepted and picker.selected_line:
             self._reveal_editor_line(tab, picker.selected_line)
 
@@ -1288,9 +1358,7 @@ class Window(QMainWindow):
             tab = next((candidate for candidate in self.all_tabs()
                         if candidate.editor is obj), None)
             if tab:
-                rect = obj.cursorRect()
-                point = obj.viewport().mapToGlobal(rect.bottomLeft())
-                self._show_heading_picker(tab, point, False)
+                self._show_heading_picker(tab)
                 return True
         return super().eventFilter(obj, event)
 
@@ -1545,6 +1613,9 @@ class Window(QMainWindow):
             specialized_label = self._specialized_editor_label(path)
             if specialized_label:
                 menu.addAction(specialized_label, lambda: self._open_specialized_editor(path))
+        target_directory = path if folder else path.parent
+        target_index = index if folder else index.parent()
+        menu.addAction("New File", lambda: self._begin_new_file(target_directory, target_index))
         menu.addAction("Remove Bookmark" if str(path) in self._bookmarks() else "Bookmark", lambda: self.toggle_bookmark(path))
         menu.addAction("Reveal in File Manager", lambda: self.reveal(path))
         if not folder:
@@ -1553,6 +1624,82 @@ class Window(QMainWindow):
         menu.addAction("Copy Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def _begin_new_file(self, directory, directory_index=None):
+        """Show an inline filename editor beneath a folder tree row."""
+        self._cancel_new_file()
+        directory = Path(directory)
+        if not directory.is_dir() or not inside(self.root, directory):
+            self.statusBar().showMessage(f"Cannot create a file outside the folder root: {directory}", 8000)
+            return
+        index = directory_index if directory_index is not None else self.model.index(str(directory))
+        if index.isValid():
+            self.tree.expand(index)
+            rect = self.tree.visualRect(index)
+            x = max(18, rect.x() + self.tree.indentation())
+            y = max(0, rect.bottom() + 1)
+        else:
+            x, y = 18, 4
+        edit = InlineFileNameEdit(self.tree.viewport())
+        edit.setPlaceholderText("New file name")
+        edit.setAccessibleName("New file name")
+        edit.setGeometry(x, y, max(180, self.tree.viewport().width() - x - 8), 28)
+        edit.setStyleSheet(
+            f"border: 2px solid {theme_value('main_window.focus_border.default', '#4A90E2')}; "
+            "border-radius: 3px; padding: 2px 6px;"
+        )
+        edit.returnPressed.connect(self._commit_new_file)
+        edit.canceled.connect(self._cancel_new_file)
+        self.new_file_directory = directory
+        self.new_file_edit = edit
+        edit.show()
+        edit.raise_()
+        QTimer.singleShot(0, self._focus_new_file_edit)
+
+    def _focus_new_file_edit(self):
+        edit = self.new_file_edit
+        if edit is not None:
+            edit.raise_()
+            edit.setFocus(Qt.PopupFocusReason)
+
+    def _cancel_new_file(self):
+        edit = self.new_file_edit
+        self.new_file_edit = None
+        self.new_file_directory = None
+        if edit is not None:
+            edit.hide()
+            edit.deleteLater()
+
+    def _commit_new_file(self):
+        edit = self.new_file_edit
+        directory = self.new_file_directory
+        if edit is None or directory is None:
+            return
+        name = edit.text().strip()
+        if not name:
+            edit.setFocus()
+            return
+        if name in {".", ".."} or Path(name).name != name:
+            self.statusBar().showMessage("Enter a file name without folder separators", 8000)
+            edit.selectAll()
+            return
+        target = directory / name
+        try:
+            with target.open("x", encoding="utf-8"):
+                pass
+        except FileExistsError:
+            self.statusBar().showMessage(f"A file named {name} already exists", 8000)
+            edit.selectAll()
+            return
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not create {name}: {exc}", 12000)
+            edit.selectAll()
+            return
+        self._cancel_new_file()
+        self.open_file(target, pinned=True)
+        tab = self.active_tab()
+        if tab and tab.editor:
+            tab.editor.setFocus(Qt.OtherFocusReason)
 
     @staticmethod
     def _specialized_editor_label(path):
