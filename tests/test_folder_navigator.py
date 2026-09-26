@@ -617,6 +617,72 @@ def test_markdown_preview_render_is_debounced_during_tree_flybys(
     window.close()
 
 
+def test_rendered_markdown_hover_remains_replaceable_preview(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    markdown = tmp_path / "hover.md"
+    plain = tmp_path / "next.txt"
+    markdown.write_text("# Hovered\n", encoding="utf-8")
+    plain.write_text("next\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.tree_markdown_open_delay_ms = 30
+    window.markdown_preview_delay_ms = 30
+    window.show()
+    window.tree.setFocus()
+
+    window.tree.setCurrentIndex(window.model.index(str(markdown)))
+    QTest.qWait(120)
+    app.processEvents()
+    markdown_tab = window.active_tab()
+    assert markdown_tab.property("folderMarkdownRendered")
+    assert not markdown_tab.dirty
+    assert not markdown_tab.pinned
+
+    window.tree.setCurrentIndex(window.model.index(str(plain)))
+    app.processEvents()
+    assert window.tabs.count() == 1
+    assert window.active_tab().path == plain
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_source_flyby_defers_pygments_until_selection_lingers(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("print('first')\n", encoding="utf-8")
+    second.write_text("print('second')\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.markdown_preview_delay_ms = 80
+    window.show()
+    window.tree.setFocus()
+
+    window.tree.setCurrentIndex(window.model.index(str(first)))
+    first_tab = window.active_tab()
+    assert isinstance(first_tab.editor, SourceEditor)
+    assert first_tab.editor.syntax_highlighter is None
+    window.tree.setCurrentIndex(window.model.index(str(second)))
+    second_tab = window.active_tab()
+    assert second_tab is not first_tab
+    assert second_tab.editor.syntax_highlighter is None
+
+    QTest.qWait(120)
+    app.processEvents()
+    assert window.tabs.count() == 1
+    assert window.active_tab().path == second
+    assert second_tab.editor.syntax_highlighter is not None
+    second_tab.editor.document().setModified(False)
+    window.close()
+
+
 def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.icon import get_folder_navigator_icon
     from sp.app.folder_navigator.window import Window

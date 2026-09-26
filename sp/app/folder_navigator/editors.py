@@ -68,7 +68,7 @@ class SourceEditor(QPlainTextEdit):
     _VI_BLOCK_EXTRA_KEY = int(QTextFormat.UserProperty) + 4200
     _VI_LINE_EXTRA_KEY = int(QTextFormat.UserProperty) + 4201
 
-    def __init__(self, filename: str | Path = "", parent=None) -> None:
+    def __init__(self, filename: str | Path = "", parent=None, *, highlight: bool = True) -> None:
         super().__init__(parent)
         font = QFont("monospace")
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -82,7 +82,18 @@ class SourceEditor(QPlainTextEdit):
         self._block_cursor_width = max(
             2, self.fontMetrics().horizontalAdvance("M")
         )
-        self.syntax_highlighter = PygmentsHighlighter(self.document(), str(filename))
+        self._highlight_filename = str(filename)
+        self.syntax_highlighter = None
+        self.highlighter = None
+        if highlight:
+            self.enable_syntax_highlighting()
+
+    def enable_syntax_highlighting(self) -> None:
+        if self.syntax_highlighter is not None:
+            return
+        self.syntax_highlighter = PygmentsHighlighter(
+            self.document(), self._highlight_filename
+        )
         # Keep the shorter name for callers that used the initial implementation.
         self.highlighter = self.syntax_highlighter
         self.cursorPositionChanged.connect(self._update_vi_cursor_highlight)

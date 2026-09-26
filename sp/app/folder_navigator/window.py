@@ -362,7 +362,7 @@ class HeadingPicker(QDialog):
 
 class Tab(QWidget):
     def __init__(self, path: Path, loaded: TextFile | None = None, *, markdown=False,
-                 details="", root: Path | None = None):
+                 details="", root: Path | None = None, defer_enhancements=False):
         super().__init__()
         self.path = path
         self.loaded = loaded
@@ -386,8 +386,9 @@ class Tab(QWidget):
                 if root is not None:
                     self.editor.set_context(str(root), str(path.relative_to(root)))
             else:
-                self.editor = SourceEditor(path)
+                self.editor = SourceEditor(path, highlight=not defer_enhancements)
                 configure_source_editor(self.editor)
+                self.setProperty("folderSourceHighlighted", not defer_enhancements)
             self.editor.setPlainText(loaded.text)
             self.editor.document().setModified(False)
             self.editor.setReadOnly(not os.access(path, os.W_OK))
@@ -1107,7 +1108,7 @@ class Window(QMainWindow):
                 self.pending_tree_markdown_path = path
                 self.tree_markdown_open_timer.start(self.tree_markdown_open_delay_ms)
             else:
-                self.open_file(path)
+                self.open_file(path, defer_enhancements=True)
 
     def _cancel_pending_tree_markdown(self):
         self.tree_markdown_open_timer.stop()
@@ -1121,11 +1122,12 @@ class Window(QMainWindow):
         index = self.tree.currentIndex()
         if (index.isValid() and not self.model.isDir(index)
                 and Path(self.model.filePath(index)) == path):
-            self.open_file(path)
+            self.open_file(path, defer_enhancements=True)
 
     def _open_tree_file_keep_focus(self, path, pinned):
         self._cancel_pending_tree_markdown()
         self.open_file(Path(path), pinned=pinned)
+        self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
     def _open_tree_file(self, path, pinned):
         """Open a tree selection and hand keyboard control to its editor."""
@@ -1136,7 +1138,7 @@ class Window(QMainWindow):
             self._schedule_markdown_preview(tab, immediate=True)
             tab.editor.setFocus(Qt.OtherFocusReason)
 
-    def open_file(self, path: Path, pinned=False, line=None):
+    def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False):
         if not path.is_file() or not inside(self.root, path):
             self.statusBar().showMessage(f"Unavailable or outside root: {path}", 12000)
             return
@@ -1179,7 +1181,7 @@ class Window(QMainWindow):
             else:
                 loaded = read_text(path)
                 tab = Tab(path, loaded, markdown=path.suffix.casefold() in (".md", ".markdown"),
-                          root=self.root)
+                          root=self.root, defer_enhancements=defer_enhancements)
         except Exception as exc:
             info = path.stat()
             details = (f"{path.name}\nType: {mimetypes.guess_type(path.name)[0] or 'Unknown'}\n"
@@ -1219,14 +1221,16 @@ class Window(QMainWindow):
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
         self._update_welcome()
-        self._schedule_markdown_preview(tab)
+        self._schedule_markdown_preview(tab if defer_enhancements else None)
 
     def _schedule_markdown_preview(self, tab, *, immediate=False):
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
-        if not tab or not tab.markdown or not tab.editor:
+        if not tab or not tab.editor:
             return
-        if tab.property("folderMarkdownRendered"):
+        if (tab.markdown and tab.property("folderMarkdownRendered")) or (
+                isinstance(tab.editor, SourceEditor)
+                and tab.property("folderSourceHighlighted")):
             return
         self.pending_markdown_preview = tab
         if immediate:
@@ -1238,12 +1242,21 @@ class Window(QMainWindow):
         tab = self.pending_markdown_preview
         self.pending_markdown_preview = None
         if (not tab or self.tabs.indexOf(tab) < 0 or tab is not self.active_tab()
-                or not tab.markdown or not tab.editor or not tab.loaded or tab.dirty
-                or tab.property("folderMarkdownRendered")):
+                or not tab.editor or not tab.loaded or tab.dirty):
             return
-        tab.editor.set_markdown(tab.loaded.text)
-        tab.editor.document().setModified(False)
-        tab.setProperty("folderMarkdownRendered", True)
+        if isinstance(tab.editor, SourceEditor):
+            tab.editor.enable_syntax_highlighting()
+            tab.setProperty("folderSourceHighlighted", True)
+            return
+        if not tab.markdown or tab.property("folderMarkdownRendered"):
+            return
+        tab.setProperty("folderMarkdownRendering", True)
+        try:
+            tab.editor.set_markdown(tab.loaded.text)
+            tab.editor.document().setModified(False)
+            tab.setProperty("folderMarkdownRendered", True)
+        finally:
+            tab.setProperty("folderMarkdownRendering", False)
 
     @staticmethod
     def _clear_initial_formatting_dirty(tab):
@@ -1363,6 +1376,15 @@ class Window(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _modified(self, tab, dirty):
+        if tab.property("folderMarkdownRendering"):
+            return
+        if dirty and tab.markdown and tab.loaded:
+            try:
+                if tab.text_for_save() == tab.loaded.text:
+                    tab.editor.document().setModified(False)
+                    return
+            except RuntimeError:
+                return
         if dirty:
             tab.pinned = True
         index = self.tabs.indexOf(tab)
