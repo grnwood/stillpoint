@@ -14,12 +14,14 @@ from pygments.lexers import TextLexer, get_lexer_for_filename
 from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QSyntaxHighlighter, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import QApplication, QPlainTextEdit
+from PySide6.QtGui import (QColor, QFont, QKeyEvent, QSyntaxHighlighter,
+                           QTextCharFormat, QTextCursor, QTextFormat)
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit
 
 from sp.app import config
 from sp.app.ui.markdown_editor import MarkdownEditor
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
+from sp.app.ui.theme import theme_color
 
 
 class PygmentsHighlighter(QSyntaxHighlighter):
@@ -63,6 +65,8 @@ class SourceEditor(QPlainTextEdit):
     viInsertModeChanged = Signal(bool)
     viNavigationEscapePressed = Signal()
     findRequested = Signal()
+    _VI_BLOCK_EXTRA_KEY = int(QTextFormat.UserProperty) + 4200
+    _VI_LINE_EXTRA_KEY = int(QTextFormat.UserProperty) + 4201
 
     def __init__(self, filename: str | Path = "", parent=None) -> None:
         super().__init__(parent)
@@ -74,29 +78,89 @@ class SourceEditor(QPlainTextEdit):
         self._vi_insert_mode = True
         self._vi_cursor_style = "block"
         self._pending_g = False
+        self._default_cursor_width = max(1, self.cursorWidth())
+        self._block_cursor_width = max(
+            2, self.fontMetrics().horizontalAdvance("M")
+        )
         self.syntax_highlighter = PygmentsHighlighter(self.document(), str(filename))
         # Keep the shorter name for callers that used the initial implementation.
         self.highlighter = self.syntax_highlighter
+        self.cursorPositionChanged.connect(self._update_vi_cursor_highlight)
+        self.textChanged.connect(self._update_vi_cursor_highlight)
 
     def set_vi_mode_enabled(self, enabled: bool) -> None:
         self._vi_feature_enabled = bool(enabled)
         self._set_vi_insert_mode(not self._vi_feature_enabled)
 
     def set_vi_cursor_style(self, style: str) -> None:
-        self._vi_cursor_style = style
+        normalized = str(style or "").strip().lower()
+        self._vi_cursor_style = normalized if normalized in {"block", "line"} else "line"
         self._update_cursor_width()
+        self._update_vi_cursor_highlight()
 
     def _set_vi_insert_mode(self, enabled: bool) -> None:
         self._vi_insert_mode = bool(enabled)
         self._pending_g = False
         self._update_cursor_width()
+        self._update_vi_cursor_highlight()
         self.viInsertModeChanged.emit(self._vi_insert_mode)
 
     def _update_cursor_width(self) -> None:
         if not self._vi_feature_enabled or self._vi_insert_mode:
-            self.setCursorWidth(1)
+            self.setCursorWidth(self._default_cursor_width)
             return
-        self.setCursorWidth(2 if self._vi_cursor_style in {"line", "bar"} else 8)
+        width = 2 if self._vi_cursor_style == "line" else self._block_cursor_width
+        self.setCursorWidth(width)
+
+    def _update_vi_cursor_highlight(self) -> None:
+        """Render the configured StillPoint vi navigation cursor treatment."""
+        existing = [
+            selection for selection in self.extraSelections()
+            if selection.format.property(self._VI_BLOCK_EXTRA_KEY) is None
+            and selection.format.property(self._VI_LINE_EXTRA_KEY) is None
+        ]
+        if (not self._vi_feature_enabled or self._vi_insert_mode
+                or self.textCursor().hasSelection()):
+            self.setExtraSelections(existing)
+            return
+
+        cursor = self.textCursor()
+        accent, foreground = self._vi_cursor_colors()
+        extra = QTextEdit.ExtraSelection()
+        if self._vi_cursor_style == "block":
+            block_cursor = QTextCursor(cursor)
+            if not block_cursor.atEnd():
+                block_cursor.movePosition(
+                    QTextCursor.MoveOperation.Right,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+            extra.cursor = block_cursor
+            extra.format.setProperty(QTextFormat.FullWidthSelection, False)
+            extra.format.setProperty(self._VI_BLOCK_EXTRA_KEY, True)
+        else:
+            extra.cursor = cursor
+            extra.format.setProperty(QTextFormat.FullWidthSelection, True)
+            extra.format.setProperty(self._VI_LINE_EXTRA_KEY, True)
+        extra.format.setBackground(accent)
+        extra.format.setForeground(foreground)
+        self.setExtraSelections(existing + [extra])
+
+    @staticmethod
+    def _vi_cursor_colors() -> tuple[QColor, QColor]:
+        accent_value = (
+            config.load_vault_accent_color()
+            or theme_color("vi_navigation_line.bg", "#2a3950").name()
+        )
+        accent = QColor(accent_value)
+        if not accent.isValid():
+            accent = QColor("#2a3950")
+        luminance = (
+            0.299 * accent.red()
+            + 0.587 * accent.green()
+            + 0.114 * accent.blue()
+        )
+        foreground = QColor("#111111" if luminance >= 160 else "#ffffff")
+        return accent, foreground
 
     def _move(self, operation: QTextCursor.MoveOperation, *, select: bool = False) -> None:
         cursor = self.textCursor()

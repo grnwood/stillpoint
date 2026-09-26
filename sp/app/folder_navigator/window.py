@@ -283,6 +283,7 @@ class HeadingPicker(QDialog):
         title.setStyleSheet("font-weight: bold;")
         self.query = QLineEdit()
         self.query.setPlaceholderText("Filter headings…")
+        self.setFocusProxy(self.query)
         self.results = QListWidget()
         layout.addWidget(title)
         layout.addWidget(self.query)
@@ -293,6 +294,16 @@ class HeadingPicker(QDialog):
         self.results.itemActivated.connect(lambda *_: self._accept_current())
         self.results.itemDoubleClicked.connect(lambda *_: self._accept_current())
         self._refresh()
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        QTimer.singleShot(0, self._focus_query)
+
+    def _focus_query(self):
+        self.raise_()
+        self.activateWindow()
+        self.query.setFocus(Qt.PopupFocusReason)
+        self.query.selectAll()
 
     def _refresh(self):
         needle = self.query.text().casefold().strip()
@@ -404,6 +415,8 @@ class Tab(QWidget):
         return bool(self.editor and self.editor.document().isModified())
 
     def text_for_save(self):
+        if isinstance(self.editor, MarkdownEditor):
+            return self.editor.to_markdown()
         return self.editor.toPlainText() if self.editor else ""
 
     def show_notice(self, message):
@@ -678,6 +691,11 @@ class Window(QMainWindow):
         self.bridge = Bridge(self)
         self.search_cancel = threading.Event()
         self.search_generation = 0
+        self.markdown_preview_delay_ms = 200
+        self.markdown_preview_timer = QTimer(self)
+        self.markdown_preview_timer.setSingleShot(True)
+        self.markdown_preview_timer.timeout.connect(self._refresh_pending_markdown_preview)
+        self.pending_markdown_preview = None
         self.specialized_editor_windows: list[QMainWindow] = []
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
@@ -1064,6 +1082,8 @@ class Window(QMainWindow):
         return next((i for i, tab in enumerate(self.all_tabs()) if tab.path == path), -1)
 
     def _tree_selected(self, current, previous):
+        self.markdown_preview_timer.stop()
+        self.pending_markdown_preview = None
         if current.isValid() and not self.model.isDir(current):
             self.open_file(Path(self.model.filePath(current)))
 
@@ -1072,6 +1092,7 @@ class Window(QMainWindow):
         self.open_file(Path(path), pinned=pinned)
         tab = self.active_tab()
         if tab and tab.editor:
+            self._schedule_markdown_preview(tab, immediate=True)
             tab.editor.setFocus(Qt.OtherFocusReason)
 
     def open_file(self, path: Path, pinned=False, line=None):
@@ -1085,7 +1106,10 @@ class Window(QMainWindow):
             self.tabs.setCurrentIndex(index)
             if line:
                 self._reveal_editor_line(self.tabs.widget(index), line)
+            self._schedule_markdown_preview(self.tabs.widget(index))
             return
+        for existing_tab in self.all_tabs():
+            self._clear_initial_formatting_dirty(existing_tab)
         preview = next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
         if preview >= 0:
             self.tabs.removeTab(preview)
@@ -1154,6 +1178,31 @@ class Window(QMainWindow):
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
         self._update_welcome()
+        self._schedule_markdown_preview(tab)
+
+    def _schedule_markdown_preview(self, tab, *, immediate=False):
+        self.markdown_preview_timer.stop()
+        self.pending_markdown_preview = None
+        if not tab or not tab.markdown or not tab.editor:
+            return
+        if tab.property("folderMarkdownRendered"):
+            return
+        self.pending_markdown_preview = tab
+        if immediate:
+            self._refresh_pending_markdown_preview()
+        else:
+            self.markdown_preview_timer.start(self.markdown_preview_delay_ms)
+
+    def _refresh_pending_markdown_preview(self):
+        tab = self.pending_markdown_preview
+        self.pending_markdown_preview = None
+        if (not tab or self.tabs.indexOf(tab) < 0 or tab is not self.active_tab()
+                or not tab.markdown or not tab.editor or not tab.loaded or tab.dirty
+                or tab.property("folderMarkdownRendered")):
+            return
+        tab.editor.set_markdown(tab.loaded.text)
+        tab.editor.document().setModified(False)
+        tab.setProperty("folderMarkdownRendered", True)
 
     @staticmethod
     def _clear_initial_formatting_dirty(tab):

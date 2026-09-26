@@ -393,6 +393,49 @@ def test_heading_picker_supports_platform_vi_navigation_chord(app):
     picker.reject()
 
 
+def test_heading_picker_t_shortcut_focuses_filter_and_accepts_navigation(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    import sp.app.folder_navigator.editors as editors
+    from sp.app.folder_navigator.window import HeadingPicker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(editors.config, "load_vi_mode_enabled", lambda: True)
+    page = tmp_path / "notes.md"
+    page.write_text("# First\n\ntext\n\n## Second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(page)
+    editor = window.active_tab().editor
+    editor.setFocus()
+    observed = {}
+
+    def operate_picker():
+        picker = next(
+            widget for widget in app.topLevelWidgets()
+            if isinstance(widget, HeadingPicker) and widget.isVisible()
+        )
+        observed["query_focus"] = picker.query.hasFocus()
+        QTest.keyClicks(picker.query, "sec")
+        observed["filtered_count"] = picker.results.count()
+        QTest.keyClick(picker.query, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
+        observed["selected_row"] = picker.results.currentRow()
+        QTest.keyClick(picker.query, Qt.Key_Return)
+
+    QTimer.singleShot(20, operate_picker)
+    QTest.keyClick(editor, Qt.Key_T)
+
+    assert observed == {
+        "query_focus": True,
+        "filtered_count": 1,
+        "selected_row": 0,
+    }
+    assert editor.textCursor().blockNumber() == 4
+    editor.document().setModified(False)
+    window.close()
+
+
 def test_source_tabs_use_pygments_and_global_vi_setting(tmp_path, monkeypatch, app):
     import sp.app.folder_navigator.editors as editors
     from sp.app.folder_navigator.window import Window
@@ -534,6 +577,41 @@ def test_markdown_tree_preview_and_plain_enter_keep_folder_focus(tmp_path, monke
     assert window.tabs.count() == 1
     for tab in window.all_tabs():
         tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_markdown_preview_render_is_debounced_during_tree_flybys(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n", encoding="utf-8")
+    second.write_text("# Second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.markdown_preview_delay_ms = 80
+    window.show()
+    window.tree.setFocus()
+
+    window.tree.setCurrentIndex(window.model.index(str(first)))
+    first_tab = window.active_tab()
+    assert not first_tab.property("folderMarkdownRendered")
+    window.tree.setCurrentIndex(window.model.index(str(second)))
+    second_tab = window.active_tab()
+    assert second_tab is not first_tab
+    assert not second_tab.property("folderMarkdownRendered")
+
+    QTest.qWait(120)
+    app.processEvents()
+
+    assert window.tree.hasFocus()
+    assert window.tabs.indexOf(first_tab) < 0
+    assert second_tab.property("folderMarkdownRendered")
+    assert not second_tab.editor.toPlainText().startswith("#")
+    assert second_tab.text_for_save().startswith("# Second")
+    second_tab.editor.document().setModified(False)
     window.close()
 
 
