@@ -1,14 +1,14 @@
 # Folder Navigator
 
-**Status:** Draft for product decisions  
-**Created:** September 25, 2026  
+**Status:** Draft for product decisions
+**Created:** September 25, 2026
 **Last revised:** September 25, 2026
 
 ## Summary
 
 Folder Navigator is a lightweight, standalone companion to Stillpoint for browsing and editing an ordinary local folder. It should feel familiar to a Stillpoint user without treating the folder as a vault.
 
-The app reads the filesystem directly. It does not index the folder, start or depend on the Stillpoint API, interpret vault conventions, scan tags or tasks, or write Stillpoint metadata into the selected folder.
+The app reads the filesystem directly. It does not build a content index, start or depend on the Stillpoint API, interpret vault conventions, scan tags or tasks, or write Stillpoint vault metadata into the selected folder. It may maintain a filename-only Quick Open cache under `.sp_folder`.
 
 The primary use case is reviewing a codebase or documentation tree containing Markdown, images, PDFs, and other text files.
 
@@ -25,7 +25,7 @@ The primary use case is reviewing a codebase or documentation tree containing Ma
 1. Open any user-selected local folder as a navigable tree.
 2. Preview Markdown, supported text files, images, and PDFs in tabs.
 3. Edit and save supported text files without Stillpoint-specific behavior.
-4. Search filenames and supported text-file contents without building a persistent index.
+4. Search filenames and supported text-file contents without building a persistent content index; Quick Open may persist filename metadata only.
 5. Preserve the high-value navigation patterns of Stillpoint: keyboard-first tree navigation, commands for moving focus, bookmarks, and a temporary subtree filter.
 6. Provide a fast, VS Code-like Quick Open flow for opening a file by name or path.
 7. Work consistently on Windows, macOS, and Linux.
@@ -34,7 +34,7 @@ The primary use case is reviewing a codebase or documentation tree containing Ma
 
 - Treating the folder as a Stillpoint vault.
 - Tags, backlinks, tasks, calendar, journal, graph, AI actions, or remote/Homebase features.
-- Persistent content indexing or writing cache/metadata files inside the selected folder.
+- Persistent content indexing or writing Stillpoint vault metadata inside the selected folder. The `.sp_folder` filename cache is the sole cache exception.
 - Rich editing of images or PDFs.
 - IDE features such as language servers, debugging, Git integration, multi-cursor editing, or an integrated shell.
 - A right-side information panel. The initial layout has only the left rail and the content area.
@@ -159,7 +159,7 @@ The primary-modifier + `P` opens a VS Code-like file picker from anywhere in the
 - When a subtree filter is active, Quick Open searches that subtree by default and clearly shows the scope. A visible action can widen the current invocation to the full root.
 - An empty query shows recently opened files followed by other candidates. A no-results state explains the current scope and exclusion settings.
 
-Quick Open may use an in-memory, filename-only catalog scoped to the current root. Begin warming it asynchronously at low priority after the window becomes interactive; never delay the first paint or recursive-load the visible tree to build it. If Quick Open is invoked before warming starts or completes, prioritize the scan and stream partial results. Update or invalidate the catalog from filesystem watcher events and verify that a selected path still exists before opening it. Do not persist the catalog, read file contents, or treat it as the prohibited content index.
+Quick Open uses a filename-only SQLite catalog at `.sp_folder/catalog.sqlite3`, scoped to the current root. Create/open the database at startup without recursively enumerating the root. Build and refresh it lazily in background batches when Quick Open is used, stream partial results, and reuse cached rows immediately on later launches. Update or invalidate the catalog from filesystem watcher events and verify that a selected path still exists before opening it. The catalog may store relative path, filename, parent, size, modified time, hidden/ignored flags, and scan bookkeeping; it must never read or persist file contents or behave as the prohibited content index.
 
 ## File handlers
 
@@ -310,12 +310,12 @@ Errors should be placed near the affected content and copied to the status area 
 ## MVP acceptance criteria
 
 1. A user can launch Folder Navigator from Stillpoint, close Stillpoint, and continue using Folder Navigator.
-2. A user can directly open a local root without starting the Stillpoint API or creating files in that root.
+2. A user can directly open a local root without starting the Stillpoint API; the only application-created structure is the `.sp_folder` filename cache.
 3. The folder tree lazily browses accessible descendants and clearly represents hidden, linked, missing, empty, and unreadable states according to this spec.
 4. Preview selection replaces only the preview tab; pinned and dirty tabs are never silently replaced.
 5. Markdown and approved text files can be edited and safely saved; dirty, read-only, failed-save, and external-conflict states are visible and non-destructive.
 6. Supported images and PDFs render with the specified basic controls; unsupported files fall back to a safe details view.
-7. Search finds filename and text-content matches without a persistent index, remains cancelable, and respects the active subtree filter.
+7. Search finds filename and text-content matches without a persistent content index, remains cancelable, and respects the active subtree filter.
 8. File and folder bookmarks persist per root, and stale bookmarks remain visible and manageable.
 9. Keyboard tree navigation, focus commands, and MRU `Ctrl+Tab` switching work without requiring a pointer.
 10. Vault-only UI and API behavior do not appear or run in Folder Navigator.

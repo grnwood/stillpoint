@@ -48,6 +48,7 @@ chroma/
 qt_plugins.log
 sp/help-vault/.stillpoint/undo_cache.json
 db.sqlite
+/.sp_folder/
 packaging/.DS_Store
 packaging/macos/.DS_Store
 .DS_Store

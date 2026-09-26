@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +79,10 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def _load_theme() -> dict[str, Any]:
     global _THEME_CACHE, _THEME_CACHE_PATH
-    theme_name = config.load_effective_theme_preference()
+    theme_name = (
+        os.environ.get("SP_THEME_OVERRIDE")
+        or config.load_effective_theme_preference()
+    )
     path = _resolve_theme_path(theme_name)
     if _THEME_CACHE is not None and _THEME_CACHE_PATH == path:
         return _THEME_CACHE

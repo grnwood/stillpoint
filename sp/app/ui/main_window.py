@@ -3089,6 +3089,9 @@ class MainWindow(QMainWindow):
         # Vault menu (now left of File)
         vault_menu = self.menuBar().addMenu("&Vault")
         file_menu = self.menuBar().addMenu("F&ile")
+        open_folder_navigator = QAction("Open Folder Navigator…", self)
+        open_folder_navigator.triggered.connect(self._open_folder_navigator)
+        file_menu.addAction(open_folder_navigator)
         self._action_save = QAction("&Save", self)
         self._action_save.setShortcut(QKeySequence.Save)
         self._action_save.setShortcutContext(Qt.ApplicationShortcut)
@@ -4178,6 +4181,18 @@ class MainWindow(QMainWindow):
 
     def _clear_command_bar_context(self) -> None:
         self._command_bar_ai_text_override = None
+
+    def _open_folder_navigator(self) -> None:
+        """Launch a detached companion that does not depend on this window or API."""
+        selected = QFileDialog.getExistingDirectory(self, "Open Folder Navigator")
+        if not selected:
+            return
+        try:
+            from sp.app.folder_navigator.launch import launch
+            launch(Path(selected))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not launch Folder Navigator",
+                                f"{exc}\nCheck the selected folder and installation, then try again.")
 
     def _build_ai_command_actions(self) -> list[tuple[str, QAction]]:
         entries: list[tuple[str, QAction]] = []
