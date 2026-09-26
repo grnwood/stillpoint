@@ -868,25 +868,13 @@ def _record_startup_phase(name: str, started_at: float, startup_started_at: floa
     )
     return ended_at
 
-_FAULTHANDLER_FILE = None
-
-
 def _enable_faulthandler_log() -> None:
     """Enable faulthandler to capture native/Python crashes to a temp log."""
-    global _FAULTHANDLER_FILE
-    if os.getenv("SP_DISABLE_FAULTHANDLER", "0") not in ("0", "false", "False", ""):
-        return
     try:
-        import faulthandler
-    except Exception:
-        return
-    try:
-        log_path = Path(tempfile.gettempdir()) / "stillpoint-faulthandler.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        _FAULTHANDLER_FILE = open(log_path, "a", buffering=1)
-        faulthandler.enable(_FAULTHANDLER_FILE)
-        os.environ["STILLPOINT_FAULTHANDLER_LOG"] = str(log_path)
-        _startup(f"Faulthandler logging to {log_path}")
+        from sp.app.crash_reporting import enable_faulthandler_log
+        log_path = enable_faulthandler_log()
+        if log_path:
+            _startup(f"Faulthandler logging to {log_path}")
     except Exception as exc:
         try:
             _startup(f"Failed to enable faulthandler log: {exc}")
@@ -895,6 +883,7 @@ def _enable_faulthandler_log() -> None:
 
 
 def main() -> None:
+    _enable_faulthandler_log()
     if len(sys.argv) >= 2 and sys.argv[1] == "--folder-navigator":
         from sp.app.folder_navigator.window import main as folder_navigator_main
         raise SystemExit(folder_navigator_main(sys.argv[2:]))
@@ -952,7 +941,6 @@ def main() -> None:
         pass
     
     start_ts = time.time()
-    _enable_faulthandler_log()
     _sp("Application starting.")
     config.init_settings()
     _ensure_user_template_files()

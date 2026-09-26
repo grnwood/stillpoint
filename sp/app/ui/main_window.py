@@ -4189,10 +4189,41 @@ class MainWindow(QMainWindow):
             return
         try:
             from sp.app.folder_navigator.launch import launch
-            launch(Path(selected))
+            process = launch(Path(selected))
+            self._monitor_folder_navigator(process)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not launch Folder Navigator",
                                 f"{exc}\nCheck the selected folder and installation, then try again.")
+
+    def _monitor_folder_navigator(self, process) -> None:
+        """Watch a detached navigator without tying its lifetime to StillPoint."""
+        timer = QTimer(self)
+        timer.setInterval(750)
+        monitors = getattr(self, "_folder_navigator_monitors", None)
+        if monitors is None:
+            monitors = []
+            self._folder_navigator_monitors = monitors
+        entry = (process, timer)
+        monitors.append(entry)
+
+        def poll() -> None:
+            returncode = process.poll()
+            if returncode is None:
+                return
+            timer.stop()
+            if entry in monitors:
+                monitors.remove(entry)
+            if self._is_crash_returncode(returncode):
+                QTimer.singleShot(100, self._maybe_prompt_crash_report)
+
+        timer.timeout.connect(poll)
+        timer.start()
+
+    @staticmethod
+    def _is_crash_returncode(returncode: int) -> bool:
+        # POSIX subprocesses report signal exits as negative values. Windows
+        # reports NTSTATUS values; 0xC0000005 is an access violation.
+        return returncode < 0 or returncode in {0xC0000005, -1073741819}
 
     def _build_ai_command_actions(self) -> list[tuple[str, QAction]]:
         entries: list[tuple[str, QAction]] = []
