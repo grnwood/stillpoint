@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QDate, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QWheelEvent
 from PySide6.QtWidgets import QMenu
 from PySide6.QtTest import QTest
@@ -411,3 +411,43 @@ def test_right_panel_apply_theme_dispatches_to_calendar_and_ai_chat(qtbot, monke
     panel.apply_theme()
 
     assert calls == ["ai", "calendar"]
+
+
+def test_utility_headers_identify_right_panels_and_follow_calendar_date(qtbot) -> None:
+    panel = TabbedRightPanel(
+        enable_tasks=True,
+        enable_calendar=True,
+        enable_link_navigator=True,
+        enable_map=True,
+        enable_ai_chats=True,
+    )
+    qtbot.addWidget(panel)
+
+    expected = {"Calendar": "CALENDAR", "Link Navigator": "LINK NAVIGATOR"}
+    for index in range(panel.tabs.count()):
+        widget = panel.tabs.widget(index)
+        tab_name = panel.tabs.tabText(index).split(" (")[0]
+        if tab_name not in expected:
+            assert widget not in panel._utility_headers
+            continue
+        header = panel._utility_headers[widget]
+        assert widget.layout().indexOf(header) == 0
+        assert header.title_label.text() == expected[tab_name]
+
+    selected = QDate(2026, 10, 3)
+    panel.calendar_panel.calendar.setSelectedDate(selected)
+    assert panel._utility_headers[panel.calendar_panel].detail_label.text() == "Oct 3, 2026"
+    panel.link_panel._set_title("Link Navigator: Current Page")
+    assert panel.link_panel.title_label.isHidden()
+    assert panel._utility_headers[panel.link_panel].detail_label.text() == "Current Page"
+
+
+def test_main_window_utility_identity_uses_existing_toolbar_and_rail(main_window) -> None:
+    main_window._update_main_utility_identity()
+
+    assert main_window.toolbar.isAncestorOf(main_window.main_toolbar_identity)
+    assert main_window.main_toolbar_identity.title_label.text() == "STILLPOINT"
+    assert main_window.main_toolbar_identity.detail_label.text().endswith("test_vault")
+    assert main_window.tree_header_widget.title_label.text() == "VAULT"
+    assert main_window.tree_header_widget.detail_label.text() == "test_vault"
+    assert main_window.search_tab._utility_panel_header.title_label.text() == "SEARCH"

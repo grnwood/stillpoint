@@ -50,6 +50,7 @@ hidden = (
     + collect_submodules('onnxruntime')
     + collect_submodules('tokenizers')
     + collect_submodules('docx')
+    + collect_submodules('pptx')
 )
 
 _charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normalizer')

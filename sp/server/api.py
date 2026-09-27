@@ -360,6 +360,9 @@ _MCP_TOKEN_LOCK = threading.RLock()
 _MCP_ACTIVE_TOKENS: dict[str, float] = {}
 _PRINT_PREVIEWS: dict[str, dict] = {}
 _PRINT_PREVIEW_LOCK = threading.Lock()
+_EXCALIDRAW_EXTERNAL_GRANTS: dict[str, dict] = {}
+_EXCALIDRAW_EXTERNAL_GRANT_LOCK = threading.Lock()
+_EXCALIDRAW_EXTERNAL_GRANT_TTL_SECONDS = 12 * 60 * 60
 
 _PRINT_TEMPLATES = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
@@ -1105,6 +1108,10 @@ class ExcalidrawChatPayload(FilePathPayload):
 
 class ExcalidrawOpenPagePayload(FilePathPayload):
     source_path: Optional[str] = None
+
+
+class ExcalidrawExternalGrantPayload(BaseModel):
+    path: str = Field(..., description="Absolute local .excalidraw file path")
 
 
 class JournalPayload(BaseModel):
@@ -3646,7 +3653,60 @@ def _request_excalidraw_ai_content(server: dict, messages: list[dict], model: st
         raise HTTPException(status_code=502, detail=f"AI request failed: {exc}") from exc
 
 
+def _require_local_ui_capability_request(request: Request) -> None:
+    local_token = _LOCAL_UI_TOKEN or os.getenv("ZIMX_LOCAL_UI_TOKEN")
+    supplied = request.headers.get("x-local-ui-token")
+    if (not _is_localhost_request(request) or not local_token or not supplied
+            or not secrets.compare_digest(supplied, local_token)):
+        raise HTTPException(
+            status_code=403,
+            detail="Local StillPoint UI authentication is required",
+        )
+
+
+def _register_external_excalidraw_path(path: str) -> tuple[str, int]:
+    try:
+        target = Path(path).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="Excalidraw file not found") from exc
+    if not target.is_file() or target.suffix.casefold() != ".excalidraw":
+        raise HTTPException(status_code=400, detail="Grant target must be an existing .excalidraw file")
+    grant_id = secrets.token_urlsafe(32)
+    now = time.time()
+    with _EXCALIDRAW_EXTERNAL_GRANT_LOCK:
+        expired = [
+            key for key, value in _EXCALIDRAW_EXTERNAL_GRANTS.items()
+            if float(value.get("expires_at", 0)) <= now
+        ]
+        for key in expired:
+            _EXCALIDRAW_EXTERNAL_GRANTS.pop(key, None)
+        _EXCALIDRAW_EXTERNAL_GRANTS[grant_id] = {
+            "path": target,
+            "expires_at": now + _EXCALIDRAW_EXTERNAL_GRANT_TTL_SECONDS,
+        }
+    return grant_id, _EXCALIDRAW_EXTERNAL_GRANT_TTL_SECONDS
+
+
+def _resolve_external_excalidraw_grant(path: str, *, must_exist: bool) -> tuple[str, Path]:
+    grant_id = path.removeprefix("external:").strip()
+    if not grant_id:
+        raise HTTPException(status_code=400, detail="Invalid external Excalidraw grant")
+    now = time.time()
+    with _EXCALIDRAW_EXTERNAL_GRANT_LOCK:
+        grant = _EXCALIDRAW_EXTERNAL_GRANTS.get(grant_id)
+        if grant is None or float(grant.get("expires_at", 0)) <= now:
+            _EXCALIDRAW_EXTERNAL_GRANTS.pop(grant_id, None)
+            raise HTTPException(status_code=404, detail="External Excalidraw grant expired or was revoked")
+        target = Path(grant["path"])
+        grant["expires_at"] = now + _EXCALIDRAW_EXTERNAL_GRANT_TTL_SECONDS
+    if must_exist and (not target.exists() or not target.is_file()):
+        raise HTTPException(status_code=404, detail="Excalidraw file not found")
+    return f"external:{grant_id}", target
+
+
 def _resolve_excalidraw_path(path: str, *, must_exist: bool) -> tuple[str, Path]:
+    if str(path).startswith("external:"):
+        return _resolve_external_excalidraw_grant(path, must_exist=must_exist)
     root = _get_vault_root().resolve()
     normalized = _vault_relative_path(path)
     if not normalized.lower().endswith(".excalidraw"):
@@ -3669,7 +3729,12 @@ def _excalidraw_summary_path(target: Path) -> Path:
 
 
 def _excalidraw_relative_path(target: Path) -> str:
-    return f"/{target.resolve().relative_to(_get_vault_root().resolve()).as_posix()}"
+    try:
+        return f"/{target.resolve().relative_to(_get_vault_root().resolve()).as_posix()}"
+    except ValueError:
+        # External grants deliberately avoid exposing an absolute filesystem
+        # path back to browser content.
+        return target.name
 
 
 def _load_excalidraw_summary_sidecar(target: Path) -> Optional[dict]:
@@ -3719,6 +3784,34 @@ def excalidraw_static(asset_path: str) -> FileResponse:
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Excalidraw asset not found")
     return FileResponse(target)
+
+
+@app.post("/api/excalidraw/external-grant")
+def excalidraw_external_grant_create(
+    request: Request,
+    payload: ExcalidrawExternalGrantPayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    """Grant the local UI temporary access to one explicit drawing file."""
+    _require_local_ui_capability_request(request)
+    grant_id, expires_in = _register_external_excalidraw_path(payload.path)
+    return {
+        "grant_id": grant_id,
+        "path": f"external:{grant_id}",
+        "expires_in": expires_in,
+    }
+
+
+@app.delete("/api/excalidraw/external-grant/{grant_id}")
+def excalidraw_external_grant_revoke(
+    grant_id: str,
+    request: Request,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    _require_local_ui_capability_request(request)
+    with _EXCALIDRAW_EXTERNAL_GRANT_LOCK:
+        removed = _EXCALIDRAW_EXTERNAL_GRANTS.pop(grant_id, None) is not None
+    return {"ok": True, "revoked": removed}
 
 
 @app.get("/excalidraw/edit")
@@ -3824,9 +3917,10 @@ def excalidraw_load(path: str = Query(...)) -> dict:
         if target.stat().st_size > _EXCALIDRAW_MAX_JSON_BYTES:
             raise HTTPException(status_code=413, detail="Excalidraw file is too large")
         raw = target.read_text(encoding="utf-8")
-        if not raw.strip():
-            raise HTTPException(status_code=400, detail="Excalidraw file is empty")
-        scene = json.loads(raw)
+        # A zero-byte drawing is a common result of creating the file from a
+        # generic file action. Treat it as a new blank canvas; malformed
+        # non-empty JSON remains an error so damaged drawings are not hidden.
+        scene = _empty_excalidraw_scene() if not raw.strip() else json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Excalidraw JSON: {exc}") from exc
     except OSError as exc:
@@ -3883,7 +3977,7 @@ def excalidraw_save_preview(
         preview_path.write_bytes(data)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save Excalidraw preview: {exc}") from exc
-    preview_rel = f"/{preview_path.resolve().relative_to(_get_vault_root().resolve()).as_posix()}"
+    preview_rel = _excalidraw_relative_path(preview_path)
     return {"ok": True, "preview_path": preview_rel}
 
 

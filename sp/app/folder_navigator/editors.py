@@ -8,6 +8,7 @@ optional UI dependencies being importable.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from pygments.lexers import TextLexer, get_lexer_for_filename
 from pygments.styles import get_style_by_name
@@ -21,6 +22,122 @@ from sp.app import config
 from sp.app.ui.markdown_editor import MarkdownEditor
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_color
+
+
+_TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    """Split table delimiters while preserving escaped, code, and link pipes."""
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|") and not text.endswith(r"\|"):
+        text = text[:-1]
+    cells: list[str] = []
+    cell: list[str] = []
+    escaped = False
+    in_code = False
+    bracket_depth = 0
+    for character in text:
+        if escaped:
+            cell.append(character)
+            escaped = False
+            continue
+        if character == "\\":
+            cell.append(character)
+            escaped = True
+            continue
+        if character == "`":
+            in_code = not in_code
+            cell.append(character)
+            continue
+        if not in_code:
+            if character == "[":
+                bracket_depth += 1
+            elif character == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif character == "|" and not bracket_depth:
+                cells.append("".join(cell).strip())
+                cell = []
+                continue
+        cell.append(character)
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def _markdown_table_row(line: str) -> bool:
+    cells = _split_markdown_table_row(line)
+    return len(cells) >= 2
+
+
+def format_markdown_table(source: str, cursor_line: int) -> tuple[str, bool]:
+    """Align the pipe table containing a zero-based source line."""
+    trailing_newline = source.endswith("\n")
+    lines = source.splitlines()
+    if not lines or cursor_line < 0 or cursor_line >= len(lines):
+        return source, False
+    if not _markdown_table_row(lines[cursor_line]):
+        return source, False
+    start = cursor_line
+    while start and _markdown_table_row(lines[start - 1]):
+        start -= 1
+    end = cursor_line + 1
+    while end < len(lines) and _markdown_table_row(lines[end]):
+        end += 1
+    rows = [_split_markdown_table_row(line) for line in lines[start:end]]
+    separator_index = next(
+        (index for index, row in enumerate(rows)
+         if row and all(_TABLE_SEPARATOR_CELL.fullmatch(cell) for cell in row)),
+        None,
+    )
+    if separator_index is None or len(rows) < 2:
+        return source, False
+    columns = max(len(row) for row in rows)
+    alignments = ["left"] * columns
+    for column, marker in enumerate(rows[separator_index]):
+        alignments[column] = (
+            "center" if marker.startswith(":") and marker.endswith(":")
+            else "right" if marker.endswith(":")
+            else "left"
+        )
+    widths = [3] * columns
+    for row_index, row in enumerate(rows):
+        if row_index == separator_index:
+            continue
+        for column, value in enumerate(row):
+            widths[column] = max(widths[column], len(value))
+    for column, alignment in enumerate(alignments):
+        if alignment == "center":
+            widths[column] = max(widths[column], 5)
+        elif alignment == "right":
+            widths[column] = max(widths[column], 4)
+
+    formatted = []
+    for row_index, row in enumerate(rows):
+        padded = []
+        for column in range(columns):
+            value = row[column] if column < len(row) else ""
+            width = widths[column]
+            alignment = alignments[column]
+            if row_index == separator_index:
+                if alignment == "center":
+                    value = ":" + "-" * (width - 2) + ":"
+                elif alignment == "right":
+                    value = "-" * (width - 1) + ":"
+                else:
+                    value = "-" * width
+            elif alignment == "right":
+                value = value.rjust(width)
+            elif alignment == "center":
+                value = value.center(width)
+            else:
+                value = value.ljust(width)
+            padded.append(value)
+        formatted.append("| " + " | ".join(padded) + " |")
+    lines[start:end] = formatted
+    result = "\n".join(lines) + ("\n" if trailing_newline else "")
+    return result, result != source
 
 
 class PygmentsHighlighter(QSyntaxHighlighter):

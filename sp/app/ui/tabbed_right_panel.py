@@ -20,6 +20,7 @@ from .calendar_panel import CalendarPanel
 from .map_panel import MapPanel
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
+from .utility_header import UtilityPanelHeader, install_utility_header
 
 
 class TabbedRightPanel(QWidget):
@@ -73,6 +74,7 @@ class TabbedRightPanel(QWidget):
         
         # Create tab widget
         self.tabs = QTabWidget()
+        self._utility_headers: dict[QWidget, UtilityPanelHeader] = {}
         self.ai_chat_panel = None
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
@@ -138,6 +140,43 @@ class TabbedRightPanel(QWidget):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
         self._focus_current_tab()
+
+    def _decorate_panel(self, panel: QWidget, title: str, detail: str = "") -> None:
+        """Give a tab's content a compact utility identity without wrapping it."""
+        try:
+            header = install_utility_header(
+                panel,
+                title,
+                detail,
+                accent_color=self._vault_accent_color,
+            )
+        except TypeError:
+            return
+        self._utility_headers[panel] = header
+
+    def _calendar_utility_date_text(self) -> str:
+        panel = self.calendar_panel
+        if panel is None:
+            return ""
+        try:
+            return panel.calendar.selectedDate().toString("MMM d, yyyy")
+        except Exception:
+            return ""
+
+    def _update_calendar_utility_date(self) -> None:
+        panel = self.calendar_panel
+        header = self._utility_headers.get(panel) if panel is not None else None
+        if header is not None:
+            header.set_detail(self._calendar_utility_date_text())
+
+    def _update_link_utility_title(self, text: str) -> None:
+        panel = self.link_panel
+        header = self._utility_headers.get(panel) if panel is not None else None
+        if header is None:
+            return
+        prefix = "Link Navigator:"
+        detail = text[len(prefix):].strip() if text.startswith(prefix) else ""
+        header.set_detail(detail, text)
 
     def set_http_client(
         self,
@@ -323,6 +362,8 @@ class TabbedRightPanel(QWidget):
 
     def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
         self._vault_accent_color = (color_hex or "").strip() or None
+        for header in self._utility_headers.values():
+            header.set_accent_color(self._vault_accent_color)
         if self.ai_chat_panel:
             self.ai_chat_panel.set_vault_accent_color(self._vault_accent_color)
         if self.task_panel:
@@ -334,6 +375,8 @@ class TabbedRightPanel(QWidget):
 
     def apply_theme(self) -> None:
         """Refresh theme-sensitive child panels after the effective theme changes."""
+        for header in self._utility_headers.values():
+            header.apply_theme()
         for panel in (
             self.ai_chat_panel,
             self.task_panel,
@@ -630,6 +673,7 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
         self.ai_chat_panel.deleteLater()
+        self._utility_headers.pop(self.ai_chat_panel, None)
         self.ai_chat_panel = None
         self.ai_chat_index = None
 
@@ -701,6 +745,7 @@ class TabbedRightPanel(QWidget):
         if idx != -1:
             self.tabs.removeTab(idx)
         self.task_panel.deleteLater()
+        self._utility_headers.pop(self.task_panel, None)
         self.task_panel = None
         self._sync_calendar_task_filters()
 
@@ -712,6 +757,14 @@ class TabbedRightPanel(QWidget):
             splitter_key="calendar_splitter_tabbed",
             http_client=self._http_client,
             api_base=self._http_client.base_url if self._http_client else None,
+        )
+        self._decorate_panel(
+            self.calendar_panel,
+            "Calendar",
+            self._calendar_utility_date_text(),
+        )
+        self.calendar_panel.calendar.selectionChanged.connect(
+            self._update_calendar_utility_date
         )
         insert_idx = self._tab_insert_index(self.task_panel)
         self.tabs.insertTab(insert_idx, self.calendar_panel, "Calendar")
@@ -736,6 +789,7 @@ class TabbedRightPanel(QWidget):
         if idx != -1:
             self.tabs.removeTab(idx)
         self.calendar_panel.deleteLater()
+        self._utility_headers.pop(self.calendar_panel, None)
         self.calendar_panel = None
         self._pending_calendar_vault_root = None
         self._pending_calendar_refresh = False
@@ -746,6 +800,12 @@ class TabbedRightPanel(QWidget):
         if self.link_panel:
             return
         self.link_panel = LinkNavigatorPanel()
+        self._decorate_panel(self.link_panel, "Link Navigator")
+        # The compact heading carries the same dynamic page/count detail in
+        # the tabbed rail; detached Link Navigator windows keep their title.
+        self.link_panel.title_label.hide()
+        self.link_panel.titleChanged.connect(self._update_link_utility_title)
+        self._update_link_utility_title(self.link_panel.title_label.text())
         insert_idx = self._tab_insert_index(self.attachments_panel)
         self.tabs.insertTab(insert_idx, self.link_panel, "Link Navigator")
         self.link_panel.pageActivated.connect(self.linkActivated)
@@ -763,6 +823,7 @@ class TabbedRightPanel(QWidget):
         if idx != -1:
             self.tabs.removeTab(idx)
         self.link_panel.deleteLater()
+        self._utility_headers.pop(self.link_panel, None)
         self.link_panel = None
 
     def _add_map_tab(self) -> None:
@@ -809,6 +870,7 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
         self.map_panel.deleteLater()
+        self._utility_headers.pop(self.map_panel, None)
         self.map_panel = None
 
     def focus_map_tab(self, page_path=None) -> None:

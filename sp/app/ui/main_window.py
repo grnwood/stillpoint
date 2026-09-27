@@ -990,6 +990,11 @@ from .find_replace_bar import FindReplaceBar
 from .search_tab import SearchTab
 from .search_index_sync import PeriodicSearchIndexSync
 from .tags_tab import TagsTab
+from .utility_header import (
+    CompactToolbarIdentity,
+    UtilityPanelHeader,
+    install_utility_header,
+)
 from sp.app.capture_triage import list_quick_capture_chunks, process_quick_capture_chunk
 from sp.app.quickcapture_common import quick_capture_destination_options
 from sp.app.task_mutations import undo_file_mutation
@@ -2573,22 +2578,17 @@ class MainWindow(QMainWindow):
         self._suppress_nav_sync_path: Optional[str] = None
         self._show_journal_in_nav = config.load_show_journal()
         
-        # Create custom header widget
-        self.tree_header_widget = QWidget()
-        tree_header_layout = QHBoxLayout()
-        tree_header_layout.setContentsMargins(8, 4, 8, 4)
-        tree_header_layout.setSpacing(8)
-        
-        tree_header_label = QLabel("Vault")
-        tree_header_label.setStyleSheet("font-weight: bold;")
-        tree_header_layout.addWidget(tree_header_label)
+        # Compact utility heading shared with the other rail panels.
+        self.tree_header_widget = UtilityPanelHeader("Vault")
+        self.tree_header_label = self.tree_header_widget.title_label
+        self._left_utility_headers = [self.tree_header_widget]
+        tree_header_layout = self.tree_header_widget.header_layout
         pal = QApplication.instance().palette()
         tooltip_fg = pal.color(QPalette.ToolTipText).name()
         tooltip_bg = pal.color(QPalette.ToolTipBase).name()
         
         # Search button to switch to search tab
         self.search_tree_button = QToolButton()
-        tree_header_layout.addStretch()
 
         # Manual refresh button to reload tree data from the API
         self.refresh_tree_button = QToolButton()
@@ -2641,14 +2641,6 @@ class MainWindow(QMainWindow):
         self.collapse_tree_button.clicked.connect(self._collapse_tree_to_root)
         tree_header_layout.addWidget(self.collapse_tree_button)
 
-        self.tree_header_widget.setLayout(tree_header_layout)
-        self.tree_header_widget.setStyleSheet(
-            "background: "
-            f"{theme_value('main_window.tree.header_bg', 'palette(midlight)')}; "
-            "border-bottom: 1px solid "
-            f"{theme_value('main_window.tree.header_border', '#555555')};"
-        )
-        
         # Set the custom header widget
         self.tree_view.header().hide()
         self.tree_view.setHeaderHidden(True)
@@ -2968,6 +2960,9 @@ class MainWindow(QMainWindow):
         self.tags_tab = None
         if self._feature_tags_enabled:
             self.tags_tab = TagsTab(http_client=self.http)
+            self._left_utility_headers.append(
+                install_utility_header(self.tags_tab, "Tags")
+            )
             self.tags_tab.pageNavigationRequested.connect(self._on_search_result_selected)
             self.tags_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
             self.left_tab_widget.addTab(self.tags_tab, "Tags")
@@ -2983,6 +2978,9 @@ class MainWindow(QMainWindow):
         
         # Search tab
         self.search_tab = SearchTab(http_client=self.http)
+        self._left_utility_headers.append(
+            install_utility_header(self.search_tab, "Search")
+        )
         self.search_tab.pageNavigationRequested.connect(self._on_search_result_selected)
         self.search_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
         self.left_tab_widget.addTab(self.search_tab, "Search")
@@ -3961,6 +3959,16 @@ class MainWindow(QMainWindow):
         self.toolbar.installEventFilter(self)
         self._update_bookmark_scroll_buttons()
         self._apply_top_nav_container_styles()
+
+        self.main_toolbar_identity = CompactToolbarIdentity(
+            "StillPoint",
+            self.vault_root_name or "",
+            self.toolbar,
+            icon=self.windowIcon(),
+            accent_color=getattr(self, "_vault_accent_color", None),
+        )
+        self.toolbar.addWidget(self.main_toolbar_identity)
+        self._update_main_utility_identity()
         
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
@@ -3976,6 +3984,17 @@ class MainWindow(QMainWindow):
 
         self.toolbar.setStyleSheet(self._main_toolbar_stylesheet())
         self._sync_filter_toolbar_toggle(bool(getattr(self, "_nav_filter_path", None)))
+
+    def _update_main_utility_identity(self) -> None:
+        """Keep compact toolbar and Vault-panel identity in sync."""
+        name = self.vault_root_name or ""
+        path = self.vault_root or ""
+        identity = getattr(self, "main_toolbar_identity", None)
+        if identity is not None:
+            identity.set_detail(name, path)
+        header = getattr(self, "tree_header_widget", None)
+        if isinstance(header, UtilityPanelHeader):
+            header.set_detail(name, path)
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
@@ -9901,6 +9920,15 @@ class MainWindow(QMainWindow):
             self.right_panel.set_vault_accent_color(accent)
         except Exception:
             pass
+        for header in getattr(self, "_left_utility_headers", []):
+            try:
+                header.set_accent_color(accent)
+            except Exception:
+                pass
+        try:
+            self.main_toolbar_identity.set_accent_color(accent)
+        except Exception:
+            pass
         try:
             if getattr(self, "toc_widget", None):
                 self.toc_widget.set_vault_accent_color(accent)
@@ -9949,13 +9977,13 @@ class MainWindow(QMainWindow):
                     widget.update()
                 except Exception:
                     pass
+        for header in getattr(self, "_left_utility_headers", []):
+            try:
+                header.apply_theme()
+            except Exception:
+                pass
         try:
-            self.tree_header_widget.setStyleSheet(
-                "background: "
-                f"{theme_value('main_window.tree.header_bg', 'palette(midlight)')}; "
-                "border-bottom: 1px solid "
-                f"{theme_value('main_window.tree.header_border', '#555555')};"
-            )
+            self.main_toolbar_identity.apply_theme()
         except Exception:
             pass
         try:
@@ -10289,6 +10317,7 @@ class MainWindow(QMainWindow):
             self.vault_root = resp.json().get("root")
             self._remote_vault_ref_path = remote_ref_path if self._remote_mode else None
             self.vault_root_name = Path(self.vault_root).name if self.vault_root else None
+            self._update_main_utility_identity()
             finish_setup_phase("api_select", result="ok")
             if self._remote_mode:
                 self._undo_cache_path = None
@@ -10319,6 +10348,7 @@ class MainWindow(QMainWindow):
                         self.statusBar().showMessage("Vault open cancelled (no index).", 4000)
                         self.vault_root = None
                         self.vault_root_name = None
+                        self._update_main_utility_identity()
                         return False
                     index_dir_missing = True
             finish_setup_phase(

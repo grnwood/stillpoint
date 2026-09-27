@@ -13,6 +13,15 @@ import tempfile
 from typing import Callable, Iterator
 
 MAX_EDIT_BYTES = int(os.environ.get("STILLPOINT_FOLDER_MAX_EDIT_BYTES", 8 * 1024 * 1024))
+MAX_RICH_MARKDOWN_BYTES = int(
+    os.environ.get("STILLPOINT_FOLDER_MAX_RICH_MARKDOWN_BYTES", 512 * 1024)
+)
+MAX_RICH_MARKDOWN_LINES = int(
+    os.environ.get("STILLPOINT_FOLDER_MAX_RICH_MARKDOWN_LINES", 5_000)
+)
+MAX_RICH_MARKDOWN_LINE_CHARS = int(
+    os.environ.get("STILLPOINT_FOLDER_MAX_RICH_MARKDOWN_LINE_CHARS", 8_192)
+)
 MAX_SEARCH_BYTES = int(os.environ.get("STILLPOINT_FOLDER_MAX_SEARCH_BYTES", 2 * 1024 * 1024))
 MAX_RESULTS = int(os.environ.get("STILLPOINT_FOLDER_MAX_RESULTS", 1000))
 MAX_IMAGE_PIXELS = int(os.environ.get("STILLPOINT_FOLDER_MAX_IMAGE_PIXELS", 40_000_000))
@@ -20,6 +29,43 @@ MAX_CONCURRENT_WORK = int(os.environ.get("STILLPOINT_FOLDER_MAX_WORKERS", 2))
 MAX_DIRECTORY_ENTRIES = int(
     os.environ.get("STILLPOINT_FOLDER_MAX_DIRECTORY_ENTRIES", 750)
 )
+MAX_INDEX_FILES = int(os.environ.get("STILLPOINT_FOLDER_MAX_INDEX_FILES", 100_000))
+MAX_INDEX_SECONDS = float(os.environ.get("STILLPOINT_FOLDER_MAX_INDEX_SECONDS", 10.0))
+DEFAULT_PRUNED_DIRECTORY_NAMES = frozenset({
+    ".sp_folder",
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+})
+
+
+def rich_markdown_fallback_reason(text: str, byte_size: int) -> str | None:
+    """Explain why Folder Navigator should avoid its expensive rich renderer."""
+    if byte_size > MAX_RICH_MARKDOWN_BYTES:
+        return f"file size {byte_size / (1024 * 1024):.1f} MB"
+    line_count = text.count("\n") + 1
+    if line_count > MAX_RICH_MARKDOWN_LINES:
+        return f"{line_count:,} lines"
+    longest = 0
+    line_start = 0
+    for index, character in enumerate(text):
+        if character == "\n":
+            longest = max(longest, index - line_start)
+            line_start = index + 1
+            if longest > MAX_RICH_MARKDOWN_LINE_CHARS:
+                break
+    longest = max(longest, len(text) - line_start)
+    if longest > MAX_RICH_MARKDOWN_LINE_CHARS:
+        return f"a {longest:,}-character line"
+    return None
 
 
 def inside(root: Path, candidate: Path) -> bool:
@@ -145,6 +191,7 @@ def walk_files(
     canceled: Callable[[], bool] = lambda: False,
     max_directory_entries: int | None = None,
     skipped: Callable[[Path, int], None] | None = None,
+    pruned_names: frozenset[str] | set[str] = DEFAULT_PRUNED_DIRECTORY_NAMES,
 ) -> Iterator[Path]:
     """Walk without following directory links, yielding only canonical in-root files."""
     if not inside(root, scope):
@@ -159,7 +206,7 @@ def walk_files(
             if skipped:
                 skipped(base, entry_count)
             continue
-        directories[:] = [name for name in directories if name != ".sp_folder"
+        directories[:] = [name for name in directories if name not in pruned_names
                           and (hidden or not name.startswith("."))
                           and inside(root, base / name) and not (base / name).is_symlink()
                           and not (ignore and ignore(base / name))]

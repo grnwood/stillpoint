@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 import json
@@ -13,25 +14,31 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import quote
 
-from PySide6.QtCore import (QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
+from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
-                            Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImageReader, QKeySequence, QPalette,
-    QPixmap, QShortcut, QTextCursor, QTextFormat)
+                            QPointF, QRect, Qt, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
+    QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QAbstractItemView, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget,
-    QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox)
+    QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListView, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
+    QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
+    QSizePolicy)
+from PySide6.QtWidgets import QTextBrowser
 
-from .core import (MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES, MAX_EDIT_BYTES, MAX_IMAGE_PIXELS, MAX_RESULTS, MAX_SEARCH_BYTES,
+from .core import (DEFAULT_PRUNED_DIRECTORY_NAMES, MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES,
+    MAX_EDIT_BYTES, MAX_IMAGE_PIXELS,
+    MAX_INDEX_FILES, MAX_INDEX_SECONDS, MAX_RESULTS, MAX_SEARCH_BYTES,
     ConflictError, TextFile, atomic_save, content_matches, fingerprint, fuzzy_score, inside,
-    read_text, walk_files)
+    read_text, rich_markdown_fallback_reason, walk_files)
 from .catalog import CatalogError, FolderCatalog
-from .editors import MarkdownEditor, SourceEditor, configure_markdown_editor, configure_source_editor
+from .editors import (MarkdownEditor, SourceEditor, configure_markdown_editor,
+                      configure_source_editor, format_markdown_table)
 from .icon import (
     configure_folder_navigator_application,
     configure_folder_navigator_process,
@@ -45,11 +52,18 @@ from sp.app.ui.keyboard_shortcuts import (
     is_vi_navigation_chord,
     vi_navigation_sequences,
 )
+from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from sp.app.ui.theme import theme_color, theme_value
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
 DIAGRAM_SUFFIXES = {".puml", ".mmd", ".excalidraw"}
+DOCUMENT_SUFFIXES = {".docx", ".pptx"}
+DIAGRAM_PREVIEW_CACHE_ENTRIES = 32
+DIAGRAM_PREVIEW_CACHE_BYTES = 64 * 1024 * 1024
+VALUE_FILTER_MAX_ROWS = 25_000
+VALUE_FILTER_MAX_CELLS = 500_000
+VALUE_FILTER_MAX_DISTINCT = 20_000
 
 
 class Bridge(QObject):
@@ -97,6 +111,7 @@ class NavigatorTree(QTreeView):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setUniformRowHeights(True)
         self.setAnimated(False)
+        self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DropOnly)
@@ -169,7 +184,29 @@ class NavigatorTree(QTreeView):
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
-        index = self.indexAt(event.pos())
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(point)
+        if event.button() == Qt.RightButton:
+            # Context menus target indexAt(point) directly. Do not let Qt make
+            # that row current first: changing currentIndex would trigger a
+            # disposable flyover preview before the requested menu action.
+            selection_model = self.selectionModel()
+            previous_selection = selection_model.selection()
+            previous_current = selection_model.currentIndex()
+            was_blocked = selection_model.blockSignals(True)
+            try:
+                super().mousePressEvent(event)
+                selection_model.select(
+                    previous_selection,
+                    QItemSelectionModel.ClearAndSelect,
+                )
+                selection_model.setCurrentIndex(
+                    previous_current,
+                    QItemSelectionModel.NoUpdate,
+                )
+            finally:
+                selection_model.blockSignals(was_blocked)
+            return
         if index.isValid() and event.modifiers() & (Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier):
             if not self.model().isDir(index):
                 self.openFile.emit(self.model().filePath(index), True)
@@ -446,15 +483,95 @@ class TablePreviewModel(QAbstractTableModel):
         super().__init__(parent)
         self.preview = preview
         self.header_row = bool(preview.has_header and preview.rows)
-        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
         self.columns = max((len(row) for row in preview.rows), default=0)
-        self.row_order = self._default_row_order()
+        self.filter_column = -1
+        self.filter_text = ""
+        self.value_filters = {}
+        self.sort_column = -1
+        self.sort_order = Qt.AscendingOrder
+        self.row_order = []
+        self._rebuild_row_order()
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
 
     def _default_row_order(self):
         return list(range(1 if self.header_row else 0, len(self.preview.rows)))
 
     def _data_row_count(self):
-        return max(0, len(self.preview.rows) - (1 if self.header_row else 0))
+        return len(self.row_order)
+
+    def _rebuild_row_order(self):
+        rows = self._default_row_order()
+        rows = [row_index for row_index in rows if self._row_matches(row_index)]
+        if 0 <= self.sort_column < self.columns:
+            column = self.sort_column
+            rows.sort(
+                key=lambda row_index: self._sort_key(
+                    self.preview.rows[row_index][column]
+                    if column < len(self.preview.rows[row_index]) else ""
+                ),
+                reverse=self.sort_order == Qt.DescendingOrder,
+            )
+        self.row_order = rows
+
+    @staticmethod
+    def _cell_text(row, column):
+        return str(row[column] if column < len(row) else "")
+
+    def _row_matches(self, row_index, *, skip_value_column=None):
+        row = self.preview.rows[row_index]
+        needle = self.filter_text.casefold()
+        if needle:
+            if self.filter_column >= 0:
+                if needle not in self._cell_text(row, self.filter_column).casefold():
+                    return False
+            elif not any(needle in str(value).casefold() for value in row):
+                return False
+        for column, selected in self.value_filters.items():
+            if column == skip_value_column:
+                continue
+            if self._cell_text(row, column) not in selected:
+                return False
+        return True
+
+    def distinct_values(self, column):
+        if column < 0 or column >= self.columns:
+            return []
+        values = {
+            self._cell_text(self.preview.rows[row_index], column)
+            for row_index in self._default_row_order()
+            if self._row_matches(row_index, skip_value_column=column)
+        }
+        return sorted(values, key=lambda value: (value != "", value.casefold(), value))
+
+    def selected_values(self, column, available=None):
+        values = list(self.distinct_values(column) if available is None else available)
+        selected = self.value_filters.get(column)
+        return set(values if selected is None else selected)
+
+    def set_value_filter(self, column, selected_values, available_values=None):
+        column = int(column)
+        available = set(
+            self.distinct_values(column)
+            if available_values is None else available_values
+        )
+        selected = {str(value) for value in selected_values}
+        self.beginResetModel()
+        if selected == available:
+            self.value_filters.pop(column, None)
+        else:
+            self.value_filters[column] = frozenset(selected)
+        self._rebuild_row_order()
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
+        self.endResetModel()
+
+    def clear_value_filters(self):
+        if not self.value_filters:
+            return
+        self.beginResetModel()
+        self.value_filters.clear()
+        self._rebuild_row_order()
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
+        self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):  # type: ignore[override]
         return 0 if parent.isValid() else self.visible_rows
@@ -504,7 +621,15 @@ class TablePreviewModel(QAbstractTableModel):
     def set_header_row(self, enabled):
         self.beginResetModel()
         self.header_row = bool(enabled and self.preview.rows)
-        self.row_order = self._default_row_order()
+        self._rebuild_row_order()
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
+        self.endResetModel()
+
+    def set_filter(self, column, text):
+        self.beginResetModel()
+        self.filter_column = int(column)
+        self.filter_text = str(text or "").strip()
+        self._rebuild_row_order()
         self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
         self.endResetModel()
 
@@ -522,14 +647,208 @@ class TablePreviewModel(QAbstractTableModel):
         if column < 0 or column >= self.columns:
             return
         self.layoutAboutToBeChanged.emit()
-        self.row_order.sort(
-            key=lambda row_index: self._sort_key(
-                self.preview.rows[row_index][column]
-                if column < len(self.preview.rows[row_index]) else ""
-            ),
-            reverse=order == Qt.DescendingOrder,
-        )
+        self.sort_column = column
+        self.sort_order = order
+        self._rebuild_row_order()
         self.layoutChanged.emit()
+
+
+class ColumnValueListModel(QAbstractListModel):
+    """Virtualized check-list for one spreadsheet column's distinct values."""
+
+    selectionChanged = Signal()
+
+    def __init__(self, values, selected, parent=None):
+        super().__init__(parent)
+        self.values = list(values)
+        self.visible_values = list(self.values)
+        self.selected = set(selected) & set(self.values)
+
+    def rowCount(self, parent=QModelIndex()):  # type: ignore[override]
+        return 0 if parent.isValid() else len(self.visible_values)
+
+    def data(self, index, role=Qt.DisplayRole):  # type: ignore[override]
+        if not index.isValid() or index.row() >= len(self.visible_values):
+            return None
+        value = self.visible_values[index.row()]
+        if role == Qt.DisplayRole:
+            return "(Blanks)" if value == "" else value
+        if role == Qt.CheckStateRole:
+            return Qt.Checked if value in self.selected else Qt.Unchecked
+        if role == Qt.ToolTipRole:
+            return "(Blanks)" if value == "" else value
+        return None
+
+    def flags(self, index):  # type: ignore[override]
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+
+    def setData(self, index, value, role=Qt.EditRole):  # type: ignore[override]
+        if role != Qt.CheckStateRole or not index.isValid():
+            return False
+        item = self.visible_values[index.row()]
+        if value == Qt.Checked.value or value == Qt.Checked:
+            self.selected.add(item)
+        else:
+            self.selected.discard(item)
+        self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+        self.selectionChanged.emit()
+        return True
+
+    def set_query(self, query):
+        needle = str(query or "").casefold()
+        self.beginResetModel()
+        self.visible_values = [
+            value for value in self.values
+            if not needle or needle in (("(Blanks)" if value == "" else value).casefold())
+        ]
+        self.endResetModel()
+        self.selectionChanged.emit()
+
+    def set_all(self, checked, *, visible_only=True):
+        targets = set(self.visible_values if visible_only else self.values)
+        if checked:
+            self.selected.update(targets)
+        else:
+            self.selected.difference_update(targets)
+        if self.visible_values:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self.visible_values) - 1, 0),
+                [Qt.CheckStateRole],
+            )
+        self.selectionChanged.emit()
+
+
+class ColumnFilterPopup(QDialog):
+    """Excel-style distinct-value filter shown below a table header."""
+
+    def __init__(self, title, values, selected, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setObjectName("spreadsheetColumnFilter")
+        self.resize(280, 360)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        heading = QLabel(str(title))
+        heading.setStyleSheet("font-weight: 600;")
+        layout.addWidget(heading)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search values…")
+        layout.addWidget(self.search)
+        self.select_all = QCheckBox("Select All")
+        self.select_all.setTristate(True)
+        layout.addWidget(self.select_all)
+        self.values_model = ColumnValueListModel(values, selected, self)
+        self.values_view = QListView()
+        self.values_view.setAccessibleName(f"Values for {title}")
+        self.values_view.setModel(self.values_model)
+        self.values_view.setUniformItemSizes(True)
+        layout.addWidget(self.values_view, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        self.apply_button = buttons.button(QDialogButtonBox.Apply)
+        self.clear_button = buttons.addButton("Clear Filter", QDialogButtonBox.ResetRole)
+        self.apply_button.clicked.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.clear_button.clicked.connect(self._clear_and_accept)
+        layout.addWidget(buttons)
+        self.search.textChanged.connect(self.values_model.set_query)
+        self.select_all.clicked.connect(
+            lambda checked: self.values_model.set_all(bool(checked))
+        )
+        self.values_model.selectionChanged.connect(self._sync_select_all)
+        self._sync_select_all()
+
+    def _sync_select_all(self):
+        visible = set(self.values_model.visible_values)
+        total = len(visible)
+        selected = len(visible & self.values_model.selected)
+        state = (
+            Qt.Unchecked if selected == 0
+            else Qt.Checked if selected == total
+            else Qt.PartiallyChecked
+        )
+        self.select_all.blockSignals(True)
+        self.select_all.setCheckState(state)
+        self.select_all.blockSignals(False)
+
+    def _clear_and_accept(self):
+        self.values_model.set_all(True, visible_only=False)
+        self.accept()
+
+    def selected_values(self):
+        return set(self.values_model.selected)
+
+
+class FilterHeaderView(QHeaderView):
+    """Spreadsheet header that paints clickable filter dropdowns per column."""
+
+    filterRequested = Signal(int, QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.filter_enabled = False
+        self.active_filter_columns = set()
+        self.setSectionsClickable(True)
+
+    def set_filter_enabled(self, enabled):
+        self.filter_enabled = bool(enabled)
+        self.setToolTip(
+            "Click a column dropdown to choose values"
+            if self.filter_enabled else "Click a column heading to sort"
+        )
+        self.viewport().update()
+
+    def set_active_filter_columns(self, columns):
+        self.active_filter_columns = set(columns)
+        self.viewport().update()
+
+    @staticmethod
+    def _filter_rect(rect):
+        return QRect(rect.right() - 20, rect.top() + 2, 18, max(16, rect.height() - 4))
+
+    def paintSection(self, painter, rect, logical_index):  # type: ignore[override]
+        super().paintSection(painter, rect, logical_index)
+        if not self.filter_enabled or not rect.isValid():
+            return
+        button = self._filter_rect(rect)
+        palette = self.palette()
+        painter.save()
+        painter.setPen(palette.color(QPalette.Mid))
+        painter.setBrush(
+            palette.color(QPalette.Highlight)
+            if logical_index in self.active_filter_columns
+            else palette.color(QPalette.Button)
+        )
+        painter.drawRoundedRect(button, 3, 3)
+        painter.setPen(
+            palette.color(QPalette.HighlightedText)
+            if logical_index in self.active_filter_columns
+            else palette.color(QPalette.ButtonText)
+        )
+        painter.drawText(button, Qt.AlignCenter, "▾")
+        painter.restore()
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if self.filter_enabled:
+            point = event.position().toPoint()
+            section = self.logicalIndexAt(point)
+            if section >= 0:
+                rect = QRect(
+                    self.sectionViewportPosition(section),
+                    0,
+                    self.sectionSize(section),
+                    self.height(),
+                )
+                if self._filter_rect(rect).contains(point):
+                    popup_point = self.viewport().mapToGlobal(
+                        QPoint(rect.right() - 280, rect.bottom())
+                    )
+                    self.filterRequested.emit(section, popup_point)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
 
 
 class PreviewTableView(QTableView):
@@ -670,6 +989,27 @@ class PreviewTableView(QTableView):
 class SpreadsheetView(QWidget):
     sheetRequested = Signal(str)
     sourceRequested = Signal()
+    statusRequested = Signal(str, int)
+
+    @staticmethod
+    def _filter_icon(palette, *, active=False):
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        role = QPalette.HighlightedText if active else QPalette.ButtonText
+        painter.setPen(QPen(palette.color(role), 1.5))
+        path = QPainterPath()
+        path.moveTo(2.5, 3)
+        path.lineTo(13.5, 3)
+        path.lineTo(9.5, 8)
+        path.lineTo(9.5, 12.5)
+        path.lineTo(6.5, 14)
+        path.lineTo(6.5, 8)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.end()
+        return QIcon(pixmap)
 
     def __init__(self, preview: TablePreview, *, allow_source=False, zoom_steps=0,
                  vi_enabled=False, parent=None):
@@ -687,6 +1027,18 @@ class SpreadsheetView(QWidget):
         self.first_row_header = QCheckBox("First row contains headers")
         self.first_row_header.toggled.connect(self._header_toggled)
         controls.addWidget(self.first_row_header)
+        self.value_filter_button = QToolButton()
+        self.value_filter_button.setObjectName("spreadsheetValueFilterToggle")
+        self.value_filter_button.setText("Filter Off")
+        self.value_filter_button.setIcon(self._filter_icon(self.palette()))
+        self.value_filter_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.value_filter_button.setCheckable(True)
+        self.value_filter_button.setToolTip(
+            "Show an Excel-style value dropdown on every column"
+        )
+        self.value_filter_button.toggled.connect(self._toggle_value_filters)
+        controls.addWidget(self.value_filter_button)
+        self._sync_value_filter_button_visual()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Find in loaded rows")
         self.search.returnPressed.connect(self.find_next)
@@ -699,9 +1051,28 @@ class SpreadsheetView(QWidget):
             raw.clicked.connect(self.sourceRequested)
             controls.addWidget(raw)
         layout.addLayout(controls)
+        filters = QHBoxLayout()
+        filters.addWidget(QLabel("Filter"))
+        self.filter_column = QComboBox()
+        self.filter_column.setAccessibleName("Filter column")
+        self.filter_column.currentIndexChanged.connect(self._schedule_filter)
+        filters.addWidget(self.filter_column)
+        self.filter_text = QLineEdit()
+        self.filter_text.setAccessibleName("Column filter text")
+        self.filter_text.setPlaceholderText("Rows containing…")
+        self.filter_text.textChanged.connect(self._schedule_filter)
+        self.filter_text.returnPressed.connect(self._apply_filter)
+        filters.addWidget(self.filter_text, 1)
+        clear_filter = QPushButton("Clear")
+        clear_filter.clicked.connect(self.filter_text.clear)
+        filters.addWidget(clear_filter)
+        layout.addLayout(filters)
         self.summary = QLabel()
         layout.addWidget(self.summary)
         self.table = PreviewTableView()
+        self.filter_header = FilterHeaderView(self.table)
+        self.filter_header.filterRequested.connect(self._show_column_filter)
+        self.table.setHorizontalHeader(self.filter_header)
         self.table.vi_enabled = vi_enabled
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
@@ -717,6 +1088,10 @@ class SpreadsheetView(QWidget):
         find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         find_shortcut.activated.connect(lambda: (self.search.setFocus(), self.search.selectAll()))
         self.find_shortcut = find_shortcut
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.setInterval(160)
+        self.filter_timer.timeout.connect(self._apply_filter)
         self.set_preview(preview)
         self.set_zoom_steps(zoom_steps)
 
@@ -730,7 +1105,15 @@ class SpreadsheetView(QWidget):
         self.first_row_header.blockSignals(True)
         self.first_row_header.setChecked(preview.has_header)
         self.first_row_header.blockSignals(False)
-        self.first_row_header.setVisible(self.allow_source)
+        # This is a view preference for both delimited files and workbooks;
+        # it does not modify the source file.
+        self.first_row_header.setVisible(True)
+        self.filter_timer.stop()
+        self.filter_text.blockSignals(True)
+        self.filter_text.clear()
+        self.filter_text.blockSignals(False)
+        self._populate_filter_columns()
+        self._configure_value_filter_availability()
         self.sheet_selector.blockSignals(True)
         self.sheet_selector.clear()
         self.sheet_selector.addItems(preview.sheet_names)
@@ -738,12 +1121,113 @@ class SpreadsheetView(QWidget):
             self.sheet_selector.setCurrentText(preview.sheet_name)
         self.sheet_selector.blockSignals(False)
         self.sheet_selector.setVisible(bool(preview.sheet_names))
-        dimensions = f"{preview.total_rows:,} rows × {preview.total_columns:,} columns" if (
+        self._base_dimensions = f"{preview.total_rows:,} rows × {preview.total_columns:,} columns" if (
             preview.total_rows is not None and preview.total_columns is not None
         ) else f"{len(preview.rows):,} loaded rows × {self.model.columns:,} columns"
-        delimiter = f" · delimiter {preview.delimiter!r}" if preview.delimiter else ""
-        limited = " · preview limited for performance" if preview.truncated else ""
-        self.summary.setText(dimensions + delimiter + limited)
+        self._update_summary()
+
+    def _configure_value_filter_availability(self):
+        rows = max(0, len(self.preview.rows) - (1 if self.model.header_row else 0))
+        cells = rows * self.model.columns
+        safe = rows <= VALUE_FILTER_MAX_ROWS and cells <= VALUE_FILTER_MAX_CELLS
+        self.value_filter_disabled_reason = ""
+        self.value_filter_button.setEnabled(safe)
+        if safe:
+            self.value_filter_button.setToolTip(
+                "Show an Excel-style value dropdown on every column"
+            )
+            self._sync_value_filter_button_visual()
+            return
+        self.value_filter_button.blockSignals(True)
+        self.value_filter_button.setChecked(False)
+        self.value_filter_button.blockSignals(False)
+        self.filter_header.set_filter_enabled(False)
+        reason = (
+            f"Column value filters disabled for this preview "
+            f"({rows:,} rows × {self.model.columns:,} columns) to keep navigation responsive"
+        )
+        self.value_filter_disabled_reason = reason
+        self.value_filter_button.setToolTip(reason)
+        self._sync_value_filter_button_visual()
+        self.statusRequested.emit(reason, 8000)
+
+    def _sync_value_filter_button_visual(self):
+        available = self.value_filter_button.isEnabled()
+        active = available and self.value_filter_button.isChecked()
+        self.value_filter_button.setText(
+            "Filter On" if active else "Filter Off" if available else "Filter Unavailable"
+        )
+        self.value_filter_button.setIcon(self._filter_icon(self.palette(), active=active))
+        palette = self.palette()
+        highlight = palette.color(QPalette.Highlight).name()
+        highlighted_text = palette.color(QPalette.HighlightedText).name()
+        hover = palette.color(QPalette.AlternateBase).name()
+        self.value_filter_button.setStyleSheet(
+            "QToolButton#spreadsheetValueFilterToggle {"
+            "border: 1px solid transparent; border-radius: 4px; padding: 2px 6px;"
+            "}"
+            "QToolButton#spreadsheetValueFilterToggle:hover {"
+            f"background: {hover}; border-color: {highlight};"
+            "}"
+            "QToolButton#spreadsheetValueFilterToggle:checked {"
+            f"background: {highlight}; color: {highlighted_text}; border-color: {highlight};"
+            "font-weight: 600;"
+            "}"
+        )
+
+    def _toggle_value_filters(self, enabled):
+        self._sync_value_filter_button_visual()
+        if enabled and not self.value_filter_button.isEnabled():
+            return
+        self.filter_header.set_filter_enabled(enabled)
+        if enabled:
+            if self.preview.truncated:
+                self.statusRequested.emit(
+                    "Column filters apply to the loaded preview rows only; "
+                    "the source was limited for performance",
+                    7000,
+                )
+            else:
+                self.statusRequested.emit(
+                    "Column filters enabled; use the dropdown on any column",
+                    3500,
+                )
+            return
+        self.model.clear_value_filters()
+        self.filter_header.set_active_filter_columns(set())
+        self._update_summary()
+
+    def _show_column_filter(self, column, global_position):
+        values = self.model.distinct_values(column)
+        if len(values) > VALUE_FILTER_MAX_DISTINCT:
+            self.statusRequested.emit(
+                f"Column filter disabled: {len(values):,} distinct values exceed the "
+                f"safe {VALUE_FILTER_MAX_DISTINCT:,}-value limit",
+                8000,
+            )
+            return
+        title = str(self.model.headerData(column, Qt.Horizontal) or "").strip()
+        popup = ColumnFilterPopup(
+            title or _spreadsheet_column_name(column),
+            values,
+            self.model.selected_values(column, values),
+            self,
+        )
+        screen = QApplication.screenAt(global_position)
+        if screen is not None:
+            available = screen.availableGeometry()
+            global_position.setX(max(available.left(), min(global_position.x(), available.right() - popup.width())))
+            global_position.setY(max(available.top(), min(global_position.y(), available.bottom() - popup.height())))
+        popup.move(global_position)
+        if popup.exec() == QDialog.Accepted:
+            self._set_column_value_filter(column, popup.selected_values(), values)
+
+    def _set_column_value_filter(self, column, selected, available):
+        self.model.set_value_filter(column, selected, available)
+        self.filter_header.set_active_filter_columns(self.model.value_filters)
+        self._update_summary()
+        if self.model.rowCount() and self.model.columnCount():
+            self.table.setCurrentIndex(self.model.index(0, 0))
 
     def _sheet_changed(self, name):
         if name and name != self.preview.sheet_name:
@@ -754,6 +1238,41 @@ class SpreadsheetView(QWidget):
         self.model.set_header_row(enabled)
         self._sort_column = -1
         self.table.horizontalHeader().setSortIndicatorShown(False)
+        self._populate_filter_columns()
+        self._apply_filter()
+        self._configure_value_filter_availability()
+
+    def _populate_filter_columns(self):
+        selected = self.filter_column.currentData()
+        self.filter_column.blockSignals(True)
+        self.filter_column.clear()
+        self.filter_column.addItem("All columns", -1)
+        for column in range(self.model.columns):
+            label = str(self.model.headerData(column, Qt.Horizontal) or "").strip()
+            self.filter_column.addItem(label or _spreadsheet_column_name(column), column)
+        index = self.filter_column.findData(selected)
+        self.filter_column.setCurrentIndex(max(0, index))
+        self.filter_column.blockSignals(False)
+
+    def _schedule_filter(self, *_args):
+        self.filter_timer.start()
+
+    def _apply_filter(self):
+        self.filter_timer.stop()
+        column = self.filter_column.currentData()
+        self.model.set_filter(-1 if column is None else column, self.filter_text.text())
+        self._update_summary()
+        if self.model.rowCount() and self.model.columnCount():
+            self.table.setCurrentIndex(self.model.index(0, 0))
+
+    def _update_summary(self):
+        delimiter = f" · delimiter {self.preview.delimiter!r}" if self.preview.delimiter else ""
+        limited = " · preview limited for performance" if self.preview.truncated else ""
+        filtered = (
+            f" · {self.model._data_row_count():,} matching rows"
+            if self.model.filter_text or self.model.value_filters else ""
+        )
+        self.summary.setText(self._base_dimensions + filtered + delimiter + limited)
 
     def _sort_clicked(self, column):
         if column == self._sort_column:
@@ -986,16 +1505,124 @@ class Tab(QWidget):
         cursor.insertText(self.replace_query.text())
 
 
+class ImageCanvasLabel(QLabel):
+    """Image canvas using StillPoint's standard wheel and trackpad policy."""
+
+    zoomRequested = Signal(float, object)
+
+    def __init__(self):
+        super().__init__()
+        self._pan_start = None
+        self.grabGesture(Qt.PinchGesture)
+
+    def _scroll_area(self):
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def wheelEvent(self, event):  # type: ignore[override]
+        action = wheel_action(event)
+        if action.is_zoom:
+            self.zoomRequested.emit(action.zoom_steps, QPointF(event.position()))
+            event.accept()
+            return
+        if action.is_pan:
+            area = self._scroll_area()
+            if area is not None:
+                area.horizontalScrollBar().setValue(
+                    area.horizontalScrollBar().value() - round(action.pan.x())
+                )
+                area.verticalScrollBar().setValue(
+                    area.verticalScrollBar().value() - round(action.pan.y())
+                )
+                event.accept()
+                return
+        super().wheelEvent(event)
+
+    def event(self, event):  # type: ignore[override]
+        if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
+            if event.value():
+                self.zoomRequested.emit(
+                    native_zoom_steps(event.value()), QPointF(event.position())
+                )
+                event.accept()
+                return True
+        return super().event(event)
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self.pixmap():
+            self._pan_start = event.globalPosition().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if self._pan_start is not None:
+            area = self._scroll_area()
+            if area is not None:
+                current = event.globalPosition().toPoint()
+                delta = current - self._pan_start
+                area.horizontalScrollBar().setValue(
+                    area.horizontalScrollBar().value() - delta.x()
+                )
+                area.verticalScrollBar().setValue(
+                    area.verticalScrollBar().value() - delta.y()
+                )
+                self._pan_start = current
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self._pan_start is not None:
+            self._pan_start = None
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ImageView(QWidget):
-    def __init__(self, path, pixels):
+    def __init__(self, path, pixels, *, open_label=None, open_callback=None,
+                 canvas_color=None, svg_text=None):
         super().__init__()
         self.original = QPixmap.fromImage(pixels)
+        self.canvas_color = canvas_color
+        self.svg_text = svg_text
         self.zoom = 1.0
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
+        if open_label and open_callback:
+            open_button = QPushButton(open_label)
+            open_button.clicked.connect(open_callback)
+            controls.addWidget(open_button)
+            controls.addSpacing(10)
+        if svg_text:
+            copy_svg = QPushButton("Copy SVG")
+            copy_svg.clicked.connect(self.copy_svg)
+            controls.addWidget(copy_svg)
+            copy_png = QPushButton("Copy PNG")
+            copy_png.clicked.connect(self.copy_png)
+            controls.addWidget(copy_png)
+            controls.addSpacing(10)
         self.scroll = QScrollArea()
-        self.label = QLabel()
+        self.label = ImageCanvasLabel()
         self.label.setAlignment(Qt.AlignCenter)
+        self.label.zoomRequested.connect(
+            lambda steps, _anchor: self.scale(zoom_factor(steps))
+        )
+        if canvas_color:
+            # Diagram SVGs commonly have a transparent root while their
+            # default text and strokes assume light paper. Keep that canvas
+            # readable without changing the application theme or export.
+            canvas_palette = self.label.palette()
+            canvas_palette.setColor(QPalette.Window, QColor(canvas_color))
+            self.label.setPalette(canvas_palette)
+            self.label.setAutoFillBackground(True)
         self.scroll.setWidget(self.label)
         self.scroll.setWidgetResizable(True)
         for title, callback in (("Fit to Window", self.fit), ("Actual Size", self.actual),
@@ -1011,14 +1638,37 @@ class ImageView(QWidget):
 
     def scale(self, factor):
         self.zoom = min(8, max(.05, self.zoom * factor))
-        self.label.setPixmap(self.original.scaled(self.original.size() * self.zoom,
-                                                   Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        scaled = self.original.scaled(
+            self.original.size() * self.zoom,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.label.setMinimumSize(scaled.size())
+        self.label.resize(scaled.size())
+        self.label.setPixmap(scaled)
 
     def zoom_in(self):
         self.scale(1.25)
 
     def zoom_out(self):
         self.scale(.8)
+
+    def copy_svg(self):
+        if self.svg_text:
+            QApplication.clipboard().setText(self.svg_text)
+
+    def copy_png(self):
+        pixmap = self.original
+        if self.canvas_color:
+            # Match what the user sees instead of copying transparent pixels
+            # that can become unreadable when pasted onto a dark surface.
+            composited = QPixmap(pixmap.size())
+            composited.fill(QColor(self.canvas_color))
+            painter = QPainter(composited)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            pixmap = composited
+        QApplication.clipboard().setPixmap(pixmap)
 
     def actual(self):
         self.zoom = 1.0
@@ -1083,6 +1733,8 @@ def pdf_view(path):
 
 
 class Picker(QDialog):
+    resultsReady = Signal(int, object)
+
     def __init__(self, window, *, quick=False):
         super().__init__(window)
         self.window = window
@@ -1110,6 +1762,13 @@ class Picker(QDialog):
             self.include.toggled.connect(self.refresh)
             self.full.toggled.connect(self.refresh)
             self.list.itemActivated.connect(lambda item: self.accept_file(False))
+            self._query_generation = 0
+            self._query_timer = QTimer(self)
+            self._query_timer.setSingleShot(True)
+            self._query_timer.setInterval(90)
+            self._query_timer.timeout.connect(self._start_refresh)
+            self.resultsReady.connect(self._apply_results)
+            self._accept_when_ready = None
             self.refresh()
             self.query.setFocus()
         else:
@@ -1151,34 +1810,85 @@ class Picker(QDialog):
             f"{'Including' if self.include.isChecked() else 'Excluding'} hidden and ignored files"
             f"  ·  {cache_state}"
         )
-        query = self.query.text().strip()
-        opened = {tab.path for tab in self.window.all_tabs()}
-        candidates = set(self.window.catalog_candidates(
-            query, scope, include_excluded=self.include.isChecked()
-        ))
-        candidates.update(opened)
-        ranked = []
-        for path in candidates:
-            if not path.is_file() or not inside(self.window.root, path):
-                continue
-            if not inside(scope, path):
-                continue
-            if (not self.include.isChecked()
-                    and (self.window.catalog_db is None or path in opened)
-                    and self.window.excluded(path)):
-                continue
-            relative = str(path.relative_to(self.window.root))
-            score = fuzzy_score(query, relative, recent=path in self.window.recent, opened=path in opened)
-            if score is not None:
-                ranked.append((-score, relative.casefold(), path))
-        ranked.sort()
+        self._query_generation += 1
         self.list.clear()
-        for _, relative, path in ranked[:150]:
+        item = QListWidgetItem("Searching cached filenames…")
+        item.setFlags(Qt.NoItemFlags)
+        self.list.addItem(item)
+        self._query_timer.start()
+
+    def _start_refresh(self):
+        if not self.quick:
+            return
+        generation = self._query_generation
+        query = self.query.text().strip()
+        scope = self.window.root if self.full.isChecked() else self.window.scope
+        include_excluded = self.include.isChecked()
+        opened = {tab.path for tab in self.window.all_tabs()}
+        recent = set(self.window.recent)
+        root = self.window.root
+        catalog_db_available = self.window.catalog_db is not None
+
+        def job():
+            if generation != self._query_generation:
+                return
+            candidates = set(self.window.catalog_candidates(
+                query, scope, include_excluded=include_excluded
+            ))
+            if generation != self._query_generation:
+                return
+            candidates.update(opened)
+            ranked = []
+            for path in candidates:
+                # SQLite rows were validated when indexed. Avoid thousands of
+                # resolve/stat calls per keystroke; stale rows are discarded
+                # lazily if the user selects one.
+                if not catalog_db_available:
+                    if not path.is_file() or not inside(root, path):
+                        continue
+                try:
+                    relative_path = path.relative_to(root)
+                    path.relative_to(scope)
+                except ValueError:
+                    continue
+                if (not include_excluded and path in opened
+                        and self.window.excluded(path)):
+                    continue
+                relative = str(relative_path)
+                score = fuzzy_score(
+                    query,
+                    relative,
+                    recent=path in recent,
+                    opened=path in opened,
+                )
+                if score is not None:
+                    ranked.append((-score, relative.casefold(), path))
+            ranked.sort()
+            selected = []
+            for candidate in ranked:
+                path = candidate[2]
+                if path.is_file() and inside(root, path):
+                    selected.append(candidate)
+                    if len(selected) >= 150:
+                        break
+            self.resultsReady.emit(generation, selected)
+
+        try:
+            self.window.executor.submit(job)
+        except RuntimeError:
+            pass
+
+    def _apply_results(self, generation, ranked):
+        if generation != self._query_generation or not self.quick:
+            return
+        self.list.clear()
+        for _, relative, path in ranked:
             item = QListWidgetItem(f"{path.name}    {Path(relative).parent}")
             item.setData(Qt.UserRole, path)
             item.setToolTip(str(path))
             self.list.addItem(item)
         if not ranked:
+            self._accept_when_ready = None
             message = ("Indexing folder… results will appear as they are discovered"
                        if self.window.catalog_running else
                        "No files in the current scope and exclusion settings")
@@ -1187,6 +1897,10 @@ class Picker(QDialog):
             self.list.addItem(item)
         else:
             self.list.setCurrentRow(0)
+            if self._accept_when_ready is not None:
+                pinned = self._accept_when_ready
+                self._accept_when_ready = None
+                self.accept_file(pinned)
 
     def accept_file(self, pinned=False):
         item = self.list.currentItem()
@@ -1195,6 +1909,12 @@ class Picker(QDialog):
             tab = self.window.active_tab()
             self.accept()
             QTimer.singleShot(0, lambda selected=tab: self.window._focus_tab_content(selected))
+        elif self.quick and self._query_timer.isActive():
+            # A fast Enter can arrive during the short debounce. Run the fresh
+            # query now and open its first result when it reaches the UI.
+            self._accept_when_ready = pinned
+            self._query_timer.stop()
+            self._start_refresh()
 
     def keyPressEvent(self, event):
         modifiers = event.modifiers() & ~Qt.KeypadModifier
@@ -1246,17 +1966,21 @@ class Window(QMainWindow):
         self.catalog_cancel = threading.Event()
         self.catalog_running = False
         self.catalog_warmed = False
+        self.catalog_indexed_this_run = 0
+        self.catalog_force_scan = False
         self.catalog_db_error = None
         try:
             self.catalog_db = FolderCatalog(self.root)
             self.catalog_count = self.catalog_db.count()
             self.catalog_ui_state = self.catalog_db.ui_states()
             self.skipped_directories = dict(self.catalog_db.skipped_directories())
+            self.catalog_state = self.catalog_db.scan_state()
         except (CatalogError, OSError, sqlite3.Error) as exc:
             self.catalog_db = None
             self.catalog_count = 0
             self.catalog_ui_state = {}
             self.skipped_directories = {}
+            self.catalog_state = "unavailable"
             self.catalog_db_error = str(exc)
         self.recent: list[Path] = []
         self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORK, thread_name_prefix="folder-navigator")
@@ -1266,6 +1990,7 @@ class Window(QMainWindow):
         self.new_file_edit = None
         self.new_file_directory = None
         self.new_file_is_folder = False
+        self.new_file_diagram_suffix = None
         self.tree_markdown_open_delay_ms = 140
         self.tree_markdown_open_timer = QTimer(self)
         self.tree_markdown_open_timer.setSingleShot(True)
@@ -1276,7 +2001,15 @@ class Window(QMainWindow):
         self.markdown_preview_timer.setSingleShot(True)
         self.markdown_preview_timer.timeout.connect(self._refresh_pending_markdown_preview)
         self.pending_markdown_preview = None
+        self.diagram_preview_cache = OrderedDict()
+        self.diagram_preview_cache_bytes = 0
+        self.diagram_preview_inflight = set()
         self.specialized_editor_windows: list[QMainWindow] = []
+        self.excalidraw_processes: list[tuple[subprocess.Popen, str | None, Path]] = []
+        self.excalidraw_browser_grants: set[str] = set()
+        self.excalidraw_process_timer = QTimer(self)
+        self.excalidraw_process_timer.setInterval(1000)
+        self.excalidraw_process_timer.timeout.connect(self._poll_excalidraw_processes)
         self.tab_switcher = None
         self.tab_switcher_list = None
         self.tab_switcher_paths = []
@@ -1287,7 +2020,7 @@ class Window(QMainWindow):
         self._startup_selected_path = None
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
-        self.setWindowTitle(f"{self.root.name} — Folder Navigator")
+        self.setWindowTitle(f"Folder Navigator — {self.root.name}")
         self.resize(1100, 760)
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
         self.settings = self._load_settings()
@@ -1352,9 +2085,28 @@ class Window(QMainWindow):
         search_layout.addWidget(self.search_progress)
         search_layout.addWidget(self.search_results)
         self.search_input.returnPressed.connect(self.run_search)
+        self.folder_page = QWidget()
+        folder_page_layout = QVBoxLayout(self.folder_page)
+        folder_page_layout.setContentsMargins(0, 0, 0, 0)
+        folder_page_layout.setSpacing(0)
+        self.folder_panel_header = QFrame()
+        self.folder_panel_header.setObjectName("folderNavigatorUtilityHeader")
+        folder_header_layout = QHBoxLayout(self.folder_panel_header)
+        folder_header_layout.setContentsMargins(9, 5, 9, 5)
+        self.folder_panel_title = QLabel("FILES")
+        self.folder_panel_title.setObjectName("folderNavigatorUtilityTitle")
+        folder_header_layout.addWidget(self.folder_panel_title)
+        folder_header_layout.addStretch()
+        self.folder_root_badge = QLabel(self.root.name)
+        self.folder_root_badge.setObjectName("folderNavigatorRootBadge")
+        self.folder_root_badge.setToolTip(str(self.root))
+        self.folder_root_badge.setMaximumWidth(160)
+        folder_header_layout.addWidget(self.folder_root_badge)
+        folder_page_layout.addWidget(self.folder_panel_header)
+        folder_page_layout.addWidget(self.tree)
         self.rail = QTabWidget()
         self.rail.setObjectName("folderNavigatorRail")
-        self.rail.addTab(self.tree, "Folder")
+        self.rail.addTab(self.folder_page, "Files")
         self.rail.addTab(search_page, "Search")
         self.tabs = QTabWidget()
         self.tabs.setObjectName("folderNavigatorEditors")
@@ -1380,7 +2132,30 @@ class Window(QMainWindow):
         self.rail.setVisible(bool(self.state.get("rail_visible", True)))
         outer = QWidget()
         layout = QVBoxLayout(outer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.identity_bar = QFrame()
+        self.identity_bar.setObjectName("folderNavigatorIdentity")
+        self.identity_bar.setFixedHeight(32)
+        identity_layout = QHBoxLayout(self.identity_bar)
+        identity_layout.setContentsMargins(8, 2, 8, 2)
+        identity_layout.setSpacing(6)
+        self.identity_icon = QLabel()
+        self.identity_icon.setFixedSize(22, 22)
+        self.identity_icon.setAlignment(Qt.AlignCenter)
+        if not icon.isNull():
+            self.identity_icon.setPixmap(icon.pixmap(20, 20))
+        identity_layout.addWidget(self.identity_icon)
+        self.identity_title = QLabel("FOLDER NAVIGATOR")
+        self.identity_title.setObjectName("folderNavigatorIdentityTitle")
+        identity_layout.addWidget(self.identity_title)
+        self.identity_root = QLabel(f"·  {self.root.name}")
+        self.identity_root.setObjectName("folderNavigatorIdentityRoot")
+        self.identity_root.setToolTip(str(self.root))
+        self.identity_root.setMinimumWidth(0)
+        identity_layout.addWidget(self.identity_root)
         self.bookmarks_bar = QHBoxLayout()
+        self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
         layout.addLayout(self.bookmarks_bar)
         self.filter_label = QPushButton()
         self.filter_label.clicked.connect(self.clear_filter)
@@ -1394,9 +2169,21 @@ class Window(QMainWindow):
         elif self.catalog_count:
             status += f" · {self.catalog_count:,} cached files"
         self.statusBar().showMessage(status)
+        self.navigator_status_identity = QLabel("FOLDER NAVIGATOR")
+        self.navigator_status_identity.setObjectName("folderNavigatorStatusIdentity")
+        self.navigator_status_identity.setAccessibleName("Folder Navigator window identity")
+        self.statusBar().addPermanentWidget(self.navigator_status_identity)
         self.index_notice = QLabel()
         self.index_notice.setAccessibleName("Folder indexing status")
         self.statusBar().addPermanentWidget(self.index_notice, 1)
+        self.index_cancel_button = QPushButton("Cancel Indexing")
+        self.index_cancel_button.clicked.connect(self._cancel_catalog_indexing)
+        self.index_cancel_button.hide()
+        self.statusBar().addPermanentWidget(self.index_cancel_button)
+        self.index_continue_button = QPushButton("Continue Full Index")
+        self.index_continue_button.clicked.connect(self._continue_catalog_indexing)
+        self.index_continue_button.hide()
+        self.statusBar().addPermanentWidget(self.index_continue_button)
         self._update_index_notice()
         self.watcher = QFileSystemWatcher(self)
         self.watcher.addPath(str(self.root))
@@ -1415,6 +2202,7 @@ class Window(QMainWindow):
         self.tree.header().sectionMoved.connect(lambda *_: self.layout_save_timer.start(500))
         self.tree.header().sortIndicatorChanged.connect(lambda *_: self.layout_save_timer.start(500))
         self._make_actions()
+        self._apply_identity_style()
         self.command_palette = CommandBar(self)
         self.command_palette.actionTriggered.connect(self._run_command_action)
         app = QApplication.instance()
@@ -1446,6 +2234,74 @@ class Window(QMainWindow):
             pass
         self._apply_focus_borders()
 
+    def _apply_identity_style(self):
+        """Apply restrained Folder Navigator chrome without changing content themes."""
+        palette = QApplication.palette()
+        accent = QColor(str(theme_value(
+            "folder_navigator.identity.accent", "#4f8f8b"
+        )))
+        if not accent.isValid():
+            accent = QColor("#4f8f8b")
+        self._folder_identity_accent = accent.name()
+        window = palette.color(QPalette.Window).name()
+        alternate = palette.color(QPalette.AlternateBase).name()
+        base = palette.color(QPalette.Base).name()
+        text = palette.color(QPalette.WindowText).name()
+        muted = palette.color(QPalette.Mid).name()
+        selected_text = palette.color(QPalette.HighlightedText).name()
+        selected = QColor(accent)
+        selected.setAlpha(190)
+        hover = QColor(accent)
+        hover.setAlpha(45)
+        self.identity_bar.setStyleSheet(
+            "QFrame#folderNavigatorIdentity {"
+            f"background: transparent; border-left: 2px solid {accent.name()};"
+            "}"
+            "QLabel#folderNavigatorIdentityTitle {"
+            f"color: {accent.name()}; font-size: 11px; font-weight: 700;"
+            "}"
+            "QLabel#folderNavigatorIdentityRoot {"
+            f"color: {text}; font-size: 11px;"
+            "}"
+        )
+        self.folder_panel_header.setStyleSheet(
+            "QFrame#folderNavigatorUtilityHeader {"
+            f"background: {alternate}; border-bottom: 1px solid {muted};"
+            "}"
+            "QLabel#folderNavigatorUtilityTitle {"
+            f"color: {accent.name()}; font-size: 10px; font-weight: 700;"
+            "}"
+            "QLabel#folderNavigatorRootBadge {"
+            f"background: {window}; color: {text}; border: 1px solid {muted};"
+            "border-radius: 7px; padding: 1px 6px; font-size: 10px;"
+            "}"
+        )
+        self.folder_page.setStyleSheet(
+            f"QWidget {{ background: {base}; }}"
+        )
+        self.tree.setStyleSheet(
+            f"QTreeView {{ border: 0; background: {base}; color: {text}; }}"
+            f"QTreeView::viewport {{ background: {base}; }}"
+            "QTreeView::item { padding: 2px 6px 2px 2px; "
+            f"border: 1px solid transparent; border-bottom-color: {muted}; "
+            "border-radius: 6px; }"
+            "QTreeView::item:hover {"
+            f"background: rgba({hover.red()}, {hover.green()}, {hover.blue()}, {hover.alpha()}); "
+            f"border-color: {accent.name()}; }}"
+            "QTreeView::item:selected, QTreeView::item:selected:active, "
+            "QTreeView::item:selected:!active {"
+            f"background: rgba({selected.red()}, {selected.green()}, {selected.blue()}, {selected.alpha()}); "
+            f"color: {selected_text}; border-color: {accent.name()}; }}"
+            "QHeaderView::section {"
+            f"background: {alternate}; color: {text}; border: 0;"
+            f"border-bottom: 1px solid {muted}; padding: 4px;"
+            "}"
+        )
+        self.navigator_status_identity.setStyleSheet(
+            f"color: {accent.name()}; font-size: 10px; font-weight: 700; "
+            f"border-left: 2px solid {accent.name()}; padding: 1px 6px;"
+        )
+
     def _apply_focus_borders(self):
         """Highlight the active navigator pane like StillPoint's main window."""
         try:
@@ -1461,17 +2317,31 @@ class Window(QMainWindow):
         focus_border = (
             theme_value("main_window.focus_border.filtered", "#D9534F")
             if self.scope != self.root and folder_has_focus
-            else theme_value("main_window.focus_border.default", "#4A90E2")
+            else getattr(self, "_folder_identity_accent", "#4f8f8b")
         )
+        palette = QApplication.palette()
+        alternate = palette.color(QPalette.AlternateBase).name()
+        text = palette.color(QPalette.WindowText).name()
+        accent = getattr(self, "_folder_identity_accent", "#4f8f8b")
         self.rail.setStyleSheet(
             "QTabWidget#folderNavigatorRail::pane { "
             f"border: 2px solid {focus_border if folder_has_focus else 'transparent'}; "
-            "border-radius: 3px; }"
+            f"border-radius: 3px; background: {alternate}; }}"
+            "QTabWidget#folderNavigatorRail QTabBar::tab {"
+            f"color: {text}; padding: 5px 11px; "
+            "border-bottom: 2px solid rgba(0, 0, 0, 0);"
+            "}"
+            "QTabWidget#folderNavigatorRail QTabBar::tab:selected {"
+            f"border-bottom: 2px solid {accent}; font-weight: 600;"
+            "}"
         )
         self.tabs.setStyleSheet(
             "QTabWidget#folderNavigatorEditors::pane { "
             f"border: 2px solid {focus_border if editor_has_focus else 'transparent'}; "
             "border-radius: 3px; }"
+            "QTabWidget#folderNavigatorEditors QTabBar::tab:selected {"
+            f"border-bottom: 3px solid {accent}; font-weight: 600;"
+            "}"
         )
 
     @staticmethod
@@ -1496,7 +2366,34 @@ class Window(QMainWindow):
     def _update_index_notice(self):
         if not hasattr(self, "index_notice"):
             return
-        if self.skipped_directories:
+        self.index_cancel_button.setVisible(self.catalog_running)
+        self.index_continue_button.setVisible(
+            not self.catalog_running and self.catalog_state == "partial"
+        )
+        if self.catalog_running:
+            budget = (
+                "full scan; Cancel remains available"
+                if self.catalog_force_scan
+                else f"safety limit {MAX_INDEX_FILES:,} files / {MAX_INDEX_SECONDS:g}s"
+            )
+            self.index_notice.setText(
+                f"Indexing filenames… {self.catalog_indexed_this_run:,} found "
+                f"({budget})"
+            )
+            self.index_notice.setToolTip(
+                "Quick Open remains usable while the filename index is built."
+            )
+            self.index_notice.show()
+        elif self.catalog_state == "partial":
+            self.index_notice.setText(
+                f"⚠ Partial Quick Open index · {self.catalog_count:,} cached files"
+            )
+            self.index_notice.setToolTip(
+                "The safety budget stopped full-root indexing. Quick Open still uses "
+                "the partial cache. Continue only if a complete root index is needed."
+            )
+            self.index_notice.show()
+        elif self.skipped_directories:
             count = len(self.skipped_directories)
             noun = "folder" if count == 1 else "folders"
             self.index_notice.setText(
@@ -1512,13 +2409,23 @@ class Window(QMainWindow):
                 "Folders over the indexing safety limit:\n" + "\n".join(details)
             )
             self.index_notice.show()
-        elif self.catalog_running:
-            self.index_notice.setText("Indexing filenames for Quick Open…")
-            self.index_notice.setToolTip("")
-            self.index_notice.show()
         else:
             self.index_notice.clear()
             self.index_notice.hide()
+
+    def _cancel_catalog_indexing(self):
+        if self.catalog_running:
+            self.catalog_cancel.set()
+            self.index_notice.setText(
+                f"Canceling indexing… {self.catalog_indexed_this_run:,} files retained"
+            )
+            self.index_cancel_button.setEnabled(False)
+
+    def _continue_catalog_indexing(self):
+        if self.catalog_running:
+            return
+        self.catalog_warmed = False
+        self._warm_catalog(force=True)
 
     def _persist(self):
         current = self.tree.currentIndex()
@@ -1695,6 +2602,7 @@ class Window(QMainWindow):
 
     def _make_actions(self):
         file_menu = self.menuBar().addMenu("&File")
+        edit_menu = self.menuBar().addMenu("&Edit")
         view_menu = self.menuBar().addMenu("&View")
         go_menu = self.menuBar().addMenu("&Go")
         self.commands = []
@@ -1717,6 +2625,9 @@ class Window(QMainWindow):
         add(file_menu, "Save All", self.save_all)
         add(file_menu, "Print Page", self.print_active, QKeySequence.Print)
         add(file_menu, "Close Window", self.close)
+        self.format_markdown_table_action = add(
+            edit_menu, "Format Markdown Table", self._format_active_markdown_table
+        )
         self.hidden_action = add(view_menu, "Show Hidden Files", self.toggle_hidden)
         self.hidden_action.setCheckable(True)
         self.hidden_action.setChecked(self.state.get("hidden", False))
@@ -1734,6 +2645,7 @@ class Window(QMainWindow):
         self.raw_text_action.setEnabled(False)
         columns_menu = view_menu.addMenu("Columns")
         columns_toolbar = self.addToolBar("File columns")
+        self.columns_toolbar = columns_toolbar
         columns_toolbar.setObjectName("folder_navigator_columns")
         columns_toolbar.setMovable(False)
         self.column_actions = {}
@@ -1755,6 +2667,10 @@ class Window(QMainWindow):
             columns_toolbar.addAction(action)
             self.commands.append(action)
             self.column_actions[column] = action
+        identity_spacer = QWidget(columns_toolbar)
+        identity_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        columns_toolbar.addWidget(identity_spacer)
+        columns_toolbar.addWidget(self.identity_bar)
         add(go_menu, "Folder", lambda: (self.rail.setCurrentIndex(0), self.tree.setFocus()))
         add(go_menu, "Search", lambda: (self.rail.setCurrentIndex(1), self.search_input.setFocus()))
         add(go_menu, "Editor", lambda: self._focus_tab_content(self.active_tab()))
@@ -1942,6 +2858,11 @@ class Window(QMainWindow):
         if (index.isValid() and not self.model.isDir(index)
                 and Path(self.model.filePath(index)) == path):
             self.open_file(path, defer_enhancements=True)
+            # The tree-selection timer has already established that this is a
+            # stable hover. Render now instead of imposing a second debounce,
+            # which made flyovers sluggish and could leave the preview in its
+            # unrendered source state under a busy event loop.
+            self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
     def _open_tree_file_keep_focus(self, path, pinned):
         self._cancel_pending_tree_markdown()
@@ -1958,7 +2879,7 @@ class Window(QMainWindow):
         self._focus_tab_content(tab)
 
     def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
-                  force_text=False):
+                  force_text=False, force_rich_markdown=False):
         # Once a visible window is explicitly opening content, do not let a
         # late QFileSystemModel load steal focus back to the startup target.
         if self.isVisible():
@@ -1989,6 +2910,9 @@ class Window(QMainWindow):
             elif not force_text and suffix in DIAGRAM_SUFFIXES:
                 tab = Tab(path, details="Rendering diagram preview…", root=self.root)
                 self._load_diagram_preview(path)
+            elif not force_text and suffix in DOCUMENT_SUFFIXES:
+                tab = Tab(path, details="Preparing document preview…", root=self.root)
+                self._load_document_preview(path)
             elif suffix == ".pdf":
                 tab = Tab(path, details="Loading PDF…", root=self.root)
                 try:
@@ -2013,8 +2937,33 @@ class Window(QMainWindow):
                 self.executor.submit(decode)
             else:
                 loaded = read_text(path)
-                tab = Tab(path, loaded, markdown=path.suffix.casefold() in (".md", ".markdown"),
-                          root=self.root, defer_enhancements=defer_enhancements)
+                is_markdown = path.suffix.casefold() in (".md", ".markdown")
+                fallback_reason = (
+                    rich_markdown_fallback_reason(loaded.text, path.stat().st_size)
+                    if is_markdown and not force_rich_markdown else None
+                )
+                tab = Tab(
+                    path,
+                    loaded,
+                    markdown=is_markdown and fallback_reason is None,
+                    root=self.root,
+                    defer_enhancements=defer_enhancements or fallback_reason is not None,
+                )
+                if fallback_reason:
+                    tab.setProperty("folderLargeMarkdownSource", True)
+                    tab.show_notice(
+                        "Large Markdown opened in lightweight mode "
+                        f"({fallback_reason}) to keep Folder Navigator responsive."
+                    )
+                    rich_button = QPushButton("Enable Rich Markdown Anyway")
+                    rich_button.setToolTip(
+                        "The rich editor may pause on files of this size or shape."
+                    )
+                    rich_button.clicked.connect(
+                        lambda checked=False, selected=path: self._enable_rich_markdown(selected)
+                    )
+                    tab.layout().insertWidget(1, rich_button)
+                    tab.rich_markdown_button = rich_button
         except Exception as exc:
             info = path.stat()
             details = (f"{path.name}\nType: {mimetypes.guess_type(path.name)[0] or 'Unknown'}\n"
@@ -2032,8 +2981,13 @@ class Window(QMainWindow):
         index = self.tabs.addTab(tab, path.name)
         if path.suffix.casefold() in DIAGRAM_SUFFIXES and not force_text:
             tab.preview_signature = self._diagram_preview_signature(path)
+        elif path.suffix.casefold() in DOCUMENT_SUFFIXES and not force_text:
+            from .documents import document_signature
+            tab.preview_signature = document_signature(path)
         self.tabs.setTabToolTip(index, str(path.parent))
         self.tabs.setCurrentIndex(index)
+        if not tab.editor:
+            self._install_preview_context_menu(tab, getattr(tab, "viewer", tab))
         if tab.editor:
             if self.editor_zoom_steps > 0:
                 tab.editor.zoomIn(self.editor_zoom_steps)
@@ -2051,6 +3005,7 @@ class Window(QMainWindow):
             )
             if isinstance(tab.editor, MarkdownEditor):
                 tab.editor.setProperty("folderNavigatorMarkdown", True)
+                tab.editor.highlighter.set_folder_navigator_table_style(True)
                 tab.editor.installEventFilter(self)
                 tab.editor.headingPickerRequested.connect(
                     lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
@@ -2079,6 +3034,27 @@ class Window(QMainWindow):
         self._update_welcome()
         self._schedule_markdown_preview(tab if defer_enhancements else None)
 
+    def _enable_rich_markdown(self, path):
+        index = self._index_for(Path(path))
+        if index < 0:
+            return
+        tab = self.tabs.widget(index)
+        if tab.dirty:
+            self.statusBar().showMessage(
+                "Save or undo lightweight-mode edits before enabling rich Markdown",
+                7000,
+            )
+            return
+        pinned = tab.pinned
+        self.tabs.removeTab(index)
+        tab.deleteLater()
+        self.open_file(
+            Path(path),
+            pinned=pinned,
+            force_rich_markdown=True,
+        )
+        self._schedule_markdown_preview(self.active_tab(), immediate=True)
+
     def _load_delimited_preview(self, path):
         def job():
             try:
@@ -2097,15 +3073,87 @@ class Window(QMainWindow):
                 self.bridge.result.emit(("table", path, None, False, str(exc)))
         self.executor.submit(job)
 
+    def _load_document_preview(self, path):
+        from .documents import build_docx_preview, build_pptx_preview, document_signature
+
+        path = Path(path)
+        signature = document_signature(path)
+        builder = build_pptx_preview if path.suffix.casefold() == ".pptx" else build_docx_preview
+
+        def job():
+            try:
+                preview = builder(path)
+                self.bridge.result.emit(("document", path, signature, preview, None))
+            except Exception as exc:
+                self.bridge.result.emit(("document", path, signature, None, str(exc)))
+
+        self.executor.submit(job)
+
     @staticmethod
     def _diagram_preview_signature(path):
         path = Path(path)
         sidecar = path.with_name(f"{path.name}.png")
         return fingerprint(path), fingerprint(sidecar) if path.suffix.casefold() == ".excalidraw" else None
 
+    @staticmethod
+    def _diagram_cache_key(path, signature):
+        return str(Path(path).resolve(strict=False)), signature
+
+    @staticmethod
+    def _diagram_payload_size(svg, pixels, error):
+        size = len((svg or "").encode("utf-8")) + len((error or "").encode("utf-8"))
+        if pixels is not None:
+            try:
+                size += int(pixels.sizeInBytes())
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return size
+
+    def _cached_diagram_preview(self, path, signature):
+        key = self._diagram_cache_key(path, signature)
+        cached = self.diagram_preview_cache.get(key)
+        if cached is None:
+            return None
+        self.diagram_preview_cache.move_to_end(key)
+        svg, pixels, error, _size = cached
+        return svg, pixels.copy() if pixels is not None else None, error
+
+    def _cache_diagram_preview(self, path, signature, svg, pixels, error):
+        key = self._diagram_cache_key(path, signature)
+        size = self._diagram_payload_size(svg, pixels, error)
+        # One unusually large sidecar should not evict every useful preview.
+        if size > DIAGRAM_PREVIEW_CACHE_BYTES:
+            return
+        for existing_key in list(self.diagram_preview_cache):
+            if existing_key[0] != key[0]:
+                continue
+            _svg, _pixels, _error, existing_size = self.diagram_preview_cache.pop(existing_key)
+            self.diagram_preview_cache_bytes -= existing_size
+        stored_pixels = pixels.copy() if pixels is not None else None
+        self.diagram_preview_cache[key] = (svg, stored_pixels, error, size)
+        self.diagram_preview_cache_bytes += size
+        while (len(self.diagram_preview_cache) > DIAGRAM_PREVIEW_CACHE_ENTRIES
+               or self.diagram_preview_cache_bytes > DIAGRAM_PREVIEW_CACHE_BYTES):
+            _old_key, (_svg, _pixels, _error, old_size) = self.diagram_preview_cache.popitem(last=False)
+            self.diagram_preview_cache_bytes -= old_size
+
     def _load_diagram_preview(self, path):
         path = Path(path)
         signature = self._diagram_preview_signature(path)
+        cached = self._cached_diagram_preview(path, signature)
+        if cached is not None:
+            svg, pixels, error = cached
+            QTimer.singleShot(
+                0,
+                lambda: self._show_diagram_preview(
+                    path, signature, svg, pixels, error, cache_result=False
+                ),
+            )
+            return
+        cache_key = self._diagram_cache_key(path, signature)
+        if cache_key in self.diagram_preview_inflight:
+            return
+        self.diagram_preview_inflight.add(cache_key)
 
         def job():
             try:
@@ -2136,16 +3184,44 @@ class Window(QMainWindow):
             except Exception as exc:
                 self.bridge.result.emit(("diagram", path, signature, None, None, str(exc)))
 
-        self.executor.submit(job)
+        try:
+            self.executor.submit(job)
+        except RuntimeError:
+            self.diagram_preview_inflight.discard(cache_key)
+            raise
 
-    def _show_diagram_preview(self, path, signature, svg, pixels, error):
+    def _show_diagram_preview(self, path, signature, svg, pixels, error, *, cache_result=True):
+        cache_key = self._diagram_cache_key(path, signature)
+        self.diagram_preview_inflight.discard(cache_key)
+        if signature != self._diagram_preview_signature(path):
+            return
+        # Cache completed previews, but allow transient renderer/tool failures
+        # to retry on the next visit even when the source itself is unchanged.
+        if cache_result and not error:
+            self._cache_diagram_preview(path, signature, svg, pixels, error)
         index = self._index_for(path)
-        if index < 0 or signature != self._diagram_preview_signature(path):
+        if index < 0:
             return
         tab = self.tabs.widget(index)
         tab.preview_signature = signature
+        current = getattr(tab, "viewer", None)
+        if current is not None:
+            tab.layout().removeWidget(current)
+            current.deleteLater()
         if error:
             tab.show_notice(f"Diagram preview unavailable: {error}")
+            fallback = QWidget()
+            fallback_layout = QVBoxLayout(fallback)
+            fallback_layout.addWidget(QLabel(str(error)))
+            open_button = QPushButton(self._diagram_editor_label(path))
+            open_button.clicked.connect(
+                lambda checked=False, selected=path: self._open_specialized_editor(selected)
+            )
+            fallback_layout.addWidget(open_button)
+            fallback_layout.addStretch()
+            tab.viewer = fallback
+            tab.layout().addWidget(fallback)
+            self._install_preview_context_menu(tab, fallback)
             return
         if pixels is None:
             pixmap = QPixmap()
@@ -2156,15 +3232,27 @@ class Window(QMainWindow):
         placeholder = tab.layout().itemAt(1)
         if placeholder and placeholder.widget():
             placeholder.widget().hide()
-        current = getattr(tab, "viewer", None)
-        if current is not None:
-            tab.layout().removeWidget(current)
-            current.deleteLater()
-        tab.viewer = ImageView(path, pixels)
+        tab.viewer = ImageView(
+            path,
+            pixels,
+            open_label=self._diagram_editor_label(path),
+            open_callback=lambda checked=False, selected=path: self._open_specialized_editor(selected),
+            canvas_color="#ffffff" if path.suffix.casefold() in {".puml", ".mmd"} else None,
+            svg_text=svg if path.suffix.casefold() in {".puml", ".mmd"} else None,
+        )
         tab.layout().addWidget(tab.viewer)
+        self._install_preview_context_menu(tab, tab.viewer)
         tab.notice.hide()
         if tab is self.active_tab() and self.focusWidget() is self.tabs:
             tab.viewer.setFocus(Qt.OtherFocusReason)
+
+    @staticmethod
+    def _diagram_editor_label(path):
+        return {
+            ".puml": "Open in PlantUML Editor",
+            ".mmd": "Open in Mermaid Editor",
+            ".excalidraw": "Open in Excalidraw Editor",
+        }.get(Path(path).suffix.casefold(), "Open Diagram Editor")
 
     def _show_table_preview(self, path, preview, allow_source, error):
         index = self._index_for(path)
@@ -2188,6 +3276,9 @@ class Window(QMainWindow):
             vi_enabled=self.tree.vi_enabled,
         )
         viewer.requested_sheet = preview.sheet_name
+        viewer.statusRequested.connect(self.statusBar().showMessage)
+        if viewer.value_filter_disabled_reason:
+            self.statusBar().showMessage(viewer.value_filter_disabled_reason, 8000)
         viewer.sourceRequested.connect(lambda selected=path: self._open_table_as_text(selected))
         viewer.sheetRequested.connect(
             lambda sheet, selected=path, view=viewer: self._request_workbook_sheet(
@@ -2196,11 +3287,127 @@ class Window(QMainWindow):
         )
         tab.viewer = viewer
         tab.layout().addWidget(viewer)
+        self._install_preview_context_menu(tab, viewer)
         if tab is self.active_tab():
             self.table_preview_action.setEnabled(False)
             self.raw_text_action.setEnabled(allow_source)
         if tab is self.active_tab() and self.focusWidget() is self.tabs:
             viewer.setFocus(Qt.OtherFocusReason)
+
+    def _show_document_preview(self, path, signature, preview, error):
+        from .documents import document_signature
+
+        index = self._index_for(path)
+        if index < 0:
+            return
+        try:
+            if signature != document_signature(path):
+                return
+        except OSError:
+            return
+        tab = self.tabs.widget(index)
+        tab.preview_signature = signature
+        current = getattr(tab, "viewer", None)
+        if current is not None:
+            tab.layout().removeWidget(current)
+            current.deleteLater()
+        if error or preview is None:
+            tab.show_notice(f"Document preview failed: {error or 'unknown error'}")
+            return
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header = QHBoxLayout()
+        if preview.backend == "libreoffice":
+            description = QLabel("Print-layout preview rendered by LibreOffice")
+        else:
+            description = QLabel(preview.notice or "Simplified document preview")
+            description.setWordWrap(True)
+        header.addWidget(description)
+        header.addStretch()
+        open_button = QPushButton("Open in Default Application")
+        open_button.clicked.connect(
+            lambda checked=False, selected=path: self.system_open(selected)
+        )
+        header.addWidget(open_button)
+        layout.addLayout(header)
+
+        try:
+            if preview.pdf_path is not None:
+                layout_content = pdf_view(preview.pdf_path)
+                content = layout_content
+                if preview.html:
+                    selectable_content = QTextBrowser()
+                    selectable_content.setAccessibleName("Selectable document text")
+                    selectable_content.setTextInteractionFlags(
+                        Qt.TextSelectableByMouse
+                        | Qt.TextSelectableByKeyboard
+                        | Qt.LinksAccessibleByMouse
+                    )
+                    selectable_content.setOpenExternalLinks(True)
+                    selectable_content.setHtml(preview.html)
+                    views = QStackedWidget()
+                    views.addWidget(layout_content)
+                    views.addWidget(selectable_content)
+                    layout_button = QPushButton("Layout")
+                    text_button = QPushButton("Selectable Text")
+                    layout_button.setCheckable(True)
+                    text_button.setCheckable(True)
+
+                    def select_document_view(index):
+                        views.setCurrentIndex(index)
+                        layout_button.setChecked(index == 0)
+                        text_button.setChecked(index == 1)
+                        views.currentWidget().setFocus(Qt.OtherFocusReason)
+
+                    layout_button.clicked.connect(lambda: select_document_view(0))
+                    text_button.clicked.connect(lambda: select_document_view(1))
+                    layout_button.setChecked(True)
+                    header.insertWidget(0, layout_button)
+                    header.insertWidget(1, text_button)
+                    content = views
+                    container.selectable_content = selectable_content
+                    container.document_views = views
+                    container.zoom_in = lambda: (
+                        layout_content.zoom_in()
+                        if views.currentIndex() == 0
+                        else selectable_content.zoomIn()
+                    )
+                    container.zoom_out = lambda: (
+                        layout_content.zoom_out()
+                        if views.currentIndex() == 0
+                        else selectable_content.zoomOut()
+                    )
+                else:
+                    container.zoom_in = layout_content.zoom_in
+                    container.zoom_out = layout_content.zoom_out
+            else:
+                content = QTextBrowser()
+                content.setAccessibleName("Selectable document text")
+                content.setTextInteractionFlags(
+                    Qt.TextSelectableByMouse
+                    | Qt.TextSelectableByKeyboard
+                    | Qt.LinksAccessibleByMouse
+                )
+                content.setOpenExternalLinks(True)
+                content.setHtml(preview.html)
+                container.zoom_in = content.zoomIn
+                container.zoom_out = content.zoomOut
+        except (ImportError, ValueError, RuntimeError) as exc:
+            tab.show_notice(f"Document preview failed: {exc}")
+            container.deleteLater()
+            return
+        layout.addWidget(content)
+        placeholder = tab.layout().itemAt(1)
+        if placeholder and placeholder.widget():
+            placeholder.widget().hide()
+        tab.viewer = container
+        tab.layout().addWidget(container)
+        self._install_preview_context_menu(tab, container)
+        tab.notice.hide()
+        if tab is self.active_tab() and self.focusWidget() is self.tabs:
+            content.setFocus(Qt.OtherFocusReason)
 
     def _request_workbook_sheet(self, path, sheet_name, viewer):
         viewer.requested_sheet = sheet_name
@@ -2238,6 +3445,8 @@ class Window(QMainWindow):
         self.pending_markdown_preview = None
         if not tab or not tab.editor:
             return
+        if tab.property("folderLargeMarkdownSource"):
+            return
         if (tab.markdown and tab.property("folderMarkdownRendered")) or (
                 isinstance(tab.editor, SourceEditor)
                 and tab.property("folderSourceHighlighted")):
@@ -2252,8 +3461,16 @@ class Window(QMainWindow):
         tab = self.pending_markdown_preview
         self.pending_markdown_preview = None
         if (not tab or self.tabs.indexOf(tab) < 0 or tab is not self.active_tab()
-                or not tab.editor or not tab.loaded or tab.dirty):
+                or not tab.editor or not tab.loaded):
             return
+        if tab.dirty:
+            # Markdown's initial display formatting can briefly toggle Qt's
+            # modified flag. Reconcile that formatting-only state before
+            # abandoning the deferred render; real buffer edits still differ
+            # from clean_text and remain protected from replacement.
+            self._clear_initial_formatting_dirty(tab)
+            if tab.dirty:
+                return
         if isinstance(tab.editor, SourceEditor):
             tab.editor.enable_syntax_highlighting()
             tab.setProperty("folderSourceHighlighted", True)
@@ -2380,6 +3597,65 @@ class Window(QMainWindow):
         if picker.exec() == QDialog.Accepted and picker.selected_line:
             self._reveal_editor_line(tab, picker.selected_line)
 
+    def _format_active_markdown_table(self):
+        tab = self.active_tab()
+        if not tab or not tab.markdown or not tab.editor:
+            self.statusBar().showMessage(
+                "Format Table is available in a Markdown editor", 4000
+            )
+            return
+        source = tab.text_for_save()
+        cursor_line = tab.editor.textCursor().blockNumber()
+        formatted, changed = format_markdown_table(source, cursor_line)
+        if not changed:
+            self.statusBar().showMessage(
+                "No unformatted Markdown table at the cursor", 4000
+            )
+            return
+        old_lines = source.splitlines()
+        new_lines = formatted.splitlines()
+        changed_lines = [
+            index for index, (old, new) in enumerate(zip(old_lines, new_lines))
+            if old != new
+        ]
+        if not changed_lines:
+            return
+        first, last = min(changed_lines), max(changed_lines)
+        replacement = "\n".join(new_lines[first:last + 1])
+        replacement = tab.editor._to_display(replacement)
+        document = tab.editor.document()
+        first_block = document.findBlockByNumber(first)
+        last_block = document.findBlockByNumber(last)
+        if not first_block.isValid() or not last_block.isValid():
+            self.statusBar().showMessage("Could not locate the table in the editor", 4000)
+            return
+        original_cursor = tab.editor.textCursor()
+        original_line = original_cursor.blockNumber()
+        original_column = original_cursor.position() - original_cursor.block().position()
+        edit = QTextCursor(document)
+        edit.setPosition(first_block.position())
+        edit.setPosition(
+            last_block.position() + max(0, last_block.length() - 1),
+            QTextCursor.KeepAnchor,
+        )
+        tab.editor._display_guard = True
+        try:
+            edit.beginEditBlock()
+            edit.insertText(replacement)
+            edit.endEditBlock()
+        finally:
+            tab.editor._display_guard = False
+        restored_block = document.findBlockByNumber(original_line)
+        if restored_block.isValid():
+            restored = QTextCursor(document)
+            restored.setPosition(
+                restored_block.position()
+                + min(original_column, max(0, restored_block.length() - 1))
+            )
+            tab.editor.setTextCursor(restored)
+        self._refresh_markdown_dirty(tab)
+        self.statusBar().showMessage("Markdown table aligned", 3000)
+
     def eventFilter(self, obj, event):  # type: ignore[override]
         if (event.type() == QEvent.KeyPress
                 and event.key() == Qt.Key_Escape
@@ -2503,6 +3779,7 @@ class Window(QMainWindow):
 
     def _tab_changed(self, index):
         tab = self.active_tab()
+        self._update_window_identity_title(tab)
         if tab and not self._cycling_tabs:
             self.mru = [tab.path] + [p for p in self.mru if p != tab.path]
         if hasattr(self, "save_action"):
@@ -2687,6 +3964,13 @@ class Window(QMainWindow):
     def _update_welcome(self):
         self.welcome.setVisible(self.tabs.count() == 0)
         self.tabs.setVisible(self.tabs.count() > 0)
+        self._update_window_identity_title(self.active_tab())
+
+    def _update_window_identity_title(self, tab=None):
+        title = f"Folder Navigator — {self.root.name}"
+        if tab is not None:
+            title += f" — {tab.path.name}"
+        self.setWindowTitle(title)
 
     def _focus_tree_when_tabs_empty(self, preferred_path=None):
         """Return keyboard/vi navigation to the folder tree after the last close."""
@@ -2784,6 +4068,7 @@ class Window(QMainWindow):
             return
         self.search_cancel.set()
         self.catalog_cancel.set()
+        self._close_excalidraw_processes()
         self._persist()
         self.executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
@@ -3203,6 +4488,7 @@ class Window(QMainWindow):
                     target_directory, target_index, create_folder=True
                 ),
             )
+            self._add_new_diagram_actions(menu, target_directory, target_index)
             menu.addAction("Open Terminal Here", lambda: self.terminal(target_directory))
             menu.exec(self.tree.viewport().mapToGlobal(point))
             return
@@ -3230,6 +4516,7 @@ class Window(QMainWindow):
                 target_directory, target_index, create_folder=True
             ),
         )
+        self._add_new_diagram_actions(menu, target_directory, target_index)
         menu.addAction("Remove Bookmark" if str(path) in self._bookmarks() else "Bookmark", lambda: self.toggle_bookmark(path))
         menu.addAction("Reveal in File Manager", lambda: self.reveal(path))
         if not folder:
@@ -3239,7 +4526,23 @@ class Window(QMainWindow):
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         menu.exec(self.tree.viewport().mapToGlobal(point))
 
-    def _begin_new_file(self, directory, directory_index=None, *, create_folder=False):
+    def _add_new_diagram_actions(self, menu, directory, directory_index):
+        for label, suffix in (
+            ("New PlantUML Diagram", ".puml"),
+            ("New Mermaid Diagram", ".mmd"),
+            ("New Excalidraw Diagram", ".excalidraw"),
+        ):
+            menu.addAction(
+                label,
+                lambda checked=False, selected=suffix: self._begin_new_file(
+                    directory,
+                    directory_index,
+                    diagram_suffix=selected,
+                ),
+            )
+
+    def _begin_new_file(self, directory, directory_index=None, *, create_folder=False,
+                        diagram_suffix=None):
         """Show an inline editor for a new file or folder name."""
         self._cancel_new_file()
         directory = Path(directory)
@@ -3261,6 +4564,10 @@ class Window(QMainWindow):
         kind = "folder" if create_folder else "file"
         edit.setPlaceholderText(f"New {kind} name")
         edit.setAccessibleName(f"New {kind} name")
+        if diagram_suffix:
+            basename = "diagram"
+            edit.setText(f"{basename}{diagram_suffix}")
+            edit.setSelection(0, len(basename))
         edit.setGeometry(x, y, max(180, self.tree.viewport().width() - x - 8), 28)
         edit.setStyleSheet(
             f"border: 2px solid {theme_value('main_window.focus_border.default', '#4A90E2')}; "
@@ -3270,6 +4577,7 @@ class Window(QMainWindow):
         edit.canceled.connect(self._cancel_new_file)
         self.new_file_directory = directory
         self.new_file_is_folder = bool(create_folder)
+        self.new_file_diagram_suffix = diagram_suffix
         self.new_file_edit = edit
         edit.show()
         edit.raise_()
@@ -3286,6 +4594,7 @@ class Window(QMainWindow):
         self.new_file_edit = None
         self.new_file_directory = None
         self.new_file_is_folder = False
+        self.new_file_diagram_suffix = None
         if edit is not None:
             edit.hide()
             edit.deleteLater()
@@ -3294,6 +4603,7 @@ class Window(QMainWindow):
         edit = self.new_file_edit
         directory = self.new_file_directory
         create_folder = self.new_file_is_folder
+        diagram_suffix = self.new_file_diagram_suffix
         if edit is None or directory is None:
             return
         name = edit.text().strip()
@@ -3307,13 +4617,16 @@ class Window(QMainWindow):
             )
             edit.selectAll()
             return
+        if diagram_suffix and not name.casefold().endswith(diagram_suffix):
+            name += diagram_suffix
         target = directory / name
         try:
             if create_folder:
                 target.mkdir()
             else:
-                with target.open("x", encoding="utf-8"):
-                    pass
+                with target.open("x", encoding="utf-8") as stream:
+                    if diagram_suffix:
+                        stream.write(self._new_diagram_template(diagram_suffix))
         except FileExistsError:
             self.statusBar().showMessage(f"An item named {name} already exists", 8000)
             edit.selectAll()
@@ -3331,6 +4644,23 @@ class Window(QMainWindow):
         tab = self.active_tab()
         if tab and tab.editor:
             tab.editor.setFocus(Qt.OtherFocusReason)
+        if diagram_suffix:
+            QTimer.singleShot(0, lambda selected=target: self._open_specialized_editor(selected))
+
+    @staticmethod
+    def _new_diagram_template(suffix):
+        return {
+            ".puml": "@startuml\nA -> B: message\n@enduml\n",
+            ".mmd": "flowchart TD\n  A[Start] --> B[End]\n",
+            ".excalidraw": json.dumps({
+                "type": "excalidraw",
+                "version": 2,
+                "source": "https://excalidraw.com",
+                "elements": [],
+                "appState": {"viewBackgroundColor": "#ffffff"},
+                "files": {},
+            }, ensure_ascii=False, indent=2) + "\n",
+        }.get(str(suffix).casefold(), "")
 
     @staticmethod
     def _specialized_editor_label(path):
@@ -3343,6 +4673,7 @@ class Window(QMainWindow):
     def _open_specialized_editor(self, path):
         """Open a diagram in the matching standalone StillPoint editor."""
         path = Path(path)
+        external_grant = None
         try:
             suffix = path.suffix.casefold()
             if suffix == ".puml":
@@ -3352,15 +4683,17 @@ class Window(QMainWindow):
                 from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
                 window = MermaidEditorWindow(str(path), parent=None)
             elif suffix == ".excalidraw":
-                from sp.app.ui.excalidraw_window import ExcalidrawWindow
-                window = ExcalidrawWindow(
-                    str(path), parent=None, url=self._excalidraw_editor_url(path)
+                editor_url, external_grant = self._excalidraw_editor_url(
+                    path, include_grant=True
                 )
+                self._launch_excalidraw_process(path, editor_url, external_grant)
+                return
             else:
                 return
             window.setWindowFlag(Qt.Window, True)
             window.setWindowFlag(Qt.Tool, False)
             window.setWindowModality(Qt.NonModal)
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
             if hasattr(window, "fileSaved"):
                 window.fileSaved.connect(self._specialized_file_saved)
             self.specialized_editor_windows.append(window)
@@ -3368,15 +4701,100 @@ class Window(QMainWindow):
                 lambda _=None, item=window: self.specialized_editor_windows.remove(item)
                 if item in self.specialized_editor_windows else None
             )
+            if suffix == ".excalidraw" and external_grant:
+                window.destroyed.connect(
+                    lambda _=None, grant=external_grant: self._revoke_excalidraw_grant(grant)
+                )
             window.show()
         except Exception as exc:
+            if external_grant:
+                self._revoke_excalidraw_grant(external_grant)
             QMessageBox.warning(
                 self,
                 "Could not open diagram editor",
                 f"Could not open {path.name} in its StillPoint editor:\n{exc}",
             )
 
-    def _excalidraw_editor_url(self, path):
+    def _launch_excalidraw_process(self, path, editor_url, external_grant=None):
+        """Host WebEngine outside the navigator's Qt process.
+
+        Constructing QWebEngineView after QApplication is running can crash
+        natively on Linux and macOS. StillPoint's main window therefore uses
+        a dedicated process for Excalidraw, and the navigator must do the same.
+        """
+        from sp.app.ui.webengine_env import env_truthy
+
+        path = Path(path)
+        if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):
+            if not QDesktopServices.openUrl(QUrl(editor_url)):
+                raise RuntimeError("Could not open the Excalidraw URL in the default browser")
+            if external_grant:
+                # The browser has no child-process lifetime to observe. Keep
+                # the scoped grant until this navigator closes (or its server
+                # TTL expires).
+                self.excalidraw_browser_grants.add(external_grant)
+            return
+
+        title = f"Excalidraw - {path.name}"
+        if getattr(sys, "frozen", False):
+            command = [
+                sys.executable,
+                "--excalidraw-webview",
+                "--excalidraw-webview-url",
+                editor_url,
+                "--excalidraw-webview-title",
+                title,
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "sp.app.excalidraw_webview_process",
+                "--url",
+                editor_url,
+                "--title",
+                title,
+            ]
+        env = os.environ.copy()
+        env.setdefault("SP_WEBENGINE_PROFILE", os.getenv("SP_WEBENGINE_PROFILE", "safe"))
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parents[3]),
+            env=env,
+        )
+        self.excalidraw_processes.append((process, external_grant, path))
+        if not self.excalidraw_process_timer.isActive():
+            self.excalidraw_process_timer.start()
+
+    def _poll_excalidraw_processes(self):
+        active = []
+        for process, grant, path in self.excalidraw_processes:
+            if process.poll() is None:
+                active.append((process, grant, path))
+                continue
+            if grant:
+                self._revoke_excalidraw_grant(grant)
+            self._specialized_file_saved(str(path))
+        self.excalidraw_processes = active
+        if not active:
+            self.excalidraw_process_timer.stop()
+
+    def _close_excalidraw_processes(self):
+        self.excalidraw_process_timer.stop()
+        for process, grant, _path in self.excalidraw_processes:
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+            if grant:
+                self._revoke_excalidraw_grant(grant)
+        self.excalidraw_processes.clear()
+        for grant in self.excalidraw_browser_grants:
+            self._revoke_excalidraw_grant(grant)
+        self.excalidraw_browser_grants.clear()
+
+    def _excalidraw_editor_url(self, path, *, include_grant=False):
         """Build the authenticated editor URL for a drawing in the active vault."""
         from sp.app import config
 
@@ -3388,21 +4806,72 @@ class Window(QMainWindow):
             os.environ.get("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", "").strip()
             or config.get_active_vault()
         )
-        if not api_base or not vault_text:
+        if not api_base:
             raise RuntimeError("Start StillPoint before opening an Excalidraw editor")
-        vault = Path(vault_text).expanduser().resolve(strict=True)
         target = Path(path).expanduser().resolve(strict=True)
-        try:
-            relative = "/" + target.relative_to(vault).as_posix()
-        except ValueError as exc:
-            raise RuntimeError(
-                "Excalidraw editing currently requires a file inside the active StillPoint vault"
-            ) from exc
-        query = f"path={quote(relative, safe='')}"
+        access_path = None
+        external_grant = None
+        if vault_text:
+            try:
+                vault = Path(vault_text).expanduser().resolve(strict=True)
+                access_path = "/" + target.relative_to(vault).as_posix()
+            except (OSError, ValueError):
+                pass
+        if access_path is None:
+            access_path, external_grant = self._create_excalidraw_grant(
+                api_base, target
+            )
+        query = f"path={quote(access_path, safe='')}"
         token = self._stillpoint_local_ui_token()
         if token:
             query += f"&token={quote(token, safe='')}"
-        return f"{api_base}/excalidraw/edit?{query}"
+        url = f"{api_base}/excalidraw/edit?{query}"
+        return (url, external_grant) if include_grant else url
+
+    def _create_excalidraw_grant(self, api_base, path):
+        token = self._stillpoint_local_ui_token()
+        if not token:
+            raise RuntimeError("StillPoint local UI authentication is unavailable")
+        request = urllib.request.Request(
+            f"{api_base}/api/excalidraw/external-grant",
+            data=json.dumps({"path": str(path)}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Local-UI-Token": token,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"StillPoint could not grant access to this drawing ({exc.code}): {detail}"
+            ) from exc
+        access_path = str(payload.get("path") or "")
+        grant_id = str(payload.get("grant_id") or "")
+        if not access_path.startswith("external:") or not grant_id:
+            raise RuntimeError("StillPoint returned an invalid external-file grant")
+        return access_path, grant_id
+
+    def _revoke_excalidraw_grant(self, grant_id):
+        api_base = (
+            os.environ.get("SP_FOLDER_NAVIGATOR_API_BASE", "").strip()
+            or self._stillpoint_state("api-base")
+        ).rstrip("/")
+        token = self._stillpoint_local_ui_token()
+        if not api_base or not token:
+            return
+        request = urllib.request.Request(
+            f"{api_base}/api/excalidraw/external-grant/{quote(str(grant_id), safe='')}",
+            method="DELETE",
+            headers={"X-Local-UI-Token": token},
+        )
+        try:
+            urllib.request.urlopen(request, timeout=3).close()
+        except (OSError, urllib.error.URLError):
+            pass
 
     def _specialized_file_saved(self, saved_path):
         """Immediately reconcile a diagram save with its navigator preview/tab."""
@@ -3430,6 +4899,8 @@ class Window(QMainWindow):
         menu = tab.editor.createStandardContextMenu(point)
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
+        if tab.markdown:
+            menu.addAction("Format Markdown Table", self._format_active_markdown_table)
         reveal_action = menu.addAction("Reveal in Folder")
         reveal_action.triggered.connect(lambda: self.reveal_tree(tab.path))
         return menu
@@ -3439,6 +4910,53 @@ class Window(QMainWindow):
         if menu is None:
             return
         menu.exec(tab.editor.viewport().mapToGlobal(point))
+
+    def _install_preview_context_menu(self, tab, root):
+        """Give every non-editor preview surface the same navigator action."""
+        if root is None:
+            return
+        targets = [(root, root)]
+        for widget in root.findChildren(QWidget):
+            if isinstance(widget, QAbstractScrollArea):
+                targets.append((widget.viewport(), widget))
+                continue
+            ancestor = widget.parentWidget()
+            inside_scroll_area = False
+            while ancestor is not None and ancestor is not root:
+                if isinstance(ancestor, QAbstractScrollArea):
+                    inside_scroll_area = True
+                    break
+                ancestor = ancestor.parentWidget()
+            if not inside_scroll_area:
+                targets.append((widget, widget))
+        for target, menu_owner in targets:
+            if target.property("folderRevealContextInstalled"):
+                continue
+            target.setProperty("folderRevealContextInstalled", True)
+            target.setContextMenuPolicy(Qt.CustomContextMenu)
+            target.customContextMenuRequested.connect(
+                lambda point, t=tab, source=target, owner=menu_owner:
+                    self._show_preview_context_menu(t, source, owner, point)
+            )
+
+    def _create_preview_context_menu(self, tab, owner=None, point=None):
+        menu = None
+        create_standard = getattr(owner, "createStandardContextMenu", None)
+        if callable(create_standard):
+            try:
+                menu = create_standard(point)
+            except TypeError:
+                menu = create_standard()
+        if menu is None:
+            menu = QMenu(self)
+        if menu.actions() and not menu.actions()[-1].isSeparator():
+            menu.addSeparator()
+        menu.addAction("Reveal in Folder", lambda: self.reveal_tree(tab.path))
+        return menu
+
+    def _show_preview_context_menu(self, tab, source, owner, point):
+        menu = self._create_preview_context_menu(tab, owner, point)
+        menu.exec(source.mapToGlobal(point))
 
     def _close_indices(self, indices):
         tabs = [self.tabs.widget(i) for i in indices]
@@ -3463,7 +4981,7 @@ class Window(QMainWindow):
 
     def _open_navigator_selection_in_system(self):
         path = None
-        if self.rail.currentWidget() is self.tree:
+        if self.rail.currentIndex() == 0:
             index = self.tree.currentIndex()
             if index.isValid():
                 path = Path(self.model.filePath(index))
@@ -3575,18 +5093,23 @@ class Window(QMainWindow):
             if isinstance(widget, Picker) and widget.window is self and widget.quick:
                 widget.refresh()
 
-    def _warm_catalog(self):
+    def _warm_catalog(self, *, force=False):
         if self.catalog_running or self.catalog_warmed:
             return
+        self.catalog_cancel = threading.Event()
         self.catalog_warmed = True
         self.catalog_running = True
+        self.catalog_state = "running"
+        self.catalog_indexed_this_run = 0
+        self.catalog_force_scan = force
+        self.index_cancel_button.setEnabled(True)
         self._update_index_notice()
+
         def job():
             generation = None
-            scan_skipped = []
-            def skipped_directory(path, entry_count):
-                scan_skipped.append((path, entry_count))
-                self.bridge.result.emit(("catalog-skip", path, entry_count))
+            indexed = 0
+            started = time.monotonic()
+            state = "complete"
             try:
                 if self.catalog_db is not None:
                     generation = self.catalog_db.begin_refresh()
@@ -3594,26 +5117,39 @@ class Window(QMainWindow):
                 for path in walk_files(
                     self.root, self.root, hidden=True,
                     canceled=self.catalog_cancel.is_set,
-                    max_directory_entries=MAX_DIRECTORY_ENTRIES,
-                    skipped=skipped_directory,
+                    # Dense legitimate directories should remain searchable.
+                    # Global file/time budgets protect the application instead.
+                    max_directory_entries=None,
                 ):
+                    if not force and indexed >= MAX_INDEX_FILES:
+                        state = "partial"
+                        break
+                    if not force and time.monotonic() - started >= MAX_INDEX_SECONDS:
+                        state = "partial"
+                        break
                     batch.append(path)
+                    indexed += 1
                     if len(batch) >= 500:
                         self._catalog_batch(batch, generation)
                         batch = []
                 if batch:
                     self._catalog_batch(batch, generation)
-                complete = not self.catalog_cancel.is_set()
+                if self.catalog_cancel.is_set():
+                    state = "canceled"
+                complete = state == "complete"
                 if self.catalog_db is not None and generation is not None:
-                    self.catalog_db.record_skipped_directories(
-                        scan_skipped, generation
+                    self.catalog_db.finish_refresh(
+                        generation,
+                        complete=complete,
+                        state=state,
                     )
-                    self.catalog_db.finish_refresh(generation, complete=complete)
-                self.bridge.finished.emit(("catalog", complete))
+                self.bridge.finished.emit(("catalog", state, indexed))
             except (OSError, sqlite3.Error) as exc:
                 if self.catalog_db is not None and generation is not None:
                     try:
-                        self.catalog_db.finish_refresh(generation, complete=False)
+                        self.catalog_db.finish_refresh(
+                            generation, complete=False, state="error"
+                        )
                     except (OSError, sqlite3.Error):
                         pass
                 self.bridge.finished.emit(("catalog-error", str(exc)))
@@ -3631,7 +5167,11 @@ class Window(QMainWindow):
         self.search_results.clear()
         self.search_results.setFocus(Qt.OtherFocusReason)
         self._last_search_path = None
-        self.search_progress.setText(f"Searching {self.scope}…")
+        rg = shutil.which("rg")
+        engine = "ripgrep" if rg else "filesystem fallback"
+        self.search_progress.setText(
+            f"Searching {self.scope} with {engine}… Cancel remains available"
+        )
         scope = self.scope
         case, whole, regex = self.search_case.isChecked(), self.search_word.isChecked(), self.search_regex.isChecked()
         ignore = not self.search_ignored.isChecked()
@@ -3642,6 +5182,35 @@ class Window(QMainWindow):
                 name_expression = re.compile((rf"\b(?:{query if regex else re.escape(query)})\b" if whole
                                               else query if regex else re.escape(query)),
                                              0 if case else re.IGNORECASE)
+                if canceled.is_set():
+                    self.bridge.finished.emit((
+                        "search", generation, 0, 0, True, False, [],
+                    ))
+                    return
+                if rg:
+                    records = self._ripgrep_search(
+                        rg,
+                        scope,
+                        query,
+                        name_expression,
+                        case=case,
+                        whole=whole,
+                        regex=regex,
+                        include_ignored=not ignore,
+                        canceled=canceled,
+                    )
+                    for path, line, excerpt in records:
+                        if canceled.is_set():
+                            break
+                        self.bridge.result.emit(
+                            ("search", generation, path, line, excerpt)
+                        )
+                        count += 1
+                    self.bridge.finished.emit((
+                        "search", generation, count, 0,
+                        canceled.is_set(), count >= MAX_RESULTS, [],
+                    ))
+                    return
                 for path in walk_files(
                     self.root,
                     scope,
@@ -3676,6 +5245,117 @@ class Window(QMainWindow):
                 self.bridge.finished.emit(("search-error", generation, str(exc)))
         self.executor.submit(job)
 
+    def _ripgrep_search(
+        self,
+        rg,
+        scope,
+        query,
+        name_expression,
+        *,
+        case,
+        whole,
+        regex,
+        include_ignored,
+        canceled,
+    ):
+        """Return bounded filename/content matches using ripgrep's native walk."""
+        target = "." if scope == self.root else scope.relative_to(self.root).as_posix()
+        common = ["--no-messages"]
+        if include_ignored:
+            common.extend(("--hidden", "--no-ignore"))
+        for name in sorted(DEFAULT_PRUNED_DIRECTORY_NAMES):
+            common.extend(("--glob", f"!**/{name}/**"))
+
+        def lines(command):
+            process = subprocess.Popen(
+                command,
+                cwd=self.root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            done = threading.Event()
+
+            def cancel_process():
+                while not done.wait(.05):
+                    if canceled.is_set():
+                        try:
+                            process.terminate()
+                        except OSError:
+                            pass
+                        return
+
+            threading.Thread(target=cancel_process, daemon=True).start()
+            exhausted = False
+            try:
+                if process.stdout is not None:
+                    for output_line in process.stdout:
+                        yield output_line
+                exhausted = True
+            finally:
+                done.set()
+                if process.stdout is not None:
+                    process.stdout.close()
+                if not exhausted and process.poll() is None:
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                return_code = process.wait()
+            if exhausted and return_code not in (0, 1) and not canceled.is_set():
+                raise RuntimeError(f"ripgrep exited with status {return_code}")
+
+        records = []
+        files_command = [rg, "--files", *common, "--", target]
+        for raw_path in lines(files_command):
+            if canceled.is_set() or len(records) >= MAX_RESULTS:
+                break
+            relative = raw_path.rstrip("\r\n")
+            path = self.root / relative
+            if name_expression.search(path.name):
+                records.append((path, None, "Filename match"))
+
+        if not canceled.is_set() and len(records) < MAX_RESULTS:
+            content_command = [
+                rg,
+                "--json",
+                "--line-number",
+                "--max-filesize",
+                str(MAX_SEARCH_BYTES),
+                *common,
+            ]
+            content_command.append("--case-sensitive" if case else "--ignore-case")
+            if whole:
+                content_command.append("--word-regexp")
+            if not regex:
+                content_command.append("--fixed-strings")
+            content_command.extend(("--", query, target))
+            for raw_event in lines(content_command):
+                if canceled.is_set() or len(records) >= MAX_RESULTS:
+                    break
+                try:
+                    event = json.loads(raw_event)
+                    if event.get("type") != "match":
+                        continue
+                    data = event["data"]
+                    relative = data["path"]["text"]
+                    line = int(data["line_number"])
+                    excerpt = data["lines"]["text"].strip()[:220]
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                records.append((self.root / relative, line, excerpt))
+
+        records.sort(
+            key=lambda item: (
+                str(item[0].relative_to(self.root)).casefold(),
+                -1 if item[1] is None else item[1],
+            )
+        )
+        return records[:MAX_RESULTS]
+
     def _search_result(self, payload):
         if payload[0] == "table":
             _, path, preview, allow_source, error = payload
@@ -3684,6 +5364,10 @@ class Window(QMainWindow):
         if payload[0] == "diagram":
             _, path, signature, svg, pixels, error = payload
             self._show_diagram_preview(path, signature, svg, pixels, error)
+            return
+        if payload[0] == "document":
+            _, path, signature, preview, error = payload
+            self._show_document_preview(path, signature, preview, error)
             return
         if payload[0] == "image":
             _, path, pixels, error = payload
@@ -3696,12 +5380,17 @@ class Window(QMainWindow):
                     tab.layout().itemAt(1).widget().hide()
                     tab.viewer = ImageView(path, pixels)
                     tab.layout().addWidget(tab.viewer)
+                    self._install_preview_context_menu(tab, tab.viewer)
             return
         if payload[0] == "catalog":
             if self.catalog_db is None:
                 self.catalog.update(payload[1])
                 self.ignored_paths.update(payload[2])
-            self.catalog_refresh_timer.start(250)
+            self.catalog_indexed_this_run += len(payload[1])
+            self._update_index_notice()
+            # Avoid re-running a large Quick Open query for every 500-file
+            # batch. The last batch wins and refreshes after indexing settles.
+            self.catalog_refresh_timer.start(750)
             return
         if payload[0] == "catalog-skip":
             self.skipped_directories[payload[1]] = payload[2]
@@ -3747,7 +5436,11 @@ class Window(QMainWindow):
                     f"Copied {len(copied)} dropped item(s)", 5000
                 )
         elif payload[0] == "catalog":
+            _, state, indexed = payload
             self.catalog_running = False
+            self.catalog_state = state
+            self.catalog_indexed_this_run = indexed
+            self.index_cancel_button.setEnabled(True)
             if self.catalog_db is not None:
                 try:
                     self.catalog_count = self.catalog_db.count()
@@ -3758,9 +5451,21 @@ class Window(QMainWindow):
                     pass
             self._update_index_notice()
             self._refresh_quick_pickers()
+            if state == "partial":
+                self.statusBar().showMessage(
+                    "Large folder detected: Quick Open is using a partial index. "
+                    "Use Continue Full Index only if full-root coverage is required.",
+                    20000,
+                )
+            elif state == "canceled":
+                self.statusBar().showMessage(
+                    f"Indexing canceled; {self.catalog_count:,} cached files remain available",
+                    10000,
+                )
         elif payload[0] == "catalog-error":
             self.catalog_running = False
             self.catalog_warmed = False
+            self.catalog_state = "error"
             self._update_index_notice()
             self.statusBar().showMessage(f"Quick Open indexing failed: {payload[1]}", 15000)
         elif payload[0] == "search-error":
@@ -3887,9 +5592,19 @@ class Window(QMainWindow):
                     != getattr(tab, "preview_signature", None)):
                 tab.show_notice("Refreshing diagram preview…")
                 self._load_diagram_preview(tab.path)
+            elif tab.path.suffix.casefold() in DOCUMENT_SUFFIXES:
+                try:
+                    from .documents import document_signature
+                    changed = document_signature(tab.path) != getattr(
+                        tab, "preview_signature", None
+                    )
+                except OSError:
+                    changed = False
+                if changed:
+                    tab.show_notice("Refreshing document preview…")
+                    self._load_document_preview(tab.path)
         self.catalog = {p for p in self.catalog if p.exists() and inside(self.root, p)}
         self.ignored_paths.intersection_update(self.catalog)
-        self.catalog_warmed = False
         self._watch_files()
 
 

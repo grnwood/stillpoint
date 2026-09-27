@@ -886,7 +886,9 @@ class CalendarPanel(QWidget):
         self.top_splitter.setStretchFactor(0, 0)
         self.top_splitter.setStretchFactor(1, 1)
 
-        root_layout = QHBoxLayout()
+        # A vertical root keeps compact utility headings above the calendar;
+        # the splitter remains responsible for the panel's internal geometry.
+        root_layout = QVBoxLayout()
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self.top_splitter)

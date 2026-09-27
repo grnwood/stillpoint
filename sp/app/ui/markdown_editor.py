@@ -969,6 +969,10 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._base_font_size = base_pt
         self._table_font_size = max(6.0, base_pt - 2.0)
         self.table_format.setFontPointSize(self._table_font_size)
+        self._folder_navigator_table_style = False
+        self.folder_table_row_format = QTextCharFormat(self.table_format)
+        self.folder_table_header_format = QTextCharFormat(self.table_format)
+        self.folder_table_separator_format = QTextCharFormat(self.table_format)
         
         # Strikethrough format
         self.strikethrough_format = QTextCharFormat()
@@ -1008,6 +1012,28 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self._apply_heading_sizes(self._base_font_size)
         self._table_font_size = max(6.0, self._base_font_size - 2.0)
         self.table_format.setFontPointSize(self._table_font_size)
+        if self._folder_navigator_table_style:
+            self.set_folder_navigator_table_style(True)
+        else:
+            self.rehighlight()
+
+    def set_folder_navigator_table_style(self, enabled: bool) -> None:
+        """Enable the richer pipe-table treatment used only by Folder Navigator."""
+        self._folder_navigator_table_style = bool(enabled)
+        app = QApplication.instance()
+        try:
+            light = app.palette().color(QPalette.ColorRole.Base).lightness() >= 128
+        except Exception:
+            light = False
+        self.folder_table_row_format = QTextCharFormat(self.table_format)
+        self.folder_table_row_format.setBackground(QColor("#f3f6fa" if light else "#20252d"))
+        self.folder_table_header_format = QTextCharFormat(self.table_format)
+        self.folder_table_header_format.setBackground(QColor("#dce8f7" if light else "#29384b"))
+        self.folder_table_header_format.setForeground(QColor("#172033" if light else "#f2f6fb"))
+        self.folder_table_header_format.setFontWeight(QFont.Weight.DemiBold)
+        self.folder_table_separator_format = QTextCharFormat(self.table_format)
+        self.folder_table_separator_format.setBackground(QColor("#e6edf6" if light else "#253244"))
+        self.folder_table_separator_format.setForeground(QColor("#52739a" if light else "#8fb8e8"))
         self.rehighlight()
 
     def _reset_code_block_cache(self) -> None:
@@ -1270,7 +1296,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         block_num = block.blockNumber()
         
         # Use content hash for persistent caching across page loads
-        content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:16]
+        folder_table_style = bool(getattr(self, "_folder_navigator_table_style", False))
+        next_is_table_separator = bool(
+            folder_table_style
+            and block.next().isValid()
+            and TABLE_SEP_PATTERN.match(block.next().text())
+        )
+        cache_material = (
+            f"folder-table:{block_num & 1}:{int(next_is_table_separator)}:{text}"
+            if folder_table_style else text
+        )
+        content_hash = hashlib.md5(cache_material.encode('utf-8')).hexdigest()[:16]
         
         # Check persistent cache for this block content
         if content_hash in type(self)._persistent_block_cache:
@@ -1369,7 +1405,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 self._timing_total += time.perf_counter() - t0
             return
 
-        is_table = bool(TABLE_ROW_PATTERN.match(text) or TABLE_SEP_PATTERN.match(text))
+        is_table_separator = bool(TABLE_SEP_PATTERN.match(text))
+        folder_pipe_row = bool(
+            folder_table_style and re.search(r"(?<!\\)\|", text)
+        )
+        is_table = bool(
+            TABLE_ROW_PATTERN.match(text) or is_table_separator or folder_pipe_row
+        )
 
         if text.strip().startswith(("- ", "* ", "+ ", "• ")):
             self.setFormat(0, len(text), self.list_format)
@@ -1400,7 +1442,21 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         
         # Apply monospace + compact font to table rows last so pipes align
         if is_table:
-            self.setFormat(0, len(text), self.table_format)
+            if folder_table_style:
+                if is_table_separator:
+                    table_line_format = self.folder_table_separator_format
+                elif next_is_table_separator:
+                    table_line_format = self.folder_table_header_format
+                else:
+                    table_line_format = QTextCharFormat(self.folder_table_row_format)
+                    if block_num & 1:
+                        alternate = QColor(table_line_format.background().color())
+                        alternate.setAlpha(185)
+                        table_line_format.setBackground(alternate)
+                self.setFormat(0, len(text), table_line_format)
+            else:
+                table_line_format = self.table_format
+                self.setFormat(0, len(text), table_line_format)
         
         # === PHASE 2: Single-pass inline pattern scanner ===
         # Scan all patterns once instead of 10+ separate passes
@@ -1574,6 +1630,13 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         # Durable capture IDs remain in Markdown without becoming editor content.
         for comment in re.finditer(r"<!--.*?-->", text):
             set_format_cp_span(comment.start(), comment.end(), self.hidden_format)
+
+        if is_table and folder_table_style:
+            pipe_format = QTextCharFormat(table_line_format)
+            pipe_format.setForeground(QColor("#52739a" if is_light_palette else "#8fb8e8"))
+            pipe_format.setFontWeight(QFont.Weight.DemiBold)
+            for pipe in re.finditer(r"(?<!\\)\|", text):
+                set_format_cp_span(pipe.start(), pipe.end(), pipe_format)
 
         # Store computed formats in persistent cache
         self._capturing_formats = False

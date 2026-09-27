@@ -7,11 +7,12 @@ import types
 import pytest
 
 from sp.app.folder_navigator.core import (ConflictError, atomic_save, content_matches,
-    fuzzy_score, inside, read_text, walk_files)
+    fuzzy_score, inside, read_text, rich_markdown_fallback_reason, walk_files)
 from sp.app.folder_navigator.catalog import (
     CATALOG_DIRECTORY, CATALOG_FILENAME, FolderCatalog,
 )
 from sp.app.folder_navigator.tabular import read_delimited_preview, read_workbook_preview
+from sp.app.folder_navigator.editors import format_markdown_table
 
 
 def test_symlink_boundary_and_cancel(tmp_path):
@@ -50,12 +51,122 @@ def test_binary_and_invalid_encoding_are_not_editable(tmp_path):
             read_text(path)
 
 
+def test_large_markdown_guard_detects_bytes_lines_and_long_lines(monkeypatch):
+    import sp.app.folder_navigator.core as core
+
+    monkeypatch.setattr(core, "MAX_RICH_MARKDOWN_BYTES", 20)
+    monkeypatch.setattr(core, "MAX_RICH_MARKDOWN_LINES", 3)
+    monkeypatch.setattr(core, "MAX_RICH_MARKDOWN_LINE_CHARS", 8)
+
+    assert "file size" in rich_markdown_fallback_reason("short", 21)
+    assert "4 lines" in rich_markdown_fallback_reason("a\nb\nc\nd", 7)
+    assert "character line" in rich_markdown_fallback_reason("123456789", 9)
+    assert rich_markdown_fallback_reason("a\nb", 3) is None
+
+
 def test_utf16_round_trip(tmp_path):
     path = tmp_path / "wide.txt"
     path.write_bytes("first\r\nsecond\r\n".encode("utf-16"))
     loaded = read_text(path)
     atomic_save(path, "first\nupdated\n", loaded)
     assert path.read_bytes().decode("utf-16") == "first\r\nupdated\r\n"
+
+
+def test_format_markdown_table_aligns_columns_and_preserves_cell_pipes():
+    source = (
+        "Before\n\n"
+        "Name | Reference | Score\n"
+        "--- | :---: | ---:\n"
+        "Ada | [Page|label] | 9\n"
+        "Grace Hopper | `a|b` | 100\n\n"
+        "After\n"
+    )
+
+    formatted, changed = format_markdown_table(source, 4)
+
+    assert changed
+    assert "| Name         |  Reference   | Score |" in formatted
+    assert "| Ada          | [Page|label] |     9 |" in formatted
+    assert "| Grace Hopper |    `a|b`     |   100 |" in formatted
+    assert formatted.startswith("Before\n\n")
+    assert formatted.endswith("\n\nAfter\n")
+
+
+def test_rich_markdown_table_style_is_folder_navigator_only(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "table.md"
+    path.write_text("| Name | Value |\n| --- | ---: |\n| A | 1 |\n")
+    window = Window(tmp_path)
+    window.open_file(path)
+    ordinary_editor = MarkdownEditor()
+
+    assert window.active_tab().editor.highlighter._folder_navigator_table_style
+    assert not ordinary_editor.highlighter._folder_navigator_table_style
+    assert (
+        window.active_tab().editor.highlighter.folder_table_header_format.background().color()
+        != window.active_tab().editor.highlighter.table_format.background().color()
+    )
+    ordinary_editor.close()
+    window.close()
+
+
+def test_folder_navigator_format_table_action_is_one_dirty_edit(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "table.md"
+    path.write_text("| Name|Value |\n|---|---:|\n|Long name|2|\n")
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+    cursor = tab.editor.textCursor()
+    cursor.setPosition(tab.editor.document().findBlockByNumber(2).position())
+    tab.editor.setTextCursor(cursor)
+
+    window._format_active_markdown_table()
+
+    assert "| Name      | Value |" in tab.text_for_save()
+    assert "| Long name |     2 |" in tab.text_for_save()
+    assert tab.dirty
+    tab.editor.undo()
+    assert "| Name|Value |" in tab.text_for_save()
+    tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_large_markdown_opens_lightweight_and_can_explicitly_enable_rich_mode(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.core as core
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(core, "MAX_RICH_MARKDOWN_BYTES", 32)
+    path = tmp_path / "large.md"
+    path.write_text("# Large\n\n" + "table row\n" * 20)
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+
+    assert isinstance(tab.editor, SourceEditor)
+    assert tab.property("folderLargeMarkdownSource")
+    assert tab.editor.syntax_highlighter is None
+    assert "lightweight mode" in tab.notice.text()
+    assert tab.rich_markdown_button.text() == "Enable Rich Markdown Anyway"
+
+    tab.rich_markdown_button.click()
+    app.processEvents()
+
+    assert isinstance(window.active_tab().editor, MarkdownEditor)
+    assert not window.active_tab().property("folderLargeMarkdownSource")
+    window.active_tab().editor.document().setModified(False)
+    window.close()
 
 
 def test_delimited_preview_detects_dialect_header_and_multiline_cells(tmp_path):
@@ -267,6 +378,130 @@ def test_table_preview_supports_vi_cell_navigation_and_header_sorting(app):
     view.close()
 
 
+def test_table_preview_filters_selected_column_and_keeps_sorting(app):
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import SpreadsheetView
+
+    view = SpreadsheetView(
+        TablePreview(
+            [
+                ["name", "region", "amount"],
+                ["Alpha", "East", "20"],
+                ["Beta", "West", "10"],
+                ["Gamma", "Northeast", "30"],
+            ],
+            has_header=True,
+        )
+    )
+    view.filter_column.setCurrentIndex(view.filter_column.findData(1))
+    view.filter_text.setText("east")
+    view._apply_filter()
+
+    assert view.model._data_row_count() == 2
+    assert [
+        view.model.data(view.model.index(row, 0))
+        for row in range(view.model.rowCount())
+    ] == ["Alpha", "Gamma"]
+    assert "2 matching rows" in view.summary.text()
+
+    view.table.horizontalHeader().sectionClicked.emit(2)
+    assert view.model.data(view.model.index(0, 2)) == "20"
+    assert view.model.data(view.model.index(1, 2)) == "30"
+    view.filter_column.setCurrentIndex(view.filter_column.findData(-1))
+    view.filter_text.setText("beta")
+    view._apply_filter()
+    assert view.model._data_row_count() == 1
+    assert view.model.data(view.model.index(0, 0), Qt.DisplayRole) == "Beta"
+    view.close()
+
+
+def test_table_preview_excel_style_column_value_filters(app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import ColumnFilterPopup, SpreadsheetView
+
+    view = SpreadsheetView(
+        TablePreview(
+            [
+                ["name", "region", "amount"],
+                ["Alpha", "East", "20"],
+                ["Beta", "West", "10"],
+                ["Gamma", "East", "30"],
+                ["Blank", "", "5"],
+            ],
+            has_header=True,
+        )
+    )
+    assert view.value_filter_button.text() == "Filter Off"
+    view.value_filter_button.setChecked(True)
+    assert view.filter_header.filter_enabled
+    assert view.value_filter_button.text() == "Filter On"
+    assert "spreadsheetValueFilterToggle:checked" in view.value_filter_button.styleSheet()
+    assert view.model.distinct_values(1) == ["", "East", "West"]
+
+    values = view.model.distinct_values(1)
+    view._set_column_value_filter(1, {"East"}, values)
+    assert view.model._data_row_count() == 2
+    assert 1 in view.filter_header.active_filter_columns
+    assert [
+        view.model.data(view.model.index(row, 0), Qt.DisplayRole)
+        for row in range(view.model.rowCount())
+    ] == ["Alpha", "Gamma"]
+    # Other dropdowns reflect the rows admitted by already-active columns.
+    assert view.model.distinct_values(2) == ["20", "30"]
+    assert "2 matching rows" in view.summary.text()
+
+    view._set_column_value_filter(1, set(values), values)
+    assert view.model._data_row_count() == 4
+    assert not view.model.value_filters
+    view.value_filter_button.setChecked(False)
+    assert not view.filter_header.filter_enabled
+    assert view.value_filter_button.text() == "Filter Off"
+
+    popup = ColumnFilterPopup("Region", ["East", "North", "West"], {"West"})
+    popup.search.setText("east")
+    popup.values_model.set_all(True)
+    assert popup.selected_values() == {"East", "West"}
+    popup.values_model.set_all(False)
+    assert popup.selected_values() == {"West"}
+    popup.apply_button.click()
+    assert popup.result() == QDialog.Accepted
+
+    clear_popup = ColumnFilterPopup("Region", ["East", "North", "West"], {"East"})
+    clear_popup.search.setText("east")
+    clear_popup.clear_button.click()
+    assert clear_popup.selected_values() == {"East", "North", "West"}
+    assert clear_popup.result() == QDialog.Accepted
+    view.close()
+
+
+def test_table_value_filter_reports_bounded_preview_and_disables_unsafe_tables(
+        app, monkeypatch):
+    import sp.app.folder_navigator.window as navigator
+    from sp.app.folder_navigator.tabular import TablePreview
+
+    bounded = navigator.SpreadsheetView(
+        TablePreview([["name"], ["A"], ["B"]], has_header=True, truncated=True)
+    )
+    messages = []
+    bounded.statusRequested.connect(lambda message, timeout: messages.append((message, timeout)))
+    bounded.value_filter_button.setChecked(True)
+    assert "loaded preview rows only" in messages[-1][0]
+    bounded.close()
+
+    monkeypatch.setattr(navigator, "VALUE_FILTER_MAX_ROWS", 1)
+    unsafe = navigator.SpreadsheetView(
+        TablePreview([["name"], ["A"], ["B"]], has_header=True)
+    )
+    assert not unsafe.value_filter_button.isEnabled()
+    assert unsafe.value_filter_button.text() == "Filter Unavailable"
+    assert "disabled" in unsafe.value_filter_disabled_reason
+    assert not unsafe.filter_header.filter_enabled
+    unsafe.close()
+
+
 def test_ctrl_shift_enter_opens_tree_selection_with_os_handler(
         tmp_path, monkeypatch, app):
     import time
@@ -445,7 +680,11 @@ def test_editor_context_menu_is_shared_and_reveals_file(
     markdown_actions = [action.text().replace("&", "") for action in markdown_menu.actions()]
     source_actions = [action.text().replace("&", "") for action in source_menu.actions()]
 
-    assert markdown_actions == source_actions
+    assert [
+        action for action in markdown_actions if action != "Format Markdown Table"
+    ] == source_actions
+    assert "Format Markdown Table" in markdown_actions
+    assert "Format Markdown Table" not in source_actions
     assert markdown_actions[-1] == "Reveal in Folder"
     assert not ({"Page", "Navigate", "Move", "AI Actions"} & set(markdown_actions))
 
@@ -604,6 +843,60 @@ def test_walk_files_skips_overfull_directories(tmp_path):
     ))
     assert paths == []
     assert skipped == [(crowded, 5)]
+
+
+def test_walk_files_always_prunes_generated_and_vcs_trees(tmp_path):
+    visible = tmp_path / "visible.txt"
+    visible.write_text("visible")
+    for directory in (".git", "node_modules", ".venv", "__pycache__"):
+        child = tmp_path / directory
+        child.mkdir()
+        (child / "noise.txt").write_text("noise")
+
+    assert list(walk_files(tmp_path, tmp_path, hidden=True)) == [visible]
+
+
+def test_catalog_scan_state_is_persistent(tmp_path):
+    catalog = FolderCatalog(tmp_path)
+    assert catalog.scan_state() == "not_started"
+    generation = catalog.begin_refresh()
+    catalog.finish_refresh(generation, complete=False, state="partial")
+
+    assert FolderCatalog(tmp_path).scan_state() == "partial"
+
+
+def test_large_folder_catalog_pauses_at_budget_and_can_continue(
+        tmp_path, monkeypatch, app):
+    import time
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module, "MAX_INDEX_FILES", 2)
+    monkeypatch.setattr(module, "MAX_INDEX_SECONDS", 60.0)
+    for index in range(5):
+        (tmp_path / f"file-{index}.txt").write_text(str(index))
+    window = module.Window(tmp_path)
+    window.show()
+
+    window._warm_catalog()
+    deadline = time.monotonic() + 3
+    while window.catalog_running and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+
+    assert window.catalog_state == "partial"
+    assert window.catalog_indexed_this_run == 2
+    assert window.index_continue_button.isVisibleTo(window)
+
+    window._continue_catalog_indexing()
+    deadline = time.monotonic() + 3
+    while window.catalog_running and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+
+    assert window.catalog_state == "complete"
+    assert window.catalog_count == 5
+    window.close()
 
 
 def test_tree_columns_and_sort_persist_in_sqlite(tmp_path, monkeypatch, app):
@@ -918,6 +1211,7 @@ def test_picker_shares_live_model_and_filter(tmp_path, monkeypatch, app):
 
 
 def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
+    import time
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from sp.app.folder_navigator.window import Picker, Window
@@ -935,8 +1229,13 @@ def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
     app.processEvents()
 
     QTest.keyClick(picker.query, Qt.Key_Return)
-    QTest.qWait(20)
-    app.processEvents()
+    deadline = time.monotonic() + 2
+    while (
+        (window.active_tab() is None or not window.active_tab().editor.hasFocus())
+        and time.monotonic() < deadline
+    ):
+        app.processEvents()
+        time.sleep(.01)
 
     assert window.active_tab().path == path
     assert window.active_tab().editor.hasFocus()
@@ -1099,6 +1398,44 @@ def test_search_limit_and_cancel(tmp_path, monkeypatch, app):
         app.processEvents()
         time.sleep(.01)
     assert "Canceled" in window.search_progress.text()
+    window.close()
+
+
+def test_ripgrep_search_prunes_generated_trees_and_honors_ignore_toggle(
+        tmp_path, monkeypatch, app):
+    import re
+    import shutil
+    import threading
+    from sp.app.folder_navigator.window import Window
+
+    rg = shutil.which("rg")
+    if not rg:
+        pytest.skip("ripgrep is not installed")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("ignored.txt\n")
+    visible = tmp_path / "visible.txt"
+    visible.write_text("needle")
+    ignored = tmp_path / "ignored.txt"
+    ignored.write_text("needle")
+    generated = tmp_path / "node_modules"
+    generated.mkdir()
+    (generated / "dependency.txt").write_text("needle")
+    window = Window(tmp_path)
+
+    default = window._ripgrep_search(
+        rg, tmp_path, "needle", re.compile("needle", re.IGNORECASE),
+        case=False, whole=False, regex=False, include_ignored=False,
+        canceled=threading.Event(),
+    )
+    included = window._ripgrep_search(
+        rg, tmp_path, "needle", re.compile("needle", re.IGNORECASE),
+        case=False, whole=False, regex=False, include_ignored=True,
+        canceled=threading.Event(),
+    )
+
+    assert {record[0] for record in default} == {visible}
+    assert {record[0] for record in included} == {visible, ignored}
     window.close()
 
 
@@ -1584,6 +1921,47 @@ def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, 
     window.close()
 
 
+def test_folder_navigator_has_distinct_restrained_window_identity(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    document = tmp_path / "notes.txt"
+    document.write_text("notes")
+    window = Window(tmp_path)
+
+    assert window.windowTitle() == f"Folder Navigator — {tmp_path.name}"
+    assert window.identity_title.text() == "FOLDER NAVIGATOR"
+    assert tmp_path.name in window.identity_root.text()
+    assert window.identity_root.toolTip() == str(tmp_path)
+    assert window.identity_bar.minimumHeight() == 32
+    assert window.identity_bar.maximumHeight() == 32
+    assert window.columns_toolbar.isAncestorOf(window.identity_bar)
+    assert window.rail.tabText(0) == "Files"
+    assert window.folder_panel_title.text() == "FILES"
+    assert window.folder_root_badge.text() == tmp_path.name
+    assert window.navigator_status_identity.text() == "FOLDER NAVIGATOR"
+    assert window._folder_identity_accent in window.identity_bar.styleSheet()
+    assert "QTreeView::item:hover" in window.tree.styleSheet()
+    assert "border-bottom-color" in window.tree.styleSheet()
+
+    window.open_file(document, pinned=True)
+    assert window.windowTitle() == (
+        f"Folder Navigator — {tmp_path.name} — {document.name}"
+    )
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_folder_navigator_process_disables_inprocess_mermaid_webengine(monkeypatch):
+    from sp.app.folder_navigator.icon import configure_folder_navigator_process
+
+    monkeypatch.setenv("SP_DISABLE_MERMAID_WEB_PREVIEW", "0")
+    configure_folder_navigator_process()
+
+    assert os.environ["SP_DISABLE_MERMAID_WEB_PREVIEW"] == "1"
+
+
 @pytest.mark.parametrize("suffix", [".py", ".md"])
 def test_vi_escape_returns_editor_focus_to_selected_file(
         tmp_path, monkeypatch, app, suffix):
@@ -1888,6 +2266,7 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         tmp_path, monkeypatch, app, suffix):
     import time
     from types import SimpleNamespace
+    from PySide6.QtWidgets import QPushButton
     from sp.app.folder_navigator.window import ImageView, Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1919,8 +2298,10 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         updated = "flowchart TD\nA --> C\n"
     path = tmp_path / f"diagram{suffix}"
     path.write_text(initial, encoding="utf-8")
+    other = tmp_path / "notes.txt"
+    other.write_text("ordinary preview", encoding="utf-8")
     window = Window(tmp_path)
-    window.open_file(path, pinned=True)
+    window.open_file(path)
 
     deadline = time.monotonic() + 2
     while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
@@ -1928,6 +2309,40 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         app.processEvents()
         time.sleep(.01)
     assert window.active_tab().editor is None
+    assert calls == [initial]
+    open_label = (
+        "Open in PlantUML Editor" if suffix == ".puml"
+        else "Open in Mermaid Editor"
+    )
+    buttons = {
+        button.text(): button
+        for button in window.active_tab().viewer.findChildren(QPushButton)
+    }
+    assert open_label in buttons
+    assert "Copy SVG" in buttons
+    assert "Copy PNG" in buttons
+    buttons["Copy PNG"].click()
+    assert not app.clipboard().pixmap().isNull()
+    buttons["Copy SVG"].click()
+    assert app.clipboard().text().startswith('<svg xmlns="http://www.w3.org/2000/svg"')
+    assert window.active_tab().viewer.label.autoFillBackground()
+    assert (
+        window.active_tab().viewer.label.palette().color(
+            window.active_tab().viewer.label.backgroundRole()
+        ).name()
+        == "#ffffff"
+    )
+
+    # Flyover tabs are disposable, but the expensive render is reusable while
+    # the source fingerprint remains unchanged.
+    window.open_file(other)
+    assert window._index_for(path) == -1
+    window.open_file(path)
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
     assert calls == [initial]
 
     path.write_text(updated, encoding="utf-8")
@@ -1941,9 +2356,45 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
     window.close()
 
 
+def test_diagram_image_view_uses_standard_mouse_and_trackpad_navigation(
+        tmp_path, app):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QImage, QWheelEvent
+    from sp.app.folder_navigator.window import ImageView
+
+    path = tmp_path / "diagram.puml"
+    path.write_text("@startuml\n@enduml\n", encoding="utf-8")
+    image = QImage(1000, 1000, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    viewer = ImageView(path, image, canvas_color="#ffffff")
+    viewer.resize(300, 300)
+    viewer.show()
+    app.processEvents()
+    viewer.actual()
+    app.processEvents()
+    viewer.scroll.verticalScrollBar().setValue(100)
+
+    trackpad = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(0, -30), QPoint(),
+        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+    )
+    viewer.label.wheelEvent(trackpad)
+    assert viewer.scroll.verticalScrollBar().value() == 130
+    assert viewer.zoom == 1.0
+
+    mouse_wheel = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+    )
+    viewer.label.wheelEvent(mouse_wheel)
+    assert viewer.zoom == pytest.approx(1.1)
+    viewer.close()
+
+
 def test_excalidraw_selection_uses_saved_png_preview(tmp_path, monkeypatch, app):
     import time
     from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QPushButton
     from sp.app.folder_navigator.window import ImageView, Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1955,7 +2406,7 @@ def test_excalidraw_selection_uses_saved_png_preview(tmp_path, monkeypatch, app)
     assert image.save(str(preview), "PNG")
 
     window = Window(tmp_path)
-    window.open_file(path, pinned=True)
+    window.open_file(path)
     deadline = time.monotonic() + 2
     while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
         assert time.monotonic() < deadline
@@ -1963,6 +2414,23 @@ def test_excalidraw_selection_uses_saved_png_preview(tmp_path, monkeypatch, app)
         time.sleep(.01)
 
     assert window.active_tab().editor is None
+    assert any(
+        button.text() == "Open in Excalidraw Editor"
+        for button in window.active_tab().viewer.findChildren(QPushButton)
+    )
+    other = tmp_path / "notes.txt"
+    other.write_text("ordinary preview", encoding="utf-8")
+    assert len(window.diagram_preview_cache) == 1
+    window.open_file(other)
+    assert window._index_for(path) == -1
+    window.open_file(path)
+    # A cache hit is scheduled onto the UI loop and launches no decoder job.
+    assert window.diagram_preview_inflight == set()
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
     window.close()
 
 
@@ -1988,6 +2456,97 @@ def test_excalidraw_editor_url_targets_selected_vault_file(
     window.close()
 
 
+def test_excalidraw_editor_url_uses_scoped_grant_outside_vault(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.excalidraw"
+    outside.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", str(vault))
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_API_BASE", "http://127.0.0.1:8765")
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_LOCAL_UI_TOKEN", "local token")
+    window = Window(tmp_path)
+    grants = []
+    monkeypatch.setattr(
+        window,
+        "_create_excalidraw_grant",
+        lambda api_base, path: grants.append((api_base, path))
+        or ("external:opaque-grant", "opaque-grant"),
+    )
+
+    url, grant = window._excalidraw_editor_url(outside, include_grant=True)
+
+    assert grants == [("http://127.0.0.1:8765", outside.resolve())]
+    assert url == (
+        "http://127.0.0.1:8765/excalidraw/edit?"
+        "path=external%3Aopaque-grant&token=local%20token"
+    )
+    assert grant == "opaque-grant"
+    window.close()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_fragment"),
+    [
+        (".puml", "@startuml"),
+        (".mmd", "flowchart TD"),
+        (".excalidraw", '"type": "excalidraw"'),
+    ],
+)
+def test_new_diagram_inline_name_preserves_extension_and_opens_editor(
+        tmp_path, monkeypatch, app, suffix, expected_fragment):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    opened = []
+    monkeypatch.setattr(window, "_open_specialized_editor", opened.append)
+    monkeypatch.setattr(window, "_load_diagram_preview", lambda _path: None)
+    window._begin_new_file(
+        tmp_path,
+        window.model.index(str(tmp_path)),
+        diagram_suffix=suffix,
+    )
+
+    assert window.new_file_edit.text() == f"diagram{suffix}"
+    assert window.new_file_edit.selectedText() == "diagram"
+    QTest.keyClicks(window.new_file_edit, "architecture")
+    QTest.keyClick(window.new_file_edit, Qt.Key_Return)
+    app.processEvents()
+
+    created = tmp_path / f"architecture{suffix}"
+    assert created.is_file()
+    assert expected_fragment in created.read_text(encoding="utf-8")
+    assert opened == [created]
+    assert window.active_tab().path == created
+    window.close()
+
+
+def test_folder_context_menu_exposes_all_new_diagram_actions(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QMenu
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    menu = QMenu(window)
+    window._add_new_diagram_actions(
+        menu, tmp_path, window.model.index(str(tmp_path))
+    )
+
+    assert [action.text() for action in menu.actions()] == [
+        "New PlantUML Diagram",
+        "New Mermaid Diagram",
+        "New Excalidraw Diagram",
+    ]
+    window.close()
+
+
 def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, app):
     import sp.app.ui.plantuml_editor_window as plantuml_editor
     from PySide6.QtWidgets import QMainWindow
@@ -2010,6 +2569,61 @@ def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, a
     assert opened == [str(diagram)]
     assert len(window.specialized_editor_windows) == 1
     window.specialized_editor_windows[0].close()
+    window.close()
+
+
+def test_excalidraw_launcher_uses_isolated_webengine_process_and_revokes_grant(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("SP_DISABLE_EXCALIDRAW_WEBENGINE", raising=False)
+    drawing = tmp_path / "diagram.excalidraw"
+    drawing.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    window = Window(tmp_path)
+    monkeypatch.setattr(
+        window,
+        "_excalidraw_editor_url",
+        lambda path, include_grant=False: (
+            "http://127.0.0.1:8765/excalidraw/edit?path=external%3Agrant",
+            "grant",
+        ),
+    )
+    revoked = []
+    refreshed = []
+    monkeypatch.setattr(window, "_revoke_excalidraw_grant", revoked.append)
+    monkeypatch.setattr(window, "_specialized_file_saved", refreshed.append)
+
+    class FakeProcess:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+    launched = {}
+    process = FakeProcess()
+
+    def fake_popen(command, **kwargs):
+        launched.update(command=command, kwargs=kwargs)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    window._open_specialized_editor(drawing)
+
+    assert launched["command"][1:3] == ["-m", "sp.app.excalidraw_webview_process"]
+    assert launched["command"][-2:] == ["--title", "Excalidraw - diagram.excalidraw"]
+    assert len(window.excalidraw_processes) == 1
+    assert window.excalidraw_process_timer.isActive()
+
+    process.returncode = 0
+    window._poll_excalidraw_processes()
+    assert window.excalidraw_processes == []
+    assert revoked == ["grant"]
+    assert refreshed == [str(drawing)]
+    assert not window.excalidraw_process_timer.isActive()
     window.close()
 
 
@@ -2138,6 +2752,45 @@ def test_empty_tree_context_new_folder_targets_displayed_level(
     app.processEvents()
 
     assert (tmp_path / "created-here").is_dir()
+    window.close()
+
+
+def test_right_click_targets_tree_item_without_previewing_it(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(first)
+    window.reveal_tree(first)
+    app.processEvents()
+
+    first_index = window.model.index(str(first))
+    second_index = window.model.index(str(second))
+    window.tree.scrollTo(second_index)
+    app.processEvents()
+    point = window.tree.visualRect(second_index).center()
+    event = QMouseEvent(
+        QEvent.MouseButtonPress,
+        QPointF(point),
+        QPointF(window.tree.viewport().mapToGlobal(point)),
+        Qt.RightButton,
+        Qt.RightButton,
+        Qt.NoModifier,
+    )
+    window.tree.mousePressEvent(event)
+    app.processEvents()
+
+    assert window.tree.currentIndex() == first_index
+    assert window.active_tab().path == first
+    assert window._index_for(second) == -1
     window.close()
 
 

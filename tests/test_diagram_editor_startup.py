@@ -85,6 +85,26 @@ def test_preview_ctrl_touchpad_scroll_zooms_without_panning(qtbot) -> None:
     assert zooms == [1]
 
 
+def test_plantuml_scaled_preview_expands_scrollable_canvas(
+        qapp, qtbot, monkeypatch, tmp_path: Path) -> None:
+    from PySide6.QtGui import QPixmap
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr(PlantUMLEditorWindow, "_render", lambda self: None)
+    drawing = tmp_path / "scrollable.puml"
+    drawing.write_text("@startuml\nA -> B\n@enduml\n", encoding="utf-8")
+    window = PlantUMLEditorWindow(str(drawing))
+    qtbot.addWidget(window)
+    window.preview_pixmap = QPixmap(800, 600)
+    window.preview_zoom_level = 1
+
+    window._update_preview_display()
+
+    assert window.preview_label.minimumSize().width() == 880
+    assert window.preview_label.minimumSize().height() == 660
+    window.close()
+
+
 def _patch_common_editor_deps(monkeypatch) -> None:
     monkeypatch.setattr("sp.app.main.get_app_icon", lambda: QIcon())
     monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_enable_ai_chats", lambda: False)
@@ -518,6 +538,27 @@ def test_excalidraw_api_loads_and_saves_scene(monkeypatch, tmp_path: Path):
     assert persisted["elements"][0]["id"] == "one"
 
 
+def test_excalidraw_api_loads_empty_file_as_blank_canvas(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
+    drawing = tmp_path / "blank.excalidraw"
+    drawing.touch()
+
+    loaded = server_api.excalidraw_load("/blank.excalidraw")
+
+    assert loaded["title"] == "blank.excalidraw"
+    assert loaded["scene"] == {
+        "type": "excalidraw",
+        "version": 2,
+        "source": "stillpoint",
+        "elements": [],
+        "appState": {},
+        "files": {},
+    }
+    # Loading is non-destructive; the editor persists the initialized scene
+    # on its first save.
+    assert drawing.read_bytes() == b""
+
+
 def test_excalidraw_api_load_repairs_incomplete_saved_scene(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(server_api.vault_state, "get_root", lambda: tmp_path)
     drawing = tmp_path / "broken.excalidraw"
@@ -551,6 +592,95 @@ def test_excalidraw_api_rejects_paths_outside_vault(monkeypatch, tmp_path: Path)
         assert exc.status_code == 400
     else:
         raise AssertionError("Expected path traversal to be rejected")
+
+
+def test_excalidraw_external_grant_scopes_load_save_and_preview_to_one_file(
+        monkeypatch, tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    external = tmp_path / "outside" / "board.excalidraw"
+    external.parent.mkdir()
+    external.write_text(
+        json.dumps({"type": "excalidraw", "elements": [], "appState": {}, "files": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server_api.vault_state, "get_root", lambda: vault)
+    grant_id, expires_in = server_api._register_external_excalidraw_path(str(external))
+    granted_path = f"external:{grant_id}"
+    try:
+        assert expires_in == server_api._EXCALIDRAW_EXTERNAL_GRANT_TTL_SECONDS
+        loaded = server_api.excalidraw_load(granted_path)
+        assert loaded["path"] == granted_path
+        assert loaded["title"] == external.name
+
+        server_api.excalidraw_save(server_api.ExcalidrawSavePayload(
+            path=granted_path,
+            scene={"elements": [{"id": "external-box", "type": "rectangle"}]},
+        ))
+        assert json.loads(external.read_text(encoding="utf-8"))["elements"][0]["id"] == "external-box"
+
+        png = b"\x89PNG\r\n\x1a\n" + b"external-preview"
+        preview = server_api.excalidraw_save_preview(
+            server_api.ExcalidrawPreviewPayload(
+                path=granted_path,
+                png_base64=base64.b64encode(png).decode("ascii"),
+            )
+        )
+        assert preview["preview_path"] == "board.excalidraw.png"
+        assert external.with_name("board.excalidraw.png").read_bytes() == png
+    finally:
+        with server_api._EXCALIDRAW_EXTERNAL_GRANT_LOCK:
+            server_api._EXCALIDRAW_EXTERNAL_GRANTS.pop(grant_id, None)
+
+    try:
+        server_api.excalidraw_load(granted_path)
+    except server_api.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected revoked external grant to be rejected")
+
+
+def test_excalidraw_external_grant_endpoint_requires_local_ui_token(
+        monkeypatch, tmp_path: Path):
+    from starlette.requests import Request
+
+    drawing = tmp_path / "outside.excalidraw"
+    drawing.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    monkeypatch.setattr(server_api, "_LOCAL_UI_TOKEN", "local-secret")
+    user = server_api.AuthModels.UserInfo(
+        username="admin", is_admin=True, can_write=True,
+        role="admin", perm="read_write",
+    )
+
+    def request(token=None):
+        headers = [] if token is None else [(b"x-local-ui-token", token.encode())]
+        return Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/excalidraw/external-grant",
+            "headers": headers,
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8765),
+            "scheme": "http",
+        })
+
+    payload = server_api.ExcalidrawExternalGrantPayload(path=str(drawing))
+    try:
+        server_api.excalidraw_external_grant_create(request(), payload, user)
+    except server_api.HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError("Expected missing local UI token to be rejected")
+
+    created = server_api.excalidraw_external_grant_create(
+        request("local-secret"), payload, user
+    )
+    grant_id = created["grant_id"]
+    assert created["path"] == f"external:{grant_id}"
+    revoked = server_api.excalidraw_external_grant_revoke(
+        grant_id, request("local-secret"), user
+    )
+    assert revoked == {"ok": True, "revoked": True}
 
 
 def test_excalidraw_preview_writes_png_sidecar(monkeypatch, tmp_path: Path):

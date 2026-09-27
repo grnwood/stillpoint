@@ -828,6 +828,7 @@ class GalaxyGraphView(QGraphicsView):
 class LinkNavigatorPanel(QWidget):
     """Galaxy-style link navigator."""
 
+    titleChanged = Signal(str)
     pageActivated = Signal(str, bool)
     openInWindowRequested = Signal(str)
     backRequested = Signal()
@@ -974,6 +975,10 @@ class LinkNavigatorPanel(QWidget):
         self.current_page = page_path
         self.refresh()
 
+    def _set_title(self, text: str) -> None:
+        self.title_label.setText(text)
+        self.titleChanged.emit(text)
+
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
         if not self._applying_theme and event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
@@ -985,7 +990,7 @@ class LinkNavigatorPanel(QWidget):
             self.current_page = page_path
         if not self.current_page or not config.has_active_vault():
             self.graph_view.clear()
-            self.title_label.setText("Link Navigator")
+            self._set_title("Link Navigator")
             return
         if self._show_raw:
             self._update_raw_view()
@@ -1031,7 +1036,7 @@ class LinkNavigatorPanel(QWidget):
             focus_paths=visible_paths,
             preserve_zoom=preserve_zoom,
         )
-        self.title_label.setText(f"Link Navigator: {self._label_for_path(center, {})}")
+        self._set_title(f"Link Navigator: {self._label_for_path(center, {})}")
 
     def reload_mode_from_config(self) -> None:
         return

@@ -170,7 +170,13 @@ class FolderCatalog:
             )
         return len(rows)
 
-    def finish_refresh(self, generation: int, *, complete: bool) -> None:
+    def finish_refresh(
+        self,
+        generation: int,
+        *,
+        complete: bool,
+        state: str | None = None,
+    ) -> None:
         """Commit a completed generation, preserving old rows on cancellation."""
         with self._connect() as connection:
             if complete:
@@ -187,8 +193,15 @@ class FolderCatalog:
                 )
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('scan_state', ?)",
-                ("complete" if complete else "canceled",),
+                (state or ("complete" if complete else "canceled"),),
             )
+
+    def scan_state(self) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = 'scan_state'"
+            ).fetchone()
+        return str(row[0]) if row else "not_started"
 
     def record_skipped_directories(
         self,
@@ -254,7 +267,7 @@ class FolderCatalog:
         scope: Path,
         *,
         include_excluded: bool = False,
-        limit: int = 4000,
+        limit: int = 1200,
     ) -> list[Path]:
         """Return a bounded fuzzy-compatible candidate set from cached rows."""
         try:

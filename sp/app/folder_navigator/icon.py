@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -51,6 +52,12 @@ def get_folder_navigator_icon() -> QIcon:
 
 def configure_folder_navigator_process() -> None:
     """Apply process identity that must be set before QApplication exists."""
+    # Folder Navigator hosts several long-lived Qt widgets and background
+    # workers. Never import QtWebEngine into this process: on Linux/macOS its
+    # teardown can abort or segfault the entire navigator. Excalidraw already
+    # runs in an isolated WebEngine child, while Mermaid retains its native
+    # SVG/PNG preview here.
+    os.environ["SP_DISABLE_MERMAID_WEB_PREVIEW"] = "1"
     if sys.platform != "win32":
         return
     try:

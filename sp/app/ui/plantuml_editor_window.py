@@ -700,9 +700,9 @@ class ZoomablePreviewLabel(QLabel):
         return super().event(event)
     
     def mousePressEvent(self, event) -> None:
-        """Start pan operation on right mouse button."""
+        """Start pan operation with the standard canvas drag buttons."""
         pixmap = self.pixmap()
-        if event.button() == Qt.RightButton and pixmap:
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and pixmap:
             self.is_panning = True
             self.pan_start_pos = event.globalPos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -732,7 +732,7 @@ class ZoomablePreviewLabel(QLabel):
     
     def mouseReleaseEvent(self, event) -> None:
         """End pan operation."""
-        if event.button() == Qt.RightButton and self.is_panning:
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self.is_panning:
             self.is_panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
@@ -2367,6 +2367,11 @@ B --> A: response
         )
         
         try:
+            # QScrollArea can only pan beyond the viewport when its child
+            # reflects the scaled canvas size. Mermaid and StillPoint's other
+            # diagram canvases follow the same sizing rule.
+            self.preview_label.setMinimumSize(scaled_pixmap.size())
+            self.preview_label.resize(scaled_pixmap.size())
             self.preview_label.setPixmap(scaled_pixmap)
         except RuntimeError:
             pass  # Widget was deleted, ignore
