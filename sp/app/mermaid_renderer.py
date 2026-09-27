@@ -102,6 +102,11 @@ class MermaidRenderer:
         """Render Mermaid diagram to SVG."""
         t0 = time.perf_counter()
 
+        # Keep the persistent cache identity stable across the first discovery
+        # and subsequent calls made through a reused renderer instance.
+        if self._mmdc_path is None:
+            self.discover_mmdc()
+
         cache_key = self._compute_cache_key(
             mermaid_text,
             theme=theme,
@@ -116,7 +121,7 @@ class MermaidRenderer:
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
-        if not self.is_configured():
+        if self._mmdc_path is None:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found. Install with npm install -g @mermaid-js/mermaid-cli",
@@ -148,6 +153,9 @@ class MermaidRenderer:
         """Render Mermaid diagram to PNG."""
         t0 = time.perf_counter()
 
+        if self._mmdc_path is None:
+            self.discover_mmdc()
+
         cache_key = self._compute_cache_key(
             mermaid_text,
             theme=theme,
@@ -162,7 +170,7 @@ class MermaidRenderer:
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
-        if not self.is_configured():
+        if self._mmdc_path is None:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found. Install with npm install -g @mermaid-js/mermaid-cli",

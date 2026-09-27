@@ -7,6 +7,8 @@ import sqlite3
 import time
 from typing import Iterable
 
+from .core import pruned_relative_path
+
 
 CATALOG_DIRECTORY = ".sp_folder"
 CATALOG_FILENAME = "catalog.sqlite3"
@@ -128,7 +130,8 @@ class FolderCatalog:
             try:
                 path = candidate.resolve(strict=True)
                 relative = path.relative_to(self.root)
-                if not path.is_file() or CATALOG_DIRECTORY in relative.parts:
+                if (not path.is_file() or CATALOG_DIRECTORY in relative.parts
+                        or pruned_relative_path(relative)):
                     continue
                 stat = path.stat()
             except (OSError, ValueError):
@@ -299,6 +302,60 @@ class FolderCatalog:
         with self._connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
         return [self.root / row[0] for row in rows]
+
+    def directory_candidates(
+        self,
+        query: str,
+        scope: Path,
+        *,
+        include_excluded: bool = False,
+        limit: int = 1200,
+    ) -> list[Path]:
+        """Return distinct human-facing parent folders from indexed files."""
+        try:
+            scope_relative = scope.resolve().relative_to(self.root)
+        except (OSError, ValueError):
+            return []
+        clauses = ["parent != ''"]
+        parameters: list[object] = []
+        if scope_relative != Path("."):
+            scope_text = scope_relative.as_posix()
+            clauses.append("(parent = ? OR parent LIKE ? ESCAPE '\\')")
+            parameters.extend((scope_text, _like_escape(scope_text) + "/%"))
+        if not include_excluded:
+            clauses.append("hidden = 0 AND ignored = 0")
+        normalized = query.strip().casefold()
+        if normalized:
+            pattern = "%" + "%".join(
+                _like_escape(character) for character in normalized
+            ) + "%"
+            clauses.append("lower(parent) LIKE ? ESCAPE '\\'")
+            parameters.append(pattern)
+        parameters.append(max(1, int(limit)))
+        sql = (
+            "SELECT DISTINCT parent FROM files WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY parent COLLATE NOCASE LIMIT ?"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        directories = set()
+        for row in rows:
+            relative = Path(row[0])
+            while relative != Path("."):
+                path = self.root / relative
+                try:
+                    path.relative_to(scope)
+                except ValueError:
+                    break
+                text = relative.as_posix().casefold()
+                characters = iter(text)
+                if path != scope and (not normalized or all(
+                    character in characters for character in normalized
+                )):
+                    directories.add(path)
+                relative = relative.parent
+        return sorted(directories, key=lambda path: str(path).casefold())
 
     def is_excluded(self, path: Path) -> bool:
         try:

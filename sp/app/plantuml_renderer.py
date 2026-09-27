@@ -165,6 +165,15 @@ class PlantUMLRenderer:
 
         self.initialize_from_config()
 
+        # Resolve the renderer configuration before deriving the cache key.
+        # Otherwise the first render is stored under ``None|None`` and the
+        # same long-lived renderer misses it after discovery populates these
+        # paths.
+        if not self._java_available:
+            self.discover_java()
+        if self._jar_path is None:
+            self.discover_jar()
+
         # Check cache first
         cache_key = self._compute_cache_key(puml_text)
         cached_svg = self._read_from_cache(cache_key)
@@ -177,16 +186,12 @@ class PlantUMLRenderer:
 
         # Verify configuration
         if not self._java_available:
-            self.discover_java()
-        if not self._java_available:
             return RenderResult(
                 success=False,
                 error_message="Java not found. Install Java or set JAVA_HOME.",
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
-        if self._jar_path is None:
-            self.discover_jar()
         if self._jar_path is None:
             return RenderResult(
                 success=False,

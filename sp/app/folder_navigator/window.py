@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
-                            QPointF, QRect, Qt, QTimer, QUrl, Signal)
+                            QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -31,11 +31,13 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
     QSizePolicy)
 from PySide6.QtWidgets import QTextBrowser
 
-from .core import (DEFAULT_PRUNED_DIRECTORY_NAMES, MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES,
+from .core import (DEFAULT_PRUNED_DIRECTORY_GLOBS, DEFAULT_PRUNED_DIRECTORY_NAMES,
+    DEFAULT_PRUNED_FILE_GLOBS, DEFAULT_PRUNED_FILE_SUFFIXES,
+    MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES,
     MAX_EDIT_BYTES, MAX_IMAGE_PIXELS,
     MAX_INDEX_FILES, MAX_INDEX_SECONDS, MAX_RESULTS, MAX_SEARCH_BYTES,
     ConflictError, TextFile, atomic_save, content_matches, fingerprint, fuzzy_score, inside,
-    read_text, rich_markdown_fallback_reason, walk_files)
+    pruned_relative_path, read_text, rich_markdown_fallback_reason, walk_files)
 from .catalog import CatalogError, FolderCatalog
 from .editors import (MarkdownEditor, SourceEditor, configure_markdown_editor,
                       configure_source_editor, format_markdown_table)
@@ -66,8 +68,11 @@ DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
 DIAGRAM_SUFFIXES = {".puml", ".mmd", ".excalidraw"}
 DOCUMENT_SUFFIXES = {".docx", ".pptx"}
-DIAGRAM_PREVIEW_CACHE_ENTRIES = 32
-DIAGRAM_PREVIEW_CACHE_BYTES = 64 * 1024 * 1024
+DIAGRAM_PREVIEW_CACHE_ENTRIES = 128
+DIAGRAM_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
+IMAGE_PREVIEW_CACHE_ENTRIES = 32
+IMAGE_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
+IMAGE_FLYOVER_MAX_PIXELS = 2_000_000
 VALUE_FILTER_MAX_ROWS = 25_000
 VALUE_FILTER_MAX_CELLS = 500_000
 VALUE_FILTER_MAX_DISTINCT = 20_000
@@ -1426,6 +1431,7 @@ class Tab(QWidget):
             label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
             label.setWordWrap(True)
             layout.addWidget(label)
+            self.placeholder = label
 
     @property
     def dirty(self):
@@ -1595,11 +1601,14 @@ class ImageCanvasLabel(QLabel):
 
 class ImageView(QWidget):
     def __init__(self, path, pixels, *, open_label=None, open_callback=None,
-                 canvas_color=None, svg_text=None):
+                 canvas_color=None, svg_text=None, source_dimensions=None,
+                 preview_limited=False, full_resolution_callback=None):
         super().__init__()
         self.original = QPixmap.fromImage(pixels)
         self.canvas_color = canvas_color
         self.svg_text = svg_text
+        self.full_resolution_callback = full_resolution_callback
+        self._full_resolution_requested = False
         self.zoom = 1.0
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -1616,11 +1625,16 @@ class ImageView(QWidget):
             copy_png.clicked.connect(self.copy_png)
             controls.addWidget(copy_png)
             controls.addSpacing(10)
+        if preview_limited and full_resolution_callback:
+            full_resolution = QPushButton("Load Full Resolution")
+            full_resolution.clicked.connect(self.request_full_resolution)
+            controls.addWidget(full_resolution)
+            controls.addSpacing(10)
         self.scroll = QScrollArea()
         self.label = ImageCanvasLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.zoomRequested.connect(
-            lambda steps, _anchor: self.scale(zoom_factor(steps))
+            lambda steps, _anchor: self._zoom_requested(zoom_factor(steps))
         )
         if canvas_color:
             # Diagram SVGs commonly have a transparent root while their
@@ -1633,13 +1647,18 @@ class ImageView(QWidget):
         self.scroll.setWidget(self.label)
         self.scroll.setWidgetResizable(True)
         for title, callback in (("Fit to Window", self.fit), ("Actual Size", self.actual),
-                                ("Zoom In", lambda: self.scale(1.25)), ("Zoom Out", lambda: self.scale(.8)),
+                                ("Zoom In", self.zoom_in), ("Zoom Out", self.zoom_out),
                                 ("Reset Zoom", self.actual)):
             button = QPushButton(title)
             button.clicked.connect(callback)
             controls.addWidget(button)
         layout.addLayout(controls)
-        layout.addWidget(QLabel(f"{pixels.width()} × {pixels.height()} pixels · {path.stat().st_size:,} bytes"))
+        dimensions = source_dimensions or (pixels.width(), pixels.height())
+        resolution_note = " · thumbnail preview" if preview_limited else ""
+        layout.addWidget(QLabel(
+            f"{dimensions[0]} × {dimensions[1]} pixels · "
+            f"{path.stat().st_size:,} bytes{resolution_note}"
+        ))
         layout.addWidget(self.scroll)
         QTimer.singleShot(0, self.fit)
 
@@ -1655,10 +1674,22 @@ class ImageView(QWidget):
         self.label.setPixmap(scaled)
 
     def zoom_in(self):
+        self.request_full_resolution()
         self.scale(1.25)
 
     def zoom_out(self):
+        self.request_full_resolution()
         self.scale(.8)
+
+    def _zoom_requested(self, factor):
+        self.request_full_resolution()
+        self.scale(factor)
+
+    def request_full_resolution(self):
+        if self._full_resolution_requested or not self.full_resolution_callback:
+            return
+        self._full_resolution_requested = True
+        self.full_resolution_callback()
 
     def copy_svg(self):
         if self.svg_text:
@@ -1678,6 +1709,7 @@ class ImageView(QWidget):
         QApplication.clipboard().setPixmap(pixmap)
 
     def actual(self):
+        self.request_full_resolution()
         self.zoom = 1.0
         self.scale(1)
 
@@ -1753,10 +1785,10 @@ class Picker(QDialog):
             self.scope = QLabel()
             layout.addWidget(self.scope)
             self.query = QLineEdit()
-            self.query.setPlaceholderText("Find a file by name or relative path")
+            self.query.setPlaceholderText("Find a readable file or folder")
             layout.addWidget(self.query)
             toggles = QHBoxLayout()
-            self.include = QCheckBox("Include hidden and ignored")
+            self.include = QCheckBox("Include hidden cached files")
             self.full = QCheckBox("Search full root")
             toggles.addWidget(self.include)
             toggles.addWidget(self.full)
@@ -1814,7 +1846,7 @@ class Picker(QDialog):
         cache_state = "indexing" if self.window.catalog_running else f"{self.window.catalog_count:,} cached"
         self.scope.setText(
             f"Scope: {scope}  ·  "
-            f"{'Including' if self.include.isChecked() else 'Excluding'} hidden and ignored files"
+            f"{'Including' if self.include.isChecked() else 'Excluding'} hidden cached files"
             f"  ·  {cache_state}"
         )
         self._query_generation += 1
@@ -1842,6 +1874,10 @@ class Picker(QDialog):
             candidates = set(self.window.catalog_candidates(
                 query, scope, include_excluded=include_excluded
             ))
+            folders = set(self.window.catalog_directory_candidates(
+                query, scope, include_excluded=include_excluded
+            ))
+            candidates.update(folders)
             if generation != self._query_generation:
                 return
             candidates.update(opened)
@@ -1862,19 +1898,21 @@ class Picker(QDialog):
                         and self.window.excluded(path)):
                     continue
                 relative = str(relative_path)
+                is_folder = path in folders
                 score = fuzzy_score(
                     query,
                     relative,
-                    recent=path in recent,
-                    opened=path in opened,
+                    recent=not is_folder and path in recent,
+                    opened=not is_folder and path in opened,
                 )
                 if score is not None:
-                    ranked.append((-score, relative.casefold(), path))
+                    ranked.append((-score, relative.casefold(), path, is_folder))
             ranked.sort()
             selected = []
             for candidate in ranked:
-                path = candidate[2]
-                if path.is_file() and inside(root, path):
+                path, is_folder = candidate[2], candidate[3]
+                valid = path.is_dir() if is_folder else path.is_file()
+                if valid and inside(root, path):
                     selected.append(candidate)
                     if len(selected) >= 150:
                         break
@@ -1889,9 +1927,14 @@ class Picker(QDialog):
         if generation != self._query_generation or not self.quick:
             return
         self.list.clear()
-        for _, relative, path in ranked:
-            item = QListWidgetItem(f"{path.name}    {Path(relative).parent}")
+        for _, relative, path, is_folder in ranked:
+            label = (
+                f"📁 {path.name}    {Path(relative).parent}"
+                if is_folder else f"{path.name}    {Path(relative).parent}"
+            )
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, path)
+            item.setData(Qt.UserRole + 1, is_folder)
             item.setToolTip(str(path))
             self.list.addItem(item)
         if not ranked:
@@ -1912,7 +1955,15 @@ class Picker(QDialog):
     def accept_file(self, pinned=False):
         item = self.list.currentItem()
         if item and item.data(Qt.UserRole):
-            self.window.open_file(Path(item.data(Qt.UserRole)), pinned=pinned)
+            path = Path(item.data(Qt.UserRole))
+            if item.data(Qt.UserRole + 1) and path.is_dir():
+                self.window.apply_filter(path)
+                self.accept()
+                QTimer.singleShot(
+                    0, lambda: self.window.tree.setFocus(Qt.OtherFocusReason)
+                )
+                return
+            self.window.open_file(path, pinned=pinned)
             tab = self.window.active_tab()
             self.accept()
             QTimer.singleShot(0, lambda selected=tab: self.window._focus_tab_content(selected))
@@ -1991,6 +2042,18 @@ class Window(QMainWindow):
             self.catalog_db_error = str(exc)
         self.recent: list[Path] = []
         self.executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORK, thread_name_prefix="folder-navigator")
+        self.preview_executor = ThreadPoolExecutor(
+            max_workers=max(1, min(2, MAX_CONCURRENT_WORK)),
+            thread_name_prefix="folder-preview",
+        )
+        self.preview_futures = set()
+        self.disposable_preview_futures = set()
+        self.preview_metrics = {}
+        self._preview_metrics_lock = threading.Lock()
+        self.preview_selection_started = {}
+        self.preview_perf_enabled = os.environ.get(
+            "STILLPOINT_FOLDER_PREVIEW_METRICS", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         self.bridge = Bridge(self)
         self.search_cancel = threading.Event()
         self.search_generation = 0
@@ -1998,6 +2061,7 @@ class Window(QMainWindow):
         self.new_file_directory = None
         self.new_file_is_folder = False
         self.new_file_diagram_suffix = None
+        self.tree_source_open_delay_ms = 90
         self.tree_markdown_open_delay_ms = 140
         self.tree_markdown_open_timer = QTimer(self)
         self.tree_markdown_open_timer.setSingleShot(True)
@@ -2008,9 +2072,19 @@ class Window(QMainWindow):
         self.markdown_preview_timer.setSingleShot(True)
         self.markdown_preview_timer.timeout.connect(self._refresh_pending_markdown_preview)
         self.pending_markdown_preview = None
+        self.preview_hydration_delay_ms = 160
+        self.preview_hydration_timer = QTimer(self)
+        self.preview_hydration_timer.setSingleShot(True)
+        self.preview_hydration_timer.timeout.connect(self._hydrate_pending_preview)
+        self.pending_preview_hydration = None
         self.diagram_preview_cache = OrderedDict()
         self.diagram_preview_cache_bytes = 0
         self.diagram_preview_inflight = set()
+        self.image_preview_cache = OrderedDict()
+        self.image_preview_cache_bytes = 0
+        self.image_preview_inflight = set()
+        self._diagram_renderers = {}
+        self._diagram_renderer_lock = threading.Lock()
         self.specialized_editor_windows: list[QMainWindow] = []
         self.excalidraw_processes: list[tuple[subprocess.Popen, str | None, Path]] = []
         self.excalidraw_browser_grants: set[str] = set()
@@ -2525,6 +2599,23 @@ class Window(QMainWindow):
                 pass
         return self.catalog
 
+    def catalog_directory_candidates(self, query, scope, *, include_excluded=False):
+        if self.catalog_db is not None:
+            try:
+                return self.catalog_db.directory_candidates(
+                    query, scope, include_excluded=include_excluded
+                )
+            except (OSError, sqlite3.Error):
+                pass
+        directories = set()
+        for path in self.catalog:
+            for parent in path.parents:
+                if parent == self.root:
+                    break
+                if parent != scope and inside(scope, parent):
+                    directories.add(parent)
+        return directories
+
     def _make_actions(self):
         file_menu = self.menuBar().addMenu("&File")
         edit_menu = self.menuBar().addMenu("&Edit")
@@ -2760,19 +2851,111 @@ class Window(QMainWindow):
         # A real selection change supersedes the queued initial-focus choice.
         self._startup_folder_focus_pending = False
         self._cancel_pending_tree_markdown()
+        self._cancel_pending_preview_hydration()
+        self._cancel_disposable_preview_jobs()
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
         if current.isValid() and not self.model.isDir(current):
             path = Path(self.model.filePath(current))
-            if path.suffix.casefold() in (".md", ".markdown"):
+            self.preview_selection_started.clear()
+            self.preview_selection_started[path] = time.perf_counter()
+            suffix = path.suffix.casefold()
+            rich_suffixes = (
+                DELIMITED_SUFFIXES | WORKBOOK_SUFFIXES | DIAGRAM_SUFFIXES
+                | DOCUMENT_SUFFIXES | {".pdf"}
+            )
+            defer_open = (
+                suffix in {".md", ".markdown"}
+                or (suffix not in rich_suffixes and not QImageReader.imageFormat(str(path)))
+            )
+            if defer_open:
                 self.pending_tree_markdown_path = path
-                self.tree_markdown_open_timer.start(self.tree_markdown_open_delay_ms)
+                delay = (
+                    self.tree_markdown_open_delay_ms
+                    if suffix in {".md", ".markdown"}
+                    else self.tree_source_open_delay_ms
+                )
+                self.tree_markdown_open_timer.start(delay)
             else:
                 self.open_file(path, defer_enhancements=True)
 
     def _cancel_pending_tree_markdown(self):
         self.tree_markdown_open_timer.stop()
         self.pending_tree_markdown_path = None
+
+    def _cancel_pending_preview_hydration(self):
+        self.preview_hydration_timer.stop()
+        self.pending_preview_hydration = None
+
+    def _cancel_disposable_preview_jobs(self):
+        for future in list(self.disposable_preview_futures):
+            future.cancel()
+
+    def _record_preview_metric(self, kind, event, duration_ms=None):
+        with self._preview_metrics_lock:
+            metrics = self.preview_metrics.setdefault(kind, {
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "completed": 0,
+                "last_ms": 0.0,
+                "max_ms": 0.0,
+                "visible": 0,
+                "last_visible_ms": 0.0,
+                "max_visible_ms": 0.0,
+            })
+            if event in {"cache_hits", "cache_misses"}:
+                metrics[event] += 1
+            elif event == "completed" and duration_ms is not None:
+                duration = max(0.0, float(duration_ms))
+                metrics["completed"] += 1
+                metrics["last_ms"] = duration
+                metrics["max_ms"] = max(metrics["max_ms"], duration)
+            elif event == "visible" and duration_ms is not None:
+                duration = max(0.0, float(duration_ms))
+                metrics["visible"] += 1
+                metrics["last_visible_ms"] = duration
+                metrics["max_visible_ms"] = max(
+                    metrics["max_visible_ms"], duration
+                )
+        if self.preview_perf_enabled:
+            detail = f" {duration_ms:.1f} ms" if duration_ms is not None else ""
+            print(
+                f"[Folder Navigator preview] {kind} {event}{detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _record_preview_visible(self, path, kind):
+        started = self.preview_selection_started.pop(Path(path), None)
+        if started is not None:
+            self._record_preview_metric(
+                kind, "visible", (time.perf_counter() - started) * 1000
+            )
+
+    def _submit_preview_job(self, job, *, kind="preview", disposable=False, cleanup=None):
+        started = time.perf_counter()
+
+        def measured_job():
+            try:
+                job()
+            finally:
+                self._record_preview_metric(
+                    kind, "completed", (time.perf_counter() - started) * 1000
+                )
+
+        future = self.preview_executor.submit(measured_job)
+        self.preview_futures.add(future)
+        if disposable:
+            self.disposable_preview_futures.add(future)
+
+        def finished(completed):
+            self.preview_futures.discard(completed)
+            self.disposable_preview_futures.discard(completed)
+            if completed.cancelled() and cleanup is not None:
+                cleanup()
+
+        future.add_done_callback(finished)
+        return future
 
     def _open_pending_tree_markdown(self):
         path = self.pending_tree_markdown_path
@@ -2783,11 +2966,12 @@ class Window(QMainWindow):
         if (index.isValid() and not self.model.isDir(index)
                 and Path(self.model.filePath(index)) == path):
             self.open_file(path, defer_enhancements=True)
-            # The tree-selection timer has already established that this is a
-            # stable hover. Render now instead of imposing a second debounce,
-            # which made flyovers sluggish and could leave the preview in its
-            # unrendered source state under a busy event loop.
-            self._schedule_markdown_preview(self.active_tab(), immediate=True)
+            if path.suffix.casefold() in {".md", ".markdown"}:
+                # The tree-selection timer has already established that this
+                # is a stable hover. Render Markdown now; source highlighting
+                # retains its own short debounce after the lightweight editor
+                # appears.
+                self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
     def _open_tree_file_keep_focus(self, path, pinned):
         self._cancel_pending_tree_markdown()
@@ -2819,6 +3003,11 @@ class Window(QMainWindow):
             self.tabs.setCurrentIndex(index)
             if line:
                 self._reveal_editor_line(self.tabs.widget(index), line)
+            tab = self.tabs.widget(index)
+            if getattr(tab, "preview_kind", None) and not tab.property("folderPreviewHydrated"):
+                self._schedule_preview_hydration(
+                    tab, immediate=pinned or not defer_enhancements
+                )
             self._schedule_markdown_preview(self.tabs.widget(index))
             return
         preview = next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
@@ -2827,39 +3016,26 @@ class Window(QMainWindow):
         try:
             suffix = path.suffix.casefold()
             if not force_text and suffix in DELIMITED_SUFFIXES:
-                tab = Tab(path, details="Loading table preview…", root=self.root)
-                self._load_delimited_preview(path)
+                tab = Tab(path, details="Table preview queued…", root=self.root)
+                tab.preview_kind = "table"
             elif not force_text and suffix in WORKBOOK_SUFFIXES:
-                tab = Tab(path, details="Loading workbook preview…", root=self.root)
-                self._load_workbook_preview(path)
+                tab = Tab(path, details="Workbook preview queued…", root=self.root)
+                tab.preview_kind = "workbook"
             elif not force_text and suffix in DIAGRAM_SUFFIXES:
-                tab = Tab(path, details="Rendering diagram preview…", root=self.root)
-                self._load_diagram_preview(path)
+                tab = Tab(path, details="Diagram preview queued…", root=self.root)
+                tab.preview_kind = "diagram"
             elif not force_text and suffix in DOCUMENT_SUFFIXES:
-                tab = Tab(path, details="Preparing document preview…", root=self.root)
-                self._load_document_preview(path)
+                tab = Tab(path, details="Document preview queued…", root=self.root)
+                tab.preview_kind = "document"
             elif suffix == ".pdf":
-                tab = Tab(path, details="Loading PDF…", root=self.root)
-                try:
-                    view = pdf_view(path)
-                    tab.viewer = view
-                    tab.layout().addWidget(view)
-                    tab.layout().itemAt(1).widget().hide()
-                except (ImportError, ValueError, RuntimeError) as exc:
-                    raise ValueError(f"PDF preview unavailable: {exc}") from exc
+                tab = Tab(path, details="PDF preview queued…", root=self.root)
+                tab.preview_kind = "pdf"
             elif QImageReader.imageFormat(str(path)):
-                tab = Tab(path, details="Loading image…", root=self.root)
-                sizing_reader = QImageReader(str(path))
-                sizing_reader.setAutoTransform(True)
-                size = sizing_reader.size()
-                if size.width() * size.height() > MAX_IMAGE_PIXELS:
-                    raise ValueError(f"Image exceeds the configured {MAX_IMAGE_PIXELS:,} pixel preview limit")
-                def decode():
-                    reader = QImageReader(str(path))
-                    reader.setAutoTransform(True)
-                    image = reader.read()
-                    self.bridge.result.emit(("image", path, image, reader.errorString()))
-                self.executor.submit(decode)
+                tab = Tab(path, details="Image preview queued…", root=self.root)
+                tab.preview_kind = "image"
+                tab.requested_image_quality = (
+                    "thumbnail" if defer_enhancements and not pinned else "full"
+                )
             else:
                 loaded = read_text(path)
                 is_markdown = path.suffix.casefold() in (".md", ".markdown")
@@ -2903,12 +3079,16 @@ class Window(QMainWindow):
                 buttons.addWidget(button)
             tab.layout().addLayout(buttons)
         tab.pinned = pinned
+        if getattr(tab, "preview_kind", None):
+            tab.setProperty("folderPreviewHydrated", False)
         index = self.tabs.addTab(tab, path.name)
         if path.suffix.casefold() in DIAGRAM_SUFFIXES and not force_text:
             tab.preview_signature = self._diagram_preview_signature(path)
         elif path.suffix.casefold() in DOCUMENT_SUFFIXES and not force_text:
             from .documents import document_signature
             tab.preview_signature = document_signature(path)
+        elif getattr(tab, "preview_kind", None) == "image":
+            tab.preview_signature = fingerprint(path)
         self._update_tab_tooltip(tab)
         self.tabs.setCurrentIndex(index)
         if not tab.editor:
@@ -2957,6 +3137,14 @@ class Window(QMainWindow):
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
         self._update_welcome()
+        if tab.editor is not None:
+            self._record_preview_visible(
+                path, "markdown" if tab.markdown else "source"
+            )
+        if getattr(tab, "preview_kind", None):
+            self._schedule_preview_hydration(
+                tab, immediate=pinned or not defer_enhancements
+            )
         self._schedule_markdown_preview(tab if defer_enhancements else None)
 
     def _enable_rich_markdown(self, path):
@@ -2980,25 +3168,89 @@ class Window(QMainWindow):
         )
         self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
-    def _load_delimited_preview(self, path):
+    def _schedule_preview_hydration(self, tab, *, immediate=False):
+        """Hydrate one rich preview only after disposable navigation settles."""
+        self._cancel_pending_preview_hydration()
+        if not isinstance(tab, Tab) or self.tabs.indexOf(tab) < 0:
+            return
+        if not getattr(tab, "preview_kind", None) or tab.property("folderPreviewHydrated"):
+            return
+        self.pending_preview_hydration = tab
+        if immediate:
+            self._hydrate_pending_preview()
+        else:
+            self.preview_hydration_timer.start(self.preview_hydration_delay_ms)
+
+    def _hydrate_pending_preview(self):
+        tab = self.pending_preview_hydration
+        self.pending_preview_hydration = None
+        if not isinstance(tab, Tab) or self.tabs.indexOf(tab) < 0:
+            return
+        # Do not spend work on a disposable preview that the user has already
+        # left. Pinned tabs are allowed to hydrate in the background.
+        if tab is not self.active_tab() and not tab.pinned:
+            return
+        if tab.property("folderPreviewHydrated"):
+            return
+        tab.setProperty("folderPreviewHydrated", True)
+        kind = getattr(tab, "preview_kind", None)
+        messages = {
+            "table": "Loading table preview…",
+            "workbook": "Loading workbook preview…",
+            "diagram": "Loading cached diagram or rendering once…",
+            "document": "Preparing document preview…",
+            "pdf": "Loading PDF preview…",
+            "image": "Decoding image preview…",
+        }
+        placeholder = getattr(tab, "placeholder", None)
+        if placeholder is not None:
+            placeholder.setText(messages.get(kind, "Loading preview…"))
+        disposable = not tab.pinned
+        if kind == "table":
+            self._load_delimited_preview(tab.path, disposable=disposable)
+        elif kind == "workbook":
+            self._load_workbook_preview(tab.path, disposable=disposable)
+        elif kind == "diagram":
+            self._load_diagram_preview(tab.path, disposable=disposable)
+        elif kind == "document":
+            self._load_document_preview(tab.path, disposable=disposable)
+        elif kind == "image":
+            self._load_image_preview(
+                tab.path,
+                quality=getattr(tab, "requested_image_quality", "full"),
+                disposable=disposable,
+            )
+        elif kind == "pdf":
+            try:
+                view = pdf_view(tab.path)
+                tab.viewer = view
+                tab.layout().addWidget(view)
+                if placeholder is not None:
+                    placeholder.hide()
+                self._install_preview_context_menu(tab, view)
+                self._record_preview_visible(tab.path, "pdf")
+            except (ImportError, ValueError, RuntimeError) as exc:
+                tab.show_notice(f"PDF preview unavailable: {exc}")
+
+    def _load_delimited_preview(self, path, *, disposable=False):
         def job():
             try:
                 preview = read_delimited_preview(path)
                 self.bridge.result.emit(("table", path, preview, True, None))
             except Exception as exc:
                 self.bridge.result.emit(("table", path, None, True, str(exc)))
-        self.executor.submit(job)
+        self._submit_preview_job(job, kind="table", disposable=disposable)
 
-    def _load_workbook_preview(self, path, sheet_name=None):
+    def _load_workbook_preview(self, path, sheet_name=None, *, disposable=False):
         def job():
             try:
                 preview = read_workbook_preview(path, sheet_name)
                 self.bridge.result.emit(("table", path, preview, False, None))
             except Exception as exc:
                 self.bridge.result.emit(("table", path, None, False, str(exc)))
-        self.executor.submit(job)
+        self._submit_preview_job(job, kind="workbook", disposable=disposable)
 
-    def _load_document_preview(self, path):
+    def _load_document_preview(self, path, *, disposable=False):
         from .documents import build_docx_preview, build_pptx_preview, document_signature
 
         path = Path(path)
@@ -3012,7 +3264,172 @@ class Window(QMainWindow):
             except Exception as exc:
                 self.bridge.result.emit(("document", path, signature, None, str(exc)))
 
-        self.executor.submit(job)
+        self._submit_preview_job(job, kind="document", disposable=disposable)
+
+    @staticmethod
+    def _image_cache_key(path, signature, quality):
+        return str(Path(path).resolve(strict=False)), signature, quality
+
+    def _cached_image_preview(self, path, signature, quality):
+        key = self._image_cache_key(path, signature, quality)
+        cached = self.image_preview_cache.get(key)
+        if cached is None:
+            self._record_preview_metric("image", "cache_misses")
+            return None
+        self._record_preview_metric("image", "cache_hits")
+        self.image_preview_cache.move_to_end(key)
+        image, source_dimensions, _size = cached
+        return image.copy(), source_dimensions
+
+    def _cache_image_preview(self, path, signature, quality, image, source_dimensions):
+        try:
+            size = int(image.sizeInBytes())
+        except (AttributeError, TypeError, ValueError):
+            return
+        if size > IMAGE_PREVIEW_CACHE_BYTES:
+            return
+        key = self._image_cache_key(path, signature, quality)
+        for existing_key in list(self.image_preview_cache):
+            if (existing_key[0] != key[0]
+                    or (existing_key[1] == signature and existing_key[2] != quality)):
+                continue
+            _image, _dimensions, existing_size = self.image_preview_cache.pop(existing_key)
+            self.image_preview_cache_bytes -= existing_size
+        self.image_preview_cache[key] = (image.copy(), source_dimensions, size)
+        self.image_preview_cache_bytes += size
+        while (len(self.image_preview_cache) > IMAGE_PREVIEW_CACHE_ENTRIES
+               or self.image_preview_cache_bytes > IMAGE_PREVIEW_CACHE_BYTES):
+            _old_key, (_image, _dimensions, old_size) = self.image_preview_cache.popitem(last=False)
+            self.image_preview_cache_bytes -= old_size
+
+    def _load_image_preview(self, path, *, quality="full", disposable=False):
+        path = Path(path)
+        quality = "thumbnail" if quality == "thumbnail" else "full"
+        signature = fingerprint(path)
+        cached = self._cached_image_preview(path, signature, quality)
+        if cached is not None:
+            image, source_dimensions = cached
+            QTimer.singleShot(
+                0,
+                lambda: self._show_image_preview(
+                    path, signature, quality, image, source_dimensions, None,
+                    cache_result=False,
+                ),
+            )
+            return
+        cache_key = self._image_cache_key(path, signature, quality)
+        if cache_key in self.image_preview_inflight:
+            return
+        self.image_preview_inflight.add(cache_key)
+
+        def decode():
+            try:
+                reader = QImageReader(str(path))
+                reader.setAutoTransform(True)
+                size = reader.size()
+                if size.width() * size.height() > MAX_IMAGE_PIXELS:
+                    raise ValueError(
+                        f"Image exceeds the configured {MAX_IMAGE_PIXELS:,} pixel preview limit"
+                    )
+                source_dimensions = (size.width(), size.height())
+                if (quality == "thumbnail"
+                        and size.width() * size.height() > IMAGE_FLYOVER_MAX_PIXELS):
+                    factor = (
+                        IMAGE_FLYOVER_MAX_PIXELS / (size.width() * size.height())
+                    ) ** 0.5
+                    reader.setScaledSize(QSize(
+                        max(1, int(size.width() * factor)),
+                        max(1, int(size.height() * factor)),
+                    ))
+                image = reader.read()
+                if image.isNull():
+                    raise ValueError(reader.errorString() or "Could not decode image")
+                self.bridge.result.emit((
+                    "image", path, signature, quality, image, source_dimensions, None,
+                ))
+            except Exception as exc:
+                self.bridge.result.emit((
+                    "image", path, signature, quality, None, None, str(exc),
+                ))
+
+        try:
+            self._submit_preview_job(
+                decode,
+                kind="image",
+                disposable=disposable,
+                cleanup=lambda: self.image_preview_inflight.discard(cache_key),
+            )
+        except RuntimeError:
+            self.image_preview_inflight.discard(cache_key)
+            raise
+
+    def _show_image_preview(self, path, signature, quality, pixels,
+                            source_dimensions, error, *, cache_result=True):
+        cache_key = self._image_cache_key(path, signature, quality)
+        self.image_preview_inflight.discard(cache_key)
+        if signature != fingerprint(path):
+            return
+        if cache_result and pixels is not None and not error:
+            self._cache_image_preview(
+                path, signature, quality, pixels, source_dimensions
+            )
+        index = self._index_for(path)
+        if index < 0:
+            return
+        tab = self.tabs.widget(index)
+        tab.preview_signature = signature
+        if error or pixels is None or pixels.isNull():
+            tab.show_notice(f"Image preview failed: {error or 'unknown error'}")
+            return
+        if (quality == "thumbnail"
+                and getattr(tab, "requested_image_quality", "thumbnail") == "full"):
+            return
+        placeholder = getattr(tab, "placeholder", None)
+        if placeholder is not None:
+            placeholder.hide()
+        current = getattr(tab, "viewer", None)
+        if current is not None:
+            tab.layout().removeWidget(current)
+            current.deleteLater()
+        tab.preview_image_quality = quality
+        tab.viewer = ImageView(
+            path,
+            pixels,
+            source_dimensions=source_dimensions,
+            preview_limited=quality == "thumbnail",
+            full_resolution_callback=lambda checked=False, current=tab:
+                self._request_full_image_preview(current),
+        )
+        tab.layout().addWidget(tab.viewer)
+        self._install_preview_context_menu(tab, tab.viewer)
+        tab.notice.hide()
+        self._record_preview_visible(path, "image")
+
+    def _request_full_image_preview(self, tab):
+        if (not isinstance(tab, Tab) or self.tabs.indexOf(tab) < 0
+                or getattr(tab, "preview_kind", None) != "image"):
+            return
+        tab.requested_image_quality = "full"
+        tab.setProperty("folderPreviewHydrated", True)
+        self._cancel_disposable_preview_jobs()
+        if getattr(tab, "preview_image_quality", None) == "full":
+            return
+        tab.show_notice("Loading full-resolution image…")
+        self._load_image_preview(tab.path, quality="full", disposable=False)
+
+    def _diagram_renderer(self, suffix):
+        with self._diagram_renderer_lock:
+            renderer = self._diagram_renderers.get(suffix)
+            if renderer is not None:
+                return renderer
+            if suffix == ".puml":
+                from sp.app.plantuml_renderer import PlantUMLRenderer
+                renderer = PlantUMLRenderer()
+            else:
+                from sp.app.mermaid_renderer import MermaidRenderer
+                renderer = MermaidRenderer()
+            self._diagram_renderers[suffix] = renderer
+            return renderer
 
     @staticmethod
     def _diagram_preview_signature(path):
@@ -3038,7 +3455,9 @@ class Window(QMainWindow):
         key = self._diagram_cache_key(path, signature)
         cached = self.diagram_preview_cache.get(key)
         if cached is None:
+            self._record_preview_metric("diagram", "cache_misses")
             return None
+        self._record_preview_metric("diagram", "cache_hits")
         self.diagram_preview_cache.move_to_end(key)
         svg, pixels, error, _size = cached
         return svg, pixels.copy() if pixels is not None else None, error
@@ -3062,7 +3481,7 @@ class Window(QMainWindow):
             _old_key, (_svg, _pixels, _error, old_size) = self.diagram_preview_cache.popitem(last=False)
             self.diagram_preview_cache_bytes -= old_size
 
-    def _load_diagram_preview(self, path):
+    def _load_diagram_preview(self, path, *, disposable=False):
         path = Path(path)
         signature = self._diagram_preview_signature(path)
         cached = self._cached_diagram_preview(path, signature)
@@ -3097,12 +3516,7 @@ class Window(QMainWindow):
                     self.bridge.result.emit(("diagram", path, signature, None, image, None))
                     return
                 source = read_text(path).text
-                if suffix == ".puml":
-                    from sp.app.plantuml_renderer import PlantUMLRenderer
-                    result = PlantUMLRenderer().render_svg(source)
-                else:
-                    from sp.app.mermaid_renderer import MermaidRenderer
-                    result = MermaidRenderer().render_svg(source)
+                result = self._diagram_renderer(suffix).render_svg(source)
                 if not result.success or not result.svg_content:
                     raise ValueError(result.error_message or result.stderr or "Diagram render failed")
                 self.bridge.result.emit(("diagram", path, signature, result.svg_content, None, None))
@@ -3110,7 +3524,12 @@ class Window(QMainWindow):
                 self.bridge.result.emit(("diagram", path, signature, None, None, str(exc)))
 
         try:
-            self.executor.submit(job)
+            self._submit_preview_job(
+                job,
+                kind="diagram",
+                disposable=disposable,
+                cleanup=lambda: self.diagram_preview_inflight.discard(cache_key),
+            )
         except RuntimeError:
             self.diagram_preview_inflight.discard(cache_key)
             raise
@@ -3120,8 +3539,17 @@ class Window(QMainWindow):
         self.diagram_preview_inflight.discard(cache_key)
         if signature != self._diagram_preview_signature(path):
             return
-        # Cache completed previews, but allow transient renderer/tool failures
-        # to retry on the next visit even when the source itself is unchanged.
+        # Convert SVG once before caching. Keeping ready-to-display pixels is
+        # what makes repeat flyovers avoid both the external renderer and a
+        # second Qt SVG rasterization on the UI path.
+        if not error and pixels is None:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(svg.encode("utf-8"), "SVG"):
+                pixels = pixmap.toImage()
+            else:
+                error = "Rendered SVG could not be displayed"
+        # Cache completed previews even if their disposable tab has already
+        # been replaced. Transient renderer/tool failures intentionally retry.
         if cache_result and not error:
             self._cache_diagram_preview(path, signature, svg, pixels, error)
         index = self._index_for(path)
@@ -3148,12 +3576,6 @@ class Window(QMainWindow):
             tab.layout().addWidget(fallback)
             self._install_preview_context_menu(tab, fallback)
             return
-        if pixels is None:
-            pixmap = QPixmap()
-            if not pixmap.loadFromData(svg.encode("utf-8"), "SVG"):
-                tab.show_notice("Diagram preview unavailable: rendered SVG could not be displayed")
-                return
-            pixels = pixmap.toImage()
         placeholder = tab.layout().itemAt(1)
         if placeholder and placeholder.widget():
             placeholder.widget().hide()
@@ -3168,6 +3590,7 @@ class Window(QMainWindow):
         tab.layout().addWidget(tab.viewer)
         self._install_preview_context_menu(tab, tab.viewer)
         tab.notice.hide()
+        self._record_preview_visible(path, "diagram")
         if tab is self.active_tab() and self.focusWidget() is self.tabs:
             tab.viewer.setFocus(Qt.OtherFocusReason)
 
@@ -3213,6 +3636,7 @@ class Window(QMainWindow):
         tab.viewer = viewer
         tab.layout().addWidget(viewer)
         self._install_preview_context_menu(tab, viewer)
+        self._record_preview_visible(path, "table")
         if tab is self.active_tab():
             self.table_preview_action.setEnabled(False)
             self.raw_text_action.setEnabled(allow_source)
@@ -3331,6 +3755,7 @@ class Window(QMainWindow):
         tab.layout().addWidget(container)
         self._install_preview_context_menu(tab, container)
         tab.notice.hide()
+        self._record_preview_visible(path, "document")
         if tab is self.active_tab() and self.focusWidget() is self.tabs:
             content.setFocus(Qt.OtherFocusReason)
 
@@ -3713,6 +4138,11 @@ class Window(QMainWindow):
             tab = self.tabs.widget(index)
             tab.pinned = True
             self._update_tab_tooltip(tab)
+            if getattr(tab, "preview_kind", None) == "image":
+                self._request_full_image_preview(tab)
+            elif (getattr(tab, "preview_kind", None)
+                    and not tab.property("folderPreviewHydrated")):
+                self._schedule_preview_hydration(tab, immediate=True)
 
     def _tab_changed(self, index):
         tab = self.active_tab()
@@ -3728,6 +4158,8 @@ class Window(QMainWindow):
             self.raw_text_action.setEnabled(delimited and table)
         # Heavy Markdown rendering and source highlighting remain deferred until
         # the newly selected tab has settled, so Ctrl+Tab itself stays instant.
+        if tab and getattr(tab, "preview_kind", None) and not tab.property("folderPreviewHydrated"):
+            self._schedule_preview_hydration(tab)
         self._schedule_markdown_preview(tab)
 
     def _focus_clicked_tab_editor(self, index):
@@ -3891,6 +4323,8 @@ class Window(QMainWindow):
             return
         tab = self.tabs.widget(index)
         if self._review_dirty([tab]):
+            if tab is self.pending_preview_hydration:
+                self._cancel_pending_preview_hydration()
             closed_path = tab.path
             self.tabs.removeTab(index)
             tab.deleteLater()
@@ -4035,8 +4469,10 @@ class Window(QMainWindow):
             return
         self.search_cancel.set()
         self.catalog_cancel.set()
+        self._cancel_pending_preview_hydration()
         self._close_excalidraw_processes()
         self._persist()
+        self.preview_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
@@ -5042,18 +5478,45 @@ class Window(QMainWindow):
                 pass
         return False
 
-    def _catalog_batch(self, batch, generation):
+    def _catalog_batch(self, batch, generation, *, git_filtered=False):
         ignored = set()
-        try:
-            result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-z", "--stdin"],
-                                    input=b"".join(os.fsencode(str(path)) + b"\0" for path in batch),
-                                    capture_output=True, timeout=5)
-            ignored = {Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name}
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        if not git_filtered:
+            try:
+                result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-z", "--stdin"],
+                                        input=b"".join(os.fsencode(str(path)) + b"\0" for path in batch),
+                                        capture_output=True, timeout=5)
+                ignored = {Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name}
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         if self.catalog_db is not None:
             self.catalog_db.upsert_paths(batch, ignored, generation)
         self.bridge.result.emit(("catalog", batch, ignored))
+
+    def _git_catalog_paths(self):
+        """Use Git's optimized index walk and never traverse ignored outputs."""
+        try:
+            result = subprocess.run(
+                [
+                    "git", "-C", str(self.root), "ls-files", "-z",
+                    "--cached", "--others", "--exclude-standard",
+                ],
+                capture_output=True,
+                timeout=max(10.0, MAX_INDEX_SECONDS),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        paths = []
+        for raw in result.stdout.split(b"\0"):
+            if not raw:
+                continue
+            relative = Path(os.fsdecode(raw))
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            if not pruned_relative_path(relative):
+                paths.append(self.root / relative)
+        return paths
 
     def _refresh_quick_pickers(self):
         for widget in QApplication.topLevelWidgets():
@@ -5081,13 +5544,17 @@ class Window(QMainWindow):
                 if self.catalog_db is not None:
                     generation = self.catalog_db.begin_refresh()
                 batch = []
-                for path in walk_files(
-                    self.root, self.root, hidden=True,
+                git_paths = self._git_catalog_paths()
+                paths = git_paths if git_paths is not None else walk_files(
+                    self.root,
+                    self.root,
+                    hidden=True,
                     canceled=self.catalog_cancel.is_set,
                     # Dense legitimate directories should remain searchable.
                     # Global file/time budgets protect the application instead.
                     max_directory_entries=None,
-                ):
+                )
+                for path in paths:
                     if not force and indexed >= MAX_INDEX_FILES:
                         state = "partial"
                         break
@@ -5097,10 +5564,14 @@ class Window(QMainWindow):
                     batch.append(path)
                     indexed += 1
                     if len(batch) >= 500:
-                        self._catalog_batch(batch, generation)
+                        self._catalog_batch(
+                            batch, generation, git_filtered=git_paths is not None
+                        )
                         batch = []
                 if batch:
-                    self._catalog_batch(batch, generation)
+                    self._catalog_batch(
+                        batch, generation, git_filtered=git_paths is not None
+                    )
                 if self.catalog_cancel.is_set():
                     state = "canceled"
                 complete = state == "complete"
@@ -5232,6 +5703,12 @@ class Window(QMainWindow):
             common.extend(("--hidden", "--no-ignore"))
         for name in sorted(DEFAULT_PRUNED_DIRECTORY_NAMES):
             common.extend(("--glob", f"!**/{name}/**"))
+        for pattern in sorted(DEFAULT_PRUNED_DIRECTORY_GLOBS):
+            common.extend(("--glob", f"!**/{pattern}/**"))
+        for suffix in sorted(DEFAULT_PRUNED_FILE_SUFFIXES):
+            common.extend(("--glob", f"!**/*{suffix}"))
+        for pattern in sorted(DEFAULT_PRUNED_FILE_GLOBS):
+            common.extend(("--glob", f"!**/{pattern}"))
 
         def lines(command):
             process = subprocess.Popen(
@@ -5337,17 +5814,10 @@ class Window(QMainWindow):
             self._show_document_preview(path, signature, preview, error)
             return
         if payload[0] == "image":
-            _, path, pixels, error = payload
-            index = self._index_for(path)
-            if index >= 0:
-                tab = self.tabs.widget(index)
-                if pixels.isNull():
-                    tab.show_notice(f"Image preview failed: {error}")
-                else:
-                    tab.layout().itemAt(1).widget().hide()
-                    tab.viewer = ImageView(path, pixels)
-                    tab.layout().addWidget(tab.viewer)
-                    self._install_preview_context_menu(tab, tab.viewer)
+            _, path, signature, quality, pixels, source_dimensions, error = payload
+            self._show_image_preview(
+                path, signature, quality, pixels, source_dimensions, error
+            )
             return
         if payload[0] == "catalog":
             if self.catalog_db is None:
@@ -5559,6 +6029,14 @@ class Window(QMainWindow):
                     != getattr(tab, "preview_signature", None)):
                 tab.show_notice("Refreshing diagram preview…")
                 self._load_diagram_preview(tab.path)
+            elif (getattr(tab, "preview_kind", None) == "image"
+                    and fingerprint(tab.path) != getattr(tab, "preview_signature", None)):
+                tab.show_notice("Refreshing image preview…")
+                self._load_image_preview(
+                    tab.path,
+                    quality=getattr(tab, "requested_image_quality", "full"),
+                    disposable=not tab.pinned,
+                )
             elif tab.path.suffix.casefold() in DOCUMENT_SUFFIXES:
                 try:
                     from .documents import document_signature

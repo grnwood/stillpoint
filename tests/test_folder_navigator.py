@@ -7,7 +7,8 @@ import types
 import pytest
 
 from sp.app.folder_navigator.core import (ConflictError, atomic_save, content_matches,
-    fuzzy_score, inside, read_text, rich_markdown_fallback_reason, walk_files)
+    fuzzy_score, inside, pruned_relative_path, read_text,
+    rich_markdown_fallback_reason, walk_files)
 from sp.app.folder_navigator.catalog import (
     CATALOG_DIRECTORY, CATALOG_FILENAME, FolderCatalog,
 )
@@ -806,6 +807,9 @@ def test_sqlite_catalog_is_persistent_scoped_and_excludes_metadata(tmp_path):
         "road", nested.parent, include_excluded=True
     ) == [nested]
     assert hidden in catalog.candidates("private", root, include_excluded=True)
+    assert catalog.directory_candidates(
+        "proj", root, include_excluded=True
+    ) == [nested.parent]
     assert catalog.count() == FolderCatalog(root).count()
     assert catalog.path not in list(walk_files(root, root, hidden=True))
 
@@ -871,12 +875,34 @@ def test_walk_files_skips_overfull_directories(tmp_path):
 def test_walk_files_always_prunes_generated_and_vcs_trees(tmp_path):
     visible = tmp_path / "visible.txt"
     visible.write_text("visible")
-    for directory in (".git", "node_modules", ".venv", "__pycache__"):
+    for directory in (
+        ".git", "node_modules", ".venv", "__pycache__", "build", "dist",
+        "target", ".next", "cmake-build-debug", "package.egg-info",
+    ):
         child = tmp_path / directory
         child.mkdir()
         (child / "noise.txt").write_text("noise")
+    (tmp_path / "bundle.min.js").write_text("generated")
+    (tmp_path / "module.pyc").write_bytes(b"generated")
 
     assert list(walk_files(tmp_path, tmp_path, hidden=True)) == [visible]
+
+
+def test_generated_pruning_keeps_ambiguous_authored_folders():
+    for relative in (
+        Path("assets/logo.svg"),
+        Path("generated/schema.py"),
+        Path("public/index.html"),
+        Path("src/main.py"),
+    ):
+        assert not pruned_relative_path(relative)
+    for relative in (
+        Path("build/app.js"),
+        Path("target/release/app"),
+        Path("cmake-build-release/output.o"),
+        Path("web/app.min.js"),
+    ):
+        assert pruned_relative_path(relative)
 
 
 def test_catalog_scan_state_is_persistent(tmp_path):
@@ -919,6 +945,37 @@ def test_large_folder_catalog_pauses_at_budget_and_can_continue(
 
     assert window.catalog_state == "complete"
     assert window.catalog_count == 5
+    window.close()
+
+
+def test_git_catalog_walk_avoids_ignored_and_generated_outputs(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("ignored-output/\n", encoding="utf-8")
+    source = root / "src" / "main.py"
+    source.parent.mkdir()
+    source.write_text("print('human')\n", encoding="utf-8")
+    ignored = root / "ignored-output" / "bundle.js"
+    ignored.parent.mkdir()
+    ignored.write_text("compiled", encoding="utf-8")
+    tracked_build = root / "dist" / "bundle.js"
+    tracked_build.parent.mkdir()
+    tracked_build.write_text("compiled", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-f", "dist/bundle.js"], check=True
+    )
+
+    window = Window(root)
+    paths = window._git_catalog_paths()
+
+    assert source in paths
+    assert ignored not in paths
+    assert tracked_build not in paths
     window.close()
 
 
@@ -1263,6 +1320,39 @@ def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
     assert window.active_tab().path == path
     assert window.active_tab().editor.hasFocus()
     window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_quick_open_folder_target_filters_the_tree(tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.window import Picker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "human-notes"
+    folder.mkdir()
+    page = folder / "page.md"
+    page.write_text("# Page\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.catalog_db.upsert_paths([page])
+    picker = Picker(window, quick=True)
+    picker.query.setText("human")
+    deadline = time.monotonic() + 2
+    folder_row = -1
+    while folder_row < 0 and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+        for row in range(picker.list.count()):
+            if picker.list.item(row).data(Qt.UserRole + 1):
+                folder_row = row
+                break
+    assert folder_row >= 0
+
+    picker.list.setCurrentRow(folder_row)
+    picker.accept_file()
+
+    assert window.scope == folder
+    assert Path(window.model.filePath(window.tree.rootIndex())) == folder
     window.close()
 
 
@@ -1849,6 +1939,7 @@ def test_rendered_markdown_hover_remains_replaceable_preview(
     assert not markdown_tab.pinned
 
     window.tree.setCurrentIndex(window.model.index(str(plain)))
+    QTest.qWait(window.tree_source_open_delay_ms + 20)
     app.processEvents()
     assert window.tabs.count() == 1
     assert window.active_tab().path == plain
@@ -1908,20 +1999,23 @@ def test_source_flyby_defers_pygments_until_selection_lingers(
     first.write_text("print('first')\n", encoding="utf-8")
     second.write_text("print('second')\n", encoding="utf-8")
     window = Window(tmp_path)
+    window.tree_source_open_delay_ms = 80
     window.markdown_preview_delay_ms = 80
     window.show()
     window.tree.setFocus()
 
     window.tree.setCurrentIndex(window.model.index(str(first)))
-    first_tab = window.active_tab()
-    assert isinstance(first_tab.editor, SourceEditor)
-    assert first_tab.editor.syntax_highlighter is None
+    assert window.active_tab() is None
     window.tree.setCurrentIndex(window.model.index(str(second)))
+    assert window.active_tab() is None
+
+    QTest.qWait(100)
+    app.processEvents()
     second_tab = window.active_tab()
-    assert second_tab is not first_tab
+    assert isinstance(second_tab.editor, SourceEditor)
     assert second_tab.editor.syntax_highlighter is None
 
-    QTest.qWait(120)
+    QTest.qWait(100)
     app.processEvents()
     assert window.tabs.count() == 1
     assert window.active_tab().path == second
@@ -2373,6 +2467,7 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         app.processEvents()
         time.sleep(.01)
     assert calls == [initial]
+    assert next(iter(window.diagram_preview_cache.values()))[1] is not None
 
     path.write_text(updated, encoding="utf-8")
     window._refresh_disk()
@@ -2382,6 +2477,209 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         app.processEvents()
         time.sleep(.01)
     assert isinstance(window.active_tab().viewer, ImageView)
+    window.close()
+
+
+def test_tree_flyovers_only_hydrate_the_diagram_selection_that_settles(
+        tmp_path, monkeypatch, app):
+    import time
+    from types import SimpleNamespace
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import ImageView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def render(_renderer, source, **_kwargs):
+        calls.append(source)
+        return SimpleNamespace(
+            success=True,
+            svg_content=(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">'
+                '<rect width="80" height="40" fill="#4488cc"/></svg>'
+            ),
+            error_message=None,
+            stderr=None,
+        )
+
+    monkeypatch.setattr(
+        "sp.app.plantuml_renderer.PlantUMLRenderer.render_svg", render
+    )
+    first = tmp_path / "first.puml"
+    second = tmp_path / "second.puml"
+    first_source = "@startuml\nA -> B\n@enduml\n"
+    second_source = "@startuml\nA -> C\n@enduml\n"
+    first.write_text(first_source, encoding="utf-8")
+    second.write_text(second_source, encoding="utf-8")
+
+    window = Window(tmp_path)
+    window.preview_hydration_delay_ms = 80
+    window.show()
+    window.tree.setFocus()
+    window.tree.setCurrentIndex(window.model.index(str(first)))
+    assert window.active_tab().path == first
+    assert not window.active_tab().property("folderPreviewHydrated")
+    window.tree.setCurrentIndex(window.model.index(str(second)))
+    assert window.active_tab().path == second
+    assert calls == []
+
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        QTest.qWait(10)
+        app.processEvents()
+
+    assert calls == [second_source]
+    assert window.active_tab().property("folderPreviewHydrated")
+    window.close()
+
+
+def test_disposable_preview_queue_cancels_stale_work_before_it_starts(
+        tmp_path, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window.preview_executor.shutdown(wait=False, cancel_futures=True)
+    window.preview_executor = ThreadPoolExecutor(max_workers=1)
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+    calls = []
+
+    def blocker():
+        blocker_started.set()
+        release_blocker.wait(2)
+
+    window._submit_preview_job(blocker, kind="test", disposable=True)
+    assert blocker_started.wait(1)
+    stale = window._submit_preview_job(
+        lambda: calls.append("stale"), kind="test", disposable=True
+    )
+
+    window._cancel_disposable_preview_jobs()
+    current = window._submit_preview_job(
+        lambda: calls.append("current"), kind="test", disposable=False
+    )
+    release_blocker.set()
+    deadline = time.monotonic() + 2
+    while not current.done() and time.monotonic() < deadline:
+        time.sleep(.01)
+
+    assert stale.cancelled()
+    assert calls == ["current"]
+    assert window.preview_metrics["test"]["completed"] == 2
+    window.close()
+
+
+def test_decoded_image_preview_is_reused_after_disposable_tab_is_replaced(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QImageReader
+    from sp.app.folder_navigator.window import ImageView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "large.png"
+    image = QImage(320, 240, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.blue)
+    assert image.save(str(path), "PNG")
+    other = tmp_path / "notes.txt"
+    other.write_text("ordinary preview", encoding="utf-8")
+    reads = []
+    original_read = QImageReader.read
+
+    def counted_read(reader):
+        reads.append(reader.fileName())
+        return original_read(reader)
+
+    monkeypatch.setattr(QImageReader, "read", counted_read)
+    window = Window(tmp_path)
+    window.open_file(path)
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert reads == [str(path)]
+
+    window.open_file(other)
+    window.open_file(path)
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert reads == [str(path)]
+    assert len(window.image_preview_cache) == 1
+    assert window.preview_metrics["image"]["cache_hits"] == 1
+
+    previous_viewer = window.active_tab().viewer
+    image.fill(Qt.GlobalColor.red)
+    assert image.save(str(path), "PNG")
+    window._refresh_disk()
+    deadline = time.monotonic() + 2
+    while window.active_tab().viewer is previous_viewer:
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert reads == [str(path), str(path)]
+    assert len(window.image_preview_cache) == 1
+    window.close()
+
+
+def test_image_tree_flyover_uses_thumbnail_then_zoom_loads_full_resolution(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QImageReader
+    from sp.app.folder_navigator.window import (
+        IMAGE_FLYOVER_MAX_PIXELS, ImageView, Window,
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "large.png"
+    image = QImage(2000, 1500, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.darkCyan)
+    assert image.save(str(path), "PNG")
+    reads = []
+    original_read = QImageReader.read
+
+    def counted_read(reader):
+        reads.append(reader.scaledSize())
+        return original_read(reader)
+
+    monkeypatch.setattr(QImageReader, "read", counted_read)
+    window = Window(tmp_path)
+    window.preview_hydration_delay_ms = 20
+    window.show()
+    window.tree.setCurrentIndex(window.model.index(str(path)))
+
+    deadline = time.monotonic() + 3
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    thumbnail = window.active_tab().viewer
+    assert thumbnail.original.width() * thumbnail.original.height() <= IMAGE_FLYOVER_MAX_PIXELS
+    assert window.active_tab().preview_image_quality == "thumbnail"
+    assert not reads[0].isEmpty()
+
+    thumbnail.zoom_in()
+    deadline = time.monotonic() + 3
+    while (getattr(window.active_tab(), "preview_image_quality", None) != "full"
+           or window.active_tab().viewer is thumbnail):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert window.active_tab().viewer.original.size() == image.size()
+    assert reads[-1].isEmpty()
+    assert len(window.image_preview_cache) == 2
+    window.keep_open(window.tabs.currentIndex())
+    app.processEvents()
+    assert len(reads) == 2
     window.close()
 
 
@@ -2535,7 +2833,9 @@ def test_new_diagram_inline_name_preserves_extension_and_opens_editor(
     window = Window(tmp_path)
     opened = []
     monkeypatch.setattr(window, "_open_specialized_editor", opened.append)
-    monkeypatch.setattr(window, "_load_diagram_preview", lambda _path: None)
+    monkeypatch.setattr(
+        window, "_load_diagram_preview", lambda _path, **_kwargs: None
+    )
     window._begin_new_file(
         tmp_path,
         window.model.index(str(tmp_path)),

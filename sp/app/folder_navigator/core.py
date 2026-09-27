@@ -36,15 +36,110 @@ DEFAULT_PRUNED_DIRECTORY_NAMES = frozenset({
     ".git",
     ".hg",
     ".svn",
+    ".angular",
+    ".astro",
+    ".aws-sam",
+    ".build",
     ".cache",
+    ".gradle",
     ".mypy_cache",
+    ".next",
+    ".netlify",
+    ".nox",
+    ".nuxt",
+    ".output",
+    ".parcel-cache",
+    ".pnpm-store",
     ".pytest_cache",
+    ".ruff_cache",
+    ".serverless",
+    ".svelte-kit",
+    ".terraform",
+    ".turbo",
+    ".vercel",
+    ".vite",
     ".tox",
     ".venv",
     "venv",
     "__pycache__",
+    "bower_components",
+    "build",
+    "coverage",
+    "cmakefiles",
+    "deriveddata",
+    "dist",
+    "htmlcov",
+    "jspm_packages",
+    "meson-info",
+    "meson-logs",
+    "meson-private",
     "node_modules",
+    "out",
+    "pods",
+    "site-packages",
+    "storybook-static",
+    "target",
 })
+DEFAULT_PRUNED_DIRECTORY_GLOBS = frozenset({
+    "*.dist-info",
+    "*.egg-info",
+    "bazel-*",
+    "cmake-build-*",
+})
+DEFAULT_PRUNED_FILE_SUFFIXES = frozenset({
+    ".a",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".jar",
+    ".o",
+    ".pdb",
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".war",
+    ".wasm",
+})
+DEFAULT_PRUNED_FILE_GLOBS = frozenset({
+    "*.css.map",
+    "*.js.map",
+    "*.min.css",
+    "*.min.js",
+})
+
+
+def pruned_directory_name(
+    name: str,
+    names: frozenset[str] | set[str] = DEFAULT_PRUNED_DIRECTORY_NAMES,
+    patterns: frozenset[str] | set[str] = DEFAULT_PRUNED_DIRECTORY_GLOBS,
+) -> bool:
+    """Return whether a directory is a conservative generated/dependency tree."""
+    folded = name.casefold()
+    return folded in names or any(
+        fnmatch.fnmatch(folded, pattern.casefold()) for pattern in patterns
+    )
+
+
+def pruned_file_name(
+    name: str,
+    suffixes: frozenset[str] | set[str] = DEFAULT_PRUNED_FILE_SUFFIXES,
+    patterns: frozenset[str] | set[str] = DEFAULT_PRUNED_FILE_GLOBS,
+) -> bool:
+    """Return whether a file is a compiler/minifier artifact, not authored text."""
+    folded = name.casefold()
+    return (
+        any(folded.endswith(suffix.casefold()) for suffix in suffixes)
+        or any(fnmatch.fnmatch(folded, pattern.casefold()) for pattern in patterns)
+    )
+
+
+def pruned_relative_path(relative: Path) -> bool:
+    """Apply the generated-output policy to a root-relative path."""
+    return (
+        any(pruned_directory_name(part) for part in relative.parts[:-1])
+        or pruned_file_name(relative.name)
+    )
 
 
 def rich_markdown_fallback_reason(text: str, byte_size: int) -> str | None:
@@ -206,7 +301,7 @@ def walk_files(
             if skipped:
                 skipped(base, entry_count)
             continue
-        directories[:] = [name for name in directories if name not in pruned_names
+        directories[:] = [name for name in directories if not pruned_directory_name(name, pruned_names)
                           and (hidden or not name.startswith("."))
                           and inside(root, base / name) and not (base / name).is_symlink()
                           and not (ignore and ignore(base / name))]
@@ -214,7 +309,7 @@ def walk_files(
             if canceled():
                 return
             path = base / name
-            if (hidden or not name.startswith(".")) and inside(root, path) \
+            if (hidden or not name.startswith(".")) and not pruned_file_name(name) and inside(root, path) \
                     and ".sp_folder" not in path.relative_to(root).parts \
                     and not (ignore and ignore(path)):
                 yield path
