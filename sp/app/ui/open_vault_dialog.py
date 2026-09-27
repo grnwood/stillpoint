@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import PAGE_SUFFIX
+from sp.vault_boundary import NestedVaultError, validate_vault_root
 
 
 def _select_directory(parent, title: str, start_dir: str) -> str:
@@ -1173,6 +1174,15 @@ class OpenVaultDialog(QDialog):
             return
         result = dlg.selected_vault()
         if not result:
+            return
+        try:
+            result["path"] = str(validate_vault_root(result["path"]))
+        except NestedVaultError as exc:
+            QMessageBox.critical(
+                self,
+                "Choose an Exact Vault Folder",
+                f"{exc}\n\nThe parent folder was not added or initialized as a vault.",
+            )
             return
         detected_metadata = config.load_homebase_vault_metadata(result["path"])
         if detected_metadata:

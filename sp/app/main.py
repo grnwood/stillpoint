@@ -23,6 +23,7 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 from sp.app import config
 from sp.app import eventloop_diag
 from sp.logging_flags import log_enabled
+from sp.vault_boundary import NestedVaultError, validate_vault_root
 
 from sp.app.ui.main_window import MainWindow
 from sp.app.ui.page_load_logger import emit_performance_span
@@ -786,6 +787,11 @@ def _run_webserver_mode(args: argparse.Namespace) -> None:
     if not vault_path.exists():
         print(f"Error: Vault not found: {vault_path}", file=sys.stderr)
         sys.exit(1)
+    try:
+        vault_path = validate_vault_root(vault_path)
+    except NestedVaultError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
     
     # Initialize config with vault
     config.init_settings()

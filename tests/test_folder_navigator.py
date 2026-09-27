@@ -758,6 +758,26 @@ def test_frozen_macos_launch_uses_companion_app(tmp_path, monkeypatch):
     ]
 
 
+def test_macos_folder_navigator_sets_native_application_icon(qapp, tmp_path, monkeypatch):
+    from sp.app.folder_navigator import icon as icon_module
+
+    icon_path = tmp_path / "FolderNavigator.icns"
+    icon_path.touch()
+    native_calls = []
+
+    monkeypatch.setattr(icon_module.sys, "platform", "darwin")
+    monkeypatch.setattr(icon_module, "get_folder_navigator_icon_path", lambda: icon_path)
+    monkeypatch.setattr(
+        icon_module,
+        "_set_macos_application_icon",
+        lambda path: native_calls.append(path) or True,
+    )
+
+    icon_module.configure_folder_navigator_application(qapp)
+
+    assert native_calls == [icon_path]
+
+
 def test_sqlite_catalog_is_persistent_scoped_and_excludes_metadata(tmp_path):
     root = tmp_path / "root"
     root.mkdir()

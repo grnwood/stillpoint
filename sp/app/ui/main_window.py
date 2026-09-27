@@ -121,6 +121,7 @@ from PySide6.QtWidgets import (
 from sp.app import config, eventloop_diag, indexer
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
+from sp.vault_boundary import NestedVaultError, validate_vault_root
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig, has_material_text_difference
 from .theme import apply_menu_theme, theme_color, theme_value
@@ -10242,6 +10243,19 @@ class MainWindow(QMainWindow):
             setup_phase_started_at = performance_start()
 
         try:
+            # Validate before stopping sync, releasing the current lock, or
+            # changing the active DB.  A parent directory containing child
+            # vaults must never become a synthetic merged vault.
+            if not self._remote_mode:
+                try:
+                    directory = str(validate_vault_root(directory))
+                except NestedVaultError as exc:
+                    QMessageBox.critical(
+                        self,
+                        "Choose an Exact Vault Folder",
+                        f"{exc}\n\nNo files, index, or Homebase sync state were changed.",
+                    )
+                    return False
             self._homebase_has_unsynced_local_changes = False
             self._homebase_unsynced_marked_at = None
             self._shutdown_homebase_sync()

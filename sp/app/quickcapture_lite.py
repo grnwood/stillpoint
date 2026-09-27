@@ -6,6 +6,7 @@ import re
 from typing import Optional
 
 from sp.app import config
+from sp.vault_boundary import validate_vault_root
 from sp.app.quickcapture_common import (
     QUICK_CAPTURE_ATTACHMENT_PLACEHOLDER_RE,
     append_quick_capture_section,
@@ -172,6 +173,7 @@ def _capture_to_files_result(
     text: str,
     attachments: Optional[list[dict]] = None,
 ) -> dict:
+    vault_root = validate_vault_root(vault_root)
     config.init_settings()
     config.set_active_vault(str(vault_root))
     if page_mode == "today":

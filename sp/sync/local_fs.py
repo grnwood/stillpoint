@@ -7,15 +7,23 @@ import time
 from pathlib import Path
 from typing import Iterator, Optional
 
+from sp.vault_boundary import METADATA_DIR
 
-EXCLUDE_DIRS = {".stillpoint"}
+
+EXCLUDE_DIRS = {METADATA_DIR}
 EXCLUDE_FILES = {"AGENTS.md"}
 CONFLICT_COPY_MARKER = ".sync-conflict-"
 
 
 def iter_files(vault_root: Path) -> Iterator[tuple[str, Path]]:
     for root, dirs, files in os.walk(vault_root):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        current = Path(root)
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in EXCLUDE_DIRS
+            and not (current / name / METADATA_DIR).is_dir()
+        ]
         for name in files:
             if name in EXCLUDE_FILES:
                 continue

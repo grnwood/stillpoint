@@ -91,6 +91,7 @@ from sp.app.task_mutations import (
 )
 from sp.app.ui.ai_api import build_api_request
 from sp.logging_flags import log_enabled
+from sp.vault_boundary import path_crosses_nested_vault, validate_vault_root
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
 
 _ANSI_BLUE = "\033[94m"
@@ -2777,6 +2778,7 @@ async def create_vault(request: Request, payload: VaultCreatePayload, _admin: No
 def select_vault(request: Request, payload: VaultSelectPayload) -> dict:
     try:
         resolved = _resolve_vault_path(payload.path)
+        resolved = validate_vault_root(resolved)
         session_id = str(request.headers.get(_REMOTE_CONTEXT_HEADER) or "").strip()
         if session_id:
             root = vault_state.bind_session_root(session_id, str(resolved))
@@ -2823,6 +2825,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
+                if path_crosses_nested_vault(root, page_file):
+                    continue
                 if page_file.name == "AGENTS.md":
                     continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():

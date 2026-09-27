@@ -9,6 +9,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Dict, List
 
+from sp.vault_boundary import is_nested_vault_root, path_crosses_nested_vault
+
 def assert_not_vault_root_write(path):
     """
     Raise an exception if attempting to write a file directly in a vault root folder.
@@ -134,6 +136,8 @@ def _resolve(root: Path, relative_path: str) -> Path:
     target = (root / rel).resolve()
     if root not in target.parents and target != root:
         raise FileAccessError("Attempted access outside the vault root")
+    if path_crosses_nested_vault(root, target):
+        raise FileAccessError("Attempted access inside a separate nested vault")
     return target
 
 
@@ -200,13 +204,17 @@ def list_dir(
                 continue
             if child.name.startswith("."):
                 continue
+            if is_nested_vault_root(root, child):
+                continue
             if recursive and (bounded_depth is None or depth + 1 < bounded_depth):
                 children.append(build(child, depth + 1))
             else:
                 grand_dirs = [
                     d
                     for d in child.iterdir()
-                    if d.is_dir() and not d.name.startswith(".")
+                    if d.is_dir()
+                    and not d.name.startswith(".")
+                    and not is_nested_vault_root(root, d)
                 ]
                 page_file = _resolve_page_for_read(child)
                 rel_file = page_file.relative_to(root).as_posix()

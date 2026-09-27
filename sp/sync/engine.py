@@ -18,6 +18,7 @@ import httpx
 from nacl.exceptions import CryptoError
 
 from sp.logging_flags import log_enabled
+from sp.vault_boundary import path_crosses_nested_vault, validate_vault_root
 from sp.sync.crypto import (
     decrypt_bytes,
     derive_key_from_passphrase,
@@ -191,6 +192,7 @@ class HomebaseSyncEngine:
         cfg: HomebaseSyncConfig,
         status_callback: Optional[Callable[[HomebaseSyncStatus], None]] = None,
     ) -> None:
+        cfg.vault_root = validate_vault_root(cfg.vault_root)
         self.cfg = cfg
         self.status_callback = status_callback
         self._thread: Optional[threading.Thread] = None
@@ -251,6 +253,8 @@ class HomebaseSyncEngine:
         """Resolve a manifest path, including the legacy root-page shorthand."""
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
         canonical = self.cfg.vault_root / rel_key
+        if path_crosses_nested_vault(self.cfg.vault_root, canonical):
+            raise ValueError(f"Homebase path crosses into a separate nested vault: {rel_key}")
         try:
             if canonical.exists():
                 return canonical
