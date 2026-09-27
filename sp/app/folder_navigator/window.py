@@ -2341,6 +2341,11 @@ class Window(QMainWindow):
                 accent_color=accent,
                 pane_border=accent if editor_has_focus else neutral,
             )
+            # The shared chrome stylesheet intentionally mutes inactive tabs.
+            # In this tab strip that palette role can be too low-contrast to
+            # read filenames, so retain the normal text color instead.
+            + "QTabWidget#folderNavigatorEditors QTabBar::tab:!selected { color: "
+            + f"{self.tabs.palette().color(QPalette.Text).name()}; }}"
         )
 
     @staticmethod
@@ -2717,8 +2722,15 @@ class Window(QMainWindow):
             shortcut.activated.connect(self._open_navigator_selection_in_system)
             self.native_open_shortcuts.append(shortcut)
         forward_sequence, backward_sequence = history_cycle_sequences()
+        cycle_sequences = [(forward_sequence, False), (backward_sequence, True)]
+        if sys.platform == "darwin":
+            # Qt and Cocoa can report the physical Control key through either
+            # modifier spelling depending on the focused native view. Keep the
+            # recent-tab switcher reachable with the user's physical Control
+            # chord in either case.
+            cycle_sequences.extend((("Ctrl+Tab", False), ("Ctrl+Shift+Tab", True)))
         self.tab_cycle_shortcuts = []
-        for sequence, reverse in ((forward_sequence, False), (backward_sequence, True)):
+        for sequence, reverse in cycle_sequences:
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(lambda backwards=reverse: self._cycle_tab_popup(backwards))
@@ -4035,8 +4047,13 @@ class Window(QMainWindow):
             else:
                 self._focus_tree_when_tabs_empty()
             return True
+        release_keys = {history_cycle_modifier_release_key()}
+        if sys.platform == "darwin":
+            # Accept both Qt's macOS Control aliases. This mirrors the two
+            # QShortcut spellings installed for Control+Tab above.
+            release_keys.update((Qt.Key_Control, Qt.Key_Meta))
         if (event.type() == QEvent.KeyRelease
-                and event.key() == history_cycle_modifier_release_key()
+                and event.key() in release_keys
                 and self.tab_switcher_paths):
             self._activate_tab_switcher_selection()
             return True

@@ -3458,6 +3458,18 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
         self._action_about = about_action
+        if sys.platform == "darwin":
+            # Qt moves AboutRole actions into macOS's application menu. Keep a
+            # plain Help-menu entry as well so the dialog remains discoverable
+            # from the window's Help menu even when the native menu is hidden
+            # or its app name comes from a differently named bundle.
+            about_help_action = QAction("About StillPoint…", self)
+            about_help_action.setMenuRole(QAction.MenuRole.NoRole)
+            about_help_action.triggered.connect(self._show_about_dialog)
+            help_menu.addAction(about_help_action)
+            self._action_about_help = about_help_action
+        else:
+            self._action_about_help = about_action
         if os.getenv("STILLPOINT_ENABLE_CRASH_TEST") == "1":
             crash_action = QAction("Debug: Crash (Segfault)", self)
             crash_action.setToolTip("Force a native crash for testing error reporting")
