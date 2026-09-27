@@ -17,6 +17,13 @@
     },
     "editor": {
       "document_margin_px": 18
+    },
+    "breadcrumb": {
+      "segment_max_width_px": 120
+    },
+    "status_bar": {
+      "horizontal_padding_px": 6,
+      "vertical_padding_px": 2
     }
   },
   "mode_window": {

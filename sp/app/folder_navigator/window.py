@@ -54,6 +54,7 @@ from sp.app.ui.keyboard_shortcuts import (
 )
 from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from sp.app.ui.theme import (
+    status_bar_stylesheet,
     tab_widget_stylesheet,
     theme_color,
     theme_value,
@@ -2112,6 +2113,9 @@ class Window(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("folderNavigatorEditors")
         self.tabs.setTabsClosable(True)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.tabs.tabBarClicked.connect(self._focus_clicked_tab_editor)
@@ -2142,6 +2146,7 @@ class Window(QMainWindow):
             accent_color=identity_accent,
         )
         self.identity_bar.set_detail(self.root.name, str(self.root))
+        self.identity_bar.breadcrumbActivated.connect(self._open_folder_breadcrumb)
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
         layout.addLayout(self.bookmarks_bar)
@@ -2151,12 +2156,11 @@ class Window(QMainWindow):
         layout.addWidget(self.filter_label)
         layout.addWidget(self.splitter)
         self.setCentralWidget(outer)
-        status = str(self.root)
+        self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
         if self.catalog_db_error:
-            status += f" · Quick Open cache unavailable: {self.catalog_db_error}"
-        elif self.catalog_count:
-            status += f" · {self.catalog_count:,} cached files"
-        self.statusBar().showMessage(status)
+            self.statusBar().showMessage(
+                f"Quick Open cache unavailable: {self.catalog_db_error}", 12000
+            )
         self.index_notice = QLabel()
         self.index_notice.setAccessibleName("Folder indexing status")
         self.statusBar().addPermanentWidget(self.index_notice, 1)
@@ -2905,7 +2909,7 @@ class Window(QMainWindow):
         elif path.suffix.casefold() in DOCUMENT_SUFFIXES and not force_text:
             from .documents import document_signature
             tab.preview_signature = document_signature(path)
-        self.tabs.setTabToolTip(index, str(path.parent))
+        self._update_tab_tooltip(tab)
         self.tabs.setCurrentIndex(index)
         if not tab.editor:
             self._install_preview_context_menu(tab, getattr(tab, "viewer", tab))
@@ -3693,10 +3697,22 @@ class Window(QMainWindow):
             )
             self.tabs.tabBar().setTabTextColor(index, color)
             tab.setAccessibleName(f"{tab.path.name}{', unsaved changes' if dirty else ''}")
+            self._update_tab_tooltip(tab)
+
+    def _update_tab_tooltip(self, tab):
+        index = self.tabs.indexOf(tab)
+        if index < 0:
+            return
+        state = "Pinned" if tab.pinned else "Preview · Enter or double-click to keep open"
+        if tab.dirty:
+            state = "Unsaved changes · pinned"
+        self.tabs.setTabToolTip(index, f"{tab.path}\n{state}")
 
     def keep_open(self, index):
         if index >= 0 and isinstance(self.tabs.widget(index), Tab):
-            self.tabs.widget(index).pinned = True
+            tab = self.tabs.widget(index)
+            tab.pinned = True
+            self._update_tab_tooltip(tab)
 
     def _tab_changed(self, index):
         tab = self.active_tab()
@@ -3892,6 +3908,36 @@ class Window(QMainWindow):
         if tab is not None:
             title += f" — {tab.path.name}"
         self.setWindowTitle(title)
+        self._update_folder_breadcrumb(tab.path if tab is not None else self.root)
+
+    def _folder_breadcrumb_items(self, path: Path) -> list[tuple[str, object, str]]:
+        target = path if inside(self.root, path) else self.root
+        items: list[tuple[str, object, str]] = [
+            (self.root.name, self.root, str(self.root))
+        ]
+        if target == self.root:
+            return items
+        try:
+            relative_parts = target.relative_to(self.root).parts
+        except ValueError:
+            return items
+        current = self.root
+        for part in relative_parts:
+            current = current / part
+            items.append((part, current, str(current)))
+        return items
+
+    def _update_folder_breadcrumb(self, path: Path) -> None:
+        identity = getattr(self, "identity_bar", None)
+        if identity is not None:
+            identity.set_breadcrumb(self._folder_breadcrumb_items(path))
+
+    def _open_folder_breadcrumb(self, target: object) -> None:
+        path = Path(str(target))
+        if path.is_file() and inside(self.root, path):
+            self.open_file(path, pinned=True)
+        elif path.is_dir() and inside(self.root, path):
+            self.reveal_tree(path)
 
     def _focus_tree_when_tabs_empty(self, preferred_path=None):
         """Return keyboard/vi navigation to the folder tree after the last close."""
@@ -4296,7 +4342,7 @@ class Window(QMainWindow):
             self.filter_label.setText(f"Filtered: {folder.name}  ·  Clear Filter ×")
             self.filter_label.show()
             self.clear_filter_action.setEnabled(True)
-            self.statusBar().showMessage(f"Scope: {folder}")
+            self.statusBar().showMessage(f"Scope: {folder.name}", 2500)
 
     def filter_from_here(self):
         """Filter to the selected folder, or the selected file's parent."""
@@ -4315,7 +4361,7 @@ class Window(QMainWindow):
         self.tree.setRootIndex(self.model.index(str(self.root)))
         self.filter_label.hide()
         self.clear_filter_action.setEnabled(False)
-        self.statusBar().showMessage(str(self.root))
+        self.statusBar().clearMessage()
 
     def _bookmarks(self):
         return self.state.setdefault("bookmarks", [])

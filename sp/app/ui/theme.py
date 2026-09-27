@@ -204,6 +204,18 @@ def tree_view_stylesheet(
     )
 
 
+def status_bar_stylesheet(source: Any = None) -> str:
+    """Build a low-noise status surface shared by both desktop windows."""
+    colors = chrome_colors(source)
+    horizontal = int(theme_value("ui.status_bar.horizontal_padding_px", 6))
+    vertical = int(theme_value("ui.status_bar.vertical_padding_px", 2))
+    return (
+        f"QStatusBar {{ color: {colors['muted']}; background: {colors['window']}; "
+        f"border-top: 1px solid {colors['border']}; padding: {vertical}px {horizontal}px; }}"
+        "QStatusBar::item { border: 0; }"
+    )
+
+
 def reload_theme() -> None:
     global _THEME_CACHE, _THEME_CACHE_PATH
     _THEME_CACHE = None

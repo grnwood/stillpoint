@@ -126,6 +126,8 @@ from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig, has_material_text_difference
 from .theme import (
     apply_menu_theme,
+    chrome_colors,
+    status_bar_stylesheet,
     tab_widget_stylesheet,
     theme_color,
     theme_value,
@@ -3488,6 +3490,7 @@ class MainWindow(QMainWindow):
         # Apply initial border state
         self._apply_focus_borders()
         self.statusBar().showMessage("Select a vault to get started")
+        self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
         self._default_status_stylesheet = self.statusBar().styleSheet()
         self._setup_eventloop_watchdog()
 
@@ -3497,6 +3500,14 @@ class MainWindow(QMainWindow):
             f"{theme_value('main_window.badge.border', '#666666')}; "
             "padding: 2px 6px; border-radius: 3px;"
         )
+
+        self._cursor_status_label = QLabel("")
+        self._cursor_status_label.setObjectName("cursorStatusLabel")
+        self._cursor_status_label.setAccessibleName("Editor cursor position")
+        self._cursor_status_label.setToolTip("Current editor line, column, and selection")
+        self._cursor_status_label.hide()
+        self.statusBar().addPermanentWidget(self._cursor_status_label, 0)
+        self._update_main_cursor_status()
 
         map_icon = self._load_icon(
             self._find_asset("mindmap.svg"),
@@ -3974,6 +3985,7 @@ class MainWindow(QMainWindow):
             icon=self.windowIcon(),
             accent_color=getattr(self, "_vault_accent_color", None),
         )
+        self.main_toolbar_identity.breadcrumbActivated.connect(self._open_main_breadcrumb)
         self.toolbar.addWidget(self.main_toolbar_identity)
         self._update_main_utility_identity()
         
@@ -3999,9 +4011,38 @@ class MainWindow(QMainWindow):
         identity = getattr(self, "main_toolbar_identity", None)
         if identity is not None:
             identity.set_detail(name, path)
+            breadcrumb = self._main_breadcrumb_items()
+            if breadcrumb:
+                identity.set_breadcrumb(breadcrumb)
+            else:
+                identity.clear_breadcrumb()
         header = getattr(self, "tree_header_widget", None)
         if isinstance(header, UtilityPanelHeader):
             header.set_detail(name, path)
+
+    def _main_breadcrumb_items(self) -> list[tuple[str, object, str]]:
+        if not self.vault_root_name:
+            return []
+        root_target = self._vault_root_page_path()
+        items: list[tuple[str, object, str]] = [
+            (self.vault_root_name, root_target, self.vault_root or self.vault_root_name)
+        ]
+        if not self.current_path:
+            return items
+        folder_path = self._file_path_to_folder(self.current_path)
+        folder_parts = list(Path(folder_path.lstrip("/")).parts)
+        for index, part in enumerate(folder_parts):
+            cumulative = "/" + "/".join(folder_parts[:index + 1])
+            if index == 0 and part.casefold() == self.vault_root_name.casefold():
+                continue
+            target = self._folder_to_file_path(cumulative)
+            items.append((part, target, cumulative))
+        return items
+
+    def _open_main_breadcrumb(self, target: object) -> None:
+        path = str(target or "").strip()
+        if path:
+            self._open_file(path)
 
     def _open_vault_on_disk(self):
         """Open the vault folder in the system file manager."""
@@ -9994,6 +10035,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
+            self._default_status_stylesheet = self.statusBar().styleSheet()
+            self._update_main_cursor_status()
+        except Exception:
+            pass
+        try:
             self._apply_tab_widget_theme_styles()
         except Exception:
             pass
@@ -13072,6 +13119,8 @@ class MainWindow(QMainWindow):
             self.editor.set_vi_mode_enabled(False)
         self.current_path = None
         self.right_panel.set_current_page(None, None)
+        self._update_main_utility_identity()
+        self._update_main_cursor_status()
 
     def _open_file(
         self,
@@ -13185,6 +13234,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.current_path = path
+        self._update_main_utility_identity()
         self._pending_top_nav_refresh = (path, history_buttons_changed)
         self._suspend_autosave = True
         self._suspend_cursor_history = True
@@ -13287,12 +13337,14 @@ class MainWindow(QMainWindow):
                     self._history_scroll_positions[path] = scroll_bar.value()
             except Exception:
                 pass
-        # Always show editing status; vi-mode banner is separate
+        # The breadcrumb now carries the persistent page location. Keep the
+        # status bar available for transient work, errors, and sync state.
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
             root_base = ensure_root_colon_link(display_path) if display_path else ""
             self.toc_widget.set_base_path(root_base)
-        self.statusBar().showMessage(f"Editing {display_path}")
+        self.statusBar().clearMessage()
+        self._update_main_cursor_status()
         self._update_window_title()
         self._mark_initial_page_loaded()
         if tracer:
@@ -18808,6 +18860,7 @@ class MainWindow(QMainWindow):
         # Set up editor without saving to disk
         self._refresh_editor_context(rel_path)
         self.current_path = rel_path
+        self._update_main_utility_identity()
         self._suspend_autosave = True
         self._suspend_dirty_tracking = True
         try:
@@ -18840,7 +18893,8 @@ class MainWindow(QMainWindow):
             root_base = ensure_root_colon_link(display_path) if display_path else ""
             self.toc_widget.set_base_path(root_base)
             self.editor.refresh_heading_outline()
-        self.statusBar().showMessage(f"Editing (unsaved) {display_path}")
+        self.statusBar().showMessage(f"Unsaved page: {display_path}", 4000)
+        self._update_main_cursor_status()
         self._update_window_title()
         
         # Update calendar to show this date
@@ -21582,10 +21636,7 @@ class MainWindow(QMainWindow):
         if message:
             self.statusBar().showMessage(message)
         else:
-            # Clear status message after drag
-            if self.current_path:
-                display_path = path_to_colon(self.current_path) or self.current_path
-                self.statusBar().showMessage(f"Editing {display_path}")
+            self.statusBar().clearMessage()
 
     # --- Zim import --------------------------------------------------
 
@@ -22439,6 +22490,7 @@ class MainWindow(QMainWindow):
 
     def _on_editor_cursor_moved(self, position: int) -> None:
         """Persist last cursor position for the active page whenever it changes."""
+        self._update_main_cursor_status()
         if not self.current_path:
             return
         if not self._feature_remember_cursor_position_enabled:
@@ -22448,6 +22500,26 @@ class MainWindow(QMainWindow):
         self._history_cursor_positions[self.current_path] = position
         if getattr(self, "_main_soft_scroll_enabled", True):
             self._soft_autoscroll_main()
+
+    def _update_main_cursor_status(self) -> None:
+        label = getattr(self, "_cursor_status_label", None)
+        if label is None:
+            return
+        if not self.current_path or not getattr(self, "editor", None):
+            label.clear()
+            label.hide()
+            return
+        cursor = self.editor.textCursor()
+        text = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
+        if cursor.hasSelection():
+            text += f" · {len(cursor.selectedText().replace(chr(0x2029), chr(10))):,} selected"
+        label.setText(text)
+        colors = chrome_colors(label, getattr(self, "_vault_accent_color", None))
+        label.setStyleSheet(
+            f"color: {colors['muted']}; background: transparent; border: 0; "
+            "padding: 0 6px;"
+        )
+        label.show()
 
     def _edit_task_from_main_editor(self, block_number: int, anchor_pos) -> None:
         """Open the shared Task Editor for a task hovered in the main editor."""

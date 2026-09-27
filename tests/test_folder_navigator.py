@@ -546,11 +546,14 @@ def test_preview_pinning_and_stale_restore(tmp_path, monkeypatch, app):
     window.open_file(tmp_path / "a.md")
     window.open_file(tmp_path / "b.md")
     assert [tab.path.name for tab in window.all_tabs()] == ["b.md"]
+    assert "Preview" in window.tabs.tabToolTip(0)
     window.keep_open(0)
+    assert "Pinned" in window.tabs.tabToolTip(0)
     window.open_file(tmp_path / "c.md")
     assert [tab.path.name for tab in window.all_tabs()] == ["b.md", "c.md"]
     window.active_tab().editor.insertPlainText("changed")
     assert window.active_tab().pinned and window.active_tab().dirty
+    assert "Unsaved changes" in window.tabs.tabToolTip(window.tabs.currentIndex())
     window.open_file(tmp_path / "a.md")
     assert len(window.all_tabs()) == 3
     window.active_tab().editor.document().setModified(False)
@@ -1943,6 +1946,7 @@ def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, 
 
 def test_folder_navigator_has_distinct_restrained_window_identity(
         tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QToolButton
     from sp.app.folder_navigator.window import Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1968,6 +1972,12 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.windowTitle() == (
         f"Folder Navigator — {tmp_path.name} — {document.name}"
     )
+    breadcrumb = window.identity_bar.findChildren(QToolButton)
+    assert [button.accessibleName() for button in breadcrumb] == [
+        f"Open {tmp_path.name}",
+        f"Open {document.name}",
+    ]
+    assert breadcrumb[-1].toolTip() == str(document)
     window.active_tab().editor.document().setModified(False)
     window.close()
 

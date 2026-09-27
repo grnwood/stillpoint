@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QDate, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QWheelEvent
-from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QMenu, QToolButton
 from PySide6.QtTest import QTest
 
 import sp.app.ui.link_navigator_panel as link_nav
@@ -451,3 +451,25 @@ def test_main_window_utility_identity_uses_existing_toolbar_and_rail(main_window
     assert main_window.tree_header_widget.title_label.text() == "VAULT"
     assert main_window.tree_header_widget.detail_label.text() == "test_vault"
     assert main_window.search_tab._utility_panel_header.title_label.text() == "SEARCH"
+
+
+def test_main_window_identity_breadcrumb_tracks_and_opens_page(main_window, monkeypatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(main_window, "_open_file", opened.append)
+    main_window.current_path = "/PageA/Child1/Child1.md"
+    main_window._update_main_utility_identity()
+
+    buttons = main_window.main_toolbar_identity.findChildren(QToolButton)
+    assert [button.text() for button in buttons] == ["test_vault", "PageA", "Child1"]
+    assert buttons[-1].toolTip() == "/PageA/Child1"
+
+    buttons[-1].click()
+    assert opened == ["/PageA/Child1/Child1.md"]
+
+
+def test_main_window_status_bar_keeps_location_in_breadcrumb(main_window) -> None:
+    main_window._open_file("/PageA/PageA.md")
+
+    assert main_window.statusBar().currentMessage() == ""
+    assert main_window._cursor_status_label.text() == "Ln 1, Col 1"
+    assert main_window._cursor_status_label.isVisibleTo(main_window.statusBar())
