@@ -2693,6 +2693,10 @@ class Window(QMainWindow):
         add(go_menu, "Markdown Headings…", self._show_active_heading_picker, "Ctrl+Alt+T")
         add(go_menu, "Quick Open", self.quick_open, "Ctrl+J")
         add(go_menu, "Folder Picker", self.folder_picker, "Ctrl+Alt+V")
+        self.reveal_active_tab_action = add(
+            go_menu, "Reveal in Folder", self._reveal_active_tab_in_folder
+        )
+        self.reveal_active_tab_action.setEnabled(self.active_tab() is not None)
         add(go_menu, "Filter From Here", self.filter_from_here)
         add(go_menu, "Next Tab", lambda: self._cycle_tab_popup(False))
         add(go_menu, "Previous Tab", lambda: self._cycle_tab_popup(True))
@@ -4151,6 +4155,8 @@ class Window(QMainWindow):
             self.mru = [tab.path] + [p for p in self.mru if p != tab.path]
         if hasattr(self, "save_action"):
             self.save_action.setEnabled(bool(tab and tab.editor and not tab.editor.isReadOnly()))
+        if hasattr(self, "reveal_active_tab_action"):
+            self.reveal_active_tab_action.setEnabled(tab is not None)
         if hasattr(self, "table_preview_action"):
             delimited = bool(tab and tab.path.suffix.casefold() in DELIMITED_SUFFIXES)
             table = isinstance(getattr(tab, "viewer", None), SpreadsheetView)
@@ -4876,6 +4882,14 @@ class Window(QMainWindow):
             self.tree.scrollTo(index)
         self.rail.setCurrentIndex(0)
         self.tree.setFocus()
+
+    def _reveal_active_tab_in_folder(self):
+        """Reveal the tab that is active when the command is executed."""
+        tab = self.active_tab()
+        if tab is None:
+            self.statusBar().showMessage("Open a file to reveal it in the folder", 3000)
+            return
+        self.reveal_tree(tab.path)
 
     def _tree_menu(self, point):
         index = self.tree.indexAt(point)

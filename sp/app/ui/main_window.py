@@ -3450,9 +3450,14 @@ class MainWindow(QMainWindow):
         shortcuts_action.setToolTip("Open the Keyboard Shortcuts page")
         shortcuts_action.triggered.connect(self._open_help_keyboard_shortcuts)
         help_menu.addAction(shortcuts_action)
-        about_action = QAction("About", self)
+        # AboutRole is required for Qt to place this action reliably in the
+        # macOS application menu.  Keep the full label on other platforms too
+        # so the command remains unambiguous in the Help menu/command bar.
+        about_action = QAction("About StillPoint", self)
+        about_action.setMenuRole(QAction.MenuRole.AboutRole)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
+        self._action_about = about_action
         if os.getenv("STILLPOINT_ENABLE_CRASH_TEST") == "1":
             crash_action = QAction("Debug: Crash (Segfault)", self)
             crash_action.setToolTip("Force a native crash for testing error reporting")

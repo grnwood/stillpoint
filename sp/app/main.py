@@ -972,6 +972,11 @@ def main() -> None:
     )
     eventloop_diag.install_qtimer_probe()
     qt_app = eventloop_diag.create_application(sys.argv)
+    # Give Qt a stable application identity before it builds the native menu
+    # bar.  In particular, macOS uses this name for its application menu and
+    # for the action carrying QAction.AboutRole.
+    qt_app.setApplicationName("StillPoint")
+    qt_app.setApplicationDisplayName("StillPoint")
     eventloop_diag.install_ui_method_probe()
     eventloop_diag.log_fd_target("after QApplication creation")
     eventloop_diag.install_qt_event_sampler(qt_app)

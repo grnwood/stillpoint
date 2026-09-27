@@ -1225,12 +1225,45 @@ def test_command_palette_uses_ctrl_shift_p_and_all_menu_actions(
     assert "View / Zoom In" in labels
     assert "View / Columns / Size" in labels
     assert "Go / Quick Open" in labels
+    assert "Go / Reveal in Folder" in labels
     assert "Go / Filter From Here" in labels
     assert len(window.command_palette.entries) == len(window._collect_command_actions())
 
     hidden = window.hidden_action.isChecked()
     window.command_palette.actionTriggered.emit(window.hidden_action)
     assert window.hidden_action.isChecked() is not hidden
+    window.close()
+
+
+def test_command_palette_reveals_the_active_tab_in_folder(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    first_path = tmp_path / "first.txt"
+    active_path = nested / "active.txt"
+    first_path.write_text("First\n", encoding="utf-8")
+    active_path.write_text("Active\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(first_path, pinned=True)
+    window.open_file(active_path, pinned=True)
+    app.processEvents()
+
+    assert window.active_tab().path == active_path
+    assert window.reveal_active_tab_action.isEnabled()
+    window.command_palette.actionTriggered.emit(window.reveal_active_tab_action)
+    app.processEvents()
+
+    current = window.tree.currentIndex()
+    assert Path(window.model.filePath(current)) == active_path
+    assert window.tree.isExpanded(window.model.index(str(nested)))
+
+    for tab in window.all_tabs():
+        if tab.editor:
+            tab.editor.document().setModified(False)
     window.close()
 
 
