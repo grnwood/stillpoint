@@ -124,7 +124,13 @@ from sp.logging_flags import log_enabled
 from sp.vault_boundary import NestedVaultError, validate_vault_root
 from sp.sync import HomebaseSyncEngine, HomebaseSyncStatus
 from sp.sync.engine import HomebaseSyncConfig, has_material_text_difference
-from .theme import apply_menu_theme, theme_color, theme_value
+from .theme import (
+    apply_menu_theme,
+    tab_widget_stylesheet,
+    theme_color,
+    theme_value,
+    tree_view_stylesheet,
+)
 from .screen_positioning import (
     clamp_popup_top_left,
     fit_window_to_available_screen,
@@ -10177,20 +10183,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _tab_widget_theme_style(self, pane_border: Optional[str] = None) -> str:
-        app_palette = QApplication.palette()
-        base_bg = app_palette.color(QPalette.Base).name()
-        alt_bg = app_palette.color(QPalette.AlternateBase).name()
-        text_fg = app_palette.color(QPalette.Text).name()
-        selected_bg = app_palette.color(QPalette.Highlight).name()
-        selected_fg = app_palette.color(QPalette.HighlightedText).name()
-        hover_fg = self._badge_text_for_background(alt_bg)
-        border = pane_border or theme_value("main_window.tree.header_border", "#555555")
-        return (
-            f"QTabWidget::pane {{ border: 2px solid {border}; background: {base_bg}; }}"
-            f"QTabBar::tab {{ background: {base_bg}; color: {text_fg}; "
-            f"border: 1px solid {border}; padding: 6px 10px; margin-right: 2px; }}"
-            f"QTabBar::tab:selected {{ background: {selected_bg}; color: {selected_fg}; }}"
-            f"QTabBar::tab:!selected:hover {{ background: {alt_bg}; color: {hover_fg}; }}"
+        return tab_widget_stylesheet(
+            self,
+            accent_color=getattr(self, "_vault_accent_color", None),
+            pane_border=(
+                pane_border
+                or theme_value("ui.chrome.border", theme_value("main_window.tree.header_border", "#555555"))
+            ),
         )
 
     def _ensure_config_active_vault_context(self) -> None:
@@ -19752,7 +19751,6 @@ class MainWindow(QMainWindow):
                 return
             focused = self.focusWidget()
             editor_has = focused is self.editor or (self.editor and self.editor.isAncestorOf(focused))
-            tree_has = focused is self.tree_view or self.tree_view.isAncestorOf(focused)
             left_has = focused is self.left_tab_widget or self.left_tab_widget.isAncestorOf(focused)
             right_has = focused is self.right_panel or self.right_panel.isAncestorOf(focused)
         except RuntimeError:
@@ -19760,35 +19758,32 @@ class MainWindow(QMainWindow):
             return
         except Exception:
             return
-        # Styles: subtle border with accent color; remove when unfocused. Reset any filter tint to default background.
+        # Focus is intentionally independent from filter/error colors. Filtering
+        # already has its own badge; the chrome accent only answers "where will
+        # my next key press go?"
         vault_accent = getattr(self, "_vault_accent_color", None)
         focus_border = (
-            theme_value("main_window.focus_border.filtered", "#D9534F")
-            if getattr(self, "_nav_filter_path", None)
-            else (
-                self._selection_bg_for_accent(vault_accent)
-                if vault_accent
-                else theme_value("main_window.focus_border.default", "#4A90E2")
-            )
+            self._selection_bg_for_accent(vault_accent)
+            if vault_accent
+            else theme_value("main_window.focus_border.default", "#4A90E2")
         )
         app_palette = QApplication.palette()
         editor_palette = self.editor.palette() if getattr(self, "editor", None) else app_palette
         tree_palette = app_palette
         base_color = editor_palette.color(QPalette.Base).name()
         text_color = editor_palette.color(QPalette.Text).name()
-        alternate_base = tree_palette.color(QPalette.AlternateBase).name()
         editor_selection_bg = editor_palette.color(QPalette.Highlight).name()
         editor_selection_text = editor_palette.color(QPalette.HighlightedText).name()
         if editor_has:
             editor_style = (
-                f"QTextEdit {{ border: 2px solid {focus_border}; border-radius:3px; "
+                f"QTextEdit {{ border: 1px solid {focus_border}; border-radius:4px; "
                 f"background: {base_color}; color: {text_color}; "
                 f"selection-background-color: {editor_selection_bg}; "
                 f"selection-color: {editor_selection_text}; }}"
             )
         else:
             editor_style = (
-                "QTextEdit { border: 2px solid transparent; "
+                "QTextEdit { border: 1px solid transparent; border-radius:4px; "
                 f"background: {base_color}; color: {text_color}; "
                 f"selection-background-color: {editor_selection_bg}; "
                 f"selection-color: {editor_selection_text}; }}"
@@ -19804,23 +19799,11 @@ class MainWindow(QMainWindow):
         arrow_open = (
             str(down_arrow_path).replace("\\", "/") if down_arrow_path else ""
         )
-        tree_item_divider = theme_value("main_window.tree.item_divider", "palette(midlight)")
         effective_tree_accent = self._effective_tree_accent_color()
-        tree_selected_bg = self._selection_bg_for_accent(effective_tree_accent)
-        tree_selected_text = self._badge_text_for_background(tree_selected_bg)
-        tree_hover_bg = self._hover_bg_for_accent(effective_tree_accent, alternate_base)
-        tree_hover_border = effective_tree_accent
-        tree_text_color = tree_palette.color(QPalette.Text).name()
-        tree_style = (
-            f"QTreeView {{ border: 1px solid transparent; background: {tree_palette.color(QPalette.Base).name()}; color: {tree_text_color}; }}"
-            f"QTreeView::viewport {{ background: {tree_palette.color(QPalette.Base).name()}; }}"
-            f"QTreeView::item {{ padding: 2px 6px 2px 2px; border: 1px solid transparent; border-bottom-color: {tree_item_divider}; border-radius: 6px; }}"
-            f"QTreeView::item:selected {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
-            f"QTreeView::item:selected:active {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
-            f"QTreeView::item:selected:!active {{ background: {tree_selected_bg}; color: {tree_selected_text}; border-color: {tree_selected_bg}; }}"
-            f"QTreeView::item:hover {{ background: {tree_hover_bg}; border-color: {tree_hover_border}; }}"
-            "QTreeView::branch { width: 16px; height: 16px; }"
-        )
+        tree_style = tree_view_stylesheet(
+            self.tree_view,
+            accent_color=effective_tree_accent,
+        ) + "QTreeView::branch { width: 16px; height: 16px; }"
         if arrow_closed and arrow_open:
             tree_style += (
                 f'QTreeView::branch:has-children:closed {{ image: url("{arrow_closed}"); }}'

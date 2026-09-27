@@ -117,6 +117,93 @@ def theme_color(path: str, default: str | QColor | None = None) -> QColor:
     return QColor(str(value))
 
 
+def _rgba(color: QColor, alpha: int) -> str:
+    """Return a QSS-safe rgba value while preserving the source hue."""
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {max(0, min(255, int(alpha)))})"
+
+
+def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) -> dict[str, str]:
+    """Resolve the small semantic color set shared by app chrome.
+
+    Content views retain their own theme-specific colors.  These values are for
+    the framing around them: tabs, rails, utility headers, and selection states.
+    """
+    palette = _resolved_palette(source)
+    accent = QColor(accent_color) if accent_color is not None else theme_color(
+        "ui.chrome.accent",
+        theme_value("main_window.utility_header.accent", palette.color(QPalette.Highlight).name()),
+    )
+    if not accent.isValid():
+        accent = palette.color(QPalette.Highlight)
+    border = theme_color("ui.chrome.border", palette.color(QPalette.Mid).name())
+    if not border.isValid():
+        border = palette.color(QPalette.Mid)
+    return {
+        "window": palette.color(QPalette.Window).name(),
+        "base": palette.color(QPalette.Base).name(),
+        "alternate": palette.color(QPalette.AlternateBase).name(),
+        "text": palette.color(QPalette.Text).name(),
+        "muted": palette.color(QPalette.Mid).name(),
+        "border": border.name(),
+        "accent": accent.name(),
+        "hover": _rgba(accent, int(theme_value("ui.chrome.hover_alpha", 28))),
+        "selected": _rgba(accent, int(theme_value("ui.chrome.selection_alpha", 72))),
+    }
+
+
+def tab_widget_stylesheet(
+    source: Any = None,
+    *,
+    object_name: str = "",
+    accent_color: str | QColor | None = None,
+    pane_border: str | QColor | None = None,
+) -> str:
+    """Build the restrained tab treatment shared by StillPoint windows."""
+    colors = chrome_colors(source, accent_color)
+    pane_color = QColor(pane_border) if pane_border is not None else QColor(colors["border"])
+    border = pane_color.name() if pane_color.isValid() else colors["border"]
+    widget = f"QTabWidget#{object_name}" if object_name else "QTabWidget"
+    tab = f"{widget} QTabBar::tab"
+    radius = int(theme_value("ui.chrome.radius_px", 4))
+    horizontal = int(theme_value("ui.tabs.horizontal_padding_px", 10))
+    vertical = int(theme_value("ui.tabs.vertical_padding_px", 5))
+    return (
+        f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
+        f"background: {colors['base']}; }}"
+        f"{tab} {{ background: transparent; color: {colors['muted']}; border: 0; "
+        f"border-bottom: 2px solid transparent; padding: {vertical}px {horizontal}px; "
+        "margin-right: 1px; }"
+        f"{tab}:selected {{ background: {colors['alternate']}; color: {colors['text']}; "
+        f"border-bottom: 2px solid {colors['accent']}; font-weight: 600; }}"
+        f"{tab}:!selected:hover {{ background: {colors['hover']}; color: {colors['text']}; }}"
+    )
+
+
+def tree_view_stylesheet(
+    source: Any = None,
+    *,
+    accent_color: str | QColor | None = None,
+    focused: bool = False,
+) -> str:
+    """Build a quiet, keyboard-friendly tree/list surface."""
+    colors = chrome_colors(source, accent_color)
+    border = colors["accent"] if focused else colors["border"]
+    radius = int(theme_value("ui.chrome.radius_px", 4))
+    horizontal = int(theme_value("ui.tree.horizontal_padding_px", 6))
+    vertical = int(theme_value("ui.tree.vertical_padding_px", 3))
+    return (
+        f"QTreeView {{ border: 1px solid {border}; border-radius: {radius}px; "
+        f"background: {colors['base']}; color: {colors['text']}; }}"
+        f"QTreeView::viewport {{ background: {colors['base']}; }}"
+        f"QTreeView::item {{ padding: {vertical}px {horizontal}px; border: 0; "
+        f"border-radius: {radius}px; }}"
+        f"QTreeView::item:hover {{ background: {colors['hover']}; }}"
+        f"QTreeView::item:selected, QTreeView::item:selected:active, "
+        f"QTreeView::item:selected:!active {{ background: {colors['selected']}; "
+        f"color: {colors['text']}; }}"
+    )
+
+
 def reload_theme() -> None:
     global _THEME_CACHE, _THEME_CACHE_PATH
     _THEME_CACHE = None

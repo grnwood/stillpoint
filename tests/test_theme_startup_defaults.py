@@ -96,6 +96,18 @@ def test_apply_qt_palette_aligns_native_color_scheme(window_bg, expected_scheme,
     assert app.applied_palette.color(QPalette.ColorRole.Window).name() == window_bg
 
 
+def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
+    tabs = theme.tab_widget_stylesheet(qapp, accent_color="#4f8f8b")
+    tree = theme.tree_view_stylesheet(qapp, accent_color="#4f8f8b")
+
+    assert "QTabWidget::pane { border: 1px solid" in tabs
+    assert "border-bottom: 2px solid #4f8f8b" in tabs
+    assert "QTabBar::tab { background: transparent" in tabs
+    assert "; }}" not in tabs
+    assert "QTreeView::item { padding: 3px 6px; border: 0" in tree
+    assert "border-bottom-color" not in tree
+
+
 def _write_template_tree(root: Path) -> None:
     (root / "Default.txt").write_text("default\n", encoding="utf-8")
     folder_template = root / "folders" / "Category" / "Template"

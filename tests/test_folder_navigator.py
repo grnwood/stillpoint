@@ -1951,19 +1951,18 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     window = Window(tmp_path)
 
     assert window.windowTitle() == f"Folder Navigator — {tmp_path.name}"
-    assert window.identity_title.text() == "FOLDER NAVIGATOR"
-    assert tmp_path.name in window.identity_root.text()
-    assert window.identity_root.toolTip() == str(tmp_path)
-    assert window.identity_bar.minimumHeight() == 32
-    assert window.identity_bar.maximumHeight() == 32
+    assert window.identity_bar.title_label.text() == "FOLDER NAVIGATOR"
+    assert tmp_path.name in window.identity_bar.detail_label.text()
+    assert window.identity_bar.detail_label.toolTip() == str(tmp_path)
+    assert window.identity_bar.minimumHeight() == 28
+    assert window.identity_bar.maximumHeight() == 28
     assert window.columns_toolbar.isAncestorOf(window.identity_bar)
     assert window.rail.tabText(0) == "Files"
-    assert window.folder_panel_title.text() == "FILES"
-    assert window.folder_root_badge.text() == tmp_path.name
-    assert window.navigator_status_identity.text() == "FOLDER NAVIGATOR"
+    assert window.folder_panel_header.title_label.text() == "FILES"
+    assert window.folder_panel_header.detail_label.text() == tmp_path.name
     assert window._folder_identity_accent in window.identity_bar.styleSheet()
     assert "QTreeView::item:hover" in window.tree.styleSheet()
-    assert "border-bottom-color" in window.tree.styleSheet()
+    assert "border-bottom-color" not in window.tree.styleSheet()
 
     window.open_file(document, pinned=True)
     assert window.windowTitle() == (
@@ -2187,13 +2186,13 @@ def test_folder_and_editor_panels_show_active_focus_border(tmp_path, monkeypatch
 
     window.tree.setFocus()
     app.processEvents()
-    assert "2px solid transparent" not in window.rail.styleSheet()
-    assert "2px solid transparent" in window.tabs.styleSheet()
+    assert f"1px solid {window._folder_identity_accent}" in window.rail.styleSheet()
+    assert f"1px solid {window._folder_identity_accent}" not in window.tabs.styleSheet()
 
     window.active_tab().editor.setFocus()
     app.processEvents()
-    assert "2px solid transparent" in window.rail.styleSheet()
-    assert "2px solid transparent" not in window.tabs.styleSheet()
+    assert f"1px solid {window._folder_identity_accent}" not in window.rail.styleSheet()
+    assert f"1px solid {window._folder_identity_accent}" in window.tabs.styleSheet()
     window.active_tab().editor.document().setModified(False)
     window.close()
 

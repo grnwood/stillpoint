@@ -53,7 +53,13 @@ from sp.app.ui.keyboard_shortcuts import (
     vi_navigation_sequences,
 )
 from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
-from sp.app.ui.theme import theme_color, theme_value
+from sp.app.ui.theme import (
+    tab_widget_stylesheet,
+    theme_color,
+    theme_value,
+    tree_view_stylesheet,
+)
+from sp.app.ui.utility_header import CompactToolbarIdentity, UtilityPanelHeader
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
@@ -2089,19 +2095,14 @@ class Window(QMainWindow):
         folder_page_layout = QVBoxLayout(self.folder_page)
         folder_page_layout.setContentsMargins(0, 0, 0, 0)
         folder_page_layout.setSpacing(0)
-        self.folder_panel_header = QFrame()
-        self.folder_panel_header.setObjectName("folderNavigatorUtilityHeader")
-        folder_header_layout = QHBoxLayout(self.folder_panel_header)
-        folder_header_layout.setContentsMargins(9, 5, 9, 5)
-        self.folder_panel_title = QLabel("FILES")
-        self.folder_panel_title.setObjectName("folderNavigatorUtilityTitle")
-        folder_header_layout.addWidget(self.folder_panel_title)
-        folder_header_layout.addStretch()
-        self.folder_root_badge = QLabel(self.root.name)
-        self.folder_root_badge.setObjectName("folderNavigatorRootBadge")
-        self.folder_root_badge.setToolTip(str(self.root))
-        self.folder_root_badge.setMaximumWidth(160)
-        folder_header_layout.addWidget(self.folder_root_badge)
+        identity_accent = str(theme_value("folder_navigator.identity.accent", "#4f8f8b"))
+        self.folder_panel_header = UtilityPanelHeader(
+            "Files",
+            self.root.name,
+            accent_color=identity_accent,
+        )
+        self.folder_panel_header.detail_label.setMaximumWidth(160)
+        self.folder_panel_header.set_detail(self.root.name, str(self.root))
         folder_page_layout.addWidget(self.folder_panel_header)
         folder_page_layout.addWidget(self.tree)
         self.rail = QTabWidget()
@@ -2134,26 +2135,13 @@ class Window(QMainWindow):
         layout = QVBoxLayout(outer)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.identity_bar = QFrame()
-        self.identity_bar.setObjectName("folderNavigatorIdentity")
-        self.identity_bar.setFixedHeight(32)
-        identity_layout = QHBoxLayout(self.identity_bar)
-        identity_layout.setContentsMargins(8, 2, 8, 2)
-        identity_layout.setSpacing(6)
-        self.identity_icon = QLabel()
-        self.identity_icon.setFixedSize(22, 22)
-        self.identity_icon.setAlignment(Qt.AlignCenter)
-        if not icon.isNull():
-            self.identity_icon.setPixmap(icon.pixmap(20, 20))
-        identity_layout.addWidget(self.identity_icon)
-        self.identity_title = QLabel("FOLDER NAVIGATOR")
-        self.identity_title.setObjectName("folderNavigatorIdentityTitle")
-        identity_layout.addWidget(self.identity_title)
-        self.identity_root = QLabel(f"·  {self.root.name}")
-        self.identity_root.setObjectName("folderNavigatorIdentityRoot")
-        self.identity_root.setToolTip(str(self.root))
-        self.identity_root.setMinimumWidth(0)
-        identity_layout.addWidget(self.identity_root)
+        self.identity_bar = CompactToolbarIdentity(
+            "Folder Navigator",
+            self.root.name,
+            icon=icon,
+            accent_color=identity_accent,
+        )
+        self.identity_bar.set_detail(self.root.name, str(self.root))
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
         layout.addLayout(self.bookmarks_bar)
@@ -2169,10 +2157,6 @@ class Window(QMainWindow):
         elif self.catalog_count:
             status += f" · {self.catalog_count:,} cached files"
         self.statusBar().showMessage(status)
-        self.navigator_status_identity = QLabel("FOLDER NAVIGATOR")
-        self.navigator_status_identity.setObjectName("folderNavigatorStatusIdentity")
-        self.navigator_status_identity.setAccessibleName("Folder Navigator window identity")
-        self.statusBar().addPermanentWidget(self.navigator_status_identity)
         self.index_notice = QLabel()
         self.index_notice.setAccessibleName("Folder indexing status")
         self.statusBar().addPermanentWidget(self.index_notice, 1)
@@ -2236,70 +2220,18 @@ class Window(QMainWindow):
 
     def _apply_identity_style(self):
         """Apply restrained Folder Navigator chrome without changing content themes."""
-        palette = QApplication.palette()
         accent = QColor(str(theme_value(
             "folder_navigator.identity.accent", "#4f8f8b"
         )))
         if not accent.isValid():
             accent = QColor("#4f8f8b")
         self._folder_identity_accent = accent.name()
-        window = palette.color(QPalette.Window).name()
-        alternate = palette.color(QPalette.AlternateBase).name()
-        base = palette.color(QPalette.Base).name()
-        text = palette.color(QPalette.WindowText).name()
-        muted = palette.color(QPalette.Mid).name()
-        selected_text = palette.color(QPalette.HighlightedText).name()
-        selected = QColor(accent)
-        selected.setAlpha(190)
-        hover = QColor(accent)
-        hover.setAlpha(45)
-        self.identity_bar.setStyleSheet(
-            "QFrame#folderNavigatorIdentity {"
-            f"background: transparent; border-left: 2px solid {accent.name()};"
-            "}"
-            "QLabel#folderNavigatorIdentityTitle {"
-            f"color: {accent.name()}; font-size: 11px; font-weight: 700;"
-            "}"
-            "QLabel#folderNavigatorIdentityRoot {"
-            f"color: {text}; font-size: 11px;"
-            "}"
-        )
-        self.folder_panel_header.setStyleSheet(
-            "QFrame#folderNavigatorUtilityHeader {"
-            f"background: {alternate}; border-bottom: 1px solid {muted};"
-            "}"
-            "QLabel#folderNavigatorUtilityTitle {"
-            f"color: {accent.name()}; font-size: 10px; font-weight: 700;"
-            "}"
-            "QLabel#folderNavigatorRootBadge {"
-            f"background: {window}; color: {text}; border: 1px solid {muted};"
-            "border-radius: 7px; padding: 1px 6px; font-size: 10px;"
-            "}"
-        )
-        self.folder_page.setStyleSheet(
-            f"QWidget {{ background: {base}; }}"
-        )
+        self.identity_bar.set_accent_color(accent.name())
+        self.folder_panel_header.set_accent_color(accent.name())
         self.tree.setStyleSheet(
-            f"QTreeView {{ border: 0; background: {base}; color: {text}; }}"
-            f"QTreeView::viewport {{ background: {base}; }}"
-            "QTreeView::item { padding: 2px 6px 2px 2px; "
-            f"border: 1px solid transparent; border-bottom-color: {muted}; "
-            "border-radius: 6px; }"
-            "QTreeView::item:hover {"
-            f"background: rgba({hover.red()}, {hover.green()}, {hover.blue()}, {hover.alpha()}); "
-            f"border-color: {accent.name()}; }}"
-            "QTreeView::item:selected, QTreeView::item:selected:active, "
-            "QTreeView::item:selected:!active {"
-            f"background: rgba({selected.red()}, {selected.green()}, {selected.blue()}, {selected.alpha()}); "
-            f"color: {selected_text}; border-color: {accent.name()}; }}"
-            "QHeaderView::section {"
-            f"background: {alternate}; color: {text}; border: 0;"
-            f"border-bottom: 1px solid {muted}; padding: 4px;"
-            "}"
-        )
-        self.navigator_status_identity.setStyleSheet(
-            f"color: {accent.name()}; font-size: 10px; font-weight: 700; "
-            f"border-left: 2px solid {accent.name()}; padding: 1px 6px;"
+            tree_view_stylesheet(self.tree, accent_color=accent.name())
+            + "QHeaderView::section { border: 0; border-bottom: 1px solid palette(mid); "
+            "padding: 4px 6px; }"
         )
 
     def _apply_focus_borders(self):
@@ -2314,34 +2246,23 @@ class Window(QMainWindow):
             )
         except RuntimeError:
             return
-        focus_border = (
-            theme_value("main_window.focus_border.filtered", "#D9534F")
-            if self.scope != self.root and folder_has_focus
-            else getattr(self, "_folder_identity_accent", "#4f8f8b")
-        )
-        palette = QApplication.palette()
-        alternate = palette.color(QPalette.AlternateBase).name()
-        text = palette.color(QPalette.WindowText).name()
         accent = getattr(self, "_folder_identity_accent", "#4f8f8b")
+        neutral = QApplication.palette().color(QPalette.Mid).name()
         self.rail.setStyleSheet(
-            "QTabWidget#folderNavigatorRail::pane { "
-            f"border: 2px solid {focus_border if folder_has_focus else 'transparent'}; "
-            f"border-radius: 3px; background: {alternate}; }}"
-            "QTabWidget#folderNavigatorRail QTabBar::tab {"
-            f"color: {text}; padding: 5px 11px; "
-            "border-bottom: 2px solid rgba(0, 0, 0, 0);"
-            "}"
-            "QTabWidget#folderNavigatorRail QTabBar::tab:selected {"
-            f"border-bottom: 2px solid {accent}; font-weight: 600;"
-            "}"
+            tab_widget_stylesheet(
+                self.rail,
+                object_name="folderNavigatorRail",
+                accent_color=accent,
+                pane_border=accent if folder_has_focus else neutral,
+            )
         )
         self.tabs.setStyleSheet(
-            "QTabWidget#folderNavigatorEditors::pane { "
-            f"border: 2px solid {focus_border if editor_has_focus else 'transparent'}; "
-            "border-radius: 3px; }"
-            "QTabWidget#folderNavigatorEditors QTabBar::tab:selected {"
-            f"border-bottom: 3px solid {accent}; font-weight: 600;"
-            "}"
+            tab_widget_stylesheet(
+                self.tabs,
+                object_name="folderNavigatorEditors",
+                accent_color=accent,
+                pane_border=accent if editor_has_focus else neutral,
+            )
         )
 
     @staticmethod

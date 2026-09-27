@@ -27,6 +27,7 @@ def test_source_editor_line_cursor_setting_highlights_current_line(qtbot) -> Non
     assert selections[0].format.property(QTextFormat.FullWidthSelection) is True
     assert _cursor_selections(editor, editor._VI_BLOCK_EXTRA_KEY) == []
     assert editor.cursorWidth() == 2
+    assert editor.document().documentMargin() == 18
 
 
 def test_source_editor_block_cursor_setting_highlights_character(qtbot) -> None:

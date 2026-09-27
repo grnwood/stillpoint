@@ -1856,6 +1856,9 @@ class MarkdownEditor(QTextEdit):
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self._indent_unit = " " * 4
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.document().setDocumentMargin(
+            float(theme_value("ui.editor.document_margin_px", 18))
+        )
         self.highlighter = MarkdownHighlighter(self.document())
         self._apply_theme_palette()
         self._hr_line_color = getattr(

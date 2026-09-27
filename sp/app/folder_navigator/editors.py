@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit
 from sp.app import config
 from sp.app.ui.markdown_editor import MarkdownEditor
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
-from sp.app.ui.theme import theme_color
+from sp.app.ui.theme import theme_color, theme_value
 
 
 _TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
@@ -196,6 +196,9 @@ class SourceEditor(QPlainTextEdit):
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.document().setDocumentMargin(
+            float(theme_value("ui.editor.document_margin_px", 18))
+        )
         self._vi_feature_enabled = False
         self._vi_insert_mode = True
         self._vi_cursor_style = "block"

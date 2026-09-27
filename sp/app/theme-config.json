@@ -1,4 +1,24 @@
 {
+  "ui": {
+    "chrome": {
+      "accent": "#4f8f8b",
+      "border": "#3b4350",
+      "hover_alpha": 28,
+      "selection_alpha": 72,
+      "radius_px": 4
+    },
+    "tabs": {
+      "horizontal_padding_px": 10,
+      "vertical_padding_px": 5
+    },
+    "tree": {
+      "horizontal_padding_px": 6,
+      "vertical_padding_px": 3
+    },
+    "editor": {
+      "document_margin_px": 18
+    }
+  },
   "mode_window": {
     "cursor_halo": {
       "fill": "#6fc1ff",

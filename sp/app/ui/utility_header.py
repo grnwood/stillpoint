@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QApplication,
     QBoxLayout,
     QFrame,
     QHBoxLayout,
@@ -14,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .theme import theme_value
+from .theme import chrome_colors, theme_value
 
 
 class UtilityPanelHeader(QFrame):
@@ -30,7 +29,7 @@ class UtilityPanelHeader(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("utilityPanelHeader")
-        self.setFixedHeight(30)
+        self.setFixedHeight(int(theme_value("ui.utility_header.height_px", 30)))
         self._accent_color = accent_color
         self.header_layout = QHBoxLayout(self)
         self.header_layout.setContentsMargins(8, 3, 8, 3)
@@ -59,27 +58,19 @@ class UtilityPanelHeader(QFrame):
         self.apply_theme()
 
     def apply_theme(self) -> None:
-        palette = QApplication.palette()
-        accent = QColor(
-            self._accent_color
-            or str(theme_value("main_window.utility_header.accent", "#4f8f8b"))
-        )
-        if not accent.isValid():
-            accent = palette.color(QPalette.Highlight)
-        alternate = palette.color(QPalette.AlternateBase).name()
-        base = palette.color(QPalette.Base).name()
-        text = palette.color(QPalette.Text).name()
-        border = palette.color(QPalette.Mid).name()
+        colors = chrome_colors(self, self._accent_color)
+        radius = int(theme_value("ui.chrome.radius_px", 4))
         self.setStyleSheet(
             "QFrame#utilityPanelHeader {"
-            f"background: {alternate}; border-bottom: 1px solid {border};"
+            f"background: {colors['alternate']}; border-bottom: 1px solid {colors['border']};"
             "}"
             "QLabel#utilityPanelTitle {"
-            f"color: {accent.name()}; font-size: 10px; font-weight: 700;"
+            f"color: {colors['accent']}; font-size: 10px; font-weight: 700;"
             "}"
             "QLabel#utilityPanelDetail {"
-            f"background: {base}; color: {text}; border: 1px solid {border};"
-            "border-radius: 7px; padding: 1px 6px; font-size: 10px;"
+            f"background: {colors['base']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; border-radius: {radius}px; "
+            "padding: 1px 6px; font-size: 10px;"
             "}"
         )
 
@@ -98,7 +89,7 @@ class CompactToolbarIdentity(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("compactToolbarIdentity")
-        self.setFixedHeight(28)
+        self.setFixedHeight(int(theme_value("ui.toolbar_identity.height_px", 28)))
         self._accent_color = accent_color
         layout = QHBoxLayout(self)
         layout.setContentsMargins(7, 2, 7, 2)
@@ -134,23 +125,16 @@ class CompactToolbarIdentity(QFrame):
         self.apply_theme()
 
     def apply_theme(self) -> None:
-        palette = QApplication.palette()
-        accent = QColor(
-            self._accent_color
-            or str(theme_value("main_window.utility_header.accent", "#4f8f8b"))
-        )
-        if not accent.isValid():
-            accent = palette.color(QPalette.Highlight)
-        text = palette.color(QPalette.WindowText).name()
+        colors = chrome_colors(self, self._accent_color)
         self.setStyleSheet(
             "QFrame#compactToolbarIdentity {"
-            f"background: transparent; border-left: 2px solid {accent.name()};"
+            f"background: transparent; border-left: 2px solid {colors['accent']};"
             "}"
             "QLabel#compactToolbarIdentityTitle {"
-            f"color: {accent.name()}; font-size: 10px; font-weight: 700;"
+            f"color: {colors['accent']}; font-size: 10px; font-weight: 700;"
             "}"
             "QLabel#compactToolbarIdentityDetail {"
-            f"color: {text}; font-size: 10px;"
+            f"color: {colors['text']}; font-size: 10px;"
             "}"
         )
 
