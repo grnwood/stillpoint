@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from sp.app.ui.main_window import MainWindow
 from sp.app import config
@@ -299,6 +299,58 @@ def test_application_deactivated_forces_save_when_dirty() -> None:
     assert kwargs.get("reason") == "application deactivated"
     assert kwargs.get("force") is True
     assert kwargs.get("allow_when_suspended") is True
+
+
+def test_application_activation_repairs_focus_to_editor_then_right_rail(monkeypatch) -> None:
+    class _Target:
+        def __init__(self):
+            self.focused = False
+
+        def setFocus(self, _reason):
+            self.focused = True
+
+    class _Tabs:
+        def __init__(self, target):
+            self.target = target
+
+        def tabBar(self):
+            return self.target
+
+    editor = _Target()
+    right_rail = _Target()
+
+    class _Dummy:
+        left_panel_container = None
+        right_panel_container = None
+        find_bar = None
+
+        def __init__(self):
+            self.current_path = "/open.md"
+            self.editor = editor
+            self.right_panel = type("Right", (), {"tabs": _Tabs(right_rail)})()
+            self._right_minibar_bar = _Target()
+
+        def _is_right_panel_expanded(self):
+            return True
+
+        def _apply_focus_borders(self):
+            pass
+
+    dummy = _Dummy()
+    monkeypatch.setattr(QApplication, "activeWindow", lambda: dummy)
+    monkeypatch.setattr(QApplication, "activeModalWidget", lambda: None)
+    monkeypatch.setattr(QApplication, "activePopupWidget", lambda: None)
+    monkeypatch.setattr(QApplication, "focusWidget", lambda: None)
+
+    MainWindow._repair_focus_after_activation(dummy)
+    assert editor.focused
+    assert not right_rail.focused
+
+    editor.focused = False
+    dummy.current_path = None
+    MainWindow._repair_focus_after_activation(dummy)
+    assert not editor.focused
+    assert right_rail.focused
 
 
 def test_is_editor_dirty_clears_false_positive_for_local_mode() -> None:

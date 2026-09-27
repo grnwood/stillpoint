@@ -28,8 +28,11 @@ def launch(root: Path) -> subprocess.Popen:
             pass
     env = os.environ.copy()
     try:
-        from sp.app.config import load_effective_theme_preference
+        from sp.app.config import get_active_vault, load_effective_theme_preference
         env["SP_THEME_OVERRIDE"] = load_effective_theme_preference()
+        active_vault = get_active_vault()
+        if active_vault:
+            env["SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT"] = active_vault
     except Exception:
         pass
     if not frozen:

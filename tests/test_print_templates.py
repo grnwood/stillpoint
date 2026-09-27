@@ -74,3 +74,35 @@ def test_print_css_contains_checkbox_and_underline_styles() -> None:
         assert "md-checkbox--checked::after" in css
         assert "mark" in css
         assert "text-decoration: underline" in css
+
+
+
+def test_transient_print_preview_rewrites_only_local_relative_images(
+        tmp_path: Path) -> None:
+    import time
+    from sp.server import api
+
+    image = tmp_path / "diagram image.png"
+    image.write_bytes(b"image")
+    preview_id = "preview-test"
+    api._PRINT_PREVIEWS[preview_id] = {
+        "expires_at": time.time() + 60,
+        "title": "Outside page",
+        "content": "![diagram](diagram image.png)",
+        "path_label": str(tmp_path / "outside.md"),
+        "source_directory": tmp_path,
+    }
+    try:
+        rendered = api._rewrite_preview_image_src(
+            '<img src="diagram image.png"><img src="https://example.com/a.png">',
+            preview_id,
+            "print-token",
+        )
+    finally:
+        api._PRINT_PREVIEWS.pop(preview_id, None)
+
+    assert (
+        '/print-preview/preview-test/asset/diagram%20image.png?token=print-token'
+        in rendered
+    )
+    assert 'src="https://example.com/a.png"' in rendered

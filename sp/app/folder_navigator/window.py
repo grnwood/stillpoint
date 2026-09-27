@@ -8,19 +8,24 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
+from urllib.parse import quote
 
-from PySide6.QtCore import (QDir, QEvent, QFileInfo, QFileSystemWatcher, QObject,
-                            QPoint, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QImageReader, QKeySequence, QPalette,
+from PySide6.QtCore import (QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
+                            QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
+                            Qt, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QImageReader, QKeySequence, QPalette,
     QPixmap, QShortcut, QTextCursor, QTextFormat)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QAbstractItemView, QFileIconProvider, QFileSystemModel, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget,
-    QStyle, QTabBar, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox)
+    QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox)
 
 from .core import (MAX_CONCURRENT_WORK, MAX_DIRECTORY_ENTRIES, MAX_EDIT_BYTES, MAX_IMAGE_PIXELS, MAX_RESULTS, MAX_SEARCH_BYTES,
     ConflictError, TextFile, atomic_save, content_matches, fingerprint, fuzzy_score, inside,
@@ -33,12 +38,18 @@ from .icon import (
     get_folder_navigator_icon,
 )
 from .launch import launch
+from .tabular import TablePreview, read_delimited_preview, read_workbook_preview
 from sp.app.ui.keyboard_shortcuts import (
     history_cycle_modifier_release_key,
     history_cycle_sequences,
     is_vi_navigation_chord,
+    vi_navigation_sequences,
 )
 from sp.app.ui.theme import theme_color, theme_value
+
+DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
+WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
+DIAGRAM_SUFFIXES = {".puml", ".mmd", ".excalidraw"}
 
 
 class Bridge(QObject):
@@ -73,6 +84,7 @@ class NavigatorTree(QTreeView):
     openFile = Signal(str, bool)
     openFileAndFocus = Signal(str, bool)
     escapePressed = Signal()
+    pathsDropped = Signal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,8 +97,53 @@ class NavigatorTree(QTreeView):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setUniformRowHeights(True)
         self.setAnimated(False)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
         self.setSortingEnabled(True)
         self.sortByColumn(0, Qt.AscendingOrder)
+
+    def _drop_directory(self, position):
+        index = self.indexAt(position)
+        model = self.model()
+        if index.isValid():
+            path = Path(model.filePath(index))
+            return path if model.isDir(index) else path.parent
+        root = self.rootIndex()
+        root_path = model.filePath(root) if root.isValid() else ""
+        return Path(root_path) if root_path else None
+
+    @staticmethod
+    def _local_drop_paths(event):
+        if not event.mimeData().hasUrls():
+            return []
+        return [Path(url.toLocalFile()) for url in event.mimeData().urls()
+                if url.isLocalFile() and url.toLocalFile()]
+
+    def dragEnterEvent(self, event):  # type: ignore[override]
+        if self._local_drop_paths(event):
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):  # type: ignore[override]
+        target = self._drop_directory(event.position().toPoint())
+        if self._local_drop_paths(event) and target is not None and target.is_dir():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):  # type: ignore[override]
+        sources = self._local_drop_paths(event)
+        target = self._drop_directory(event.position().toPoint())
+        if not sources or target is None or not target.is_dir():
+            event.ignore()
+            return
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        self.pathsDropped.emit(sources, target)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -147,6 +204,13 @@ class SearchResultsList(QListWidget):
             row += delta
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if (self.vi_enabled
+                and event.key() in (Qt.Key_J, Qt.Key_K)
+                and is_vi_navigation_chord(event.modifiers() & ~Qt.KeypadModifier)):
+            from PySide6.QtGui import QKeyEvent
+            page_key = Qt.Key_PageDown if event.key() == Qt.Key_J else Qt.Key_PageUp
+            super().keyPressEvent(QKeyEvent(event.type(), page_key, Qt.NoModifier))
+            return
         if self.vi_enabled and event.modifiers() == Qt.NoModifier:
             if event.key() == Qt.Key_J:
                 self._move_to_result(1)
@@ -364,12 +428,387 @@ class HeadingPicker(QDialog):
         return super().eventFilter(obj, event)
 
 
+def _spreadsheet_column_name(column):
+    name = ""
+    column += 1
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+class TablePreviewModel(QAbstractTableModel):
+    """Incrementally exposes an already bounded table to Qt's virtualized view."""
+
+    CHUNK_ROWS = 500
+
+    def __init__(self, preview: TablePreview, parent=None):
+        super().__init__(parent)
+        self.preview = preview
+        self.header_row = bool(preview.has_header and preview.rows)
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
+        self.columns = max((len(row) for row in preview.rows), default=0)
+        self.row_order = self._default_row_order()
+
+    def _default_row_order(self):
+        return list(range(1 if self.header_row else 0, len(self.preview.rows)))
+
+    def _data_row_count(self):
+        return max(0, len(self.preview.rows) - (1 if self.header_row else 0))
+
+    def rowCount(self, parent=QModelIndex()):  # type: ignore[override]
+        return 0 if parent.isValid() else self.visible_rows
+
+    def columnCount(self, parent=QModelIndex()):  # type: ignore[override]
+        return 0 if parent.isValid() else self.columns
+
+    def data(self, index, role=Qt.DisplayRole):  # type: ignore[override]
+        if not index.isValid():
+            return None
+        source_row = self.row_order[index.row()]
+        row = self.preview.rows[source_row]
+        if role in (Qt.DisplayRole, Qt.ToolTipRole):
+            return row[index.column()] if index.column() < len(row) else ""
+        if role == Qt.BackgroundRole:
+            color = QColor.fromHsl((index.column() * 47) % 360, 110, 128)
+            color.setAlpha(18)
+            return color
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):  # type: ignore[override]
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Vertical:
+                return section + 1 + (1 if self.header_row else 0)
+            if self.header_row and section < len(self.preview.rows[0]):
+                return self.preview.rows[0][section]
+            return _spreadsheet_column_name(section)
+        if role == Qt.ForegroundRole and orientation == Qt.Horizontal:
+            return QColor.fromHsl((section * 47) % 360, 180, 115)
+        return None
+
+    def canFetchMore(self, parent=QModelIndex()):  # type: ignore[override]
+        return not parent.isValid() and self.visible_rows < self._data_row_count()
+
+    def fetchMore(self, parent=QModelIndex()):  # type: ignore[override]
+        if parent.isValid():
+            return
+        remaining = self._data_row_count() - self.visible_rows
+        count = min(self.CHUNK_ROWS, remaining)
+        if count <= 0:
+            return
+        first = self.visible_rows
+        self.beginInsertRows(QModelIndex(), first, first + count - 1)
+        self.visible_rows += count
+        self.endInsertRows()
+
+    def set_header_row(self, enabled):
+        self.beginResetModel()
+        self.header_row = bool(enabled and self.preview.rows)
+        self.row_order = self._default_row_order()
+        self.visible_rows = min(self.CHUNK_ROWS, self._data_row_count())
+        self.endResetModel()
+
+    @staticmethod
+    def _sort_key(value):
+        text = str(value or "").strip()
+        if not text:
+            return 2, 0, ""
+        try:
+            return 0, float(text.replace(",", "")), ""
+        except ValueError:
+            return 1, 0, text.casefold()
+
+    def sort(self, column, order=Qt.AscendingOrder):  # type: ignore[override]
+        if column < 0 or column >= self.columns:
+            return
+        self.layoutAboutToBeChanged.emit()
+        self.row_order.sort(
+            key=lambda row_index: self._sort_key(
+                self.preview.rows[row_index][column]
+                if column < len(self.preview.rows[row_index]) else ""
+            ),
+            reverse=order == Qt.DescendingOrder,
+        )
+        self.layoutChanged.emit()
+
+
+class PreviewTableView(QTableView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.vi_enabled = False
+        self.vi_page_shortcuts = []
+        for sequence, page_key in zip(
+                vi_navigation_sequences(), (Qt.Key_PageDown, Qt.Key_PageUp)):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda selected=page_key: self._vi_page(selected)
+            )
+            self.vi_page_shortcuts.append(shortcut)
+
+    def _vi_page(self, page_key):
+        if not self.vi_enabled:
+            return
+        from PySide6.QtGui import QKeyEvent
+        super().keyPressEvent(QKeyEvent(QEvent.KeyPress, page_key, Qt.NoModifier))
+
+    def _copy_selected_cells(self):
+        indexes = self.selectionModel().selectedIndexes()
+        if not indexes and self.currentIndex().isValid():
+            indexes = [self.currentIndex()]
+        if not indexes:
+            return
+        top = min(index.row() for index in indexes)
+        bottom = max(index.row() for index in indexes)
+        left = min(index.column() for index in indexes)
+        right = max(index.column() for index in indexes)
+        selected = {(index.row(), index.column()): index for index in indexes}
+        lines = []
+        for row in range(top, bottom + 1):
+            values = []
+            for column in range(left, right + 1):
+                index = selected.get((row, column))
+                value = index.data(Qt.DisplayRole) if index is not None else ""
+                values.append(str(value or "").replace("\t", " "))
+            lines.append("\t".join(values))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _extend_cell_selection(self, row_delta, column_delta):
+        model = self.model()
+        if model is None or not model.rowCount() or not model.columnCount():
+            return
+        current = self.currentIndex()
+        if not current.isValid():
+            current = model.index(0, 0)
+        selected = self.selectionModel().selectedIndexes()
+        anchor = current if len(selected) <= 1 else getattr(
+            self, "_vi_selection_anchor", current
+        )
+        self._vi_selection_anchor = anchor
+        target_row = max(0, current.row() + row_delta)
+        while target_row >= model.rowCount() and model.canFetchMore():
+            model.fetchMore()
+        target_row = min(model.rowCount() - 1, target_row)
+        target_column = max(0, min(model.columnCount() - 1, current.column() + column_delta))
+        target = model.index(target_row, target_column)
+        top_left = model.index(
+            min(anchor.row(), target.row()), min(anchor.column(), target.column())
+        )
+        bottom_right = model.index(
+            max(anchor.row(), target.row()), max(anchor.column(), target.column())
+        )
+        selection_model = self.selectionModel()
+        selection_model.select(
+            QItemSelection(top_left, bottom_right), QItemSelectionModel.ClearAndSelect
+        )
+        selection_model.setCurrentIndex(target, QItemSelectionModel.NoUpdate)
+
+    def _move_to_file_edge(self, *, end):
+        model = self.model()
+        if model is None:
+            return
+        if end:
+            while model.canFetchMore():
+                model.fetchMore()
+        if not model.rowCount() or not model.columnCount():
+            return
+        current = self.currentIndex()
+        column = current.column() if current.isValid() else 0
+        target = model.index(model.rowCount() - 1 if end else 0, column)
+        self._vi_selection_anchor = target
+        self.setCurrentIndex(target)
+        self.scrollTo(target)
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        if (self.vi_enabled
+                and event.key() in (Qt.Key_J, Qt.Key_K)
+                and is_vi_navigation_chord(event.modifiers() & ~Qt.KeypadModifier)):
+            self._vi_page(Qt.Key_PageDown if event.key() == Qt.Key_J else Qt.Key_PageUp)
+            return
+        if (self.vi_enabled and event.key() == Qt.Key_G
+                and event.modifiers() & ~Qt.KeypadModifier
+                in (Qt.NoModifier, Qt.ShiftModifier)):
+            self._move_to_file_edge(
+                end=bool(event.modifiers() & Qt.ShiftModifier)
+            )
+            return
+        if self.vi_enabled and event.modifiers() == Qt.ShiftModifier:
+            select_mapping = {
+                Qt.Key_H: (0, -1),
+                Qt.Key_J: (1, 0),
+                Qt.Key_K: (-1, 0),
+                Qt.Key_L: (0, 1),
+                Qt.Key_N: (1, 0),
+                Qt.Key_U: (-1, 0),
+                Qt.Key_Left: (0, -1),
+                Qt.Key_Down: (1, 0),
+                Qt.Key_Up: (-1, 0),
+                Qt.Key_Right: (0, 1),
+            }
+            if event.key() in select_mapping:
+                self._extend_cell_selection(*select_mapping[event.key()])
+                return
+        if self.vi_enabled and event.modifiers() == Qt.NoModifier:
+            mapping = {
+                Qt.Key_H: Qt.Key_Left,
+                Qt.Key_J: Qt.Key_Down,
+                Qt.Key_K: Qt.Key_Up,
+                Qt.Key_L: Qt.Key_Right,
+            }
+            if event.key() in mapping:
+                from PySide6.QtGui import QKeyEvent
+                event = QKeyEvent(event.type(), mapping[event.key()], Qt.NoModifier)
+            elif event.key() == Qt.Key_C:
+                self._copy_selected_cells()
+                return
+        if event.matches(QKeySequence.Copy):
+            self._copy_selected_cells()
+            return
+        super().keyPressEvent(event)
+
+
+class SpreadsheetView(QWidget):
+    sheetRequested = Signal(str)
+    sourceRequested = Signal()
+
+    def __init__(self, preview: TablePreview, *, allow_source=False, zoom_steps=0,
+                 vi_enabled=False, parent=None):
+        super().__init__(parent)
+        self.allow_source = allow_source
+        self.zoom_steps = zoom_steps
+        self._base_font = QFont(QApplication.font())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        controls = QHBoxLayout()
+        self.sheet_selector = QComboBox()
+        self.sheet_selector.setAccessibleName("Worksheet")
+        self.sheet_selector.currentTextChanged.connect(self._sheet_changed)
+        controls.addWidget(self.sheet_selector)
+        self.first_row_header = QCheckBox("First row contains headers")
+        self.first_row_header.toggled.connect(self._header_toggled)
+        controls.addWidget(self.first_row_header)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Find in loaded rows")
+        self.search.returnPressed.connect(self.find_next)
+        controls.addWidget(self.search, 1)
+        find_next = QPushButton("Next")
+        find_next.clicked.connect(self.find_next)
+        controls.addWidget(find_next)
+        if allow_source:
+            raw = QPushButton("Raw Text")
+            raw.clicked.connect(self.sourceRequested)
+            controls.addWidget(raw)
+        layout.addLayout(controls)
+        self.summary = QLabel()
+        layout.addWidget(self.summary)
+        self.table = PreviewTableView()
+        self.table.vi_enabled = vi_enabled
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setDefaultSectionSize(140)
+        self.table.horizontalHeader().sectionClicked.connect(self._sort_clicked)
+        layout.addWidget(self.table)
+        self.setFocusProxy(self.table)
+        find_shortcut = QShortcut(QKeySequence.Find, self)
+        find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(lambda: (self.search.setFocus(), self.search.selectAll()))
+        self.find_shortcut = find_shortcut
+        self.set_preview(preview)
+        self.set_zoom_steps(zoom_steps)
+
+    def set_preview(self, preview):
+        self.preview = preview
+        self.model = TablePreviewModel(preview, self)
+        self.table.setModel(self.model)
+        self._sort_column = -1
+        self._sort_order = Qt.AscendingOrder
+        self.table.horizontalHeader().setSortIndicatorShown(False)
+        self.first_row_header.blockSignals(True)
+        self.first_row_header.setChecked(preview.has_header)
+        self.first_row_header.blockSignals(False)
+        self.first_row_header.setVisible(self.allow_source)
+        self.sheet_selector.blockSignals(True)
+        self.sheet_selector.clear()
+        self.sheet_selector.addItems(preview.sheet_names)
+        if preview.sheet_name:
+            self.sheet_selector.setCurrentText(preview.sheet_name)
+        self.sheet_selector.blockSignals(False)
+        self.sheet_selector.setVisible(bool(preview.sheet_names))
+        dimensions = f"{preview.total_rows:,} rows × {preview.total_columns:,} columns" if (
+            preview.total_rows is not None and preview.total_columns is not None
+        ) else f"{len(preview.rows):,} loaded rows × {self.model.columns:,} columns"
+        delimiter = f" · delimiter {preview.delimiter!r}" if preview.delimiter else ""
+        limited = " · preview limited for performance" if preview.truncated else ""
+        self.summary.setText(dimensions + delimiter + limited)
+
+    def _sheet_changed(self, name):
+        if name and name != self.preview.sheet_name:
+            self.summary.setText(f"Loading {name}…")
+            self.sheetRequested.emit(name)
+
+    def _header_toggled(self, enabled):
+        self.model.set_header_row(enabled)
+        self._sort_column = -1
+        self.table.horizontalHeader().setSortIndicatorShown(False)
+
+    def _sort_clicked(self, column):
+        if column == self._sort_column:
+            self._sort_order = (
+                Qt.DescendingOrder
+                if self._sort_order == Qt.AscendingOrder else Qt.AscendingOrder
+            )
+        else:
+            self._sort_column = column
+            self._sort_order = Qt.AscendingOrder
+        self.model.sort(column, self._sort_order)
+        self.table.horizontalHeader().setSortIndicator(column, self._sort_order)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+
+    def find_next(self):
+        needle = self.search.text().casefold()
+        if not needle or not self.model.rowCount() or not self.model.columnCount():
+            return
+        current = self.table.currentIndex()
+        start = current.row() * self.model.columnCount() + current.column() + 1 if current.isValid() else 0
+        total = self.model._data_row_count() * self.model.columnCount()
+        for offset in range(total):
+            flat = (start + offset) % total
+            row, column = divmod(flat, self.model.columnCount())
+            while row >= self.model.rowCount() and self.model.canFetchMore():
+                self.model.fetchMore()
+            index = self.model.index(row, column)
+            if needle in str(self.model.data(index, Qt.DisplayRole)).casefold():
+                self.table.setCurrentIndex(index)
+                self.table.scrollTo(index)
+                return
+
+    def set_zoom_steps(self, steps):
+        self.zoom_steps = steps
+        font = QFont(self._base_font)
+        size = font.pointSizeF() if font.pointSizeF() > 0 else QApplication.font().pointSizeF()
+        font.setPointSizeF(max(6.0, size + steps))
+        self.table.setFont(font)
+        self.table.horizontalHeader().setFont(font)
+        self.table.verticalHeader().setFont(font)
+
+    def zoom_in(self):
+        self.set_zoom_steps(min(20, self.zoom_steps + 1))
+
+    def zoom_out(self):
+        self.set_zoom_steps(max(-8, self.zoom_steps - 1))
+
+
 class Tab(QWidget):
     def __init__(self, path: Path, loaded: TextFile | None = None, *, markdown=False,
                  details="", root: Path | None = None, defer_enhancements=False):
         super().__init__()
         self.path = path
         self.loaded = loaded
+        self.clean_text = loaded.text if loaded else ""
         self.markdown = markdown
         self.pinned = False
         self.detached = False
@@ -394,6 +833,11 @@ class Tab(QWidget):
                 configure_source_editor(self.editor)
                 self.setProperty("folderSourceHighlighted", not defer_enhancements)
             self.editor.setPlainText(loaded.text)
+            if markdown:
+                # Markdown serialization canonicalizes some source forms even
+                # before rich rendering begins. Capture that representation
+                # before deferred editor timers can report it as a change.
+                self.clean_text = self.editor.to_markdown()
             self.editor.document().setModified(False)
             self.editor.setReadOnly(not os.access(path, os.W_OK))
             self.find_bar = QWidget()
@@ -404,11 +848,15 @@ class Tab(QWidget):
             self.replace_query.setPlaceholderText("Replace")
             find_next = QPushButton("Next")
             replace = QPushButton("Replace")
-            find_next.clicked.connect(lambda: self.editor.find(self.find_query.text()) or
-                                      (self.editor.moveCursor(QTextCursor.Start), self.editor.find(self.find_query.text())))
+            find_next.clicked.connect(self._find_next)
+            self.find_query.returnPressed.connect(self._find_next)
             replace.clicked.connect(self._replace_current)
             for control in (self.find_query, find_next, self.replace_query, replace):
                 find_layout.addWidget(control)
+            find_close_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self.find_bar)
+            find_close_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            find_close_shortcut.activated.connect(self._hide_find)
+            self.find_close_shortcut = find_close_shortcut
             self.find_bar.hide()
             layout.addWidget(self.find_bar)
             find_shortcut = QShortcut(QKeySequence.Find, self.editor)
@@ -419,6 +867,33 @@ class Tab(QWidget):
             if self.editor.isReadOnly():
                 self.show_notice("Read-only file: editing and saving are disabled")
             layout.addWidget(self.editor)
+            self.editor_status = QFrame()
+            self.editor_status.setObjectName("folderEditorStatus")
+            status_layout = QHBoxLayout(self.editor_status)
+            status_layout.setContentsMargins(8, 2, 8, 2)
+            status_layout.setSpacing(14)
+            self.cursor_status = QLabel()
+            self.cursor_status.setAccessibleName("Cursor position and selection")
+            self.file_status = QLabel()
+            self.file_status.setAccessibleName("File format and editor mode")
+            status_layout.addWidget(self.cursor_status)
+            status_layout.addStretch()
+            status_layout.addWidget(self.file_status)
+            palette = QApplication.palette()
+            self.editor_status.setStyleSheet(
+                "QFrame#folderEditorStatus {"
+                f"background: {palette.color(QPalette.AlternateBase).name()};"
+                f"color: {palette.color(QPalette.Text).name()};"
+                f"border-top: 1px solid {palette.color(QPalette.Mid).name()};"
+                "} QLabel { border: none; background: transparent; }"
+            )
+            layout.addWidget(self.editor_status)
+            self.editor.cursorPositionChanged.connect(self._update_editor_status)
+            self.editor.selectionChanged.connect(self._update_editor_status)
+            self.editor.document().blockCountChanged.connect(
+                lambda _count: self._update_editor_status()
+            )
+            self._update_editor_status()
         else:
             self.editor = None
             label = QLabel(details)
@@ -435,14 +910,70 @@ class Tab(QWidget):
             return self.editor.to_markdown()
         return self.editor.toPlainText() if self.editor else ""
 
+    def load_text(self, text):
+        """Replace a clean editor buffer after an external filesystem change."""
+        if self.editor is None:
+            return
+        if isinstance(self.editor, MarkdownEditor):
+            self.editor.set_markdown(text)
+            self.clean_text = self.editor.to_markdown()
+        else:
+            self.editor.setPlainText(text)
+            self.clean_text = text
+        self.editor.document().setModified(False)
+        self.detached = False
+        self._update_editor_status()
+
     def show_notice(self, message):
         self.notice.setText(message)
         self.notice.show()
+
+    def _update_editor_status(self):
+        if self.editor is None or not hasattr(self, "cursor_status"):
+            return
+        cursor = self.editor.textCursor()
+        position = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
+        if cursor.hasSelection():
+            selected = cursor.selectedText().replace("\u2029", "\n")
+            position += f"  ·  {len(selected):,} selected"
+        position += f"  ·  {self.editor.document().blockCount():,} lines"
+        self.cursor_status.setText(position)
+
+        suffix = self.path.suffix.casefold()
+        languages = {
+            ".py": "Python", ".pyw": "Python", ".js": "JavaScript",
+            ".ts": "TypeScript", ".tsx": "TypeScript JSX", ".jsx": "JavaScript JSX",
+            ".json": "JSON", ".yaml": "YAML", ".yml": "YAML", ".toml": "TOML",
+            ".html": "HTML", ".htm": "HTML", ".css": "CSS", ".scss": "SCSS",
+            ".sh": "Shell", ".bash": "Shell", ".ps1": "PowerShell",
+            ".sql": "SQL", ".xml": "XML", ".md": "Markdown", ".markdown": "Markdown",
+            ".c": "C", ".h": "C", ".cpp": "C++", ".hpp": "C++",
+            ".rs": "Rust", ".go": "Go", ".java": "Java",
+        }
+        language = languages.get(suffix, "Plain Text")
+        encoding = str(self.loaded.encoding if self.loaded else "utf-8").upper().replace("-SIG", "")
+        newline = {"\r\n": "CRLF", "\r": "CR", "\n": "LF"}.get(
+            self.loaded.newline if self.loaded else "\n", "LF"
+        )
+        access = "Read-only" if self.editor.isReadOnly() else "Editable"
+        self.file_status.setText(f"{language}  ·  {encoding}  ·  {newline}  ·  {access}")
 
     def _show_find(self):
         self.find_bar.show()
         self.find_query.setFocus()
         self.find_query.selectAll()
+
+    def _hide_find(self):
+        self.find_bar.hide()
+        if self.editor:
+            self.editor.setFocus(Qt.OtherFocusReason)
+
+    def _find_next(self):
+        if not self.editor or not self.find_query.text():
+            return
+        if not self.editor.find(self.find_query.text()):
+            self.editor.moveCursor(QTextCursor.Start)
+            self.editor.find(self.find_query.text())
 
     def _replace_current(self):
         if not self.editor or self.editor.isReadOnly() or not self.find_query.text():
@@ -482,6 +1013,12 @@ class ImageView(QWidget):
         self.zoom = min(8, max(.05, self.zoom * factor))
         self.label.setPixmap(self.original.scaled(self.original.size() * self.zoom,
                                                    Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def zoom_in(self):
+        self.scale(1.25)
+
+    def zoom_out(self):
+        self.scale(.8)
 
     def actual(self):
         self.zoom = 1.0
@@ -540,6 +1077,8 @@ def pdf_view(path):
     layout.addWidget(viewer)
     widget.document = document
     widget.search_model = model
+    widget.zoom_in = lambda: viewer.setZoomFactor(viewer.zoomFactor() * 1.2)
+    widget.zoom_out = lambda: viewer.setZoomFactor(viewer.zoomFactor() / 1.2)
     return widget
 
 
@@ -567,6 +1106,7 @@ class Picker(QDialog):
             layout.addWidget(self.list)
             self.query.textChanged.connect(self.refresh)
             self.query.installEventFilter(self)
+            self.list.installEventFilter(self)
             self.include.toggled.connect(self.refresh)
             self.full.toggled.connect(self.refresh)
             self.list.itemActivated.connect(lambda item: self.accept_file(False))
@@ -597,10 +1137,9 @@ class Picker(QDialog):
 
     def _opened(self, path, pinned):
         self.window.open_file(Path(path))
-        self.accept()
         tab = self.window.active_tab()
-        if tab and tab.editor:
-            tab.editor.setFocus()
+        self.accept()
+        QTimer.singleShot(0, lambda selected=tab: self.window._focus_tab_content(selected))
 
     def refresh(self):
         if not self.quick:
@@ -653,25 +1192,42 @@ class Picker(QDialog):
         item = self.list.currentItem()
         if item and item.data(Qt.UserRole):
             self.window.open_file(Path(item.data(Qt.UserRole)), pinned=pinned)
+            tab = self.window.active_tab()
             self.accept()
+            QTimer.singleShot(0, lambda selected=tab: self.window._focus_tab_content(selected))
 
     def keyPressEvent(self, event):
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        vi_selection = (
+            event.key() in (Qt.Key_J, Qt.Key_K)
+            and (
+                modifiers == Qt.ControlModifier
+                or is_vi_navigation_chord(modifiers)
+            )
+        )
         if event.key() == Qt.Key_Escape:
             self.reject()
         elif self.quick and event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self.accept_file(bool(event.modifiers() & (Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier)))
-        elif self.quick and (event.key() in (Qt.Key_Down, Qt.Key_Up) or
-                event.modifiers() == Qt.ControlModifier and event.key() in (Qt.Key_J, Qt.Key_K)):
+        elif self.quick and (event.key() in (Qt.Key_Down, Qt.Key_Up) or vi_selection):
             delta = 1 if event.key() in (Qt.Key_Down, Qt.Key_J) else -1
             self.list.setCurrentRow(max(0, min(self.list.count() - 1, self.list.currentRow() + delta)))
         else:
             super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):
-        if self.quick and obj is self.query and event.type() == QEvent.KeyPress:
+        if self.quick and obj in (self.query, self.list) and event.type() == QEvent.KeyPress:
             key = event.key()
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            vi_selection = (
+                key in (Qt.Key_J, Qt.Key_K)
+                and (
+                    modifiers == Qt.ControlModifier
+                    or is_vi_navigation_chord(modifiers)
+                )
+            )
             if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Down, Qt.Key_Up) or (
-                    event.modifiers() == Qt.ControlModifier and key in (Qt.Key_J, Qt.Key_K)):
+                    vi_selection):
                 self.keyPressEvent(event)
                 return True
         return super().eventFilter(obj, event)
@@ -709,6 +1265,7 @@ class Window(QMainWindow):
         self.search_generation = 0
         self.new_file_edit = None
         self.new_file_directory = None
+        self.new_file_is_folder = False
         self.tree_markdown_open_delay_ms = 140
         self.tree_markdown_open_timer = QTimer(self)
         self.tree_markdown_open_timer.setSingleShot(True)
@@ -723,7 +1280,11 @@ class Window(QMainWindow):
         self.tab_switcher = None
         self.tab_switcher_list = None
         self.tab_switcher_paths = []
+        self._tab_switcher_rendered_paths = []
         self.tab_switcher_index = -1
+        self._tab_switcher_focus_editor_on_activate = False
+        self._startup_folder_focus_pending = True
+        self._startup_selected_path = None
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
         self.setWindowTitle(f"{self.root.name} — Folder Navigator")
@@ -731,6 +1292,13 @@ class Window(QMainWindow):
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
         self.settings = self._load_settings()
         self.state = self.settings.setdefault(str(self.root), {})
+        try:
+            self.editor_zoom_steps = max(-8, min(20, int(self.state.get("editor_zoom_steps", 0))))
+            self.folder_zoom_steps = max(-8, min(20, int(self.state.get("folder_zoom_steps", 0))))
+        except (TypeError, ValueError):
+            self.editor_zoom_steps = 0
+            self.folder_zoom_steps = 0
+        self._last_focus_pane = "folder"
         self.model = FolderModel(self.root, self)
         self.tree = NavigatorTree()
         self._suppress_tree_preview = False
@@ -745,11 +1313,14 @@ class Window(QMainWindow):
         self.tree.setColumnWidth(1, 100)
         self.tree.setColumnWidth(2, 130)
         self.tree.setColumnWidth(3, 170)
+        self._tree_base_font = QFont(self.tree.font())
+        self._apply_folder_zoom()
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
         self.tree.openFile.connect(self._open_tree_file_keep_focus)
         self.tree.openFileAndFocus.connect(self._open_tree_file)
+        self.tree.pathsDropped.connect(self._copy_dropped_paths)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -790,10 +1361,11 @@ class Window(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self._tab_changed)
+        self.tabs.tabBarClicked.connect(self._focus_clicked_tab_editor)
         self.tabs.tabBarDoubleClicked.connect(lambda i: self.keep_open(i))
         self.tabs.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
-        self.welcome = QLabel(f"{self.root.name}\n\nSelect a file to preview · Enter to keep it open · Ctrl+P to find a file")
+        self.welcome = QLabel(f"{self.root.name}\n\nSelect a file to preview · Enter to keep it open · Ctrl+J to find a file")
         self.welcome.setAlignment(Qt.AlignCenter)
         self.content = QSplitter(Qt.Vertical)
         self.content.addWidget(self.tabs)
@@ -802,6 +1374,10 @@ class Window(QMainWindow):
         self.splitter.addWidget(self.rail)
         self.splitter.addWidget(self.content)
         self.splitter.setSizes(self.state.get("splitter", [300, 800]))
+        self._rail_last_width = max(
+            160, int(self.state.get("rail_width", self.state.get("splitter", [300])[0]))
+        )
+        self.rail.setVisible(bool(self.state.get("rail_visible", True)))
         outer = QWidget()
         layout = QVBoxLayout(outer)
         self.bookmarks_bar = QHBoxLayout()
@@ -839,6 +1415,8 @@ class Window(QMainWindow):
         self.tree.header().sectionMoved.connect(lambda *_: self.layout_save_timer.start(500))
         self.tree.header().sortIndicatorChanged.connect(lambda *_: self.layout_save_timer.start(500))
         self._make_actions()
+        self.command_palette = CommandBar(self)
+        self.command_palette.actionTriggered.connect(self._run_command_action)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -847,6 +1425,7 @@ class Window(QMainWindow):
         self._render_bookmarks()
         self._restore()
         self.model.directoryLoaded.connect(lambda _: self._schedule_refresh())
+        self.model.directoryLoaded.connect(self._focus_folder_tree_on_launch)
         self.model.rowsInserted.connect(lambda parent, first, last: self._catalog_rows(parent, first, last))
 
     def _load_settings(self):
@@ -856,6 +1435,15 @@ class Window(QMainWindow):
             return {}
 
     def _on_focus_changed(self, _old, _current):
+        try:
+            if _current is self.rail or (
+                    _current is not None and self.rail.isAncestorOf(_current)):
+                self._last_focus_pane = "folder"
+            elif _current is self.tabs or (
+                    _current is not None and self.tabs.isAncestorOf(_current)):
+                self._last_focus_pane = "editor"
+        except RuntimeError:
+            pass
         self._apply_focus_borders()
 
     def _apply_focus_borders(self):
@@ -933,9 +1521,19 @@ class Window(QMainWindow):
             self.index_notice.hide()
 
     def _persist(self):
-        self.state.update(splitter=self.splitter.sizes(), rail=self.rail.currentIndex(),
+        current = self.tree.currentIndex()
+        selected = self.model.filePath(current) if current.isValid() else None
+        splitter_sizes = (
+            self.splitter.sizes()
+            if not self.rail.isHidden()
+            else self.state.get("splitter", [self._rail_last_width, 800])
+        )
+        self.state.update(splitter=splitter_sizes, rail=self.rail.currentIndex(),
+                          rail_visible=not self.rail.isHidden(),
+                          rail_width=self._rail_last_width,
                           pinned=[str(t.path) for t in self.all_tabs() if t.pinned],
                           active=str(self.active_tab().path) if self.active_tab() and self.active_tab().pinned else None,
+                          selected=selected,
                           geometry=bytes(self.saveGeometry().toBase64()).decode("ascii"))
         self._persist_sqlite_layout()
         temporary = self.settings_path.with_suffix(".tmp")
@@ -964,6 +1562,11 @@ class Window(QMainWindow):
                 pass
         self._sync_column_actions()
         self.rail.setCurrentIndex(self.state.get("rail", 0))
+        selected = self.state.get("selected")
+        if selected:
+            selected_path = Path(selected)
+            if inside(self.root, selected_path):
+                self._startup_selected_path = selected_path
         for name in self.state.get("pinned", []):
             path = Path(name)
             if path.is_file() and inside(self.root, path):
@@ -982,6 +1585,80 @@ class Window(QMainWindow):
                     self.tree.expand(index)
             else:
                 self.statusBar().showMessage(f"Omitted stale expansion: {name}", 12000)
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        if self._startup_folder_focus_pending:
+            QTimer.singleShot(0, self._focus_folder_tree_on_launch)
+
+    def event(self, event):  # type: ignore[override]
+        result = super().event(event)
+        if event.type() == QEvent.WindowActivate:
+            QTimer.singleShot(0, self._repair_focus_after_activation)
+        return result
+
+    def _repair_focus_after_activation(self):
+        """Restore keyboard focus if an OS window switch left no pane active."""
+        if QApplication.activeWindow() is not self:
+            return
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return
+        focused = QApplication.focusWidget()
+        if focused is not None and focused.window() is self:
+            pane_roots = (
+                getattr(self, "rail", None),
+                getattr(self, "tabs", None),
+                getattr(self, "command_palette", None),
+            )
+            if any(root is not None and (focused is root or root.isAncestorOf(focused))
+                   for root in pane_roots):
+                return
+        tab = self.active_tab() if hasattr(self, "tabs") else None
+        if tab is not None:
+            target = tab.editor or getattr(tab, "viewer", None) or self.tabs
+            target.setFocus(Qt.ActiveWindowFocusReason)
+        elif hasattr(self, "rail"):
+            if self.rail.isHidden():
+                self._set_folder_rail_visible(True)
+            self.rail.setCurrentIndex(0)
+            self.tree.setFocus(Qt.ActiveWindowFocusReason)
+        self._apply_focus_borders()
+
+    def _focus_folder_tree_on_launch(self, loaded_path=None):
+        """Give a newly shown navigator a usable initial tree selection."""
+        if not self._startup_folder_focus_pending or not self.isVisible():
+            return
+        if self.rail.isHidden():
+            self._startup_folder_focus_pending = False
+            tab = self.active_tab()
+            if tab is not None:
+                self._focus_tab_content(tab)
+            else:
+                self.content.setFocus(Qt.OtherFocusReason)
+            return
+        # Focus is useful even for an empty or not-yet-populated model. Keep
+        # the pending flag until a row can also be selected.
+        self.rail.setCurrentIndex(0)
+        self.tree.setFocus(Qt.OtherFocusReason)
+        root_index = self.tree.rootIndex()
+        target = None
+        if self._startup_selected_path is not None:
+            restored = self.model.index(str(self._startup_selected_path))
+            if restored.isValid():
+                target = restored
+        if target is None:
+            row_count = self.model.rowCount(root_index)
+            if row_count:
+                target = self.model.index(0, 0, root_index)
+            elif loaded_path is None or Path(loaded_path) != self.scope:
+                return
+
+        self._startup_folder_focus_pending = False
+        if target is not None and target.isValid():
+            self._suppress_tree_preview = True
+            self.tree.setCurrentIndex(target)
+            self.tree.scrollTo(target)
+            self._suppress_tree_preview = False
 
     def _remember_expansion(self, index, expanded):
         name = self.model.filePath(index)
@@ -1035,13 +1712,26 @@ class Window(QMainWindow):
             self.commands.append(action)
             return action
         add(file_menu, "Open Folder…", self.open_folder)
+        add(file_menu, "Add Bookmark to StillPoint", self._bookmark_in_stillpoint)
         self.save_action = add(file_menu, "Save", self.save_active, QKeySequence.Save)
         add(file_menu, "Save All", self.save_all)
+        add(file_menu, "Print Page", self.print_active, QKeySequence.Print)
         add(file_menu, "Close Window", self.close)
         self.hidden_action = add(view_menu, "Show Hidden Files", self.toggle_hidden)
         self.hidden_action.setCheckable(True)
         self.hidden_action.setChecked(self.state.get("hidden", False))
         self.toggle_hidden(self.hidden_action.isChecked())
+        add(view_menu, "Zoom In", lambda: self._zoom_active_view(1), QKeySequence.ZoomIn)
+        add(view_menu, "Zoom Out", lambda: self._zoom_active_view(-1), QKeySequence.ZoomOut)
+        self.rail_visibility_action = add(
+            view_menu, "Show Folder Rail", self._toggle_folder_rail, "Ctrl+Shift+B"
+        )
+        self.rail_visibility_action.setCheckable(True)
+        self.rail_visibility_action.setChecked(not self.rail.isHidden())
+        self.table_preview_action = add(view_menu, "Table Preview", self._reopen_active_table)
+        self.raw_text_action = add(view_menu, "Raw Text", self._reopen_active_as_text)
+        self.table_preview_action.setEnabled(False)
+        self.raw_text_action.setEnabled(False)
         columns_menu = view_menu.addMenu("Columns")
         columns_toolbar = self.addToolBar("File columns")
         columns_toolbar.setObjectName("folder_navigator_columns")
@@ -1067,10 +1757,11 @@ class Window(QMainWindow):
             self.column_actions[column] = action
         add(go_menu, "Folder", lambda: (self.rail.setCurrentIndex(0), self.tree.setFocus()))
         add(go_menu, "Search", lambda: (self.rail.setCurrentIndex(1), self.search_input.setFocus()))
-        add(go_menu, "Editor", lambda: self.active_tab().editor.setFocus() if self.active_tab() and self.active_tab().editor else None)
+        add(go_menu, "Editor", lambda: self._focus_tab_content(self.active_tab()))
         add(go_menu, "Markdown Headings…", self._show_active_heading_picker, "Ctrl+Alt+T")
-        add(go_menu, "Quick Open", self.quick_open, "Ctrl+P" if sys.platform != "darwin" else "Meta+P")
+        add(go_menu, "Quick Open", self.quick_open, "Ctrl+J")
         add(go_menu, "Folder Picker", self.folder_picker, "Ctrl+Alt+V")
+        add(go_menu, "Filter From Here", self.filter_from_here)
         add(go_menu, "Next Tab", lambda: self._cycle_tab_popup(False))
         add(go_menu, "Previous Tab", lambda: self._cycle_tab_popup(True))
         add(go_menu, "Command Bar", self.command_bar, "Alt+G")
@@ -1083,6 +1774,12 @@ class Window(QMainWindow):
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(self.command_bar)
             self.command_bar_shortcuts.append(shortcut)
+        self.native_open_shortcuts = []
+        for sequence in ("Ctrl+Shift+Return", "Ctrl+Shift+Enter"):
+            shortcut = QShortcut(QKeySequence(sequence), self.rail)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self._open_navigator_selection_in_system)
+            self.native_open_shortcuts.append(shortcut)
         forward_sequence, backward_sequence = history_cycle_sequences()
         self.tab_cycle_shortcuts = []
         for sequence, reverse in ((forward_sequence, False), (backward_sequence, True)):
@@ -1099,11 +1796,112 @@ class Window(QMainWindow):
         self.tree.setColumnHidden(column, not visible)
         self.layout_save_timer.start(250)
 
+    def _toggle_folder_rail(self):
+        self._set_folder_rail_visible(self.rail.isHidden())
+
+    def _set_folder_rail_visible(self, visible):
+        visible = bool(visible)
+        if visible == (not self.rail.isHidden()):
+            return
+        focused = self.focusWidget()
+        rail_had_focus = focused is self.rail or (
+            focused is not None and self.rail.isAncestorOf(focused)
+        )
+        sizes = self.splitter.sizes()
+        total = sum(sizes) or max(1, self.splitter.width())
+        if not visible:
+            if sizes and sizes[0] > 0:
+                self._rail_last_width = sizes[0]
+                self.state["splitter"] = list(sizes)
+            self.rail.hide()
+            if rail_had_focus:
+                tab = self.active_tab()
+                if tab is not None:
+                    self._focus_tab_content(tab)
+                else:
+                    self.content.setFocus(Qt.OtherFocusReason)
+        else:
+            self.rail.show()
+            width = min(self._rail_last_width, max(160, total - 160))
+            self.splitter.setSizes([width, max(1, total - width)])
+            if self.active_tab() is None:
+                self.tree.setFocus(Qt.OtherFocusReason)
+        self.rail_visibility_action.blockSignals(True)
+        self.rail_visibility_action.setChecked(visible)
+        self.rail_visibility_action.blockSignals(False)
+        self.state["rail_visible"] = visible
+        self._persist()
+
     def _sync_column_actions(self):
         for column, action in getattr(self, "column_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(not self.tree.isColumnHidden(column))
             action.blockSignals(False)
+
+    def _zoom_active_view(self, direction):
+        """Route StillPoint's standard zoom keys to the active viewer."""
+        focused = self.focusWidget()
+        folder_focused = focused is self.rail or (
+            focused is not None and self.rail.isAncestorOf(focused)
+        )
+        if folder_focused or (
+                focused is not None and self.command_palette.isAncestorOf(focused)
+                and self._last_focus_pane == "folder"):
+            self.folder_zoom_steps = max(-8, min(20, self.folder_zoom_steps + direction))
+            self.state["folder_zoom_steps"] = self.folder_zoom_steps
+            self._apply_folder_zoom()
+            self._persist()
+            return
+        tab = self.active_tab()
+        if tab is None:
+            return
+        if tab.editor is not None:
+            new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
+            applied = new_steps - self.editor_zoom_steps
+            if not applied:
+                return
+            self.editor_zoom_steps = new_steps
+            self.state["editor_zoom_steps"] = new_steps
+            for candidate in self.all_tabs():
+                if candidate.editor is not None:
+                    if applied > 0:
+                        candidate.editor.zoomIn(applied)
+                    else:
+                        candidate.editor.zoomOut(-applied)
+            self._persist()
+            return
+        viewer = getattr(tab, "viewer", None)
+        if isinstance(viewer, SpreadsheetView):
+            new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
+            applied = new_steps - self.editor_zoom_steps
+            if not applied:
+                return
+            self.editor_zoom_steps = new_steps
+            self.state["editor_zoom_steps"] = new_steps
+            for candidate in self.all_tabs():
+                if candidate.editor is not None:
+                    if applied > 0:
+                        candidate.editor.zoomIn(applied)
+                    else:
+                        candidate.editor.zoomOut(-applied)
+                candidate_viewer = getattr(candidate, "viewer", None)
+                if isinstance(candidate_viewer, SpreadsheetView):
+                    candidate_viewer.set_zoom_steps(new_steps)
+            self._persist()
+            return
+        callback = getattr(viewer, "zoom_in" if direction > 0 else "zoom_out", None)
+        if callable(callback):
+            callback()
+        else:
+            self.statusBar().showMessage("Zoom is not available for this preview", 2500)
+
+    def _apply_folder_zoom(self):
+        font = QFont(self._tree_base_font)
+        base_size = font.pointSizeF()
+        if base_size <= 0:
+            base_size = QApplication.font().pointSizeF()
+        font.setPointSizeF(max(6.0, base_size + self.folder_zoom_steps))
+        self.tree.setFont(font)
 
     def active_tab(self):
         widget = self.tabs.currentWidget()
@@ -1118,6 +1916,8 @@ class Window(QMainWindow):
     def _tree_selected(self, current, previous):
         if self._suppress_tree_preview:
             return
+        # A real selection change supersedes the queued initial-focus choice.
+        self._startup_folder_focus_pending = False
         self._cancel_pending_tree_markdown()
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
@@ -1155,9 +1955,14 @@ class Window(QMainWindow):
         tab = self.active_tab()
         if tab and tab.editor:
             self._schedule_markdown_preview(tab, immediate=True)
-            tab.editor.setFocus(Qt.OtherFocusReason)
+        self._focus_tab_content(tab)
 
-    def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False):
+    def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
+                  force_text=False):
+        # Once a visible window is explicitly opening content, do not let a
+        # late QFileSystemModel load steal focus back to the startup target.
+        if self.isVisible():
+            self._startup_folder_focus_pending = False
         if not path.is_file() or not inside(self.root, path):
             self.statusBar().showMessage(f"Unavailable or outside root: {path}", 12000)
             return
@@ -1170,16 +1975,25 @@ class Window(QMainWindow):
                 self._reveal_editor_line(self.tabs.widget(index), line)
             self._schedule_markdown_preview(self.tabs.widget(index))
             return
-        for existing_tab in self.all_tabs():
-            self._clear_initial_formatting_dirty(existing_tab)
         preview = next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
         if preview >= 0:
             self.tabs.removeTab(preview)
         try:
-            if path.suffix.casefold() == ".pdf":
+            suffix = path.suffix.casefold()
+            if not force_text and suffix in DELIMITED_SUFFIXES:
+                tab = Tab(path, details="Loading table preview…", root=self.root)
+                self._load_delimited_preview(path)
+            elif not force_text and suffix in WORKBOOK_SUFFIXES:
+                tab = Tab(path, details="Loading workbook preview…", root=self.root)
+                self._load_workbook_preview(path)
+            elif not force_text and suffix in DIAGRAM_SUFFIXES:
+                tab = Tab(path, details="Rendering diagram preview…", root=self.root)
+                self._load_diagram_preview(path)
+            elif suffix == ".pdf":
                 tab = Tab(path, details="Loading PDF…", root=self.root)
                 try:
                     view = pdf_view(path)
+                    tab.viewer = view
                     tab.layout().addWidget(view)
                     tab.layout().itemAt(1).widget().hide()
                 except (ImportError, ValueError, RuntimeError) as exc:
@@ -1216,9 +2030,15 @@ class Window(QMainWindow):
             tab.layout().addLayout(buttons)
         tab.pinned = pinned
         index = self.tabs.addTab(tab, path.name)
+        if path.suffix.casefold() in DIAGRAM_SUFFIXES and not force_text:
+            tab.preview_signature = self._diagram_preview_signature(path)
         self.tabs.setTabToolTip(index, str(path.parent))
         self.tabs.setCurrentIndex(index)
         if tab.editor:
+            if self.editor_zoom_steps > 0:
+                tab.editor.zoomIn(self.editor_zoom_steps)
+            elif self.editor_zoom_steps < 0:
+                tab.editor.zoomOut(-self.editor_zoom_steps)
             # Folder Navigator owns a deliberately small editor context menu.
             # In particular, Markdown tabs must not expose StillPoint page,
             # link-graph, AI, or vault-navigation actions here.
@@ -1236,6 +2056,16 @@ class Window(QMainWindow):
                     lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
                 )
             tab.editor.document().modificationChanged.connect(lambda dirty, t=tab: self._modified(t, dirty))
+            if tab.markdown:
+                # MarkdownEditor may rewrite display symbols while handling a
+                # keystroke. Those rewrites can change the document's modified
+                # flag without another useful modificationChanged edge, so
+                # compare serialized content after the keystroke settles.
+                tab.editor.textChanged.connect(
+                    lambda t=tab: QTimer.singleShot(
+                        0, lambda current=t: self._refresh_markdown_dirty(current)
+                    )
+                )
             # Markdown's initial display formatting can toggle Qt's modified
             # flag after the file is loaded. Clear only formatting-only changes;
             # never clear the flag once the text differs from disk.
@@ -1248,6 +2078,160 @@ class Window(QMainWindow):
         self._watch_files()
         self._update_welcome()
         self._schedule_markdown_preview(tab if defer_enhancements else None)
+
+    def _load_delimited_preview(self, path):
+        def job():
+            try:
+                preview = read_delimited_preview(path)
+                self.bridge.result.emit(("table", path, preview, True, None))
+            except Exception as exc:
+                self.bridge.result.emit(("table", path, None, True, str(exc)))
+        self.executor.submit(job)
+
+    def _load_workbook_preview(self, path, sheet_name=None):
+        def job():
+            try:
+                preview = read_workbook_preview(path, sheet_name)
+                self.bridge.result.emit(("table", path, preview, False, None))
+            except Exception as exc:
+                self.bridge.result.emit(("table", path, None, False, str(exc)))
+        self.executor.submit(job)
+
+    @staticmethod
+    def _diagram_preview_signature(path):
+        path = Path(path)
+        sidecar = path.with_name(f"{path.name}.png")
+        return fingerprint(path), fingerprint(sidecar) if path.suffix.casefold() == ".excalidraw" else None
+
+    def _load_diagram_preview(self, path):
+        path = Path(path)
+        signature = self._diagram_preview_signature(path)
+
+        def job():
+            try:
+                suffix = path.suffix.casefold()
+                if suffix == ".excalidraw":
+                    sidecar = path.with_name(f"{path.name}.png")
+                    if not sidecar.is_file():
+                        raise ValueError(
+                            "No rendered preview exists yet. Open the Excalidraw editor and save the drawing."
+                        )
+                    reader = QImageReader(str(sidecar))
+                    reader.setAutoTransform(True)
+                    image = reader.read()
+                    if image.isNull():
+                        raise ValueError(reader.errorString() or "Could not decode preview image")
+                    self.bridge.result.emit(("diagram", path, signature, None, image, None))
+                    return
+                source = read_text(path).text
+                if suffix == ".puml":
+                    from sp.app.plantuml_renderer import PlantUMLRenderer
+                    result = PlantUMLRenderer().render_svg(source)
+                else:
+                    from sp.app.mermaid_renderer import MermaidRenderer
+                    result = MermaidRenderer().render_svg(source)
+                if not result.success or not result.svg_content:
+                    raise ValueError(result.error_message or result.stderr or "Diagram render failed")
+                self.bridge.result.emit(("diagram", path, signature, result.svg_content, None, None))
+            except Exception as exc:
+                self.bridge.result.emit(("diagram", path, signature, None, None, str(exc)))
+
+        self.executor.submit(job)
+
+    def _show_diagram_preview(self, path, signature, svg, pixels, error):
+        index = self._index_for(path)
+        if index < 0 or signature != self._diagram_preview_signature(path):
+            return
+        tab = self.tabs.widget(index)
+        tab.preview_signature = signature
+        if error:
+            tab.show_notice(f"Diagram preview unavailable: {error}")
+            return
+        if pixels is None:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(svg.encode("utf-8"), "SVG"):
+                tab.show_notice("Diagram preview unavailable: rendered SVG could not be displayed")
+                return
+            pixels = pixmap.toImage()
+        placeholder = tab.layout().itemAt(1)
+        if placeholder and placeholder.widget():
+            placeholder.widget().hide()
+        current = getattr(tab, "viewer", None)
+        if current is not None:
+            tab.layout().removeWidget(current)
+            current.deleteLater()
+        tab.viewer = ImageView(path, pixels)
+        tab.layout().addWidget(tab.viewer)
+        tab.notice.hide()
+        if tab is self.active_tab() and self.focusWidget() is self.tabs:
+            tab.viewer.setFocus(Qt.OtherFocusReason)
+
+    def _show_table_preview(self, path, preview, allow_source, error):
+        index = self._index_for(path)
+        if index < 0:
+            return
+        tab = self.tabs.widget(index)
+        current_viewer = getattr(tab, "viewer", None)
+        if error:
+            tab.show_notice(f"Table preview failed: {error}")
+            return
+        if isinstance(current_viewer, SpreadsheetView):
+            requested = getattr(current_viewer, "requested_sheet", None)
+            if requested and preview.sheet_name != requested:
+                return
+            current_viewer.set_preview(preview)
+            current_viewer.requested_sheet = preview.sheet_name
+            return
+        tab.layout().itemAt(1).widget().hide()
+        viewer = SpreadsheetView(
+            preview, allow_source=allow_source, zoom_steps=self.editor_zoom_steps,
+            vi_enabled=self.tree.vi_enabled,
+        )
+        viewer.requested_sheet = preview.sheet_name
+        viewer.sourceRequested.connect(lambda selected=path: self._open_table_as_text(selected))
+        viewer.sheetRequested.connect(
+            lambda sheet, selected=path, view=viewer: self._request_workbook_sheet(
+                selected, sheet, view
+            )
+        )
+        tab.viewer = viewer
+        tab.layout().addWidget(viewer)
+        if tab is self.active_tab():
+            self.table_preview_action.setEnabled(False)
+            self.raw_text_action.setEnabled(allow_source)
+        if tab is self.active_tab() and self.focusWidget() is self.tabs:
+            viewer.setFocus(Qt.OtherFocusReason)
+
+    def _request_workbook_sheet(self, path, sheet_name, viewer):
+        viewer.requested_sheet = sheet_name
+        self._load_workbook_preview(path, sheet_name)
+
+    def _open_table_as_text(self, path):
+        index = self._index_for(path)
+        if index < 0:
+            return
+        pinned = self.tabs.widget(index).pinned
+        old = self.tabs.widget(index)
+        self.tabs.removeTab(index)
+        old.deleteLater()
+        self.open_file(path, pinned=pinned, force_text=True)
+
+    def _reopen_active_table(self):
+        tab = self.active_tab()
+        if tab is None or tab.path.suffix.casefold() not in DELIMITED_SUFFIXES:
+            return
+        if isinstance(getattr(tab, "viewer", None), SpreadsheetView):
+            return
+        pinned = tab.pinned
+        index = self.tabs.indexOf(tab)
+        self.tabs.removeTab(index)
+        tab.deleteLater()
+        self.open_file(tab.path, pinned=pinned)
+
+    def _reopen_active_as_text(self):
+        tab = self.active_tab()
+        if tab is not None and tab.path.suffix.casefold() in DELIMITED_SUFFIXES:
+            self._open_table_as_text(tab.path)
 
     def _schedule_markdown_preview(self, tab, *, immediate=False):
         self.markdown_preview_timer.stop()
@@ -1279,6 +2263,10 @@ class Window(QMainWindow):
         tab.setProperty("folderMarkdownRendering", True)
         try:
             tab.editor.set_markdown(tab.loaded.text)
+            # Rendering intentionally canonicalizes a few Markdown forms
+            # (notably +CamelCase links and relative image paths). Treat that
+            # canonical representation as clean; it was not a user edit.
+            tab.clean_text = tab.text_for_save()
             tab.editor.document().setModified(False)
             tab.setProperty("folderMarkdownRendered", True)
         finally:
@@ -1288,7 +2276,7 @@ class Window(QMainWindow):
     def _clear_initial_formatting_dirty(tab):
         try:
             if (tab.editor and tab.loaded
-                    and tab.text_for_save() == tab.loaded.text
+                    and tab.text_for_save() == tab.clean_text
                     and tab.editor.document().isModified()):
                 tab.editor.document().setModified(False)
         except RuntimeError:
@@ -1299,7 +2287,13 @@ class Window(QMainWindow):
     def _focus_tree_from_editor(self, tab):
         """Return vi navigation to the file that owns the focused editor."""
         if tab is self.active_tab():
-            self.reveal_tree(tab.path)
+            current = self.tree.currentIndex()
+            if (current.isValid()
+                    and Path(self.model.filePath(current)) == tab.path):
+                self.rail.setCurrentIndex(0)
+                self.tree.setFocus(Qt.OtherFocusReason)
+            else:
+                self.reveal_tree(tab.path)
 
     def _reveal_editor_line(self, tab, line):
         """Select, flash, and scroll a search target into view."""
@@ -1387,11 +2381,51 @@ class Window(QMainWindow):
             self._reveal_editor_line(tab, picker.selected_line)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if (event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_Escape
+                and event.modifiers() == Qt.NoModifier
+                and self.rail.isHidden()
+                and isinstance(obj, QWidget)
+                and obj.window() is self):
+            tab = self.active_tab()
+            find_bar = getattr(tab, "find_bar", None) if tab is not None else None
+            if (find_bar is not None and not find_bar.isHidden()
+                    and (obj is find_bar or find_bar.isAncestorOf(obj))):
+                return super().eventFilter(obj, event)
+            if (self.command_palette.isVisible()
+                    and (obj is self.command_palette
+                         or self.command_palette.isAncestorOf(obj))):
+                return super().eventFilter(obj, event)
+            editor = tab.editor if tab is not None else None
+            if (editor is not None and getattr(editor, "_vi_feature_enabled", False)
+                    and getattr(editor, "_vi_insert_mode", False)):
+                return super().eventFilter(obj, event)
+            if tab is not None:
+                self.reveal_tree(tab.path)
+            else:
+                self._focus_tree_when_tabs_empty()
+            return True
         if (event.type() == QEvent.KeyRelease
                 and event.key() == history_cycle_modifier_release_key()
                 and self.tab_switcher_paths):
             self._activate_tab_switcher_selection()
             return True
+        if (event.type() == QEvent.KeyPress
+                and obj.property("folderNavigatorMarkdown")
+                and event.key() == Qt.Key_Escape
+                and event.modifiers() == Qt.NoModifier
+                and getattr(obj, "_vi_feature_enabled", False)
+                and getattr(obj, "_vi_mode_active", False)
+                and not getattr(obj, "_vi_insert_mode", False)):
+            # Markdown's normal-mode Escape also clears selections and empty
+            # line transforms. In Folder Navigator, an already-normal editor
+            # has no deeper mode to leave, so the first Escape is the pane
+            # handoff regardless of those transient cursor states.
+            tab = next((candidate for candidate in self.all_tabs()
+                        if candidate.editor is obj), None)
+            if tab is not None:
+                self._focus_tree_from_editor(tab)
+                return True
         if (event.type() == QEvent.KeyPress
                 and obj.property("folderNavigatorMarkdown")
                 and event.key() == Qt.Key_T
@@ -1406,16 +2440,51 @@ class Window(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
+    def keyPressEvent(self, event):  # type: ignore[override]
+        """Use an otherwise-unhandled Escape to return to file navigation.
+
+        Handling this on the window, rather than in the application event
+        filter, lets editors, dialogs, and inline controls consume Escape for
+        their own cancellation and vi-mode behavior first.
+        """
+        if (event.key() == Qt.Key_Escape
+                and event.modifiers() == Qt.NoModifier):
+            tab = self.active_tab()
+            if tab is not None:
+                self.reveal_tree(tab.path)
+            else:
+                self._focus_tree_when_tabs_empty()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _modified(self, tab, dirty):
         if tab.property("folderMarkdownRendering"):
             return
         if dirty and tab.markdown and tab.loaded:
             try:
-                if tab.text_for_save() == tab.loaded.text:
+                if tab.text_for_save() == tab.clean_text:
                     tab.editor.document().setModified(False)
                     return
             except RuntimeError:
                 return
+        self._apply_tab_dirty_state(tab, dirty)
+
+    def _refresh_markdown_dirty(self, tab):
+        """Reconcile Markdown dirty state after display-text transformations."""
+        try:
+            if (tab.property("folderMarkdownRendering") or not tab.editor
+                    or not tab.loaded or self.tabs.indexOf(tab) < 0):
+                return
+            dirty = tab.text_for_save() != tab.clean_text
+            if tab.editor.document().isModified() != dirty:
+                tab.editor.document().setModified(dirty)
+            self._apply_tab_dirty_state(tab, dirty)
+        except RuntimeError:
+            # A queued reconciliation can outlive a rapidly replaced preview.
+            return
+
+    def _apply_tab_dirty_state(self, tab, dirty):
         if dirty:
             tab.pinned = True
         index = self.tabs.indexOf(tab)
@@ -1438,6 +2507,46 @@ class Window(QMainWindow):
             self.mru = [tab.path] + [p for p in self.mru if p != tab.path]
         if hasattr(self, "save_action"):
             self.save_action.setEnabled(bool(tab and tab.editor and not tab.editor.isReadOnly()))
+        if hasattr(self, "table_preview_action"):
+            delimited = bool(tab and tab.path.suffix.casefold() in DELIMITED_SUFFIXES)
+            table = isinstance(getattr(tab, "viewer", None), SpreadsheetView)
+            self.table_preview_action.setEnabled(delimited and not table)
+            self.raw_text_action.setEnabled(delimited and table)
+        # Heavy Markdown rendering and source highlighting remain deferred until
+        # the newly selected tab has settled, so Ctrl+Tab itself stays instant.
+        self._schedule_markdown_preview(tab)
+
+    def _focus_clicked_tab_editor(self, index):
+        """Give a mouse-selected tab's content focus after the click completes."""
+        tab = self.tabs.widget(index)
+        if not isinstance(tab, Tab):
+            return
+
+        def apply_focus():
+            if self.tabs.currentWidget() is not tab:
+                return
+            if tab.editor is not None:
+                tab.editor.setFocus(Qt.MouseFocusReason)
+            elif getattr(tab, "viewer", None) is not None:
+                tab.viewer.setFocus(Qt.MouseFocusReason)
+            else:
+                self.tabs.setFocus(Qt.MouseFocusReason)
+
+        QTimer.singleShot(0, apply_focus)
+
+    def _focus_tab_content(self, tab):
+        """Place keyboard focus in a selected tab after a popup closes."""
+        if not isinstance(tab, Tab) or self.tabs.indexOf(tab) < 0:
+            return
+        self.raise_()
+        self.activateWindow()
+        self.tabs.setCurrentWidget(tab)
+        if tab.editor is not None:
+            tab.editor.setFocus(Qt.OtherFocusReason)
+        elif getattr(tab, "viewer", None) is not None:
+            tab.viewer.setFocus(Qt.OtherFocusReason)
+        else:
+            self.tabs.setFocus(Qt.OtherFocusReason)
 
     def cycle_tab(self, delta):
         current = self.active_tab()
@@ -1486,7 +2595,16 @@ class Window(QMainWindow):
         paths = self._recent_tab_candidates()
         if not paths:
             return
+        # Do not let a pending Pygments/Markdown enhancement for the outgoing
+        # tab land synchronously while the user is holding the tab-cycle chord.
+        self.markdown_preview_timer.stop()
+        self.pending_markdown_preview = None
         if not self.tab_switcher_paths or not self.tab_switcher or not self.tab_switcher.isVisible():
+            focused = self.focusWidget()
+            self._tab_switcher_focus_editor_on_activate = (
+                focused is self.rail
+                or (focused is not None and self.rail.isAncestorOf(focused))
+            )
             self.tab_switcher_paths = paths
             self.tab_switcher_index = 0
         else:
@@ -1497,14 +2615,16 @@ class Window(QMainWindow):
 
     def _show_tab_switcher(self):
         self._ensure_tab_switcher()
-        self.tab_switcher_list.clear()
-        for path in self.tab_switcher_paths:
-            try:
-                parent = path.parent.relative_to(self.root)
-                label = f"{path.name}  —  {parent if str(parent) != '.' else self.root.name}"
-            except ValueError:
-                label = path.name
-            self.tab_switcher_list.addItem(label)
+        if self._tab_switcher_rendered_paths != self.tab_switcher_paths:
+            self.tab_switcher_list.clear()
+            for path in self.tab_switcher_paths:
+                try:
+                    parent = path.parent.relative_to(self.root)
+                    label = f"{path.name}  —  {parent if str(parent) != '.' else self.root.name}"
+                except ValueError:
+                    label = path.name
+                self.tab_switcher_list.addItem(label)
+            self._tab_switcher_rendered_paths = list(self.tab_switcher_paths)
         self.tab_switcher_list.setCurrentRow(self.tab_switcher_index)
         area = self.tabs.rect()
         origin = self.tabs.mapToGlobal(area.topLeft())
@@ -1519,12 +2639,20 @@ class Window(QMainWindow):
         if not self.tab_switcher_paths or self.tab_switcher_index < 0:
             return
         target = self.tab_switcher_paths[self.tab_switcher_index]
+        focus_editor = self._tab_switcher_focus_editor_on_activate
         self.tab_switcher.hide()
         self.tab_switcher_paths = []
         self.tab_switcher_index = -1
+        self._tab_switcher_focus_editor_on_activate = False
         index = self._index_for(target)
         if index >= 0:
             self.tabs.setCurrentIndex(index)
+            tab = self.active_tab()
+            if focus_editor:
+                if tab is not None and tab.editor is not None:
+                    tab.editor.setFocus(Qt.OtherFocusReason)
+                else:
+                    self.tabs.setFocus(Qt.OtherFocusReason)
 
     def _review_dirty(self, tabs):
         dirty = [t for t in tabs if t.dirty]
@@ -1549,22 +2677,32 @@ class Window(QMainWindow):
             return
         tab = self.tabs.widget(index)
         if self._review_dirty([tab]):
+            closed_path = tab.path
             self.tabs.removeTab(index)
             tab.deleteLater()
             self._watch_files()
             self._update_welcome()
-            self._focus_tree_when_tabs_empty()
+            self._focus_tree_when_tabs_empty(closed_path)
 
     def _update_welcome(self):
         self.welcome.setVisible(self.tabs.count() == 0)
         self.tabs.setVisible(self.tabs.count() > 0)
 
-    def _focus_tree_when_tabs_empty(self):
+    def _focus_tree_when_tabs_empty(self, preferred_path=None):
         """Return keyboard/vi navigation to the folder tree after the last close."""
         if self.tabs.count() != 0:
             return
+        if self.rail.isHidden():
+            self._set_folder_rail_visible(True)
         self._suppress_tree_preview = True
         self.rail.setCurrentIndex(0)
+        if preferred_path is not None and inside(self.root, preferred_path):
+            if not inside(self.scope, preferred_path):
+                self.clear_filter()
+            index = self.model.index(str(preferred_path))
+            if index.isValid():
+                self.tree.setCurrentIndex(index)
+                self.tree.scrollTo(index)
         self.tree.setFocus(Qt.OtherFocusReason)
         QTimer.singleShot(0, self._focus_tree_if_still_empty)
 
@@ -1594,8 +2732,9 @@ class Window(QMainWindow):
             tab.show_notice("Cannot save a missing or outside-root path")
             return False
         try:
+            buffer_text = tab.text_for_save()
             try:
-                changed = atomic_save(tab.path, tab.text_for_save(), tab.loaded)
+                changed = atomic_save(tab.path, buffer_text, tab.loaded)
             except ConflictError:
                 dialog = QMessageBox(self)
                 dialog.setWindowTitle("External changes")
@@ -1616,7 +2755,7 @@ class Window(QMainWindow):
                     diff = QTextEdit()
                     diff.setReadOnly(True)
                     diff.setPlainText("".join(difflib.unified_diff(
-                        disk.text.splitlines(True), tab.text_for_save().splitlines(True),
+                        disk.text.splitlines(True), buffer_text.splitlines(True),
                         fromfile="Disk", tofile="Buffer")))
                     layout.addWidget(diff)
                     review.exec()
@@ -1627,8 +2766,10 @@ class Window(QMainWindow):
                     return True
                 if dialog.clickedButton() != overwrite:
                     return False
-                changed = atomic_save(tab.path, tab.text_for_save(), tab.loaded, overwrite=True)
+                changed = atomic_save(tab.path, buffer_text, tab.loaded, overwrite=True)
             tab.loaded.fingerprint = changed
+            tab.loaded.text = buffer_text
+            tab.clean_text = buffer_text
             tab.editor.document().setModified(False)
             tab.show_notice("Saved")
             return True
@@ -1655,6 +2796,280 @@ class Window(QMainWindow):
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Could not launch Folder Navigator", f"{exc}\nCheck the installation and try again.")
 
+    @staticmethod
+    def _stillpoint_state(name):
+        try:
+            return (Path.home() / ".stillpoint" / name).read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            return ""
+
+    def print_active(self):
+        """Open the active page through StillPoint's server print pipeline."""
+        tab = self.active_tab()
+        if tab is None or tab.path.suffix.casefold() not in (".md", ".markdown", ".txt"):
+            self.statusBar().showMessage(
+                "StillPoint printing is available for Markdown and text pages", 6000
+            )
+            return
+        vault_text = os.environ.get("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", "")
+        relative = None
+        try:
+            vault = Path(vault_text).resolve(strict=True)
+            relative = tab.path.resolve(strict=True).relative_to(vault).as_posix()
+        except (OSError, ValueError):
+            pass
+        options = self._show_print_dialog(tab.path)
+        if not options:
+            return
+        api_base = (
+            os.environ.get("SP_FOLDER_NAVIGATOR_API_BASE", "").strip()
+            or self._stillpoint_state("api-base")
+        ).rstrip("/")
+        if not api_base:
+            self.statusBar().showMessage(
+                "StillPoint's print server is not running", 8000
+            )
+            return
+        try:
+            token = self._get_stillpoint_print_token(api_base)
+            if (relative is not None and not tab.dirty
+                    and tab.path.suffix.casefold() in (".md", ".txt")):
+                mode = "tree" if options["include_subpages"] else "page"
+                path_to_use = relative
+                if mode == "tree":
+                    parent = Path(relative).parent.as_posix()
+                    path_to_use = (
+                        parent if parent and parent != "."
+                        else Path(relative).with_suffix("").as_posix()
+                    )
+                url = self._build_print_url(
+                    api_base,
+                    path_to_use,
+                    mode=mode,
+                    depth=options["depth"],
+                    token=token,
+                    show_header=options["include_header"],
+                    include_toc=options["include_toc"],
+                    toc_title=options["toc_title"],
+                    auto_pop=options["auto_pop_browser"],
+                )
+            else:
+                if options["include_subpages"]:
+                    raise RuntimeError(
+                        "Subpage printing requires a saved page inside the connected vault"
+                    )
+                preview_id = self._create_stillpoint_print_preview(
+                    api_base, tab.path, tab.text_for_save()
+                )
+                url = self._build_print_preview_url(
+                    api_base,
+                    preview_id,
+                    token=token,
+                    show_header=options["include_header"],
+                    include_toc=options["include_toc"],
+                    toc_title=options["toc_title"],
+                    auto_pop=options["auto_pop_browser"],
+                )
+            if not QDesktopServices.openUrl(QUrl(url)):
+                raise RuntimeError("The browser could not open the print view")
+            self.statusBar().showMessage("Print view opened in browser", 3000)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as exc:
+            self.statusBar().showMessage(f"Failed to open print view: {exc}", 12000)
+
+    def _show_print_dialog(self, path):
+        from sp.app import config
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Print to Browser")
+        dialog.setMinimumWidth(400)
+        dialog.setWindowModality(Qt.ApplicationModal)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Print options:"))
+        include_header = QCheckBox("Include header (title/path)")
+        layout.addWidget(include_header)
+        auto_pop = QCheckBox("Auto pop the browser print dialogue?")
+        auto_pop.setChecked(config.load_print_auto_pop_browser())
+        layout.addWidget(auto_pop)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(divider)
+        include_subpages = QCheckBox("Include subpages")
+        layout.addWidget(include_subpages)
+        depth_row = QHBoxLayout()
+        depth_label = QLabel("Max depth:")
+        depth = QSpinBox()
+        depth.setRange(1, 20)
+        depth.setValue(1)
+        depth.setEnabled(False)
+        depth_label.setEnabled(False)
+        depth_row.addWidget(depth_label)
+        depth_row.addWidget(depth)
+        depth_row.addStretch(1)
+        layout.addLayout(depth_row)
+        include_toc = QCheckBox("Include table of contents")
+        include_toc.setEnabled(False)
+        layout.addWidget(include_toc)
+        title_row = QHBoxLayout()
+        title_row.addSpacing(24)
+        title_label = QLabel("Page header title:")
+        title = QLineEdit(Path(path).stem)
+        title.setEnabled(False)
+        title_label.setEnabled(False)
+        title_row.addWidget(title_label)
+        title_row.addWidget(title)
+        layout.addLayout(title_row)
+
+        def toggle_subpages(checked):
+            depth.setEnabled(checked)
+            depth_label.setEnabled(checked)
+            include_toc.setEnabled(checked)
+            if checked and not include_toc.isChecked():
+                include_toc.setChecked(True)
+            title.setEnabled(checked and include_toc.isChecked())
+            title_label.setEnabled(checked and include_toc.isChecked())
+
+        include_subpages.toggled.connect(toggle_subpages)
+        include_toc.toggled.connect(
+            lambda checked: (
+                title.setEnabled(checked and include_subpages.isChecked()),
+                title_label.setEnabled(checked and include_subpages.isChecked()),
+            )
+        )
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setDefault(True)
+            ok_button.setFocus()
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        config.save_print_auto_pop_browser(auto_pop.isChecked())
+        return {
+            "include_subpages": include_subpages.isChecked(),
+            "depth": depth.value(),
+            "include_header": include_header.isChecked(),
+            "include_toc": include_toc.isChecked(),
+            "toc_title": title.text().strip(),
+            "auto_pop_browser": auto_pop.isChecked(),
+        }
+
+    def _get_stillpoint_print_token(self, api_base):
+        local_token = self._stillpoint_local_ui_token()
+        request = urllib.request.Request(
+            f"{api_base}/auth/print-token",
+            data=json.dumps({"ttl_seconds": 900}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Local-UI-Token": local_token} if local_token else {}),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"StillPoint print server returned {exc.code}: {detail}") from exc
+        return payload.get("token") or None
+
+    def _stillpoint_local_ui_token(self):
+        return (
+            os.environ.get("SP_FOLDER_NAVIGATOR_LOCAL_UI_TOKEN", "").strip()
+            or self._stillpoint_state("local-ui-token")
+        )
+
+    def _create_stillpoint_print_preview(self, api_base, path, content):
+        local_token = self._stillpoint_local_ui_token()
+        request = urllib.request.Request(
+            f"{api_base}/api/print-preview",
+            data=json.dumps({
+                "title": Path(path).stem,
+                "content": content,
+                "path_label": str(path),
+                "source_directory": str(Path(path).parent),
+            }).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Local-UI-Token": local_token} if local_token else {}),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"StillPoint preview server returned {exc.code}: {detail}") from exc
+        preview_id = payload.get("preview_id")
+        if not preview_id:
+            raise RuntimeError("StillPoint did not return a print preview ID")
+        return str(preview_id)
+
+    @staticmethod
+    def _build_print_url(api_base, path, *, mode, depth, token, show_header,
+                         include_toc, toc_title, auto_pop=True):
+        safe_path = quote(str(path).lstrip("/"), safe="/")
+        url = f"{api_base.rstrip('/')}/print/{safe_path}?mode={mode}&auto={'1' if auto_pop else '0'}"
+        if mode == "tree":
+            url += f"&depth={depth}"
+        if show_header:
+            url += "&header=1"
+        url += f"&toc={'1' if include_toc else '0'}"
+        if include_toc and toc_title:
+            url += f"&toc_title={quote(toc_title)}"
+        if token:
+            url += f"&token={quote(token)}"
+        return url
+
+    @staticmethod
+    def _build_print_preview_url(api_base, preview_id, *, token, show_header,
+                                 include_toc, toc_title, auto_pop=True):
+        url = (
+            f"{api_base.rstrip('/')}/print-preview/{quote(str(preview_id), safe='')}"
+            f"?auto={'1' if auto_pop else '0'}"
+        )
+        if show_header:
+            url += "&header=1"
+        url += f"&toc={'1' if include_toc else '0'}"
+        if include_toc and toc_title:
+            url += f"&toc_title={quote(toc_title)}"
+        if token:
+            url += f"&token={quote(token)}"
+        return url
+
+    def _bookmark_in_stillpoint(self):
+        """Add this root to the launching StillPoint vault's folder bookmarks."""
+        from sp.app import config
+
+        vault = os.environ.get("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT") or config.get_active_vault()
+        if not vault:
+            self.statusBar().showMessage(
+                "No StillPoint vault is connected; launch Folder Navigator from StillPoint first",
+                6000,
+            )
+            return
+        token = config.push_active_vault_context(vault)
+        try:
+            bookmarks = config.load_folder_bookmarks()
+            root = str(self.root)
+            if root in bookmarks:
+                self.statusBar().showMessage(
+                    f"Already bookmarked in StillPoint: {self.root.name}", 3500
+                )
+                return
+            bookmarks.append(root)
+            config.save_folder_bookmarks(bookmarks)
+            self.statusBar().showMessage(
+                f"Added StillPoint bookmark: {self.root.name}", 3500
+            )
+        finally:
+            config.reset_active_vault_context(token)
+
     def toggle_hidden(self, checked):
         filters = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if checked:
@@ -1676,6 +3091,18 @@ class Window(QMainWindow):
             self.filter_label.show()
             self.clear_filter_action.setEnabled(True)
             self.statusBar().showMessage(f"Scope: {folder}")
+
+    def filter_from_here(self):
+        """Filter to the selected folder, or the selected file's parent."""
+        index = self.tree.currentIndex()
+        if index.isValid():
+            path = Path(self.model.filePath(index))
+            folder = path if self.model.isDir(index) else path.parent
+        else:
+            folder = self.scope
+        self.apply_filter(folder)
+        self.rail.setCurrentIndex(0)
+        self.tree.setFocus(Qt.OtherFocusReason)
 
     def clear_filter(self):
         self.scope = self.root
@@ -1733,21 +3160,51 @@ class Window(QMainWindow):
     def reveal_tree(self, path):
         if not inside(self.root, path):
             return
+        if self.rail.isHidden():
+            self._set_folder_rail_visible(True)
         if not inside(self.scope, path):
             self.clear_filter()
         index = self.model.index(str(path))
+        root_index = self.tree.rootIndex()
         cursor = index.parent()
-        while cursor.isValid():
+        # Only expand ancestors displayed beneath the tree's root. Expanding
+        # QFileSystemModel parents all the way to the filesystem root is both
+        # invisible here and noticeably expensive on an editor-to-tree Escape.
+        while cursor.isValid() and cursor != root_index:
             self.tree.expand(cursor)
             cursor = cursor.parent()
-        self.tree.setCurrentIndex(index)
-        self.tree.scrollTo(index)
+        # Revealing the active editor file is a focus handoff, not a new
+        # flyover selection. Avoid restarting preview/debounce work for a tab
+        # whose content is already loaded and visible.
+        was_suppressed = self._suppress_tree_preview
+        self._suppress_tree_preview = True
+        try:
+            if self.tree.currentIndex() != index:
+                self.tree.setCurrentIndex(index)
+        finally:
+            self._suppress_tree_preview = was_suppressed
+        visible_rect = self.tree.visualRect(index)
+        if not visible_rect.isValid() or not self.tree.viewport().rect().intersects(visible_rect):
+            self.tree.scrollTo(index)
         self.rail.setCurrentIndex(0)
         self.tree.setFocus()
 
     def _tree_menu(self, point):
         index = self.tree.indexAt(point)
         if not index.isValid():
+            root_path = self.model.filePath(self.tree.rootIndex())
+            target_directory = Path(root_path) if root_path else self.scope
+            target_index = self.tree.rootIndex()
+            menu = QMenu(self)
+            menu.addAction("New File", lambda: self._begin_new_file(target_directory, target_index))
+            menu.addAction(
+                "New Folder",
+                lambda: self._begin_new_file(
+                    target_directory, target_index, create_folder=True
+                ),
+            )
+            menu.addAction("Open Terminal Here", lambda: self.terminal(target_directory))
+            menu.exec(self.tree.viewport().mapToGlobal(point))
             return
         path = Path(self.model.filePath(index))
         folder = self.model.isDir(index)
@@ -1767,6 +3224,12 @@ class Window(QMainWindow):
         target_directory = path if folder else path.parent
         target_index = index if folder else index.parent()
         menu.addAction("New File", lambda: self._begin_new_file(target_directory, target_index))
+        menu.addAction(
+            "New Folder",
+            lambda: self._begin_new_file(
+                target_directory, target_index, create_folder=True
+            ),
+        )
         menu.addAction("Remove Bookmark" if str(path) in self._bookmarks() else "Bookmark", lambda: self.toggle_bookmark(path))
         menu.addAction("Reveal in File Manager", lambda: self.reveal(path))
         if not folder:
@@ -1776,12 +3239,15 @@ class Window(QMainWindow):
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         menu.exec(self.tree.viewport().mapToGlobal(point))
 
-    def _begin_new_file(self, directory, directory_index=None):
-        """Show an inline filename editor beneath a folder tree row."""
+    def _begin_new_file(self, directory, directory_index=None, *, create_folder=False):
+        """Show an inline editor for a new file or folder name."""
         self._cancel_new_file()
         directory = Path(directory)
         if not directory.is_dir() or not inside(self.root, directory):
-            self.statusBar().showMessage(f"Cannot create a file outside the folder root: {directory}", 8000)
+            kind = "folder" if create_folder else "file"
+            self.statusBar().showMessage(
+                f"Cannot create a {kind} outside the folder root: {directory}", 8000
+            )
             return
         index = directory_index if directory_index is not None else self.model.index(str(directory))
         if index.isValid():
@@ -1792,8 +3258,9 @@ class Window(QMainWindow):
         else:
             x, y = 18, 4
         edit = InlineFileNameEdit(self.tree.viewport())
-        edit.setPlaceholderText("New file name")
-        edit.setAccessibleName("New file name")
+        kind = "folder" if create_folder else "file"
+        edit.setPlaceholderText(f"New {kind} name")
+        edit.setAccessibleName(f"New {kind} name")
         edit.setGeometry(x, y, max(180, self.tree.viewport().width() - x - 8), 28)
         edit.setStyleSheet(
             f"border: 2px solid {theme_value('main_window.focus_border.default', '#4A90E2')}; "
@@ -1802,6 +3269,7 @@ class Window(QMainWindow):
         edit.returnPressed.connect(self._commit_new_file)
         edit.canceled.connect(self._cancel_new_file)
         self.new_file_directory = directory
+        self.new_file_is_folder = bool(create_folder)
         self.new_file_edit = edit
         edit.show()
         edit.raise_()
@@ -1817,6 +3285,7 @@ class Window(QMainWindow):
         edit = self.new_file_edit
         self.new_file_edit = None
         self.new_file_directory = None
+        self.new_file_is_folder = False
         if edit is not None:
             edit.hide()
             edit.deleteLater()
@@ -1824,6 +3293,7 @@ class Window(QMainWindow):
     def _commit_new_file(self):
         edit = self.new_file_edit
         directory = self.new_file_directory
+        create_folder = self.new_file_is_folder
         if edit is None or directory is None:
             return
         name = edit.text().strip()
@@ -1831,15 +3301,21 @@ class Window(QMainWindow):
             edit.setFocus()
             return
         if name in {".", ".."} or Path(name).name != name:
-            self.statusBar().showMessage("Enter a file name without folder separators", 8000)
+            kind = "folder" if create_folder else "file"
+            self.statusBar().showMessage(
+                f"Enter a {kind} name without folder separators", 8000
+            )
             edit.selectAll()
             return
         target = directory / name
         try:
-            with target.open("x", encoding="utf-8"):
-                pass
+            if create_folder:
+                target.mkdir()
+            else:
+                with target.open("x", encoding="utf-8"):
+                    pass
         except FileExistsError:
-            self.statusBar().showMessage(f"A file named {name} already exists", 8000)
+            self.statusBar().showMessage(f"An item named {name} already exists", 8000)
             edit.selectAll()
             return
         except OSError as exc:
@@ -1847,6 +3323,10 @@ class Window(QMainWindow):
             edit.selectAll()
             return
         self._cancel_new_file()
+        if create_folder:
+            self.tree.setFocus(Qt.OtherFocusReason)
+            QTimer.singleShot(100, lambda: self.reveal_tree(target))
+            return
         self.open_file(target, pinned=True)
         tab = self.active_tab()
         if tab and tab.editor:
@@ -1873,12 +3353,16 @@ class Window(QMainWindow):
                 window = MermaidEditorWindow(str(path), parent=None)
             elif suffix == ".excalidraw":
                 from sp.app.ui.excalidraw_window import ExcalidrawWindow
-                window = ExcalidrawWindow(str(path), parent=None)
+                window = ExcalidrawWindow(
+                    str(path), parent=None, url=self._excalidraw_editor_url(path)
+                )
             else:
                 return
             window.setWindowFlag(Qt.Window, True)
             window.setWindowFlag(Qt.Tool, False)
             window.setWindowModality(Qt.NonModal)
+            if hasattr(window, "fileSaved"):
+                window.fileSaved.connect(self._specialized_file_saved)
             self.specialized_editor_windows.append(window)
             window.destroyed.connect(
                 lambda _=None, item=window: self.specialized_editor_windows.remove(item)
@@ -1891,6 +3375,40 @@ class Window(QMainWindow):
                 "Could not open diagram editor",
                 f"Could not open {path.name} in its StillPoint editor:\n{exc}",
             )
+
+    def _excalidraw_editor_url(self, path):
+        """Build the authenticated editor URL for a drawing in the active vault."""
+        from sp.app import config
+
+        api_base = (
+            os.environ.get("SP_FOLDER_NAVIGATOR_API_BASE", "").strip()
+            or self._stillpoint_state("api-base")
+        ).rstrip("/")
+        vault_text = (
+            os.environ.get("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", "").strip()
+            or config.get_active_vault()
+        )
+        if not api_base or not vault_text:
+            raise RuntimeError("Start StillPoint before opening an Excalidraw editor")
+        vault = Path(vault_text).expanduser().resolve(strict=True)
+        target = Path(path).expanduser().resolve(strict=True)
+        try:
+            relative = "/" + target.relative_to(vault).as_posix()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Excalidraw editing currently requires a file inside the active StillPoint vault"
+            ) from exc
+        query = f"path={quote(relative, safe='')}"
+        token = self._stillpoint_local_ui_token()
+        if token:
+            query += f"&token={quote(token, safe='')}"
+        return f"{api_base}/excalidraw/edit?{query}"
+
+    def _specialized_file_saved(self, saved_path):
+        """Immediately reconcile a diagram save with its navigator preview/tab."""
+        path = Path(saved_path)
+        self.statusBar().showMessage(f"Saved {path.name}; refreshing preview", 3000)
+        QTimer.singleShot(0, self._refresh_disk)
 
     def _tab_menu(self, point):
         index = self.tabs.tabBar().tabAt(point)
@@ -1926,12 +3444,14 @@ class Window(QMainWindow):
         tabs = [self.tabs.widget(i) for i in indices]
         if not self._review_dirty(tabs):
             return
+        active = self.active_tab()
+        preferred_path = active.path if active in tabs else None
         for tab in tabs:
             self.tabs.removeTab(self.tabs.indexOf(tab))
             tab.deleteLater()
         self._watch_files()
         self._update_welcome()
-        self._focus_tree_when_tabs_empty()
+        self._focus_tree_when_tabs_empty(preferred_path)
 
     def system_open(self, path):
         if not inside(self.root, path):
@@ -1940,6 +3460,22 @@ class Window(QMainWindow):
                 return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self.statusBar().showMessage(f"No default application could open {path}", 12000)
+
+    def _open_navigator_selection_in_system(self):
+        path = None
+        if self.rail.currentWidget() is self.tree:
+            index = self.tree.currentIndex()
+            if index.isValid():
+                path = Path(self.model.filePath(index))
+        else:
+            item = self.search_results.currentItem()
+            target = item.data(Qt.UserRole) if item else None
+            if target:
+                path = Path(target[0])
+        if path is None or not path.exists():
+            self.statusBar().showMessage("Select a file to open in its default application", 3000)
+            return
+        self.system_open(path)
 
     def reveal(self, path):
         target = path.parent if path.is_file() else path
@@ -1968,7 +3504,39 @@ class Window(QMainWindow):
         Picker(self, quick=True).exec()
 
     def command_bar(self):
-        self.command_palette.show_actions(self.commands)
+        self.command_palette.show_actions(self._collect_command_actions())
+
+    @staticmethod
+    def _command_menu_text(text):
+        return str(text or "").replace("&", "").strip()
+
+    def _collect_command_actions(self):
+        """Collect every leaf menu action, matching StillPoint's command bar."""
+        actions = []
+
+        def walk(menu, path):
+            for action in menu.actions():
+                if action.isSeparator():
+                    continue
+                submenu = action.menu()
+                label = self._command_menu_text(action.text())
+                if submenu is not None:
+                    walk(submenu, path + ([label] if label else []))
+                elif label:
+                    action.setProperty("commandLabel", " / ".join(path + [label]))
+                    actions.append(action)
+
+        for top_action in self.menuBar().actions():
+            menu = top_action.menu()
+            if menu is not None:
+                label = self._command_menu_text(top_action.text())
+                walk(menu, [label] if label else [])
+        return actions
+
+    @staticmethod
+    def _run_command_action(action):
+        if action.isEnabled():
+            action.trigger()
 
     def _git_ignored(self, path):
         try:
@@ -2109,6 +3677,14 @@ class Window(QMainWindow):
         self.executor.submit(job)
 
     def _search_result(self, payload):
+        if payload[0] == "table":
+            _, path, preview, allow_source, error = payload
+            self._show_table_preview(path, preview, allow_source, error)
+            return
+        if payload[0] == "diagram":
+            _, path, signature, svg, pixels, error = payload
+            self._show_diagram_preview(path, signature, svg, pixels, error)
+            return
         if payload[0] == "image":
             _, path, pixels, error = payload
             index = self._index_for(path)
@@ -2118,7 +3694,8 @@ class Window(QMainWindow):
                     tab.show_notice(f"Image preview failed: {error}")
                 else:
                     tab.layout().itemAt(1).widget().hide()
-                    tab.layout().addWidget(ImageView(path, pixels))
+                    tab.viewer = ImageView(path, pixels)
+                    tab.layout().addWidget(tab.viewer)
             return
         if payload[0] == "catalog":
             if self.catalog_db is None:
@@ -2147,7 +3724,29 @@ class Window(QMainWindow):
             self.search_results.setCurrentItem(item)
 
     def _search_finished(self, payload):
-        if payload[0] == "catalog":
+        if payload[0] == "drop-copy":
+            _, copied, errors = payload
+            self._schedule_refresh()
+            if self.catalog_db is not None:
+                try:
+                    self.catalog_count = self.catalog_db.count()
+                except (OSError, sqlite3.Error):
+                    pass
+            self._update_index_notice()
+            self._refresh_quick_pickers()
+            if errors:
+                detail = "; ".join(errors[:3])
+                if len(errors) > 3:
+                    detail += f"; and {len(errors) - 3} more"
+                self.statusBar().showMessage(
+                    f"Copied {len(copied)} item(s); {len(errors)} skipped: {detail}",
+                    15000,
+                )
+            else:
+                self.statusBar().showMessage(
+                    f"Copied {len(copied)} dropped item(s)", 5000
+                )
+        elif payload[0] == "catalog":
             self.catalog_running = False
             if self.catalog_db is not None:
                 try:
@@ -2185,8 +3784,74 @@ class Window(QMainWindow):
         path, line = target
         self.open_file(path, line=line)
 
+    def _copy_dropped_paths(self, sources, target):
+        """Copy local file-manager drops into an in-root directory."""
+        try:
+            target = Path(target).resolve(strict=True)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Drop failed: {exc}", 12000)
+            return
+        if not target.is_dir() or not inside(self.root, target):
+            self.statusBar().showMessage("Drop target is outside the folder root", 12000)
+            return
+
+        self.statusBar().showMessage(f"Copying {len(sources)} dropped item(s)…")
+
+        def job():
+            copied = []
+            errors = []
+            for candidate in sources:
+                try:
+                    source = Path(candidate).resolve(strict=True)
+                    destination = target / source.name
+                    if destination.exists():
+                        errors.append(f"{source.name}: already exists")
+                        continue
+                    if source.is_dir():
+                        if inside(source, target):
+                            errors.append(f"{source.name}: cannot copy a folder into itself")
+                            continue
+                        shutil.copytree(source, destination)
+                    elif source.is_file():
+                        shutil.copy2(source, destination)
+                    else:
+                        errors.append(f"{source.name}: unsupported item")
+                        continue
+                    copied.append(destination)
+                except (OSError, shutil.Error) as exc:
+                    errors.append(f"{Path(candidate).name}: {exc}")
+
+            batch = []
+            for destination in copied:
+                paths = ([destination] if destination.is_file() else walk_files(
+                    self.root, destination, hidden=True,
+                    canceled=self.catalog_cancel.is_set,
+                    max_directory_entries=MAX_DIRECTORY_ENTRIES,
+                ))
+                for path in paths:
+                    batch.append(path)
+                    if len(batch) >= 500:
+                        self._catalog_batch(batch, None)
+                        batch = []
+            if batch:
+                self._catalog_batch(batch, None)
+            self.bridge.finished.emit(("drop-copy", copied, errors))
+
+        try:
+            self.executor.submit(job)
+        except RuntimeError:
+            self.statusBar().showMessage("Drop failed: navigator is closing", 8000)
+
     def _watch_files(self):
-        desired = {str(self.root)} | {str(t.path) for t in self.all_tabs() if t.path.exists()}
+        desired = {str(self.root)}
+        desired |= {str(t.path) for t in self.all_tabs() if t.path.exists()}
+        desired |= {
+            str(sidecar)
+            for tab in self.all_tabs()
+            if tab.path.suffix.casefold() == ".excalidraw"
+            for sidecar in [tab.path.with_name(f"{tab.path.name}.png")]
+            if sidecar.exists()
+        }
         for path in set(self.watcher.files() + self.watcher.directories()) - desired:
             self.watcher.removePath(path)
         for path in desired - set(self.watcher.files() + self.watcher.directories()):
@@ -2217,6 +3882,11 @@ class Window(QMainWindow):
                         tab.show_notice("File reloaded after an external change")
                     except (OSError, ValueError) as exc:
                         tab.show_notice(f"Reload failed: {exc}")
+            elif (tab.path.suffix.casefold() in DIAGRAM_SUFFIXES
+                    and self._diagram_preview_signature(tab.path)
+                    != getattr(tab, "preview_signature", None)):
+                tab.show_notice("Refreshing diagram preview…")
+                self._load_diagram_preview(tab.path)
         self.catalog = {p for p in self.catalog if p.exists() and inside(self.root, p)}
         self.ignored_paths.intersection_update(self.catalog)
         self.catalog_warmed = False

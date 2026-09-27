@@ -164,6 +164,44 @@ def test_plantuml_editor_defers_initial_render_until_window_is_shown(qapp, monke
     window.close()
 
 
+def test_plantuml_and_mermaid_save_source_and_emit_refresh_signal(
+        qapp, qtbot, monkeypatch, tmp_path: Path):
+    from PySide6.QtTest import QSignalSpy
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr(PlantUMLEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(MermaidEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._should_use_web_preview",
+        lambda: False,
+    )
+    cases = [
+        (PlantUMLEditorWindow, tmp_path / "saved.puml", "@startuml\nA -> C\n@enduml\n"),
+        (MermaidEditorWindow, tmp_path / "saved.mmd", "flowchart TD\nA --> C\n"),
+    ]
+    for editor_class, path, updated in cases:
+        path.write_text("initial\n", encoding="utf-8")
+        window = editor_class(str(path))
+        qtbot.addWidget(window)
+        window.show()
+        if isinstance(window, PlantUMLEditorWindow):
+            _wait_for(qapp, lambda: window._startup_initialized)
+        spy = QSignalSpy(window.fileSaved)
+        window.editor.setPlainText(updated)
+
+        window._save_file()
+
+        assert path.read_text(encoding="utf-8") == updated
+        assert spy.count() == 1
+        assert spy.at(0)[0] == str(path)
+        assert not window.editor.document().isModified()
+        window.close()
+
+
 def test_plantuml_editor_without_ai_has_single_preview_pane(qapp, monkeypatch, tmp_path: Path):
     _patch_common_editor_deps(monkeypatch)
     monkeypatch.setattr(

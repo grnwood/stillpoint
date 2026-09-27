@@ -1,6 +1,8 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
+import types
 
 import pytest
 
@@ -9,6 +11,7 @@ from sp.app.folder_navigator.core import (ConflictError, atomic_save, content_ma
 from sp.app.folder_navigator.catalog import (
     CATALOG_DIRECTORY, CATALOG_FILENAME, FolderCatalog,
 )
+from sp.app.folder_navigator.tabular import read_delimited_preview, read_workbook_preview
 
 
 def test_symlink_boundary_and_cancel(tmp_path):
@@ -55,6 +58,75 @@ def test_utf16_round_trip(tmp_path):
     assert path.read_bytes().decode("utf-16") == "first\r\nupdated\r\n"
 
 
+def test_delimited_preview_detects_dialect_header_and_multiline_cells(tmp_path):
+    path = tmp_path / "people.csv"
+    path.write_text(
+        'name;notes;score\r\nAlice;"first line\nsecond line";10\r\nBob;ok;20\r\n',
+        encoding="utf-8",
+    )
+
+    preview = read_delimited_preview(path)
+
+    assert preview.delimiter == ";"
+    assert preview.has_header
+    assert preview.rows == [
+        ["name", "notes", "score"],
+        ["Alice", "first line\nsecond line", "10"],
+        ["Bob", "ok", "20"],
+    ]
+    assert not preview.truncated
+
+
+def test_tsv_preview_uses_extension_fallback_for_ambiguous_content(tmp_path):
+    path = tmp_path / "single.tsv"
+    path.write_text("one\ttwo\n", encoding="utf-8")
+
+    preview = read_delimited_preview(path)
+
+    assert preview.delimiter == "\t"
+    assert preview.rows == [["one", "two"]]
+
+
+def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monkeypatch):
+    class Sheet:
+        end = (1, 1)
+        total_height = 1
+        total_width = 1
+
+        def iter_rows(self):
+            return iter((("label", "value"), ("answer", 42)))
+
+    class Workbook:
+        sheet_names = ["First", "Second"]
+
+        @classmethod
+        def from_path(cls, path):
+            return cls()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get_sheet_by_name(self, name):
+            assert name == "Second"
+            return Sheet()
+
+    monkeypatch.setitem(
+        sys.modules, "python_calamine", types.SimpleNamespace(CalamineWorkbook=Workbook)
+    )
+    path = tmp_path / "book.xlsx"
+    path.write_bytes(b"placeholder")
+
+    preview = read_workbook_preview(path, "Second")
+
+    assert preview.sheet_names == ("First", "Second")
+    assert preview.sheet_name == "Second"
+    assert preview.rows == [["label", "value"], ["answer", "42"]]
+    assert (preview.total_rows, preview.total_columns) == (2, 2)
+
+
 def test_quick_open_ranking_and_content_matching():
     assert fuzzy_score("read", "README.md") > fuzzy_score("read", "docs/other-readme.md")
     assert fuzzy_score("main", "src/main.py", opened=True) > fuzzy_score("main", "src/main.py")
@@ -67,6 +139,167 @@ def app(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
+
+
+def test_csv_opens_in_incremental_table_and_can_switch_to_raw_text(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import SpreadsheetView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "data.csv"
+    path.write_text(
+        "name,value\n" + "".join(f"item-{row},{row}\n" for row in range(650)),
+        encoding="utf-8",
+    )
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(path, pinned=True)
+    deadline = time.monotonic() + 3
+    while not getattr(window.active_tab(), "viewer", None) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+
+    viewer = window.active_tab().viewer
+    assert isinstance(viewer, SpreadsheetView)
+    assert viewer.model.rowCount() == 500
+    assert viewer.model.canFetchMore()
+    viewer.model.fetchMore()
+    assert viewer.model.rowCount() == 650
+    assert viewer.model.headerData(0, Qt.Horizontal) == "name"
+
+    window._set_folder_rail_visible(False)
+    viewer.table.setFocus()
+    app.processEvents()
+    QTest.keyClick(viewer.table, Qt.Key_Escape)
+    app.processEvents()
+    assert not window.rail.isHidden()
+    assert window.tree.hasFocus()
+
+    viewer.sourceRequested.emit()
+    app.processEvents()
+    assert window.active_tab().editor is not None
+    assert window.active_tab().pinned
+    assert "item-649,649" in window.active_tab().editor.toPlainText()
+    window.close()
+
+
+def test_table_preview_supports_vi_cell_navigation_and_header_sorting(app):
+    from PySide6.QtCore import QItemSelectionModel, Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import SpreadsheetView
+
+    view = SpreadsheetView(
+        TablePreview(
+            [["name", "value"]]
+            + [[f"item-{value}", str(value)] for value in range(100, 0, -1)],
+            has_header=True,
+        ),
+        allow_source=True,
+        vi_enabled=True,
+    )
+    view.resize(500, 220)
+    view.show()
+    view.activateWindow()
+    app.processEvents()
+    view.table.setCurrentIndex(view.model.index(0, 0))
+    view.table.setFocus()
+    QTest.keyClick(view.table, Qt.Key_L)
+    QTest.keyClick(view.table, Qt.Key_J)
+    assert (view.table.currentIndex().row(), view.table.currentIndex().column()) == (1, 1)
+
+    QTest.keyClick(view.table, Qt.Key_G, Qt.ShiftModifier)
+    assert (view.table.currentIndex().row(), view.table.currentIndex().column()) == (99, 1)
+    QTest.keyClick(view.table, Qt.Key_G)
+    assert (view.table.currentIndex().row(), view.table.currentIndex().column()) == (0, 1)
+
+    QTest.keyClick(
+        view.table, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier
+    )
+    app.processEvents()
+    page_down_row = view.table.currentIndex().row()
+    assert page_down_row > 1
+    QTest.keyClick(
+        view.table, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier
+    )
+    app.processEvents()
+    assert view.table.currentIndex().row() < page_down_row
+
+    selection = view.table.selectionModel()
+    selection.setCurrentIndex(
+        view.model.index(0, 0),
+        QItemSelectionModel.ClearAndSelect,
+    )
+    QTest.keyClick(view.table, Qt.Key_L, Qt.ShiftModifier)
+    QTest.keyClick(view.table, Qt.Key_J, Qt.ShiftModifier)
+    assert {
+        (index.row(), index.column()) for index in selection.selectedIndexes()
+    } == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    QTest.keyClick(view.table, Qt.Key_C)
+    assert app.clipboard().text() == "item-100\t100\nitem-99\t99"
+
+    selection.setCurrentIndex(
+        view.model.index(0, 0),
+        QItemSelectionModel.ClearAndSelect,
+    )
+    QTest.keyClick(view.table, Qt.Key_Right, Qt.ShiftModifier)
+    QTest.keyClick(view.table, Qt.Key_Down, Qt.ShiftModifier)
+    assert len(selection.selectedIndexes()) == 4
+    selection.setCurrentIndex(
+        view.model.index(0, 0),
+        QItemSelectionModel.ClearAndSelect,
+    )
+    QTest.keyClick(view.table, Qt.Key_N, Qt.ShiftModifier)
+    assert {(index.row(), index.column()) for index in selection.selectedIndexes()} == {
+        (0, 0), (1, 0)
+    }
+    QTest.keyClick(view.table, Qt.Key_U, Qt.ShiftModifier)
+    assert [(index.row(), index.column()) for index in selection.selectedIndexes()] == [(0, 0)]
+
+    view.table.horizontalHeader().sectionClicked.emit(1)
+    assert view.model.data(view.model.index(0, 1)) == "1"
+    assert view.model.data(view.model.index(99, 1)) == "100"
+    view.table.horizontalHeader().sectionClicked.emit(1)
+    assert view.model.data(view.model.index(0, 1)) == "100"
+    view.close()
+
+
+def test_ctrl_shift_enter_opens_tree_selection_with_os_handler(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "native.txt"
+    path.write_text("open me", encoding="utf-8")
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()) or True)
+    window = Window(tmp_path)
+    window.show()
+    deadline = time.monotonic() + 2
+    index = window.model.index(str(path))
+    while not index.isValid() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+        index = window.model.index(str(path))
+    window.rail.setCurrentWidget(window.tree)
+    window.tree.setCurrentIndex(index)
+    window.tree.setFocus()
+    app.processEvents()
+
+    QTest.keyClick(
+        window.tree, Qt.Key_Return, Qt.ControlModifier | Qt.ShiftModifier
+    )
+    app.processEvents()
+
+    assert opened == [str(path)]
+    window.close()
 
 
 def test_preview_pinning_and_stale_restore(tmp_path, monkeypatch, app):
@@ -93,10 +326,14 @@ def test_preview_pinning_and_stale_restore(tmp_path, monkeypatch, app):
 
 def test_closing_last_tab_returns_focus_to_folder_tree(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Window
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     path = tmp_path / "notes.txt"
+    other_path = tmp_path / "other.txt"
     path.write_text("notes")
+    other_path.write_text("other")
     window = Window(tmp_path)
     window.show()
     window.open_file(path, pinned=True)
@@ -109,6 +346,76 @@ def test_closing_last_tab_returns_focus_to_folder_tree(tmp_path, monkeypatch, ap
     assert window.tabs.count() == 0
     assert window.rail.currentIndex() == 0
     assert window.tree.hasFocus()
+    assert Path(window.model.filePath(window.tree.currentIndex())) == path
+
+    QTest.keyClick(window.tree, Qt.Key_Down)
+    app.processEvents()
+
+    assert Path(window.model.filePath(window.tree.currentIndex())) == other_path
+    window.close()
+
+
+def test_launch_focuses_folder_tree_with_vi_navigation_ready(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".stillpoint_config.json").write_text(
+        '{"enable_vi_mode": true}', encoding="utf-8"
+    )
+    first = tmp_path / "alpha.txt"
+    second = tmp_path / "bravo.txt"
+    first.write_text("alpha", encoding="utf-8")
+    second.write_text("bravo", encoding="utf-8")
+
+    window = Window(tmp_path)
+    window.show()
+    QTest.qWait(100)
+    app.processEvents()
+
+    assert window.rail.currentIndex() == 0
+    assert window.tree.hasFocus()
+    current = window.tree.currentIndex()
+    assert current.isValid()
+    adjacent = window.tree.indexAbove(current)
+    key = Qt.Key_K
+    if not adjacent.isValid():
+        adjacent = window.tree.indexBelow(current)
+        key = Qt.Key_J
+    assert adjacent.isValid()
+
+    QTest.keyClick(window.tree, key)
+    app.processEvents()
+
+    assert window.tree.currentIndex() == adjacent
+    assert window.tree.hasFocus()
+    if window.active_tab() and window.active_tab().editor:
+        window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_unhandled_escape_returns_focus_to_folder_tree(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "notes.txt"
+    path.write_text("notes")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(path, pinned=True)
+    editor = window.active_tab().editor
+    editor.setFocus()
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+    app.processEvents()
+
+    assert window.tree.hasFocus()
+    assert Path(window.model.filePath(window.tree.currentIndex())) == path
+    editor.document().setModified(False)
     window.close()
 
 
@@ -167,9 +474,16 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
         "sp.app.config.load_effective_theme_preference",
         lambda: "midnight-blue.json",
     )
+    monkeypatch.setattr(
+        "sp.app.config.get_active_vault",
+        lambda: str(tmp_path / "vault"),
+    )
     launch.launch(tmp_path)
     assert captured["command"][1:3] == ["-m", "sp.app.folder_navigator"]
     assert captured["kwargs"]["env"]["SP_THEME_OVERRIDE"] == "midnight-blue.json"
+    assert captured["kwargs"]["env"]["SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT"] == str(
+        tmp_path / "vault"
+    )
     source_root = str(Path(launch.__file__).resolve().parents[3])
     assert captured["kwargs"]["env"]["PYTHONPATH"].split(os.pathsep)[0] == source_root
     if os.name != "nt":
@@ -334,6 +648,260 @@ def test_ctrl_tab_cycles_all_open_tabs(tmp_path, monkeypatch, app):
     window.close()
 
 
+def test_standard_zoom_actions_route_to_active_viewer(tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QAction, QKeySequence
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "notes.txt"
+    path.write_text("notes", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+    calls = []
+    monkeypatch.setattr(tab.editor, "zoomIn", lambda amount=1: calls.append(("in", amount)))
+    monkeypatch.setattr(tab.editor, "zoomOut", lambda amount=1: calls.append(("out", amount)))
+
+    actions = {
+        action.text().replace("&", ""): action
+        for action in window.findChildren(QAction)
+    }
+    zoom_in = actions["Zoom In"]
+    zoom_out = actions["Zoom Out"]
+    assert zoom_in.shortcut().matches(QKeySequence(QKeySequence.ZoomIn)) == QKeySequence.ExactMatch
+    assert zoom_out.shortcut().matches(QKeySequence(QKeySequence.ZoomOut)) == QKeySequence.ExactMatch
+
+    zoom_in.trigger()
+    zoom_out.trigger()
+    assert calls == [("in", 1), ("out", 1)]
+    tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_quick_open_uses_ctrl_j_and_ctrl_p_prints_through_stillpoint(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+    from sp.app.folder_navigator.window import Window
+
+    vault = tmp_path / "vault"
+    folder = vault / "notes"
+    folder.mkdir(parents=True)
+    page = folder / "hello world.md"
+    page.write_text("# Hello\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", str(vault))
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_API_BASE", "http://127.0.0.1:8765")
+    window = Window(folder)
+    window.open_file(page, pinned=True)
+    options = {
+        "include_subpages": False,
+        "depth": 1,
+        "include_header": True,
+        "include_toc": False,
+        "toc_title": "",
+        "auto_pop_browser": True,
+    }
+    monkeypatch.setattr(window, "_show_print_dialog", lambda _path: options)
+    monkeypatch.setattr(window, "_get_stillpoint_print_token", lambda _base: "print token")
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(QUrl(url)) or True
+    )
+    actions = {
+        action.text().replace("&", ""): action
+        for action in window.findChildren(QAction)
+    }
+
+    assert actions["Quick Open"].shortcut().matches(
+        QKeySequence("Ctrl+J")
+    ) == QKeySequence.ExactMatch
+    assert actions["Print Page"].shortcut().matches(
+        QKeySequence(QKeySequence.Print)
+    ) == QKeySequence.ExactMatch
+
+    actions["Print Page"].trigger()
+
+    assert len(opened) == 1
+    assert bytes(opened[0].toEncoded()).decode("ascii") == (
+        "http://127.0.0.1:8765/print/notes/hello%20world.md"
+        "?mode=page&auto=1&header=1&toc=0&token=print%20token"
+    )
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_print_outside_vault_stages_current_buffer_on_server(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    from sp.app.folder_navigator.window import Window
+
+    folder = tmp_path / "outside"
+    folder.mkdir()
+    page = folder / "draft.md"
+    page.write_text("# Disk\n", encoding="utf-8")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", str(vault))
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_API_BASE", "http://127.0.0.1:8765")
+    window = Window(folder)
+    window.open_file(page, pinned=True)
+    window.active_tab().editor.insertPlainText("current buffer")
+    options = {
+        "include_subpages": False,
+        "depth": 1,
+        "include_header": True,
+        "include_toc": False,
+        "toc_title": "",
+        "auto_pop_browser": False,
+    }
+    monkeypatch.setattr(window, "_show_print_dialog", lambda _path: options)
+    monkeypatch.setattr(window, "_get_stillpoint_print_token", lambda _base: "token")
+    staged = []
+    monkeypatch.setattr(
+        window,
+        "_create_stillpoint_print_preview",
+        lambda base, path, content: staged.append((base, path, content)) or "preview-id",
+    )
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(QUrl(url)) or True
+    )
+
+    window.print_active()
+
+    assert len(staged) == 1
+    assert staged[0][0] == "http://127.0.0.1:8765"
+    assert staged[0][1] == page
+    assert "current buffer" in staged[0][2]
+    assert bytes(opened[0].toEncoded()).decode("ascii") == (
+        "http://127.0.0.1:8765/print-preview/preview-id"
+        "?auto=0&header=1&toc=0&token=token"
+    )
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_zoom_is_shared_persisted_and_routes_to_folder_tree(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    home.mkdir()
+    root.mkdir()
+    paths = [root / name for name in ("one.txt", "two.txt", "three.txt")]
+    for path in paths:
+        path.write_text(path.name, encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+    window.show()
+    window.open_file(paths[0], pinned=True)
+    first = window.active_tab().editor
+    first.setFocus()
+    app.processEvents()
+    editor_size = first.document().defaultFont().pointSizeF()
+
+    window._zoom_active_view(1)
+    assert first.document().defaultFont().pointSizeF() == editor_size + 1
+    window.open_file(paths[1], pinned=True)
+    assert window.active_tab().editor.document().defaultFont().pointSizeF() == editor_size + 1
+
+    tree_size = window.tree.font().pointSizeF()
+    window.tree.setFocus()
+    app.processEvents()
+    window._zoom_active_view(1)
+    assert window.tree.font().pointSizeF() == tree_size + 1
+    assert window.editor_zoom_steps == 1
+    assert window.folder_zoom_steps == 1
+    window.close()
+
+    restored = Window(root)
+    assert restored.editor_zoom_steps == 1
+    assert restored.folder_zoom_steps == 1
+    assert restored.tree.font().pointSizeF() == tree_size + 1
+    restored.open_file(paths[2], pinned=True)
+    assert restored.active_tab().editor.document().defaultFont().pointSizeF() == editor_size + 1
+    restored.close()
+
+
+def test_command_palette_uses_ctrl_shift_p_and_all_menu_actions(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window.show()
+    window.activateWindow()
+    window.tree.setFocus()
+    app.processEvents()
+
+    QTest.keyClick(window.tree, Qt.Key_P, Qt.ControlModifier | Qt.ShiftModifier)
+    app.processEvents()
+
+    assert window.command_palette.isVisible()
+    labels = {
+        str(action.property("commandLabel"))
+        for action in window.command_palette.entries
+    }
+    assert "File / Add Bookmark to StillPoint" in labels
+    assert "View / Zoom In" in labels
+    assert "View / Columns / Size" in labels
+    assert "Go / Quick Open" in labels
+    assert "Go / Filter From Here" in labels
+    assert len(window.command_palette.entries) == len(window._collect_command_actions())
+
+    hidden = window.hidden_action.isChecked()
+    window.command_palette.actionTriggered.emit(window.hidden_action)
+    assert window.hidden_action.isChecked() is not hidden
+    window.close()
+
+
+def test_filter_from_here_uses_selected_folder_or_file_parent(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "nested"
+    folder.mkdir()
+    path = folder / "note.txt"
+    path.write_text("note", encoding="utf-8")
+    window = Window(tmp_path)
+    window.tree.setCurrentIndex(window.model.index(str(path)))
+
+    window.filter_from_here()
+
+    assert window.scope == folder
+    assert Path(window.model.filePath(window.tree.rootIndex())) == folder
+    window.close()
+
+
+def test_add_bookmark_to_stillpoint_saves_folder_root(
+        tmp_path, monkeypatch, app):
+    from sp.app import config
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", str(tmp_path / "vault"))
+    saved = []
+    resets = []
+    monkeypatch.setattr(config, "push_active_vault_context", lambda vault: ("token", vault))
+    monkeypatch.setattr(config, "reset_active_vault_context", resets.append)
+    monkeypatch.setattr(config, "load_folder_bookmarks", lambda: ["/existing"])
+    monkeypatch.setattr(config, "save_folder_bookmarks", lambda paths: saved.append(list(paths)))
+    window = Window(tmp_path)
+
+    window._bookmark_in_stillpoint()
+
+    assert saved == [["/existing", str(tmp_path.resolve())]]
+    assert resets == [("token", str(tmp_path / "vault"))]
+    window.close()
+
+
 def test_picker_shares_live_model_and_filter(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Picker, Window
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -345,6 +913,68 @@ def test_picker_shares_live_model_and_filter(tmp_path, monkeypatch, app):
     picker = Picker(window)
     assert picker.tree.model() is window.tree.model()
     assert Path(window.model.filePath(picker.tree.rootIndex())) == folder
+    picker.close()
+    window.close()
+
+
+def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Picker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "target.txt"
+    path.write_text("target", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.catalog_db.upsert_paths([path])
+    window.tree.setFocus()
+    picker = Picker(window, quick=True)
+    picker.show()
+    picker.query.setText("target")
+    app.processEvents()
+
+    QTest.keyClick(picker.query, Qt.Key_Return)
+    QTest.qWait(20)
+    app.processEvents()
+
+    assert window.active_tab().path == path
+    assert window.active_tab().editor.hasFocus()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_quick_open_supports_standard_vi_selection_chord(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Picker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    picker = Picker(window, quick=True)
+    picker.list.clear()
+    for label in ("first", "second", "third"):
+        picker.list.addItem(QListWidgetItem(label))
+    picker.list.setCurrentRow(0)
+    picker.show()
+    picker.query.setFocus()
+
+    QTest.keyClick(
+        picker.query,
+        Qt.Key_J,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    assert picker.list.currentRow() == 1
+
+    picker.list.setFocus()
+    QTest.keyClick(
+        picker.list,
+        Qt.Key_K,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    assert picker.list.currentRow() == 0
     picker.close()
     window.close()
 
@@ -361,6 +991,85 @@ def test_stale_tabs_omitted_and_quick_open_invalidates(tmp_path, monkeypatch, ap
     window.catalog.add(missing)
     window._refresh_disk()
     assert missing not in window.catalog
+    window.close()
+
+
+def test_external_drop_copies_files_and_folders_and_updates_catalog(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtWidgets import QAbstractItemView
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    source_area = tmp_path / "outside"
+    home.mkdir()
+    root.mkdir()
+    source_area.mkdir()
+    source_file = source_area / "loose.txt"
+    source_file.write_text("loose", encoding="utf-8")
+    source_folder = source_area / "bundle"
+    source_folder.mkdir()
+    nested_file = source_folder / "nested.md"
+    nested_file.write_text("# Nested\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+
+    assert window.tree.acceptDrops()
+    assert window.tree.dragDropMode() == QAbstractItemView.DropOnly
+    window._copy_dropped_paths([source_file, source_folder], root)
+
+    deadline = time.monotonic() + 5
+    copied_file = root / source_file.name
+    copied_nested = root / source_folder.name / nested_file.name
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if copied_file.exists() and copied_nested.exists() and window.catalog_db \
+                and copied_nested in window.catalog_db.candidates(
+                    "nested", root, include_excluded=True
+                ):
+            break
+        time.sleep(.01)
+
+    assert copied_file.read_text(encoding="utf-8") == "loose"
+    assert copied_nested.read_text(encoding="utf-8") == "# Nested\n"
+    assert source_file.exists()
+    assert nested_file.exists()
+    assert copied_file in window.catalog_db.candidates(
+        "loose", root, include_excluded=True
+    )
+    assert copied_nested in window.catalog_db.candidates(
+        "nested", root, include_excluded=True
+    )
+    window.close()
+
+
+def test_external_drop_does_not_overwrite_existing_file(
+        tmp_path, monkeypatch, app):
+    import time
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    source_area = tmp_path / "outside"
+    home.mkdir()
+    root.mkdir()
+    source_area.mkdir()
+    existing = root / "same.txt"
+    existing.write_text("keep", encoding="utf-8")
+    source = source_area / "same.txt"
+    source.write_text("replace", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+
+    window._copy_dropped_paths([source], root)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "already exists" not in window.statusBar().currentMessage():
+        app.processEvents()
+        time.sleep(.01)
+
+    assert existing.read_text(encoding="utf-8") == "keep"
+    assert "already exists" in window.statusBar().currentMessage()
     window.close()
 
 
@@ -519,6 +1228,49 @@ def test_source_tabs_use_pygments_and_global_vi_setting(tmp_path, monkeypatch, a
     window.close()
 
 
+def test_pygments_highlighter_reuses_token_formats(app):
+    from pygments.token import Token
+    from sp.app.folder_navigator.editors import SourceEditor
+
+    editor = SourceEditor("sample.py")
+    first = editor.syntax_highlighter._format_for_token(Token.Keyword)
+    second = editor.syntax_highlighter._format_for_token(Token.Keyword)
+
+    assert first is second
+    assert len(editor.syntax_highlighter._formats) == 1
+    editor.close()
+
+
+def test_text_editor_status_rail_tracks_cursor_selection_and_file_format(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QTextCursor
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "sample.py"
+    source.write_bytes(b"one\r\ntwo")
+    window = Window(tmp_path)
+    window.open_file(source)
+    tab = window.active_tab()
+
+    assert tab.cursor_status.text() == "Ln 1, Col 1  ·  2 lines"
+    assert tab.file_status.text() == "Python  ·  UTF-8  ·  CRLF  ·  Editable"
+
+    cursor = tab.editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.Down)
+    cursor.movePosition(QTextCursor.MoveOperation.Right)
+    cursor.movePosition(
+        QTextCursor.MoveOperation.Right,
+        QTextCursor.MoveMode.KeepAnchor,
+        2,
+    )
+    tab.editor.setTextCursor(cursor)
+
+    assert tab.cursor_status.text() == "Ln 2, Col 4  ·  2 selected  ·  2 lines"
+    tab.editor.document().setModified(False)
+    window.close()
+
+
 def test_search_result_click_reveals_line_in_existing_tab(tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QListWidgetItem
@@ -580,6 +1332,36 @@ def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
     app.processEvents()
     assert (view.original.width(), view.original.height()) == (1000, 2000)
     assert view.zoom < 1.0
+    initial_zoom = view.zoom
+    window.tabs.setFocus()
+    app.processEvents()
+    window._zoom_active_view(1)
+    assert view.zoom > initial_zoom
+    window._zoom_active_view(-1)
+    assert view.zoom == pytest.approx(initial_zoom)
+    window.close()
+
+
+def test_pdf_preview_uses_shared_zoom_commands(tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pdf_path = tmp_path / "sample.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    painter.drawText(100, 100, "sample")
+    painter.end()
+    window = Window(tmp_path)
+    window.open_file(pdf_path, pinned=True)
+    viewer = window.active_tab().viewer.findChild(QPdfView)
+
+    initial_zoom = viewer.zoomFactor()
+    window._zoom_active_view(1)
+    assert viewer.zoomFactor() > initial_zoom
+    window._zoom_active_view(-1)
+    assert viewer.zoomFactor() == pytest.approx(initial_zoom)
     window.close()
 
 
@@ -714,6 +1496,46 @@ def test_rendered_markdown_hover_remains_replaceable_preview(
     window.close()
 
 
+@pytest.mark.parametrize(
+    "first_text",
+    ["+CamelCase\n", "![alt](missing.png)\n"],
+)
+def test_markdown_render_normalization_stays_clean_and_replaceable(
+        tmp_path, monkeypatch, app, first_text):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text(first_text, encoding="utf-8")
+    second.write_text("# Second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.tree_markdown_open_delay_ms = 20
+    window.markdown_preview_delay_ms = 20
+    window.show()
+    window.tree.setFocus()
+
+    window.tree.setCurrentIndex(window.model.index(str(first)))
+    QTest.qWait(100)
+    app.processEvents()
+    first_tab = window.active_tab()
+    assert first_tab.path == first
+    assert not first_tab.dirty
+    assert not first_tab.pinned
+    assert not window.tabs.tabText(window.tabs.indexOf(first_tab)).startswith("● ")
+
+    window.tree.setCurrentIndex(window.model.index(str(second)))
+    QTest.qWait(100)
+    app.processEvents()
+
+    assert window.tabs.count() == 1
+    assert window.active_tab().path == second
+    assert not window.active_tab().dirty
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
 def test_source_flyby_defers_pygments_until_selection_lingers(
         tmp_path, monkeypatch, app):
     from PySide6.QtTest import QTest
@@ -785,11 +1607,21 @@ def test_vi_escape_returns_editor_focus_to_selected_file(
     editor = window.active_tab().editor
     assert editor.hasFocus()
 
+    QTest.keyClick(editor, Qt.Key_G, Qt.ShiftModifier)
+    assert editor.textCursor().atEnd()
+    QTest.keyClick(editor, Qt.Key_G)
+    assert editor.textCursor().position() == 0
+
     # Escape leaves insert mode first; the next Escape returns to file navigation.
     QTest.keyClick(editor, Qt.Key_I)
     QTest.keyClick(editor, Qt.Key_Escape)
     app.processEvents()
     assert editor.hasFocus()
+    if suffix == ".md":
+        # Markdown normally consumes Escape to transform/clear a selection.
+        # Folder Navigator should still treat an already-normal editor as a
+        # one-Escape pane handoff.
+        editor.selectAll()
     QTest.keyClick(editor, Qt.Key_Escape)
     app.processEvents()
 
@@ -906,6 +1738,44 @@ def test_source_editor_vi_slash_opens_find_bar(tmp_path, monkeypatch, app):
     window.close()
 
 
+@pytest.mark.parametrize("suffix", [".txt", ".md"])
+def test_find_enter_cycles_results_and_escape_closes_bar(
+        tmp_path, monkeypatch, app, suffix):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / f"sample{suffix}"
+    source.write_text("needle one needle two\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source, pinned=True)
+    tab = window.active_tab()
+    if suffix == ".md":
+        window._schedule_markdown_preview(tab, immediate=True)
+
+    tab._show_find()
+    tab.find_query.setText("needle")
+    QTest.keyClick(tab.find_query, Qt.Key_Return)
+    app.processEvents()
+    assert tab.editor.textCursor().selectionStart() == 0
+    assert tab.find_query.hasFocus()
+
+    QTest.keyClick(tab.find_query, Qt.Key_Return)
+    app.processEvents()
+    assert tab.editor.textCursor().selectionStart() == 11
+    assert tab.find_query.hasFocus()
+
+    QTest.keyClick(tab.find_query, Qt.Key_Escape)
+    app.processEvents()
+    assert tab.find_bar.isHidden()
+    assert tab.editor.hasFocus()
+    assert not window.tree.hasFocus()
+    tab.editor.document().setModified(False)
+    window.close()
+
+
 def test_folder_and_editor_panels_show_active_focus_border(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Window
 
@@ -930,6 +1800,80 @@ def test_folder_and_editor_panels_show_active_focus_border(tmp_path, monkeypatch
     window.close()
 
 
+def test_ctrl_shift_b_toggles_and_persists_folder_rail(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "sample.txt"
+    source.write_text("rail toggle\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source, pinned=True)
+    window.tree.setFocus()
+    app.processEvents()
+
+    QTest.keyClick(window.tree, Qt.Key_B, Qt.ControlModifier | Qt.ShiftModifier)
+    app.processEvents()
+    assert window.rail.isHidden()
+    assert window.active_tab().editor.hasFocus()
+    assert not window.rail_visibility_action.isChecked()
+
+    QTest.keyClick(
+        window.active_tab().editor,
+        Qt.Key_B,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    app.processEvents()
+    assert not window.rail.isHidden()
+    assert window.rail_visibility_action.isChecked()
+
+    QTest.keyClick(
+        window.active_tab().editor,
+        Qt.Key_B,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    app.processEvents()
+    assert window.rail.isHidden()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+    restored = Window(tmp_path)
+    assert restored.rail.isHidden()
+    restored.close()
+
+
+def test_window_activation_repairs_missing_folder_navigator_focus(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "sample.txt"
+    source.write_text("activation focus\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.activateWindow()
+    window.open_file(source, pinned=True)
+    window.menuBar().setFocus()
+    app.processEvents()
+
+    window._repair_focus_after_activation()
+    app.processEvents()
+    assert window.active_tab().editor.hasFocus()
+
+    window.active_tab().editor.document().setModified(False)
+    window.close_tab(0)
+    window._set_folder_rail_visible(False)
+    window.menuBar().setFocus()
+    window._repair_focus_after_activation()
+    app.processEvents()
+    assert not window.rail.isHidden()
+    assert window.tree.hasFocus()
+    window.close()
+
+
 def test_specialized_editor_labels_are_extension_specific():
     from sp.app.folder_navigator.window import Window
 
@@ -937,6 +1881,111 @@ def test_specialized_editor_labels_are_extension_specific():
     assert Window._specialized_editor_label(Path("diagram.MMD")) == "Open Mermaid Editor"
     assert Window._specialized_editor_label(Path("board.excalidraw")) == "Open Excalidraw"
     assert Window._specialized_editor_label(Path("notes.md")) is None
+
+
+@pytest.mark.parametrize("suffix", [".puml", ".mmd"])
+def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
+        tmp_path, monkeypatch, app, suffix):
+    import time
+    from types import SimpleNamespace
+    from sp.app.folder_navigator.window import ImageView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    calls = []
+
+    def render(_renderer, source, **_kwargs):
+        calls.append(source)
+        return SimpleNamespace(
+            success=True,
+            svg_content=(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">'
+                '<rect width="80" height="40" fill="#4488cc"/></svg>'
+            ),
+            error_message=None,
+            stderr=None,
+        )
+
+    if suffix == ".puml":
+        monkeypatch.setattr(
+            "sp.app.plantuml_renderer.PlantUMLRenderer.render_svg", render
+        )
+        initial = "@startuml\nA -> B\n@enduml\n"
+        updated = "@startuml\nA -> C\n@enduml\n"
+    else:
+        monkeypatch.setattr(
+            "sp.app.mermaid_renderer.MermaidRenderer.render_svg", render
+        )
+        initial = "flowchart TD\nA --> B\n"
+        updated = "flowchart TD\nA --> C\n"
+    path = tmp_path / f"diagram{suffix}"
+    path.write_text(initial, encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert window.active_tab().editor is None
+    assert calls == [initial]
+
+    path.write_text(updated, encoding="utf-8")
+    window._refresh_disk()
+    deadline = time.monotonic() + 2
+    while calls != [initial, updated]:
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert isinstance(window.active_tab().viewer, ImageView)
+    window.close()
+
+
+def test_excalidraw_selection_uses_saved_png_preview(tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtGui import QImage
+    from sp.app.folder_navigator.window import ImageView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "board.excalidraw"
+    path.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    preview = path.with_name(f"{path.name}.png")
+    image = QImage(64, 48, QImage.Format.Format_ARGB32)
+    image.fill(0xff4488cc)
+    assert image.save(str(preview), "PNG")
+
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+
+    assert window.active_tab().editor is None
+    window.close()
+
+
+def test_excalidraw_editor_url_targets_selected_vault_file(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    drawing = vault / "diagrams" / "board.excalidraw"
+    drawing.parent.mkdir()
+    drawing.write_text('{"type":"excalidraw","elements":[]}', encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT", str(vault))
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_API_BASE", "http://127.0.0.1:8765")
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_LOCAL_UI_TOKEN", "local token")
+    window = Window(vault)
+
+    assert window._excalidraw_editor_url(drawing) == (
+        "http://127.0.0.1:8765/excalidraw/edit?"
+        "path=%2Fdiagrams%2Fboard.excalidraw&token=local%20token"
+    )
+    window.close()
 
 
 def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, app):
@@ -961,6 +2010,28 @@ def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, a
     assert opened == [str(diagram)]
     assert len(window.specialized_editor_windows) == 1
     window.specialized_editor_windows[0].close()
+    window.close()
+
+
+def test_specialized_editor_save_refreshes_existing_source_tab(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    diagram = tmp_path / "diagram.puml"
+    diagram.write_text("@startuml\nA -> B\n@enduml\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(diagram, pinned=True, force_text=True)
+    tab = window.active_tab()
+    assert "A -> B" in tab.editor.toPlainText()
+
+    diagram.write_text("@startuml\nA -> C\n@enduml\n", encoding="utf-8")
+    window._specialized_file_saved(str(diagram))
+    app.processEvents()
+
+    assert "A -> C" in tab.editor.toPlainText()
+    assert "File reloaded after an external change" in tab.notice.text()
+    tab.editor.document().setModified(False)
     window.close()
 
 
@@ -1010,6 +2081,66 @@ def test_inline_new_file_escape_cancels(tmp_path, monkeypatch, app):
     window.close()
 
 
+def test_inline_new_folder_creates_directory(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    parent = tmp_path / "notes"
+    parent.mkdir()
+    window = Window(tmp_path)
+    window.show()
+    window._begin_new_file(
+        parent, window.model.index(str(parent)), create_folder=True
+    )
+    edit = window.new_file_edit
+
+    QTest.keyClicks(edit, "projects")
+    QTest.keyClick(edit, Qt.Key_Return)
+    QTest.qWait(120)
+    app.processEvents()
+
+    assert (parent / "projects").is_dir()
+    assert window.new_file_edit is None
+    assert window.active_tab() is None
+    assert window.tree.hasFocus()
+    window.close()
+
+
+def test_empty_tree_context_new_folder_targets_displayed_level(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QPoint, Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QMenu
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window.show()
+
+    def choose_new_folder():
+        menu = QApplication.activePopupWidget()
+        assert isinstance(menu, QMenu)
+        action = next(action for action in menu.actions() if action.text() == "New Folder")
+        action.trigger()
+        menu.close()
+
+    QTimer.singleShot(0, choose_new_folder)
+    window._tree_menu(QPoint(window.tree.viewport().width() - 1,
+                             window.tree.viewport().height() - 1))
+    assert window.new_file_directory == tmp_path
+    assert window.new_file_is_folder
+
+    QTest.keyClicks(window.new_file_edit, "created-here")
+    QTest.keyClick(window.new_file_edit, Qt.Key_Return)
+    QTest.qWait(120)
+    app.processEvents()
+
+    assert (tmp_path / "created-here").is_dir()
+    window.close()
+
+
 def test_recent_tab_switcher_waits_for_modifier_release(tmp_path, monkeypatch, app):
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtGui import QKeyEvent
@@ -1025,6 +2156,10 @@ def test_recent_tab_switcher_waits_for_modifier_release(tmp_path, monkeypatch, a
     for path in paths:
         window.open_file(path, pinned=True)
 
+    assert window.active_tab().path == paths[2]
+    window.reveal_tree(paths[2])
+    app.processEvents()
+    assert window.tree.hasFocus()
     assert window.active_tab().path == paths[2]
     window._cycle_tab_popup(False)
     assert window.tab_switcher.isVisible()
@@ -1042,9 +2177,96 @@ def test_recent_tab_switcher_waits_for_modifier_release(tmp_path, monkeypatch, a
     )
     assert window.eventFilter(window, release)
     assert window.active_tab().path == paths[0]
+    assert window.active_tab().editor.hasFocus()
     assert not window.tab_switcher.isVisible()
     for tab in window.all_tabs():
         tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_tab_switcher_defers_source_and_markdown_enhancements_until_settled(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "first.py"
+    markdown = tmp_path / "second.md"
+    source.write_text("print('first')\n", encoding="utf-8")
+    markdown.write_text("# Second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(source, pinned=True, defer_enhancements=True)
+    source_tab = window.active_tab()
+    window.open_file(markdown, pinned=True, defer_enhancements=True)
+    markdown_tab = window.active_tab()
+
+    assert window.pending_markdown_preview is markdown_tab
+    assert window.markdown_preview_timer.isActive()
+    window._cycle_tab_popup(False)
+
+    assert window.pending_markdown_preview is None
+    assert not window.markdown_preview_timer.isActive()
+    window._activate_tab_switcher_selection()
+
+    assert window.active_tab() is source_tab
+    assert window.pending_markdown_preview is source_tab
+    assert window.markdown_preview_timer.isActive()
+    for tab in window.all_tabs():
+        tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_mouse_clicking_tab_focuses_its_editor(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    paths = [tmp_path / name for name in ("first.txt", "second.txt")]
+    for path in paths:
+        path.write_text(path.stem, encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    for path in paths:
+        window.open_file(path, pinned=True)
+    window.tree.setFocus()
+    app.processEvents()
+
+    tab_bar = window.tabs.tabBar()
+    QTest.mouseClick(tab_bar, Qt.LeftButton, pos=tab_bar.tabRect(0).center())
+    app.processEvents()
+
+    assert window.active_tab().path == paths[0]
+    assert window.active_tab().editor.hasFocus()
+    for tab in window.all_tabs():
+        tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_opening_flyover_does_not_reserialize_existing_markdown_tabs(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    markdown_paths = [tmp_path / f"notes-{index}.md" for index in range(3)]
+    target = tmp_path / "target.txt"
+    for path in markdown_paths:
+        path.write_text("# Heading\n" + ("body\n" * 200), encoding="utf-8")
+    target.write_text("target", encoding="utf-8")
+    window = Window(tmp_path)
+    for path in markdown_paths:
+        window.open_file(path, pinned=True)
+
+    for tab in window.all_tabs():
+        monkeypatch.setattr(
+            tab,
+            "text_for_save",
+            lambda: pytest.fail("existing Markdown tab was reserialized"),
+        )
+
+    window.open_file(target, defer_enhancements=True)
+
+    assert window.active_tab().path == target
+    window.active_tab().editor.document().setModified(False)
     window.close()
 
 
@@ -1075,4 +2297,45 @@ def test_dirty_tab_uses_attention_color_until_clean(tmp_path, monkeypatch, app):
     assert window.tabs.tabBar().tabTextColor(index) == window.tabs.tabBar().palette().color(
         QPalette.WindowText
     )
+    window.close()
+
+
+def test_markdown_dirty_tab_tracks_transformed_buffer_and_saved_baseline(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QColor, QPalette
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.theme import theme_value
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "notes.md"
+    path.write_text("# Clean\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+    index = window.tabs.indexOf(tab)
+
+    # Editing immediately also exercises Markdown's display-symbol rewrite,
+    # which does not produce the same modificationChanged sequence as a plain
+    # text editor.
+    tab.editor.insertPlainText("x")
+    app.processEvents()
+    assert tab.dirty
+    assert window.tabs.tabText(index).startswith("● ")
+    assert window.tabs.tabBar().tabTextColor(index) == QColor(
+        str(theme_value("main_window.badge.dirty_bg", "#e57373"))
+    )
+
+    assert window.save_tab(tab)
+    app.processEvents()
+    assert not tab.dirty
+    assert window.tabs.tabText(index) == path.name
+    assert window.tabs.tabBar().tabTextColor(index) == window.tabs.tabBar().palette().color(
+        QPalette.WindowText
+    )
+
+    tab.editor.insertPlainText("y")
+    app.processEvents()
+    assert tab.dirty
+    assert window.tabs.tabText(index).startswith("● ")
+    tab.editor.document().setModified(False)
     window.close()

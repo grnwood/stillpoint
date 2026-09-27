@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pygments import lex
 from pygments.lexers import TextLexer, get_lexer_for_filename
 from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
@@ -37,26 +36,32 @@ class PygmentsHighlighter(QSyntaxHighlighter):
             self.style = get_style_by_name(config.load_pygments_style())
         except (ClassNotFound, ValueError):
             self.style = get_style_by_name("default")
+        self._formats: dict[object, QTextCharFormat] = {}
+
+    def _format_for_token(self, token) -> QTextCharFormat:
+        cached = self._formats.get(token)
+        if cached is not None:
+            return cached
+        style = self.style.style_for_token(token)
+        char_format = QTextCharFormat()
+        if style.get("color"):
+            char_format.setForeground(QColor("#" + style["color"]))
+        if style.get("bgcolor"):
+            char_format.setBackground(QColor("#" + style["bgcolor"]))
+        if style.get("bold"):
+            char_format.setFontWeight(QFont.Weight.Bold)
+        if style.get("italic"):
+            char_format.setFontItalic(True)
+        if style.get("underline"):
+            char_format.setFontUnderline(True)
+        self._formats[token] = char_format
+        return char_format
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt API
-        offset = 0
-        for token, value in lex(text, self.lexer):
+        for offset, token, value in self.lexer.get_tokens_unprocessed(text):
             length = len(value)
             if length:
-                style = self.style.style_for_token(token)
-                char_format = QTextCharFormat()
-                if style.get("color"):
-                    char_format.setForeground(QColor("#" + style["color"]))
-                if style.get("bgcolor"):
-                    char_format.setBackground(QColor("#" + style["bgcolor"]))
-                if style.get("bold"):
-                    char_format.setFontWeight(QFont.Weight.Bold)
-                if style.get("italic"):
-                    char_format.setFontItalic(True)
-                if style.get("underline"):
-                    char_format.setFontUnderline(True)
-                self.setFormat(offset, length, char_format)
-            offset += length
+                self.setFormat(offset, length, self._format_for_token(token))
 
 
 class SourceEditor(QPlainTextEdit):
@@ -271,11 +276,11 @@ class SourceEditor(QPlainTextEdit):
             self._pending_g = False
             return
         if key == Qt.Key.Key_G:
-            if self._pending_g:
-                self._move(QTextCursor.MoveOperation.Start)
-                self._pending_g = False
-            else:
-                self._pending_g = True
+            self._move(
+                QTextCursor.MoveOperation.End
+                if shift else QTextCursor.MoveOperation.Start
+            )
+            self._pending_g = False
             return
         self._pending_g = False
         if (key == Qt.Key.Key_Escape

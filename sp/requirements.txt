@@ -1,6 +1,7 @@
 # StillPoint Desktop and Server requirements (no PySide UI)
 
 PySide6>=6.6
+python-calamine>=0.8,<0.9
 fastapi>=0.110
 python-multipart>=0.0.6
 uvicorn>=0.29

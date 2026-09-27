@@ -4262,6 +4262,16 @@ class MainWindow(QMainWindow):
         monitors.append(entry)
 
         def poll() -> None:
+            # Folder Navigator can add its root to this vault's bookmarks from
+            # its own File menu. Reflect that detached-process write in the
+            # already-open StillPoint window.
+            try:
+                folder_bookmarks = config.load_folder_bookmarks()
+                if folder_bookmarks != self.folder_bookmarks:
+                    self.folder_bookmarks = folder_bookmarks
+                    self._refresh_bookmark_buttons()
+            except Exception:
+                pass
             returncode = process.poll()
             if returncode is None:
                 return
@@ -14396,6 +14406,7 @@ class MainWindow(QMainWindow):
             # Homebase auto-reload races with pending editor state changes.
             self._homebase_reload_not_before = time.monotonic() + 1.0
             QTimer.singleShot(0, self._refresh_editor_visual_state_after_activation)
+            QTimer.singleShot(0, self._repair_focus_after_activation)
             if not self._check_current_file_for_external_change("app activated current page"):
                 self._schedule_local_filesystem_scan("app activated")
             return
@@ -14414,6 +14425,12 @@ class MainWindow(QMainWindow):
             allow_when_suspended=force_save,
         )
 
+    def event(self, event):  # type: ignore[override]
+        result = super().event(event)
+        if event.type() == QEvent.WindowActivate:
+            QTimer.singleShot(0, self._repair_focus_after_activation)
+        return result
+
     def _refresh_editor_visual_state_after_activation(self) -> None:
         """Repair occasional palette/highlighter drift after app activation."""
         try:
@@ -14428,6 +14445,34 @@ class MainWindow(QMainWindow):
             self.editor.viewport().update()
         except Exception:
             pass
+
+    def _repair_focus_after_activation(self) -> None:
+        """Give an activated main window a useful panel focus when Qt has none."""
+        app = QApplication.instance()
+        if app is None or QApplication.activeWindow() is not self:
+            return
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return
+        focused = QApplication.focusWidget()
+        if focused is not None and focused.window() is self:
+            panel_roots = (
+                getattr(self, "editor", None),
+                getattr(self, "find_bar", None),
+                getattr(self, "left_panel_container", None),
+                getattr(self, "right_panel_container", None),
+            )
+            if any(root is not None and (focused is root or root.isAncestorOf(focused))
+                   for root in panel_roots):
+                return
+        if getattr(self, "current_path", None):
+            self.editor.setFocus(Qt.ActiveWindowFocusReason)
+        else:
+            if self._is_right_panel_expanded():
+                target = self.right_panel.tabs.tabBar()
+            else:
+                target = self._right_minibar_bar
+            target.setFocus(Qt.ActiveWindowFocusReason)
+        self._apply_focus_borders()
 
     def _find_asset(self, name: str) -> Optional[Path]:
         """Locate an asset in development or PyInstaller layouts."""

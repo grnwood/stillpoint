@@ -12,7 +12,7 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -195,6 +195,8 @@ def _render_failure_details(result: object, error: object) -> str:
 
 class MermaidEditorWindow(QMainWindow):
     """Non-modal editor window for Mermaid diagrams with split editor/preview."""
+
+    fileSaved = Signal(str)
 
     def __init__(self, file_path: str, parent=None, on_save=None) -> None:
         super().__init__(parent)
@@ -1540,7 +1542,10 @@ class MermaidEditorWindow(QMainWindow):
             self.file_path.write_text(content, encoding="utf-8")
             self._last_saved_content = content
             self._editor_dirty = False
+            self.editor.document().setModified(False)
             self._update_render_status_label()
+            self.fileSaved.emit(str(self.file_path))
+            self.statusBar().showMessage(f"Saved {self.file_path.name}", 2500)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")
 

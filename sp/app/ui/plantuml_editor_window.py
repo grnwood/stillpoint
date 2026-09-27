@@ -787,6 +787,8 @@ def _generate_error_svg(error_msg: str, line_num: int = 0) -> str:
 class PlantUMLEditorWindow(QMainWindow):
     """Non-modal editor window for PlantUML diagrams with split editor/preview."""
 
+    fileSaved = Signal(str)
+
     def __init__(self, file_path: str, parent=None, on_save=None) -> None:
         super().__init__(parent)
         
@@ -2196,6 +2198,9 @@ B --> A: response
                     QMessageBox.critical(self, "Error", message or "Failed to save file.")
                     return
             self.file_path.write_text(content, encoding="utf-8")
+            self.editor.document().setModified(False)
+            self.fileSaved.emit(str(self.file_path))
+            self.statusBar().showMessage(f"Saved {self.file_path.name}", 2500)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")
 

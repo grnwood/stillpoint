@@ -358,6 +358,8 @@ password_hasher = PasswordHasher()
 security = HTTPBearer(auto_error=False)
 _MCP_TOKEN_LOCK = threading.RLock()
 _MCP_ACTIVE_TOKENS: dict[str, float] = {}
+_PRINT_PREVIEWS: dict[str, dict] = {}
+_PRINT_PREVIEW_LOCK = threading.Lock()
 
 _PRINT_TEMPLATES = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
@@ -415,6 +417,12 @@ class AuthModels:
 
     class PrintTokenRequest(BaseModel):
         ttl_seconds: int = Field(default=900, ge=60, le=3600)
+
+    class PrintPreviewRequest(BaseModel):
+        title: str = Field(..., min_length=1, max_length=500)
+        content: str = Field(..., max_length=10_000_000)
+        path_label: Optional[str] = Field(default=None, max_length=4096)
+        source_directory: Optional[str] = Field(default=None, max_length=4096)
 
     class McpTokenRequest(BaseModel):
         ttl_seconds: int = Field(default=43200, ge=60, le=43200)
@@ -4227,6 +4235,113 @@ def excalidraw_poc() -> HTMLResponse:
     return HTMLResponse(content=html, status_code=200)
 
 
+@app.post("/api/print-preview")
+def create_print_preview(
+    request: Request,
+    payload: AuthModels.PrintPreviewRequest,
+    user: AuthModels.UserInfo = Depends(get_current_user),
+) -> dict:
+    """Stage an authenticated, short-lived print buffer for local documents."""
+    local_token = _LOCAL_UI_TOKEN or os.getenv("ZIMX_LOCAL_UI_TOKEN")
+    if (not _is_localhost_request(request) or not local_token
+            or request.headers.get("x-local-ui-token") != local_token):
+        raise HTTPException(
+            status_code=403,
+            detail="Local StillPoint UI authentication is required for print previews",
+        )
+    now = time.time()
+    source_directory = None
+    if payload.source_directory:
+        try:
+            candidate = Path(payload.source_directory).resolve(strict=True)
+            if candidate.is_dir():
+                source_directory = candidate
+        except OSError:
+            pass
+    preview_id = secrets.token_urlsafe(24)
+    with _PRINT_PREVIEW_LOCK:
+        expired = [key for key, value in _PRINT_PREVIEWS.items()
+                   if float(value.get("expires_at", 0)) <= now]
+        for key in expired:
+            _PRINT_PREVIEWS.pop(key, None)
+        _PRINT_PREVIEWS[preview_id] = {
+            "expires_at": now + 900,
+            "title": payload.title,
+            "content": payload.content,
+            "path_label": payload.path_label,
+            "source_directory": source_directory,
+        }
+    return {"preview_id": preview_id, "expires_in": 900}
+
+
+def _get_print_preview(preview_id: str) -> dict:
+    with _PRINT_PREVIEW_LOCK:
+        preview = _PRINT_PREVIEWS.get(preview_id)
+        if preview is None or float(preview.get("expires_at", 0)) <= time.time():
+            _PRINT_PREVIEWS.pop(preview_id, None)
+            raise HTTPException(status_code=404, detail="Print preview expired or not found")
+        return dict(preview)
+
+
+@app.get("/print-preview/{preview_id}/asset/{path:path}")
+async def print_preview_asset(
+    request: Request,
+    preview_id: str,
+    path: str,
+    token: Optional[str] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> FileResponse:
+    await _require_print_user(request, token, credentials)
+    preview = _get_print_preview(preview_id)
+    source_directory = preview.get("source_directory")
+    if not isinstance(source_directory, Path):
+        raise HTTPException(status_code=404, detail="Preview has no asset directory")
+    try:
+        target = (source_directory / unquote(path).lstrip("/")).resolve(strict=True)
+        target.relative_to(source_directory)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Preview asset not found") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Preview asset not found")
+    return FileResponse(target)
+
+
+@app.get("/print-preview/{preview_id}")
+async def print_preview(
+    request: Request,
+    preview_id: str,
+    auto: int = 1,
+    header: int = 0,
+    toc: int = 0,
+    toc_title: Optional[str] = None,
+    token: Optional[str] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> HTMLResponse:
+    await _require_print_user(request, token, credentials)
+    preview = _get_print_preview(preview_id)
+    body = _render_markdown_html(str(preview["content"]))
+    body = _rewrite_preview_image_src(body, preview_id, token)
+    anchor = _slugify_anchor(str(preview["title"]))
+    body = f'<section class="stillpoint-section" id="{anchor}">{body}</section>'
+    if toc:
+        heading = html.escape(toc_title or "Table of Contents")
+        label = html.escape(str(preview["title"]))
+        body = (
+            '<nav class="stillpoint-toc">'
+            f"<h2>{heading}</h2><ul><li><a href=\"#{anchor}\">{label}</a></li></ul>"
+            '</nav><div class="stillpoint-page-break"></div>' + body
+        )
+    rendered = _render_print_document(
+        title=str(preview["title"]),
+        body_html=body,
+        auto_print=bool(auto),
+        show_header=bool(header),
+        path_label=preview.get("path_label"),
+        token=token,
+    )
+    return HTMLResponse(content=rendered, status_code=200)
+
+
 @app.get("/print/{path:path}")
 async def print_page(
     request: Request,
@@ -6331,6 +6446,40 @@ def _rewrite_image_src(html: str, root: Path, page_path: Path, token: Optional[s
         return f"{prefix}{_asset_url(rel, token)}{suffix}"
 
     return _IMAGE_SRC_RE.sub(_replacer, html)
+
+
+def _rewrite_preview_image_src(
+    rendered_html: str, preview_id: str, token: Optional[str]
+) -> str:
+    """Route relative preview images through the preview's constrained asset path."""
+    preview = _get_print_preview(preview_id)
+    source_directory = preview.get("source_directory")
+    if not isinstance(source_directory, Path):
+        return rendered_html
+
+    def _replacer(match: re.Match) -> str:
+        prefix, src, suffix = match.groups()
+        raw = src.strip()
+        if not raw or raw.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+        if raw.startswith("file://"):
+            raw = unquote(urlparse(raw).path or "")
+        try:
+            candidate = Path(raw)
+            target = (candidate if candidate.is_absolute()
+                      else source_directory / candidate).resolve(strict=True)
+            relative = target.relative_to(source_directory)
+        except (OSError, ValueError):
+            return match.group(0)
+        asset = (
+            f"/print-preview/{quote(preview_id, safe='')}/asset/"
+            f"{quote(relative.as_posix(), safe='/')}"
+        )
+        if token:
+            asset += f"?token={quote(token, safe='')}"
+        return f"{prefix}{asset}{suffix}"
+
+    return _IMAGE_SRC_RE.sub(_replacer, rendered_html)
 
 
 def _render_print_document(
