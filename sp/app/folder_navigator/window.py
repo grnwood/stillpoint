@@ -2322,7 +2322,9 @@ class Window(QMainWindow):
         self.model.rowsInserted.connect(lambda parent, first, last: self._catalog_rows(parent, first, last))
         from .instances import InstanceRegistration
         self.instance_registration = InstanceRegistration(self, self.root)
-        if sys.platform == "win32":
+        if (sys.platform == "win32" and os.environ.get(
+                "STILLPOINT_FOLDER_WINDOW_TRACE", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}):
             from .window_trace import WindowTrace
             self.window_trace = WindowTrace(self)
             app.aboutToQuit.connect(self.window_trace.close)
