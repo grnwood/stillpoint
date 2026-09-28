@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 import json
 import mimetypes
@@ -22,7 +23,7 @@ from urllib.parse import quote
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAbstractFileIconProvider, QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -73,6 +74,9 @@ DIAGRAM_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
 IMAGE_PREVIEW_CACHE_ENTRIES = 32
 IMAGE_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
 IMAGE_FLYOVER_MAX_PIXELS = 2_000_000
+_BACKGROUND_SUBPROCESS_OPTIONS = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
 VALUE_FILTER_MAX_ROWS = 25_000
 VALUE_FILTER_MAX_CELLS = 500_000
 VALUE_FILTER_MAX_DISTINCT = 20_000
@@ -83,11 +87,48 @@ class Bridge(QObject):
     finished = Signal(object)
 
 
+@lru_cache(maxsize=1)
+def _image_suffixes() -> frozenset[str]:
+    return frozenset(
+        f".{bytes(fmt).decode('ascii').casefold()}"
+        for fmt in QImageReader.supportedImageFormats()
+    )
+
+
+def _may_be_image(path: Path) -> bool:
+    suffix = path.suffix.casefold()
+    return not suffix or suffix in _image_suffixes()
+
+
+class FastFileIconProvider(QAbstractFileIconProvider):
+    """Avoid Windows shell extensions while listing ordinary files."""
+
+    def __init__(self):
+        super().__init__()
+        style = QApplication.style()
+        self._file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        self._folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+
+    def icon(self, info):
+        folder = (info.isDir() if isinstance(info, QFileInfo)
+                  else info == self.IconType.Folder)
+        return self._folder_icon if folder else self._file_icon
+
+    def type(self, info):
+        if info.isDir():
+            return "Folder"
+        suffix = info.suffix().upper()
+        return f"{suffix} file" if suffix else "File"
+
+
 class FolderModel(QFileSystemModel):
     def __init__(self, root: Path, parent=None):
         super().__init__(parent)
         self.root = root
-        self.setIconProvider(QFileIconProvider())
+        self._icon_provider = (
+            FastFileIconProvider() if sys.platform == "win32" else QFileIconProvider()
+        )
+        self.setIconProvider(self._icon_provider)
         self.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs)
         self.setNameFilterDisables(False)
         self.setRootPath(str(root))
@@ -2916,7 +2957,7 @@ class Window(QMainWindow):
             )
             defer_open = (
                 suffix in {".md", ".markdown"}
-                or (suffix not in rich_suffixes and not QImageReader.imageFormat(str(path)))
+                or (suffix not in rich_suffixes and not _may_be_image(path))
             )
             if defer_open:
                 self.pending_tree_markdown_path = path
@@ -3062,7 +3103,9 @@ class Window(QMainWindow):
             return
         preview = next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
         if preview >= 0:
+            previous_preview = self.tabs.widget(preview)
             self.tabs.removeTab(preview)
+            previous_preview.deleteLater()
         try:
             suffix = path.suffix.casefold()
             if not force_text and suffix in DELIMITED_SUFFIXES:
@@ -3080,7 +3123,7 @@ class Window(QMainWindow):
             elif suffix == ".pdf":
                 tab = Tab(path, details="PDF preview queued…", root=self.root)
                 tab.preview_kind = "pdf"
-            elif QImageReader.imageFormat(str(path)):
+            elif _may_be_image(path) and QImageReader.imageFormat(str(path)):
                 tab = Tab(path, details="Image preview queued…", root=self.root)
                 tab.preview_kind = "image"
                 tab.requested_image_quality = (
@@ -3173,14 +3216,17 @@ class Window(QMainWindow):
                 # compare serialized content after the keystroke settles.
                 tab.editor.textChanged.connect(
                     lambda t=tab: QTimer.singleShot(
-                        0, lambda current=t: self._refresh_markdown_dirty(current)
+                        0, t, lambda current=t: self._refresh_markdown_dirty(current)
                     )
                 )
             # Markdown's initial display formatting can toggle Qt's modified
             # flag after the file is loaded. Clear only formatting-only changes;
             # never clear the flag once the text differs from disk.
             for delay in (0, 100):
-                QTimer.singleShot(delay, lambda t=tab: self._clear_initial_formatting_dirty(t))
+                QTimer.singleShot(
+                    delay, tab,
+                    lambda t=tab: self._clear_initial_formatting_dirty(t),
+                )
             if line:
                 self._reveal_editor_line(tab, line)
         self.recent.insert(0, path)
@@ -5587,7 +5633,8 @@ class Window(QMainWindow):
     def _git_ignored(self, path):
         try:
             result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-q", str(path)],
-                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=1)
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=1,
+                                    **_BACKGROUND_SUBPROCESS_OPTIONS)
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -5609,7 +5656,8 @@ class Window(QMainWindow):
             try:
                 result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-z", "--stdin"],
                                         input=b"".join(os.fsencode(str(path)) + b"\0" for path in batch),
-                                        capture_output=True, timeout=5)
+                                        capture_output=True, timeout=5,
+                                        **_BACKGROUND_SUBPROCESS_OPTIONS)
                 ignored = {Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name}
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -5627,6 +5675,7 @@ class Window(QMainWindow):
                 ],
                 capture_output=True,
                 timeout=max(10.0, MAX_INDEX_SECONDS),
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -5845,6 +5894,7 @@ class Window(QMainWindow):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
             )
             done = threading.Event()
 
