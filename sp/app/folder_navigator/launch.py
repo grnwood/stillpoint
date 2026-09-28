@@ -10,14 +10,22 @@ def launch(root: Path) -> subprocess.Popen:
         raise ValueError(f"Folder does not exist: {root}")
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL, "cwd": str(Path.home())}
+    frozen = getattr(sys, "frozen", False)
     if sys.platform == "win32":
+        # Keep a source-checkout launch out of the invoking console as well.
+        # pythonw is the same interpreter without a console subsystem.
+        executable = sys.executable
+        if not frozen:
+            pythonw = Path(executable).with_name("pythonw.exe")
+            if Path(executable).name.lower() == "python.exe" and pythonw.is_file():
+                executable = str(pythonw)
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    frozen = getattr(sys, "frozen", False)
-    command = ([sys.executable, "--folder-navigator", str(root.resolve())]
-               if frozen else
-               [sys.executable, "-m", "sp.app.folder_navigator", str(root.resolve())])
+    command = [executable if sys.platform == "win32" and not frozen else sys.executable,
+               "--folder-navigator", str(root.resolve())] if frozen else [
+               executable if sys.platform == "win32" else sys.executable,
+               "-m", "sp.app.folder_navigator", str(root.resolve())]
     if frozen and sys.platform == "darwin":
         try:
             main_bundle = Path(sys.executable).resolve().parents[2]

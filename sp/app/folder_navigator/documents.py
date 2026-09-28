@@ -136,6 +136,8 @@ def _convert_with_libreoffice(path: Path, executable: str, cache_dir: Path) -> P
             timeout=45,
             check=False,
             env=environment,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW}
+               if os.name == "nt" else {}),
         )
         converted = output_dir / f"{path.stem}.pdf"
         if completed.returncode or not converted.is_file() or not converted.stat().st_size:

@@ -26,7 +26,7 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QIma
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListView, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
+    QListView, QListWidgetItem, QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
     QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
     QSizePolicy)
 from PySide6.QtWidgets import QTextBrowser
@@ -1774,21 +1774,28 @@ def pdf_view(path):
 class Picker(QDialog):
     resultsReady = Signal(int, object)
 
-    def __init__(self, window, *, quick=False):
+    def __init__(self, window, *, quick=False, folder_only=False):
         super().__init__(window)
         self.window = window
         self.quick = quick
-        self.setWindowTitle("Quick Open" if quick else "Folder Picker")
+        self.folder_only = folder_only
+        title = "Folder Picker" if folder_only else "Quick Open" if quick else "Folder Picker"
+        self.setWindowTitle(title)
         self.resize(650, 430)
         layout = QVBoxLayout(self)
         if quick:
             self.scope = QLabel()
             layout.addWidget(self.scope)
             self.query = QLineEdit()
-            self.query.setPlaceholderText("Find a readable file or folder")
+            self.query.setPlaceholderText(
+                "Find a folder" if folder_only else "Find a readable file or folder"
+            )
             layout.addWidget(self.query)
             toggles = QHBoxLayout()
-            self.include = QCheckBox("Include hidden cached files")
+            self.include = QCheckBox(
+                "Include hidden folders" if folder_only
+                else "Include hidden cached files"
+            )
             self.full = QCheckBox("Search full root")
             toggles.addWidget(self.include)
             toggles.addWidget(self.full)
@@ -1844,14 +1851,16 @@ class Picker(QDialog):
             return
         scope = self.window.root if self.full.isChecked() else self.window.scope
         cache_state = "indexing" if self.window.catalog_running else f"{self.window.catalog_count:,} cached"
+        hidden_label = "hidden folders" if self.folder_only else "hidden cached files"
         self.scope.setText(
             f"Scope: {scope}  ·  "
-            f"{'Including' if self.include.isChecked() else 'Excluding'} hidden cached files"
+            f"{'Including' if self.include.isChecked() else 'Excluding'} {hidden_label}"
             f"  ·  {cache_state}"
         )
         self._query_generation += 1
         self.list.clear()
-        item = QListWidgetItem("Searching cached filenames…")
+        cache_label = "folder names" if self.folder_only else "filenames"
+        item = QListWidgetItem(f"Searching cached {cache_label}…")
         item.setFlags(Qt.NoItemFlags)
         self.list.addItem(item)
         self._query_timer.start()
@@ -1871,23 +1880,28 @@ class Picker(QDialog):
         def job():
             if generation != self._query_generation:
                 return
-            candidates = set(self.window.catalog_candidates(
-                query, scope, include_excluded=include_excluded
-            ))
             folders = set(self.window.catalog_directory_candidates(
                 query, scope, include_excluded=include_excluded
             ))
-            candidates.update(folders)
+            if self.folder_only:
+                candidates = folders
+            else:
+                candidates = set(self.window.catalog_candidates(
+                    query, scope, include_excluded=include_excluded
+                ))
+                candidates.update(folders)
             if generation != self._query_generation:
                 return
-            candidates.update(opened)
+            if not self.folder_only:
+                candidates.update(opened)
             ranked = []
             for path in candidates:
                 # SQLite rows were validated when indexed. Avoid thousands of
                 # resolve/stat calls per keystroke; stale rows are discarded
                 # lazily if the user selects one.
                 if not catalog_db_available:
-                    if not path.is_file() or not inside(root, path):
+                    valid_path = path.is_dir() if self.folder_only else path.is_file()
+                    if not valid_path or not inside(root, path):
                         continue
                 try:
                     relative_path = path.relative_to(root)
@@ -1939,9 +1953,12 @@ class Picker(QDialog):
             self.list.addItem(item)
         if not ranked:
             self._accept_when_ready = None
-            message = ("Indexing folder… results will appear as they are discovered"
-                       if self.window.catalog_running else
-                       "No files in the current scope and exclusion settings")
+            if self.window.catalog_running:
+                message = "Indexing folder… results will appear as they are discovered"
+            elif self.folder_only:
+                message = "No matching folders in the current scope and exclusion settings"
+            else:
+                message = "No files in the current scope and exclusion settings"
             item = QListWidgetItem(message)
             item.setFlags(Qt.NoItemFlags)
             self.list.addItem(item)
@@ -2106,6 +2123,11 @@ class Window(QMainWindow):
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
         self.settings = self._load_settings()
         self.state = self.settings.setdefault(str(self.root), {})
+        stored_masks = self.state.get("file_masks", [])
+        self.file_masks = (
+            [str(mask) for mask in stored_masks if str(mask).strip()]
+            if isinstance(stored_masks, list) else []
+        )
         try:
             self.editor_zoom_steps = max(-8, min(20, int(self.state.get("editor_zoom_steps", 0))))
             self.folder_zoom_steps = max(-8, min(20, int(self.state.get("folder_zoom_steps", 0))))
@@ -2114,6 +2136,7 @@ class Window(QMainWindow):
             self.folder_zoom_steps = 0
         self._last_focus_pane = "folder"
         self.model = FolderModel(self.root, self)
+        self.model.setNameFilters(self.file_masks)
         self.tree = NavigatorTree()
         self._suppress_tree_preview = False
         try:
@@ -2220,7 +2243,9 @@ class Window(QMainWindow):
             accent_color=identity_accent,
         )
         self.identity_bar.set_detail(self.root.name, str(self.root))
-        self.identity_bar.breadcrumbActivated.connect(self._open_folder_breadcrumb)
+        self.identity_bar.breadcrumbActivatedWithModifiers.connect(
+            self._open_folder_breadcrumb
+        )
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
         layout.addLayout(self.bookmarks_bar)
@@ -2277,6 +2302,8 @@ class Window(QMainWindow):
         self.model.directoryLoaded.connect(lambda _: self._schedule_refresh())
         self.model.directoryLoaded.connect(self._focus_folder_tree_on_launch)
         self.model.rowsInserted.connect(lambda parent, first, last: self._catalog_rows(parent, first, last))
+        from .instances import InstanceRegistration
+        self.instance_registration = InstanceRegistration(self, self.root)
 
     def _load_settings(self):
         try:
@@ -2706,6 +2733,13 @@ class Window(QMainWindow):
         add(go_menu, "Next Tab", lambda: self._cycle_tab_popup(False))
         add(go_menu, "Previous Tab", lambda: self._cycle_tab_popup(True))
         add(go_menu, "Command Bar", self.command_bar, "Alt+G")
+        self.file_mask_action = add(
+            view_menu, "File Mask…", self._choose_file_mask
+        )
+        self.clear_file_mask_action = add(
+            view_menu, "Clear File Mask", self._clear_file_mask
+        )
+        self.clear_file_mask_action.setEnabled(bool(self.file_masks))
         self.clear_filter_action = add(go_menu, "Remove Filter", self.clear_filter)
         self.clear_filter_action.setEnabled(self.scope != self.root)
         self.command_bar_shortcuts = []
@@ -4389,11 +4423,20 @@ class Window(QMainWindow):
         if identity is not None:
             identity.set_breadcrumb(self._folder_breadcrumb_items(path))
 
-    def _open_folder_breadcrumb(self, target: object) -> None:
+    def _open_folder_breadcrumb(self, target: object, modifiers=Qt.NoModifier) -> None:
         path = Path(str(target))
-        if path.is_file() and inside(self.root, path):
-            self.open_file(path, pinned=True)
-        elif path.is_dir() and inside(self.root, path):
+        if not path.is_dir():
+            return
+        control_modifier = (
+            Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier
+        )
+        if modifiers & control_modifier:
+            launch(path)
+            return
+        from .instances import activate_existing
+        if activate_existing(path, exclude_pid=os.getpid()):
+            return
+        if inside(self.root, path):
             self.reveal_tree(path)
 
     def _focus_tree_when_tabs_empty(self, preferred_path=None):
@@ -4495,6 +4538,9 @@ class Window(QMainWindow):
         self._cancel_pending_preview_hydration()
         self._close_excalidraw_processes()
         self._persist()
+        registration = getattr(self, "instance_registration", None)
+        if registration is not None:
+            registration.close()
         self.preview_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
@@ -4503,7 +4549,10 @@ class Window(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Open Folder", str(self.root))
         if path:
             try:
-                launch(Path(path))
+                selected = Path(path)
+                from .instances import activate_existing
+                if not activate_existing(selected):
+                    launch(selected)
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Could not launch Folder Navigator", f"{exc}\nCheck the installation and try again.")
 
@@ -4821,6 +4870,41 @@ class Window(QMainWindow):
         self.filter_label.hide()
         self.clear_filter_action.setEnabled(False)
         self.statusBar().clearMessage()
+
+    def _choose_file_mask(self):
+        current = "; ".join(self.file_masks)
+        text, accepted = QInputDialog.getText(
+            self,
+            "Filter Files by Mask",
+            "File masks (for example: *.md; *.txt):",
+            text=current,
+        )
+        if not accepted:
+            return
+        masks = [mask.strip() for mask in re.split(r"[;,]", text) if mask.strip()]
+        normalized = []
+        for mask in masks:
+            if not any(character in mask for character in "*?["):
+                mask = f"*{mask}*"
+            normalized.append(mask)
+        self.file_masks = normalized
+        self.model.setNameFilters(self.file_masks)
+        self.state["file_masks"] = list(self.file_masks)
+        self.clear_file_mask_action.setEnabled(bool(self.file_masks))
+        self._persist()
+        self.statusBar().showMessage(
+            f"File mask: {'; '.join(self.file_masks)}" if self.file_masks
+            else "File mask cleared",
+            4000,
+        )
+
+    def _clear_file_mask(self):
+        self.file_masks = []
+        self.model.setNameFilters([])
+        self.state["file_masks"] = []
+        self.clear_file_mask_action.setEnabled(False)
+        self._persist()
+        self.statusBar().showMessage("File mask cleared", 2500)
 
     def _bookmarks(self):
         return self.state.setdefault("bookmarks", [])
@@ -5449,7 +5533,8 @@ class Window(QMainWindow):
             self.statusBar().showMessage(f"Could not open terminal: {exc}", 12000)
 
     def folder_picker(self):
-        Picker(self).exec()
+        self._warm_catalog()
+        Picker(self, quick=True, folder_only=True).exec()
 
     def quick_open(self):
         self._warm_catalog()

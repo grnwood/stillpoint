@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QBoxLayout,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -81,6 +82,7 @@ class CompactToolbarIdentity(QFrame):
     """Small application/vault marker designed to live inside a toolbar."""
 
     breadcrumbActivated = Signal(object)
+    breadcrumbActivatedWithModifiers = Signal(object, object)
 
     def __init__(
         self,
@@ -186,11 +188,16 @@ class CompactToolbarIdentity(QFrame):
                 )
             )
             button.clicked.connect(
-                lambda checked=False, value=target: self.breadcrumbActivated.emit(value)
+                lambda checked=False, value=target: self._activate_breadcrumb(value)
             )
             self.identity_layout.addWidget(button)
             self._breadcrumb_widgets.append(button)
         self.apply_theme()
+
+    def _activate_breadcrumb(self, target: object) -> None:
+        modifiers = QApplication.keyboardModifiers()
+        self.breadcrumbActivated.emit(target)
+        self.breadcrumbActivatedWithModifiers.emit(target, modifiers)
 
     def set_accent_color(self, color: Optional[str]) -> None:
         self._accent_color = (color or "").strip() or None

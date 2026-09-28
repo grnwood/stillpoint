@@ -246,6 +246,8 @@ class MermaidRenderer:
                     cmd,
                     capture_output=True,
                     timeout=15,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW}
+                       if os.name == "nt" else {}),
                 )
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
@@ -331,6 +333,8 @@ class MermaidRenderer:
                     cmd,
                     capture_output=True,
                     timeout=15,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW}
+                       if os.name == "nt" else {}),
                 )
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")

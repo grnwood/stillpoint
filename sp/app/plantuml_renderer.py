@@ -239,6 +239,8 @@ Alice -> Bob: test
                 input=puml_text.encode("utf-8"),
                 capture_output=True,
                 timeout=10,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW}
+                   if os.name == "nt" else {}),
             )
 
             # Debug output: show result

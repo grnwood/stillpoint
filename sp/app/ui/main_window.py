@@ -4299,9 +4299,13 @@ class MainWindow(QMainWindow):
             return
         self._launch_folder_navigator(Path(selected))
 
-    def _launch_folder_navigator(self, root: Path) -> bool:
+    def _launch_folder_navigator(self, root: Path, *, force_new: bool = False) -> bool:
         """Launch Folder Navigator at *root* and report whether startup succeeded."""
         try:
+            if not force_new:
+                from sp.app.folder_navigator.instances import activate_existing
+                if activate_existing(root):
+                    return True
             from sp.app.folder_navigator.launch import launch
             process = launch(root)
             self._monitor_folder_navigator(process)
@@ -15813,9 +15817,14 @@ class MainWindow(QMainWindow):
         # Dynamic vault list (populated on menu show)
         menu.addSeparator()
         menu.aboutToShow.connect(lambda: self._update_tray_vault_list(menu))
-        
-        # Static menu items at bottom
+
+        folder_navigators = menu.addMenu("Folder Navigators")
+        folder_navigators.aboutToShow.connect(
+            lambda target=folder_navigators: self._update_tray_folder_navigators(target)
+        )
         menu.addSeparator()
+
+        # Static menu items at bottom
         action_quit = menu.addAction("Quit")
         action_quit.triggered.connect(self._quit_from_tray)
         
@@ -15878,6 +15887,53 @@ class MainWindow(QMainWindow):
                 action.triggered.connect(lambda checked=False, pid=vault_pid: self._activate_process_window(pid))
             
             menu.insertAction(second_sep, action)
+
+    def _update_tray_folder_navigators(self, menu: QMenu) -> None:
+        """List live Folder Navigator instances in the system tray submenu."""
+        menu.clear()
+        try:
+            from sp.app.folder_navigator.instances import (
+                activate_instance,
+                list_instances,
+            )
+
+            instances = sorted(
+                list_instances(),
+                key=lambda item: (str(item.get("name", "")).casefold(),
+                                  str(item.get("root", "")).casefold()),
+            )
+        except Exception:
+            instances = []
+            activate_instance = None
+
+        if not instances:
+            unavailable = menu.addAction("No Folder Navigator windows open")
+            unavailable.setEnabled(False)
+        else:
+            for instance in instances:
+                root = str(instance.get("root", ""))
+                label = str(instance.get("name") or Path(root).name or "Folder")
+                action = menu.addAction(f"{label} — {root}")
+                action.setToolTip(root)
+                action.triggered.connect(
+                    lambda checked=False, item=instance:
+                        self._activate_folder_navigator_instance(item, activate_instance)
+                )
+
+        menu.addSeparator()
+        open_action = menu.addAction("Open Folder Navigator…")
+        open_action.triggered.connect(self._open_folder_navigator)
+
+    def _activate_folder_navigator_instance(self, instance, activate_instance=None) -> None:
+        """Activate a Folder Navigator through its local IPC endpoint."""
+        if activate_instance is None:
+            try:
+                from sp.app.folder_navigator.instances import activate_instance
+            except Exception:
+                activate_instance = None
+        if callable(activate_instance) and activate_instance(instance):
+            return
+        self._activate_process_window(int(instance.get("pid", 0)))
 
     def _get_all_process_vaults(self) -> list[dict]:
         """Get all open vaults from all StillPoint processes."""
