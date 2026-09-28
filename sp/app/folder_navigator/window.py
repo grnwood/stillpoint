@@ -2076,6 +2076,7 @@ class Window(QMainWindow):
         if not icon.isNull():
             self.setWindowIcon(icon)
         self.root = root.resolve(strict=True)
+        self.window_trace = None
         self.scope = self.root
         self.catalog: set[Path] = set()
         self.ignored_paths: set[Path] = set()
@@ -2345,6 +2346,13 @@ class Window(QMainWindow):
         self.model.rowsInserted.connect(lambda parent, first, last: self._catalog_rows(parent, first, last))
         from .instances import InstanceRegistration
         self.instance_registration = InstanceRegistration(self, self.root)
+        if sys.platform == "win32":
+            from .window_trace import WindowTrace
+            self.window_trace = WindowTrace(self)
+            app.aboutToQuit.connect(self.window_trace.close)
+            self.statusBar().showMessage(
+                f"Window popup trace: {self.window_trace.path}", 12000
+            )
 
     def _load_settings(self):
         try:
@@ -2948,6 +2956,8 @@ class Window(QMainWindow):
         self.pending_markdown_preview = None
         if current.isValid() and not self.model.isDir(current):
             path = Path(self.model.filePath(current))
+            if self.window_trace is not None:
+                self.window_trace.arm(path)
             self.preview_selection_started.clear()
             self.preview_selection_started[path] = time.perf_counter()
             suffix = path.suffix.casefold()
@@ -3080,6 +3090,8 @@ class Window(QMainWindow):
 
     def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
                   force_text=False, force_rich_markdown=False):
+        if self.window_trace is not None:
+            self.window_trace.arm(path)
         # Once a visible window is explicitly opening content, do not let a
         # late QFileSystemModel load steal focus back to the startup target.
         if self.isVisible():
@@ -4596,6 +4608,8 @@ class Window(QMainWindow):
         registration = getattr(self, "instance_registration", None)
         if registration is not None:
             registration.close()
+        if self.window_trace is not None:
+            self.window_trace.close()
         self.preview_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
