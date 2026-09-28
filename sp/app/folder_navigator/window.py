@@ -23,7 +23,7 @@ from urllib.parse import quote
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAbstractFileIconProvider, QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -100,35 +100,11 @@ def _may_be_image(path: Path) -> bool:
     return not suffix or suffix in _image_suffixes()
 
 
-class FastFileIconProvider(QAbstractFileIconProvider):
-    """Avoid Windows shell extensions while listing ordinary files."""
-
-    def __init__(self):
-        super().__init__()
-        style = QApplication.style()
-        self._file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        self._folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-
-    def icon(self, info):
-        folder = (info.isDir() if isinstance(info, QFileInfo)
-                  else info == self.IconType.Folder)
-        return self._folder_icon if folder else self._file_icon
-
-    def type(self, info):
-        if info.isDir():
-            return "Folder"
-        suffix = info.suffix().upper()
-        return f"{suffix} file" if suffix else "File"
-
-
 class FolderModel(QFileSystemModel):
     def __init__(self, root: Path, parent=None):
         super().__init__(parent)
         self.root = root
-        self._icon_provider = (
-            FastFileIconProvider() if sys.platform == "win32" else QFileIconProvider()
-        )
-        self.setIconProvider(self._icon_provider)
+        self.setIconProvider(QFileIconProvider())
         self.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs)
         self.setNameFilterDisables(False)
         self.setRootPath(str(root))

@@ -10,10 +10,13 @@ from pathlib import Path
 import tempfile
 import time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QWindow
+from PySide6.QtWidgets import QApplication, QWidget
 
 
 EVENT_SYSTEM_FOREGROUND = 0x0003
+EVENT_OBJECT_CREATE = 0x8000
 EVENT_OBJECT_SHOW = 0x8002
 EVENT_OBJECT_NAMECHANGE = 0x800C
 OBJID_WINDOW = 0
@@ -26,10 +29,11 @@ def trace_log_path() -> Path:
     return Path(configured) if configured else Path(tempfile.gettempdir()) / "stillpoint-window-trace.log"
 
 
-class WindowTrace:
+class WindowTrace(QObject):
     """Record transient top-level windows near a file selection on Windows."""
 
     def __init__(self, owner) -> None:
+        super().__init__(owner)
         self.path = trace_log_path()
         self._until = 0.0
         self._selection = ""
@@ -43,6 +47,9 @@ class WindowTrace:
         self._flush_timer = QTimer(owner)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.timeout.connect(self.flush)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         if os.name == "nt":
             try:
@@ -85,7 +92,10 @@ class WindowTrace:
         ]
         self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
-        for event in (EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND):
+        for event in (
+            EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND,
+        ):
             hook = self._user32.SetWinEventHook(event, event, None, self._callback, 0, 0, 0)
             if hook:
                 self._hooks.append(hook)
@@ -123,15 +133,15 @@ class WindowTrace:
     def _on_window_event(self, _hook, event, hwnd, object_id, child_id, _thread, _time) -> None:
         if self._in_callback or not hwnd or time.monotonic() >= self._until:
             return
-        if object_id != OBJID_WINDOW or child_id != 0 or self._events >= 40:
+        if object_id != OBJID_WINDOW or child_id != 0 or self._events >= 80:
             return
         self._in_callback = True
         try:
             window_id = int(getattr(hwnd, "value", hwnd))
-            if self._user32.GetAncestor(hwnd, GA_ROOT) != window_id:
+            root = self._user32.GetAncestor(hwnd, GA_ROOT)
+            if root and root != window_id:
                 return
-            if not self._user32.IsWindowVisible(hwnd):
-                return
+            visible = bool(self._user32.IsWindowVisible(hwnd))
             if event == EVENT_OBJECT_NAMECHANGE and window_id not in self._shown:
                 return
             title = ctypes.create_unicode_buffer(512)
@@ -142,7 +152,7 @@ class WindowTrace:
             if key in self._seen:
                 return
             self._seen.add(key)
-            if event == EVENT_OBJECT_SHOW:
+            if event in (EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW):
                 self._shown.add(window_id)
             pid = wintypes.DWORD()
             self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -150,6 +160,7 @@ class WindowTrace:
             self._user32.GetWindowRect(hwnd, ctypes.byref(rect))
             image = self._process_image(pid.value) if pid.value else "unavailable"
             event_name = {
+                EVENT_OBJECT_CREATE: "create",
                 EVENT_OBJECT_SHOW: "show",
                 EVENT_OBJECT_NAMECHANGE: "title",
                 EVENT_SYSTEM_FOREGROUND: "foreground",
@@ -158,13 +169,46 @@ class WindowTrace:
             self._append(
                 f"file={self._selection!r} event={event_name} hwnd={window_id:#x} "
                 f"pid={pid.value} image={image!r} class={window_class.value!r} "
-                f"title={title.value!r} size={rect.right - rect.left}x{rect.bottom - rect.top}"
+                f"title={title.value!r} visible={visible} "
+                f"size={rect.right - rect.left}x{rect.bottom - rect.top}"
             )
         except Exception:
             # Never let diagnostics disrupt the editor's native event loop.
             pass
         finally:
             self._in_callback = False
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if self._closed or time.monotonic() >= self._until or self._events >= 80:
+            return False
+        if event.type() not in (QEvent.Show, QEvent.WindowActivate):
+            return False
+        try:
+            if isinstance(obj, QWidget):
+                if not (obj.isWindow() or obj.testAttribute(Qt.WA_NativeWindow)):
+                    return False
+                title = obj.windowTitle()
+                size = obj.size()
+                flags = int(obj.windowFlags())
+            elif isinstance(obj, QWindow):
+                title = obj.title()
+                size = obj.size()
+                flags = int(obj.flags())
+            else:
+                return False
+            object_name = obj.objectName()
+            parent = obj.parent()
+            parent_class = type(parent).__name__ if parent is not None else "none"
+            self._events += 1
+            self._append(
+                f"file={self._selection!r} event=qt-{event.type().name.lower()} "
+                f"object={type(obj).__name__} name={object_name!r} "
+                f"parent={parent_class} title={title!r} "
+                f"size={size.width()}x{size.height()} flags={flags:#x}"
+            )
+        except (RuntimeError, AttributeError, ValueError):
+            pass
+        return False
 
     def _append(self, message: str) -> None:
         timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -187,6 +231,12 @@ class WindowTrace:
         if self._closed:
             return
         self._closed = True
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except RuntimeError:
+                pass
         for hook in self._hooks:
             self._user32.UnhookWinEvent(hook)
         self._hooks.clear()
