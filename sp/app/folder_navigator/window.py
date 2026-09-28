@@ -4430,14 +4430,23 @@ class Window(QMainWindow):
         control_modifier = (
             Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier
         )
-        if modifiers & control_modifier:
+        try:
+            if not modifiers & control_modifier:
+                if path.resolve() == self.root:
+                    if self.isMinimized():
+                        self.showNormal()
+                    else:
+                        self.show()
+                    self.raise_()
+                    self.activateWindow()
+                    return
+                from .instances import activate_existing
+                if activate_existing(path, exclude_pid=os.getpid()):
+                    return
             launch(path)
-            return
-        from .instances import activate_existing
-        if activate_existing(path, exclude_pid=os.getpid()):
-            return
-        if inside(self.root, path):
-            self.reveal_tree(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not launch Folder Navigator",
+                                f"{exc}\nCheck the selected folder and installation, then try again.")
 
     def _focus_tree_when_tabs_empty(self, preferred_path=None):
         """Return keyboard/vi navigation to the folder tree after the last close."""

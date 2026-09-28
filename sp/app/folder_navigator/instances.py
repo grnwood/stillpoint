@@ -75,7 +75,7 @@ class InstanceRegistration:
     """Publish this window and handle local activation requests."""
 
     def __init__(self, window, root: Path) -> None:
-        from PySide6.QtCore import QLocalServer
+        from PySide6.QtNetwork import QLocalServer
 
         self.window = window
         self.server = QLocalServer(window)

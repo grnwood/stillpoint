@@ -736,6 +736,28 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
     assert captured["command"][1] == "--folder-navigator"
 
 
+def test_folder_breadcrumb_launches_when_no_instance_is_open(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator import instances
+    from sp.app.folder_navigator import window as navigator
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    child = tmp_path / "child"
+    child.mkdir()
+    launched = []
+    monkeypatch.setattr(navigator, "launch", lambda path: launched.append(path))
+    monkeypatch.setattr(instances, "activate_existing", lambda *args, **kwargs: False)
+
+    window = navigator.Window(tmp_path)
+    window._open_folder_breadcrumb(child)
+    window._open_folder_breadcrumb(child, Qt.ControlModifier)
+    assert launched == [child, child]
+    monkeypatch.setattr(instances, "activate_existing", lambda *args, **kwargs: True)
+    window._open_folder_breadcrumb(child)
+    assert launched == [child, child]
+    window.close()
+
+
 def test_frozen_macos_launch_uses_companion_app(tmp_path, monkeypatch):
     from sp.app.folder_navigator import launch
 
