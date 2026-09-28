@@ -111,6 +111,7 @@ class CompactToolbarIdentity(QFrame):
         self.detail_label.setObjectName("compactToolbarIdentityDetail")
         self.identity_layout.addWidget(self.detail_label)
         self._breadcrumb_widgets: list[QWidget] = []
+        self._breadcrumb_display: list[tuple[str, object, str] | None] = []
         self.set_icon(icon or QIcon())
         self.set_detail(detail)
         self.apply_theme()
@@ -129,11 +130,26 @@ class CompactToolbarIdentity(QFrame):
 
     def clear_breadcrumb(self) -> None:
         for widget in self._breadcrumb_widgets:
+            widget.hide()
             self.identity_layout.removeWidget(widget)
-            widget.setParent(None)
             widget.deleteLater()
         self._breadcrumb_widgets.clear()
+        self._breadcrumb_display.clear()
         self.detail_label.setVisible(bool(self.detail_label.text()))
+
+    @staticmethod
+    def _set_breadcrumb_button(button: QToolButton, item: tuple[str, object, str]) -> None:
+        label, target, tooltip = item
+        button._breadcrumb_target = target
+        button.setToolTip(tooltip or label)
+        button.setAccessibleName(f"Open {label}")
+        button.setText(
+            button.fontMetrics().elidedText(
+                label,
+                Qt.TextElideMode.ElideMiddle,
+                int(theme_value("ui.breadcrumb.segment_max_width_px", 120)),
+            )
+        )
 
     def set_breadcrumb(
         self,
@@ -146,13 +162,13 @@ class CompactToolbarIdentity(QFrame):
         Each item is ``(label, target, tooltip)``. Long paths retain the root
         and the two nearest segments with a quiet ellipsis between them.
         """
-        self.clear_breadcrumb()
         normalized = [
             (str(label or "").strip(), target, str(tooltip or "").strip())
             for label, target, tooltip in items
             if str(label or "").strip()
         ]
         if not normalized:
+            self.clear_breadcrumb()
             return
         limit = max(2, int(max_segments))
         display: list[tuple[str, object, str] | None]
@@ -160,6 +176,18 @@ class CompactToolbarIdentity(QFrame):
             display = [normalized[0], None, *normalized[-(limit - 2):]]
         else:
             display = list(normalized)
+        if display == self._breadcrumb_display:
+            return
+        shape = [item is None for item in display]
+        if shape == [item is None for item in self._breadcrumb_display]:
+            for index, item in enumerate(display):
+                if item is not None and item != self._breadcrumb_display[index]:
+                    button = self._breadcrumb_widgets[index * 2 + 1]
+                    self._set_breadcrumb_button(button, item)
+            self._breadcrumb_display = display
+            return
+
+        self.clear_breadcrumb()
         self.detail_label.hide()
         for item in display:
             separator = QLabel("›", self)
@@ -172,26 +200,19 @@ class CompactToolbarIdentity(QFrame):
                 self.identity_layout.addWidget(ellipsis)
                 self._breadcrumb_widgets.append(ellipsis)
                 continue
-            label, target, tooltip = item
             button = QToolButton(self)
             button.setProperty("breadcrumbSegment", True)
             button.setAutoRaise(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setToolTip(tooltip or label)
-            button.setAccessibleName(f"Open {label}")
-            button.setText(
-                button.fontMetrics().elidedText(
-                    label,
-                    Qt.TextElideMode.ElideMiddle,
-                    int(theme_value("ui.breadcrumb.segment_max_width_px", 120)),
-                )
-            )
+            self._set_breadcrumb_button(button, item)
             button.clicked.connect(
-                lambda checked=False, value=target: self._activate_breadcrumb(value)
+                lambda checked=False, control=button:
+                    self._activate_breadcrumb(control._breadcrumb_target)
             )
             self.identity_layout.addWidget(button)
             self._breadcrumb_widgets.append(button)
+        self._breadcrumb_display = display
         self.apply_theme()
 
     def _activate_breadcrumb(self, target: object) -> None:

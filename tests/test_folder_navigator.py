@@ -2131,6 +2131,36 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     window.close()
 
 
+def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
+    from PySide6.QtWidgets import QToolButton
+    from sp.app.ui.utility_header import CompactToolbarIdentity
+
+    identity = CompactToolbarIdentity("Folder Navigator")
+    identity.show()
+    identity.set_breadcrumb([
+        ("root", "root", "root"),
+        ("first.txt", "first", "first"),
+    ])
+    widgets = list(identity._breadcrumb_widgets)
+    selected = []
+    identity.breadcrumbActivated.connect(selected.append)
+
+    identity.set_breadcrumb([
+        ("root", "root", "root"),
+        ("second.txt", "second", "second"),
+    ])
+    assert identity._breadcrumb_widgets == widgets
+    button = identity._breadcrumb_widgets[-1]
+    assert isinstance(button, QToolButton)
+    button.click()
+    assert selected == ["second"]
+
+    identity.set_breadcrumb([("root", "root", "root")])
+    assert all(not widget.isVisible() for widget in widgets)
+    assert all(widget.parent() is identity for widget in widgets)
+    identity.close()
+
+
 def test_folder_navigator_process_disables_inprocess_mermaid_webengine(monkeypatch):
     from sp.app.folder_navigator.icon import configure_folder_navigator_process
 
