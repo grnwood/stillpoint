@@ -49,9 +49,9 @@ def activate_instance(record: dict, timeout_ms: int = 250) -> bool:
     if not socket.waitForConnected(timeout_ms):
         return False
     socket.write(b"activate\n")
-    socket.waitForBytesWritten(timeout_ms)
+    delivered = socket.waitForBytesWritten(timeout_ms)
     socket.disconnectFromServer()
-    return True
+    return delivered
 
 
 def activate_existing(root: Path, *, exclude_pid: int | None = None) -> bool:
@@ -65,10 +65,9 @@ def activate_existing(root: Path, *, exclude_pid: int | None = None) -> bool:
             continue
         if activate_instance(record):
             return True
-        try:
-            Path(record["record_path"]).unlink(missing_ok=True)
-        except (OSError, KeyError):
-            pass
+        # A live process can temporarily have an unavailable IPC endpoint
+        # (notably while starting on Windows). Do not discard its registry
+        # entry; let the caller launch another navigator as a safe fallback.
     return False
 
 
@@ -120,6 +119,18 @@ class InstanceRegistration:
             self.window.show()
             self.window.raise_()
             self.window.activateWindow()
+            if os.name == "nt":
+                # Qt activation alone can be ignored by Windows when another
+                # process initiated the request. Explicitly ask the window
+                # manager to restore and foreground this process's window.
+                try:
+                    import ctypes
+
+                    hwnd = int(self.window.winId())
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                except (AttributeError, OSError, ValueError):
+                    pass
         socket.disconnectFromServer()
         socket.deleteLater()
 
