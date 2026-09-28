@@ -1378,7 +1378,7 @@ def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
     window.close()
 
 
-def test_quick_open_folder_target_filters_the_tree(tmp_path, monkeypatch, app):
+def test_quick_open_folder_target_reveals_without_filtering(tmp_path, monkeypatch, app):
     import time
     from PySide6.QtCore import Qt
     from sp.app.folder_navigator.window import Picker, Window
@@ -1405,9 +1405,84 @@ def test_quick_open_folder_target_filters_the_tree(tmp_path, monkeypatch, app):
 
     picker.list.setCurrentRow(folder_row)
     picker.accept_file()
+    app.processEvents()
 
-    assert window.scope == folder
-    assert Path(window.model.filePath(window.tree.rootIndex())) == folder
+    assert window.scope == tmp_path
+    assert Path(window.model.filePath(window.tree.rootIndex())) == tmp_path
+    assert Path(window.model.filePath(window.tree.currentIndex())) == folder
+    window.close()
+
+
+def test_folder_navigator_vi_picker_keys(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    invoked = []
+    monkeypatch.setattr(Window, "bookmark_picker", lambda self: invoked.append("bookmark"))
+    monkeypatch.setattr(Window, "folder_picker", lambda self: invoked.append("folder"))
+    window = Window(tmp_path)
+    window.tree.vi_enabled = True
+    window.show()
+    window.tree.setFocus()
+
+    QTest.keyClick(window.tree, Qt.Key_F)
+    QTest.keyClick(window.tree, Qt.Key_V)
+
+    assert invoked == ["bookmark", "folder"]
+    window.close()
+
+
+@pytest.mark.parametrize("suffix", [".txt", ".md"])
+def test_folder_navigator_editor_vi_picker_keys(tmp_path, monkeypatch, app, suffix):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / f"notes{suffix}"
+    path.write_text("Notes", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path)
+    editor = window.active_tab().editor
+    editor.set_vi_mode_enabled(True)
+    if suffix == ".md":
+        editor.set_vi_mode(True)
+    invoked = []
+    monkeypatch.setattr(window, "bookmark_picker", lambda: invoked.append("bookmark"))
+    monkeypatch.setattr(window, "folder_picker", lambda: invoked.append("folder"))
+    window.show()
+    editor.setFocus()
+
+    QTest.keyClick(editor, Qt.Key_F)
+    QTest.keyClick(editor, Qt.Key_V)
+
+    assert invoked == ["bookmark", "folder"]
+    editor.document().setModified(False)
+    window.close()
+
+
+def test_bookmark_picker_fuzzy_selects_bookmarked_folder(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+    from sp.app.folder_navigator.window import BookmarkPicker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "project-notes"
+    folder.mkdir()
+    window = Window(tmp_path)
+    window.toggle_bookmark(folder)
+    picker = BookmarkPicker(window)
+    picker.show()
+    picker.query.setText("prnt")
+    assert picker.list.count() == 1
+
+    QTest.keyClick(picker.query, Qt.Key_Return)
+
+    assert picker.result() == QDialog.Accepted
+    assert picker.selected_path == folder
     window.close()
 
 

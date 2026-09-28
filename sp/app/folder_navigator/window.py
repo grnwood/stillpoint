@@ -127,6 +127,8 @@ class NavigatorTree(QTreeView):
     openFile = Signal(str, bool)
     openFileAndFocus = Signal(str, bool)
     escapePressed = Signal()
+    bookmarkPickerRequested = Signal()
+    folderPickerRequested = Signal()
     pathsDropped = Signal(object, object)
 
     def __init__(self, parent=None):
@@ -196,6 +198,12 @@ class NavigatorTree(QTreeView):
             self.escapePressed.emit()
             return
         if self.vi_enabled and mods == Qt.NoModifier:
+            if key == Qt.Key_F:
+                self.bookmarkPickerRequested.emit()
+                return
+            if key == Qt.Key_V:
+                self.folderPickerRequested.emit()
+                return
             mapping = {Qt.Key_J: Qt.Key_Down, Qt.Key_K: Qt.Key_Up,
                        Qt.Key_H: Qt.Key_Left, Qt.Key_L: Qt.Key_Right}
             if key in mapping:
@@ -1788,6 +1796,77 @@ def pdf_view(path):
     return widget
 
 
+class BookmarkPicker(QDialog):
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.selected_path = None
+        self.setWindowTitle("Go to Bookmark")
+        self.resize(650, 430)
+        layout = QVBoxLayout(self)
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Find a bookmark")
+        self.list = QListWidget()
+        layout.addWidget(self.query)
+        layout.addWidget(self.list)
+        self.query.textChanged.connect(self.refresh)
+        self.query.installEventFilter(self)
+        self.list.installEventFilter(self)
+        self.list.itemActivated.connect(lambda _item: self.choose())
+        self.refresh()
+        self.query.setFocus()
+
+    def refresh(self):
+        query = self.query.text().strip()
+        ranked = []
+        for name in self.window._bookmarks():
+            path = Path(name)
+            try:
+                relative = str(path.relative_to(self.window.root))
+            except ValueError:
+                relative = str(path)
+            score = fuzzy_score(query, relative)
+            if score is not None:
+                ranked.append((-score, relative.casefold(), path))
+        ranked.sort()
+        self.list.clear()
+        for _, relative, path in ranked:
+            kind = "📁 " if path.is_dir() else ""
+            label = f"{kind}{path.name}    {Path(relative).parent}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(str(path))
+            self.list.addItem(item)
+        if ranked:
+            self.list.setCurrentRow(0)
+        else:
+            item = QListWidgetItem("No matching bookmarks")
+            item.setFlags(Qt.NoItemFlags)
+            self.list.addItem(item)
+
+    def choose(self):
+        item = self.list.currentItem()
+        if item is not None and item.data(Qt.UserRole):
+            self.selected_path = Path(item.data(Qt.UserRole))
+            self.accept()
+
+    def eventFilter(self, obj, event):
+        if obj in (self.query, self.list) and event.type() == QEvent.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self.choose()
+                return True
+            if key in (Qt.Key_Down, Qt.Key_Up) or (
+                key in (Qt.Key_J, Qt.Key_K)
+                and (modifiers == Qt.ControlModifier or is_vi_navigation_chord(modifiers))
+            ):
+                delta = 1 if key in (Qt.Key_Down, Qt.Key_J) else -1
+                self.list.setCurrentRow(max(0, min(self.list.count() - 1, self.list.currentRow() + delta)))
+                return True
+        return super().eventFilter(obj, event)
+
+
 class Picker(QDialog):
     resultsReady = Signal(int, object)
 
@@ -1991,11 +2070,8 @@ class Picker(QDialog):
         if item and item.data(Qt.UserRole):
             path = Path(item.data(Qt.UserRole))
             if item.data(Qt.UserRole + 1) and path.is_dir():
-                self.window.apply_filter(path)
                 self.accept()
-                QTimer.singleShot(
-                    0, lambda: self.window.tree.setFocus(Qt.OtherFocusReason)
-                )
+                QTimer.singleShot(0, lambda selected=path: self.window.reveal_tree(selected))
                 return
             self.window.open_file(path, pinned=pinned)
             tab = self.window.active_tab()
@@ -2175,6 +2251,8 @@ class Window(QMainWindow):
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
         self.tree.openFile.connect(self._open_tree_file_keep_focus)
         self.tree.openFileAndFocus.connect(self._open_tree_file)
+        self.tree.bookmarkPickerRequested.connect(self.bookmark_picker)
+        self.tree.folderPickerRequested.connect(self.folder_picker)
         self.tree.pathsDropped.connect(self._copy_dropped_paths)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
@@ -2752,6 +2830,7 @@ class Window(QMainWindow):
         add(go_menu, "Markdown Headings…", self._show_active_heading_picker, "Ctrl+Alt+T")
         add(go_menu, "Quick Open", self.quick_open, "Ctrl+J")
         add(go_menu, "Folder Picker", self.folder_picker, "Ctrl+Alt+V")
+        add(go_menu, "Go to Bookmark", self.bookmark_picker)
         self.reveal_active_tab_action = add(
             go_menu, "Reveal in Folder", self._reveal_active_tab_in_folder
         )
@@ -3191,10 +3270,10 @@ class Window(QMainWindow):
             tab.editor.viNavigationEscapePressed.connect(
                 lambda t=tab: self._focus_tree_from_editor(t)
             )
+            tab.editor.installEventFilter(self)
             if isinstance(tab.editor, MarkdownEditor):
                 tab.editor.setProperty("folderNavigatorMarkdown", True)
                 tab.editor.highlighter.set_folder_navigator_table_style(True)
-                tab.editor.installEventFilter(self)
                 tab.editor.headingPickerRequested.connect(
                     lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
                 )
@@ -4093,6 +4172,20 @@ class Window(QMainWindow):
         self.statusBar().showMessage("Markdown table aligned", 3000)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if (event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_F, Qt.Key_V)
+                and event.modifiers() == Qt.NoModifier):
+            tab = self.active_tab()
+            editor = tab.editor if tab is not None else None
+            if (obj is editor
+                    and getattr(editor, "_vi_feature_enabled", False)
+                    and not getattr(editor, "_vi_insert_mode", True)
+                    and getattr(editor, "_vi_mode_active", True)):
+                if event.key() == Qt.Key_F:
+                    self.bookmark_picker()
+                else:
+                    self.folder_picker()
+                return True
         if (event.type() == QEvent.KeyPress
                 and event.key() == Qt.Key_Escape
                 and event.modifiers() == Qt.NoModifier
@@ -5582,6 +5675,14 @@ class Window(QMainWindow):
     def folder_picker(self):
         self._warm_catalog()
         Picker(self, quick=True, folder_only=True).exec()
+
+    def bookmark_picker(self):
+        if not self._bookmarks():
+            self.statusBar().showMessage("No bookmarks to jump to", 3000)
+            return
+        picker = BookmarkPicker(self)
+        if picker.exec() == QDialog.Accepted and picker.selected_path is not None:
+            self._activate_bookmark(picker.selected_path)
 
     def quick_open(self):
         self._warm_catalog()
