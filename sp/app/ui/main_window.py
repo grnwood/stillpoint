@@ -10886,7 +10886,12 @@ class MainWindow(QMainWindow):
                 tooltip += " — folder is missing (right-click to remove)"
             btn.setToolTip(tooltip)
             btn.clicked.connect(
-                lambda checked=False, p=folder_path: self._open_folder_bookmark(p)
+                lambda checked=False, p=folder_path: self._open_folder_bookmark(
+                    p,
+                    force_new=bool(QApplication.keyboardModifiers() & (
+                        Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier
+                    )),
+                )
             )
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
             btn.customContextMenuRequested.connect(
@@ -11769,13 +11774,13 @@ class MainWindow(QMainWindow):
         """Open a bookmarked page."""
         self._open_file(path)
 
-    def _open_folder_bookmark(self, folder_path: str) -> None:
+    def _open_folder_bookmark(self, folder_path: str, *, force_new: bool = False) -> None:
         """Open a bookmarked external folder in Folder Navigator."""
         path = Path(folder_path)
         if not path.is_dir():
             self.statusBar().showMessage(f"Bookmarked folder is missing: {folder_path}", 12000)
             return
-        self._launch_folder_navigator(path)
+        self._launch_folder_navigator(path, force_new=force_new)
 
     def _show_folder_bookmark_context_menu(
         self,
@@ -15108,7 +15113,8 @@ class MainWindow(QMainWindow):
         if not config.has_active_vault():
             return
         bookmark_paths = [p for p in self.bookmarks if isinstance(p, str) and p.strip()]
-        if not bookmark_paths:
+        folder_paths = config.load_folder_bookmarks()
+        if not bookmark_paths and not folder_paths:
             self.statusBar().showMessage("No bookmarks to jump to.", 2000)
             return
 
@@ -15120,6 +15126,7 @@ class MainWindow(QMainWindow):
             remote_mode=self._remote_mode,
             launch_mode="bookmarks",
             allowed_paths=bookmark_paths,
+            folder_paths=folder_paths,
         )
         result = dlg.exec()
 
@@ -15127,7 +15134,10 @@ class MainWindow(QMainWindow):
             target = dlg.selected_path()
             if target:
                 self._exit_vi_insert_on_activate()
-                self._open_file(target)
+                if dlg.selected_is_folder_navigator():
+                    self._open_folder_bookmark(target)
+                else:
+                    self._open_file(target)
         
 
     def _insert_link(self) -> None:

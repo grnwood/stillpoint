@@ -1797,10 +1797,12 @@ def pdf_view(path):
 
 
 class BookmarkPicker(QDialog):
-    def __init__(self, window):
+    def __init__(self, window, folder_navigators=()):
         super().__init__(window)
         self.window = window
+        self.folder_navigators = folder_navigators
         self.selected_path = None
+        self.selected_folder_navigator = False
         self.setWindowTitle("Go to Bookmark")
         self.resize(650, 430)
         layout = QVBoxLayout(self)
@@ -1827,14 +1829,23 @@ class BookmarkPicker(QDialog):
                 relative = str(path)
             score = fuzzy_score(query, relative)
             if score is not None:
-                ranked.append((-score, relative.casefold(), path))
+                ranked.append((-score, relative.casefold(), path, False))
+        for name in self.folder_navigators:
+            path = Path(name)
+            score = fuzzy_score(query, f"{path.name} {path}")
+            if score is not None:
+                ranked.append((-score, str(path).casefold(), path, True))
         ranked.sort()
         self.list.clear()
-        for _, relative, path in ranked:
-            kind = "📁 " if path.is_dir() else ""
-            label = f"{kind}{path.name}    {Path(relative).parent}"
+        for _, relative, path, is_navigator in ranked:
+            kind = "📁 " if path.is_dir() and not is_navigator else ""
+            label = (f"{path.name}    Folder Navigator — {path}"
+                     if is_navigator else f"{kind}{path.name}    {Path(relative).parent}")
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, path)
+            item.setData(Qt.UserRole + 1, is_navigator)
+            if is_navigator:
+                item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
             item.setToolTip(str(path))
             self.list.addItem(item)
         if ranked:
@@ -1848,6 +1859,7 @@ class BookmarkPicker(QDialog):
         item = self.list.currentItem()
         if item is not None and item.data(Qt.UserRole):
             self.selected_path = Path(item.data(Qt.UserRole))
+            self.selected_folder_navigator = bool(item.data(Qt.UserRole + 1))
             self.accept()
 
     def eventFilter(self, obj, event):
@@ -5677,12 +5689,28 @@ class Window(QMainWindow):
         Picker(self, quick=True, folder_only=True).exec()
 
     def bookmark_picker(self):
-        if not self._bookmarks():
+        folder_navigators = self._stillpoint_folder_bookmarks()
+        if not self._bookmarks() and not folder_navigators:
             self.statusBar().showMessage("No bookmarks to jump to", 3000)
             return
-        picker = BookmarkPicker(self)
+        picker = BookmarkPicker(self, folder_navigators)
         if picker.exec() == QDialog.Accepted and picker.selected_path is not None:
-            self._activate_bookmark(picker.selected_path)
+            if picker.selected_folder_navigator:
+                self._open_folder_breadcrumb(picker.selected_path)
+            else:
+                self._activate_bookmark(picker.selected_path)
+
+    def _stillpoint_folder_bookmarks(self):
+        from sp.app import config
+
+        vault = os.environ.get("SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT") or config.get_active_vault()
+        if not vault:
+            return []
+        token = config.push_active_vault_context(vault)
+        try:
+            return config.load_folder_bookmarks()
+        finally:
+            config.reset_active_vault_context(token)
 
     def quick_open(self):
         self._warm_catalog()

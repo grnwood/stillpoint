@@ -1486,6 +1486,57 @@ def test_bookmark_picker_fuzzy_selects_bookmarked_folder(tmp_path, monkeypatch, 
     window.close()
 
 
+def test_bookmark_picker_includes_stillpoint_folder_navigator(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+    from sp.app.folder_navigator.window import BookmarkPicker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "another-project"
+    folder.mkdir()
+    window = Window(tmp_path)
+    picker = BookmarkPicker(window, [str(folder)])
+    picker.show()
+    picker.query.setText("another")
+
+    assert picker.list.count() == 1
+    item = picker.list.item(0)
+    assert not item.icon().isNull()
+    assert item.data(Qt.UserRole + 1) is True
+    QTest.keyClick(picker.query, Qt.Key_Return)
+    assert picker.result() == QDialog.Accepted
+    assert picker.selected_path == folder
+    assert picker.selected_folder_navigator
+    window.close()
+
+
+def test_bookmark_picker_activates_selected_folder_navigator(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QTimer
+    from sp.app.folder_navigator.window import BookmarkPicker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "another-project"
+    folder.mkdir()
+    window = Window(tmp_path)
+    monkeypatch.setattr(window, "_stillpoint_folder_bookmarks", lambda: [str(folder)])
+    activated = []
+    monkeypatch.setattr(window, "_open_folder_breadcrumb", lambda path: activated.append(path))
+    original_exec = BookmarkPicker.exec
+
+    def choose_first(picker):
+        QTimer.singleShot(0, picker.choose)
+        return original_exec(picker)
+
+    monkeypatch.setattr(BookmarkPicker, "exec", choose_first)
+    window.bookmark_picker()
+
+    assert activated == [folder]
+    window.close()
+
+
 def test_quick_open_supports_standard_vi_selection_chord(
         tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt

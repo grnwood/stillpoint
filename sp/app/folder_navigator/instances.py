@@ -8,6 +8,42 @@ from pathlib import Path
 import secrets
 
 
+def _process_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # On Windows os.kill(pid, 0) calls TerminateProcess rather than probing
+        # the PID. Query the exit status through a limited-access handle.
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)
+        )
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            return (
+                bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)))
+                and exit_code.value == 259  # STILL_ACTIVE
+            )
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def _instances_dir() -> Path:
     return Path.home() / ".stillpoint" / "folder_navigators"
 
@@ -23,7 +59,8 @@ def list_instances() -> list[dict]:
                 pid = int(record.get("pid", 0))
                 if pid <= 0:
                     raise ValueError("invalid process id")
-                os.kill(pid, 0)
+                if not _process_is_alive(pid):
+                    raise ProcessLookupError(pid)
                 record["pid"] = pid
                 record["record_path"] = str(record_path)
                 records.append(record)
@@ -43,6 +80,17 @@ def activate_instance(record: dict, timeout_ms: int = 250) -> bool:
     if not socket_name:
         return False
     from PySide6.QtNetwork import QLocalSocket
+
+    if os.name == "nt":
+        # The bookmark click comes from the foreground process. Grant the
+        # navigator permission to bring its window forward when it receives
+        # the activation message.
+        try:
+            import ctypes
+
+            ctypes.windll.user32.AllowSetForegroundWindow(int(record["pid"]))
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            pass
 
     socket = QLocalSocket()
     socket.connectToServer(socket_name)

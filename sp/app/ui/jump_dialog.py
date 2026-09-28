@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from pathlib import Path
-from PySide6.QtCore import Qt, QByteArray, QTimer, QRectF, QSize, QEvent, QPoint
-from PySide6.QtGui import QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
+from PySide6.QtCore import Qt, QByteArray, QTimer, QRect, QRectF, QSize, QEvent, QPoint
+from PySide6.QtGui import QIcon, QKeyEvent, QPainter, QTextDocument, QAbstractTextDocumentLayout
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -43,7 +43,9 @@ class HTMLDelegate(QStyledItemDelegate):
         doc.setDocumentMargin(2)
         
         # Set the width to match the item width
-        doc.setTextWidth(option.rect.width())
+        icon = index.data(Qt.DecorationRole)
+        icon_width = 20 if isinstance(icon, QIcon) and not icon.isNull() else 0
+        doc.setTextWidth(max(1, option.rect.width() - icon_width))
         
         # Draw background if selected
         if option.state & QStyle.StateFlag.State_Selected:
@@ -53,7 +55,10 @@ class HTMLDelegate(QStyledItemDelegate):
             doc.setHtml(text)  # Re-parse with new stylesheet
         
         # Translate painter to item position
-        painter.translate(option.rect.topLeft())
+        if icon_width:
+            icon_rect = QRect(option.rect.left() + 2, option.rect.center().y() - 8, 16, 16)
+            icon.paint(painter, icon_rect)
+        painter.translate(option.rect.topLeft() + QPoint(icon_width, 0))
         
         # Render the document
         doc.drawContents(painter)
@@ -66,9 +71,14 @@ class HTMLDelegate(QStyledItemDelegate):
         doc.setHtml(text)
         doc.setDefaultFont(option.font)
         doc.setDocumentMargin(2)
-        doc.setTextWidth(option.rect.width() if option.rect.width() > 0 else 400)
+        icon = index.data(Qt.DecorationRole)
+        icon_width = 20 if isinstance(icon, QIcon) and not icon.isNull() else 0
+        doc.setTextWidth(
+            max(1, option.rect.width() - icon_width)
+            if option.rect.width() > 0 else 400
+        )
         size = doc.size()
-        return QSize(int(size.width()), int(size.height()))
+        return QSize(int(size.width()) + icon_width, int(size.height()))
 
 
 class JumpToPageDialog(QDialog):
@@ -92,6 +102,7 @@ class JumpToPageDialog(QDialog):
         implied_target_label: str | None = None,
         quick_targets: list[tuple[str, str]] | None = None,
         allowed_paths: list[str] | None = None,
+        folder_paths: list[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._launch_mode = launch_mode  # 'jump', 'insert_link', or 'create_new'
@@ -139,6 +150,9 @@ class JumpToPageDialog(QDialog):
                     continue
                 seen.add(path)
                 self._allowed_paths.append(path)
+        self._folder_paths = list(dict.fromkeys(
+            path for path in (folder_paths or []) if isinstance(path, str) and path.strip()
+        ))
         self.rewrite_links_checkbox = None
         self.http = http_client
         self._remote_mode = remote_mode
@@ -240,6 +254,10 @@ class JumpToPageDialog(QDialog):
             if search_term:
                 return self._generate_new_page_path(search_term)
         return None
+
+    def selected_is_folder_navigator(self) -> bool:
+        item = self.list_widget.currentItem()
+        return bool(item and item.data(Qt.UserRole + 1) == "folder_navigator")
     
     def should_rewrite_links(self) -> bool:
         """Return whether link rewriting is enabled (only relevant for move operations)."""
@@ -352,7 +370,7 @@ class JumpToPageDialog(QDialog):
             term = term.lstrip(":")
 
         pages: list[dict]
-        if self._allowed_paths:
+        if self._allowed_paths or self._folder_paths:
             needle = term.lower().strip()
             pages = []
             for page_path in self._allowed_paths:
@@ -388,6 +406,21 @@ class JumpToPageDialog(QDialog):
             item = QListWidgetItem(self._display_label(page))
             item.setData(Qt.UserRole, page["path"])
             self.list_widget.addItem(item)
+        if self._launch_mode == "bookmarks":
+            needle = term.casefold()
+            folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+            for folder_path in self._folder_paths:
+                name = Path(folder_path).name or folder_path
+                if needle and needle not in f"{name} {folder_path}".casefold():
+                    continue
+                item = QListWidgetItem(
+                    f"<b>{html.escape(name)}</b> — Folder Navigator — {html.escape(folder_path)}"
+                )
+                item.setData(Qt.UserRole, folder_path)
+                item.setData(Qt.UserRole + 1, "folder_navigator")
+                item.setIcon(folder_icon)
+                item.setToolTip(folder_path)
+                self.list_widget.addItem(item)
         
         # Track if we have matching pages and update title accordingly
         self._has_matching_pages = self.list_widget.count() > 0
