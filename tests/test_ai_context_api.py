@@ -40,6 +40,24 @@ def test_attachment_text_accepts_plain_text_attachment(tmp_path, monkeypatch) ->
     }
 
 
+def test_attachment_text_extracts_promoted_workbook(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("python_calamine")
+    xlsxwriter = pytest.importorskip("xlsxwriter")
+    folder = tmp_path / "Folder Chat Imports"
+    folder.mkdir()
+    attachment = folder / "budget.xlsx"
+    workbook = xlsxwriter.Workbook(str(attachment))
+    sheet = workbook.add_worksheet("Forecast")
+    sheet.write_row(0, 0, ["Month", "Revenue"])
+    sheet.write_row(1, 0, ["April", 1200])
+    workbook.close()
+    monkeypatch.setattr(api.vault_state, "get_root", lambda: tmp_path)
+
+    result = api.attachment_text(api.FilePathPayload(path="/Folder Chat Imports/budget.xlsx"))
+    assert "Sheet: Forecast" in result["content"]
+    assert "April | 1200" in result["content"]
+
+
 def test_attachment_image_returns_bounded_data_url(tmp_path, monkeypatch) -> None:
     folder = tmp_path / "Notes"
     folder.mkdir()

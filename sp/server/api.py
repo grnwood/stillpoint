@@ -3148,9 +3148,9 @@ def attachment_text(payload: FilePathPayload) -> dict:
             raise FileNotFoundError(target)
         if target.stat().st_size > 20 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Attachment is too large for chat context")
-        from sp.rag.attachment_text import extract_attachment_text
+        from sp.rag.attachment_text import MAX_OFFICE_CONTEXT_CHARS, extract_attachment_text
 
-        content = extract_attachment_text(target)
+        content = extract_attachment_text(target, max_chars=MAX_OFFICE_CONTEXT_CHARS)
         if not content.strip():
             raise HTTPException(status_code=422, detail="No readable text found in attachment")
         return {"content": content[:16000], "truncated": len(content) > 16000}

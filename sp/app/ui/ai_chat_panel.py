@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel, QSizePolicy
 from PySide6.QtSvg import QSvgRenderer
-from sp.rag.attachment_text import extract_attachment_text
+from sp.rag.attachment_text import MAX_OFFICE_CONTEXT_CHARS, extract_attachment_text
 from markdown import markdown
 import html
 
@@ -3405,7 +3405,7 @@ class AIChatPanel(QtWidgets.QWidget):
             return content
         path = self._attachment_path(page_ref, attachment_name)
         if path:
-            content = extract_attachment_text(path)
+            content = extract_attachment_text(path, max_chars=MAX_OFFICE_CONTEXT_CHARS)
             if not content and Path(attachment_name).suffix.lower() in VISION_IMAGE_SUFFIXES:
                 return "[No readable text found in this image.]"
             return content

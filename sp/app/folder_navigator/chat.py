@@ -17,11 +17,13 @@ from sp.ai.context import (
 from sp.ai.manager import AIManager, ContextItem
 from sp.app.ui.ai_chat_panel import AIChatPanel, AIChatStore, ContextCandidate
 from sp.app import config
-from sp.rag.attachment_text import extract_attachment_text
+from sp.rag.attachment_text import MAX_OFFICE_CONTEXT_CHARS, extract_attachment_text
 
 
 OCR_IMAGE_SUFFIXES = frozenset({".bmp", ".tif", ".tiff"})
-DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx"})
+DOCUMENT_SUFFIXES = frozenset({
+    ".pdf", ".docx", ".pptx", ".xls", ".xlsx", ".xlsm", ".xlsb", ".ods",
+})
 MAX_READ_BYTES = 256 * 1024
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
@@ -328,7 +330,7 @@ class FolderChatPanel(AIChatPanel):
         if path.suffix.casefold() in DOCUMENT_SUFFIXES:
             if path.stat().st_size > MAX_ATTACHMENT_BYTES:
                 raise ValueError(f"Selected document is too large: {page_ref}")
-            content = extract_attachment_text(path)
+            content = extract_attachment_text(path, max_chars=MAX_OFFICE_CONTEXT_CHARS)
             if not content:
                 raise ValueError(f"Could not extract text from {page_ref}")
             return content

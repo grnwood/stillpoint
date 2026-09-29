@@ -123,6 +123,61 @@ def test_folder_context_includes_utf16_text_but_skips_binary(tmp_path, monkeypat
     panel.close()
 
 
+def test_folder_chat_extracts_office_files_for_any_chat_server(tmp_path, monkeypatch, qapp):
+    docx = pytest.importorskip("docx")
+    pptx = pytest.importorskip("pptx")
+    pytest.importorskip("python_calamine")
+    xlsxwriter = pytest.importorskip("xlsxwriter")
+
+    root = tmp_path / "root"
+    root.mkdir()
+    document_path = root / "report.docx"
+    document = docx.Document()
+    document.add_paragraph("Quarterly narrative")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Region"
+    table.cell(0, 1).text = "North"
+    document.save(document_path)
+
+    slides_path = root / "briefing.pptx"
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    box = slide.shapes.add_textbox(0, 0, 2_000_000, 500_000)
+    box.text = "Launch roadmap"
+    slide.shapes.add_table(1, 2, 0, 500_000, 2_000_000, 500_000).table.cell(0, 0).text = "Milestone"
+    presentation.save(slides_path)
+
+    workbook_path = root / "budget.xlsx"
+    workbook = xlsxwriter.Workbook(str(workbook_path))
+    first = workbook.add_worksheet("Revenue")
+    first.write_row(0, 0, ["Region", "Amount"])
+    first.write_row(1, 0, ["West", 42])
+    second = workbook.add_worksheet("Costs")
+    second.write_row(0, 0, ["Expense", "Rent"])
+    workbook.close()
+
+    catalog = FolderCatalog(root)
+    catalog.upsert_paths([document_path, slides_path, workbook_path])
+    monkeypatch.setattr(folder_chat, "folder_chat_database", lambda _root: tmp_path / "chat.db")
+    panel = folder_chat.FolderChatPanel(
+        root, lambda q, s: catalog.candidates(q, s),
+        lambda q, s: catalog.directory_candidates(q, s), lambda _p: None,
+    )
+    assert set(panel._list_context_pages("/")) == {
+        "/report.docx", "/briefing.pptx", "/budget.xlsx",
+    }
+    for path in (document_path, slides_path, workbook_path):
+        assert panel.add_path_to_context(path)
+    prompt = panel._build_context_prompt("Summarize")
+    assert "Quarterly narrative" in prompt
+    assert "Region | North" in prompt
+    assert "Launch roadmap" in prompt
+    assert "Milestone" in prompt
+    assert "Sheet: Revenue" in prompt and "Sheet: Costs" in prompt
+    assert "West | 42" in prompt
+    panel.close()
+
+
 def test_folder_context_waits_for_complete_catalog(tmp_path, monkeypatch, qapp):
     root = tmp_path / "root"
     root.mkdir()
