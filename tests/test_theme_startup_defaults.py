@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,46 @@ def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
     assert "; }}" not in tabs
     assert "QTreeView::item { padding: 3px 6px; border: 0" in tree
     assert "border-bottom-color" not in tree
+
+
+def test_vault_theme_refresh_restyles_existing_navigation_tree(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    theme_dir = tmp_path / ".stillpoint" / "themes"
+    theme_dir.mkdir(parents=True)
+    for name, background, text in (
+        ("midnight-blue.json", "#0f172a", "#dbeafe"),
+        ("ember-rose.json", "#211316", "#ffe3ea"),
+    ):
+        (theme_dir / name).write_text(
+            json.dumps(
+                {
+                    "page_editor_window": {"base": {"bg": background}},
+                    "markdown_editor": {"base": {"bg": background, "text": text}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    selected_theme = "midnight-blue.json"
+    monkeypatch.setattr(theme.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        theme.config,
+        "load_effective_theme_preference",
+        lambda: selected_theme,
+    )
+    monkeypatch.delenv("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE", raising=False)
+
+    theme.reload_theme()
+    main_window._apply_vault_accent_visuals()
+    assert "background: #0f172a" in main_window.tree_view.styleSheet()
+
+    selected_theme = "ember-rose.json"
+    theme.reload_theme()
+    main_window._apply_vault_accent_visuals()
+
+    assert "background: #211316" in main_window.tree_view.styleSheet()
+    assert "color: #ffe3ea" in main_window.tree_view.styleSheet()
 
 
 def _write_template_tree(root: Path) -> None:

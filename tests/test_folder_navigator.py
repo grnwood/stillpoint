@@ -723,7 +723,8 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
     )
     launch.launch(tmp_path)
     assert captured["command"][1:3] == ["-m", "sp.app.folder_navigator"]
-    assert captured["kwargs"]["env"]["SP_THEME_OVERRIDE"] == "midnight-blue.json"
+    assert captured["kwargs"]["env"]["SP_FOLDER_NAVIGATOR_THEME_OVERRIDE"] == "midnight-blue.json"
+    assert "SP_THEME_OVERRIDE" not in captured["kwargs"]["env"]
     assert captured["kwargs"]["env"]["SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT"] == str(
         tmp_path / "vault"
     )
@@ -734,6 +735,27 @@ def test_child_process_is_detached(tmp_path, monkeypatch):
     monkeypatch.setattr(__import__("sys"), "frozen", True, raising=False)
     launch.launch(tmp_path)
     assert captured["command"][1] == "--folder-navigator"
+
+
+def test_child_folder_navigator_preserves_launching_vault_theme(tmp_path, monkeypatch):
+    from sp.app.folder_navigator import launch
+
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE", "ember-rose.json")
+    monkeypatch.setattr(
+        "sp.app.config.load_effective_theme_preference",
+        lambda: "midnight-blue.json",
+    )
+
+    launch.launch(tmp_path)
+
+    assert captured["kwargs"]["env"]["SP_FOLDER_NAVIGATOR_THEME_OVERRIDE"] == "ember-rose.json"
 
 
 def test_folder_breadcrumb_launches_when_no_instance_is_open(qapp, tmp_path, monkeypatch):

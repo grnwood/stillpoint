@@ -19938,7 +19938,7 @@ class MainWindow(QMainWindow):
         )
         effective_tree_accent = self._effective_tree_accent_color()
         tree_style = tree_view_stylesheet(
-            self.tree_view,
+            QApplication.instance(),
             accent_color=effective_tree_accent,
         ) + "QTreeView::branch { width: 16px; height: 16px; }"
         if arrow_closed and arrow_open:

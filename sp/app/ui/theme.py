@@ -80,7 +80,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def _load_theme() -> dict[str, Any]:
     global _THEME_CACHE, _THEME_CACHE_PATH
     theme_name = (
-        os.environ.get("SP_THEME_OVERRIDE")
+        os.environ.get("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE")
         or config.load_effective_theme_preference()
     )
     path = _resolve_theme_path(theme_name)

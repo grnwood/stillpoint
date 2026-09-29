@@ -37,7 +37,14 @@ def launch(root: Path) -> subprocess.Popen:
     env = os.environ.copy()
     try:
         from sp.app.config import get_active_vault, load_effective_theme_preference
-        env["SP_THEME_OVERRIDE"] = load_effective_theme_preference()
+        # This override belongs only to the detached Folder Navigator. A generic
+        # environment override can leak back into StillPoint and outrank the
+        # active vault's own theme preference.
+        env.pop("SP_THEME_OVERRIDE", None)
+        env["SP_FOLDER_NAVIGATOR_THEME_OVERRIDE"] = (
+            os.environ.get("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE")
+            or load_effective_theme_preference()
+        )
         active_vault = get_active_vault()
         if active_vault:
             env["SP_FOLDER_NAVIGATOR_STILLPOINT_VAULT"] = active_vault

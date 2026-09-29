@@ -58,6 +58,27 @@ def test_theme_load_resolves_effective_preference_once(monkeypatch) -> None:
     assert calls == 1
 
 
+def test_regular_app_ignores_legacy_folder_navigator_theme_override(monkeypatch) -> None:
+    monkeypatch.setenv("SP_THEME_OVERRIDE", "midnight-blue.json")
+    monkeypatch.delenv("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE", raising=False)
+    monkeypatch.setattr(
+        theme.config,
+        "load_effective_theme_preference",
+        lambda: "ember-rose.json",
+    )
+    resolved = []
+    monkeypatch.setattr(
+        theme,
+        "_resolve_theme_path",
+        lambda theme_name=None: resolved.append(theme_name) or theme.default_theme_path(),
+    )
+
+    theme.reload_theme()
+    theme._load_theme()
+
+    assert resolved == ["ember-rose.json"]
+
+
 def test_homebase_user_info_refresh_is_non_blocking(main_window, monkeypatch, qapp) -> None:
     request_started = threading.Event()
     allow_response = threading.Event()
