@@ -1399,6 +1399,15 @@ def save_enable_ai_chats(enabled: bool) -> None:
     _update_global_config({"enable_ai_chats": bool(enabled)})
 
 
+def load_enable_folder_navigator_chat() -> bool:
+    """Return whether external Folder Navigator windows may show AI chat."""
+    return bool(_read_global_config().get("enable_folder_navigator_chat", False))
+
+
+def save_enable_folder_navigator_chat(enabled: bool) -> None:
+    _update_global_config({"enable_folder_navigator_chat": bool(enabled)})
+
+
 def load_global_enable_ai_agents() -> bool:
     """Return global enablement for AI Agents (default False)."""
     payload = _read_global_config()

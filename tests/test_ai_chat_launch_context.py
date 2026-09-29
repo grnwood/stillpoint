@@ -109,7 +109,7 @@ def test_open_chat_for_page_attaches_page_context(monkeypatch) -> None:
     assert calls == [
         ("new_chat", None),
         ("set_current_page", "/PageA/PageA.md"),
-        ("ensure_context_page_ref", ("/PageA/PageA.md", True)),
+        ("ensure_context_page_ref", ("/PageA/PageA.md", False)),
     ]
 
 

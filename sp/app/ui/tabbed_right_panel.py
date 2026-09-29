@@ -69,6 +69,7 @@ class TabbedRightPanel(QWidget):
         ai_chat_font_size: int = 13,
         http_client: Optional[httpx.Client] = None,
         auth_prompt=None,
+        editor_context_provider=None,
     ) -> None:
         super().__init__(parent)
         
@@ -79,6 +80,7 @@ class TabbedRightPanel(QWidget):
         self.ai_chat_index = None
         self._ai_chat_font_size = self._clamp_ai_font(ai_chat_font_size)
         self._http_client = http_client
+        self._editor_context_provider = editor_context_provider
         self._remote_mode = False
         self._current_page_path: Optional[Path] = None
         self._current_relative_path: Optional[str] = None
@@ -651,6 +653,7 @@ class TabbedRightPanel(QWidget):
         if self.ai_chat_panel:
             return
         self.ai_chat_panel = AIChatPanel(font_size=self._ai_chat_font_size, api_client=self._http_client)
+        self.ai_chat_panel.set_editor_context_provider(self._editor_context_provider)
         self.tabs.addTab(self.ai_chat_panel, "AI Chat")
         self.ai_chat_index = self.tabs.indexOf(self.ai_chat_panel)
         self.ai_chat_panel.chatNavigateRequested.connect(self._emit_chat_navigation)

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Optional
 import httpx
 from PySide6 import QtCore
 
-from .ai_api import build_api_request
+from .ai_api import build_api_request, is_unsupported_vision_response, with_vision_images
 from .path_utils import colon_to_path, ensure_root_colon_link, normalize_link_target, path_to_colon
 from sp.app import config
 
@@ -142,7 +142,8 @@ Available tools:
 
 If the user says "add", "append", or "edit", prefer vault.write with mode="append". If the page name is ambiguous, search for the page and ask the user to pick one.
 When appending without an explicit page name, default to the current editor page or the chat page; if both exist and differ, ask the user to choose.
-Only call tools the user explicitly asked for. Do not call daily.open unless the user asked about today's journal or daily page.
+Use vault.read for pages or folders the user explicitly attaches as chat context.
+Only call other tools the user explicitly asked for. Do not call daily.open unless the user asked about today's journal or daily page.
 For a child of today's journal page, call daily.open first, then pass its returned path
 unchanged as parent_path to vault.create_child. Never construct a child path by appending
 the journal page filename yourself.
@@ -1736,6 +1737,7 @@ class AgentToolChatWorker(QtCore.QThread):
     toolMessage = QtCore.Signal(str)
     finalMessage = QtCore.Signal(str)
     failed = QtCore.Signal(str)
+    visionFallback = QtCore.Signal()
 
     def __init__(
         self,
@@ -1744,6 +1746,8 @@ class AgentToolChatWorker(QtCore.QThread):
         client: httpx.Client,
         user_prompt: str,
         context: dict,
+        vision_images: Optional[list[str]] = None,
+        ocr_fallback_system_prompt: Optional[str] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1751,6 +1755,8 @@ class AgentToolChatWorker(QtCore.QThread):
         self._client = client
         self._user_prompt = user_prompt
         self._context = context or {}
+        self._vision_images = vision_images or []
+        self._ocr_fallback_system_prompt = ocr_fallback_system_prompt
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -1761,6 +1767,23 @@ class AgentToolChatWorker(QtCore.QThread):
             self._config.server_config, messages, self._config.model, stream=False
         )
         resp = httpx.post(url, json=payload, headers=headers, timeout=timeout, verify=verify)
+        if (
+            self._vision_images and self._ocr_fallback_system_prompt
+            and is_unsupported_vision_response(resp)
+        ):
+            messages[0] = {"role": "system", "content": self._ocr_fallback_system_prompt}
+            for message in messages:
+                if message.get("role") == "user" and isinstance(message.get("content"), list):
+                    message["content"] = next(
+                        (part.get("text", "") for part in message["content"] if part.get("type") == "text"), ""
+                    )
+                    break
+            self._vision_images = []
+            self.visionFallback.emit()
+            _, _, _, _, payload = build_api_request(
+                self._config.server_config, messages, self._config.model, stream=False
+            )
+            resp = httpx.post(url, json=payload, headers=headers, timeout=timeout, verify=verify)
         resp.raise_for_status()
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
@@ -1798,6 +1821,8 @@ class AgentToolChatWorker(QtCore.QThread):
                     ),
                 },
             ]
+            if self._vision_images:
+                messages = with_vision_images(messages, self._vision_images)
             for _ in range(self._config.max_steps):
                 if self._cancel_requested:
                     self.failed.emit("Cancelled")

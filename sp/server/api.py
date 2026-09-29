@@ -3116,6 +3116,74 @@ def file_read(payload: FilePathPayload) -> dict:
     return {"content": content, "rev": rev, "mtime_ns": mtime_ns}
 
 
+@app.post("/api/context/page")
+def context_page(payload: FilePathPayload) -> dict:
+    """Read a selected page without creating a missing page as file/read can."""
+    root = vault_state.get_root()
+    try:
+        if any(part.startswith(".") for part in Path(payload.path.lstrip("/")).parts):
+            raise FileAccessError("Hidden vault files are not chat context")
+        target = files._resolve_page_for_read(files._resolve(root, payload.path))
+        if not target.is_file() or target.suffix.lower() not in PAGE_SUFFIXES:
+            raise FileNotFoundError(target)
+        return {"content": target.read_text(encoding="utf-8")}
+    except FileAccessError as exc:
+        _raise_file_http(400, f"Context page blocked for {payload.path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Context page not found for {payload.path}", exc)
+    except UnicodeDecodeError as exc:
+        _raise_file_http(422, f"Context page is not UTF-8 text: {payload.path}", exc)
+
+
+@app.post("/api/attachment/text")
+def attachment_text(payload: FilePathPayload) -> dict:
+    """Extract bounded text from a vault attachment for explicit chat context."""
+    root = vault_state.get_root()
+    try:
+        if any(part.startswith(".") for part in Path(payload.path.lstrip("/")).parts):
+            raise FileAccessError("Hidden vault files are not chat context")
+        target = files._resolve(root, payload.path)
+        is_page_file = target.suffix.lower() in PAGE_SUFFIXES and target.stem == target.parent.name
+        if not target.is_file() or is_page_file:
+            raise FileNotFoundError(target)
+        if target.stat().st_size > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Attachment is too large for chat context")
+        from sp.rag.attachment_text import extract_attachment_text
+
+        content = extract_attachment_text(target)
+        if not content.strip():
+            raise HTTPException(status_code=422, detail="No readable text found in attachment")
+        return {"content": content[:16000], "truncated": len(content) > 16000}
+    except FileAccessError as exc:
+        _raise_file_http(400, f"Attachment blocked for {payload.path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Attachment not found for {payload.path}", exc)
+
+
+@app.post("/api/attachment/image")
+def attachment_image(payload: FilePathPayload) -> dict:
+    """Return a bounded selected vault image as a data URL for vision chat."""
+    from sp.ai.context import MAX_VISION_IMAGE_BYTES, image_data_url
+
+    root = vault_state.get_root()
+    try:
+        if any(part.startswith(".") for part in Path(payload.path.lstrip("/")).parts):
+            raise FileAccessError("Hidden vault files are not chat context")
+        target = files._resolve(root, payload.path)
+        if not target.is_file():
+            raise FileNotFoundError(target)
+        if target.stat().st_size > MAX_VISION_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Image is too large for vision context")
+        try:
+            return {"data_url": image_data_url(target.name, target.read_bytes())}
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FileAccessError as exc:
+        _raise_file_http(400, f"Image blocked for {payload.path}", exc)
+    except FileNotFoundError as exc:
+        _raise_file_http(404, f"Image not found for {payload.path}", exc)
+
+
 @app.get("/api/file/raw")
 def file_raw(path: str) -> FileResponse:
     root = _get_vault_root()
@@ -5892,8 +5960,14 @@ def delete_files(request: Request, payload: AttachmentDeletePayload) -> dict:
     return {"ok": True, "deleted": deleted}
 
 
+def _require_legacy_vector_context() -> None:
+    if os.environ.get("SP_ENABLE_LEGACY_VECTOR_CONTEXT", "").strip().lower() not in {"1", "true", "yes"}:
+        raise HTTPException(status_code=404, detail="Legacy vector context is disabled")
+
+
 @app.post("/vector/add")
 def vector_add(payload: VectorAddPayload) -> dict:
+    _require_legacy_vector_context()
     root = _get_vault_root()
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="Text must not be empty")
@@ -5907,6 +5981,7 @@ def vector_add(payload: VectorAddPayload) -> dict:
 
 @app.post("/vector/remove")
 def vector_remove(payload: VectorRemovePayload) -> dict:
+    _require_legacy_vector_context()
     root = _get_vault_root()
     try:
         vector_manager.delete_text(root, payload.page_ref, payload.kind, payload.attachment_name)
@@ -5927,6 +6002,7 @@ def _chunk_to_dict(chunk: RetrievedChunk) -> dict:
 
 @app.post("/vector/query")
 def vector_query(payload: VectorQueryPayload) -> dict:
+    _require_legacy_vector_context()
     root = _get_vault_root()
     try:
         if payload.kind == "attachment":

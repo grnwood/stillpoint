@@ -60,3 +60,31 @@ def build_api_request(server_config: dict, messages: List[dict], model: str, str
 
     payload = {"model": model, "messages": messages, "stream": bool(stream)}
     return url, headers, verify, timeout, payload
+
+
+def with_vision_images(messages: List[dict], data_urls: list[str]) -> List[dict]:
+    """Put explicitly attached images alongside the latest user message."""
+    if not data_urls:
+        return messages
+    result = [dict(message) for message in messages]
+    for message in reversed(result):
+        if message.get("role") == "user":
+            content = message.get("content") or ""
+            parts = [{"type": "text", "text": content}]
+            parts.extend({"type": "image_url", "image_url": {"url": url}} for url in data_urls)
+            message["content"] = parts
+            return result
+    raise ValueError("Vision context requires a user message")
+
+
+def is_unsupported_vision_response(response: httpx.Response) -> bool:
+    """Retry with OCR only when the provider rejects image input."""
+    if response.status_code not in {400, 404, 415, 422, 501}:
+        return False
+    try:
+        detail = response.text.lower()[:4000]
+    except httpx.ResponseNotRead:
+        return False
+    return any(word in detail for word in ("image", "vision", "multimodal")) or (
+        "content" in detail and any(word in detail for word in ("string", "text only", "unsupported"))
+    )

@@ -54,7 +54,6 @@ from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import (
     AIChatPanel,
     ApiWorker,
-    VectorAPIClient,
     resolve_operations_server_and_model,
 )
 from .date_insert_dialog import DateInsertDialog
@@ -288,12 +287,8 @@ class TaskPanel(QWidget):
         self._ai_copy_btn = None
         self._ai_markdown_view = None
         self._ai_title_label = None
-        self._task_context_dirty = True
-        self._task_index_version = config.get_task_index_version()
-        self._task_context_initialized = False
         self._ai_progress = None
         self._http_client = None
-        self._vector_api = VectorAPIClient(None)
         self._calendar_feature_enabled = config.load_feature_calendar_enabled()
         self._triage_mode = False
         self._triage_items: list[dict] = []
@@ -1680,6 +1675,9 @@ class TaskPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self._ai_summary_panel = self._build_ai_summary_panel()
         self._ai_chat_panel = AIChatPanel(font_size=self._font_size, api_client=self._http_client)
+        self._ai_chat_panel.set_editor_context_provider(
+            lambda path: self._build_task_context_text() if path == "tasks" else None
+        )
         self._ai_chat_panel.set_preserve_session_on_reset(True, keep_context=True)
         self._ai_chat_panel.chatNavigateRequested.connect(self._on_ai_chat_navigate_requested)
         if self.vault_root:
@@ -1687,7 +1685,7 @@ class TaskPanel(QWidget):
                 self._ai_chat_panel.set_vault_root(self.vault_root)
             except Exception:
                 pass
-        self._set_ai_chat_enabled(self._task_context_initialized)
+        self._set_ai_chat_enabled(config.has_active_vault())
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self._ai_summary_panel)
         splitter.addWidget(self._ai_chat_panel)
@@ -1718,13 +1716,11 @@ class TaskPanel(QWidget):
             self._set_ai_markdown("Open a vault to view task insights.")
             return
         self._ensure_task_chat_ready()
+        self._set_ai_chat_enabled(True)
         stored = config.load_task_ai_summary() or ""
         if stored.strip():
             self._set_ai_markdown(stored)
-            self._task_context_initialized = True
-            self._set_ai_chat_enabled(True)
         else:
-            self._set_ai_chat_enabled(self._task_context_initialized)
             self._set_ai_markdown("Click AI button to generate AI summary.")
 
     def _set_ai_markdown(self, text: str) -> None:
@@ -1885,7 +1881,7 @@ class TaskPanel(QWidget):
         if enabled:
             self._ai_chat_panel.setToolTip("")
         else:
-            self._ai_chat_panel.setToolTip("Initialize task AI to enable chat.")
+            self._ai_chat_panel.setToolTip("Open a vault to chat about tasks.")
 
     def _build_task_context_text(self) -> str:
         tasks = self._fetch_tasks_api(
@@ -2044,22 +2040,6 @@ class TaskPanel(QWidget):
             count += 1
         return "\n".join(lines).strip()
 
-    def _ensure_task_context_indexed(self, force: bool) -> bool:
-        if not config.has_active_vault():
-            return False
-        if not self._vector_api or not self._vector_api.available():
-            return False
-        if not force and not self._task_context_dirty:
-            return True
-        text = self._build_task_context_text()
-        if not text:
-            return False
-        ok = self._vector_api.index_text("tasks", text, "page", timeout=60.0)
-        if ok:
-            self._task_context_dirty = False
-            self._task_context_initialized = True
-        return ok
-
     def _resolve_ai_server_and_model(self) -> Optional[tuple[dict, str]]:
         return resolve_operations_server_and_model()
 
@@ -2104,14 +2084,6 @@ class TaskPanel(QWidget):
                 self._ai_progress = None
             self._set_ai_markdown("Configure an AI server to generate a summary.")
             return
-        if not self._ensure_task_context_indexed(force=True):
-            if self._ai_progress:
-                self._ai_progress.close()
-                self._ai_progress = None
-            self._set_ai_markdown("Unable to index task context.")
-            return
-        self._set_ai_chat_enabled(True)
-        self._ensure_task_chat_ready()
         task_context = self._build_task_insight_input()
         if not task_context.strip():
             if self._ai_progress:
@@ -2119,6 +2091,8 @@ class TaskPanel(QWidget):
                 self._ai_progress = None
             self._set_ai_markdown("No tasks available to summarize.")
             return
+        self._set_ai_chat_enabled(True)
+        self._ensure_task_chat_ready()
         server_config, model = server_model
         messages = [
             {"role": "system", "content": prompt_text},
@@ -3341,8 +3315,6 @@ class TaskPanel(QWidget):
         self._last_keyboard_task_path = None
         self._last_keyboard_task_line = None
         self._focus_after_removed_task = None
-        self._task_context_dirty = True
-        self._task_context_initialized = False
         self._update_filter_indicator()
 
     def _refresh_tags(self) -> None:
@@ -3508,10 +3480,6 @@ class TaskPanel(QWidget):
             task = current_item.data(0, Qt.UserRole)
             if task:
                 self._remember_task_selection(task)
-        current_version = config.get_task_index_version()
-        if current_version != self._task_index_version:
-            self._task_index_version = current_version
-            self._task_context_dirty = True
         self._update_actionable_tooltip()
         self._update_date_filter_button()
         self._configure_task_columns()
@@ -4440,14 +4408,12 @@ class TaskPanel(QWidget):
     def set_vault_root(self, vault_root: str) -> None:
         """Set vault root for task filtering preferences."""
         self.vault_root = vault_root
-        self._task_context_dirty = True
-        self._task_context_initialized = False
         self._last_refresh_signature = None
         self._invalidate_api_task_requests()
         # Applying the preference performs the initial refresh. It must happen
         # after invalidation so that request is part of the current generation.
         self._apply_show_future_preference()
-        self._set_ai_chat_enabled(False)
+        self._set_ai_chat_enabled(bool(vault_root))
         if self._ai_chat_panel:
             try:
                 self._ai_chat_panel.set_vault_root(vault_root)
@@ -4459,7 +4425,6 @@ class TaskPanel(QWidget):
         self._invalidate_api_task_requests()
         self._api_task_result_queue = queue.Queue()
         self._http_client = http_client
-        self._vector_api = VectorAPIClient(http_client)
         if self._ai_chat_panel:
             try:
                 self._ai_chat_panel.set_api_client(http_client)

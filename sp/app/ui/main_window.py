@@ -2799,6 +2799,7 @@ class MainWindow(QMainWindow):
             ai_chat_font_size=ai_font_size,
             http_client=self.http,
             auth_prompt=self._prompt_remote_login,
+            editor_context_provider=self._chat_editor_context_text,
         )
         try:
             self.right_panel.setMinimumWidth(0)
@@ -17828,6 +17829,7 @@ class MainWindow(QMainWindow):
         
         # No tabbed or detached window - create a new detached window
         panel = AIChatPanel(font_size=self.right_panel.get_ai_font_size(), api_client=self.http)
+        panel.set_editor_context_provider(self._chat_editor_context_text)
         panel.set_font_family(config.load_ai_chat_font_family())
         local_vault_root = self._local_vault_root()
         if local_vault_root:
@@ -19162,6 +19164,14 @@ class MainWindow(QMainWindow):
             except Exception:
                 return ""
         return ""
+
+    def _chat_editor_context_text(self, rel_path: str) -> Optional[str]:
+        """Return the live page only when it is the page open in this editor."""
+        if not rel_path or not self.current_path:
+            return None
+        if self._normalize_editor_path(rel_path) != self._normalize_editor_path(self.current_path):
+            return None
+        return self._get_editor_text_for_path(rel_path)
     
     def _normalize_editor_path(self, path: str) -> str:
         """Normalize incoming page refs (folder, colon, bare) to file path with leading slash."""

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import RLock
-from typing import Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
-from sp.rag.chroma import ChromaRAG
 from sp.rag.index import RetrievedChunk
+
+if TYPE_CHECKING:
+    from sp.rag.chroma import ChromaRAG
 
 
 class VectorIndexManager:
@@ -21,6 +23,8 @@ class VectorIndexManager:
         with self._lock:
             client = self._instances.get(key)
             if client is None:
+                from sp.rag.chroma import ChromaRAG
+
                 client = ChromaRAG(key)
                 self._instances[key] = client
             return client

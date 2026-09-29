@@ -7,7 +7,7 @@ from PIL import Image, UnidentifiedImageError
 import pytesseract
 
 
-SUPPORTED_OCR_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tiff"})
+SUPPORTED_OCR_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"})
 
 
 @dataclass(slots=True)
