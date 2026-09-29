@@ -300,6 +300,22 @@ def test_folder_navigator_shows_chat_when_enabled(tmp_path, monkeypatch, qapp):
     window = Window(root)
     window.settings_path = tmp_path / "navigator-settings.json"
     assert window.chat_panel is not None
+    assert window.chat_tabs.count() == 1
+    assert window.chat_tabs.tabText(0) == "AI Chat"
+    assert window.chat_container.currentWidget() is window.chat_tabs
+    assert window.chat_visibility_action.shortcut().toString() == "Ctrl+Shift+N"
+
+    window.chat_toggle_button.click()
+    assert not window.chat_visible
+    assert window.chat_container.currentWidget() is window.chat_minibar
+    assert window.chat_minibar_tab.tabText(0) == "AI Chat"
+    assert window.chat_visibility_action.isChecked() is False
+
+    window.chat_minibar_tab.tabBarClicked.emit(0)
+    assert window.chat_visible
+    assert window.chat_container.currentWidget() is window.chat_tabs
+    assert window.chat_visibility_action.isChecked() is True
+
     window._chat_add_path(note)
     assert "Folder content" in window.chat_panel._build_context_prompt("Summarize")
     window.close()

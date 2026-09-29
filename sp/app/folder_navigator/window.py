@@ -2337,6 +2337,9 @@ class Window(QMainWindow):
         self.splitter.addWidget(self.rail)
         self.splitter.addWidget(self.content)
         self.chat_panel = None
+        self.chat_container = None
+        self.chat_tabs = None
+        self.chat_minibar = None
         self.chat_visible = False
         self.chat_error = None
         from sp.app import config
@@ -2348,7 +2351,19 @@ class Window(QMainWindow):
                 self.chat_panel = None
         splitter_sizes = self.state.get("splitter", [300, 800])
         if self.chat_panel is not None and len(splitter_sizes) == 2:
-            splitter_sizes = [splitter_sizes[0], max(300, splitter_sizes[1] - 420), 420]
+            chat_width = self._chat_last_width if self.chat_visible else 28
+            splitter_sizes = [
+                splitter_sizes[0],
+                max(300, splitter_sizes[1] - chat_width),
+                chat_width,
+            ]
+        elif self.chat_panel is not None and len(splitter_sizes) == 3:
+            splitter_sizes = list(splitter_sizes)
+            desired_chat_width = self._chat_last_width if self.chat_visible else 28
+            if (self.chat_visible and splitter_sizes[2] < 100) or not self.chat_visible:
+                reclaimed = splitter_sizes[2] - desired_chat_width
+                splitter_sizes[1] = max(1, splitter_sizes[1] + reclaimed)
+                splitter_sizes[2] = desired_chat_width
         self.splitter.setSizes(splitter_sizes)
         self._rail_last_width = max(
             160, int(self.state.get("rail_width", self.state.get("splitter", [300])[0]))
@@ -2486,6 +2501,10 @@ class Window(QMainWindow):
             editor_has_focus = focused is self.tabs or (
                 focused is not None and self.tabs.isAncestorOf(focused)
             )
+            chat_has_focus = self.chat_tabs is not None and (
+                focused is self.chat_tabs
+                or (focused is not None and self.chat_tabs.isAncestorOf(focused))
+            )
         except RuntimeError:
             return
         accent = getattr(self, "_folder_identity_accent", "#4f8f8b")
@@ -2511,6 +2530,15 @@ class Window(QMainWindow):
             + "QTabWidget#folderNavigatorEditors QTabBar::tab:!selected { color: "
             + f"{self.tabs.palette().color(QPalette.Text).name()}; }}"
         )
+        if self.chat_tabs is not None:
+            self.chat_tabs.setStyleSheet(
+                tab_widget_stylesheet(
+                    self.chat_tabs,
+                    object_name="folderNavigatorChatRail",
+                    accent_color=accent,
+                    pane_border=accent if chat_has_focus else neutral,
+                )
+            )
 
     @staticmethod
     def _encode_qt_state(value):
@@ -2605,6 +2633,7 @@ class Window(QMainWindow):
         )
         self.state.update(splitter=splitter_sizes, rail=self.rail.currentIndex(),
                           chat_visible=self.chat_visible,
+                          chat_width=getattr(self, "_chat_last_width", 420),
                           rail_visible=not self.rail.isHidden(),
                           rail_width=self._rail_last_width,
                           pinned=[str(t.path) for t in self.all_tabs() if t.pinned],
@@ -2826,7 +2855,12 @@ class Window(QMainWindow):
         self.rail_visibility_action.setCheckable(True)
         self.rail_visibility_action.setChecked(not self.rail.isHidden())
         if self.chat_panel is not None:
-            self.chat_visibility_action = add(view_menu, "Show AI Chat", self._toggle_chat_panel)
+            self.chat_visibility_action = add(
+                view_menu,
+                "Show AI Chat",
+                self._toggle_chat_panel,
+                "Ctrl+Shift+N",
+            )
             self.chat_visibility_action.setCheckable(True)
             self.chat_visibility_action.setChecked(self.chat_visible)
         self.table_preview_action = add(view_menu, "Table Preview", self._reopen_active_table)
@@ -2948,7 +2982,13 @@ class Window(QMainWindow):
         else:
             self.rail.show()
             width = min(self._rail_last_width, max(160, total - 160))
-            self.splitter.setSizes([width, max(1, total - width)])
+            if self.chat_container is not None:
+                chat_width = self.chat_container.width()
+                self.splitter.setSizes(
+                    [width, max(1, total - width - chat_width), chat_width]
+                )
+            else:
+                self.splitter.setSizes([width, max(1, total - width)])
             if self.active_tab() is None:
                 self.tree.setFocus(Qt.OtherFocusReason)
         self.rail_visibility_action.blockSignals(True)
@@ -3045,9 +3085,56 @@ class Window(QMainWindow):
             parent=self,
         )
         self.chat_panel.chatNavigateRequested.connect(self._chat_navigate)
-        self.splitter.addWidget(self.chat_panel)
+        self.chat_tabs = QTabWidget()
+        self.chat_tabs.setObjectName("folderNavigatorChatRail")
+        self.chat_tabs.addTab(self.chat_panel, "AI Chat")
+
+        self.chat_toggle_button = QToolButton()
+        self.chat_toggle_button.setAutoRaise(True)
+        self.chat_toggle_button.setFocusPolicy(Qt.NoFocus)
+        self.chat_toggle_button.clicked.connect(
+            lambda *_: self._toggle_chat_panel(False)
+        )
+        self.chat_tabs.setCornerWidget(self.chat_toggle_button, Qt.TopRightCorner)
+
+        self.chat_minibar_tab = QTabBar()
+        self.chat_minibar_tab.setObjectName("folderNavigatorChatMinibarTab")
+        self.chat_minibar_tab.setDocumentMode(True)
+        self.chat_minibar_tab.setExpanding(False)
+        self.chat_minibar_tab.setUsesScrollButtons(False)
+        self.chat_minibar_tab.setFocusPolicy(Qt.NoFocus)
+        self.chat_minibar_tab.setElideMode(Qt.ElideNone)
+        self.chat_minibar_tab.setShape(QTabBar.RoundedEast)
+        self.chat_minibar_tab.addTab("AI Chat")
+        self.chat_minibar_tab.tabBarClicked.connect(
+            lambda _index: self._toggle_chat_panel(True)
+        )
+        self.chat_minibar_tab.setStyleSheet(
+            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
+            "QTabBar::tab:selected { background: palette(alternate-base); }"
+        )
+        self.chat_minibar_toggle = QToolButton()
+        self.chat_minibar_toggle.setAutoRaise(True)
+        self.chat_minibar_toggle.setFocusPolicy(Qt.NoFocus)
+        self.chat_minibar_toggle.clicked.connect(
+            lambda *_: self._toggle_chat_panel(True)
+        )
+        self.chat_minibar = QWidget()
+        minibar_layout = QVBoxLayout(self.chat_minibar)
+        minibar_layout.setContentsMargins(0, 0, 0, 0)
+        minibar_layout.setSpacing(0)
+        minibar_layout.setAlignment(Qt.AlignTop)
+        minibar_layout.addWidget(self.chat_minibar_toggle)
+        minibar_layout.addWidget(self.chat_minibar_tab)
+
+        self.chat_container = QStackedWidget()
+        self.chat_container.setObjectName("folderNavigatorChatContainer")
+        self.chat_container.addWidget(self.chat_tabs)
+        self.chat_container.addWidget(self.chat_minibar)
+        self.splitter.addWidget(self.chat_container)
+        self._chat_last_width = max(220, int(self.state.get("chat_width", 420)))
         self.chat_visible = bool(self.state.get("chat_visible", True))
-        self.chat_panel.setVisible(self.chat_visible)
+        self._set_chat_panel_visible(self.chat_visible, focus=False, persist=False)
 
     def _chat_file_candidates(self, query: str, scope: Path) -> list[Path]:
         if self.catalog_db is not None:
@@ -3106,15 +3193,57 @@ class Window(QMainWindow):
                 self.tree.scrollTo(index)
 
     def _toggle_chat_panel(self, visible: bool) -> None:
+        self._set_chat_panel_visible(visible, focus=bool(visible), persist=True)
+
+    def _set_chat_panel_visible(
+        self, visible: bool, *, focus: bool, persist: bool
+    ) -> None:
+        if self.chat_panel is None or self.chat_container is None:
+            return
+        visible = bool(visible)
+        widths = self.splitter.sizes()
+        total = sum(widths) or max(1, self.splitter.width())
+        if visible:
+            self.chat_container.setMinimumWidth(28)
+            self.chat_container.setMaximumWidth(16777215)
+            self.chat_container.setCurrentWidget(self.chat_tabs)
+            if len(widths) == 3 and (not self.chat_visible or widths[2] < 100):
+                target = min(self._chat_last_width, max(220, total - 380))
+                self.splitter.setSizes(
+                    [widths[0], max(1, total - widths[0] - target), target]
+                )
+        else:
+            if len(widths) == 3 and self.chat_visible and widths[2] >= 100:
+                self._chat_last_width = widths[2]
+            self.chat_container.setCurrentWidget(self.chat_minibar)
+            self.chat_container.setFixedWidth(28)
+            if len(widths) == 3:
+                self.splitter.setSizes(
+                    [widths[0], max(1, total - widths[0] - 28), 28]
+                )
+        self.chat_visible = visible
+        self._update_chat_toggle_icons()
+        action = getattr(self, "chat_visibility_action", None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(False)
+        self.state["chat_visible"] = visible
+        self.state["chat_width"] = self._chat_last_width
+        if visible and focus:
+            self.chat_panel.focus_input()
+        if persist:
+            self._persist()
+
+    def _update_chat_toggle_icons(self) -> None:
         if self.chat_panel is None:
             return
-        self.chat_visible = bool(visible)
-        self.chat_panel.setVisible(self.chat_visible)
-        if self.chat_visible:
-            widths = self.splitter.sizes()
-            if len(widths) == 3 and widths[2] < 100:
-                self.splitter.setSizes([widths[0], max(300, widths[1] - 420), 420])
-            self.chat_panel.focus_input()
+        collapse_icon = self.style().standardIcon(QStyle.SP_ArrowRight)
+        expand_icon = self.style().standardIcon(QStyle.SP_ArrowLeft)
+        self.chat_toggle_button.setIcon(collapse_icon)
+        self.chat_toggle_button.setToolTip("Hide AI chat sidebar")
+        self.chat_minibar_toggle.setIcon(expand_icon)
+        self.chat_minibar_toggle.setToolTip("Show AI chat sidebar")
 
     def all_tabs(self):
         return [self.tabs.widget(i) for i in range(self.tabs.count())]
