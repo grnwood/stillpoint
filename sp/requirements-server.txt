@@ -17,8 +17,12 @@ chromadb>=0.3.26
 tokenizers>=0.15
 onnxruntime>=1.17
 
-# Optional: attachment text extraction (enable if you move OCR/parsing to server)
-# pdfminer.six>=20221105
-# python-docx>=0.8.11
-# pytesseract>=0.3.10
-# Pillow>=10.0
+# Attachment text extraction for chat context
+pdfminer.six>=20221105
+python-docx>=0.8.11
+python-pptx>=1.0,<2
+python-calamine>=0.8,<0.9
+
+# OCR fallback for image attachments (also requires the Tesseract executable)
+pytesseract>=0.3.10
+Pillow>=10.0

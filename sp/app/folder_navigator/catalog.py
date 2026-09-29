@@ -271,6 +271,8 @@ class FolderCatalog:
         *,
         include_excluded: bool = False,
         limit: int = 1200,
+        suffixes: Iterable[str] | None = None,
+        exclude_suffixes: Iterable[str] | None = None,
     ) -> list[Path]:
         """Return a bounded fuzzy-compatible candidate set from cached rows."""
         try:
@@ -285,6 +287,12 @@ class FolderCatalog:
             parameters.append(prefix)
         if not include_excluded:
             clauses.append("hidden = 0 AND ignored = 0")
+        for values, exclude in ((suffixes, False), (exclude_suffixes, True)):
+            if values:
+                patterns = [f"%{_like_escape(suffix.lower())}" for suffix in values]
+                matches = " OR ".join("lower(name) LIKE ? ESCAPE '\\'" for _ in patterns)
+                clauses.append(f"NOT ({matches})" if exclude else f"({matches})")
+                parameters.extend(patterns)
         normalized = query.strip().casefold()
         if normalized:
             # A subsequence LIKE keeps the SQL result compatible with the

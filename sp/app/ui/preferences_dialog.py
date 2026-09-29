@@ -556,6 +556,10 @@ class PreferencesDialog(QDialog):
         self.enable_ai_chats_checkbox.setChecked(config.load_global_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
         ai_layout.addWidget(self.enable_ai_chats_checkbox)
+        self.enable_folder_navigator_chat_checkbox = QCheckBox("Enable AI chat in Folder Navigator")
+        self.enable_folder_navigator_chat_checkbox.setChecked(config.load_enable_folder_navigator_chat())
+        self.enable_folder_navigator_chat_checkbox.stateChanged.connect(self._warn_restart_required)
+        ai_layout.addWidget(self.enable_folder_navigator_chat_checkbox)
         self.manage_server_btn = QPushButton("Manage Servers")
         self.manage_server_btn.clicked.connect(self._open_manage_server_dialog)
         ai_layout.addWidget(self.manage_server_btn)
@@ -1254,6 +1258,7 @@ class PreferencesDialog(QDialog):
         if log_enabled("editor_markdown"):
             print(f"[DEBUG] Saving enable_ai_chats: {self.enable_ai_chats_checkbox.isChecked()}")
         config.save_enable_ai_chats(self.enable_ai_chats_checkbox.isChecked())
+        config.save_enable_folder_navigator_chat(self.enable_folder_navigator_chat_checkbox.isChecked())
         config.save_enable_ai_agents(self.enable_ai_agents_checkbox.isChecked())
         config.save_seed_agents_workspace(self.seed_agents_workspace_checkbox.isChecked())
         config.save_local_filesystem_quiet_seconds(self.local_filesystem_quiet_spin.value())

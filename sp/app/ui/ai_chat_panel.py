@@ -14,7 +14,7 @@ import html
 import re
 import traceback
 import threading
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import httpx
 from PySide6 import QtCore, QtWidgets
@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel, QSizePolicy
 from PySide6.QtSvg import QSvgRenderer
-from sp.rag.attachment_text import extract_attachment_text
+from sp.rag.attachment_text import MAX_OFFICE_CONTEXT_CHARS, extract_attachment_text
 from markdown import markdown
 import html
 
@@ -43,6 +43,10 @@ import html
 from sp.app import config, config as stillpoint_config
 from .theme import apply_menu_theme, theme_color, theme_value
 from sp.ai.manager import AIManager, ContextItem
+from sp.ai.context import (
+    MAX_VISION_IMAGES_PER_REQUEST, MAX_VISION_PAYLOAD_CHARS,
+    VISION_IMAGE_SUFFIXES, build_context_prompt, image_data_url,
+)
 from .agent_tool_loop import (
     AgentLoopConfig,
     AgentToolChatWorker,
@@ -50,15 +54,17 @@ from .agent_tool_loop import (
     build_vault_key,
     parse_agent_message,
 )
-from .ai_api import build_api_request, build_auth_headers, build_httpx_timeout, compose_url
-from sp.rag.index import RetrievedChunk
+from .ai_api import (
+    build_api_request, build_auth_headers, build_httpx_timeout, compose_url,
+    is_unsupported_vision_response, with_vision_images,
+)
 from .path_utils import path_to_colon, ensure_root_colon_link
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.logging_flags import log_enabled
 
 AI_CHAT_COLOR = "\033[34m"
-CHROMA_COLOR = "\033[33m"
+CONTEXT_COLOR = "\033[33m"
 LLM_RESPONSE_COLOR = "\033[32m"
 LOG_RESET = "\033[0m"
 AI_TIMEOUT_SECONDS = 5.0
@@ -74,9 +80,9 @@ def _log_ai_chat(message: str) -> None:
     if log_enabled("ai_chat"):
         print(_color_text(message, AI_CHAT_COLOR))
 
-def _log_vector(message: str) -> None:
-    if log_enabled("rag_vector"):
-        print(_color_text(f"[Vector] {message}", CHROMA_COLOR))
+def _log_context(message: str) -> None:
+    if log_enabled("ai_chat"):
+        print(_color_text(f"[Context] {message}", CONTEXT_COLOR))
 
 
 def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
@@ -96,90 +102,6 @@ def _log_llm_response(message: str) -> None:
     if log_enabled("ai_chat"):
         print(_color_text(message, LLM_RESPONSE_COLOR))
 
-
-class VectorAPIClient:
-    """Light wrapper around the server's vector endpoints."""
-
-    def __init__(self, client: Optional[httpx.Client]) -> None:
-        self._client = client
-
-    def available(self) -> bool:
-        if self._client is None:
-            return False
-        try:
-            return not self._client.is_closed
-        except Exception:
-            return True
-
-    def index_text(
-        self,
-        page_ref: str,
-        text: str,
-        kind: str,
-        attachment: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ) -> bool:
-        if not self.available():
-            return False
-        payload = {
-            "page_ref": page_ref,
-            "text": text,
-            "kind": kind,
-            "attachment_name": attachment,
-        }
-        try:
-            resp = self._client.post("/vector/add", json=payload, timeout=timeout or AI_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            return True
-        except (httpx.HTTPError, RuntimeError) as exc:
-            _log_vector(f"Failed to index {page_ref}: {exc}")
-            return False
-
-    def delete_text(self, page_ref: str, kind: str, attachment: Optional[str] = None, timeout: Optional[float] = None) -> bool:
-        if not self.available():
-            return False
-        payload = {
-            "page_ref": page_ref,
-            "kind": kind,
-            "attachment_name": attachment,
-        }
-        try:
-            resp = self._client.post("/vector/remove", json=payload, timeout=timeout or AI_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            return True
-        except (httpx.HTTPError, RuntimeError) as exc:
-            _log_vector(f"Failed to delete {page_ref}: {exc}")
-            return False
-
-    def query(self, query_text: str, page_refs: Optional[List[str]] = None, limit: int = 4) -> List[RetrievedChunk]:
-        return self._query_internal(query_text, page_refs=page_refs, limit=limit, kind="page")
-
-    def query_attachments(self, query_text: str, attachment_names: list[str], limit: int = 4) -> List[RetrievedChunk]:
-        return self._query_internal(query_text, attachment_names=attachment_names, limit=limit, kind="attachment")
-
-    def _query_internal(
-        self,
-        query_text: str,
-        limit: int = 4,
-        kind: str = "page",
-        page_refs: Optional[List[str]] = None,
-        attachment_names: Optional[list[str]] = None,
-    ) -> List[RetrievedChunk]:
-        if not self.available():
-            return []
-        payload = {"query_text": query_text, "kind": kind, "limit": limit}
-        if page_refs:
-            payload["page_refs"] = page_refs
-        if attachment_names:
-            payload["attachment_names"] = attachment_names
-        try:
-            resp = self._client.post("/vector/query", json=payload, timeout=AI_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            data = resp.json()
-            return [RetrievedChunk(**item) for item in data.get("chunks", [])]
-        except (httpx.HTTPError, RuntimeError) as exc:
-            _log_vector(f"Failed to query context: {exc}")
-            return []
 
 # Shared config (aligns with slipstream/ask-server/ask-client.py defaults)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -345,6 +267,7 @@ class ContextCandidate:
     page_ref: str
     label: str
     attachment_name: Optional[str] = None
+    display_label: Optional[str] = None
 
 
 class ClickableLabel(QtWidgets.QLabel):
@@ -1529,13 +1452,20 @@ class ApiWorker(QtCore.QThread):
     chunk = QtCore.Signal(str)
     finished = QtCore.Signal(str)
     failed = QtCore.Signal(str)
+    visionFallback = QtCore.Signal()
 
-    def __init__(self, server_config: dict, messages: List[dict], model: str, stream: bool = True, parent=None):
+    def __init__(
+        self, server_config: dict, messages: List[dict], model: str, stream: bool = True,
+        parent=None, *, vision_images: Optional[list[str]] = None,
+        ocr_fallback_messages: Optional[List[dict]] = None,
+    ):
         super().__init__(parent)
         self.server_config = server_config
         self.messages = messages
         self.model = model
         self.stream = stream
+        self.vision_images = vision_images or []
+        self.ocr_fallback_messages = ocr_fallback_messages
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -1544,56 +1474,69 @@ class ApiWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            url, headers, verify, timeout, payload = build_api_request(
-                self.server_config, self.messages, self.model, stream=self.stream
-            )
-            _log_ai_chat(f"[AIChat][request] url={url} headers={headers} payload={payload}")
-            if self.stream:
-                with httpx.stream(
-                    "POST", url, json=payload, headers=headers, timeout=timeout, verify=verify
-                ) as resp:
-                    resp.raise_for_status()
-                    full = ""
-                    for line in resp.iter_lines():
-                        if self._cancel_requested:
-                            self.failed.emit("Cancelled")
-                            return
-                        if not line:
-                            continue
-                        decoded = line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
-                        #print(f"[AIChat][stream raw] {decoded}")
-                        if decoded.startswith("data: "):
-                            json_data = decoded[len("data: ") :]
-                            if json_data.strip() == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(json_data)
-                                if "choices" in data and data["choices"]:
-                                    delta = data["choices"][0].get("delta", {})
-                                    if "content" in delta:
-                                        chunk = delta["content"]
-                                        full += chunk
-                                        self.chunk.emit(chunk)
-                            except Exception:
-                                continue
-                    if full:
-                        _log_ai_chat(f"[AIChat][stream complete] {full}")
-                        self.finished.emit(full)
+            attempts = [(with_vision_images(self.messages, self.vision_images), bool(self.vision_images))]
+            if self.vision_images and self.ocr_fallback_messages:
+                attempts.append((self.ocr_fallback_messages, False))
+            for messages, using_vision in attempts:
+                url, headers, verify, timeout, payload = build_api_request(
+                    self.server_config, messages, self.model, stream=self.stream
+                )
+                _log_ai_chat(
+                    f"[AIChat][request] url={url} model={self.model} "
+                    f"messages={len(messages)} vision_images={len(self.vision_images) if using_vision else 0}"
+                )
+                try:
+                    if self.stream:
+                        with httpx.stream(
+                            "POST", url, json=payload, headers=headers, timeout=timeout, verify=verify
+                        ) as resp:
+                            if resp.is_error:
+                                resp.read()
+                            resp.raise_for_status()
+                            full = ""
+                            for line in resp.iter_lines():
+                                if self._cancel_requested:
+                                    self.failed.emit("Cancelled")
+                                    return
+                                if not line:
+                                    continue
+                                decoded = line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                if decoded.startswith("data: "):
+                                    json_data = decoded[len("data: ") :]
+                                    if json_data.strip() == "[DONE]":
+                                        break
+                                    try:
+                                        data = json.loads(json_data)
+                                        if "choices" in data and data["choices"]:
+                                            delta = data["choices"][0].get("delta", {})
+                                            if "content" in delta:
+                                                chunk = delta["content"]
+                                                full += chunk
+                                                self.chunk.emit(chunk)
+                                    except Exception:
+                                        continue
+                            if full:
+                                self.finished.emit(full)
+                                return
+                        # Some compatible servers do not stream; retry without streaming.
+                    with httpx.Client(timeout=timeout, verify=verify) as client:
+                        resp = client.post(url, json=payload, headers=headers)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        choice = (data.get("choices") or [{}])[0]
+                        content = ""
+                        if isinstance(choice, dict):
+                            message = choice.get("message") or {}
+                            if isinstance(message, dict):
+                                content = message.get("content", "")
+                        self.finished.emit(content or str(data))
                         return
-                # Fallback to non-stream if no chunks were handled
-            with httpx.Client(timeout=timeout, verify=verify) as client:
-                resp = client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                _log_ai_chat(f"[AIChat][response status] {resp.status_code}")
-                _log_ai_chat(f"[AIChat][response body] {resp.text}")
-                data = resp.json()
-                choice = (data.get("choices") or [{}])[0]
-                content = ""
-                if isinstance(choice, dict):
-                    message = choice.get("message") or {}
-                    if isinstance(message, dict):
-                        content = message.get("content", "")
-                self.finished.emit(content or str(data))
+                except httpx.HTTPStatusError as exc:
+                    if using_vision and len(attempts) > 1 and is_unsupported_vision_response(exc.response):
+                        _log_context("Model server rejected image input; retrying with OCR text.")
+                        self.visionFallback.emit()
+                        continue
+                    raise
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -1890,10 +1833,13 @@ class AIChatPanel(QtWidgets.QWidget):
             return True
         return False
 
-    def __init__(self, parent=None, font_size=13, api_client: Optional[httpx.Client] = None):
+    def __init__(
+        self, parent=None, font_size=13, api_client: Optional[httpx.Client] = None,
+        store: Optional[AIChatStore] = None,
+    ):
         super().__init__(parent)
         self.vault_root = None
-        self.store = AIChatStore()
+        self.store = store if store is not None else AIChatStore()
         self.server_manager = ServerManager()
         self.current_server = self.server_manager.get_server(self.server_manager.get_active_server_name())
         self.messages = []
@@ -1936,8 +1882,8 @@ class AIChatPanel(QtWidgets.QWidget):
         self._context_popup_width: Optional[int] = None
         self._quick_choice_overlay: Optional[QuickChoiceOverlay] = None
         self._page_title_link_cache: dict[str, Optional[str]] = {}
-        self._vector_api = VectorAPIClient(api_client)
         self._api_client = api_client
+        self._editor_context_provider: Optional[Callable[[str], Optional[str]]] = None
         self._chat_history: List[str] = []
         self._chat_history_index: Optional[int] = None
         self._unsent_buffer: str = ""
@@ -2090,8 +2036,8 @@ class AIChatPanel(QtWidgets.QWidget):
         context_layout = QtWidgets.QHBoxLayout(self.context_bar)
         context_layout.setContentsMargins(4, 2, 4, 2)
         self.context_refresh_btn = QtWidgets.QToolButton()
-        self.context_refresh_btn.setText("↺")
-        self.context_refresh_btn.setToolTip("Refresh current page context")
+        self.context_refresh_btn.setText("+ Page")
+        self.context_refresh_btn.setToolTip("Attach current page to this chat")
         self.context_refresh_btn.setAutoRaise(True)
         self.context_refresh_btn.clicked.connect(self._refresh_current_page_context)
         context_layout.addWidget(self.show_chats_btn)
@@ -2441,9 +2387,6 @@ class AIChatPanel(QtWidgets.QWidget):
         session_id = self.current_session_id
         if self._preserve_session_on_reset:
             if not self._reset_keep_context:
-                if self._context_items:
-                    for item in list(self._context_items):
-                        self._delete_context_source(item)
                 if self.ai_manager and self._current_ai_conversation_id:
                     try:
                         self.ai_manager.clear_context_items(self._current_ai_conversation_id)
@@ -2474,9 +2417,6 @@ class AIChatPanel(QtWidgets.QWidget):
             _log_ai_chat("[AIChat][reset] Finished _reset_chat_history")
             return
 
-        if self._context_items:
-            for item in list(self._context_items):
-                self._delete_context_source(item)
         if self.ai_manager and self._current_ai_conversation_id:
             try:
                 self.ai_manager.clear_context_items(self._current_ai_conversation_id)
@@ -2585,12 +2525,16 @@ class AIChatPanel(QtWidgets.QWidget):
         elif item_type == "chat":
             generate_summary = menu.addAction("Generate Chat Summary")
             generate_summary.triggered.connect(lambda: self._request_chat_summary_title(data))
+            self._add_chat_context_menu_actions(menu, data)
             menu.addSeparator()
             rename_chat = menu.addAction("Rename Chat")
             rename_chat.triggered.connect(lambda: self._rename_chat(data))
             delete_chat = menu.addAction("Delete Chat")
             delete_chat.triggered.connect(lambda: self._delete_chat_session(data))
         menu.exec(self.chat_tree.viewport().mapToGlobal(pos))
+
+    def _add_chat_context_menu_actions(self, menu: QtWidgets.QMenu, data: dict) -> None:
+        _ = menu, data
 
     def _delete_selected_tree_item(self) -> None:
         if self._has_active_operation():
@@ -3201,7 +3145,15 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         cursor_rect = self.input_edit.cursorRect()
         point = self.input_edit.mapToGlobal(cursor_rect.bottomLeft())
-        self._context_overlay.show_for(trigger, list(candidates), point)
+        self._context_overlay.show_for(
+            trigger, list(candidates), point,
+            candidate_provider=self._context_candidate_provider(trigger),
+        )
+
+    def _context_candidate_provider(self, trigger: str):
+        """Optionally resolve picker results as the user types a filter."""
+        _ = trigger
+        return None
 
     def _candidates_for_trigger(self, trigger: str) -> List[ContextCandidate]:
         if trigger == "@":
@@ -3255,7 +3207,10 @@ class AIChatPanel(QtWidgets.QWidget):
             if item.kind == "page" and item.page_ref:
                 pages.add(item.page_ref)
             elif item.kind == "page-tree" and item.page_ref:
-                pages.update(self._pages_under_tree(item.page_ref))
+                try:
+                    pages.update(self._list_context_pages(item.page_ref)[:30])
+                except httpx.HTTPError:
+                    pass
         return pages
 
     def _pages_under_tree(self, tree_ref: str) -> set[str]:
@@ -3277,6 +3232,17 @@ class AIChatPanel(QtWidgets.QWidget):
         return result
 
     def _attachments_in_page(self, page_ref: str) -> list[Path]:
+        if self._api_client_available():
+            try:
+                response = self._api_client.get("/files/", params={"page_path": page_ref})
+                response.raise_for_status()
+                return [
+                    Path(str(entry.get("attachment_path") or entry.get("stored_path")))
+                    for entry in response.json().get("attachments", [])
+                    if entry.get("attachment_path") or entry.get("stored_path")
+                ]
+            except (httpx.HTTPError, ValueError):
+                return []
         if not self.vault_root:
             return []
         root = Path(self.vault_root)
@@ -3300,93 +3266,164 @@ class AIChatPanel(QtWidgets.QWidget):
                 continue
             if entry.name.startswith("."):
                 continue
-            if entry.suffix.lower() in PAGE_SUFFIXES:
+            if entry.suffix.lower() in PAGE_SUFFIXES and entry.stem == entry.parent.name:
                 continue
             if ".stillpoint" in entry.parts:
                 continue
             attachments.append(entry)
         return attachments
 
-    def _rag_context_pages(self) -> List[str]:
-        pages: Set[str] = set()
-        if self.current_page_path:
-            pages.add(self.current_page_path)
-        for item in self._context_items:
-            if item.kind == "page" and item.page_ref:
-                pages.add(item.page_ref)
-            elif item.kind == "page-tree" and item.page_ref:
-                pages.update(self._pages_under_tree(item.page_ref))
-            elif item.kind == "attachment" and item.page_ref:
-                pages.add(item.page_ref)
-        return sorted(pages)
-
-    def _rag_context_chunks(self, query: str) -> List[RetrievedChunk]:
-        if not self._vector_api.available():
-            return []
-        pages = self._rag_context_pages()
-        if not pages:
-            return []
-        attachment_labels = [
-            f"{item.page_ref}/{item.attachment_name}"
-            for item in self._context_items
-            if item.kind == "attachment" and item.attachment_name
-        ]
-        _log_vector(
-            f"querying for query={query!r} "
-            f"pages={pages} attachments={attachment_labels or 'none'}"
-        )
-        try:
-            limit = 4
-            attachment_names = [label.split("/")[-1] for label in attachment_labels]
-            deduped: list[RetrievedChunk] = []
-            seen: Set[tuple[str, Optional[str]]] = set()
-            if attachment_names:
-                attachment_chunks = self._vector_api.query_attachments(query, attachment_names, limit=limit)
-                for chunk in attachment_chunks:
-                    key = (chunk.page_ref, chunk.attachment_name)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    deduped.append(chunk)
-                    if len(deduped) >= limit:
-                        break
-            if len(deduped) < limit:
-                general_chunks = self._vector_api.query(query, page_refs=pages, limit=limit * 2)
-                for chunk in general_chunks:
-                    key = (chunk.page_ref, chunk.attachment_name)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    deduped.append(chunk)
-                    if len(deduped) >= limit:
-                        break
-            if deduped:
-                _log_vector(f"Retrieved {len(deduped)} context chunks for query.")
-                for chunk in deduped:
-                    score = f"{chunk.score:.3f}" if chunk.score is not None else "n/a"
-                    attachment = chunk.attachment_name or "page"
-                    _log_vector(f"chunk {chunk.page_ref} ({attachment}) score={score}")
-            return deduped
-        except Exception as exc:
-            _log_vector(f"Failed to query context: {exc}")
-            return []
-
     def _build_context_prompt(self, query: str) -> Optional[str]:
-        chunks = self._rag_context_chunks(query)
-        if not chunks:
-            return None
-        lines: List[str] = ["Vault context relevant to the query:"]
-        for chunk in chunks:
-            snippet = re.sub(r"\s+", " ", chunk.content.strip())
-            if len(snippet) > 2000:
-                snippet = snippet[:2000].rstrip() + "…"
-            label = chunk.page_ref
-            if chunk.attachment_name:
-                label += f" ({chunk.attachment_name})"
-            lines.append(f"{label}: {snippet}")
-        prompt_text = "\n".join(lines)
-        _log_vector(f"rag retrieved:\n{prompt_text}")
-        return "\n".join(lines)
+        _ = query
+        return build_context_prompt(
+            self._context_items,
+            read_page=self._read_context_page,
+            list_pages=self._list_context_pages,
+            read_attachment=self._read_context_attachment,
+            agent_mode=self._should_use_agent_tools(),
+            source_label=self._context_source_label(),
+            file_label=self._context_file_label(),
+            folder_listing_complete=self._folder_listing_complete(),
+        )
+
+    def _context_source_label(self) -> str:
+        return "StillPoint vault"
+
+    def _context_file_label(self) -> str:
+        return "Page"
+
+    def _folder_listing_complete(self) -> bool:
+        return True
+
+    def _build_context_payload(self, query: str) -> tuple[Optional[str], list[str], Optional[str]]:
+        """Build the normal prompt, vision images, and an OCR-only retry prompt."""
+        images = [
+            item for item in self._context_items
+            if item.kind == "attachment" and item.attachment_name
+            and Path(item.attachment_name).suffix.lower() in VISION_IMAGE_SUFFIXES
+        ]
+        if not images:
+            return self._build_context_prompt(query), [], None
+        if len(images) > MAX_VISION_IMAGES_PER_REQUEST:
+            raise ValueError(
+                f"Select at most {MAX_VISION_IMAGES_PER_REQUEST} images for one request. "
+                "Remove images from chat context before sending."
+            )
+        data_urls = []
+        payload_chars = 0
+        for item in images:
+            try:
+                data_url = self._read_context_image(item.page_ref, item.attachment_name)
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                _log_context(f"Could not prepare vision image; using OCR text: {exc}")
+                return self._build_context_prompt(query), [], None
+            payload_chars += len(data_url)
+            if payload_chars > MAX_VISION_PAYLOAD_CHARS:
+                raise ValueError(
+                    "Selected images exceed the 20 MiB request limit. "
+                    "Remove images from chat context before sending."
+                )
+            data_urls.append(data_url)
+        prompt = build_context_prompt(
+            self._context_items,
+            read_page=self._read_context_page,
+            list_pages=self._list_context_pages,
+            read_attachment=self._read_context_attachment,
+            agent_mode=self._should_use_agent_tools(),
+            vision_images=True,
+            source_label=self._context_source_label(),
+            file_label=self._context_file_label(),
+            folder_listing_complete=self._folder_listing_complete(),
+        )
+        def read_ocr_fallback(page_ref: str, attachment_name: str) -> str:
+            try:
+                return self._read_context_attachment(page_ref, attachment_name)
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+                if Path(attachment_name).suffix.lower() not in VISION_IMAGE_SUFFIXES:
+                    raise
+                return "[OCR text unavailable for this image.]"
+
+        fallback = build_context_prompt(
+            self._context_items,
+            read_page=self._read_context_page,
+            list_pages=self._list_context_pages,
+            read_attachment=read_ocr_fallback,
+            agent_mode=self._should_use_agent_tools(),
+            source_label=self._context_source_label(),
+            file_label=self._context_file_label(),
+            folder_listing_complete=self._folder_listing_complete(),
+        )
+        return prompt, data_urls, fallback
+
+    def set_editor_context_provider(self, provider: Optional[Callable[[str], Optional[str]]]) -> None:
+        self._editor_context_provider = provider
+
+    def _read_context_page(self, page_ref: str) -> str:
+        if self._editor_context_provider:
+            live = self._editor_context_provider(page_ref)
+            if live is not None:
+                return live
+        if self._api_client_available():
+            response = self._api_client.post("/api/context/page", json={"path": page_ref})
+            response.raise_for_status()
+            return str(response.json().get("content", ""))
+        if self.vault_root:
+            target = (Path(self.vault_root) / page_ref.lstrip("/")).resolve()
+            root = Path(self.vault_root).resolve()
+            if target.is_relative_to(root) and target.is_file():
+                return target.read_text(encoding="utf-8")
+        raise RuntimeError(f"Could not read selected page {page_ref}")
+
+    def _list_context_pages(self, tree_ref: str) -> list[str]:
+        if self._api_client_available():
+            response = self._api_client.get(
+                "/api/vault/tree", params={"path": tree_ref, "recursive": True, "include_journal": True}
+            )
+            response.raise_for_status()
+            result: list[str] = []
+            def collect(nodes: list[dict]) -> None:
+                for node in nodes:
+                    page = str(node.get("open_path") or "")
+                    if page:
+                        result.append(page)
+                    collect(node.get("children") or [])
+            collect(response.json().get("tree") or [])
+            return result
+        return sorted(self._pages_under_tree(tree_ref))
+
+    def _read_context_attachment(self, page_ref: str, attachment_name: str) -> str:
+        attachment_ref = f"{Path(page_ref).parent.as_posix()}/{attachment_name}"
+        if self._api_client_available():
+            response = self._api_client.post("/api/attachment/text", json={"path": attachment_ref})
+            if getattr(response, "status_code", 200) == 422 and Path(attachment_name).suffix.lower() in VISION_IMAGE_SUFFIXES:
+                return "[No readable text found in this image.]"
+            response.raise_for_status()
+            data = response.json()
+            content = str(data.get("content", ""))
+            if data.get("truncated"):
+                content += "\n[Attachment shortened by the vault server.]"
+            return content
+        path = self._attachment_path(page_ref, attachment_name)
+        if path:
+            content = extract_attachment_text(path, max_chars=MAX_OFFICE_CONTEXT_CHARS)
+            if not content and Path(attachment_name).suffix.lower() in VISION_IMAGE_SUFFIXES:
+                return "[No readable text found in this image.]"
+            return content
+        raise RuntimeError(f"Could not read selected attachment {attachment_ref}")
+
+    def _read_context_image(self, page_ref: str, attachment_name: str) -> str:
+        attachment_ref = f"{Path(page_ref).parent.as_posix()}/{attachment_name}"
+        if self._api_client_available():
+            response = self._api_client.post("/api/attachment/image", json={"path": attachment_ref})
+            response.raise_for_status()
+            data_url = response.json().get("data_url")
+            if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+                raise ValueError("Vault server did not return a usable image")
+            return data_url
+        path = self._attachment_path(page_ref, attachment_name)
+        if path:
+            return image_data_url(attachment_name, path.read_bytes())
+        raise RuntimeError(f"Could not read selected image {attachment_ref}")
 
     def _record_chat_history(self, content: str) -> None:
         if not content:
@@ -3467,7 +3504,6 @@ class AIChatPanel(QtWidgets.QWidget):
             else:
                 name = candidate.attachment_name or ""
                 self.ai_manager.add_context_attachment(conv_id, candidate.page_ref, name)
-            self._index_context_item(trigger, candidate)
         except Exception:
             return
         self._refresh_context_items()
@@ -3527,7 +3563,6 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         try:
             self.ai_manager.delete_context_item(item.id)
-            self._delete_context_source(item)
         except Exception:
             pass
         self._refresh_context_items()
@@ -3547,27 +3582,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self._refresh_context_item(item)
 
     def _refresh_context_item(self, item: ContextItem) -> None:
-        if not self._vector_api.available():
-            _log_vector(f"Skipping refresh for context {item.page_ref} ({item.kind}) — client unavailable.")
-            return
-        self._set_status(
-            "Refreshing context...",
-            theme_value("ai_chat_panel.status.warning", "#f6c343"),
-        )
-        try:
-            self._delete_context_source(item)
-        except Exception:
-            pass
-        trigger = {"page": "@", "page-tree": "#"}.get(item.kind, "^")
-        candidate = ContextCandidate(
-            page_ref=item.page_ref,
-            label=item.page_ref,
-            attachment_name=item.attachment_name,
-        )
-        self._index_context_item(trigger, candidate)
+        _ = item
+        self._set_status("Context is read fresh when you send.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
 
     def _refresh_current_page_context(self) -> None:
         if not self.current_page_path:
+            self._set_status("Open a page before attaching it.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
             return
         target = next(
             (
@@ -3578,96 +3598,29 @@ class AIChatPanel(QtWidgets.QWidget):
             None,
         )
         if target:
-            self._refresh_context_item(target)
+            self._set_status("Current page is already attached.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
             return
-        self.ensure_context_page_ref(self.current_page_path, index=True)
-
-    def _index_context_item(self, trigger: str, candidate: ContextCandidate) -> None:
-        if not self._vector_api.available():
-            _log_vector(f"Skipping indexing for context {candidate.page_ref} ({trigger}) — client unavailable.")
-            return
-        kind = {"@": "page", "#": "page-tree"}.get(trigger, "attachment")
-        _log_vector(f"Indexing {kind} context for {candidate.page_ref}")
-        self._set_status(
-            f"Indexing context: {kind}",
-            theme_value("ai_chat_panel.status.warning", "#f6c343"),
-        )
-        if trigger == "@":
-            text = self._read_page_text(candidate.page_ref)
-            self._vector_api.index_text(candidate.page_ref, text, kind="page")
-        elif trigger == "#":
-            for page in self._pages_under_tree(candidate.page_ref):
-                text = self._read_page_text(page)
-                self._vector_api.index_text(page, text, kind="page")
+        self.ensure_context_page_ref(self.current_page_path, index=False)
+        if self._context_matches_page(self.current_page_path):
+            self._set_status("Current page attached.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
         else:
-            if not candidate.attachment_name:
-                return
-            text = self._extract_attachment_text(candidate.page_ref, candidate.attachment_name)
-            if not text.strip():
-                return
-            attachment_path = self._attachment_path(candidate.page_ref, candidate.attachment_name)
-            _log_vector(
-                f"Indexing attachment {candidate.attachment_name or '<unnamed>'} "
-                f"for {candidate.page_ref} "
-                f"({attachment_path or 'path unavailable'})"
-            )
-            self._vector_api.index_text(candidate.page_ref, text, kind="attachment", attachment=candidate.attachment_name)
-        self._set_status(
-            "Context indexed.",
-            theme_value("ai_chat_panel.status.success", "#2ecc71"),
-        )
-
-    def _delete_context_source(self, item: ContextItem) -> None:
-        if not self._vector_api.available():
-            _log_vector(f"Skipping delete for context {item.page_ref} ({item.kind}) — client unavailable.")
-            return
-        if item.kind == "page" and item.page_ref:
-            _log_vector(f"Removing page context {item.page_ref}")
-            self._vector_api.delete_text(item.page_ref, kind="page")
-        elif item.kind == "page-tree" and item.page_ref:
-            pages = list(self._pages_under_tree(item.page_ref))
-            _log_vector(f"Removing tree context {item.page_ref} ({len(pages)} pages)")
-            for page in pages:
-                self._vector_api.delete_text(page, kind="page")
-        elif item.kind == "attachment" and item.page_ref and item.attachment_name:
-            _log_vector(f"Removing attachment context {item.page_ref} ({item.attachment_name})")
-            self._vector_api.delete_text(item.page_ref, kind="attachment", attachment=item.attachment_name)
-
-    def _read_page_text(self, page_ref: str) -> str:
-        if not self.vault_root:
-            return ""
-        page_path = Path(self.vault_root) / page_ref.lstrip("/")
-        if not page_path.exists():
-            candidate_md = page_path.with_suffix(PAGE_SUFFIX)
-            candidate_txt = page_path.with_suffix(LEGACY_SUFFIX)
-            if candidate_md.exists():
-                page_path = candidate_md
-            elif candidate_txt.exists():
-                page_path = candidate_txt
-            else:
-                return ""
-        try:
-            return page_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            return ""
-
-    def _extract_attachment_text(self, page_ref: str, attachment_name: str) -> str:
-        path = self._attachment_path(page_ref, attachment_name)
-        if not path or not path.exists():
-            return ""
-        _log_vector(f"Extracting text from attachment {path}")
-        return extract_attachment_text(path)
+            self._set_status("Could not attach the current page.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
 
     def _attachment_path(self, page_ref: str, attachment_name: str) -> Optional[Path]:
         if not self.vault_root:
             return None
-        base = Path(self.vault_root) / page_ref.lstrip("/")
+        root = Path(self.vault_root).resolve()
+        base = (root / page_ref.lstrip("/")).resolve()
+        if not base.is_relative_to(root):
+            return None
         if base.is_dir():
             folder = base
         else:
             folder = base.parent
-        candidate = folder / attachment_name
-        return candidate if candidate.exists() else None
+        candidate = (folder / attachment_name).resolve()
+        if not candidate.is_relative_to(root) or any(part.startswith(".") for part in candidate.relative_to(root).parts):
+            return None
+        return candidate if candidate.is_file() else None
 
     def _reload_context_index(self) -> None:
         if not self._api_client_available():
@@ -3697,7 +3650,7 @@ class AIChatPanel(QtWidgets.QWidget):
                 pages, trees = self._fetch_context_candidates_from_api()
                 result = (pages, trees, [])
             except Exception as exc:
-                _log_vector(f"Failed to build context index: {exc}")
+                _log_context(f"Failed to build context index: {exc}")
                 result = ([], [], [])
             QtCore.QTimer.singleShot(0, lambda r=result: finish(r))
 
@@ -4390,8 +4343,17 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self._ensure_active_chat():
             QtWidgets.QMessageBox.critical(self, "Chat", "Could not find or create a chat.")
             return
+        try:
+            context_prompt, vision_images, ocr_context_prompt = self._build_context_payload(content)
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, "Context unavailable", str(exc))
+            return
         if self._should_use_agent_tools():
-            self._start_agent_send(content, extra_system=extra_system, record_user=True)
+            self._start_agent_send(
+                content, extra_system=extra_system, record_user=True,
+                context_prompt=context_prompt, vision_images=vision_images,
+                ocr_context_prompt=ocr_context_prompt,
+            )
             return
         self.messages.append(("user", content))
         if self.current_session_id:
@@ -4412,7 +4374,6 @@ class AIChatPanel(QtWidgets.QWidget):
                 if role in {"user", "assistant"}
             ]
             merged_systems: List[str] = []
-            context_prompt = self._build_context_prompt(content)
             if context_prompt:
                 merged_systems.append(context_prompt)
             if self.current_system_prompt:
@@ -4422,6 +4383,11 @@ class AIChatPanel(QtWidgets.QWidget):
             if merged_systems:
                 blocks.insert(0, {"role": "system", "content": "\n\n".join(merged_systems)})
                 _log_ai_chat(f"[system prompt] sending {len(merged_systems)} system block(s); primary:\n{merged_systems[-1]}")
+            ocr_blocks = None
+            if vision_images and ocr_context_prompt:
+                ocr_systems = [block for block in (ocr_context_prompt, self.current_system_prompt, extra_system) if block]
+                ocr_blocks = [dict(block) for block in blocks]
+                ocr_blocks[0] = {"role": "system", "content": "\n\n".join(ocr_systems)}
             if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
                 try:
                     debug_payload = json.dumps(blocks, ensure_ascii=False, indent=2)
@@ -4429,8 +4395,12 @@ class AIChatPanel(QtWidgets.QWidget):
                     debug_payload = str(blocks)
                 anchor_index = len(self.messages) - 2 if len(self.messages) >= 2 else None
                 self._append_debug_message(f"LLM request:\n{debug_payload}", anchor_index=anchor_index)
-            self._api_worker = ApiWorker(self.current_server, blocks, self.model_combo.currentText(), stream=True)
+            self._api_worker = ApiWorker(
+                self.current_server, blocks, self.model_combo.currentText(), stream=True,
+                vision_images=vision_images, ocr_fallback_messages=ocr_blocks,
+            )
             self._api_worker.chunk.connect(lambda chunk, idx=assistant_index: self._handle_chunk(idx, chunk))
+            self._api_worker.visionFallback.connect(self._show_vision_fallback_notice)
             self._api_worker.finished.connect(lambda full, idx=assistant_index: self._handle_finished(idx, full))
             self._api_worker.failed.connect(self._handle_error)
             self._api_worker.start()
@@ -4511,7 +4481,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self._active_think_debug = {}
         self._active_tool_debug = None
 
-    def _start_agent_send(self, content: str, extra_system: Optional[str], record_user: bool) -> None:
+    def _start_agent_send(
+        self, content: str, extra_system: Optional[str], record_user: bool,
+        context_prompt: Optional[str] = None,
+        vision_images: Optional[list[str]] = None,
+        ocr_context_prompt: Optional[str] = None,
+    ) -> None:
         content = (content or "").strip()
         if not content:
             return
@@ -4550,7 +4525,12 @@ class AIChatPanel(QtWidgets.QWidget):
         self._agent_progress_lines = []
         self._render_messages()
 
-        context_prompt = self._build_context_prompt(content)
+        if context_prompt is None:
+            try:
+                context_prompt, vision_images, ocr_context_prompt = self._build_context_payload(content)
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                self._handle_agent_failed(f"Context unavailable: {exc}")
+                return
         merged_systems: List[str] = [DEFAULT_AGENT_SYSTEM_PROMPT]
         if context_prompt:
             merged_systems.append(context_prompt)
@@ -4559,6 +4539,12 @@ class AIChatPanel(QtWidgets.QWidget):
         if extra_system:
             merged_systems.append(extra_system)
         system_prompt = "\n\n".join([block for block in merged_systems if block])
+        ocr_system_prompt = None
+        if vision_images and ocr_context_prompt:
+            ocr_system_prompt = "\n\n".join(
+                block for block in (DEFAULT_AGENT_SYSTEM_PROMPT, ocr_context_prompt, self.current_system_prompt, extra_system)
+                if block
+            )
 
         config_obj = AgentLoopConfig(
             server_config=self.current_server,
@@ -4569,6 +4555,8 @@ class AIChatPanel(QtWidgets.QWidget):
             config=config_obj,
             client=self._api_client,
             user_prompt=content,
+            vision_images=vision_images,
+            ocr_fallback_system_prompt=ocr_system_prompt,
             context={
                 "current_path": self.current_page_path or "",
                 "chat_page_path": self._current_chat_path or "",
@@ -4580,12 +4568,16 @@ class AIChatPanel(QtWidgets.QWidget):
             },
         )
         self._agent_tool_worker.toolMessage.connect(self._handle_agent_tool_message)
+        self._agent_tool_worker.visionFallback.connect(self._show_vision_fallback_notice)
         self._agent_tool_worker.finalMessage.connect(self._handle_agent_final)
         self._agent_tool_worker.failed.connect(self._handle_agent_failed)
         self._agent_tool_worker.start()
         self.send_btn.setEnabled(False)
         self._set_status("Waiting for agent response…", "#f6c343")
         self._update_stop_button()
+
+    def _show_vision_fallback_notice(self) -> None:
+        self._append_app_message("This model could not accept the attached image; using OCR text instead.")
 
     def _update_agent_progress(self, line: str) -> None:
         if not line:
@@ -5260,15 +5252,6 @@ class AIChatPanel(QtWidgets.QWidget):
             conv_id = session.get("ai_conversation_id")
             if self.ai_manager and conv_id:
                 try:
-                    items = self.ai_manager.list_context_items(conv_id)
-                except Exception:
-                    items = []
-                for item in items:
-                    try:
-                        self._delete_context_source(item)
-                    except Exception:
-                        pass
-                try:
                     self.ai_manager.delete_conversation(conv_id)
                 except Exception:
                     pass
@@ -5631,15 +5614,6 @@ class AIChatPanel(QtWidgets.QWidget):
                     if not conv_id:
                         continue
                     try:
-                        items = self.ai_manager.list_context_items(conv_id)
-                    except Exception:
-                        items = []
-                    for item in items:
-                        try:
-                            self._delete_context_source(item)
-                        except Exception:
-                            pass
-                    try:
                         self.ai_manager.delete_conversation(conv_id)
                     except Exception:
                         pass
@@ -5778,7 +5752,7 @@ class AIChatPanel(QtWidgets.QWidget):
         self._new_chat()
         if rel_path:
             self.set_current_page(rel_path)
-            self.ensure_context_page_ref(rel_path, index=True)
+            self.ensure_context_page_ref(rel_path, index=False)
     def open_named_chat(self, name: str, folder_path: str = "/") -> None:
         """Open (and create if needed) a stable named chat under the given folder."""
         if self._has_active_operation():
@@ -5814,8 +5788,7 @@ class AIChatPanel(QtWidgets.QWidget):
             return
         try:
             self.ai_manager.add_context_page(self._current_ai_conversation_id, page_ref)
-            if index:
-                self._index_context_item("@", ContextCandidate(page_ref=page_ref, label=page_ref))
+            _ = index  # Compatibility with callers; context is read at send time.
         except Exception:
             return
         self._refresh_context_items()
@@ -5832,6 +5805,7 @@ class AIChatPanel(QtWidgets.QWidget):
     def _update_load_current_page_button(self) -> None:
         self.context_label.setText("Chat")
         self.context_bar.setVisible(True)
+        self.context_refresh_btn.setEnabled(bool(self.current_page_path))
     def get_active_chat_path(self) -> Optional[str]:
         """Return the folder path for the currently loaded chat session."""
         return self._current_chat_path
@@ -5880,8 +5854,7 @@ class AIChatPanel(QtWidgets.QWidget):
             pass
 
     def set_api_client(self, api_client: Optional[httpx.Client]) -> None:
-        """Update the shared HTTP client used for vector operations."""
-        self._vector_api = VectorAPIClient(api_client)
+        """Update the shared vault API client used to resolve context."""
         self._api_client = api_client
 
     def _api_client_available(self) -> bool:
@@ -5927,14 +5900,14 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self._api_client_available():
             return [], []
         try:
-            _log_vector("Fetching context tree from API for context picker.")
+            _log_context("Fetching context tree from API for context picker.")
             resp = self._api_client.get("/api/vault/tree", params={"path": "/", "recursive": "true"})
             resp.raise_for_status()
             payload = resp.json() or {}
             tree = payload.get("tree") or []
             return self._collect_candidates_from_tree(tree)
         except Exception as exc:
-            _log_vector(f"Failed to load context tree from API: {exc}")
+            _log_context(f"Failed to load context tree from API: {exc}")
             return [], []
         self._select_default_chat()
         self._update_load_current_page_button()
@@ -5966,10 +5939,15 @@ class ContextOverlay(QtWidgets.QFrame):
         layout.addWidget(self.list_widget)
         self._candidates: list[ContextCandidate] = []
         self._trigger: Optional[str] = None
+        self._candidate_provider: Optional[Callable[[str], list[ContextCandidate]]] = None
 
-    def show_for(self, trigger: str, candidates: list[ContextCandidate], position: QtCore.QPoint) -> None:
+    def show_for(
+        self, trigger: str, candidates: list[ContextCandidate], position: QtCore.QPoint,
+        candidate_provider: Optional[Callable[[str], list[ContextCandidate]]] = None,
+    ) -> None:
         self._trigger = trigger
         self._candidates = candidates
+        self._candidate_provider = candidate_provider
         self.filter_edit.clear()
         self._filter_items()
         self.adjustSize()
@@ -6003,10 +5981,12 @@ class ContextOverlay(QtWidgets.QFrame):
 
     def _filter_items(self) -> None:
         pattern = self.filter_edit.text().strip().lower()
+        if self._candidate_provider is not None:
+            self._candidates = self._candidate_provider(pattern)
         self.list_widget.clear()
         for candidate in self._candidates:
             searchable = f"{candidate.label} {candidate.page_ref}".lower()
-            if pattern and pattern not in searchable:
+            if pattern and self._candidate_provider is None and pattern not in searchable:
                 continue
             display = self._candidate_display_label(candidate)
             item = QtWidgets.QListWidgetItem(display)
@@ -6058,6 +6038,8 @@ class ContextOverlay(QtWidgets.QFrame):
         self.list_widget.setCurrentRow(next_row)
 
     def _candidate_display_label(self, candidate: ContextCandidate) -> str:
+        if candidate.display_label:
+            return candidate.display_label
         return self._label(candidate.page_ref, candidate.attachment_name)
 
     def _label(self, page_ref: str, attachment: Optional[str]) -> str:
@@ -6079,6 +6061,8 @@ class ContextListPopup(QtWidgets.QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        self.context_labeler: Optional[Callable[[ContextItem], str]] = None
+        self.kind_labels: Optional[dict[str, str]] = None
         self.setFrameShape(QtWidgets.QFrame.Box)
         self.setFrameShadow(QtWidgets.QFrame.Plain)
         layout = QtWidgets.QVBoxLayout(self)
@@ -6115,11 +6099,6 @@ class ContextListPopup(QtWidgets.QFrame):
         for item in items:
             row = self.table.rowCount()
             self.table.insertRow(row)
-            refresh_btn = QtWidgets.QToolButton()
-            refresh_btn.setText("↺")
-            refresh_btn.setToolTip("Refresh context")
-            refresh_btn.setAutoRaise(True)
-            refresh_btn.clicked.connect(lambda checked=False, tgt=item: self.refreshed.emit(tgt))
             delete_btn = QtWidgets.QToolButton()
             delete_btn.setText("✕")
             delete_btn.setToolTip("Remove context")
@@ -6129,7 +6108,6 @@ class ContextListPopup(QtWidgets.QFrame):
             actions_layout = QtWidgets.QHBoxLayout(actions)
             actions_layout.setContentsMargins(0, 0, 0, 0)
             actions_layout.setSpacing(4)
-            actions_layout.addWidget(refresh_btn)
             actions_layout.addWidget(delete_btn)
             self.table.setCellWidget(row, 0, actions)
             name_item = QtWidgets.QTableWidgetItem(self._context_label(item))
@@ -6169,11 +6147,15 @@ class ContextListPopup(QtWidgets.QFrame):
         super().show()
 
     def _context_label(self, item: ContextItem) -> str:
+        if self.context_labeler is not None:
+            return self.context_labeler(item)
         if item.kind == "attachment" and item.attachment_name:
             return f"{item.page_ref}/{item.attachment_name}"
         return item.page_ref
 
     def _kind_label(self, kind: str) -> str:
+        if self.kind_labels is not None:
+            return self.kind_labels.get(kind, kind.title())
         return {"page": "Page", "page-tree": "Tree", "attachment": "File"}.get(kind, kind.title())
 
     def _handle_cell_activated(self, row: int, column: int) -> None:

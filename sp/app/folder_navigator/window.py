@@ -69,6 +69,7 @@ DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
 DIAGRAM_SUFFIXES = {".puml", ".mmd", ".excalidraw"}
 DOCUMENT_SUFFIXES = {".docx", ".pptx"}
+CHAT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DIAGRAM_PREVIEW_CACHE_ENTRIES = 128
 DIAGRAM_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
 IMAGE_PREVIEW_CACHE_ENTRIES = 32
@@ -2335,7 +2336,35 @@ class Window(QMainWindow):
         self.splitter = QSplitter()
         self.splitter.addWidget(self.rail)
         self.splitter.addWidget(self.content)
-        self.splitter.setSizes(self.state.get("splitter", [300, 800]))
+        self.chat_panel = None
+        self.chat_container = None
+        self.chat_tabs = None
+        self.chat_minibar = None
+        self.chat_visible = False
+        self.chat_error = None
+        from sp.app import config
+        if config.load_enable_folder_navigator_chat():
+            try:
+                self._create_chat_panel()
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                self.chat_error = str(exc)
+                self.chat_panel = None
+        splitter_sizes = self.state.get("splitter", [300, 800])
+        if self.chat_panel is not None and len(splitter_sizes) == 2:
+            chat_width = self._chat_last_width if self.chat_visible else 28
+            splitter_sizes = [
+                splitter_sizes[0],
+                max(300, splitter_sizes[1] - chat_width),
+                chat_width,
+            ]
+        elif self.chat_panel is not None and len(splitter_sizes) == 3:
+            splitter_sizes = list(splitter_sizes)
+            desired_chat_width = self._chat_last_width if self.chat_visible else 28
+            if (self.chat_visible and splitter_sizes[2] < 100) or not self.chat_visible:
+                reclaimed = splitter_sizes[2] - desired_chat_width
+                splitter_sizes[1] = max(1, splitter_sizes[1] + reclaimed)
+                splitter_sizes[2] = desired_chat_width
+        self.splitter.setSizes(splitter_sizes)
         self._rail_last_width = max(
             160, int(self.state.get("rail_width", self.state.get("splitter", [300])[0]))
         )
@@ -2368,6 +2397,8 @@ class Window(QMainWindow):
             self.statusBar().showMessage(
                 f"Quick Open cache unavailable: {self.catalog_db_error}", 12000
             )
+        if self.chat_error:
+            self.statusBar().showMessage(f"AI chat unavailable: {self.chat_error}", 12000)
         self.index_notice = QLabel()
         self.index_notice.setAccessibleName("Folder indexing status")
         self.statusBar().addPermanentWidget(self.index_notice, 1)
@@ -2397,6 +2428,8 @@ class Window(QMainWindow):
         self.tree.header().sectionMoved.connect(lambda *_: self.layout_save_timer.start(500))
         self.tree.header().sortIndicatorChanged.connect(lambda *_: self.layout_save_timer.start(500))
         self._make_actions()
+        if self.chat_error:
+            self.statusBar().showMessage(f"AI chat could not open: {self.chat_error}", 20000)
         self._apply_identity_style()
         self.command_palette = CommandBar(self)
         self.command_palette.actionTriggered.connect(self._run_command_action)
@@ -2407,6 +2440,8 @@ class Window(QMainWindow):
         self._apply_focus_borders()
         self._render_bookmarks()
         self._restore()
+        if self.chat_panel is not None:
+            self._warm_catalog()
         self.model.directoryLoaded.connect(lambda _: self._schedule_refresh())
         self.model.directoryLoaded.connect(self._focus_folder_tree_on_launch)
         self.model.rowsInserted.connect(lambda parent, first, last: self._catalog_rows(parent, first, last))
@@ -2466,6 +2501,10 @@ class Window(QMainWindow):
             editor_has_focus = focused is self.tabs or (
                 focused is not None and self.tabs.isAncestorOf(focused)
             )
+            chat_has_focus = self.chat_tabs is not None and (
+                focused is self.chat_tabs
+                or (focused is not None and self.chat_tabs.isAncestorOf(focused))
+            )
         except RuntimeError:
             return
         accent = getattr(self, "_folder_identity_accent", "#4f8f8b")
@@ -2491,6 +2530,15 @@ class Window(QMainWindow):
             + "QTabWidget#folderNavigatorEditors QTabBar::tab:!selected { color: "
             + f"{self.tabs.palette().color(QPalette.Text).name()}; }}"
         )
+        if self.chat_tabs is not None:
+            self.chat_tabs.setStyleSheet(
+                tab_widget_stylesheet(
+                    self.chat_tabs,
+                    object_name="folderNavigatorChatRail",
+                    accent_color=accent,
+                    pane_border=accent if chat_has_focus else neutral,
+                )
+            )
 
     @staticmethod
     def _encode_qt_state(value):
@@ -2584,6 +2632,8 @@ class Window(QMainWindow):
             else self.state.get("splitter", [self._rail_last_width, 800])
         )
         self.state.update(splitter=splitter_sizes, rail=self.rail.currentIndex(),
+                          chat_visible=self.chat_visible,
+                          chat_width=getattr(self, "_chat_last_width", 420),
                           rail_visible=not self.rail.isHidden(),
                           rail_width=self._rail_last_width,
                           pinned=[str(t.path) for t in self.all_tabs() if t.pinned],
@@ -2804,6 +2854,15 @@ class Window(QMainWindow):
         )
         self.rail_visibility_action.setCheckable(True)
         self.rail_visibility_action.setChecked(not self.rail.isHidden())
+        if self.chat_panel is not None:
+            self.chat_visibility_action = add(
+                view_menu,
+                "Show AI Chat",
+                self._toggle_chat_panel,
+                "Ctrl+Shift+N",
+            )
+            self.chat_visibility_action.setCheckable(True)
+            self.chat_visibility_action.setChecked(self.chat_visible)
         self.table_preview_action = add(view_menu, "Table Preview", self._reopen_active_table)
         self.raw_text_action = add(view_menu, "Raw Text", self._reopen_active_as_text)
         self.table_preview_action.setEnabled(False)
@@ -2923,7 +2982,13 @@ class Window(QMainWindow):
         else:
             self.rail.show()
             width = min(self._rail_last_width, max(160, total - 160))
-            self.splitter.setSizes([width, max(1, total - width)])
+            if self.chat_container is not None:
+                chat_width = self.chat_container.width()
+                self.splitter.setSizes(
+                    [width, max(1, total - width - chat_width), chat_width]
+                )
+            else:
+                self.splitter.setSizes([width, max(1, total - width)])
             if self.active_tab() is None:
                 self.tree.setFocus(Qt.OtherFocusReason)
         self.rail_visibility_action.blockSignals(True)
@@ -3006,6 +3071,179 @@ class Window(QMainWindow):
     def active_tab(self):
         widget = self.tabs.currentWidget()
         return widget if isinstance(widget, Tab) else None
+
+    def _create_chat_panel(self):
+        from .chat import FolderChatPanel
+
+        self.chat_panel = FolderChatPanel(
+            self.root,
+            file_candidates=self._chat_file_candidates,
+            directory_candidates=self._chat_directory_candidates,
+            editor_text=self._chat_editor_text,
+            image_candidates=self._chat_image_candidates,
+            index_state=lambda: self.catalog_state,
+            parent=self,
+        )
+        self.chat_panel.chatNavigateRequested.connect(self._chat_navigate)
+        self.chat_tabs = QTabWidget()
+        self.chat_tabs.setObjectName("folderNavigatorChatRail")
+        self.chat_tabs.addTab(self.chat_panel, "AI Chat")
+
+        self.chat_toggle_button = QToolButton()
+        self.chat_toggle_button.setAutoRaise(True)
+        self.chat_toggle_button.setFocusPolicy(Qt.NoFocus)
+        self.chat_toggle_button.clicked.connect(
+            lambda *_: self._toggle_chat_panel(False)
+        )
+        self.chat_tabs.setCornerWidget(self.chat_toggle_button, Qt.TopRightCorner)
+
+        self.chat_minibar_tab = QTabBar()
+        self.chat_minibar_tab.setObjectName("folderNavigatorChatMinibarTab")
+        self.chat_minibar_tab.setDocumentMode(True)
+        self.chat_minibar_tab.setExpanding(False)
+        self.chat_minibar_tab.setUsesScrollButtons(False)
+        self.chat_minibar_tab.setFocusPolicy(Qt.NoFocus)
+        self.chat_minibar_tab.setElideMode(Qt.ElideNone)
+        self.chat_minibar_tab.setShape(QTabBar.RoundedEast)
+        self.chat_minibar_tab.addTab("AI Chat")
+        self.chat_minibar_tab.tabBarClicked.connect(
+            lambda _index: self._toggle_chat_panel(True)
+        )
+        self.chat_minibar_tab.setStyleSheet(
+            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
+            "QTabBar::tab:selected { background: palette(alternate-base); }"
+        )
+        self.chat_minibar_toggle = QToolButton()
+        self.chat_minibar_toggle.setAutoRaise(True)
+        self.chat_minibar_toggle.setFocusPolicy(Qt.NoFocus)
+        self.chat_minibar_toggle.clicked.connect(
+            lambda *_: self._toggle_chat_panel(True)
+        )
+        self.chat_minibar = QWidget()
+        minibar_layout = QVBoxLayout(self.chat_minibar)
+        minibar_layout.setContentsMargins(0, 0, 0, 0)
+        minibar_layout.setSpacing(0)
+        minibar_layout.setAlignment(Qt.AlignTop)
+        minibar_layout.addWidget(self.chat_minibar_toggle)
+        minibar_layout.addWidget(self.chat_minibar_tab)
+
+        self.chat_container = QStackedWidget()
+        self.chat_container.setObjectName("folderNavigatorChatContainer")
+        self.chat_container.addWidget(self.chat_tabs)
+        self.chat_container.addWidget(self.chat_minibar)
+        self.splitter.addWidget(self.chat_container)
+        self._chat_last_width = max(220, int(self.state.get("chat_width", 420)))
+        self.chat_visible = bool(self.state.get("chat_visible", True))
+        self._set_chat_panel_visible(self.chat_visible, focus=False, persist=False)
+
+    def _chat_file_candidates(self, query: str, scope: Path) -> list[Path]:
+        if self.catalog_db is not None:
+            try:
+                return self.catalog_db.candidates(
+                    query, scope, exclude_suffixes=CHAT_IMAGE_SUFFIXES,
+                )
+            except (OSError, sqlite3.Error):
+                pass
+        candidates = self.catalog_candidates(query, scope)
+        return sorted(
+            (path for path in candidates if inside(scope, path) and path.is_file()
+             and path.suffix.casefold() not in CHAT_IMAGE_SUFFIXES
+             and (not query or fuzzy_score(query, str(path.relative_to(self.root))) is not None)),
+            key=lambda path: str(path).casefold(),
+        )
+
+    def _chat_image_candidates(self, query: str, scope: Path) -> list[Path]:
+        if self.catalog_db is not None:
+            try:
+                return self.catalog_db.candidates(
+                    query, scope, suffixes=CHAT_IMAGE_SUFFIXES,
+                )
+            except (OSError, sqlite3.Error):
+                pass
+        return sorted(
+            (path for path in self.catalog_candidates(query, scope)
+             if inside(scope, path) and path.is_file()
+             and path.suffix.casefold() in CHAT_IMAGE_SUFFIXES
+             and (not query or fuzzy_score(query, str(path.relative_to(self.root))) is not None)),
+            key=lambda path: str(path).casefold(),
+        )
+
+    def _chat_directory_candidates(self, query: str, scope: Path) -> list[Path]:
+        candidates = self.catalog_directory_candidates(query, scope)
+        return sorted(
+            (path for path in candidates if inside(scope, path) and path.is_dir()),
+            key=lambda path: str(path).casefold(),
+        )
+
+    def _chat_editor_text(self, path: Path) -> str | None:
+        for tab in self.all_tabs():
+            if tab.path == path and tab.editor is not None:
+                return tab.editor.to_markdown() if tab.markdown else tab.editor.toPlainText()
+        return None
+
+    def _chat_navigate(self, path: str) -> None:
+        target = Path(path)
+        if target.is_file() and inside(self.root, target):
+            self.open_file(target, pinned=True)
+        elif target.is_dir() and inside(self.root, target):
+            self.rail.setCurrentIndex(0)
+            index = self.model.index(str(target))
+            if index.isValid():
+                self.tree.setCurrentIndex(index)
+                self.tree.scrollTo(index)
+
+    def _toggle_chat_panel(self, visible: bool) -> None:
+        self._set_chat_panel_visible(visible, focus=bool(visible), persist=True)
+
+    def _set_chat_panel_visible(
+        self, visible: bool, *, focus: bool, persist: bool
+    ) -> None:
+        if self.chat_panel is None or self.chat_container is None:
+            return
+        visible = bool(visible)
+        widths = self.splitter.sizes()
+        total = sum(widths) or max(1, self.splitter.width())
+        if visible:
+            self.chat_container.setMinimumWidth(28)
+            self.chat_container.setMaximumWidth(16777215)
+            self.chat_container.setCurrentWidget(self.chat_tabs)
+            if len(widths) == 3 and (not self.chat_visible or widths[2] < 100):
+                target = min(self._chat_last_width, max(220, total - 380))
+                self.splitter.setSizes(
+                    [widths[0], max(1, total - widths[0] - target), target]
+                )
+        else:
+            if len(widths) == 3 and self.chat_visible and widths[2] >= 100:
+                self._chat_last_width = widths[2]
+            self.chat_container.setCurrentWidget(self.chat_minibar)
+            self.chat_container.setFixedWidth(28)
+            if len(widths) == 3:
+                self.splitter.setSizes(
+                    [widths[0], max(1, total - widths[0] - 28), 28]
+                )
+        self.chat_visible = visible
+        self._update_chat_toggle_icons()
+        action = getattr(self, "chat_visibility_action", None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(False)
+        self.state["chat_visible"] = visible
+        self.state["chat_width"] = self._chat_last_width
+        if visible and focus:
+            self.chat_panel.focus_input()
+        if persist:
+            self._persist()
+
+    def _update_chat_toggle_icons(self) -> None:
+        if self.chat_panel is None:
+            return
+        collapse_icon = self.style().standardIcon(QStyle.SP_ArrowRight)
+        expand_icon = self.style().standardIcon(QStyle.SP_ArrowLeft)
+        self.chat_toggle_button.setIcon(collapse_icon)
+        self.chat_toggle_button.setToolTip("Hide AI chat sidebar")
+        self.chat_minibar_toggle.setIcon(expand_icon)
+        self.chat_minibar_toggle.setToolTip("Show AI chat sidebar")
 
     def all_tabs(self):
         return [self.tabs.widget(i) for i in range(self.tabs.count())]
@@ -4342,6 +4580,9 @@ class Window(QMainWindow):
 
     def _tab_changed(self, index):
         tab = self.active_tab()
+        if self.chat_panel is not None:
+            ref = "/" + tab.path.relative_to(self.root).as_posix() if tab else None
+            self.chat_panel.set_current_page(ref)
         self._update_window_identity_title(tab)
         if tab and not self._cycling_tabs:
             self.mru = [tab.path] + [p for p in self.mru if p != tab.path]
@@ -4685,6 +4926,8 @@ class Window(QMainWindow):
             return
         self.search_cancel.set()
         self.catalog_cancel.set()
+        if self.chat_panel is not None:
+            self.chat_panel.close()
         self._cancel_pending_preview_hydration()
         self._close_excalidraw_processes()
         self._persist()
@@ -5165,6 +5408,9 @@ class Window(QMainWindow):
         path = Path(self.model.filePath(index))
         folder = self.model.isDir(index)
         menu = QMenu(self)
+        if self.chat_panel is not None:
+            menu.addAction("Add to AI Chat Context", lambda: self._chat_add_path(path))
+            menu.addSeparator()
         if folder:
             menu.addAction("Expand / Collapse", lambda: self.tree.setExpanded(index, not self.tree.isExpanded(index)))
             menu.addAction("Filter From Here", lambda: self.apply_filter(path))
@@ -5195,6 +5441,15 @@ class Window(QMainWindow):
         menu.addAction("Copy Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def _chat_add_path(self, path: Path) -> None:
+        if self.chat_panel is None:
+            return
+        self._toggle_chat_panel(True)
+        if hasattr(self, "chat_visibility_action"):
+            self.chat_visibility_action.setChecked(True)
+        if not self.chat_panel.add_path_to_context(path):
+            self.statusBar().showMessage(f"Could not add chat context: {path}", 8000)
 
     def _add_new_diagram_actions(self, menu, directory, directory_index):
         for label, suffix in (
