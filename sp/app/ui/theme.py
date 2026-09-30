@@ -160,8 +160,9 @@ def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) 
         "accent": accent.name(),
         "hover": _rgba(accent, int(theme_value("ui.chrome.hover_alpha", 28))),
         "selected": _rgba(accent, int(theme_value("ui.chrome.selection_alpha", 72))),
-        "rail_inactive": _mixed_color(base, text, 0.18 if dark else 0.08),
-        "rail_hover": _mixed_color(base, accent, 0.30 if dark else 0.12),
+        "rail_inactive": _mixed_color(base, text, 0.55 if dark else 0.12),
+        "rail_hover": _mixed_color(base, text, 0.66 if dark else 0.18),
+        "rail_text": "#101820" if dark else text.name(),
     }
 
 
@@ -186,7 +187,7 @@ def tab_widget_stylesheet(
         return (
             f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
             f"background: {colors['base']}; }}"
-            f"{tab} {{ background: {colors['rail_inactive']}; color: {colors['text']}; "
+            f"{tab} {{ background: {colors['rail_inactive']}; color: {colors['rail_text']}; "
             f"border: 1px solid {colors['border']}; "
             f"border-bottom: 2px solid {colors['border']}; "
             f"border-radius: {radius}px {radius}px 0 0; "
@@ -194,7 +195,7 @@ def tab_widget_stylesheet(
             f"{tab}:selected {{ background: {colors['base']}; color: {colors['text']}; "
             f"border: 1px solid {colors['accent']}; "
             f"border-bottom: 2px solid {colors['accent']}; font-weight: 600; }}"
-            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['text']}; }}"
+            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['rail_text']}; }}"
         )
     return (
         f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "

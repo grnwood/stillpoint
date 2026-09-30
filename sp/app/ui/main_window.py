@@ -18519,18 +18519,16 @@ class MainWindow(QMainWindow):
         is_light_palette = base_lightness >= 128
         selected_bg_default = "#eef2f7" if is_light_palette else "#2b2b2b"
         selected_text_default = "#111827" if is_light_palette else "#ffffff"
-        unselected_text_default = "#4b5563" if is_light_palette else "#c0c0c0"
         selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
         selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
-        unselected_text = theme_value("main_window.minibar.unselected_text", unselected_text_default)
         return (
             f"QTabBar::tab {{ background: {colors['rail_inactive']}; "
-            f"color: {unselected_text}; border: 1px solid {colors['border']}; "
+            f"color: {colors['rail_text']}; border: 1px solid {colors['border']}; "
             "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
             f"QTabBar::tab:selected {{ background: {selected_bg}; "
             f"color: {selected_text}; border: 1px solid {colors['accent']}; }}"
             f"QTabBar::tab:!selected:hover {{ background: {colors['rail_hover']}; "
-            f"color: {colors['text']}; }}"
+            f"color: {colors['rail_text']}; }}"
         )
 
     def _show_right_minibar_context_menu(self, pos: QPoint) -> None:
