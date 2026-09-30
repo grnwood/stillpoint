@@ -57,6 +57,7 @@ from sp.app.ui.keyboard_shortcuts import (
 )
 from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from sp.app.ui.theme import (
+    chrome_colors,
     status_bar_stylesheet,
     tab_widget_stylesheet,
     theme_color,
@@ -2527,6 +2528,7 @@ class Window(QMainWindow):
                 object_name="folderNavigatorRail",
                 accent_color=accent,
                 pane_border=accent if folder_has_focus else neutral,
+                readable_rail_tabs=True,
             )
         )
         self.tabs.setStyleSheet(
@@ -2535,12 +2537,8 @@ class Window(QMainWindow):
                 object_name="folderNavigatorEditors",
                 accent_color=accent,
                 pane_border=accent if editor_has_focus else neutral,
+                readable_rail_tabs=True,
             )
-            # The shared chrome stylesheet intentionally mutes inactive tabs.
-            # In this tab strip that palette role can be too low-contrast to
-            # read filenames, so retain the normal text color instead.
-            + "QTabWidget#folderNavigatorEditors QTabBar::tab:!selected { color: "
-            + f"{self.tabs.palette().color(QPalette.Text).name()}; }}"
         )
         if self.chat_tabs is not None:
             self.chat_tabs.setStyleSheet(
@@ -2549,6 +2547,7 @@ class Window(QMainWindow):
                     object_name="folderNavigatorChatRail",
                     accent_color=accent,
                     pane_border=accent if chat_has_focus else neutral,
+                    readable_rail_tabs=True,
                 )
             )
 
@@ -3121,9 +3120,17 @@ class Window(QMainWindow):
         self.chat_minibar_tab.tabBarClicked.connect(
             lambda _index: self._toggle_chat_panel(True)
         )
+        chat_tab_colors = chrome_colors(
+            self.chat_minibar_tab,
+            theme_value("folder_navigator.identity.accent", "#4f8f8b"),
+        )
         self.chat_minibar_tab.setStyleSheet(
-            "QTabBar::tab { padding: 6px 10px; margin: 2px 0; }"
-            "QTabBar::tab:selected { background: palette(alternate-base); }"
+            f"QTabBar::tab {{ background: {chat_tab_colors['rail_inactive']}; "
+            f"color: {chat_tab_colors['text']}; "
+            f"border: 1px solid {chat_tab_colors['border']}; "
+            "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
+            f"QTabBar::tab:selected {{ background: {chat_tab_colors['base']}; "
+            f"border: 1px solid {chat_tab_colors['accent']}; }}"
         )
         self.chat_minibar_toggle = QToolButton()
         self.chat_minibar_toggle.setAutoRaise(True)
