@@ -122,6 +122,15 @@ def _rgba(color: QColor, alpha: int) -> str:
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {max(0, min(255, int(alpha)))})"
 
 
+def _mixed_color(base: QColor, target: QColor, amount: float) -> str:
+    """Blend two palette colors into an opaque tab surface."""
+    return QColor(
+        round(base.red() * (1 - amount) + target.red() * amount),
+        round(base.green() * (1 - amount) + target.green() * amount),
+        round(base.blue() * (1 - amount) + target.blue() * amount),
+    ).name()
+
+
 def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) -> dict[str, str]:
     """Resolve the small semantic color set shared by app chrome.
 
@@ -138,6 +147,9 @@ def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) 
     border = theme_color("ui.chrome.border", palette.color(QPalette.Mid).name())
     if not border.isValid():
         border = palette.color(QPalette.Mid)
+    base = palette.color(QPalette.Base)
+    text = palette.color(QPalette.Text)
+    dark = base.lightness() < 128
     return {
         "window": palette.color(QPalette.Window).name(),
         "base": palette.color(QPalette.Base).name(),
@@ -148,6 +160,8 @@ def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) 
         "accent": accent.name(),
         "hover": _rgba(accent, int(theme_value("ui.chrome.hover_alpha", 28))),
         "selected": _rgba(accent, int(theme_value("ui.chrome.selection_alpha", 72))),
+        "rail_inactive": _mixed_color(base, text, 0.18 if dark else 0.08),
+        "rail_hover": _mixed_color(base, accent, 0.30 if dark else 0.12),
     }
 
 
@@ -157,6 +171,7 @@ def tab_widget_stylesheet(
     object_name: str = "",
     accent_color: str | QColor | None = None,
     pane_border: str | QColor | None = None,
+    readable_rail_tabs: bool = False,
 ) -> str:
     """Build the restrained tab treatment shared by StillPoint windows."""
     colors = chrome_colors(source, accent_color)
@@ -167,6 +182,20 @@ def tab_widget_stylesheet(
     radius = int(theme_value("ui.chrome.radius_px", 4))
     horizontal = int(theme_value("ui.tabs.horizontal_padding_px", 10))
     vertical = int(theme_value("ui.tabs.vertical_padding_px", 5))
+    if readable_rail_tabs:
+        return (
+            f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
+            f"background: {colors['base']}; }}"
+            f"{tab} {{ background: {colors['rail_inactive']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; "
+            f"border-bottom: 2px solid {colors['border']}; "
+            f"border-radius: {radius}px {radius}px 0 0; "
+            f"padding: {vertical}px {horizontal}px; margin-right: 1px; }}"
+            f"{tab}:selected {{ background: {colors['base']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['accent']}; "
+            f"border-bottom: 2px solid {colors['accent']}; font-weight: 600; }}"
+            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['text']}; }}"
+        )
     return (
         f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
         f"background: {colors['base']}; }}"
