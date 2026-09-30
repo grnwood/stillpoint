@@ -18512,23 +18512,14 @@ class MainWindow(QMainWindow):
     def _minibar_tab_style(self) -> str:
         app = QApplication.instance()
         colors = chrome_colors(app, getattr(self, "_vault_accent_color", None))
-        try:
-            base_lightness = app.palette().color(QPalette.ColorRole.Base).lightness() if app else 0
-        except Exception:
-            base_lightness = 0
-        is_light_palette = base_lightness >= 128
-        selected_bg_default = "#eef2f7" if is_light_palette else "#2b2b2b"
-        selected_text_default = "#111827" if is_light_palette else "#ffffff"
-        selected_bg = theme_value("main_window.minibar.selected_bg", selected_bg_default)
-        selected_text = theme_value("main_window.minibar.selected_text", selected_text_default)
         return (
             f"QTabBar::tab {{ background: {colors['rail_inactive']}; "
-            f"color: {colors['rail_text']}; border: 1px solid {colors['border']}; "
+            f"color: {colors['rail_inactive_text']}; border: 1px solid {colors['border']}; "
             "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
-            f"QTabBar::tab:selected {{ background: {selected_bg}; "
-            f"color: {selected_text}; border: 1px solid {colors['accent']}; }}"
+            f"QTabBar::tab:selected {{ background: {colors['rail_active']}; "
+            f"color: {colors['rail_active_text']}; border: 1px solid {colors['accent']}; }}"
             f"QTabBar::tab:!selected:hover {{ background: {colors['rail_hover']}; "
-            f"color: {colors['rail_text']}; }}"
+            f"color: {colors['rail_inactive_text']}; }}"
         )
 
     def _show_right_minibar_context_menu(self, pos: QPoint) -> None:

@@ -3126,10 +3126,11 @@ class Window(QMainWindow):
         )
         self.chat_minibar_tab.setStyleSheet(
             f"QTabBar::tab {{ background: {chat_tab_colors['rail_inactive']}; "
-            f"color: {chat_tab_colors['rail_text']}; "
+            f"color: {chat_tab_colors['rail_inactive_text']}; "
             f"border: 1px solid {chat_tab_colors['border']}; "
             "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
-            f"QTabBar::tab:selected {{ background: {chat_tab_colors['base']}; "
+            f"QTabBar::tab:selected {{ background: {chat_tab_colors['rail_active']}; "
+            f"color: {chat_tab_colors['rail_active_text']}; "
             f"border: 1px solid {chat_tab_colors['accent']}; }}"
         )
         self.chat_minibar_toggle = QToolButton()

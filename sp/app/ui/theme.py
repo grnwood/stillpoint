@@ -160,9 +160,11 @@ def chrome_colors(source: Any = None, accent_color: str | QColor | None = None) 
         "accent": accent.name(),
         "hover": _rgba(accent, int(theme_value("ui.chrome.hover_alpha", 28))),
         "selected": _rgba(accent, int(theme_value("ui.chrome.selection_alpha", 72))),
-        "rail_inactive": _mixed_color(base, text, 0.55 if dark else 0.12),
-        "rail_hover": _mixed_color(base, text, 0.66 if dark else 0.18),
-        "rail_text": "#101820" if dark else text.name(),
+        "rail_inactive": _mixed_color(base, text, 0.10 if dark else 0.14),
+        "rail_active": _mixed_color(base, text, 0.55) if dark else base.name(),
+        "rail_hover": _mixed_color(base, text, 0.24 if dark else 0.08),
+        "rail_inactive_text": text.name(),
+        "rail_active_text": "#101820" if dark else text.name(),
     }
 
 
@@ -187,15 +189,15 @@ def tab_widget_stylesheet(
         return (
             f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
             f"background: {colors['base']}; }}"
-            f"{tab} {{ background: {colors['rail_inactive']}; color: {colors['rail_text']}; "
+            f"{tab} {{ background: {colors['rail_inactive']}; color: {colors['rail_inactive_text']}; "
             f"border: 1px solid {colors['border']}; "
             f"border-bottom: 2px solid {colors['border']}; "
             f"border-radius: {radius}px {radius}px 0 0; "
             f"padding: {vertical}px {horizontal}px; margin-right: 1px; }}"
-            f"{tab}:selected {{ background: {colors['base']}; color: {colors['text']}; "
+            f"{tab}:selected {{ background: {colors['rail_active']}; color: {colors['rail_active_text']}; "
             f"border: 1px solid {colors['accent']}; "
             f"border-bottom: 2px solid {colors['accent']}; font-weight: 600; }}"
-            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['rail_text']}; }}"
+            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['rail_inactive_text']}; }}"
         )
     return (
         f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "
