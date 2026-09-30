@@ -2386,10 +2386,6 @@ class Window(QMainWindow):
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
         layout.addLayout(self.bookmarks_bar)
-        self.filter_label = QPushButton()
-        self.filter_label.clicked.connect(self.clear_filter)
-        self.filter_label.hide()
-        layout.addWidget(self.filter_label)
         layout.addWidget(self.splitter)
         self.setCentralWidget(outer)
         self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
@@ -2402,6 +2398,22 @@ class Window(QMainWindow):
         self.index_notice = QLabel()
         self.index_notice.setAccessibleName("Folder indexing status")
         self.statusBar().addPermanentWidget(self.index_notice, 1)
+        self.filter_label = QPushButton("Filtered")
+        self.filter_label.setObjectName("filterStatusLabel")
+        self.filter_label.setAccessibleName("Clear folder filter")
+        self.filter_label.setCursor(Qt.PointingHandCursor)
+        self.filter_label.setStyleSheet(
+            "QPushButton#filterStatusLabel {"
+            f"border: 1px solid {theme_value('main_window.badge.border', '#666666')};"
+            "padding: 2px 6px; border-radius: 3px; margin-right: 6px;"
+            f"background-color: {theme_value('main_window.filter_badge.bg', '#c62828')};"
+            f"color: {theme_value('main_window.filter_badge.text', '#ffffff')};"
+            "}"
+        )
+        self.filter_label.setToolTip("Click to clear the folder filter")
+        self.filter_label.clicked.connect(self.clear_filter)
+        self.filter_label.hide()
+        self.statusBar().addPermanentWidget(self.filter_label)
         self.index_cancel_button = QPushButton("Cancel Indexing")
         self.index_cancel_button.clicked.connect(self._cancel_catalog_indexing)
         self.index_cancel_button.hide()
@@ -4913,7 +4925,7 @@ class Window(QMainWindow):
             tab.loaded.text = buffer_text
             tab.clean_text = buffer_text
             tab.editor.document().setModified(False)
-            tab.show_notice("Saved")
+            self.statusBar().showMessage("Saved", 2000)
             return True
         except (OSError, ValueError, UnicodeError) as exc:
             tab.show_notice(f"Save failed: {exc}")
@@ -5240,9 +5252,12 @@ class Window(QMainWindow):
 
     def apply_filter(self, folder):
         if folder.is_dir() and inside(self.root, folder):
+            if folder == self.root:
+                self.clear_filter()
+                return
             self.scope = folder
             self.tree.setRootIndex(self.model.index(str(folder)))
-            self.filter_label.setText(f"Filtered: {folder.name}  ·  Clear Filter ×")
+            self.filter_label.setToolTip(f"Filtered to {folder} (click to clear)")
             self.filter_label.show()
             self.clear_filter_action.setEnabled(True)
             self.statusBar().showMessage(f"Scope: {folder.name}", 2500)

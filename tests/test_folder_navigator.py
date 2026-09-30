@@ -1945,17 +1945,28 @@ def test_search_result_click_reveals_line_in_existing_tab(tmp_path, monkeypatch,
 
 def test_filter_chicklet_and_remove_action_stay_in_sync(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Window
+    from sp.app.ui.theme import theme_value
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     nested = tmp_path / "nested"
     nested.mkdir()
     window = Window(tmp_path)
+    assert window.filter_label.isHidden()
     window.apply_filter(nested)
+    assert window.filter_label.parentWidget() is window.statusBar()
     assert not window.filter_label.isHidden()
-    assert "×" in window.filter_label.text()
+    assert window.filter_label.text() == "Filtered"
+    assert str(nested) in window.filter_label.toolTip()
+    assert str(theme_value("main_window.filter_badge.bg", "#c62828")) in window.filter_label.styleSheet()
     assert window.clear_filter_action.isEnabled()
     window.clear_filter_action.trigger()
     assert window.scope == window.root
+    assert window.filter_label.isHidden()
+    assert not window.clear_filter_action.isEnabled()
+    window.apply_filter(nested)
+    window.filter_label.click()
+    assert window.scope == window.root
+    assert window.filter_label.isHidden()
     assert not window.clear_filter_action.isEnabled()
     window.close()
 
@@ -3542,6 +3553,8 @@ def test_markdown_dirty_tab_tracks_transformed_buffer_and_saved_baseline(
 
     assert window.save_tab(tab)
     app.processEvents()
+    assert window.statusBar().currentMessage() == "Saved"
+    assert tab.notice.isHidden()
     assert not tab.dirty
     assert window.tabs.tabText(index) == path.name
     assert window.tabs.tabBar().tabTextColor(index) == window.tabs.tabBar().palette().color(
