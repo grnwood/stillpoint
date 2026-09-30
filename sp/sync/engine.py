@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import errno
 import json
 import os
@@ -35,6 +36,7 @@ from sp.sync.local_fs import (
     stat_file,
     write_bytes_atomic,
 )
+from sp.sync.recovery import RecoveryError, RecoveryStore
 
 
 _HOMEBASE_LOG = log_enabled("homebase_sync")
@@ -43,6 +45,10 @@ _ANSI_BLUE = "\033[94m"
 _ANSI_RED = "\033[91m"
 _ANSI_RESET = "\033[0m"
 _FULL_HASH_AUDIT_SECONDS = 24 * 60 * 60
+
+
+class RecoveryCancelled(ValueError):
+    """The user declined a protected checkpoint."""
 
 
 def _log(message: str) -> None:
@@ -184,6 +190,12 @@ class HomebaseSyncConfig:
     push_debounce_seconds: int = 3
     max_parallel_transfers: int = 3
     token_update_callback: Optional[Callable[[str, str], None]] = None
+    recovery_enabled: bool = True
+    recovery_base_dir: Optional[Path] = None
+    recovery_quota_bytes: int = 2 * 1024**3
+    recovery_versions_per_file: int = 3
+    recovery_daily_days: int = 7
+    reset_review_confirmed: bool = False
 
 
 class HomebaseSyncEngine:
@@ -219,6 +231,147 @@ class HomebaseSyncEngine:
         self._object_cache_path = self._sync_dir / "object_cache.json"
         self._sync_errors_path = self._sync_dir / "sync_errors.json"
         self._local_deletions_path = self._sync_dir / "local_deletions.json"
+        self._recovery: Optional[RecoveryStore] = None
+        self._review_cv = threading.Condition()
+        self._pending_review: Optional[dict[str, Any]] = None
+        self._review_decision: Optional[bool] = None
+        self._interrupted_events: list[dict[str, Any]] = []
+
+    def interrupted_recovery_events(self) -> list[dict[str, Any]]:
+        return list(self._interrupted_events)
+
+    def continue_after_interrupted_recovery(self) -> None:
+        self.recovery.acknowledge_interrupted()
+        self._interrupted_events = []
+        self.resume_sync("interrupted recovery reviewed", sync_now=True)
+
+    def pending_recovery_review(self) -> Optional[dict[str, Any]]:
+        with self._review_cv:
+            return dict(self._pending_review) if self._pending_review else None
+
+    def decide_recovery_review(self, event_id: str, apply: bool) -> None:
+        with self._review_cv:
+            if not self._pending_review or self._pending_review["event_id"] != event_id:
+                raise RecoveryError("Recovery review is no longer pending")
+            self._review_decision = bool(apply)
+            self._review_cv.notify_all()
+
+    def _review_protected_plan(self, event: dict[str, Any], plan: list[dict[str, Any]], tracked_count: int) -> None:
+        destructive = [item for item in plan if item["planned_action"] in {"overwrite", "delete"}]
+        deletes = [item for item in destructive if item["planned_action"] == "delete"]
+        if event["operation"] == "server-authoritative-reset" and self.cfg.reset_review_confirmed:
+            return
+        if not destructive and not (event["operation"] == "server-authoritative-reset" and tracked_count):
+            return
+        percentage = len(destructive) * 100 / max(1, tracked_count)
+        delete_percentage = len(deletes) * 100 / max(1, tracked_count)
+        reason = None
+        if event["operation"] == "server-authoritative-reset" and tracked_count:
+            reason = "Server-authoritative reset of a non-empty vault"
+        elif len(destructive) >= 25 and percentage >= 10:
+            reason = "Large number of files will be overwritten or deleted"
+        elif len(deletes) >= 10 and delete_percentage >= 5:
+            reason = "Large number of files will be deleted"
+        else:
+            known_devices = {
+                prior.get("remote_device_id")
+                for prior in self.recovery.list_events()
+                if prior["event_id"] != event["event_id"]
+            }
+            if len(destructive) >= 25 and event.get("remote_device_id") not in known_devices:
+                reason = "A new device is changing many files"
+            severe_text_shrink = sum(
+                item["planned_action"] == "overwrite"
+                and item["path"].lower().endswith((".md", ".txt"))
+                and (item.get("old_size") or 0) > 0
+                and (item.get("new_size") or 0) <= (item["old_size"] * 0.1)
+                for item in event["paths"]
+            )
+            if severe_text_shrink >= 10:
+                reason = "Many text files would become empty or shrink by at least 90%"
+        if reason is None:
+            return
+        with self._review_cv:
+            self._pending_review = {
+                "event_id": event["event_id"],
+                "reason": reason,
+                "checkpoint_id": event["target_checkpoint_id"],
+                "remote_device_id": event["remote_device_id"],
+                "creates": sum(item["planned_action"] == "create" for item in plan),
+                "overwrites": sum(item["planned_action"] == "overwrite" for item in plan),
+                "deletes": len(deletes),
+                "percent": round(percentage, 1),
+                "bytes_removed": sum(max(0, (item.get("old_size") or 0) - (item.get("new_size") or 0)) for item in event["paths"]),
+                "paths": [item["path"] for item in destructive[:15]],
+            }
+            self._review_decision = None
+            self._set_status_locked(state="review", summary="Waiting for review of destructive Homebase changes")
+            while self._review_decision is None and not self._stop:
+                self._review_cv.wait(timeout=0.2)
+            approved = self._review_decision is True and not self._stop
+            self._pending_review = None
+            self._review_decision = None
+        if not approved:
+            self.recovery.set_state(event, "cancelled")
+            raise RecoveryCancelled("Homebase pull cancelled during local recovery review")
+
+    @property
+    def recovery(self) -> RecoveryStore:
+        if self._recovery is None:
+            self._recovery = RecoveryStore(
+                self.cfg.vault_root,
+                self.cfg.vault_id,
+                self.cfg.device_id,
+                base_dir=self.cfg.recovery_base_dir,
+                quota_bytes=self.cfg.recovery_quota_bytes,
+            )
+        return self._recovery
+
+    def list_recovery_events(self) -> list[dict[str, Any]]:
+        return self.recovery.list_events()
+
+    def prune_recovery(self) -> None:
+        self.recovery.prune(self.cfg.recovery_versions_per_file, self.cfg.recovery_daily_days)
+
+    def _pause_for_interrupted_recovery(self) -> None:
+        if not self.cfg.recovery_enabled:
+            return
+        interrupted = self.recovery.scan_interrupted()
+        if not interrupted:
+            return
+        self._interrupted_events = interrupted
+        with self._cv:
+            self._sync_suspended = True
+        self._set_status_locked(
+            state="interrupted",
+            summary="Interrupted Homebase recovery needs review",
+            pending_downloads=0,
+            transfer_workers=[],
+        )
+
+    def restore_recovery_event(
+        self, event_id: str, paths: Optional[list[str]] = None, *, full: bool = False,
+        confirm_deletions: bool = False, allow_changed_paths: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        interrupted = bool(self._interrupted_events)
+        self.suspend_sync("local recovery")
+        restored_ok = False
+        try:
+            restored = self.recovery.restore(
+                event_id, paths, full=full, confirm_deletions=confirm_deletions,
+                allow_changed_paths=allow_changed_paths or (),
+            )
+            if restored["state"] != "complete":
+                raise RecoveryError("Some recovery paths could not be restored")
+            self._queue_remote_updates([item["path"] for item in restored["paths"]])
+            restored_ok = True
+            return restored
+        finally:
+            if interrupted:
+                if restored_ok:
+                    self.continue_after_interrupted_recovery()
+            else:
+                self.resume_sync("local recovery", sync_now=restored_ok)
 
     def _canonical_rel_path(self, rel_path: str) -> str:
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
@@ -252,7 +405,15 @@ class HomebaseSyncEngine:
     def _local_path_for_rel(self, rel_path: str) -> Path:
         """Resolve a manifest path, including the legacy root-page shorthand."""
         rel_key = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_key or any(part in {"", ".", ".."} for part in rel_key.split("/")):
+            raise ValueError(f"Unsafe Homebase path: {rel_path}")
         canonical = self.cfg.vault_root / rel_key
+        try:
+            if not canonical.resolve().is_relative_to(self.cfg.vault_root):
+                raise ValueError(f"Homebase path escapes vault: {rel_key}")
+        except OSError as exc:
+            if not _is_unrepresentable_path_error(exc):
+                raise
         if path_crosses_nested_vault(self.cfg.vault_root, canonical):
             raise ValueError(f"Homebase path crosses into a separate nested vault: {rel_key}")
         try:
@@ -286,6 +447,13 @@ class HomebaseSyncEngine:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        if self.cfg.recovery_enabled:
+            self._interrupted_events = self.recovery.scan_interrupted()
+            if self._interrupted_events:
+                self._sync_suspended = True
+                self._set_status_locked(state="interrupted", summary="Interrupted Homebase recovery needs review")
+            else:
+                self.prune_recovery()
         self._stop = False
         # Anchor the first periodic run to engine startup.  Previously the run
         # loop recalculated a full interval after every timeout until some
@@ -305,6 +473,8 @@ class HomebaseSyncEngine:
         with self._cv:
             self._stop = True
             self._cv.notify_all()
+        with self._review_cv:
+            self._review_cv.notify_all()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         _log("engine stop")
@@ -458,6 +628,7 @@ class HomebaseSyncEngine:
             _log("reset complete (server authoritative)")
         finally:
             client.close()
+            self._pause_for_interrupted_recovery()
 
     def get_status(self) -> HomebaseSyncStatus:
         with self._status_lock:
@@ -1390,6 +1561,15 @@ class HomebaseSyncEngine:
                 f"sync failed: {exc} "
                 f"error_count={count} next_retry_in={delay}s backoff_until={hb['backoff_until']}"
             )
+        except RecoveryCancelled as exc:
+            self._set_status_locked(
+                state="paused",
+                summary="Homebase pull cancelled; remote checkpoint remains pending",
+                last_error=str(exc),
+                pending_downloads=0,
+                transfer_workers=[],
+            )
+            _log(str(exc))
         except (httpx.HTTPError, OSError, ValueError) as exc:
             self._hibernating = False
             self._no_change_streak = 0
@@ -1417,6 +1597,7 @@ class HomebaseSyncEngine:
             )
         finally:
             client.close()
+            self._pause_for_interrupted_recovery()
 
     def _refresh_tokens(self) -> bool:
         refresh_token = str(self.cfg.refresh_token or "").strip()
@@ -1546,57 +1727,6 @@ class HomebaseSyncEngine:
         remote_deleted_paths = set(known_objects) - remote_paths
         applied_remote_deletions = 0
         preserved_local_deletions = 0
-        for rel_key in sorted(remote_deleted_paths):
-            local_path = self._local_path_for_rel(rel_key)
-            try:
-                local_is_file = local_path.is_file()
-            except OSError:
-                local_is_file = False
-            if not local_is_file:
-                continue
-            try:
-                local_envelope = encrypt_bytes(key, read_bytes(local_path))
-                local_object_id = object_id_from_ciphertext(local_envelope)
-            except OSError as deletion_read_exc:
-                self._last_pull_incomplete = True
-                apply_errors += 1
-                self._record_sync_error(
-                    path=rel_key,
-                    phase="delete",
-                    reason=f"/{rel_key}: could not verify remote deletion ({deletion_read_exc})",
-                    object_id=str(known_objects.get(rel_key) or ""),
-                )
-                continue
-            baseline_object_id = str(known_objects.get(rel_key) or "").strip().lower()
-            if local_object_id != baseline_object_id:
-                # Both sides changed: the remote removed the baseline while
-                # this client edited it. Preserve the local file so it can be
-                # surfaced/published rather than destroying local work.
-                preserved_local_deletions += 1
-                _log(
-                    f"pull decision=preserve-local-vs-remote-delete path={rel_key} "
-                    f"baseline_object_id={baseline_object_id} local_object_id={local_object_id}"
-                )
-                continue
-            try:
-                local_path.unlink()
-            except OSError as deletion_exc:
-                self._last_pull_incomplete = True
-                apply_errors += 1
-                self._record_sync_error(
-                    path=rel_key,
-                    phase="delete",
-                    reason=f"/{rel_key}: could not apply remote deletion ({deletion_exc})",
-                    object_id=baseline_object_id,
-                )
-                continue
-            applied_remote_deletions += 1
-            applied_paths.append(rel_key)
-            resolved_error_paths.add(rel_key)
-            _log(
-                f"pull decision=remote-delete path={rel_key} "
-                f"baseline_object_id={baseline_object_id}"
-            )
         cold_local_matches = 0
         # A copied/older vault may have no .stillpoint sync metadata even though
         # many of its files already equal the remote checkpoint.  Homebase
@@ -1712,6 +1842,105 @@ class HomebaseSyncEngine:
                 f"object download phase complete workers={worker_count} "
                 f"queued={remaining_downloads}"
             )
+        # Decide every mutation before touching the vault. The recovery event
+        # is the write-ahead record for both deletions and downloaded files.
+        plan: list[dict[str, Any]] = []
+        for rel_key in sorted(remote_deleted_paths):
+            local_path = self._local_path_for_rel(rel_key)
+            if not local_path.is_file():
+                continue
+            local_bytes = read_bytes(local_path)
+            local_object_id = object_id_from_ciphertext(encrypt_bytes(key, local_bytes))
+            if local_object_id == str(known_objects.get(rel_key) or "").strip().lower():
+                plan.append({
+                    "path": rel_key, "planned_action": "delete",
+                    "expected_old_hash": hashlib.sha256(local_bytes).hexdigest(),
+                    "new_object_id": None, "new_size": None,
+                })
+            else:
+                preserved_local_deletions += 1
+        for rel, meta in entries.items():
+            if not isinstance(meta, dict) or str(rel).startswith(".stillpoint/") or not meta.get("object_id"):
+                continue
+            rel_key = self._canonical_rel_path(str(rel))
+            object_id_text = str(meta.get("object_id") or "").strip().lower()
+            if rel_key in local_deletions or str(known_objects.get(rel_key) or "").strip().lower() == object_id_text:
+                continue
+            plaintext, error = download_outcomes.get(rel_key, (None, None))
+            if error is not None or plaintext is None:
+                continue
+            local_path = self._local_path_for_rel(rel_key)
+            new_hash = hashlib.sha256(plaintext).hexdigest()
+            if not local_path.is_file():
+                plan.append({"path": rel_key, "planned_action": "create", "new_object_id": new_hash, "new_size": len(plaintext)})
+                continue
+            local_bytes = read_bytes(local_path)
+            if local_bytes == plaintext:
+                continue
+            if rel_key.lower().endswith((".md", ".txt")):
+                try:
+                    if not has_material_text_difference(local_bytes.decode("utf-8"), plaintext.decode("utf-8")):
+                        continue
+                except UnicodeDecodeError:
+                    pass
+            remote_mtime = int(meta.get("mtime", 0) or 0)
+            if remote_mtime > 0 and remote_mtime >= int(local_path.stat().st_mtime):
+                plan.append({
+                    "path": rel_key, "planned_action": "overwrite",
+                    "expected_old_hash": hashlib.sha256(local_bytes).hexdigest(),
+                    "new_object_id": new_hash, "new_size": len(plaintext),
+                })
+            elif self._resolved_conflict_resolution(rel_key, checkpoint_id) != "keep-local":
+                conflict_rel = conflict_copy_path(rel_key, remote_device_id)
+                conflict_path = self.cfg.vault_root / conflict_rel
+                conflict_old = read_bytes(conflict_path) if conflict_path.is_file() else None
+                plan.append({
+                    "path": conflict_rel,
+                    "planned_action": "overwrite" if conflict_old is not None else "conflict-copy",
+                    "expected_old_hash": hashlib.sha256(conflict_old).hexdigest() if conflict_old is not None else None,
+                    "new_object_id": new_hash, "new_size": len(plaintext),
+                })
+        recovery_event: Optional[dict[str, Any]] = None
+        planned_actions = {item["path"]: item for item in plan}
+        if plan and self.cfg.recovery_enabled:
+            self._set_status_locked(summary="Preparing local recovery...")
+            try:
+                recovery_event = self.recovery.begin(
+                    operation="normal-pull",
+                    source_checkpoint_id=_read_json(self._state_path, self._default_state()).get("homebase", {}).get("last_pulled_checkpoint_id"),
+                    target_checkpoint_id=checkpoint_id,
+                    remote_device_id=remote_device_id,
+                    plan=plan,
+                )
+            except (OSError, RecoveryError) as exc:
+                for item in plan:
+                    if item["planned_action"] in {"overwrite", "delete"}:
+                        self._record_sync_error(path=item["path"], phase="recovery", reason=str(exc))
+                raise
+            _log(f"recovery protected event={recovery_event['event_id']} paths={len(plan)}")
+            self._review_protected_plan(recovery_event, plan, len(known_objects))
+            self.recovery.set_state(recovery_event, "applying")
+        for rel_key in sorted(remote_deleted_paths):
+            action = planned_actions.get(rel_key)
+            if not action or action["planned_action"] != "delete":
+                continue
+            local_path = self._local_path_for_rel(rel_key)
+            try:
+                if hashlib.sha256(read_bytes(local_path)).hexdigest() != action["expected_old_hash"]:
+                    raise RecoveryError(f"Local file changed after recovery preparation: {rel_key}")
+                local_path.unlink()
+                if recovery_event:
+                    self.recovery.mark(recovery_event, rel_key, "applied")
+            except (OSError, RecoveryError) as deletion_exc:
+                if recovery_event:
+                    self.recovery.mark(recovery_event, rel_key, "failed", str(deletion_exc))
+                self._last_pull_incomplete = True
+                apply_errors += 1
+                self._record_sync_error(path=rel_key, phase="delete", reason=str(deletion_exc), object_id=str(known_objects.get(rel_key) or ""))
+                continue
+            applied_remote_deletions += 1
+            applied_paths.append(rel_key)
+            resolved_error_paths.add(rel_key)
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
                 continue
@@ -1797,8 +2026,14 @@ class HomebaseSyncEngine:
             remote_mtime = int(meta.get("mtime", 0) or 0)
             try:
                 if not local_path.exists():
+                    if self.cfg.recovery_enabled and (
+                        rel_key not in planned_actions or planned_actions[rel_key]["planned_action"] != "create"
+                    ):
+                        raise RecoveryError(f"Local path changed since recovery planning: {rel_key}")
                     self._update_transfer_worker(0, f"WRITE {rel_key}")
                     write_bytes_atomic(local_path, plaintext)
+                    if recovery_event:
+                        self.recovery.mark(recovery_event, rel_key, "applied")
                     if self._is_valid_object_id(object_id_text):
                         pulled_cache[rel_key] = object_id_text
                     written_new += 1
@@ -1857,8 +2092,16 @@ class HomebaseSyncEngine:
                 _, local_mtime = stat_file(local_path)
                 local_mtime_i = int(local_mtime)
                 if remote_mtime > 0 and remote_mtime >= int(local_mtime):
+                    action = planned_actions.get(rel_key)
+                    if self.cfg.recovery_enabled and (
+                        not action or action["planned_action"] != "overwrite"
+                        or hashlib.sha256(local_bytes).hexdigest() != action["expected_old_hash"]
+                    ):
+                        raise RecoveryError(f"Local file changed since recovery planning: {rel_key}")
                     self._update_transfer_worker(0, f"WRITE {rel_key}")
                     write_bytes_atomic(local_path, plaintext)
+                    if recovery_event:
+                        self.recovery.mark(recovery_event, rel_key, "applied")
                     if self._is_valid_object_id(object_id_text):
                         pulled_cache[rel_key] = object_id_text
                     overwritten += 1
@@ -1902,8 +2145,18 @@ class HomebaseSyncEngine:
                     continue
                 conflict_rel = conflict_copy_path(rel_key, remote_device_id)
                 conflict_path = self.cfg.vault_root / conflict_rel
+                conflict_action = planned_actions.get(conflict_rel)
+                if self.cfg.recovery_enabled and not conflict_action:
+                    raise RecoveryError(f"Conflict path changed since recovery planning: {conflict_rel}")
+                if conflict_action and conflict_action.get("expected_old_hash") is not None:
+                    if not conflict_path.is_file() or hashlib.sha256(read_bytes(conflict_path)).hexdigest() != conflict_action["expected_old_hash"]:
+                        raise RecoveryError(f"Conflict path changed since recovery planning: {conflict_rel}")
+                elif conflict_path.exists():
+                    raise RecoveryError(f"Conflict path appeared since recovery planning: {conflict_rel}")
                 self._update_transfer_worker(0, f"WRITE {conflict_rel}")
                 write_bytes_atomic(conflict_path, plaintext)
+                if recovery_event:
+                    self.recovery.mark(recovery_event, conflict_rel, "applied")
                 applied_paths.append(str(conflict_rel))
                 reason = "local_newer_than_remote" if remote_mtime > 0 else "remote_mtime_missing"
                 _log(
@@ -1932,10 +2185,14 @@ class HomebaseSyncEngine:
                     pending_downloads=remaining_downloads,
                     transfer_workers=["Idle"],
                 )
-            except OSError as apply_exc:
+            except (OSError, RecoveryError) as apply_exc:
                 # Keep pull progress moving when a specific local path cannot be
                 # represented on this platform (e.g., WinError 123).
                 pulled_cache.pop(rel_key, None)
+                if recovery_event:
+                    event_path = rel_key if rel_key in planned_actions else conflict_copy_path(rel_key, remote_device_id)
+                    if event_path in planned_actions:
+                        self.recovery.mark(recovery_event, event_path, "failed", str(apply_exc))
                 self._last_pull_incomplete = True
                 apply_errors += 1
                 path_error = _is_unrepresentable_path_error(apply_exc)
@@ -1967,6 +2224,10 @@ class HomebaseSyncEngine:
                     f"object_id={object_id_text} error={apply_exc}"
                 )
                 continue
+        if recovery_event:
+            self.recovery.finish(recovery_event)
+            if recovery_event["state"] == "complete":
+                self.prune_recovery()
         if resolved_error_paths:
             self._clear_sync_errors_for_paths(resolved_error_paths)
         self._set_status_locked(
@@ -1996,7 +2257,8 @@ class HomebaseSyncEngine:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
         pulled_cache: dict[str, str] = {}
-        written = 0
+        downloaded: list[tuple[str, bytes, int]] = []
+        plan: list[dict[str, Any]] = []
         for rel, meta in entries.items():
             if not isinstance(meta, dict):
                 continue
@@ -2022,15 +2284,62 @@ class HomebaseSyncEngine:
                 raise ValueError(
                     f"Homebase decryption failed for '{rel_key}' (passphrase mismatch or corrupted object)"
                 ) from exc
-            local_path = self.cfg.vault_root / rel_key
-            write_bytes_atomic(local_path, plaintext)
+            local_path = self._local_path_for_rel(rel_key)
+            old_bytes = read_bytes(local_path) if local_path.is_file() else None
+            if old_bytes != plaintext:
+                plan.append({
+                    "path": rel_key,
+                    "planned_action": "overwrite" if old_bytes is not None else "create",
+                    "expected_old_hash": hashlib.sha256(old_bytes).hexdigest() if old_bytes is not None else None,
+                    "new_object_id": hashlib.sha256(plaintext).hexdigest(),
+                    "new_size": len(plaintext),
+                })
             remote_mtime = int(meta.get("mtime", 0) or 0)
+            downloaded.append((rel_key, plaintext, remote_mtime))
+        recovery_event: Optional[dict[str, Any]] = None
+        planned = {item["path"]: item for item in plan}
+        if plan and self.cfg.recovery_enabled:
+            self._set_status_locked(summary="Preparing local recovery...")
+            recovery_event = self.recovery.begin(
+                operation="server-authoritative-reset",
+                source_checkpoint_id=_read_json(self._state_path, self._default_state()).get("homebase", {}).get("last_pulled_checkpoint_id"),
+                target_checkpoint_id=checkpoint_id,
+                remote_device_id=str(manifest.get("device_id") or "remote"),
+                plan=plan,
+            )
+            self._review_protected_plan(recovery_event, plan, len(self._iter_sync_files()))
+            self.recovery.set_state(recovery_event, "applying")
+        written = 0
+        for rel_key, plaintext, remote_mtime in downloaded:
+            local_path = self._local_path_for_rel(rel_key)
+            action = planned.get(rel_key)
+            if action is None:
+                continue
+            current = read_bytes(local_path) if local_path.is_file() else None
+            if self.cfg.recovery_enabled and (
+                (action["planned_action"] == "create" and current is not None)
+                or (action["planned_action"] == "overwrite" and (current is None or hashlib.sha256(current).hexdigest() != action["expected_old_hash"]))
+            ):
+                if recovery_event:
+                    self.recovery.mark(recovery_event, rel_key, "failed", "Local file changed after protection")
+                raise RecoveryError(f"Local file changed after recovery protection: {rel_key}")
+            try:
+                write_bytes_atomic(local_path, plaintext)
+            except OSError as exc:
+                if recovery_event:
+                    self.recovery.mark(recovery_event, rel_key, "failed", str(exc))
+                raise
+            if recovery_event:
+                self.recovery.mark(recovery_event, rel_key, "applied")
             if remote_mtime > 0:
                 try:
                     os.utime(local_path, (remote_mtime, remote_mtime))
                 except OSError:
                     pass
             written += 1
+        if recovery_event:
+            self.recovery.finish(recovery_event)
+            self.prune_recovery()
         _log(f"reset pull complete written={written}")
         return pulled_cache
 

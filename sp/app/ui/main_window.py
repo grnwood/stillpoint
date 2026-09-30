@@ -471,10 +471,12 @@ class HomebaseResetWorker(QThread):
     def __init__(self, cfg: HomebaseSyncConfig, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
+        self.engine: Optional[HomebaseSyncEngine] = None
 
     def run(self) -> None:  # type: ignore[override]
         try:
             reset_engine = HomebaseSyncEngine(self._cfg)
+            self.engine = reset_engine
             reset_engine.reset_to_server_authoritative()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -3191,6 +3193,9 @@ class MainWindow(QMainWindow):
         self._remote_vault_menu.addAction(self._action_reset_password)
         self._remote_vault_menu.addSeparator()
         self._remote_vault_menu.addAction(self._action_homebase_sync_now)
+        self._action_homebase_recovery = QAction("Local Recovery...", self)
+        self._action_homebase_recovery.triggered.connect(self._show_homebase_recovery_manager)
+        self._remote_vault_menu.addAction(self._action_homebase_recovery)
         self._remote_vault_menu.addAction(self._action_homebase_reset_sync)
         self._action_new_vault = QAction("New Vault", self)
         self._action_new_vault.setToolTip("Create a new vault")
@@ -6003,6 +6008,8 @@ class MainWindow(QMainWindow):
         self._update_user_management_ui()
         if hasattr(self, "_action_homebase_sync_now"):
             self._action_homebase_sync_now.setVisible(self._is_homebase_mode_enabled())
+        if hasattr(self, "_action_homebase_recovery"):
+            self._action_homebase_recovery.setVisible(self._is_homebase_mode_enabled())
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
         self._update_periodic_search_sync_timer()
@@ -6897,6 +6904,10 @@ class MainWindow(QMainWindow):
                 push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
                 max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
                 token_update_callback=self._store_homebase_tokens,
+                recovery_enabled=config.load_homebase_recovery_enabled(),
+                recovery_quota_bytes=config.load_homebase_recovery_quota_mib() * 1024**2,
+                recovery_versions_per_file=config.load_homebase_recovery_versions(),
+                recovery_daily_days=config.load_homebase_recovery_days(),
             )
             _log_homebase_client(
                 "sync engine start: "
@@ -6926,6 +6937,16 @@ class MainWindow(QMainWindow):
 
     def _poll_homebase_status(self) -> None:
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+        if self._homebase_sync_engine:
+            review = self._homebase_sync_engine.pending_recovery_review()
+            if review:
+                self._show_homebase_recovery_review(review)
+            interrupted = self._homebase_sync_engine.interrupted_recovery_events()
+            if interrupted:
+                fingerprint = tuple(event["event_id"] for event in interrupted)
+                if getattr(self, "_homebase_interrupted_prompted", None) != fingerprint:
+                    self._homebase_interrupted_prompted = fingerprint
+                    self._show_homebase_interrupted_recovery(interrupted)
         should_refresh_tree_for_local_sync = False
         if self._homebase_status_clears_unsynced_marker(status):
             self._homebase_has_unsynced_local_changes = False
@@ -6964,6 +6985,124 @@ class MainWindow(QMainWindow):
         if callable(update_poll_interval):
             update_poll_interval(status)
         self._update_homebase_sync_action_state()
+
+    def _show_homebase_recovery_review(
+        self, review: dict[str, Any], engine: Optional[HomebaseSyncEngine] = None
+    ) -> None:
+        engine = engine or self._homebase_sync_engine
+        if not engine:
+            return
+        counts = (
+            f"Create: {review['creates']}   Overwrite: {review['overwrites']}   "
+            f"Delete: {review['deletes']}\n"
+            f"Affected tracked files: {review['percent']}%\n"
+            f"Bytes removed: {review['bytes_removed']:,}\n"
+            f"Source device: {review['remote_device_id']}\n"
+            f"Checkpoint: {review['checkpoint_id']}"
+        )
+        while True:
+            box = QMessageBox(self)
+            box.setWindowTitle("Review Homebase Changes")
+            box.setIcon(QMessageBox.Warning)
+            box.setText(str(review["reason"]))
+            box.setInformativeText(counts)
+            box.setDetailedText("\n".join(review["paths"]))
+            review_button = box.addButton("Review Changes", QMessageBox.ActionRole)
+            apply_button = box.addButton("Apply Now", QMessageBox.AcceptRole)
+            cancel_button = box.addButton("Cancel This Pull", QMessageBox.RejectRole)
+            box.setDefaultButton(cancel_button)
+            box.exec()
+            if box.clickedButton() == review_button:
+                QMessageBox.information(self, "Affected paths", "\n".join(review["paths"]))
+                continue
+            engine.decide_recovery_review(review["event_id"], box.clickedButton() == apply_button)
+            break
+
+    def _show_homebase_recovery_manager(self) -> None:
+        if not self._homebase_sync_engine or not self._is_homebase_mode_enabled():
+            return
+        from .homebase_recovery import HomebaseRecoveryDialog
+
+        dialog = HomebaseRecoveryDialog(self, self._homebase_sync_engine, self._restore_homebase_recovery)
+        dialog.exec()
+
+    def _show_homebase_interrupted_recovery(self, events: list[dict[str, Any]]) -> None:
+        engine = self._homebase_sync_engine
+        if not engine:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Interrupted Homebase Recovery")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"{len(events)} Homebase pull event(s) were interrupted. Sync is paused.")
+        box.setInformativeText("Review protected files before allowing another sync cycle.")
+        review_button = box.addButton("Open Recovery Manager", QMessageBox.ActionRole)
+        continue_button = box.addButton("Continue Sync", QMessageBox.AcceptRole)
+        box.addButton("Keep Paused", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() == review_button:
+            self._show_homebase_recovery_manager()
+        elif box.clickedButton() == continue_button:
+            engine.continue_after_interrupted_recovery()
+
+    def _restore_homebase_recovery(self, event_id: str, paths: Optional[list[str]], full: bool) -> bool:
+        engine = self._homebase_sync_engine
+        if not engine:
+            return False
+        try:
+            event = engine.recovery.load(event_id)
+            selected = set(paths) if paths is not None else {item["path"] for item in event["paths"]}
+            current_rel = str(self.current_path or "").lstrip("/")
+            allow_changed_paths: list[str] = []
+            if current_rel in selected and self._is_editor_dirty():
+                box = QMessageBox(self)
+                box.setWindowTitle("Unsaved Editor Changes")
+                box.setText("The open page has unsaved changes and is included in this restore.")
+                save_button = box.addButton("Save", QMessageBox.AcceptRole)
+                discard_button = box.addButton("Discard", QMessageBox.DestructiveRole)
+                skip_button = box.addButton("Skip This File", QMessageBox.ActionRole)
+                cancel_button = box.addButton("Cancel", QMessageBox.RejectRole)
+                box.setDefaultButton(cancel_button)
+                box.exec()
+                choice = box.clickedButton()
+                if choice == cancel_button:
+                    return False
+                if choice == save_button and not self._save_before_page_transition("Homebase recovery"):
+                    return False
+                if choice == save_button:
+                    allow_changed_paths.append(current_rel)
+                if choice == skip_button:
+                    selected.discard(current_rel)
+                    paths = list(selected)
+                    full = False
+                if choice == discard_button:
+                    pass
+            try:
+                restored = engine.restore_recovery_event(
+                    event_id, paths, full=full, confirm_deletions=full,
+                    allow_changed_paths=allow_changed_paths,
+                )
+            except ValueError as exc:
+                if "changed since pull" not in str(exc) and "recreated since pull" not in str(exc):
+                    raise
+                if QMessageBox.question(
+                    self, "Review Changed File",
+                    f"{exc}\n\nRestore the old version anyway? The current bytes will be saved as a new recovery event.",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                ) != QMessageBox.Yes:
+                    return False
+                restored = engine.restore_recovery_event(
+                    event_id, paths, full=full, confirm_deletions=full,
+                    allow_changed_paths=list(selected),
+                )
+            changed = {item["path"] for item in restored["paths"] if item["result"] == "applied"}
+            self._refresh_tree()
+            if current_rel in changed and self.current_path:
+                self._open_file(self.current_path, add_to_history=False, force=True)
+            self.statusBar().showMessage(f"Restored {len(changed)} file(s); Homebase sync scheduled.", 6000)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Homebase Recovery Failed", str(exc))
+            return False
 
     def _update_homebase_status_poll_interval(self, status: Optional[HomebaseSyncStatus]) -> None:
         timer = self._homebase_status_poll_timer
@@ -8114,6 +8253,10 @@ class MainWindow(QMainWindow):
                 push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
                 max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
                 token_update_callback=self._store_homebase_tokens,
+                recovery_enabled=config.load_homebase_recovery_enabled(),
+                recovery_quota_bytes=config.load_homebase_recovery_quota_mib() * 1024**2,
+                recovery_versions_per_file=config.load_homebase_recovery_versions(),
+                recovery_daily_days=config.load_homebase_recovery_days(),
             )
         except Exception as exc:
             self._configure_homebase_sync_for_vault()
@@ -8132,8 +8275,26 @@ class MainWindow(QMainWindow):
         self._homebase_reset_worker = worker
         self._homebase_reset_progress = progress
         self._update_homebase_sync_action_state()
+        review_timer = QTimer(self)
+        review_timer.setInterval(200)
+
+        def _poll_reset_review() -> None:
+            reset_engine = worker.engine
+            if reset_engine:
+                review = reset_engine.pending_recovery_review()
+                if review:
+                    progress.hide()
+                    try:
+                        self._show_homebase_recovery_review(review, reset_engine)
+                    finally:
+                        progress.show()
+
+        review_timer.timeout.connect(_poll_reset_review)
+        review_timer.start()
 
         def _cleanup_reset_worker() -> None:
+            review_timer.stop()
+            review_timer.deleteLater()
             self._homebase_reset_worker = None
             self._homebase_reset_progress = None
             self._update_homebase_sync_action_state()
@@ -8448,6 +8609,34 @@ class MainWindow(QMainWindow):
         max_parallel_spin.setValue(max(1, max_parallel_transfers))
         settings_layout.addRow("Max Parallel Transfers:", max_parallel_spin)
 
+        recovery_enabled_cb = QCheckBox("Protect files before Homebase pulls")
+        recovery_enabled_cb.setChecked(config.load_homebase_recovery_enabled())
+        settings_layout.addRow("Local Recovery:", recovery_enabled_cb)
+        recovery_versions_spin = QSpinBox()
+        recovery_versions_spin.setRange(1, 100)
+        recovery_versions_spin.setValue(config.load_homebase_recovery_versions())
+        settings_layout.addRow("Versions Per File:", recovery_versions_spin)
+        recovery_days_spin = QSpinBox()
+        recovery_days_spin.setRange(0, 365)
+        recovery_days_spin.setValue(config.load_homebase_recovery_days())
+        settings_layout.addRow("Daily Retention:", recovery_days_spin)
+        recovery_quota_spin = QSpinBox()
+        recovery_quota_spin.setRange(1, 1024 * 1024)
+        recovery_quota_spin.setValue(config.load_homebase_recovery_quota_mib())
+        recovery_quota_spin.setSuffix(" MiB")
+        settings_layout.addRow("Recovery Quota:", recovery_quota_spin)
+        recovery_usage_label = QLabel()
+        try:
+            recovery_events = self._homebase_sync_engine.list_recovery_events() if self._homebase_sync_engine else []
+            usage_mib = self._homebase_sync_engine.recovery.usage_bytes() / 1024**2 if self._homebase_sync_engine else 0
+            oldest = recovery_events[-1]["created_at"] if recovery_events else "None"
+            recovery_usage_label.setText(f"{usage_mib:.1f} MiB · oldest: {oldest}")
+        except Exception as exc:
+            recovery_usage_label.setText(str(exc))
+        settings_layout.addRow("Recovery Usage:", recovery_usage_label)
+        prune_recovery_btn = QPushButton("Prune Unpinned Recovery Now")
+        settings_layout.addRow("", prune_recovery_btn)
+
         body_layout.addWidget(settings_box)
 
         def _toggle_interval_enabled() -> None:
@@ -8463,6 +8652,7 @@ class MainWindow(QMainWindow):
         reset_passphrase_btn = QPushButton("Reset Encryption Passphrase")
         reset_passphrase_btn.setObjectName("homebaseResetEncryptionButton")
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
+        local_recovery_btn = QPushButton("Local Recovery...")
         sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
         sync_errors_btn = QPushButton(f"View Sync Errors ({len(sync_errors)})")
         close_btn = QPushButton("Close")
@@ -8470,6 +8660,7 @@ class MainWindow(QMainWindow):
 
         status_actions = QVBoxLayout() if available.width() < 620 else QHBoxLayout()
         status_actions.addWidget(conflicts_btn)
+        status_actions.addWidget(local_recovery_btn)
         status_actions.addWidget(sync_errors_btn)
         if isinstance(status_actions, QHBoxLayout):
             status_actions.addStretch(1)
@@ -8504,6 +8695,17 @@ class MainWindow(QMainWindow):
 
         def _save_settings() -> None:
             try:
+                if not recovery_enabled_cb.isChecked() and config.load_homebase_recovery_enabled():
+                    if QMessageBox.warning(
+                        dialog, "Disable Local Recovery",
+                        "Remote overwrites and deletions will no longer have device-local preimages. Disable protection?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                    ) != QMessageBox.Yes:
+                        return
+                config.save_homebase_recovery_enabled(recovery_enabled_cb.isChecked())
+                config.save_homebase_recovery_versions(recovery_versions_spin.value())
+                config.save_homebase_recovery_days(recovery_days_spin.value())
+                config.save_homebase_recovery_quota_mib(recovery_quota_spin.value())
                 new_auto_sync = bool(auto_sync_cb.isChecked())
                 new_sync_at_startup = bool(startup_sync_cb.isChecked())
                 new_interval = int(interval_spin.value())
@@ -8535,10 +8737,12 @@ class MainWindow(QMainWindow):
             self._show_homebase_sync_errors_popup(errors)
 
         save_settings_btn.clicked.connect(_save_settings)
+        prune_recovery_btn.clicked.connect(lambda: self._homebase_sync_engine.prune_recovery() if self._homebase_sync_engine else None)
         sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
         reset_auth_btn.clicked.connect(self._reset_homebase_auth)
         reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
         conflicts_btn.clicked.connect(_view_conflicts)
+        local_recovery_btn.clicked.connect(self._show_homebase_recovery_manager)
         sync_errors_btn.clicked.connect(_view_sync_errors)
 
         def _refresh_dialog_status() -> None:

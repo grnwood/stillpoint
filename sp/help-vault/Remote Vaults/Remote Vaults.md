@@ -47,6 +47,13 @@ Homebase supports account auth and user management APIs.
 - Passwords are still not stored. You authenticate once, then StillPoint reuses Homebase access and refresh tokens.
 - StillPoint also writes non-secret Homebase recovery metadata into the vault under `.stillpoint/homebase.json` so re-adding the vault later can prefill the server URL, SSL mode, vault ID, and vault name.
 
+## Local Recovery
+- Homebase saves the previous local bytes before a pull overwrites or deletes a file. Recovery data stays on this device outside the vault, under `~/.stillpoint/homebase-recovery/`.
+- Open **Local Recovery** from the Homebase sync summary or the Remote Vault menu to inspect changes, restore selected files or an entire pull, export prior copies, and pin a recovery point.
+- A restore becomes a new local edit and syncs normally. It does not move the server checkpoint backward.
+- Large or unusually destructive pulls pause for review. If a pull is interrupted, Homebase pauses syncing until you review the recovery event and choose to continue.
+- Local recovery is enabled by default. Its storage quota and retention settings are in the Homebase sync summary.
+
 ## Practical Takeaway
 - Use a **Local Vault** when you only need files on one machine.
 - Use a **Homebase Vault** when you want sync, offline-first behavior, and a stronger local-first trust boundary.

@@ -2344,6 +2344,45 @@ def save_homebase_max_parallel_transfers(value: int) -> None:
     _save_vault_int_setting("homebase_max_parallel_transfers", max(1, int(value)))
 
 
+def load_homebase_recovery_enabled(default: bool = True) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return default
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", ("homebase_recovery_enabled",)).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    return default if row is None else str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_homebase_recovery_enabled(enabled: bool) -> None:
+    _save_vault_int_setting("homebase_recovery_enabled", int(bool(enabled)))
+
+
+def load_homebase_recovery_quota_mib(default: int = 2048) -> int:
+    return _load_vault_int_setting("homebase_recovery_quota_mib", default=default, minimum=1)
+
+
+def save_homebase_recovery_quota_mib(value: int) -> None:
+    _save_vault_int_setting("homebase_recovery_quota_mib", max(1, int(value)))
+
+
+def load_homebase_recovery_versions(default: int = 3) -> int:
+    return _load_vault_int_setting("homebase_recovery_versions", default=default, minimum=1)
+
+
+def save_homebase_recovery_versions(value: int) -> None:
+    _save_vault_int_setting("homebase_recovery_versions", max(1, int(value)))
+
+
+def load_homebase_recovery_days(default: int = 7) -> int:
+    return _load_vault_int_setting("homebase_recovery_days", default=default, minimum=0)
+
+
+def save_homebase_recovery_days(value: int) -> None:
+    _save_vault_int_setting("homebase_recovery_days", max(0, int(value)))
+
+
 def load_homebase_device_id() -> str:
     """Return stable client device id used by Homebase sync."""
     payload = _read_global_config()
