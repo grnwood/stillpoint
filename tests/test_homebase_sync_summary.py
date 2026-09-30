@@ -108,3 +108,34 @@ def test_homebase_recovery_buttons_remain_outside_scrolling_body(main_window, mo
     assert reset_encryption is not None and reset_encryption.parentWidget() is recovery
     assert not body_scroll.isAncestorOf(reset_auth)
     assert not body_scroll.isAncestorOf(reset_encryption)
+
+
+def test_sync_problem_dialog_treats_old_errors_as_history_and_hides_destructive_action(
+    main_window, monkeypatch
+) -> None:
+    captured: list[QDialog] = []
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: captured.append(dialog) or QDialog.Rejected)
+
+    main_window._show_homebase_sync_errors_popup(
+        [
+            {
+                "path": "Journal/old.md",
+                "phase": "apply",
+                "reason": "temporary staging failure",
+                "object_id": "a" * 64,
+                "ts": "2026-08-27T14:35:00Z",
+                "attempts": 1,
+                "active": False,
+            }
+        ]
+    )
+
+    assert len(captured) == 1
+    dialog = captured[0]
+    assert dialog.windowTitle() == "Homebase Sync Problems"
+    retry = dialog.findChild(QPushButton, "homebaseSyncRetryButton")
+    dismiss = dialog.findChild(QPushButton, "homebaseSyncDismissHistoryButton")
+    delete_remote = dialog.findChild(QPushButton, "homebaseSyncDeleteRemoteButton")
+    assert retry is not None and retry.isEnabled() is False
+    assert dismiss is not None and dismiss.isEnabled() is True
+    assert delete_remote is not None and delete_remote.isHidden() is True

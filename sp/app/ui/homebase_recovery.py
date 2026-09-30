@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
-    QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit, QVBoxLayout,
+    QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
 
@@ -22,7 +22,16 @@ class HomebaseRecoveryDialog(QDialog):
         self.setWindowTitle("Homebase Local Recovery")
         self.resize(850, 620)
         layout = QVBoxLayout(self)
+        introduction = QLabel(
+            "StillPoint keeps protected copies before Homebase replaces or removes local files. "
+            "Choose a recovery point to preview or restore an earlier version."
+        )
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
         self.usage = QLabel()
+        self.usage.setToolTip(
+            "Recovery copies stay only on this device and are pruned according to Homebase settings."
+        )
         layout.addWidget(self.usage)
         row = QHBoxLayout()
         layout.addLayout(row, 1)
@@ -41,29 +50,55 @@ class HomebaseRecoveryDialog(QDialog):
         self.image_preview.setAlignment(Qt.AlignCenter)
         self.image_preview.hide()
         right.addWidget(self.image_preview, 2)
-        buttons = QHBoxLayout()
-        layout.addLayout(buttons)
-        actions = (
+        primary_buttons = QHBoxLayout()
+        layout.addLayout(primary_buttons)
+        for title, callback in (
             ("Restore Selected", self._restore_selected),
-            ("Restore Entire Event", self._restore_all),
+            ("Restore Everything in This Recovery Point", self._restore_all),
+            ("Continue Sync", self._continue_sync),
+        ):
+            button = QPushButton(title)
+            button.clicked.connect(callback)
+            primary_buttons.addWidget(button)
+        primary_buttons.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        primary_buttons.addWidget(close_button)
+
+        self.advanced_toggle = QPushButton("Show advanced tools")
+        self.advanced_toggle.setCheckable(True)
+        layout.addWidget(self.advanced_toggle)
+        self.advanced_tools = QWidget(self)
+        advanced_buttons = QHBoxLayout(self.advanced_tools)
+        advanced_buttons.setContentsMargins(0, 0, 0, 0)
+        for title, callback in (
             ("Export Selected", self._export),
             ("Pin / Rename", self._pin),
             ("Unpin", self._unpin),
-            ("Delete Event", self._delete),
-            ("Continue Sync", self._continue_sync),
-            ("Check Integrity", self._integrity),
-        )
-        for title, callback in actions:
+            ("Delete Recovery Point", self._delete),
+            ("Check Storage Integrity", self._integrity),
+        ):
             button = QPushButton(title)
             button.clicked.connect(callback)
-            buttons.addWidget(button)
+            advanced_buttons.addWidget(button)
+        advanced_buttons.addStretch(1)
+        self.advanced_tools.hide()
+        layout.addWidget(self.advanced_tools)
+        self.advanced_toggle.toggled.connect(
+            lambda checked: (
+                self.advanced_tools.setVisible(checked),
+                self.advanced_toggle.setText(
+                    "Hide advanced tools" if checked else "Show advanced tools"
+                ),
+            )
+        )
         self.events.currentItemChanged.connect(self._show_event)
         self.paths.currentItemChanged.connect(self._show_preview)
         self.refresh()
 
     def refresh(self) -> None:
         self.events.clear()
-        self.usage.setText(f"Recovery storage: {self.store.usage_bytes() / 1024**2:.1f} MiB")
+        self.usage.setText(f"Protected local copies: {self.store.usage_bytes() / 1024**2:.1f} MiB")
         for event in self.store.list_events():
             counts = {action: 0 for action in ("create", "overwrite", "delete")}
             for path in event["paths"]:
@@ -76,15 +111,30 @@ class HomebaseRecoveryDialog(QDialog):
                 for path in event["paths"]
                 if path.get("old_object_id") and self.store._object_path(path["old_object_id"]).is_file()
             )
+            affected = counts["create"] + counts["overwrite"] + counts["delete"]
+            state_label = {
+                "complete": "Ready to restore",
+                "protected": "Waiting for review",
+                "applying": "Interrupted while applying",
+                "cancelled": "Pull cancelled",
+            }.get(str(event.get("state") or ""), "Recovery available")
             text = (
-                f"{event['created_at']}  {'📌 ' if event['pinned'] else ''}{label}\n"
-                f"{event['state']} · +{counts['create']} ~{counts['overwrite']} -{counts['delete']} "
-                f"· {event.get('remote_device_id') or 'local'} · {size / 1024:.1f} KiB\n"
-                f"Checkpoint: {event.get('target_checkpoint_id') or 'local'}"
+                f"{'📌 ' if event['pinned'] else ''}{label} · {event['created_at']}\n"
+                f"{affected} file(s) protected · {state_label}"
             )
             from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, event["event_id"])
+            item.setToolTip(
+                f"Created: {event['created_at']}\n"
+                f"State: {event.get('state') or 'unknown'}\n"
+                f"Created files: {counts['create']}\n"
+                f"Changed files: {counts['overwrite']}\n"
+                f"Removed files: {counts['delete']}\n"
+                f"Source device: {event.get('remote_device_id') or 'local'}\n"
+                f"Checkpoint: {event.get('target_checkpoint_id') or 'local'}\n"
+                f"Protected bytes: {size / 1024:.1f} KiB"
+            )
             self.events.addItem(item)
 
     def _event(self):
@@ -100,8 +150,20 @@ class HomebaseRecoveryDialog(QDialog):
             return
         from PySide6.QtWidgets import QListWidgetItem
         for path in event["paths"]:
-            item = QListWidgetItem(f"{path['planned_action']}: {path['path']}  [{path['result']}]")
+            action = {
+                "create": "Added by Homebase",
+                "overwrite": "Changed by Homebase",
+                "delete": "Removed by Homebase",
+                "conflict-copy": "Saved as a conflict copy",
+            }.get(path["planned_action"], "Changed by Homebase")
+            result = str(path.get("result") or "")
+            suffix = " · needs attention" if result == "failed" else ""
+            item = QListWidgetItem(f"{action}: {path['path']}{suffix}")
             item.setData(Qt.UserRole, path["path"])
+            item.setToolTip(
+                f"Action: {path.get('planned_action') or 'unknown'}\n"
+                f"Result: {result or 'unknown'}"
+            )
             self.paths.addItem(item)
 
     def _show_preview(self, *_args) -> None:

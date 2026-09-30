@@ -484,6 +484,37 @@ class HomebaseResetWorker(QThread):
         self.finished.emit()
 
 
+class HomebaseAuthoritativeWorker(QThread):
+    preview_ready = Signal(object)
+    publish_finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        cfg: HomebaseSyncConfig,
+        *,
+        mode: str,
+        expected_remote_head: str = "",
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._cfg = cfg
+        self._mode = mode
+        self._expected_remote_head = expected_remote_head
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            engine = HomebaseSyncEngine(self._cfg)
+            if self._mode == "preview":
+                self.preview_ready.emit(engine.preview_local_authoritative())
+            else:
+                self.publish_finished.emit(
+                    engine.publish_local_authoritative(self._expected_remote_head)
+                )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class UserCreateDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2467,6 +2498,8 @@ class MainWindow(QMainWindow):
         self._homebase_reload_not_before: float = 0.0
         self._homebase_conflict_seen_keys: set[str] = set()
         self._homebase_conflict_popup_open: bool = False
+        self._homebase_attention_dialog_open: bool = False
+        self._homebase_authoritative_worker: Optional[HomebaseAuthoritativeWorker] = None
         self._tree_refresh_in_progress: bool = False
         self._pending_tree_refresh: bool = False
         self._deferred_nav_tree_refresh_target: Optional[str] = None
@@ -3162,6 +3195,11 @@ class MainWindow(QMainWindow):
             "Discard local sync state/conflicts and re-seed local files from the current server snapshot"
         )
         self._action_homebase_reset_sync.triggered.connect(self._reset_homebase_sync_state_server_authoritative)
+        self._action_homebase_publish_local = QAction("Publish This Device as Authoritative…", self)
+        self._action_homebase_publish_local.setToolTip(
+            "Replace the shared Homebase snapshot with this device after reviewing the impact"
+        )
+        self._action_homebase_publish_local.triggered.connect(self._start_homebase_local_authoritative)
         reload_vault_action = QAction("Reload Vault", self)
         reload_vault_action.setToolTip("Close and reopen the current vault")
         reload_vault_action.triggered.connect(self._reload_vault)
@@ -3196,6 +3234,7 @@ class MainWindow(QMainWindow):
         self._action_homebase_recovery = QAction("Local Recovery...", self)
         self._action_homebase_recovery.triggered.connect(self._show_homebase_recovery_manager)
         self._remote_vault_menu.addAction(self._action_homebase_recovery)
+        self._remote_vault_menu.addAction(self._action_homebase_publish_local)
         self._remote_vault_menu.addAction(self._action_homebase_reset_sync)
         self._action_new_vault = QAction("New Vault", self)
         self._action_new_vault.setToolTip("Create a new vault")
@@ -3652,7 +3691,7 @@ class MainWindow(QMainWindow):
         )
         self._homebase_status_label.setToolTip("")
         self._homebase_status_label.setCursor(QCursor(Qt.PointingHandCursor))
-        self._homebase_status_label.mousePressEvent = lambda event: self._show_homebase_sync_summary()
+        self._homebase_status_label.mousePressEvent = lambda event: self._handle_homebase_badge_click()
         self._homebase_status_label.hide()
         self.statusBar().addPermanentWidget(self._homebase_status_label, 0)
 
@@ -6012,6 +6051,8 @@ class MainWindow(QMainWindow):
             self._action_homebase_recovery.setVisible(self._is_homebase_mode_enabled())
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
+        if hasattr(self, "_action_homebase_publish_local"):
+            self._action_homebase_publish_local.setVisible(self._is_homebase_mode_enabled())
         self._update_periodic_search_sync_timer()
 
     def _open_vault_workspace_terminal(self) -> None:
@@ -6937,16 +6978,6 @@ class MainWindow(QMainWindow):
 
     def _poll_homebase_status(self) -> None:
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
-        if self._homebase_sync_engine:
-            review = self._homebase_sync_engine.pending_recovery_review()
-            if review:
-                self._show_homebase_recovery_review(review)
-            interrupted = self._homebase_sync_engine.interrupted_recovery_events()
-            if interrupted:
-                fingerprint = tuple(event["event_id"] for event in interrupted)
-                if getattr(self, "_homebase_interrupted_prompted", None) != fingerprint:
-                    self._homebase_interrupted_prompted = fingerprint
-                    self._show_homebase_interrupted_recovery(interrupted)
         should_refresh_tree_for_local_sync = False
         if self._homebase_status_clears_unsynced_marker(status):
             self._homebase_has_unsynced_local_changes = False
@@ -6954,7 +6985,6 @@ class MainWindow(QMainWindow):
             self._homebase_sync_cycle_had_true_activity = True
             should_refresh_tree_for_local_sync = True
             _log_homebase_client("status poll: local sync completed; scheduling tree refresh")
-        self._maybe_show_homebase_conflict_popup(status)
         if self._homebase_sync_engine:
             try:
                 updates = self._homebase_sync_engine.consume_remote_updates()
@@ -6993,30 +7023,30 @@ class MainWindow(QMainWindow):
         if not engine:
             return
         counts = (
-            f"Create: {review['creates']}   Overwrite: {review['overwrites']}   "
-            f"Delete: {review['deletes']}\n"
+            f"{review['overwrites']} local file(s) will be replaced and "
+            f"{review['deletes']} will be removed. "
+            f"{review['creates']} new file(s) will be added.\n\n"
+            "StillPoint has protected the current local versions so they can be restored later."
+        )
+        technical = (
+            f"Reason: {review['reason']}\n"
             f"Affected tracked files: {review['percent']}%\n"
             f"Bytes removed: {review['bytes_removed']:,}\n"
             f"Source device: {review['remote_device_id']}\n"
-            f"Checkpoint: {review['checkpoint_id']}"
+            f"Checkpoint: {review['checkpoint_id']}\n\n"
+            "Affected paths:\n" + "\n".join(review["paths"])
         )
-        while True:
-            box = QMessageBox(self)
-            box.setWindowTitle("Review Homebase Changes")
-            box.setIcon(QMessageBox.Warning)
-            box.setText(str(review["reason"]))
-            box.setInformativeText(counts)
-            box.setDetailedText("\n".join(review["paths"]))
-            review_button = box.addButton("Review Changes", QMessageBox.ActionRole)
-            apply_button = box.addButton("Apply Now", QMessageBox.AcceptRole)
-            cancel_button = box.addButton("Cancel This Pull", QMessageBox.RejectRole)
-            box.setDefaultButton(cancel_button)
-            box.exec()
-            if box.clickedButton() == review_button:
-                QMessageBox.information(self, "Affected paths", "\n".join(review["paths"]))
-                continue
-            engine.decide_recovery_review(review["event_id"], box.clickedButton() == apply_button)
-            break
+        box = QMessageBox(self)
+        box.setWindowTitle("Homebase Changes Need Review")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("Homebase is paused before applying a large set of incoming changes.")
+        box.setInformativeText(counts)
+        box.setDetailedText(technical)
+        apply_button = box.addButton("Apply Protected Changes", QMessageBox.AcceptRole)
+        cancel_button = box.addButton("Cancel This Pull", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        engine.decide_recovery_review(review["event_id"], box.clickedButton() == apply_button)
 
     def _show_homebase_recovery_manager(self) -> None:
         if not self._homebase_sync_engine or not self._is_homebase_mode_enabled():
@@ -7033,9 +7063,12 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Interrupted Homebase Recovery")
         box.setIcon(QMessageBox.Warning)
-        box.setText(f"{len(events)} Homebase pull event(s) were interrupted. Sync is paused.")
-        box.setInformativeText("Review protected files before allowing another sync cycle.")
-        review_button = box.addButton("Open Recovery Manager", QMessageBox.ActionRole)
+        box.setText("Homebase stopped while applying incoming changes. Sync is paused.")
+        box.setInformativeText(
+            f"StillPoint protected local files for {len(events)} interrupted update(s). "
+            "Review them before continuing."
+        )
+        review_button = box.addButton("Review Protected Copies", QMessageBox.ActionRole)
         continue_button = box.addButton("Continue Sync", QMessageBox.AcceptRole)
         box.addButton("Keep Paused", QMessageBox.RejectRole)
         box.exec()
@@ -7572,55 +7605,104 @@ class MainWindow(QMainWindow):
 
     def _show_homebase_sync_errors_popup(self, errors: list[dict[str, Any]]) -> None:
         if not errors:
-            QMessageBox.information(self, "Homebase Sync Errors", "No skipped sync errors were recorded.")
+            QMessageBox.information(self, "Homebase Sync Problems", "No file problems were recorded.")
             return
+        errors = sorted(errors, key=lambda item: bool(item.get("active")), reverse=True)
+        active_count = sum(bool(item.get("active")) for item in errors)
+        history_count = len(errors) - active_count
         dialog = QDialog(self)
-        dialog.setWindowTitle("Homebase Sync Errors")
+        dialog.setWindowTitle("Homebase Sync Problems")
         layout = QVBoxLayout(dialog)
-        info = QLabel(
-            "These files failed during sync and were skipped so the rest of sync could continue. "
-            "Review the reason for each entry."
-        )
+        if active_count:
+            summary_text = (
+                f"Homebase needs attention for {active_count} file(s). Other files were allowed "
+                "to continue, but local uploads wait until the incoming problems are resolved."
+            )
+        else:
+            summary_text = (
+                f"These {history_count} file problem(s) are historical. A later Homebase sync "
+                "completed successfully, so they are not blocking uploads now."
+            )
+        info = QLabel(summary_text)
         info.setWordWrap(True)
         layout.addWidget(info)
         list_widget = QListWidget(dialog)
-        detail_label = QLabel("")
-        detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        detail_label.setWordWrap(True)
-        detail_label.setStyleSheet(
-            f"padding: 8px; border: 1px solid {theme_value('main_window.splitter.handle', '#444')};"
-        )
+        list_widget.setObjectName("homebaseSyncProblemList")
         for entry in errors:
             path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
-            phase = str(entry.get("phase") or "unknown").strip().lower() or "unknown"
-            ts_text = self._format_homebase_conflict_ts(entry.get("ts"))
-            item_text = f"/{path}  |  {phase}  |  {ts_text}"
-            item = QListWidgetItem(item_text)
+            state_text = "Needs attention" if entry.get("active") else "Resolved history"
+            item = QListWidgetItem(f"{state_text}  ·  /{path}")
             item.setData(Qt.UserRole, entry)
             list_widget.addItem(item)
         layout.addWidget(list_widget, 1)
-        layout.addWidget(detail_label)
+
+        friendly_label = QLabel("")
+        friendly_label.setWordWrap(True)
+        friendly_label.setStyleSheet(
+            f"padding: 8px; border: 1px solid {theme_value('main_window.splitter.handle', '#444')};"
+        )
+        layout.addWidget(friendly_label)
+
+        technical_toggle = QPushButton("Show technical details", dialog)
+        technical_toggle.setObjectName("homebaseSyncTechnicalToggle")
+        technical_toggle.setCheckable(True)
+        technical_label = QLabel("")
+        technical_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        technical_label.setWordWrap(True)
+        technical_label.hide()
+        layout.addWidget(technical_toggle)
+        layout.addWidget(technical_label)
+
+        advanced_toggle = QPushButton("Show advanced actions", dialog)
+        advanced_toggle.setObjectName("homebaseSyncAdvancedToggle")
+        advanced_toggle.setCheckable(True)
+        remove_remote_btn = QPushButton("Delete selected path from shared Homebase…", dialog)
+        remove_remote_btn.setObjectName("homebaseSyncDeleteRemoteButton")
+        remove_remote_btn.hide()
+        remove_remote_btn.setEnabled(False)
+        layout.addWidget(advanced_toggle)
+        layout.addWidget(remove_remote_btn)
 
         buttons = QHBoxLayout()
-        remove_remote_btn = QPushButton("Remove from Homebase", dialog)
-        remove_remote_btn.setEnabled(False)
+        retry_btn = QPushButton("Retry Failed Files", dialog)
+        retry_btn.setObjectName("homebaseSyncRetryButton")
+        retry_btn.setEnabled(active_count > 0)
+        dismiss_btn = QPushButton("Dismiss Resolved History", dialog)
+        dismiss_btn.setObjectName("homebaseSyncDismissHistoryButton")
+        dismiss_btn.setEnabled(history_count > 0)
         close_btn = QPushButton("Close", dialog)
         close_btn.clicked.connect(dialog.accept)
-        buttons.addWidget(remove_remote_btn)
+        buttons.addWidget(retry_btn)
+        buttons.addWidget(dismiss_btn)
         buttons.addStretch(1)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
 
+        def _friendly_reason(phase: str) -> str:
+            if phase == "download":
+                return "StillPoint could not download this file from Homebase. Retrying is usually safe."
+            if phase == "path":
+                return "This Homebase path could not be represented on this device's filesystem."
+            if phase == "delete":
+                return "StillPoint could not apply a deletion from Homebase on this device."
+            if phase == "recovery":
+                return "StillPoint could not create a protected local recovery copy before applying the change."
+            return "The file was downloaded, but StillPoint could not safely save it into the local vault."
+
         def _update_detail() -> None:
             item = list_widget.currentItem()
             if item is None:
-                detail_label.setText("")
+                friendly_label.setText("")
+                technical_label.setText("")
+                remove_remote_btn.setEnabled(False)
                 return
             entry = item.data(Qt.UserRole) or {}
             path = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
             phase = str(entry.get("phase") or "unknown").strip().lower() or "unknown"
             reason = str(entry.get("reason") or "Unknown error").strip() or "Unknown error"
             object_id = str(entry.get("object_id") or "").strip().lower()
+            state_text = "This problem still needs attention." if entry.get("active") else "A later sync succeeded; this is retained history."
+            friendly_label.setText(f"/{path}\n\n{_friendly_reason(phase)}\n\n{state_text}")
             lines = [
                 f"Path: /{path}",
                 f"Stage: {phase}",
@@ -7632,8 +7714,22 @@ class MainWindow(QMainWindow):
             attempts = max(1, int(entry.get("attempts", 1) or 1))
             if attempts > 1:
                 lines.append(f"Attempts: {attempts}")
-            detail_label.setText("\n".join(lines))
-            remove_remote_btn.setEnabled(bool(path and self._homebase_sync_engine))
+            technical_label.setText("\n".join(lines))
+            local_missing = False
+            if path and self.vault_root:
+                try:
+                    local_missing = not (Path(self.vault_root) / path).exists()
+                except OSError:
+                    local_missing = True
+            can_delete_remote = bool(
+                path and phase == "path" and local_missing and self._homebase_sync_engine
+            )
+            remove_remote_btn.setEnabled(can_delete_remote)
+            remove_remote_btn.setToolTip(
+                "Available only for an unrepresentable path that is absent locally."
+                if not can_delete_remote
+                else "Publish a deletion of this path to every Homebase device."
+            )
 
         def _remove_from_homebase() -> None:
             item = list_widget.currentItem()
@@ -7645,9 +7741,9 @@ class MainWindow(QMainWindow):
                 return
             answer = QMessageBox.question(
                 dialog,
-                "Remove from Homebase",
-                f"Publish the local deletion of /{path}?\n\n"
-                "This removes the path from the shared Homebase checkpoint on the next sync.",
+                "Delete from shared Homebase",
+                f"Delete /{path} from the shared Homebase vault?\n\n"
+                "This is destructive and affects every connected device on the next sync.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -7656,12 +7752,12 @@ class MainWindow(QMainWindow):
             try:
                 marked = self._homebase_sync_engine.mark_remote_path_deleted(path)
             except Exception as exc:
-                QMessageBox.critical(dialog, "Remove from Homebase", f"Could not record deletion: {exc}")
+                QMessageBox.critical(dialog, "Homebase", f"Could not record deletion: {exc}")
                 return
             if not marked:
                 QMessageBox.warning(
                     dialog,
-                    "Remove from Homebase",
+                    "Homebase",
                     "The file still exists locally. Delete or move it locally, then try again.",
                 )
                 return
@@ -7669,8 +7765,37 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Homebase removal queued for /{path}.", 5000)
             dialog.accept()
 
+        def _retry() -> None:
+            if self._homebase_sync_engine:
+                self._homebase_sync_engine.sync_now("retry failed files")
+                self.statusBar().showMessage("Homebase retry requested.", 4000)
+            dialog.accept()
+
+        def _dismiss_history() -> None:
+            if not self._homebase_sync_engine:
+                return
+            removed = self._homebase_sync_engine.dismiss_resolved_sync_errors()
+            self.statusBar().showMessage(
+                f"Dismissed {removed} resolved Homebase problem(s).", 5000
+            )
+            dialog.accept()
+
         list_widget.currentItemChanged.connect(lambda _cur, _prev: _update_detail())
         remove_remote_btn.clicked.connect(_remove_from_homebase)
+        retry_btn.clicked.connect(_retry)
+        dismiss_btn.clicked.connect(_dismiss_history)
+        technical_toggle.toggled.connect(
+            lambda checked: (
+                technical_label.setVisible(checked),
+                technical_toggle.setText("Hide technical details" if checked else "Show technical details"),
+            )
+        )
+        advanced_toggle.toggled.connect(
+            lambda checked: (
+                remove_remote_btn.setVisible(checked),
+                advanced_toggle.setText("Hide advanced actions" if checked else "Show advanced actions"),
+            )
+        )
         if list_widget.count():
             list_widget.setCurrentRow(0)
         fit_window_to_available_screen(dialog, QSize(900, 520), parent=self)
@@ -7851,6 +7976,43 @@ class MainWindow(QMainWindow):
             return False
         return self._apply_homebase_conflict_resolution(entry, merged_text, resolution="merged")
 
+    def _homebase_sync_error_summary(self) -> dict[str, Any]:
+        engine = getattr(self, "_homebase_sync_engine", None)
+        if not engine:
+            return {"active": 0, "resolved": 0, "total": 0, "latest": None}
+        try:
+            return engine.sync_error_summary()
+        except Exception:
+            return {"active": 0, "resolved": 0, "total": 0, "latest": None}
+
+    def _handle_homebase_badge_click(self) -> None:
+        if self._homebase_attention_dialog_open or not self._homebase_sync_engine:
+            return
+        self._homebase_attention_dialog_open = True
+        try:
+            review = self._homebase_sync_engine.pending_recovery_review()
+            if review:
+                self._show_homebase_recovery_review(review)
+                return
+            interrupted = self._homebase_sync_engine.interrupted_recovery_events()
+            if interrupted:
+                self._show_homebase_interrupted_recovery(interrupted)
+                return
+            status = self._homebase_sync_engine.get_status()
+            if int(getattr(status, "conflicts", 0) or 0) > 0:
+                self._show_homebase_conflicts_popup(
+                    self._homebase_sync_engine.list_conflicts(limit=200)
+                )
+                return
+            if int(self._homebase_sync_error_summary().get("active", 0) or 0) > 0:
+                self._show_homebase_sync_errors_popup(
+                    self._homebase_sync_engine.list_sync_errors(limit=500)
+                )
+                return
+            self._show_homebase_sync_summary()
+        finally:
+            self._homebase_attention_dialog_open = False
+
     def _update_homebase_status_badge(self, status: Optional[HomebaseSyncStatus]) -> None:
         if not hasattr(self, "_homebase_status_label"):
             return
@@ -7908,18 +8070,36 @@ class MainWindow(QMainWindow):
         text = f"HOMEBASE{star}"
         summary_lower = str(status.summary or "").lower()
         last_error_lower = str(status.last_error or "").lower()
+        error_summary_getter = getattr(self, "_homebase_sync_error_summary", None)
+        sync_errors = (
+            error_summary_getter()
+            if callable(error_summary_getter)
+            else {"active": 0, "resolved": 0, "total": 0, "latest": None}
+        )
+        active_sync_errors = int(sync_errors.get("active", 0) or 0)
+        needs_recovery_review = state in {"review", "interrupted"}
+        sync_paused = state == "paused"
         auth_error = (
             "unauthor" in summary_lower
             or "not authenticated" in summary_lower
             or "auth error" in summary_lower
             or "401" in last_error_lower
         )
-        if status.conflicts > 0:
+        if needs_recovery_review:
+            text = f"HOMEBASE REVIEW{star}"
+            bg = theme_value("main_window.homebase_badge.attention_bg", "#ed6c02")
+        elif sync_paused:
+            text = f"HOMEBASE PAUSED{star}"
+            bg = theme_value("main_window.homebase_badge.attention_bg", "#ed6c02")
+        elif status.conflicts > 0:
             text = f"HOMEBASE ({status.conflicts}){star}"
             bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
         elif auth_error:
             text = f"HOMEBASE AUTH{star}"
             bg = theme_value("main_window.homebase_badge.auth_bg", "#d32f2f")
+        elif active_sync_errors > 0 or state in {"error", "offline"}:
+            text = f"HOMEBASE ERROR ({active_sync_errors}){star}" if active_sync_errors else f"HOMEBASE ERROR{star}"
+            bg = theme_value("main_window.homebase_badge.error_bg", "#d32f2f")
         elif show_syncing_blue:
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
         elif state == "hibernated" and not has_manifest_delta:
@@ -7938,6 +8118,14 @@ class MainWindow(QMainWindow):
             tooltip += f"\nLast real sync: {format_sync_local(self._homebase_last_real_sync_at)}"
         if status.last_error:
             tooltip += f"\nLast error: {status.last_error}"
+        if needs_recovery_review:
+            tooltip += "\nClick to review protected local changes."
+        elif sync_paused:
+            tooltip += "\nClick to review Homebase status and retry when ready."
+        elif active_sync_errors:
+            tooltip += f"\n{active_sync_errors} file problem(s) need attention. Click to review."
+        elif status.conflicts > 0:
+            tooltip += "\nClick to resolve Homebase conflicts."
         self._homebase_status_label.setText(text)
         self._homebase_status_label.setToolTip(tooltip)
         self._homebase_status_label.setStyleSheet(
@@ -8213,12 +8401,156 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"Homebase sync request failed: {exc}", 5000)
 
+    def _current_homebase_sync_config(self) -> HomebaseSyncConfig:
+        if not self.vault_root:
+            raise ValueError("No local vault is open.")
+        self._ensure_config_active_vault_context()
+        remote_url = config.load_homebase_remote_url().strip()
+        passphrase = self._load_homebase_session_passphrase()
+        if not remote_url or not passphrase:
+            raise ValueError("Homebase URL and encryption passphrase are required.")
+        return HomebaseSyncConfig(
+            vault_root=Path(self.vault_root),
+            vault_id=config.load_homebase_vault_id() or config.ensure_homebase_vault_id(),
+            device_id=config.load_homebase_device_id(),
+            remote_url=remote_url,
+            verify_ssl=config.load_homebase_verify_ssl(),
+            auth_token=config.load_homebase_auth_token().strip(),
+            local_ui_token=self._homebase_local_ui_token_for_url(remote_url),
+            passphrase=passphrase,
+            refresh_token=config.load_homebase_refresh_token().strip(),
+            auto_sync=config.load_homebase_auto_sync(),
+            interval_seconds=config.load_homebase_interval_seconds(),
+            push_debounce_seconds=config.load_homebase_push_debounce_seconds(),
+            max_parallel_transfers=config.load_homebase_max_parallel_transfers(),
+            token_update_callback=self._store_homebase_tokens,
+            recovery_enabled=config.load_homebase_recovery_enabled(),
+            recovery_quota_bytes=config.load_homebase_recovery_quota_mib() * 1024**2,
+            recovery_versions_per_file=config.load_homebase_recovery_versions(),
+            recovery_daily_days=config.load_homebase_recovery_days(),
+        )
+
+    def _start_homebase_local_authoritative(self) -> None:
+        if not self.vault_root or not self._is_homebase_mode_enabled():
+            self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
+            return
+        if self._homebase_authoritative_worker or getattr(self, "_homebase_reset_worker", None):
+            self.statusBar().showMessage("A Homebase recovery operation is already running.", 4000)
+            return
+        if self._is_editor_dirty() and not self._save_before_page_transition("Homebase authoritative publish"):
+            return
+        try:
+            cfg = self._current_homebase_sync_config()
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase", str(exc))
+            return
+
+        self._shutdown_homebase_sync()
+        progress = QProgressDialog("Comparing this device with Homebase…", None, 0, 0, self)
+        progress.setWindowTitle("Review Local Authoritative Publish")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        preview_worker = HomebaseAuthoritativeWorker(cfg, mode="preview", parent=self)
+        self._homebase_authoritative_worker = preview_worker
+        self._update_homebase_sync_action_state()
+
+        def _restore_normal_sync() -> None:
+            self._homebase_authoritative_worker = None
+            self._configure_homebase_sync_for_vault()
+            self._update_homebase_sync_action_state()
+
+        def _preview_failed(message: str) -> None:
+            progress.close()
+            _restore_normal_sync()
+            QMessageBox.critical(self, "Homebase Preview Failed", message or "Unknown error")
+            preview_worker.deleteLater()
+
+        def _preview_ready(preview: dict[str, Any]) -> None:
+            progress.close()
+            self._homebase_authoritative_worker = None
+            preview_worker.deleteLater()
+            remote_head = str(preview.get("remote_head") or "")
+            box = QMessageBox(self)
+            box.setWindowTitle("Publish This Device as Authoritative")
+            box.setIcon(QMessageBox.Warning)
+            box.setText("Replace the shared Homebase snapshot with this device?")
+            box.setInformativeText(
+                f"Local files: {int(preview.get('local_files', 0)):,}\n"
+                f"Files only on this device: {int(preview.get('local_only', 0)):,}\n"
+                f"Files only on Homebase that will be removed: {int(preview.get('remote_only', 0)):,}\n"
+                f"Shared paths that will use this device's bytes: {int(preview.get('shared', 0)):,}\n\n"
+                "Use this only when local changes are intentionally authoritative. "
+                "StillPoint will abort if Homebase changes after this preview."
+            )
+            publish_button = box.addButton("Continue…", QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() != publish_button:
+                _restore_normal_sync()
+                return
+            vault_name = Path(self.vault_root or "vault").name
+            typed, ok = QInputDialog.getText(
+                self,
+                "Confirm Authoritative Publish",
+                f"Type {vault_name} to confirm replacing the shared Homebase snapshot:",
+            )
+            if not ok or typed.strip() != vault_name:
+                _restore_normal_sync()
+                if ok:
+                    QMessageBox.warning(self, "Homebase", "Vault name did not match. Nothing was published.")
+                return
+
+            publish_progress = QProgressDialog(
+                "Encrypting and publishing the local vault…", None, 0, 0, self
+            )
+            publish_progress.setWindowTitle("Publishing Local Homebase Snapshot")
+            publish_progress.setCancelButton(None)
+            publish_progress.setWindowModality(Qt.WindowModal)
+            publish_progress.setMinimumDuration(0)
+            publish_progress.show()
+            publish_worker = HomebaseAuthoritativeWorker(
+                cfg,
+                mode="publish",
+                expected_remote_head=remote_head,
+                parent=self,
+            )
+            self._homebase_authoritative_worker = publish_worker
+            self._update_homebase_sync_action_state()
+
+            def _publish_failed(message: str) -> None:
+                publish_progress.close()
+                _restore_normal_sync()
+                QMessageBox.critical(self, "Homebase Publish Failed", message or "Unknown error")
+                publish_worker.deleteLater()
+
+            def _publish_finished(result: dict[str, Any]) -> None:
+                publish_progress.close()
+                _restore_normal_sync()
+                QMessageBox.information(
+                    self,
+                    "Homebase Published",
+                    f"Published {int(result.get('files', 0)):,} local file(s) as the shared Homebase snapshot.",
+                )
+                publish_worker.deleteLater()
+
+            publish_worker.failed.connect(_publish_failed)
+            publish_worker.publish_finished.connect(_publish_finished)
+            publish_worker.start()
+
+        preview_worker.failed.connect(_preview_failed)
+        preview_worker.preview_ready.connect(_preview_ready)
+        preview_worker.start()
+
     def _reset_homebase_sync_state_server_authoritative(self) -> None:
         if not self.vault_root or not self._is_homebase_mode_enabled():
             self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
             return
-        if getattr(self, "_homebase_reset_worker", None):
-            self.statusBar().showMessage("Homebase reset already in progress.", 3000)
+        if getattr(self, "_homebase_reset_worker", None) or self._homebase_authoritative_worker:
+            self.statusBar().showMessage("A Homebase recovery operation is already in progress.", 3000)
             return
         confirm = QMessageBox.question(
             self,
@@ -8338,9 +8670,13 @@ class MainWindow(QMainWindow):
     def _update_homebase_sync_action_state(self) -> None:
         action = getattr(self, "_action_homebase_sync_now", None)
         reset_action = getattr(self, "_action_homebase_reset_sync", None)
-        if action is None and reset_action is None:
+        publish_action = getattr(self, "_action_homebase_publish_local", None)
+        if action is None and reset_action is None and publish_action is None:
             return
-        reset_in_progress = bool(getattr(self, "_homebase_reset_worker", None))
+        reset_in_progress = bool(
+            getattr(self, "_homebase_reset_worker", None)
+            or getattr(self, "_homebase_authoritative_worker", None)
+        )
         enabled = bool(self._homebase_sync_engine) and self._is_homebase_mode_enabled() and not reset_in_progress
         if action is not None:
             action.setEnabled(enabled)
@@ -8363,6 +8699,16 @@ class MainWindow(QMainWindow):
                 reset_action.setToolTip("Homebase reset is already in progress.")
             else:
                 reset_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
+        if publish_action is not None:
+            publish_action.setEnabled(enabled)
+            if enabled:
+                publish_action.setToolTip(
+                    "Replace the shared Homebase snapshot with this device after reviewing the impact"
+                )
+            elif reset_in_progress:
+                publish_action.setToolTip("Disabled while another Homebase recovery operation is in progress.")
+            else:
+                publish_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
 
     def _homebase_activity_snapshot(self, status: Optional[HomebaseSyncStatus]) -> tuple[str, list[str]]:
         if not status:
@@ -8394,6 +8740,8 @@ class MainWindow(QMainWindow):
             phase = "Waiting to retry"
         elif state == "offline":
             phase = "Offline"
+        elif state == "paused":
+            phase = "Paused"
         elif state == "syncing":
             phase = "Syncing"
         elif state == "hibernated":
@@ -8654,7 +9002,16 @@ class MainWindow(QMainWindow):
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
         local_recovery_btn = QPushButton("Local Recovery...")
         sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
-        sync_errors_btn = QPushButton(f"View Sync Errors ({len(sync_errors)})")
+        error_summary = self._homebase_sync_error_summary()
+        active_error_count = int(error_summary.get("active", 0) or 0)
+        history_error_count = int(error_summary.get("resolved", 0) or 0)
+        error_button_text = (
+            f"Review Sync Problems ({active_error_count})"
+            if active_error_count
+            else f"Sync Problem History ({history_error_count})"
+        )
+        sync_errors_btn = QPushButton(error_button_text)
+        publish_local_btn = QPushButton("Publish This Device as Authoritative…")
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
 
@@ -8690,6 +9047,7 @@ class MainWindow(QMainWindow):
             primary_actions.addStretch(1)
         primary_actions.addWidget(save_settings_btn)
         primary_actions.addWidget(sync_now_btn)
+        primary_actions.addWidget(publish_local_btn)
         primary_actions.addWidget(close_btn)
         layout.addLayout(primary_actions)
 
@@ -8739,6 +9097,11 @@ class MainWindow(QMainWindow):
         save_settings_btn.clicked.connect(_save_settings)
         prune_recovery_btn.clicked.connect(lambda: self._homebase_sync_engine.prune_recovery() if self._homebase_sync_engine else None)
         sync_now_btn.clicked.connect(lambda: self._trigger_homebase_sync_now("badge"))
+        def _publish_local_authoritative() -> None:
+            dialog.accept()
+            QTimer.singleShot(0, self._start_homebase_local_authoritative)
+
+        publish_local_btn.clicked.connect(_publish_local_authoritative)
         reset_auth_btn.clicked.connect(self._reset_homebase_auth)
         reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
         conflicts_btn.clicked.connect(_view_conflicts)
@@ -8761,12 +9124,17 @@ class MainWindow(QMainWindow):
             error_label.setText(str(current.last_error or "None"))
             conflicts_btn.setText(f"View Conflicts ({int(getattr(current, 'conflicts', 0) or 0)})")
             conflicts_btn.setEnabled(bool(self._homebase_sync_engine) and int(getattr(current, "conflicts", 0) or 0) > 0)
-            try:
-                sync_error_count = len(self._homebase_sync_engine.list_sync_errors(limit=200)) if self._homebase_sync_engine else 0
-            except Exception:
-                sync_error_count = 0
-            sync_errors_btn.setText(f"View Sync Errors ({int(sync_error_count)})")
-            sync_errors_btn.setEnabled(bool(self._homebase_sync_engine) and int(sync_error_count) > 0)
+            current_errors = self._homebase_sync_error_summary()
+            active_errors = int(current_errors.get("active", 0) or 0)
+            resolved_errors = int(current_errors.get("resolved", 0) or 0)
+            sync_errors_btn.setText(
+                f"Review Sync Problems ({active_errors})"
+                if active_errors
+                else f"Sync Problem History ({resolved_errors})"
+            )
+            sync_errors_btn.setEnabled(
+                bool(self._homebase_sync_engine) and (active_errors + resolved_errors) > 0
+            )
 
             activity_phase, activity_lines = self._homebase_activity_snapshot(current)
             activity_phase_label.setText(activity_phase)

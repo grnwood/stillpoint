@@ -54,6 +54,22 @@ Homebase supports account auth and user management APIs.
 - Large or unusually destructive pulls pause for review. If a pull is interrupted, Homebase pauses syncing until you review the recovery event and choose to continue.
 - Local recovery is enabled by default. Its storage quota and retention settings are in the Homebase sync summary.
 
+Homebase never opens Local Recovery over the main window during startup. When review is needed, the Homebase status badge turns amber. Click the badge to review protected changes or an interrupted pull.
+
+## Sync Problems
+
+- A red Homebase badge means an active authentication, connection, conflict, or per-file sync problem needs attention.
+- Click the badge to open the relevant review screen. **Retry Failed Files** retries an incomplete pull before local uploads continue.
+- A file problem that predates a later successful sync is shown as resolved history and does not block uploads. Resolved history can be dismissed.
+- Raw operating-system errors, object IDs, checkpoints, and device IDs are available under technical details or tooltips.
+- **Delete selected path from shared Homebase** is an advanced destructive action. It is available only for an unrepresentable path that is absent locally.
+
+## Choosing an Authoritative Copy
+
+- **Reset Sync State (Server Authoritative)** replaces matching local content with the current Homebase snapshot and protects affected local files through Local Recovery.
+- **Publish This Device as Authoritative** does the opposite: it previews path counts, requires the vault name as confirmation, and replaces the shared Homebase snapshot with this device's current files.
+- An authoritative local publish aborts if the Homebase head changes after the preview. Use it only when you deliberately want local files—including local deletions—to win.
+
 ## Practical Takeaway
 - Use a **Local Vault** when you only need files on one machine.
 - Use a **Homebase Vault** when you want sync, offline-first behavior, and a stronger local-first trust boundary.

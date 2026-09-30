@@ -231,6 +231,7 @@ class HomebaseSyncEngine:
         self._object_cache_path = self._sync_dir / "object_cache.json"
         self._sync_errors_path = self._sync_dir / "sync_errors.json"
         self._local_deletions_path = self._sync_dir / "local_deletions.json"
+        self._sync_error_summary_cache: Optional[tuple[tuple[int, int], dict[str, Any]]] = None
         self._recovery: Optional[RecoveryStore] = None
         self._review_cv = threading.Condition()
         self._pending_review: Optional[dict[str, Any]] = None
@@ -630,6 +631,193 @@ class HomebaseSyncEngine:
             client.close()
             self._pause_for_interrupted_recovery()
 
+    def preview_local_authoritative(self) -> dict[str, Any]:
+        """Describe the effect of replacing the shared head with this device."""
+        client = HomebaseClient(
+            base_url=self.cfg.remote_url,
+            token=self.cfg.auth_token,
+            vault_id=self.cfg.vault_id,
+            local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
+        )
+        try:
+            latest = client.get_latest()
+            remote_head = str(latest.get("checkpoint_id") or "").strip()
+            remote_entries: dict[str, Any] = {}
+            if remote_head:
+                manifest = json.loads(client.get_manifest(remote_head).decode("utf-8"))
+                remote_entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
+            local_paths = {
+                self._canonical_rel_path(rel)
+                for rel, _full in self._iter_sync_files()
+                if self._canonical_rel_path(rel)
+            }
+            remote_paths = {
+                self._canonical_rel_path(str(rel))
+                for rel, meta in remote_entries.items()
+                if isinstance(meta, dict)
+                and not str(rel).startswith(".stillpoint/")
+                and self._canonical_rel_path(str(rel))
+            }
+            return {
+                "remote_head": remote_head,
+                "local_files": len(local_paths),
+                "remote_files": len(remote_paths),
+                "local_only": len(local_paths - remote_paths),
+                "remote_only": len(remote_paths - local_paths),
+                "shared": len(local_paths & remote_paths),
+            }
+        finally:
+            client.close()
+
+    def publish_local_authoritative(self, expected_remote_head: str) -> dict[str, Any]:
+        """Publish the current local vault without first applying the remote head.
+
+        This is intentionally separate from normal sync and guarded by an
+        expected-head check so a device cannot knowingly overwrite a snapshot
+        that changed after the user reviewed the preview.
+        """
+        key = derive_key_from_passphrase(self.cfg.passphrase, self.cfg.vault_id)
+        client = HomebaseClient(
+            base_url=self.cfg.remote_url,
+            token=self.cfg.auth_token,
+            vault_id=self.cfg.vault_id,
+            local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
+        )
+        try:
+            latest = client.get_latest()
+            remote_head = str(latest.get("checkpoint_id") or "").strip()
+            if remote_head != str(expected_remote_head or "").strip():
+                raise ValueError(
+                    "Homebase changed after the preview. Review the latest state before publishing again."
+                )
+
+            file_items = self._iter_sync_files()
+            manifest = {
+                "schema_version": 1,
+                "vault_id": self.cfg.vault_id,
+                "created_at": _utc_now_iso(),
+                "device_id": self.cfg.device_id,
+                "entries": {},
+            }
+            current_scan: dict[str, dict[str, Any]] = {}
+            current_object_map: dict[str, str] = {}
+
+            def _prepare_and_upload(item: tuple[str, Path]) -> tuple[str, dict[str, Any], dict[str, Any], str, bool]:
+                rel, full = item
+                before = full.stat()
+                plaintext = read_bytes(full)
+                after = full.stat()
+                if (
+                    int(before.st_size) != int(after.st_size)
+                    or int(getattr(before, "st_mtime_ns", 0) or 0)
+                    != int(getattr(after, "st_mtime_ns", 0) or 0)
+                ):
+                    raise OSError(f"Local file changed while preparing authoritative publish: {rel}")
+                envelope = encrypt_bytes(key, plaintext)
+                object_id = object_id_from_ciphertext(envelope)
+                uploaded = False
+                if not client.has_object(object_id):
+                    client.put_object(object_id, envelope)
+                    uploaded = True
+                manifest_entry = {
+                    "size": int(after.st_size),
+                    "mtime": int(after.st_mtime),
+                    "kind": "file",
+                    "object_id": object_id,
+                }
+                scan_entry = {
+                    "size": int(after.st_size),
+                    "mtime": int(after.st_mtime),
+                    "mtime_ns": int(getattr(after, "st_mtime_ns", 0) or 0),
+                    "ctime_ns": int(getattr(after, "st_ctime_ns", 0) or 0),
+                    "content_sha256": hashlib.sha256(plaintext).hexdigest(),
+                }
+                return rel, manifest_entry, scan_entry, object_id, uploaded
+
+            uploaded_objects = 0
+            max_workers = min(max(1, int(self.cfg.max_parallel_transfers or 1)), max(1, len(file_items)))
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="homebase-authoritative") as executor:
+                futures = [executor.submit(_prepare_and_upload, item) for item in file_items]
+                for future in as_completed(futures):
+                    rel, manifest_entry, scan_entry, object_id, uploaded = future.result()
+                    manifest["entries"][rel] = manifest_entry
+                    current_scan[rel] = scan_entry
+                    current_object_map[rel] = object_id
+                    uploaded_objects += int(uploaded)
+
+            final_items = self._iter_sync_files()
+            if {rel for rel, _full in final_items} != set(current_object_map):
+                raise OSError(
+                    "The local file set changed while the authoritative snapshot was being prepared. "
+                    "Nothing was published as latest."
+                )
+            for rel, full in final_items:
+                current_stat = full.stat()
+                prepared = current_scan[rel]
+                if (
+                    int(current_stat.st_size) != int(prepared["size"])
+                    or int(getattr(current_stat, "st_mtime_ns", 0) or 0)
+                    != int(prepared["mtime_ns"])
+                ):
+                    raise OSError(
+                        f"Local file changed while the authoritative snapshot was being prepared: {rel}. "
+                        "Nothing was published as latest."
+                    )
+
+            manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            checkpoint_id = _manifest_id_bytes(manifest_bytes)
+            # Recheck immediately before moving the shared head. The server API
+            # does not expose compare-and-swap, so this is the narrowest safe
+            # client-side guard available.
+            latest_before_publish = client.get_latest()
+            if str(latest_before_publish.get("checkpoint_id") or "").strip() != remote_head:
+                raise ValueError(
+                    "Homebase changed while local files were being prepared. Nothing was published as latest."
+                )
+            client.put_manifest(checkpoint_id, manifest_bytes)
+            client.put_latest(checkpoint_id)
+
+            state = _read_json(self._state_path, self._default_state())
+            hb = state.setdefault("homebase", {})
+            hb["last_seen_latest_checkpoint_id"] = checkpoint_id
+            hb["last_pulled_checkpoint_id"] = checkpoint_id
+            hb["last_pushed_checkpoint_id"] = checkpoint_id
+            hb["last_sync_at"] = _utc_now_iso()
+            hb["last_error"] = None
+            hb["error_count"] = 0
+            hb["backoff_until"] = None
+            _write_json(self._state_path, state)
+            _write_json(
+                self._scan_path,
+                {
+                    "schema_version": 1,
+                    "vault_id": self.cfg.vault_id,
+                    "updated_at": hb["last_sync_at"],
+                    "last_full_hash_epoch": float(time.time()),
+                    "entries": current_scan,
+                },
+            )
+            self._save_object_cache(current_object_map)
+            self._save_local_deletions(set())
+            _write_json(
+                self._conflict_path,
+                {"schema_version": 1, "vault_id": self.cfg.vault_id, "conflicts": []},
+            )
+            _write_json(
+                self._sync_errors_path,
+                {"schema_version": 1, "vault_id": self.cfg.vault_id, "errors": []},
+            )
+            self._sync_error_summary_cache = None
+            return {
+                "checkpoint_id": checkpoint_id,
+                "files": len(current_object_map),
+                "uploaded_objects": uploaded_objects,
+            }
+        finally:
+            client.close()
+
     def get_status(self) -> HomebaseSyncStatus:
         with self._status_lock:
             return HomebaseSyncStatus(**self._status.__dict__)
@@ -713,12 +901,15 @@ class HomebaseSyncEngine:
         if len(errors) > max_entries:
             payload["errors"] = errors[-max_entries:]
         _write_json(self._sync_errors_path, payload)
+        self._sync_error_summary_cache = None
 
     def list_sync_errors(self, limit: int = 200) -> list[dict[str, Any]]:
         payload = _read_json(self._sync_errors_path, {"errors": []})
         errors = payload.get("errors")
         if not isinstance(errors, list):
             return []
+        state = _read_json(self._state_path, self._default_state())
+        last_success = str(state.get("homebase", {}).get("last_sync_at") or "").strip()
         sanitized: list[dict[str, Any]] = []
         for item in errors:
             if not isinstance(item, dict):
@@ -726,14 +917,21 @@ class HomebaseSyncEngine:
             path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
             if not path:
                 continue
+            detected_at = str(item.get("ts") or "").strip()
+            resolved_at = str(item.get("resolved_at") or "").strip()
+            # Older builds did not persist a resolved marker. A later clean
+            # sync is proof that those failures no longer block the pull.
+            active = not resolved_at and (not last_success or not detected_at or detected_at > last_success)
             sanitized.append(
                 {
-                    "ts": str(item.get("ts") or "").strip(),
+                    "ts": detected_at,
                     "path": path,
                     "phase": str(item.get("phase") or "unknown").strip() or "unknown",
                     "reason": str(item.get("reason") or "").strip() or "Unknown error",
                     "object_id": str(item.get("object_id") or "").strip().lower(),
                     "attempts": max(1, int(item.get("attempts", 1) or 1)),
+                    "resolved_at": resolved_at,
+                    "active": active,
                 }
             )
         if limit > 0:
@@ -741,6 +939,66 @@ class HomebaseSyncEngine:
         # Show newest entries first in UI.
         sanitized.reverse()
         return sanitized
+
+    def sync_error_summary(self) -> dict[str, Any]:
+        """Return lightweight active/history counts for the status UI."""
+        try:
+            error_stat = self._sync_errors_path.stat()
+            state_stat = self._state_path.stat()
+            stamp = (
+                int(getattr(error_stat, "st_mtime_ns", 0) or 0),
+                int(getattr(state_stat, "st_mtime_ns", 0) or 0),
+            )
+        except OSError:
+            stamp = (0, 0)
+        cached = self._sync_error_summary_cache
+        if cached and cached[0] == stamp:
+            return dict(cached[1])
+        errors = self.list_sync_errors(limit=0)
+        active = sum(bool(item.get("active")) for item in errors)
+        summary = {
+            "active": active,
+            "resolved": max(0, len(errors) - active),
+            "total": len(errors),
+            "latest": errors[0] if errors else None,
+        }
+        self._sync_error_summary_cache = (stamp, dict(summary))
+        return summary
+
+    def dismiss_resolved_sync_errors(self) -> int:
+        """Remove historical errors that predate the latest successful sync."""
+        payload = _read_json(self._sync_errors_path, {"errors": []})
+        raw_errors = payload.get("errors")
+        if not isinstance(raw_errors, list):
+            return 0
+        active_keys = {
+            (
+                str(item.get("path") or ""),
+                str(item.get("phase") or ""),
+                str(item.get("object_id") or ""),
+                str(item.get("ts") or ""),
+            )
+            for item in self.list_sync_errors(limit=0)
+            if item.get("active")
+        }
+        retained = [
+            item
+            for item in raw_errors
+            if isinstance(item, dict)
+            and (
+                str(item.get("path") or ""),
+                str(item.get("phase") or ""),
+                str(item.get("object_id") or ""),
+                str(item.get("ts") or ""),
+            )
+            in active_keys
+        ]
+        removed = len(raw_errors) - len(retained)
+        if removed:
+            payload["errors"] = retained
+            _write_json(self._sync_errors_path, payload)
+            self._sync_error_summary_cache = None
+        return removed
 
     def _clear_sync_errors_for_paths(self, paths: set[str]) -> None:
         cleaned_paths = {
@@ -764,6 +1022,7 @@ class HomebaseSyncEngine:
             return
         payload["errors"] = retained
         _write_json(self._sync_errors_path, payload)
+        self._sync_error_summary_cache = None
 
     def _load_local_deletions(self) -> set[str]:
         payload = _read_json(self._local_deletions_path, {"paths": []})

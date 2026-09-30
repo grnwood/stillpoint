@@ -36,6 +36,7 @@ def _make_cfg(vault_root: Path, **overrides) -> HomebaseSyncConfig:
         verify_ssl=True,
         auth_token="tok",
         passphrase="secret",
+        recovery_base_dir=vault_root.parent / "homebase-recovery",
     )
     defaults.update(overrides)
     return HomebaseSyncConfig(**defaults)
@@ -206,6 +207,103 @@ class TestImageSyncPull:
         errors = engine.list_sync_errors()
         assert len(errors) == 1
         assert errors[0]["attempts"] == 3
+
+    def test_later_success_classifies_old_sync_error_as_dismissible_history(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+        engine._record_sync_error(
+            path="old-problem.md",
+            phase="apply",
+            reason="temporary write failure",
+            object_id="a" * 64,
+        )
+        state = engine._default_state()
+        state["homebase"]["last_sync_at"] = "9999-12-31T23:59:59Z"
+        _write_json(engine._state_path, state)
+
+        summary = engine.sync_error_summary()
+
+        assert summary["active"] == 0
+        assert summary["resolved"] == 1
+        assert engine.dismiss_resolved_sync_errors() == 1
+        assert engine.list_sync_errors() == []
+
+    def test_local_authoritative_publish_previews_and_replaces_remote_paths(self, tmp_path, monkeypatch):
+        client = FakeClient()
+        remote_vault = tmp_path / "remote-source"
+        remote_vault.mkdir()
+        (remote_vault / "shared.md").write_text("remote bytes\n", encoding="utf-8")
+        (remote_vault / "remote-only.md").write_text("remove me\n", encoding="utf-8")
+        remote_engine = HomebaseSyncEngine(_make_cfg(remote_vault, recovery_enabled=False))
+        original_head = _push_via_engine(remote_engine, client)
+
+        local_vault = tmp_path / "local-source"
+        local_vault.mkdir()
+        (local_vault / "shared.md").write_text("local bytes\n", encoding="utf-8")
+        (local_vault / "local-only.md").write_text("add me\n", encoding="utf-8")
+        local_engine = HomebaseSyncEngine(
+            _make_cfg(local_vault, device_id="local-device", recovery_enabled=False)
+        )
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        preview = local_engine.preview_local_authoritative()
+        result = local_engine.publish_local_authoritative(preview["remote_head"])
+
+        assert preview == {
+            "remote_head": original_head,
+            "local_files": 2,
+            "remote_files": 2,
+            "local_only": 1,
+            "remote_only": 1,
+            "shared": 1,
+        }
+        assert result["files"] == 2
+        assert client.latest_checkpoint == result["checkpoint_id"]
+        latest_manifest = json.loads(client.get_manifest(client.latest_checkpoint))
+        assert set(latest_manifest["entries"]) == {"local-only.md", "shared.md"}
+        state = json.loads(local_engine._state_path.read_text(encoding="utf-8"))
+        assert state["homebase"]["last_pushed_checkpoint_id"] == client.latest_checkpoint
+
+    def test_local_authoritative_publish_rejects_changed_remote_head(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Page.md").write_text("local\n", encoding="utf-8")
+        engine = HomebaseSyncEngine(_make_cfg(vault, recovery_enabled=False))
+        client = FakeClient()
+        client.latest_checkpoint = "newer-than-preview"
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        with pytest.raises(ValueError, match="changed after the preview"):
+            engine.publish_local_authoritative("reviewed-head")
+
+    def test_local_authoritative_publish_rechecks_head_before_advancing_latest(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Page.md").write_text("local\n", encoding="utf-8")
+        engine = HomebaseSyncEngine(_make_cfg(vault, recovery_enabled=False))
+
+        class ChangingHeadClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.latest_checkpoint = "reviewed-head"
+                self.latest_reads = 0
+
+            def get_latest(self) -> dict:
+                self.latest_reads += 1
+                if self.latest_reads == 1:
+                    return {"checkpoint_id": "reviewed-head"}
+                self.latest_checkpoint = "new-concurrent-head"
+                return {"checkpoint_id": self.latest_checkpoint}
+
+        client = ChangingHeadClient()
+        monkeypatch.setattr("sp.sync.engine.HomebaseClient", lambda **_kwargs: client)
+
+        with pytest.raises(ValueError, match="changed while local files were being prepared"):
+            engine.publish_local_authoritative("reviewed-head")
+
+        assert client.latest_checkpoint == "new-concurrent-head"
+        assert client.manifests == {}
 
     def test_pull_fetches_only_objects_changed_since_known_checkpoint(self, tmp_path):
         vault_a = tmp_path / "vault_a"

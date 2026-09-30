@@ -132,6 +132,41 @@ def test_hibernated_badge_stays_gray_without_manifest_delta() -> None:
     assert "#757575" in window._homebase_status_label.stylesheet
 
 
+def test_recovery_review_badge_is_amber_and_actionable() -> None:
+    window = _DummyWindow()
+    status = HomebaseSyncStatus(state="review", summary="Waiting for review")
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert window._homebase_status_label.text == "HOMEBASE REVIEW"
+    assert "#ed6c02" in window._homebase_status_label.stylesheet
+    assert "Click to review" in window._homebase_status_label.tooltip
+
+
+def test_active_file_errors_make_idle_badge_red() -> None:
+    window = _DummyWindow()
+    window._homebase_sync_error_summary = lambda: {
+        "active": 3,
+        "resolved": 0,
+        "total": 3,
+        "latest": None,
+    }
+    status = HomebaseSyncStatus(state="idle", summary="Up to date")
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert window._homebase_status_label.text == "HOMEBASE ERROR (3)"
+    assert "#d32f2f" in window._homebase_status_label.stylesheet
+
+
+def test_status_poll_never_opens_homebase_attention_modals() -> None:
+    source = inspect.getsource(MainWindow._poll_homebase_status)
+
+    assert "_show_homebase_recovery_review" not in source
+    assert "_show_homebase_interrupted_recovery" not in source
+    assert "_maybe_show_homebase_conflict_popup" not in source
+
+
 def test_tooltip_includes_last_real_sync_timestamp() -> None:
     window = _DummyWindow()
     window._homebase_sync_cycle_had_true_activity = True
