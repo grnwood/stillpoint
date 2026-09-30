@@ -50,3 +50,23 @@ def test_mermaid_cache_key_is_stable_after_tool_discovery(tmp_path, monkeypatch)
     assert renderer.render_svg("flowchart TD\nA --> B").success
     assert renderer.render_svg("flowchart TD\nA --> B").success
     assert calls == ["flowchart TD\nA --> B"]
+
+
+def test_mermaid_discovers_nvm_cli_without_shell_path(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    nvm_bin = tmp_path / "nvm" / "versions" / "node" / "v25.2.1" / "bin"
+    nvm_bin.mkdir(parents=True)
+    mmdc = nvm_bin / "mmdc"
+    node = nvm_bin / "node"
+    mmdc.touch(mode=0o755)
+    node.touch(mode=0o755)
+    monkeypatch.setenv("NVM_DIR", str(tmp_path / "nvm"))
+    monkeypatch.delenv("NVM_BIN", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr("sp.app.mermaid_renderer.shutil.which", lambda name: None)
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    assert renderer.discover_mmdc() == mmdc
+    assert renderer._mmdc_env()["PATH"].split(os.pathsep)[0] == str(nvm_bin)
+import os

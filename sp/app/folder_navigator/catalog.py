@@ -173,6 +173,51 @@ class FolderCatalog:
             )
         return len(rows)
 
+    def forget_path(self, path: Path) -> None:
+        """Remove a renamed or trashed file from the Quick Open cache."""
+        relative = path.relative_to(self.root).as_posix()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM files WHERE relative_path = ?", (relative,))
+
+    def relocate_path(self, old_path: Path, new_path: Path, *, directory: bool) -> None:
+        """Update indexed paths immediately after a move within the root."""
+        old_relative = old_path.relative_to(self.root).as_posix()
+        new_relative = new_path.relative_to(self.root)
+        with self._connect() as connection:
+            if directory:
+                rows = connection.execute(
+                    "SELECT relative_path, mtime_ns, size, ignored, generation FROM files "
+                    "WHERE relative_path LIKE ? ESCAPE '\\'",
+                    (_like_escape(old_relative) + "/%",),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT relative_path, mtime_ns, size, ignored, generation FROM files "
+                    "WHERE relative_path = ?", (old_relative,),
+                ).fetchall()
+            updated = []
+            for relative_text, mtime_ns, size, ignored, generation in rows:
+                suffix = Path(relative_text).relative_to(old_relative) if directory else Path()
+                relative = new_relative / suffix
+                updated.append((
+                    relative.as_posix(), relative.name,
+                    relative.parent.as_posix() if relative.parent != Path(".") else "",
+                    mtime_ns, size, int(any(part.startswith(".") for part in relative.parts)),
+                    ignored, generation,
+                ))
+            if directory:
+                connection.execute(
+                    "DELETE FROM files WHERE relative_path LIKE ? ESCAPE '\\'",
+                    (_like_escape(old_relative) + "/%",),
+                )
+            else:
+                connection.execute("DELETE FROM files WHERE relative_path = ?", (old_relative,))
+            if updated:
+                connection.executemany(
+                    "INSERT INTO files(relative_path, name, parent, mtime_ns, size, hidden, ignored, generation) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)", updated,
+                )
+
     def finish_refresh(
         self,
         generation: int,

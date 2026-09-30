@@ -64,11 +64,26 @@ class MermaidRenderer:
         self._render_lock = threading.Lock()
 
     def discover_mmdc(self) -> Optional[Path]:
-        """Attempt to locate mmdc on PATH."""
-        mmdc_path = shutil.which("mmdc")
-        if mmdc_path:
-            path = Path(mmdc_path)
-            if path.exists():
+        """Locate mmdc, including nvm installs omitted from desktop PATH."""
+        candidates = []
+        if mmdc_path := shutil.which("mmdc"):
+            candidates.append(Path(mmdc_path))
+
+        nvm_bin = os.environ.get("NVM_BIN")
+        if nvm_bin:
+            candidates.append(Path(nvm_bin) / "mmdc")
+        nvm_root = Path(os.environ.get("NVM_DIR") or Path.home() / ".nvm")
+        versions_dir = nvm_root / "versions" / "node"
+        if versions_dir.is_dir():
+            versions = sorted(
+                versions_dir.iterdir(),
+                key=lambda path: tuple(int(part) for part in re.findall(r"\d+", path.name)),
+                reverse=True,
+            )
+            candidates.extend(version / "bin" / "mmdc" for version in versions)
+
+        for path in candidates:
+            if path.is_file() and os.access(path, os.X_OK):
                 self._mmdc_path = path
                 return path
         return None
@@ -84,6 +99,15 @@ class MermaidRenderer:
     def get_mmdc_path(self) -> Optional[Path]:
         """Get the currently configured mmdc path."""
         return self._mmdc_path
+
+    def _mmdc_env(self) -> dict[str, str]:
+        """Make node beside an nvm-installed mmdc visible to its env shebang."""
+        env = os.environ.copy()
+        if self._mmdc_path is not None:
+            node_name = "node.exe" if os.name == "nt" else "node"
+            if (self._mmdc_path.parent / node_name).is_file():
+                env["PATH"] = os.pathsep.join((str(self._mmdc_path.parent), env.get("PATH", "")))
+        return env
 
     def is_configured(self) -> bool:
         """Check if Mermaid CLI is available."""
@@ -246,6 +270,7 @@ class MermaidRenderer:
                     cmd,
                     capture_output=True,
                     timeout=15,
+                    env=self._mmdc_env(),
                     **({"creationflags": subprocess.CREATE_NO_WINDOW}
                        if os.name == "nt" else {}),
                 )
@@ -333,6 +358,7 @@ class MermaidRenderer:
                     cmd,
                     capture_output=True,
                     timeout=15,
+                    env=self._mmdc_env(),
                     **({"creationflags": subprocess.CREATE_NO_WINDOW}
                        if os.name == "nt" else {}),
                 )

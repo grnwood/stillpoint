@@ -20,10 +20,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote
 
-from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFileInfo, QFileSystemWatcher,
+from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -126,12 +126,14 @@ class FolderModel(QFileSystemModel):
 
 
 class NavigatorTree(QTreeView):
+    INTERNAL_PATHS_MIME = "application/x-stillpoint-folder-navigator-paths"
     openFile = Signal(str, bool)
     openFileAndFocus = Signal(str, bool)
     escapePressed = Signal()
     bookmarkPickerRequested = Signal()
     folderPickerRequested = Signal()
     pathsDropped = Signal(object, object)
+    pathsMoved = Signal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -147,7 +149,8 @@ class NavigatorTree(QTreeView):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setSortingEnabled(True)
         self.sortByColumn(0, Qt.AscendingOrder)
 
@@ -168,7 +171,37 @@ class NavigatorTree(QTreeView):
         return [Path(url.toLocalFile()) for url in event.mimeData().urls()
                 if url.isLocalFile() and url.toLocalFile()]
 
+    def _selected_drag_paths(self):
+        model = self.model()
+        return [Path(model.filePath(index)) for index in self.selectionModel().selectedRows(0)
+                if index.isValid() and (Path(model.filePath(index)).is_file()
+                                        or Path(model.filePath(index)).is_dir())]
+
+    def startDrag(self, supported_actions):  # type: ignore[override]
+        paths = self._selected_drag_paths()
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setData(self.INTERNAL_PATHS_MIME, json.dumps([str(path) for path in paths]).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+
+    def _internal_drop_paths(self, event):
+        if event.source() is not self or not event.mimeData().hasFormat(self.INTERNAL_PATHS_MIME):
+            return []
+        try:
+            return [Path(value) for value in json.loads(
+                bytes(event.mimeData().data(self.INTERNAL_PATHS_MIME)).decode("utf-8")
+            ) if isinstance(value, str)]
+        except (UnicodeError, ValueError, TypeError):
+            return []
+
     def dragEnterEvent(self, event):  # type: ignore[override]
+        if self._internal_drop_paths(event):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
         if self._local_drop_paths(event):
             event.setDropAction(Qt.CopyAction)
             event.accept()
@@ -177,6 +210,11 @@ class NavigatorTree(QTreeView):
 
     def dragMoveEvent(self, event):  # type: ignore[override]
         target = self._drop_directory(event.position().toPoint())
+        if (self._internal_drop_paths(event) and target is not None
+                and target.is_dir() and inside(self.model().root, target)):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
         if self._local_drop_paths(event) and target is not None and target.is_dir():
             event.setDropAction(Qt.CopyAction)
             event.accept()
@@ -184,8 +222,14 @@ class NavigatorTree(QTreeView):
         event.ignore()
 
     def dropEvent(self, event):  # type: ignore[override]
-        sources = self._local_drop_paths(event)
         target = self._drop_directory(event.position().toPoint())
+        internal = self._internal_drop_paths(event)
+        if internal and target is not None and target.is_dir():
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            self.pathsMoved.emit(internal, target)
+            return
+        sources = self._local_drop_paths(event)
         if not sources or target is None or not target.is_dir():
             event.ignore()
             return
@@ -246,10 +290,6 @@ class NavigatorTree(QTreeView):
             finally:
                 selection_model.blockSignals(was_blocked)
             return
-        if index.isValid() and event.modifiers() & (Qt.MetaModifier if sys.platform == "darwin" else Qt.ControlModifier):
-            if not self.model().isDir(index):
-                self.openFile.emit(self.model().filePath(index), True)
-                return
         super().mousePressEvent(event)
 
 
@@ -2186,6 +2226,8 @@ class Window(QMainWindow):
         self.new_file_directory = None
         self.new_file_is_folder = False
         self.new_file_diagram_suffix = None
+        self.rename_file_edit = None
+        self.rename_file_path = None
         self.tree_source_open_delay_ms = 90
         self.tree_markdown_open_delay_ms = 140
         self.tree_markdown_open_timer = QTimer(self)
@@ -2268,6 +2310,7 @@ class Window(QMainWindow):
         self.tree.bookmarkPickerRequested.connect(self.bookmark_picker)
         self.tree.folderPickerRequested.connect(self.folder_picker)
         self.tree.pathsDropped.connect(self._copy_dropped_paths)
+        self.tree.pathsMoved.connect(self._move_dropped_paths)
         self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3416,7 +3459,7 @@ class Window(QMainWindow):
         self._focus_tab_content(tab)
 
     def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
-                  force_text=False, force_rich_markdown=False):
+                  force_text=False, force_rich_markdown=False, replace_preview=True):
         if self.window_trace is not None:
             self.window_trace.arm(path)
         # Once a visible window is explicitly opening content, do not let a
@@ -3440,7 +3483,10 @@ class Window(QMainWindow):
                 )
             self._schedule_markdown_preview(self.tabs.widget(index))
             return
-        preview = next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
+        preview = (
+            next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
+            if replace_preview else -1
+        )
         if preview >= 0:
             previous_preview = self.tabs.widget(preview)
             self.tabs.removeTab(preview)
@@ -5412,28 +5458,21 @@ class Window(QMainWindow):
 
     def _tree_menu(self, point):
         index = self.tree.indexAt(point)
+        menu = self._create_tree_context_menu(index)
+        menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def _create_tree_context_menu(self, index):
+        menu = QMenu(self)
         if not index.isValid():
             root_path = self.model.filePath(self.tree.rootIndex())
             target_directory = Path(root_path) if root_path else self.scope
             target_index = self.tree.rootIndex()
-            menu = QMenu(self)
-            menu.addAction("New File", lambda: self._begin_new_file(target_directory, target_index))
-            menu.addAction(
-                "New Folder",
-                lambda: self._begin_new_file(
-                    target_directory, target_index, create_folder=True
-                ),
-            )
-            self._add_new_diagram_actions(menu, target_directory, target_index)
+            self._add_new_context_menu(menu, target_directory, target_index)
+            menu.addSeparator()
             menu.addAction("Open Terminal Here", lambda: self.terminal(target_directory))
-            menu.exec(self.tree.viewport().mapToGlobal(point))
-            return
+            return menu
         path = Path(self.model.filePath(index))
         folder = self.model.isDir(index)
-        menu = QMenu(self)
-        if self.chat_panel is not None:
-            menu.addAction("Add to AI Chat Context", lambda: self._chat_add_path(path))
-            menu.addSeparator()
         if folder:
             menu.addAction("Expand / Collapse", lambda: self.tree.setExpanded(index, not self.tree.isExpanded(index)))
             menu.addAction("Filter From Here", lambda: self.apply_filter(path))
@@ -5446,24 +5485,188 @@ class Window(QMainWindow):
             specialized_label = self._specialized_editor_label(path)
             if specialized_label:
                 menu.addAction(specialized_label, lambda: self._open_specialized_editor(path))
+            menu.addAction("Open in Default Application", lambda: self.system_open(path))
+            menu.addSeparator()
+            menu.addAction("Rename…", lambda: self._rename_file(path))
+            menu.addAction("Delete File…", lambda: self._delete_file(path))
         target_directory = path if folder else path.parent
         target_index = index if folder else index.parent()
-        menu.addAction("New File", lambda: self._begin_new_file(target_directory, target_index))
-        menu.addAction(
-            "New Folder",
-            lambda: self._begin_new_file(
-                target_directory, target_index, create_folder=True
-            ),
-        )
-        self._add_new_diagram_actions(menu, target_directory, target_index)
+        menu.addSeparator()
+        self._add_new_context_menu(menu, target_directory, target_index)
+        menu.addSeparator()
+        if self.chat_panel is not None:
+            menu.addAction("Add to AI Chat Context", lambda: self._chat_add_path(path))
         menu.addAction("Remove Bookmark" if str(path) in self._bookmarks() else "Bookmark", lambda: self.toggle_bookmark(path))
+        menu.addSeparator()
         menu.addAction("Reveal in File Manager", lambda: self.reveal(path))
-        if not folder:
-            menu.addAction("Open in Default Application", lambda: self.system_open(path))
-        menu.addAction("Copy Full Path", lambda: QApplication.clipboard().setText(str(path)))
-        menu.addAction("Copy Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
+        copy_menu = QMenu("Copy Path", menu)
+        menu.addMenu(copy_menu)
+        copy_menu.addAction("Full Path", lambda: QApplication.clipboard().setText(str(path)))
+        copy_menu.addAction("Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
-        menu.exec(self.tree.viewport().mapToGlobal(point))
+        return menu
+
+    def _add_new_context_menu(self, menu, directory, directory_index):
+        new_menu = QMenu("New", menu)
+        menu.addMenu(new_menu)
+        new_menu.addAction("File", lambda: self._begin_new_file(directory, directory_index))
+        new_menu.addAction(
+            "Folder", lambda: self._begin_new_file(directory, directory_index, create_folder=True)
+        )
+        new_menu.addSeparator()
+        self._add_new_diagram_actions(new_menu, directory, directory_index)
+
+    def _rename_file(self, path):
+        path = Path(path)
+        if not path.is_file() or not inside(self.root, path):
+            self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+            return
+        tab_index = self._index_for(path)
+        if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
+            self.statusBar().showMessage("Save changes before renaming this file", 8000)
+            return
+        self._cancel_new_file()
+        self._cancel_rename_file()
+        index = self.model.index(str(path))
+        if not index.isValid():
+            self.statusBar().showMessage(f"File is not visible in the folder tree: {path}", 8000)
+            return
+        self.tree.scrollTo(index)
+        rect = self.tree.visualRect(index)
+        x = max(18, rect.x() + self.tree.indentation())
+        edit = InlineFileNameEdit(self.tree.viewport())
+        edit.setPlaceholderText("File name")
+        edit.setAccessibleName("Rename file")
+        edit.setText(path.name)
+        edit.setSelection(0, len(path.name) - len(path.suffix))
+        edit.setGeometry(x, rect.y(), max(180, self.tree.viewport().width() - x - 8), 28)
+        edit.setStyleSheet(
+            f"border: 2px solid {theme_value('main_window.focus_border.default', '#4A90E2')}; "
+            "border-radius: 3px; padding: 2px 6px;"
+        )
+        edit.returnPressed.connect(self._commit_rename_file)
+        edit.canceled.connect(self._cancel_rename_file)
+        self.rename_file_path = path
+        self.rename_file_edit = edit
+        edit.show()
+        edit.raise_()
+        QTimer.singleShot(0, self._focus_rename_file_edit)
+
+    def _focus_rename_file_edit(self):
+        edit = self.rename_file_edit
+        if edit is not None:
+            edit.raise_()
+            edit.setFocus(Qt.PopupFocusReason)
+
+    def _cancel_rename_file(self):
+        edit = self.rename_file_edit
+        self.rename_file_edit = None
+        self.rename_file_path = None
+        if edit is not None:
+            edit.hide()
+            edit.deleteLater()
+
+    def _commit_rename_file(self):
+        edit = self.rename_file_edit
+        path = self.rename_file_path
+        if edit is None or path is None:
+            return
+        name = edit.text().strip()
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            self.statusBar().showMessage("Enter a file name without folder separators", 8000)
+            edit.selectAll()
+            return
+        target = path.with_name(name)
+        if target == path:
+            self._cancel_rename_file()
+            return
+        if target.exists() or target.is_symlink():
+            self.statusBar().showMessage(f"An item named {name} already exists", 8000)
+            edit.selectAll()
+            return
+        if not path.is_file() or not inside(self.root, path):
+            self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+            self._cancel_rename_file()
+            return
+        tab_index = self._index_for(path)
+        if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
+            self.statusBar().showMessage("Save changes before renaming this file", 8000)
+            return
+        try:
+            path.rename(target)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not rename {path.name}: {exc}", 12000)
+            edit.selectAll()
+            return
+        self._cancel_rename_file()
+        active_path = self.active_tab().path if self.active_tab() else None
+        was_pinned = self.tabs.widget(tab_index).pinned if tab_index >= 0 else False
+        if tab_index >= 0:
+            self.close_tab(tab_index)
+        self._reconcile_file_change(path, target)
+        if tab_index >= 0:
+            self.open_file(target, pinned=was_pinned, replace_preview=False)
+            if active_path is not None and active_path != path:
+                previous_index = self._index_for(active_path)
+                if previous_index >= 0:
+                    self.tabs.setCurrentIndex(previous_index)
+        self.statusBar().showMessage(f"Renamed {path.name} to {name}", 4000)
+
+    @staticmethod
+    def _move_file_to_trash(path):
+        return QFile.moveToTrash(str(path))
+
+    def _delete_file(self, path):
+        path = Path(path)
+        if not path.is_file() or not inside(self.root, path):
+            self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+            return
+        tab_index = self._index_for(path)
+        if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
+            self.statusBar().showMessage("Save or close unsaved changes before deleting this file", 8000)
+            return
+        answer = QMessageBox.question(
+            self, "Delete File", f"Move {path.name} to Trash?",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        if not self._move_file_to_trash(path):
+            self.statusBar().showMessage(f"Could not move {path.name} to Trash", 12000)
+            return
+        if tab_index >= 0:
+            self.close_tab(tab_index)
+        self._reconcile_file_change(path)
+        self.statusBar().showMessage(f"Moved {path.name} to Trash", 4000)
+
+    def _reconcile_file_change(self, old_path, new_path=None):
+        self._cancel_pending_tree_markdown()
+        self._cancel_pending_preview_hydration()
+        self.catalog.discard(old_path)
+        was_ignored = old_path in self.ignored_paths
+        self.ignored_paths.discard(old_path)
+        self.mru = [new_path if item == old_path else item for item in self.mru
+                    if new_path is not None or item != old_path]
+        bookmarks = self._bookmarks()
+        if str(old_path) in bookmarks:
+            bookmarks.remove(str(old_path))
+            if new_path is not None and str(new_path) not in bookmarks:
+                bookmarks.append(str(new_path))
+            self._render_bookmarks()
+            self._persist()
+        if new_path is not None:
+            self.catalog.add(new_path)
+            if was_ignored:
+                self.ignored_paths.add(new_path)
+        if self.catalog_db is not None:
+            try:
+                self.catalog_db.forget_path(old_path)
+                if new_path is not None:
+                    self.catalog_db.upsert_paths([new_path])
+            except (OSError, sqlite3.Error) as exc:
+                self.statusBar().showMessage(f"Quick Open cache update failed: {exc}", 8000)
+        self._watch_files()
+        self._refresh_quick_pickers()
 
     def _chat_add_path(self, path: Path) -> None:
         if self.chat_panel is None:
@@ -5492,6 +5695,7 @@ class Window(QMainWindow):
     def _begin_new_file(self, directory, directory_index=None, *, create_folder=False,
                         diagram_suffix=None):
         """Show an inline editor for a new file or folder name."""
+        self._cancel_rename_file()
         self._cancel_new_file()
         directory = Path(directory)
         if not directory.is_dir() or not inside(self.root, directory):
@@ -5848,6 +6052,10 @@ class Window(QMainWindow):
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         if tab.markdown:
+            menu.addAction(
+                "Copy as Markdown",
+                lambda: QApplication.clipboard().setText(tab.editor.to_markdown()),
+            )
             menu.addAction("Format Markdown Table", self._format_active_markdown_table)
         reveal_action = menu.addAction("Reveal in Folder")
         reveal_action.triggered.connect(lambda: self.reveal_tree(tab.path))
@@ -6557,6 +6765,113 @@ class Window(QMainWindow):
             self.executor.submit(job)
         except RuntimeError:
             self.statusBar().showMessage("Drop failed: navigator is closing", 8000)
+
+    def _move_dropped_paths(self, sources, target):
+        """Move selected in-root items to another folder without overwriting."""
+        target = Path(target)
+        if not target.is_dir() or not inside(self.root, target):
+            self.statusBar().showMessage("Move target is outside the folder root", 8000)
+            return
+        candidates = sorted(set(map(Path, sources)), key=lambda path: len(path.parts))
+        selected = []
+        for source in candidates:
+            if (not source.is_relative_to(self.root) or not inside(self.root, source)
+                    or not (source.is_file() or source.is_dir()) or source == self.root):
+                self.statusBar().showMessage(f"Cannot move unavailable item: {source}", 8000)
+                return
+            if not any(parent.is_dir() and source.is_relative_to(parent) for parent in selected):
+                selected.append(source)
+        moves = []
+        destinations = set()
+        for source in selected:
+            if source.parent == target:
+                continue
+            if source.is_dir() and target.is_relative_to(source):
+                self.statusBar().showMessage("Cannot move a folder into itself", 8000)
+                return
+            destination = target / source.name
+            if destination in destinations or destination.exists() or destination.is_symlink():
+                self.statusBar().showMessage(f"An item named {source.name} already exists in {target.name}", 8000)
+                return
+            destinations.add(destination)
+            moves.append((source, destination, source.is_dir()))
+        if not moves:
+            self.statusBar().showMessage("Items are already in that folder", 4000)
+            return
+        for tab in self.all_tabs():
+            if tab.dirty and self._relocated_path(tab.path, moves) != tab.path:
+                self.statusBar().showMessage(
+                    "Save or close unsaved files before moving them", 8000
+                )
+                return
+        completed = []
+        errors = []
+        for source, destination, directory in moves:
+            try:
+                source.rename(destination)
+                completed.append((source, destination, directory))
+            except OSError as exc:
+                errors.append(f"{source.name}: {exc}")
+        if completed:
+            self._reconcile_moved_paths(completed)
+        if errors:
+            self.statusBar().showMessage(
+                f"Moved {len(completed)} item(s); failed: {'; '.join(errors[:3])}", 12000
+            )
+        else:
+            self.statusBar().showMessage(f"Moved {len(completed)} item(s) to {target.name}", 4000)
+
+    @staticmethod
+    def _relocated_path(path, moves):
+        for source, destination, directory in moves:
+            if path == source:
+                return destination
+            if directory and path.is_relative_to(source):
+                return destination / path.relative_to(source)
+        return path
+
+    def _reconcile_moved_paths(self, moves):
+        self._cancel_pending_tree_markdown()
+        self._cancel_pending_preview_hydration()
+        active_path = self.active_tab().path if self.active_tab() else None
+        affected = [
+            (tab.path, self._relocated_path(tab.path, moves), tab.pinned)
+            for tab in self.all_tabs()
+            if self._relocated_path(tab.path, moves) != tab.path
+        ]
+        for old_path, _new_path, _pinned in affected:
+            index = self._index_for(old_path)
+            if index >= 0:
+                self.close_tab(index)
+        remap = lambda path: self._relocated_path(path, moves)
+        self.catalog = {remap(path) for path in self.catalog}
+        self.ignored_paths = {remap(path) for path in self.ignored_paths}
+        self.mru = [remap(path) for path in self.mru]
+        bookmarks = self._bookmarks()
+        updated_bookmarks = list(dict.fromkeys(str(remap(Path(name))) for name in bookmarks))
+        if updated_bookmarks != bookmarks:
+            bookmarks[:] = updated_bookmarks
+            self._render_bookmarks()
+            self._persist()
+        if self.catalog_db is not None:
+            try:
+                for source, destination, directory in moves:
+                    self.catalog_db.relocate_path(source, destination, directory=directory)
+                    if not directory:
+                        self.catalog_db.upsert_paths([destination])
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                self.statusBar().showMessage(f"Quick Open cache update failed: {exc}", 8000)
+        if self.scope != self.root and remap(self.scope) != self.scope:
+            self.clear_filter()
+        for _old_path, new_path, pinned in affected:
+            self.open_file(new_path, pinned=pinned, replace_preview=False)
+        if active_path is not None:
+            current_index = self._index_for(remap(active_path))
+            if current_index >= 0:
+                self.tabs.setCurrentIndex(current_index)
+        self._watch_files()
+        self._refresh_quick_pickers()
+        self._schedule_refresh()
 
     def _watch_files(self):
         desired = {str(self.root)}

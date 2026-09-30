@@ -685,12 +685,21 @@ def test_editor_context_menu_is_shared_and_reveals_file(
     source_actions = [action.text().replace("&", "") for action in source_menu.actions()]
 
     assert [
-        action for action in markdown_actions if action != "Format Markdown Table"
+        action for action in markdown_actions
+        if action not in {"Copy as Markdown", "Format Markdown Table"}
     ] == source_actions
+    assert "Copy as Markdown" in markdown_actions
+    assert "Copy as Markdown" not in source_actions
     assert "Format Markdown Table" in markdown_actions
     assert "Format Markdown Table" not in source_actions
     assert markdown_actions[-1] == "Reveal in Folder"
     assert not ({"Page", "Navigate", "Move", "AI Actions"} & set(markdown_actions))
+
+    markdown_tab.editor.insertPlainText("unsaved ")
+    next(action for action in markdown_menu.actions()
+         if action.text() == "Copy as Markdown").trigger()
+    assert app.clipboard().text() == markdown_tab.editor.to_markdown()
+    assert app.clipboard().text() != markdown_path.read_text()
 
     markdown_menu.actions()[-1].trigger()
     app.processEvents()
@@ -1631,7 +1640,8 @@ def test_external_drop_copies_files_and_folders_and_updates_catalog(
     window = Window(root)
 
     assert window.tree.acceptDrops()
-    assert window.tree.dragDropMode() == QAbstractItemView.DropOnly
+    assert window.tree.dragDropMode() == QAbstractItemView.DragDrop
+    assert window.tree.dragEnabled()
     window._copy_dropped_paths([source_file, source_folder], root)
 
     deadline = time.monotonic() + 5
@@ -1685,6 +1695,143 @@ def test_external_drop_does_not_overwrite_existing_file(
 
     assert existing.read_text(encoding="utf-8") == "keep"
     assert "already exists" in window.statusBar().currentMessage()
+    window.close()
+
+
+def test_internal_drop_moves_selected_files_and_folder_and_updates_open_tabs(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    destination = root / "destination"
+    folder = root / "bundle"
+    home.mkdir()
+    destination.mkdir(parents=True)
+    folder.mkdir()
+    first = root / "first.txt"
+    second = root / "second.txt"
+    nested = folder / "nested.md"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    nested.write_text("# Nested\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+    window.open_file(first, pinned=True)
+    window.open_file(nested, pinned=True)
+    window.toggle_bookmark(folder)
+    window.catalog_db.upsert_paths([first, second, nested])
+
+    window._move_dropped_paths([first, second, folder, nested], destination)
+
+    moved_first = destination / first.name
+    moved_second = destination / second.name
+    moved_folder = destination / folder.name
+    moved_nested = moved_folder / nested.name
+    assert moved_first.read_text(encoding="utf-8") == "first"
+    assert moved_second.read_text(encoding="utf-8") == "second"
+    assert moved_nested.read_text(encoding="utf-8") == "# Nested\n"
+    assert not first.exists() and not second.exists() and not folder.exists()
+    assert {tab.path for tab in window.all_tabs()} == {moved_first, moved_nested}
+    assert window.active_tab().path == moved_nested
+    assert str(moved_folder) in window._bookmarks()
+    assert moved_first in window.catalog_db.candidates("first", root)
+    assert moved_nested in window.catalog_db.candidates("nested", root)
+    assert nested not in window.catalog_db.candidates("nested", root)
+    window.close()
+
+
+def test_internal_drop_rejects_collisions_descendants_and_dirty_tabs(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    destination = root / "destination"
+    folder = root / "bundle"
+    home.mkdir()
+    destination.mkdir(parents=True)
+    folder.mkdir()
+    child = folder / "child"
+    child.mkdir()
+    first = root / "first.txt"
+    second = root / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    (destination / first.name).write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+
+    window._move_dropped_paths([first, second], destination)
+    assert first.exists() and second.exists()
+    assert (destination / first.name).read_text(encoding="utf-8") == "keep"
+    window._move_dropped_paths([folder], child)
+    assert folder.exists() and child.exists()
+
+    window.open_file(second, pinned=True)
+    window.active_tab().editor.insertPlainText("unsaved")
+    window._move_dropped_paths([second], destination)
+    assert second.exists() and not (destination / second.name).exists()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_tree_internal_drop_routes_selected_rows_as_move(tmp_path, monkeypatch, app):
+    import json
+    from PySide6.QtCore import QItemSelectionModel, QMimeData, QPointF, Qt
+    from sp.app.folder_navigator.window import Window
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    target = root / "target"
+    home.mkdir()
+    target.mkdir(parents=True)
+    files = [root / "one.txt", root / "two.txt"]
+    for path in files:
+        path.write_text(path.stem, encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    window = Window(root)
+    window.show()
+    app.processEvents()
+    selection = window.tree.selectionModel()
+    selection.clearSelection()
+    for path in files:
+        selection.select(
+            window.model.index(str(path)),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    assert set(window.tree._selected_drag_paths()) == set(files)
+
+    mime = QMimeData()
+    mime.setData(
+        window.tree.INTERNAL_PATHS_MIME,
+        json.dumps([str(path) for path in window.tree._selected_drag_paths()]).encode(),
+    )
+    monkeypatch.setattr(window.tree, "_drop_directory", lambda point: target)
+
+    class Drop:
+        action = None
+        accepted = False
+
+        def source(self):
+            return window.tree
+
+        def mimeData(self):
+            return mime
+
+        def position(self):
+            return QPointF(0, 0)
+
+        def setDropAction(self, action):
+            self.action = action
+
+        def accept(self):
+            self.accepted = True
+
+    event = Drop()
+    window.tree.dropEvent(event)
+    assert event.accepted and event.action == Qt.MoveAction
+    assert all((target / path.name).exists() and not path.exists() for path in files)
     window.close()
 
 
@@ -3120,6 +3267,116 @@ def test_folder_context_menu_exposes_all_new_diagram_actions(
     window.close()
 
 
+def test_file_context_menu_groups_actions_and_renames_open_file(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "notes.txt"
+    source.write_text("hello", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source, pinned=True)
+    window.toggle_bookmark(source)
+    window.catalog_db.upsert_paths([source])
+
+    menu = window._create_tree_context_menu(window.model.index(str(source)))
+    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+    assert labels == [
+        "Open", "Open in New Tab", "Keep Open", "Open in Default Application",
+        "Rename…", "Delete File…", "New", "Add to AI Chat Context", "Remove Bookmark",
+        "Reveal in File Manager", "Copy Path", "Open Terminal Here",
+    ]
+    new_menu = next(action.menu() for action in menu.actions() if action.text() == "New")
+    assert [action.text() for action in new_menu.actions() if not action.isSeparator()] == [
+        "File", "Folder", "New PlantUML Diagram", "New Mermaid Diagram",
+        "New Excalidraw Diagram",
+    ]
+
+    rename_action = next(action for action in menu.actions() if action.text() == "Rename…")
+    conflict = tmp_path / "taken.txt"
+    conflict.write_text("keep", encoding="utf-8")
+    rename_action.trigger()
+    app.processEvents()
+    edit = window.rename_file_edit
+    assert edit.text() == "notes.txt"
+    assert edit.selectedText() == "notes"
+    assert edit.geometry().y() == window.tree.visualRect(window.model.index(str(source))).y()
+    QTest.keyClicks(edit, "taken")
+    QTest.keyClick(edit, Qt.Key_Return)
+    assert source.exists() and conflict.read_text(encoding="utf-8") == "keep"
+    assert window.rename_file_edit is edit
+
+    QTest.keyClicks(edit, "renamed.txt")
+    QTest.keyClick(edit, Qt.Key_Return)
+    target = tmp_path / "renamed.txt"
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert not source.exists()
+    assert window.active_tab().path == target
+    assert str(target) in window._bookmarks() and str(source) not in window._bookmarks()
+    assert target in window.catalog_db.candidates("renamed", tmp_path)
+    assert source not in window.catalog_db.candidates("notes", tmp_path)
+    assert window.rename_file_edit is None
+    menu.deleteLater()
+    window.close()
+
+
+def test_inline_rename_escape_keeps_file(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "notes.md"
+    source.write_text("# Notes\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window._rename_file(source)
+    edit = window.rename_file_edit
+    QTest.keyClicks(edit, "other")
+    QTest.keyClick(edit, Qt.Key_Escape)
+    app.processEvents()
+
+    assert window.rename_file_edit is None
+    assert source.exists()
+    assert not (tmp_path / "other.md").exists()
+    window.close()
+
+
+def test_file_delete_confirms_and_protects_unsaved_tab(tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QMessageBox
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "notes.txt"
+    source.write_text("hello", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(source, pinned=True)
+    window.toggle_bookmark(source)
+    window.catalog_db.upsert_paths([source])
+    moved = []
+    monkeypatch.setattr(window, "_move_file_to_trash", lambda path: (moved.append(path), path.unlink(), True)[-1])
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Cancel)
+    window._delete_file(source)
+    assert source.exists() and moved == []
+
+    window.active_tab().editor.insertPlainText("unsaved")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    window._delete_file(source)
+    assert source.exists() and moved == []
+
+    window.active_tab().editor.document().setModified(False)
+    window._delete_file(source)
+    assert moved == [source]
+    assert not source.exists()
+    assert window._index_for(source) == -1
+    assert str(source) not in window._bookmarks()
+    assert source not in window.catalog_db.candidates("notes", tmp_path)
+    window.close()
+
+
 def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, app):
     import sp.app.ui.plantuml_editor_window as plantuml_editor
     from PySide6.QtWidgets import QMainWindow
@@ -3309,7 +3566,8 @@ def test_empty_tree_context_new_folder_targets_displayed_level(
     def choose_new_folder():
         menu = QApplication.activePopupWidget()
         assert isinstance(menu, QMenu)
-        action = next(action for action in menu.actions() if action.text() == "New Folder")
+        new_menu = next(action.menu() for action in menu.actions() if action.text() == "New")
+        action = next(action for action in new_menu.actions() if action.text() == "Folder")
         action.trigger()
         menu.close()
 
