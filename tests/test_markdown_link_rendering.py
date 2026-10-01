@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QDialog
 from sp.app.ui.markdown_editor import (
     LINK_SENTINEL,
     MarkdownEditor,
+    WIKI_LINK_STORAGE_PATTERN,
     heading_level_from_char,
     heading_sentinel,
 )
@@ -188,6 +189,14 @@ def test_camelcase_not_converted_in_existing_link_label(editor):
     converted = editor._convert_camelcase_links(text)
     assert "[PageA:PageB|+KeepLabel]" in converted
     assert "[:ConvertMe|ConvertMe]" in converted
+
+
+def test_escaped_wiki_link_scan_is_bounded(editor):
+    # Both regex branches used to consume a backslash, making this malformed
+    # link exponentially expensive even though it contains no link delimiter.
+    text = "[" + "\\" * 32 + "broken +NextThing"
+    assert WIKI_LINK_STORAGE_PATTERN.search(text) is None
+    assert "[:NextThing|NextThing]" in editor._convert_camelcase_links(text)
 
 
 def test_camelcase_uses_current_page_parent(editor):

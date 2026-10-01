@@ -62,6 +62,7 @@ def test_large_markdown_guard_detects_bytes_lines_and_long_lines(monkeypatch):
     assert "file size" in rich_markdown_fallback_reason("short", 21)
     assert "4 lines" in rich_markdown_fallback_reason("a\nb\nc\nd", 7)
     assert "character line" in rich_markdown_fallback_reason("123456789", 9)
+    assert rich_markdown_fallback_reason("123456789\n" + "x" * 100, 10) == "a 9-character line"
     assert rich_markdown_fallback_reason("a\nb", 3) is None
 
 
@@ -108,6 +109,31 @@ def test_markdown_flyover_opens_full_editor_on_pin(tmp_path, app, monkeypatch):
         assert isinstance(window.active_tab().editor, MarkdownEditor)
         assert window.active_tab().pinned
         assert window.active_tab().property("folderMarkdownRendered")
+    finally:
+        window.close()
+
+
+def test_supplied_wms_hover_files_keep_event_loop_responsive(tmp_path, app, monkeypatch):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = Path(__file__).resolve().parents[1] / "dev-assets" / "mac-hang"
+    large = folder / "3.3 WMS Integration.md"
+    regular = folder / "3.3.1 WMS Events and Payloads.md"
+    window = Window(folder)
+    try:
+        window.open_file(large, defer_enhancements=True)
+        assert isinstance(window.active_tab().editor, SourceEditor)
+        window.open_file(regular, defer_enhancements=True)
+        QTest.qWait(window.markdown_preview_delay_ms + 100)
+        assert isinstance(window.active_tab().editor, MarkdownEditor)
+        assert window.active_tab().property("folderMarkdownRendered")
+        window.open_file(large, pinned=True)
+        assert isinstance(window.active_tab().editor, SourceEditor)
+        assert "Full Markdown preview skipped" in window.statusBar().currentMessage()
     finally:
         window.close()
 

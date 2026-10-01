@@ -156,7 +156,7 @@ def rich_markdown_fallback_reason(text: str, byte_size: int) -> str | None:
             longest = max(longest, index - line_start)
             line_start = index + 1
             if longest > MAX_RICH_MARKDOWN_LINE_CHARS:
-                break
+                return f"a {longest:,}-character line"
     longest = max(longest, len(text) - line_start)
     if longest > MAX_RICH_MARKDOWN_LINE_CHARS:
         return f"a {longest:,}-character line"
