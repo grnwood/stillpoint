@@ -3136,9 +3136,11 @@ class Window(QMainWindow):
             editor_text=self._chat_editor_text,
             image_candidates=self._chat_image_candidates,
             index_state=lambda: self.catalog_state,
+            dirty_paths=lambda: {tab.path for tab in self.all_tabs() if tab.dirty},
             parent=self,
         )
         self.chat_panel.chatNavigateRequested.connect(self._chat_navigate)
+        self.chat_panel.pageWritten.connect(self._chat_file_written)
         self.chat_tabs = QTabWidget()
         self.chat_tabs.setObjectName("folderNavigatorChatRail")
         self.chat_tabs.addTab(self.chat_panel, "AI Chat")
@@ -3243,6 +3245,20 @@ class Window(QMainWindow):
             if tab.path == path and tab.editor is not None:
                 return tab.editor.to_markdown() if tab.markdown else tab.editor.toPlainText()
         return None
+
+    def _chat_file_written(self, name: str) -> None:
+        path = Path(name)
+        if not path.is_file() or not inside(self.root, path):
+            return
+        self.catalog.add(path)
+        if self.catalog_db is not None:
+            try:
+                self.catalog_db.upsert_paths([path])
+                self.catalog_count = self.catalog_db.count()
+            except (OSError, sqlite3.Error) as exc:
+                self.statusBar().showMessage(f"Quick Open cache update failed: {exc}", 8000)
+        self._refresh_quick_pickers()
+        self._schedule_refresh()
 
     def _chat_navigate(self, path: str) -> None:
         target = Path(path)
