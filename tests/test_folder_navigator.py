@@ -3333,6 +3333,37 @@ def test_diagram_image_view_uses_standard_mouse_and_trackpad_navigation(
     viewer.close()
 
 
+def test_diagram_preview_fits_window_until_manually_zoomed(tmp_path, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    from sp.app.folder_navigator.window import ImageView
+
+    path = tmp_path / "diagram.mmd"
+    path.write_text("flowchart TD\nA --> B\n", encoding="utf-8")
+    image = QImage(80, 40, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    viewer = ImageView(path, image, fit_upscale=True)
+    viewer.resize(400, 300)
+    viewer.show()
+    app.processEvents()
+    assert viewer.zoom > 1
+
+    first_zoom = viewer.zoom
+    viewer.resize(600, 400)
+    app.processEvents()
+    assert viewer.zoom > first_zoom
+
+    viewer.zoom_out()
+    manual_zoom = viewer.zoom
+    viewer.resize(500, 350)
+    app.processEvents()
+    assert viewer.zoom == pytest.approx(manual_zoom)
+
+    viewer.fit()
+    assert viewer.zoom > manual_zoom
+    viewer.close()
+
+
 def test_excalidraw_selection_uses_saved_png_preview(tmp_path, monkeypatch, app):
     import time
     from PySide6.QtGui import QImage

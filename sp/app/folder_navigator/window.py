@@ -1669,7 +1669,8 @@ class ImageCanvasLabel(QLabel):
 class ImageView(QWidget):
     def __init__(self, path, pixels, *, open_label=None, open_callback=None,
                  canvas_color=None, svg_text=None, source_dimensions=None,
-                 preview_limited=False, full_resolution_callback=None):
+                 preview_limited=False, full_resolution_callback=None,
+                 fit_upscale=False):
         super().__init__()
         self.original = QPixmap.fromImage(pixels)
         self.canvas_color = canvas_color
@@ -1677,6 +1678,11 @@ class ImageView(QWidget):
         self.full_resolution_callback = full_resolution_callback
         self._full_resolution_requested = False
         self.zoom = 1.0
+        self.fit_upscale = fit_upscale
+        self._fit_mode = True
+        self._fit_scheduled = False
+        self._fitting = False
+        self._last_fit_size = None
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
         if open_label and open_callback:
@@ -1713,6 +1719,7 @@ class ImageView(QWidget):
             self.label.setAutoFillBackground(True)
         self.scroll.setWidget(self.label)
         self.scroll.setWidgetResizable(True)
+        self.scroll.viewport().installEventFilter(self)
         for title, callback in (("Fit to Window", self.fit), ("Actual Size", self.actual),
                                 ("Zoom In", self.zoom_in), ("Zoom Out", self.zoom_out),
                                 ("Reset Zoom", self.actual)):
@@ -1727,7 +1734,25 @@ class ImageView(QWidget):
             f"{path.stat().st_size:,} bytes{resolution_note}"
         ))
         layout.addWidget(self.scroll)
-        QTimer.singleShot(0, self.fit)
+        self._schedule_fit()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if (obj is self.scroll.viewport() and event.type() == QEvent.Resize
+                and self._fit_mode and not self._fitting
+                and event.size() != self._last_fit_size):
+            self.fit()
+        return super().eventFilter(obj, event)
+
+    def _schedule_fit(self):
+        if self._fit_mode and not self._fit_scheduled:
+            self._fit_scheduled = True
+            QTimer.singleShot(0, self, self._fit_if_needed)
+
+    def _fit_if_needed(self):
+        self._fit_scheduled = False
+        size = self.scroll.viewport().size()
+        if self._fit_mode and size != self._last_fit_size:
+            self.fit()
 
     def scale(self, factor):
         self.zoom = min(8, max(.05, self.zoom * factor))
@@ -1741,14 +1766,17 @@ class ImageView(QWidget):
         self.label.setPixmap(scaled)
 
     def zoom_in(self):
+        self._fit_mode = False
         self.request_full_resolution()
         self.scale(1.25)
 
     def zoom_out(self):
+        self._fit_mode = False
         self.request_full_resolution()
         self.scale(.8)
 
     def _zoom_requested(self, factor):
+        self._fit_mode = False
         self.request_full_resolution()
         self.scale(factor)
 
@@ -1776,14 +1804,27 @@ class ImageView(QWidget):
         QApplication.clipboard().setPixmap(pixmap)
 
     def actual(self):
+        self._fit_mode = False
         self.request_full_resolution()
         self.zoom = 1.0
         self.scale(1)
 
     def fit(self):
+        if self._fitting:
+            return
+        self._fitting = True
         area = self.scroll.viewport().size()
-        self.zoom = min(area.width() / self.original.width(), area.height() / self.original.height(), 1)
-        self.scale(1)
+        self._fit_mode = True
+        self._last_fit_size = area
+        try:
+            self.zoom = min(
+                max(1, area.width() - 2) / self.original.width(),
+                max(1, area.height() - 2) / self.original.height(),
+                8 if self.fit_upscale else 1,
+            )
+            self.scale(1)
+        finally:
+            self._fitting = False
 
 
 def pdf_view(path):
@@ -4118,6 +4159,7 @@ class Window(QMainWindow):
             open_callback=lambda checked=False, selected=path: self._open_specialized_editor(selected),
             canvas_color="#ffffff" if path.suffix.casefold() in {".puml", ".mmd"} else None,
             svg_text=svg if path.suffix.casefold() in {".puml", ".mmd"} else None,
+            fit_upscale=True,
         )
         tab.layout().addWidget(tab.viewer)
         self._install_preview_context_menu(tab, tab.viewer)
