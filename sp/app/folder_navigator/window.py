@@ -1789,6 +1789,49 @@ class ImageView(QWidget):
 def pdf_view(path):
     from PySide6.QtPdf import QPdfDocument, QPdfSearchModel
     from PySide6.QtPdfWidgets import QPdfView
+
+    class ZoomablePdfView(QPdfView):
+        def zoom_by(self, factor):
+            self.setZoomMode(QPdfView.ZoomMode.Custom)
+            self.setZoomFactor(max(0.1, min(8.0, self.zoomFactor() * factor)))
+
+        def zoom_in(self):
+            self.zoom_by(1.2)
+
+        def zoom_out(self):
+            self.zoom_by(1 / 1.2)
+
+        def wheelEvent(self, event):  # type: ignore[override]
+            if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+                pixels = event.pixelDelta()
+                angles = event.angleDelta()
+                steps = ((pixels.y() or pixels.x()) / 40.0 if not pixels.isNull()
+                         else (angles.y() or angles.x()) / 120.0)
+                if steps:
+                    self.zoom_by(zoom_factor(steps))
+                    event.accept()
+                    return
+            super().wheelEvent(event)
+
+        def _handle_native_zoom(self, event):
+            if (isinstance(event, QNativeGestureEvent)
+                    and event.gestureType() == Qt.ZoomNativeGesture
+                    and event.value()):
+                self.zoom_by(zoom_factor(native_zoom_steps(event.value())))
+                event.accept()
+                return True
+            return False
+
+        def event(self, event):  # type: ignore[override]
+            if self._handle_native_zoom(event):
+                return True
+            return super().event(event)
+
+        def viewportEvent(self, event):  # type: ignore[override]
+            if self._handle_native_zoom(event):
+                return True
+            return super().viewportEvent(event)
+
     widget = QWidget()
     layout = QVBoxLayout(widget)
     controls = QHBoxLayout()
@@ -1796,7 +1839,7 @@ def pdf_view(path):
     status = document.load(str(path))
     if status != QPdfDocument.Error.None_:
         raise ValueError(f"PDF could not be loaded: {status}")
-    viewer = QPdfView()
+    viewer = ZoomablePdfView()
     viewer.setDocument(document)
     viewer.setPageMode(QPdfView.PageMode.MultiPage)
     nav = viewer.pageNavigator()
@@ -1804,8 +1847,8 @@ def pdf_view(path):
                             ("Next", lambda: nav.jump(min(document.pageCount() - 1, nav.currentPage() + 1), nav.currentLocation(), nav.currentZoom())),
                             ("Fit Width", lambda: viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)),
                             ("Fit Page", lambda: viewer.setZoomMode(QPdfView.ZoomMode.FitInView)),
-                            ("Zoom In", lambda: viewer.setZoomFactor(viewer.zoomFactor() * 1.2)),
-                            ("Zoom Out", lambda: viewer.setZoomFactor(viewer.zoomFactor() / 1.2))):
+                            ("Zoom In", viewer.zoom_in),
+                            ("Zoom Out", viewer.zoom_out)):
         button = QPushButton(title)
         button.clicked.connect(callback)
         controls.addWidget(button)
@@ -1833,8 +1876,8 @@ def pdf_view(path):
     layout.addWidget(viewer)
     widget.document = document
     widget.search_model = model
-    widget.zoom_in = lambda: viewer.setZoomFactor(viewer.zoomFactor() * 1.2)
-    widget.zoom_out = lambda: viewer.setZoomFactor(viewer.zoomFactor() / 1.2)
+    widget.zoom_in = viewer.zoom_in
+    widget.zoom_out = viewer.zoom_out
     return widget
 
 

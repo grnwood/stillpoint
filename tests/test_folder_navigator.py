@@ -2336,8 +2336,10 @@ def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
 
 
 def test_pdf_preview_uses_shared_zoom_commands(tmp_path, monkeypatch, app):
-    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QNativeGestureEvent, QPainter, QPdfWriter, QPointingDevice, QWheelEvent
     from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtWidgets import QPushButton
     from sp.app.folder_navigator.window import Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -2351,10 +2353,50 @@ def test_pdf_preview_uses_shared_zoom_commands(tmp_path, monkeypatch, app):
     viewer = window.active_tab().viewer.findChild(QPdfView)
 
     initial_zoom = viewer.zoomFactor()
+    viewer.setZoomMode(QPdfView.ZoomMode.FitToWidth)
     window._zoom_active_view(1)
+    assert viewer.zoomMode() == QPdfView.ZoomMode.Custom
     assert viewer.zoomFactor() > initial_zoom
     window._zoom_active_view(-1)
     assert viewer.zoomFactor() == pytest.approx(initial_zoom)
+
+    controls = window.active_tab().viewer.findChildren(QPushButton)
+    fit_page = next(button for button in controls if button.text() == "Fit Page")
+    zoom_in = next(button for button in controls if button.text() == "Zoom In")
+    fit_page.click()
+    assert viewer.zoomMode() == QPdfView.ZoomMode.FitInView
+    zoom_in.click()
+    assert viewer.zoomMode() == QPdfView.ZoomMode.Custom
+
+    for modifier in (Qt.ControlModifier, Qt.MetaModifier):
+        before = viewer.zoomFactor()
+        event = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+            Qt.NoButton, modifier, Qt.ScrollUpdate, False,
+        )
+        app.sendEvent(viewer.viewport(), event)
+        assert event.isAccepted()
+        assert viewer.zoomFactor() > before
+
+    before = viewer.zoomFactor()
+    plain_wheel = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+    )
+    app.sendEvent(viewer.viewport(), plain_wheel)
+    assert viewer.zoomFactor() == pytest.approx(before)
+
+    before = viewer.zoomFactor()
+    point = QPointF(10, 10)
+    for target in (viewer.viewport(), viewer):
+        pinch = QNativeGestureEvent(
+            Qt.ZoomNativeGesture, QPointingDevice.primaryPointingDevice(),
+            2, point, point, point, 0.1, QPointF(),
+        )
+        app.sendEvent(target, pinch)
+        assert pinch.isAccepted()
+        assert viewer.zoomFactor() > before
+        before = viewer.zoomFactor()
     window.close()
 
 
