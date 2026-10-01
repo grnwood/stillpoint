@@ -2070,11 +2070,11 @@ class Picker(QDialog):
                     opened=not is_folder and path in opened,
                 )
                 if score is not None:
-                    ranked.append((-score, relative.casefold(), path, is_folder))
+                    ranked.append((not is_folder, -score, relative.casefold(), path, is_folder))
             ranked.sort()
             selected = []
             for candidate in ranked:
-                path, is_folder = candidate[2], candidate[3]
+                path, is_folder = candidate[3], candidate[4]
                 valid = path.is_dir() if is_folder else path.is_file()
                 if valid and inside(root, path):
                     selected.append(candidate)
@@ -2091,7 +2091,7 @@ class Picker(QDialog):
         if generation != self._query_generation or not self.quick:
             return
         self.list.clear()
-        for _, relative, path, is_folder in ranked:
+        for _, _, relative, path, is_folder in ranked:
             label = (
                 f"📁 {path.name}    {Path(relative).parent}"
                 if is_folder else f"{path.name}    {Path(relative).parent}"
@@ -2184,6 +2184,7 @@ class Window(QMainWindow):
         self.root = root.resolve(strict=True)
         self.window_trace = None
         self.scope = self.root
+        self._filtered_escape_at = 0.0
         self.catalog: set[Path] = set()
         self.ignored_paths: set[Path] = set()
         self.catalog_cancel = threading.Event()
@@ -3334,6 +3335,7 @@ class Window(QMainWindow):
     def _tree_selected(self, current, previous):
         if self._suppress_tree_preview:
             return
+        self._filtered_escape_at = 0.0
         # A real selection change supersedes the queued initial-focus choice.
         self._startup_folder_focus_pending = False
         self._cancel_pending_tree_markdown()
@@ -5362,7 +5364,19 @@ class Window(QMainWindow):
 
     def _escape_tree(self):
         if self.scope != self.root:
-            self.clear_filter()
+            now = time.monotonic()
+            if self._filtered_escape_at and now - self._filtered_escape_at < 1.5:
+                self.clear_filter()
+                self.tree.collapseAll()
+            else:
+                was_suppressed = self._suppress_tree_preview
+                self._suppress_tree_preview = True
+                try:
+                    self.tree.selectionModel().clearCurrentIndex()
+                    self.tree.collapseAll()
+                finally:
+                    self._suppress_tree_preview = was_suppressed
+                self._filtered_escape_at = now
         else:
             self.tree.collapseAll()
 
@@ -5372,6 +5386,7 @@ class Window(QMainWindow):
                 self.clear_filter()
                 return
             self.scope = folder
+            self._filtered_escape_at = 0.0
             self.tree.setRootIndex(self.model.index(str(folder)))
             self.filter_label.setToolTip(f"Filtered to {folder} (click to clear)")
             self.filter_label.show()
@@ -5391,6 +5406,7 @@ class Window(QMainWindow):
         self.tree.setFocus(Qt.OtherFocusReason)
 
     def clear_filter(self):
+        self._filtered_escape_at = 0.0
         self.scope = self.root
         self.tree.setRootIndex(self.model.index(str(self.root)))
         self.filter_label.hide()

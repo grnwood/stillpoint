@@ -1427,6 +1427,62 @@ def test_filter_from_here_uses_selected_folder_or_file_parent(
     window.close()
 
 
+def test_filtered_escape_folds_scope_then_clears_filter(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    scope = tmp_path / "scope"
+    nested = scope / "nested"
+    nested.mkdir(parents=True)
+    window = Window(tmp_path)
+    try:
+        window.show()
+        window.apply_filter(scope)
+        nested_index = window.model.index(str(nested))
+        window.tree.expand(nested_index)
+        window.tree.setCurrentIndex(nested_index)
+        window.tree.setFocus()
+
+        QTest.keyClick(window.tree, Qt.Key_Escape)
+        assert window.scope == scope
+        assert not window.tree.isExpanded(nested_index)
+        assert not window.tree.currentIndex().isValid()
+        assert not window.filter_label.isHidden()
+
+        QTest.keyClick(window.tree, Qt.Key_Escape)
+        assert window.scope == tmp_path
+        assert not window.clear_filter_action.isEnabled()
+        assert window.filter_label.isHidden()
+    finally:
+        window.close()
+
+
+def test_tree_defaults_to_folders_first_and_preserves_explicit_sort(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / "z-folder").mkdir()
+    (tmp_path / "a-folder").mkdir()
+    (tmp_path / "b-file.txt").write_text("b", encoding="utf-8")
+    (tmp_path / "c-file.txt").write_text("c", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        root_index = window.tree.rootIndex()
+        QTest.qWait(120)
+        app.processEvents()
+        children = [window.model.index(row, 0, root_index)
+                    for row in range(window.model.rowCount(root_index))]
+        assert [window.model.isDir(index) for index in children] == [True, True, False, False]
+        window.tree.sortByColumn(0, Qt.DescendingOrder)
+        assert window.tree.header().sortIndicatorOrder() == Qt.DescendingOrder
+    finally:
+        window.close()
+
+
 def test_add_bookmark_to_stillpoint_saves_folder_root(
         tmp_path, monkeypatch, app):
     from sp.app import config
@@ -1530,6 +1586,35 @@ def test_quick_open_folder_target_reveals_without_filtering(tmp_path, monkeypatc
     assert Path(window.model.filePath(window.tree.rootIndex())) == tmp_path
     assert Path(window.model.filePath(window.tree.currentIndex())) == folder
     window.close()
+
+
+def test_quick_open_lists_matching_folders_before_files(tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.window import Picker, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "match-folder"
+    folder.mkdir()
+    child = folder / "notes.txt"
+    child.write_text("notes", encoding="utf-8")
+    file = tmp_path / "match-file.txt"
+    file.write_text("match", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        window.catalog_db.upsert_paths([file, child])
+        picker = Picker(window, quick=True)
+        picker.query.setText("match")
+        deadline = time.monotonic() + 2
+        while picker.list.count() < 2 and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.01)
+        assert picker.list.count() >= 2
+        assert picker.list.item(0).data(Qt.UserRole + 1)
+        assert not picker.list.item(1).data(Qt.UserRole + 1)
+        picker.close()
+    finally:
+        window.close()
 
 
 def test_folder_navigator_vi_picker_keys(tmp_path, monkeypatch, app):
