@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
-                            QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal)
+                            QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -2239,6 +2239,7 @@ class Window(QMainWindow):
         self.markdown_preview_timer.setSingleShot(True)
         self.markdown_preview_timer.timeout.connect(self._refresh_pending_markdown_preview)
         self.pending_markdown_preview = None
+        self._heading_scroll_anim = None
         self.preview_hydration_delay_ms = 160
         self.preview_hydration_timer = QTimer(self)
         self.preview_hydration_timer.setSingleShot(True)
@@ -3475,7 +3476,7 @@ class Window(QMainWindow):
         self._focus_tab_content(tab)
 
     def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
-                  force_text=False, force_rich_markdown=False, replace_preview=True):
+                  force_text=False, replace_preview=True):
         if self.window_trace is not None:
             self.window_trace.arm(path)
         # Once a visible window is explicitly opening content, do not let a
@@ -3489,6 +3490,7 @@ class Window(QMainWindow):
         if index >= 0:
             if pinned:
                 self.keep_open(index)
+                index = self._index_for(path)
             self.tabs.setCurrentIndex(index)
             if line:
                 self._reveal_editor_line(self.tabs.widget(index), line)
@@ -3497,7 +3499,7 @@ class Window(QMainWindow):
                 self._schedule_preview_hydration(
                     tab, immediate=pinned or not defer_enhancements
                 )
-            self._schedule_markdown_preview(self.tabs.widget(index))
+            self._schedule_markdown_preview(self.tabs.widget(index), immediate=pinned)
             return
         preview = (
             next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
@@ -3535,30 +3537,36 @@ class Window(QMainWindow):
                 is_markdown = path.suffix.casefold() in (".md", ".markdown")
                 fallback_reason = (
                     rich_markdown_fallback_reason(loaded.text, path.stat().st_size)
-                    if is_markdown and not force_rich_markdown else None
+                    if is_markdown and not force_text else None
                 )
-                tab = Tab(
-                    path,
-                    loaded,
-                    markdown=is_markdown and fallback_reason is None,
-                    root=self.root,
-                    defer_enhancements=defer_enhancements or fallback_reason is not None,
-                )
+                rich_markdown = is_markdown and not force_text and fallback_reason is None
+                try:
+                    tab = Tab(
+                        path, loaded, markdown=rich_markdown, root=self.root,
+                        defer_enhancements=(
+                            defer_enhancements or (is_markdown and not rich_markdown)
+                        ),
+                    )
+                except Exception as exc:
+                    if not rich_markdown:
+                        raise
+                    tab = Tab(path, loaded, markdown=False, root=self.root,
+                              defer_enhancements=True)
+                    tab.setProperty("folderLargeMarkdownSource", True)
+                    self.statusBar().showMessage(
+                        f"Full Markdown preview failed for {path.name}: {exc}", 12000
+                    )
                 if fallback_reason:
                     tab.setProperty("folderLargeMarkdownSource", True)
                     tab.show_notice(
                         "Large Markdown opened in lightweight mode "
                         f"({fallback_reason}) to keep Folder Navigator responsive."
                     )
-                    rich_button = QPushButton("Enable Rich Markdown Anyway")
-                    rich_button.setToolTip(
-                        "The rich editor may pause on files of this size or shape."
-                    )
-                    rich_button.clicked.connect(
-                        lambda checked=False, selected=path: self._enable_rich_markdown(selected)
-                    )
-                    tab.layout().insertWidget(1, rich_button)
-                    tab.rich_markdown_button = rich_button
+                    if pinned:
+                        self.statusBar().showMessage(
+                            f"Full Markdown preview skipped for {path.name}: {fallback_reason}",
+                            12000,
+                        )
         except Exception as exc:
             info = path.stat()
             details = (f"{path.name}\nType: {mimetypes.guess_type(path.name)[0] or 'Unknown'}\n"
@@ -3642,28 +3650,10 @@ class Window(QMainWindow):
             self._schedule_preview_hydration(
                 tab, immediate=pinned or not defer_enhancements
             )
-        self._schedule_markdown_preview(tab if defer_enhancements else None)
-
-    def _enable_rich_markdown(self, path):
-        index = self._index_for(Path(path))
-        if index < 0:
-            return
-        tab = self.tabs.widget(index)
-        if tab.dirty:
-            self.statusBar().showMessage(
-                "Save or undo lightweight-mode edits before enabling rich Markdown",
-                7000,
+        if tab.markdown or defer_enhancements:
+            self._schedule_markdown_preview(
+                tab, immediate=pinned and not defer_enhancements
             )
-            return
-        pinned = tab.pinned
-        self.tabs.removeTab(index)
-        tab.deleteLater()
-        self.open_file(
-            Path(path),
-            pinned=pinned,
-            force_rich_markdown=True,
-        )
-        self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
     def _schedule_preview_hydration(self, tab, *, immediate=False):
         """Hydrate one rich preview only after disposable navigation settles."""
@@ -4333,6 +4323,15 @@ class Window(QMainWindow):
             tab.clean_text = tab.text_for_save()
             tab.editor.document().setModified(False)
             tab.setProperty("folderMarkdownRendered", True)
+        except Exception as exc:
+            path, pinned = tab.path, tab.pinned
+            index = self.tabs.indexOf(tab)
+            self.tabs.removeTab(index)
+            tab.deleteLater()
+            self.open_file(path, pinned=pinned, force_text=True, replace_preview=False)
+            self.statusBar().showMessage(
+                f"Full Markdown preview failed for {path.name}: {exc}", 12000
+            )
         finally:
             tab.setProperty("folderMarkdownRendering", False)
 
@@ -4360,34 +4359,72 @@ class Window(QMainWindow):
                 self.reveal_tree(tab.path)
 
     def _reveal_editor_line(self, tab, line):
-        """Select, flash, and scroll a search target into view."""
+        """Scroll to a line and flash it like the main editor does."""
         if not tab or not tab.editor or not line:
             return
         block = tab.editor.document().findBlockByNumber(max(0, int(line) - 1))
         if not block.isValid():
             return
         cursor = QTextCursor(block)
-        tab.editor.setTextCursor(cursor)
-        tab.editor.ensureCursorVisible()
+        editor = tab.editor
+        editor.setTextCursor(cursor)
+        editor.setFocus(Qt.OtherFocusReason)
+        scrollbar = editor.verticalScrollBar()
+        if scrollbar is None:
+            editor.ensureCursorVisible()
+            self._flash_editor_line(editor, cursor)
+            return
+        view_height = max(1, editor.viewport().height())
+        target_rect = editor.cursorRect(cursor)
+        target = scrollbar.value() + target_rect.top() - max(0, int(view_height * 0.25))
+        target = max(0, min(int(target), scrollbar.maximum()))
+        current_value = scrollbar.value()
+        distance = abs(target - current_value)
+        if self._heading_scroll_anim and self._heading_scroll_anim.state() == QPropertyAnimation.Running:
+            self._heading_scroll_anim.stop()
+        if distance <= 2:
+            scrollbar.setValue(target)
+            editor.ensureCursorVisible()
+            self._flash_editor_line(editor, cursor)
+            return
+        animation = QPropertyAnimation(scrollbar, b"value", self)
+        animation.setDuration(min(150, max(60, distance)))
+        animation.setStartValue(current_value)
+        animation.setEndValue(target)
+
+        def finish():
+            try:
+                if self.tabs.indexOf(tab) < 0 or cursor.document() is not editor.document():
+                    return
+                editor.setTextCursor(cursor)
+                editor.ensureCursorVisible()
+                self._flash_editor_line(editor, cursor)
+            except RuntimeError:
+                # A preview tab may be replaced while the scroll animation runs.
+                return
+
+        animation.finished.connect(finish)
+        self._heading_scroll_anim = animation
+        animation.start()
+
+    def _flash_editor_line(self, editor, cursor):
         marker = QTextEdit.ExtraSelection()
         marker.cursor = cursor
-        marker.format.setBackground(theme_color("page_editor_window.highlight.selection_bg", "#ffd54f"))
+        marker.cursor.clearSelection()
+        marker.format.setBackground(QColor(getattr(self, "_folder_identity_accent", "#4f8f8b")))
         marker.format.setProperty(QTextFormat.FullWidthSelection, True)
-        marker.format.setProperty(QTextFormat.UserProperty, 9911)
-        current = [selection for selection in tab.editor.extraSelections()
-                   if selection.format.property(QTextFormat.UserProperty) != 9911]
-        tab.editor.setExtraSelections(current + [marker])
+        marker.format.setProperty(QTextFormat.UserProperty, 9991)
+        editor.setExtraSelections(editor.extraSelections() + [marker])
 
         def clear_marker():
             try:
-                keep = [selection for selection in tab.editor.extraSelections()
-                        if selection.format.property(QTextFormat.UserProperty) != 9911]
-                tab.editor.setExtraSelections(keep)
+                keep = [selection for selection in editor.extraSelections()
+                        if selection.format.property(QTextFormat.UserProperty) != 9991]
+                editor.setExtraSelections(keep)
             except RuntimeError:
                 pass
 
-        QTimer.singleShot(1400, clear_marker)
-        tab.editor.setFocus(Qt.OtherFocusReason)
+        QTimer.singleShot(220, editor, clear_marker)
 
     def _show_active_heading_picker(self):
         tab = self.active_tab()
@@ -4654,6 +4691,15 @@ class Window(QMainWindow):
             tab = self.tabs.widget(index)
             tab.pinned = True
             self._update_tab_tooltip(tab)
+            if tab.property("folderLargeMarkdownSource") and tab.loaded:
+                reason = rich_markdown_fallback_reason(
+                    tab.loaded.text, tab.path.stat().st_size
+                )
+                if reason:
+                    self.statusBar().showMessage(
+                        f"Full Markdown preview skipped for {tab.path.name}: {reason}",
+                        12000,
+                    )
             if getattr(tab, "preview_kind", None) == "image":
                 self._request_full_image_preview(tab)
             elif (getattr(tab, "preview_kind", None)

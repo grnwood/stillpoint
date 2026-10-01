@@ -1284,6 +1284,17 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
     def highlightBlock(self, text: str) -> None:  # type: ignore[override]
         import time
+        # Rich highlighting runs on the GUI thread. Copied HTML and minified
+        # content can turn a single block into an expensive regex scan.
+        if len(text) > 2_048:
+            previous_state = self.previousBlockState()
+            if text.startswith("```"):
+                self.setCurrentBlockState(
+                    0 if previous_state == self.CODE_BLOCK_STATE else self.CODE_BLOCK_STATE
+                )
+            else:
+                self.setCurrentBlockState(previous_state)
+            return
         t0 = time.perf_counter() if self._timing_enabled else 0.0
         app = QApplication.instance()
         try:

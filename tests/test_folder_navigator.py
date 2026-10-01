@@ -65,6 +65,76 @@ def test_large_markdown_guard_detects_bytes_lines_and_long_lines(monkeypatch):
     assert rich_markdown_fallback_reason("a\nb", 3) is None
 
 
+def test_copied_html_code_block_opens_without_regex_highlighting(tmp_path, app, monkeypatch):
+    from sp.app.folder_navigator.window import Window
+    from sp.app.folder_navigator.editors import SourceEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "integration.md"
+    span = '<span data-testid="renderer-code-block-line-1" class="token property">"eventType"</span>'
+    content = "# Integration\n\n`" + span * 40 + "`\n"
+    path.write_text(content, encoding="utf-8")
+    assert "character line" in rich_markdown_fallback_reason(
+        content, path.stat().st_size
+    )
+
+    window = Window(tmp_path)
+    try:
+        window.open_file(path, defer_enhancements=True)
+        assert isinstance(window.active_tab().editor, SourceEditor)
+        window.open_file(path, pinned=True)
+        tab = window.active_tab()
+        assert tab.pinned
+        assert isinstance(tab.editor, SourceEditor)
+        assert tab.editor.syntax_highlighter is None
+        assert tab.editor.toPlainText() == content
+        assert "Full Markdown preview skipped" in window.statusBar().currentMessage()
+    finally:
+        window.close()
+
+
+def test_markdown_flyover_opens_full_editor_on_pin(tmp_path, app, monkeypatch):
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "note.md"
+    path.write_text("# Heading\n\nA short note.\n", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        window.open_file(path, defer_enhancements=True)
+        assert isinstance(window.active_tab().editor, MarkdownEditor)
+        window.open_file(path, pinned=True)
+        assert isinstance(window.active_tab().editor, MarkdownEditor)
+        assert window.active_tab().pinned
+        assert window.active_tab().property("folderMarkdownRendered")
+    finally:
+        window.close()
+
+
+def test_failed_full_markdown_preview_keeps_editable_source(tmp_path, app, monkeypatch):
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import Window
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "note.md"
+    path.write_text("# Heading\n", encoding="utf-8")
+
+    def fail_render(_self, _content):
+        raise ValueError("invalid preview")
+
+    monkeypatch.setattr(MarkdownEditor, "set_markdown", fail_render)
+    window = Window(tmp_path)
+    try:
+        window.open_file(path, pinned=True)
+        assert isinstance(window.active_tab().editor, SourceEditor)
+        assert window.active_tab().editor.toPlainText() == "# Heading\n"
+        assert "Full Markdown preview failed" in window.statusBar().currentMessage()
+    finally:
+        window.close()
+
+
 def test_utf16_round_trip(tmp_path):
     path = tmp_path / "wide.txt"
     path.write_bytes("first\r\nsecond\r\n".encode("utf-16"))
@@ -140,12 +210,11 @@ def test_folder_navigator_format_table_action_is_one_dirty_edit(
     window.close()
 
 
-def test_large_markdown_opens_lightweight_and_can_explicitly_enable_rich_mode(
+def test_large_markdown_opens_lightweight_without_rich_override(
         tmp_path, monkeypatch, app):
     import sp.app.folder_navigator.core as core
     from sp.app.folder_navigator.editors import SourceEditor
     from sp.app.folder_navigator.window import Window
-    from sp.app.ui.markdown_editor import MarkdownEditor
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(core, "MAX_RICH_MARKDOWN_BYTES", 32)
@@ -159,14 +228,7 @@ def test_large_markdown_opens_lightweight_and_can_explicitly_enable_rich_mode(
     assert tab.property("folderLargeMarkdownSource")
     assert tab.editor.syntax_highlighter is None
     assert "lightweight mode" in tab.notice.text()
-    assert tab.rich_markdown_button.text() == "Enable Rich Markdown Anyway"
-
-    tab.rich_markdown_button.click()
-    app.processEvents()
-
-    assert isinstance(window.active_tab().editor, MarkdownEditor)
-    assert not window.active_tab().property("folderLargeMarkdownSource")
-    window.active_tab().editor.document().setModified(False)
+    assert not hasattr(tab, "rich_markdown_button")
     window.close()
 
 
@@ -1925,6 +1987,8 @@ def test_image_preview_and_outside_bookmark(tmp_path, monkeypatch, app):
 
 
 def test_markdown_tabs_use_stillpoint_editor_and_heading_picker(tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QColor, QTextFormat
+    from PySide6.QtTest import QTest
     from sp.app.folder_navigator.window import Window
     from sp.app.ui.markdown_editor import MarkdownEditor
 
@@ -1938,6 +2002,13 @@ def test_markdown_tabs_use_stillpoint_editor_and_heading_picker(tmp_path, monkey
     assert tab.text_for_save().startswith("# First")
     window._reveal_editor_line(tab, 5)
     assert tab.editor.textCursor().blockNumber() == 4
+    flashes = [selection for selection in tab.editor.extraSelections()
+               if selection.format.property(QTextFormat.UserProperty) == 9991]
+    assert len(flashes) == 1
+    assert flashes[0].format.background().color() == QColor(window._folder_identity_accent)
+    QTest.qWait(260)
+    assert not any(selection.format.property(QTextFormat.UserProperty) == 9991
+                   for selection in tab.editor.extraSelections())
     tab.editor.document().setModified(False)
     window.close()
 

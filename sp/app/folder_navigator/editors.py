@@ -25,6 +25,7 @@ from sp.app.ui.theme import theme_color, theme_value
 
 
 _TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
+MAX_HIGHLIGHT_BLOCK_CHARS = 2_048
 
 
 def _split_markdown_table_row(line: str) -> list[str]:
@@ -175,6 +176,10 @@ class PygmentsHighlighter(QSyntaxHighlighter):
         return char_format
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt API
+        # A pasted/minified line can make a lexer spend seconds in a regex on
+        # the GUI thread. Leave that block unstyled while keeping it editable.
+        if len(text) > MAX_HIGHLIGHT_BLOCK_CHARS:
+            return
         for offset, token, value in self.lexer.get_tokens_unprocessed(text):
             length = len(value)
             if length:
