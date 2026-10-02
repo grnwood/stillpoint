@@ -18,3 +18,7 @@ Public License (LGPL) version 3.
 
 Users may obtain the source code for Qt and PySide6 at:
 https://www.qt.io
+
+Desktop bundles include ripgrep 15.2.0, Copyright (c) 2015 Andrew Gallant,
+licensed under the MIT License or the Unlicense. The bundled MIT license is
+provided at licenses/ripgrep-LICENSE-MIT.txt.

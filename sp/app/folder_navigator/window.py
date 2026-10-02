@@ -114,6 +114,17 @@ def _may_be_image(path: Path) -> bool:
     return not suffix or suffix in _image_suffixes()
 
 
+def _ripgrep_executable() -> str | None:
+    """Prefer the verified PyInstaller-bundled rg, then fall back to PATH."""
+    executable = "rg.exe" if sys.platform == "win32" else "rg"
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        candidate = Path(bundle_root) / executable
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("rg")
+
+
 class FolderModel(QFileSystemModel):
     def __init__(self, root: Path, parent=None):
         super().__init__(parent)
@@ -6989,7 +7000,7 @@ class Window(QMainWindow):
                 f"Search query is limited to {MAX_SEARCH_QUERY_CHARS:,} characters"
             )
             return
-        rg = shutil.which("rg")
+        rg = _ripgrep_executable()
         if self.search_regex.isChecked() and not rg:
             self.search_progress.setText(
                 "Regex search requires ripgrep so expressions cannot hang the application"

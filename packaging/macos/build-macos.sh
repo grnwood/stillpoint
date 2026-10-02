@@ -83,6 +83,7 @@ VENV_PYTHON="$VENV_DIR/bin/python"
 "$VENV_PYTHON" -m pip install pyinstaller
 "$VENV_PYTHON" -m pip install --no-binary charset_normalizer -r ../../sp/requirements.txt
 
+"$VENV_PYTHON" ../../packaging/fetch_ripgrep.py
 "$VENV_DIR/bin/pyinstaller" -y --clean ../../packaging/sp-macos.spec
 "$VENV_DIR/bin/pyinstaller" -y --clean ../../packaging/stillpoint-capture.spec
 

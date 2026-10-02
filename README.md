@@ -388,8 +388,12 @@ pytest tests
 Build scripts and spec live under `packaging/`.
 
 ```bash
+python packaging/fetch_ripgrep.py
 pyinstaller -y packaging/sp.spec
 ```
+
+The fetch step downloads the pinned native ripgrep release for the current
+platform, verifies its SHA-256 digest, and stages it for the desktop bundle.
 
 Artifacts land in `dist/stillpoint/`.
 
@@ -407,6 +411,7 @@ Open powershell
 
 ```bash
 > .\venv\Scripts\Activate.ps1
+> python .\packaging\fetch_ripgrep.py
 > pyinstaller.exe -y .\packaging\sp.spec
 > cd .\packaging\win32\
 > .\install.ps1

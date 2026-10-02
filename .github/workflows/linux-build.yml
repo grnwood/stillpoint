@@ -34,6 +34,7 @@ jobs:
 
       - name: PyInstaller build
         run: |
+          python packaging/fetch_ripgrep.py
           pyinstaller -y --clean packaging/sp.spec
           pyinstaller -y --clean packaging/stillpoint-capture.spec
 
@@ -44,6 +45,7 @@ jobs:
       - name: Smoke test bundle
         run: |
           test -x dist/stillpoint/stillpoint
+          test -x dist/stillpoint/_internal/rg
           test -f dist/stillpoint/run-server.sh
           test -f dist/stillpoint/_launch.sh
           test -x dist/stillpoint-capture/stillpoint-capture

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +20,36 @@ def test_pyinstaller_specs_bundle_the_icon_assets() -> None:
     for spec_name in ("sp.spec", "sp-macos.spec"):
         spec = (ROOT / "packaging" / spec_name).read_text()
         assert "for subdir in ['assets', 'slipstream', 'rag', 'ai']" in spec
+
+
+def test_desktop_bundles_require_pinned_ripgrep() -> None:
+    for spec_name in ("sp.spec", "sp-macos.spec"):
+        spec = (ROOT / "packaging" / spec_name).read_text()
+        assert "packaging', 'vendor', 'ripgrep'" in spec
+        assert "Missing pinned ripgrep binary" in spec
+
+    for workflow_name in ("windows-build.yml", "linux-build.yml", "macos-build.yml"):
+        workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+        assert "python packaging/fetch_ripgrep.py" in workflow
+
+
+def test_ripgrep_fetch_manifest_covers_release_platforms() -> None:
+    path = ROOT / "packaging" / "fetch_ripgrep.py"
+    spec = importlib.util.spec_from_file_location("fetch_ripgrep", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    assert module.RIPGREP_VERSION == "15.2.0"
+    for platform_name in ("win32", "linux", "darwin"):
+        for machine in ("x86_64", "aarch64"):
+            artifact = module.artifact_for(platform_name, machine)
+            assert artifact.filename.startswith(("ripgrep-15.2.0", "ripgrep_15.2.0"))
+            assert len(artifact.sha256) == 64
 
 
 def test_linux_installer_registers_folder_navigator_identity() -> None:

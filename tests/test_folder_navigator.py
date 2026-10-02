@@ -2208,6 +2208,27 @@ def test_regex_search_refuses_unsafe_python_fallback(
     window.close()
 
 
+def test_ripgrep_executable_prefers_pyinstaller_bundle(tmp_path, monkeypatch):
+    import sp.app.folder_navigator.window as module
+
+    executable = "rg.exe" if sys.platform == "win32" else "rg"
+    bundled = tmp_path / executable
+    bundled.write_bytes(b"bundled")
+    monkeypatch.setattr(module.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/path/rg")
+
+    assert module._ripgrep_executable() == str(bundled)
+
+
+def test_ripgrep_executable_uses_path_outside_bundle(monkeypatch):
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.delattr(module.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/path/rg")
+
+    assert module._ripgrep_executable() == "/path/rg"
+
+
 def test_closing_navigator_suppresses_late_worker_qt_signals(
         tmp_path, monkeypatch, app):
     import threading

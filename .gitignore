@@ -51,4 +51,5 @@ db.sqlite
 /.sp_folder/
 packaging/.DS_Store
 packaging/macos/.DS_Store
+packaging/vendor/ripgrep/
 .DS_Store

@@ -33,6 +33,7 @@ jobs:
           STILLPOINT_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          python packaging/fetch_ripgrep.py
           pyinstaller -y --clean packaging/sp-macos.spec
           pyinstaller -y --clean packaging/stillpoint-capture.spec
           ls -lah dist
@@ -43,6 +44,7 @@ jobs:
           test -d dist/StillPoint.app
           test -f dist/StillPoint.app/Contents/Info.plist
           test -x dist/StillPoint.app/Contents/MacOS/StillPoint
+          test -n "$(find dist/StillPoint.app -type f -name rg -perm -111 -print -quit)"
           test -x dist/stillpoint-capture/stillpoint-capture
 
           # Ensure it's a real mac binary, not a stub script

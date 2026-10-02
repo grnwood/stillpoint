@@ -72,7 +72,7 @@ hidden += _charset_hidden
 _calamine_datas, _calamine_binaries, _calamine_hidden = collect_all('python_calamine')
 hidden += _calamine_hidden
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION','0.99')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.0').lstrip('v')
 
 # Data files: templates + bundled assets
 _datas = [
@@ -93,6 +93,7 @@ _datas = [
     (os.path.join(ROOT, 'SP-vault-copilot-mcp.json'), '.'),
     (os.path.join(ROOT, 'LICENSE'), '.'),
     (os.path.join(ROOT, 'NOTICE'), '.'),
+    (os.path.join(ROOT, 'packaging', 'ripgrep-LICENSE-MIT.txt'), 'licenses'),
 ]
 
 # Add platform-specific install scripts
@@ -136,6 +137,14 @@ datas = _datas
 datas += _charset_datas
 datas += _calamine_datas
 binaries = _charset_binaries + _calamine_binaries
+
+_ripgrep_name = 'rg.exe' if sys.platform == 'win32' else 'rg'
+_ripgrep_binary = os.path.join(ROOT, 'packaging', 'vendor', 'ripgrep', _ripgrep_name)
+if not os.path.isfile(_ripgrep_binary):
+    raise SystemExit(
+        'Missing pinned ripgrep binary. Run: python packaging/fetch_ripgrep.py'
+    )
+binaries.append((_ripgrep_binary, '.'))
 
 block_cipher = None
 

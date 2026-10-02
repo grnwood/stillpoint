@@ -29,12 +29,14 @@ jobs:
 
       - name: PyInstaller build
         run: |
+          python packaging/fetch_ripgrep.py
           pyinstaller -y packaging/sp.spec
           pyinstaller -y packaging/stillpoint-capture.spec
 
       - name: Smoke test bundle
         run: |
           if (!(Test-Path "dist/stillpoint/stillpoint.exe")) { throw "dist/stillpoint/stillpoint.exe not found" }
+          if (!(Test-Path "dist/stillpoint/_internal/rg.exe")) { throw "bundled rg.exe not found" }
           if (!(Test-Path "dist/stillpoint-capture/stillpoint-capture.exe")) { throw "dist/stillpoint-capture/stillpoint-capture.exe not found" }
 
       - name: Runtime smoke test (stillpoint startup)

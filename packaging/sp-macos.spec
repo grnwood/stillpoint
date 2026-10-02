@@ -14,7 +14,7 @@ def _find_root():
 ROOT = _find_root()
 MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '0.99')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.0').lstrip('v')
 
 hidden = (
     collect_submodules('sp')
@@ -74,6 +74,7 @@ _datas = [
     (os.path.join(ROOT, 'SP-vault-copilot-mcp.json'), '.'),
     (os.path.join(ROOT, 'LICENSE'), '.'),
     (os.path.join(ROOT, 'NOTICE'), '.'),
+    (os.path.join(ROOT, 'packaging', 'ripgrep-LICENSE-MIT.txt'), 'licenses'),
 ]
 
 for subdir in ['assets', 'slipstream', 'rag', 'ai']:
@@ -89,6 +90,13 @@ from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
 datas += _charset_datas
 binaries = _charset_binaries
+
+_ripgrep_binary = os.path.join(ROOT, 'packaging', 'vendor', 'ripgrep', 'rg')
+if not os.path.isfile(_ripgrep_binary):
+    raise SystemExit(
+        'Missing pinned ripgrep binary. Run: python packaging/fetch_ripgrep.py'
+    )
+binaries.append((_ripgrep_binary, '.'))
 
 a = Analysis(
     [MAIN],
