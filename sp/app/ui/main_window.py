@@ -3052,6 +3052,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.setStretchFactor(1, 5)
         self.main_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self._set_macos_splitter_handle_widths()
 
         # Create history bar (separate row for history buttons)
         self.history_bar = QWidget()
@@ -11455,6 +11456,9 @@ class MainWindow(QMainWindow):
         else:
             if _DETAILED_LOGGING:
                 print("[Geometry] No saved editor splitter state found")
+
+        # QSplitter.restoreState() also restores the old handle width.
+        self._set_macos_splitter_handle_widths()
         
         # Restore panel visibility (overrides splitter sizes if hidden)
         vis = {}
@@ -11471,6 +11475,12 @@ class MainWindow(QMainWindow):
                 self._set_right_panel_collapsed(True)
         except Exception:
             pass
+
+    def _set_macos_splitter_handle_widths(self) -> None:
+        """Give the main vertical dividers a comfortable drag target on macOS."""
+        if sys.platform == "darwin":
+            self.main_splitter.setHandleWidth(12)
+            self.editor_split.setHandleWidth(12)
 
     def _reset_view_layout(self) -> None:
         """Reset window geometry and splitter positions to defaults."""

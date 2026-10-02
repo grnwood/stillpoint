@@ -2670,6 +2670,7 @@ class Window(QMainWindow):
         self.splitter = QSplitter()
         self.splitter.addWidget(self.rail)
         self.splitter.addWidget(self.content)
+        self._set_macos_splitter_handle_widths()
         self.chat_panel = None
         self.chat_container = None
         self.chat_tabs = None
@@ -3006,6 +3007,12 @@ class Window(QMainWindow):
             except OSError:
                 pass
 
+    def _set_macos_splitter_handle_widths(self) -> None:
+        """Give Folder Navigator's dividers a comfortable drag target on macOS."""
+        if sys.platform == "darwin":
+            self.splitter.setHandleWidth(12)
+            self.content.setHandleWidth(12)
+
     def _restore(self):
         from PySide6.QtCore import QByteArray
         geometry = self.catalog_ui_state.get("window_geometry") or self.state.get("geometry")
@@ -3014,6 +3021,8 @@ class Window(QMainWindow):
         splitter_state = self.catalog_ui_state.get("splitter_state")
         if isinstance(splitter_state, str) and splitter_state:
             self.splitter.restoreState(QByteArray.fromBase64(splitter_state.encode("ascii")))
+        # Restoring splitter state can also restore an older handle width.
+        self._set_macos_splitter_handle_widths()
         header_state = self.catalog_ui_state.get("tree_header")
         if isinstance(header_state, str) and header_state:
             self.tree.header().restoreState(
