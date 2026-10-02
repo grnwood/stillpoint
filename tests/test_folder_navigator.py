@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import subprocess
 import sys
@@ -29,6 +30,69 @@ def test_symlink_boundary_and_cancel(tmp_path):
     assert not inside(root, root / "file-link")
     assert list(walk_files(root, root)) == [root / "inside.txt"]
     assert list(walk_files(root, root, canceled=lambda: True)) == []
+
+
+def test_workbook_preview_rejects_archive_expansion_bomb(tmp_path, monkeypatch):
+    import zipfile
+    import sp.app.folder_navigator.tabular as tabular
+
+    path = tmp_path / "bomb.xlsx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/sharedStrings.xml", b"x" * 256)
+    monkeypatch.setattr(tabular, "MAX_WORKBOOK_UNCOMPRESSED_BYTES", 128)
+
+    with pytest.raises(ValueError, match="expands beyond"):
+        tabular.read_workbook_preview(path)
+
+
+def test_preview_allocation_limits_guard_pdf_and_svg(tmp_path, monkeypatch):
+    import sp.app.folder_navigator.window as module
+
+    pdf = tmp_path / "large.pdf"
+    pdf.write_bytes(b"%PDF" + b"x" * 64)
+    monkeypatch.setattr(module, "MAX_PDF_PREVIEW_BYTES", 32)
+    with pytest.raises(ValueError, match="preview limit"):
+        module.pdf_view(pdf)
+
+    monkeypatch.setattr(module, "DIAGRAM_PREVIEW_MAX_PIXELS", 10_000)
+    image = module.Window._rasterize_diagram_svg(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="10000" height="10000" '
+        'viewBox="0 0 10000 10000"><rect width="10000" height="10000"/></svg>'
+    )
+    assert image.width() * image.height() <= 10_000
+
+    monkeypatch.setattr(module, "DIAGRAM_PREVIEW_MAX_SVG_BYTES", 16)
+    with pytest.raises(ValueError, match="SVG exceeds"):
+        module.Window._rasterize_diagram_svg("<svg>more than sixteen bytes</svg>")
+
+
+def test_excalidraw_sidecar_is_scaled_before_background_decode(
+        tmp_path, monkeypatch, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module, "DIAGRAM_PREVIEW_MAX_PIXELS", 10_000)
+    drawing = tmp_path / "drawing.excalidraw"
+    drawing.write_text("{}", encoding="utf-8")
+    sidecar = tmp_path / "drawing.excalidraw.png"
+    image = QImage(1000, 500, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    assert image.save(str(sidecar))
+
+    window = module.Window(tmp_path)
+    window.open_file(drawing)
+    deadline = time.monotonic() + 2
+    while getattr(window.active_tab(), "viewer", None) is None:
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+
+    preview = window.active_tab().viewer.original
+    assert preview.width() * preview.height() <= 10_000
+    window.close()
 
 
 def test_atomic_save_detects_changes_and_preserves_newlines(tmp_path):
@@ -288,6 +352,8 @@ def test_tsv_preview_uses_extension_fallback_for_ambiguous_content(tmp_path):
 
 
 def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monkeypatch):
+    import zipfile
+
     class Sheet:
         end = (1, 1)
         total_height = 1
@@ -317,7 +383,8 @@ def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monke
         sys.modules, "python_calamine", types.SimpleNamespace(CalamineWorkbook=Workbook)
     )
     path = tmp_path / "book.xlsx"
-    path.write_bytes(b"placeholder")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
 
     preview = read_workbook_preview(path, "Second")
 
@@ -383,6 +450,30 @@ def test_csv_opens_in_incremental_table_and_can_switch_to_raw_text(
     assert window.active_tab().editor is not None
     assert window.active_tab().pinned
     assert "item-649,649" in window.active_tab().editor.toPlainText()
+    window.close()
+
+
+def test_stale_table_worker_result_cannot_replace_newer_file(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.core import fingerprint
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "data.csv"
+    path.write_text("old\n", encoding="utf-8")
+    old_signature = fingerprint(path)
+    window = Window(tmp_path)
+    monkeypatch.setattr(window, "_load_delimited_preview", lambda *_a, **_k: None)
+    window.open_file(path, pinned=True)
+    path.write_text("new content\n", encoding="utf-8")
+
+    window._show_table_preview(
+        path, TablePreview([["stale"]]), True, None,
+        signature=old_signature,
+    )
+
+    assert getattr(window.active_tab(), "viewer", None) is None
     window.close()
 
 
@@ -1017,7 +1108,7 @@ def test_walk_files_always_prunes_generated_and_vcs_trees(tmp_path):
     visible = tmp_path / "visible.txt"
     visible.write_text("visible")
     for directory in (
-        ".git", "node_modules", ".venv", "__pycache__", "build", "dist",
+        ".git", ".stillpoint", "node_modules", ".venv", "__pycache__", "build", "dist",
         "target", ".next", "cmake-build-debug", "package.egg-info",
     ):
         child = tmp_path / directory
@@ -1025,6 +1116,7 @@ def test_walk_files_always_prunes_generated_and_vcs_trees(tmp_path):
         (child / "noise.txt").write_text("noise")
     (tmp_path / "bundle.min.js").write_text("generated")
     (tmp_path / "module.pyc").write_bytes(b"generated")
+    (tmp_path / ".stillpoint_folder_navigator.json").write_text("{}")
 
     assert list(walk_files(tmp_path, tmp_path, hidden=True)) == [visible]
 
@@ -2075,6 +2167,116 @@ def test_ripgrep_search_prunes_generated_trees_and_honors_ignore_toggle(
     window.close()
 
 
+def test_regex_filename_search_runs_in_bounded_ripgrep_process(
+        tmp_path, monkeypatch, app):
+    import shutil
+    import threading
+    from sp.app.folder_navigator.window import Window
+
+    rg = shutil.which("rg")
+    if not rg:
+        pytest.skip("ripgrep is not installed")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    matching = tmp_path / "report-12.md"
+    matching.write_text("", encoding="utf-8")
+    (tmp_path / "report-final.md").write_text("", encoding="utf-8")
+    window = Window(tmp_path)
+
+    records = window._ripgrep_search(
+        rg, tmp_path, r"^report-[0-9]+\.md$", None,
+        case=True, whole=False, regex=True, include_ignored=True,
+        canceled=threading.Event(),
+    )
+
+    assert records == [(matching, None, "Filename match")]
+    window.close()
+
+
+def test_regex_search_refuses_unsafe_python_fallback(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    window = module.Window(tmp_path)
+    window.search_input.setText("(a+)+$")
+    window.search_regex.setChecked(True)
+
+    window.run_search()
+
+    assert "requires ripgrep" in window.search_progress.text()
+    window.close()
+
+
+def test_closing_navigator_suppresses_late_worker_qt_signals(
+        tmp_path, monkeypatch, app):
+    import threading
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    emitted = []
+
+    def job():
+        started.set()
+        release.wait(2)
+        emitted.append(window._emit_bridge_result(("late-result",)))
+
+    future = window._submit_preview_job(job)
+    assert started.wait(1)
+    window.close()
+    release.set()
+    future.result(timeout=2)
+
+    assert window._closing_event.is_set()
+    assert emitted == [False]
+
+
+def test_corrupt_structured_settings_fall_back_safely(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    settings_path = tmp_path / ".stillpoint_folder_navigator.json"
+    settings_path.write_text(json.dumps({
+        str(tmp_path): {
+            "splitter": "not-a-size-list",
+            "rail": {"bad": "value"},
+            "rail_width": [],
+            "chat_width": {},
+            "geometry": [],
+            "selected": {},
+            "pinned": [None, {}],
+            "expanded": "not-a-list",
+            "bookmarks": {},
+        },
+    }), encoding="utf-8")
+
+    window = Window(tmp_path)
+
+    assert window.state["splitter"] == [300, 800]
+    assert window.rail.currentIndex() == 0
+    assert window._bookmarks() == []
+    window.state["expanded"] = "broken"
+    window._remember_expansion(window.model.index(str(tmp_path)), True)
+    assert isinstance(window.state["expanded"], list)
+    window.close()
+
+
+def test_persist_failure_does_not_break_window_shutdown(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window.settings_path = tmp_path / "missing-parent" / "settings.json"
+
+    window._persist()
+    window.close()
+
+    assert not window.settings_path.with_suffix(".tmp").exists()
+
+
 def test_image_preview_and_outside_bookmark(tmp_path, monkeypatch, app):
     import time
     from PySide6.QtGui import QImage
@@ -2397,6 +2599,54 @@ def test_pdf_preview_uses_shared_zoom_commands(tmp_path, monkeypatch, app):
         assert pinch.isAccepted()
         assert viewer.zoomFactor() > before
         before = viewer.zoomFactor()
+    window.close()
+
+
+def test_scroll_shortcuts_page_source_and_pdf_previews(tmp_path, monkeypatch, app):
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "long.txt"
+    source.write_text("\n".join(f"line {index}" for index in range(600)), encoding="utf-8")
+    pdf_path = tmp_path / "long.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    for page in range(4):
+        painter.drawText(100, 100, f"page {page + 1}")
+        if page < 3:
+            writer.newPage()
+    painter.end()
+
+    window = Window(tmp_path)
+    window.resize(900, 600)
+    window.show()
+    window.open_file(source, pinned=True)
+    app.processEvents()
+    editor = window.active_tab().editor
+    editor.setFocus()
+    editor.verticalScrollBar().setValue(0)
+    window._scroll_active_view(1)
+    assert editor.verticalScrollBar().value() > 0
+    window._scroll_active_view(-1)
+    assert editor.verticalScrollBar().value() == 0
+
+    window.open_file(pdf_path, pinned=True)
+    app.processEvents()
+    pdf = window.active_tab().viewer.findChild(QPdfView)
+    pdf.setFocus()
+    pdf.verticalScrollBar().setValue(0)
+    window._scroll_active_view(1)
+    assert pdf.verticalScrollBar().value() > 0
+    window._scroll_active_view(-1)
+    assert pdf.verticalScrollBar().value() == 0
+
+    sequences = {
+        shortcut.key().toString()
+        for shortcut in window.preview_scroll_shortcuts
+    }
+    assert {"Ctrl+Shift+J", "Ctrl+Shift+K"}.issubset(sequences)
     window.close()
 
 
@@ -2905,13 +3155,17 @@ def test_folder_and_editor_panels_show_active_focus_border(tmp_path, monkeypatch
 
     window.tree.setFocus()
     app.processEvents()
-    assert f"1px solid {window._folder_identity_accent}" in window.rail.styleSheet()
-    assert f"1px solid {window._folder_identity_accent}" not in window.tabs.styleSheet()
+    rail_pane = window.rail.styleSheet().split("}", 1)[0]
+    editor_pane = window.tabs.styleSheet().split("}", 1)[0]
+    assert f"1px solid {window._folder_identity_accent}" in rail_pane
+    assert f"1px solid {window._folder_identity_accent}" not in editor_pane
 
     window.active_tab().editor.setFocus()
     app.processEvents()
-    assert f"1px solid {window._folder_identity_accent}" not in window.rail.styleSheet()
-    assert f"1px solid {window._folder_identity_accent}" in window.tabs.styleSheet()
+    rail_pane = window.rail.styleSheet().split("}", 1)[0]
+    editor_pane = window.tabs.styleSheet().split("}", 1)[0]
+    assert f"1px solid {window._folder_identity_accent}" not in rail_pane
+    assert f"1px solid {window._folder_identity_accent}" in editor_pane
     window.active_tab().editor.document().setModified(False)
     window.close()
 
@@ -3004,7 +3258,7 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         tmp_path, monkeypatch, app, suffix):
     import time
     from types import SimpleNamespace
-    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QAbstractButton
     from sp.app.folder_navigator.window import ImageView, Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -3039,6 +3293,8 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
     other = tmp_path / "notes.txt"
     other.write_text("ordinary preview", encoding="utf-8")
     window = Window(tmp_path)
+    revealed = []
+    window.reveal_tree = lambda selected: revealed.append(Path(selected))
     window.open_file(path)
 
     deadline = time.monotonic() + 2
@@ -3054,22 +3310,30 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
     )
     buttons = {
         button.text(): button
-        for button in window.active_tab().viewer.findChildren(QPushButton)
+        for button in window.active_tab().viewer.findChildren(QAbstractButton)
     }
     assert open_label in buttons
-    assert "Copy SVG" in buttons
-    assert "Copy PNG" in buttons
-    buttons["Copy PNG"].click()
+    assert "Fit" in buttons
+    assert "1:1" in buttons
+    assert "−" in buttons
+    assert "+" in buttons
+    assert "↓ Export" in buttons
+    export_actions = {
+        action.text(): action
+        for action in window.active_tab().viewer._diagram_menu().actions()
+        if not action.isSeparator()
+    }
+    assert set(export_actions) == {
+        "Export as SVG…", "Export as PNG…", "Copy SVG", "Copy PNG",
+        "Reveal in Folder",
+    }
+    export_actions["Copy PNG"].trigger()
     assert not app.clipboard().pixmap().isNull()
-    buttons["Copy SVG"].click()
+    export_actions["Copy SVG"].trigger()
     assert app.clipboard().text().startswith('<svg xmlns="http://www.w3.org/2000/svg"')
-    assert window.active_tab().viewer.label.autoFillBackground()
-    assert (
-        window.active_tab().viewer.label.palette().color(
-            window.active_tab().viewer.label.backgroundRole()
-        ).name()
-        == "#ffffff"
-    )
+    export_actions["Reveal in Folder"].trigger()
+    assert revealed == [path]
+    assert "background-color: #ffffff" in window.active_tab().viewer.label.styleSheet()
 
     # Flyover tabs are disposable, but the expensive render is reusable while
     # the source fingerprint remains unchanged.
@@ -3092,6 +3356,93 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         app.processEvents()
         time.sleep(.01)
     assert isinstance(window.active_tab().viewer, ImageView)
+    window.close()
+
+
+def test_uncached_diagram_preview_uses_animated_loading_state(
+        tmp_path, monkeypatch, app):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from sp.app.folder_navigator.window import ImageView, PreviewLoadingView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def render(_renderer, _source, **_kwargs):
+        started.set()
+        release.wait(2)
+        return SimpleNamespace(
+            success=True,
+            svg_content=(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">'
+                '<rect width="80" height="40" fill="#4488cc"/></svg>'
+            ),
+            error_message=None,
+            stderr=None,
+        )
+
+    monkeypatch.setattr(
+        "sp.app.mermaid_renderer.MermaidRenderer.render_svg", render
+    )
+    path = tmp_path / "diagram.mmd"
+    path.write_text("flowchart TD\nA --> B\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(path)
+
+    deadline = time.monotonic() + 2
+    while not started.is_set():
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    placeholder = window.active_tab().placeholder
+    assert isinstance(placeholder, PreviewLoadingView)
+    assert placeholder.timer.isActive()
+    first_frame = placeholder.spinner.text()
+    deadline = time.monotonic() + .5
+    while placeholder.spinner.text() == first_frame and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert placeholder.spinner.text() != first_frame
+
+    release.set()
+    deadline = time.monotonic() + 2
+    while not isinstance(getattr(window.active_tab(), "viewer", None), ImageView):
+        assert time.monotonic() < deadline
+        app.processEvents()
+        time.sleep(.01)
+    assert not placeholder.timer.isActive()
+    window.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "preview_kind", "loader_name", "contents"),
+    [
+        ("report.docx", "document", "_load_document_preview", b"document"),
+        ("data.csv", "table", "_load_delimited_preview", b"a,b\n1,2\n"),
+        ("workbook.xlsx", "workbook", "_load_workbook_preview", b"workbook"),
+        ("diagram.mmd", "diagram", "_load_diagram_preview", b"flowchart TD\nA --> B\n"),
+    ],
+)
+def test_rich_preview_types_share_animated_loading_state(
+        tmp_path, monkeypatch, app, name, preview_kind, loader_name, contents):
+    from sp.app.folder_navigator.window import PreviewLoadingView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / name
+    path.write_bytes(contents)
+    window = Window(tmp_path)
+    setattr(window, loader_name, lambda *_args, **_kwargs: None)
+    window.open_file(path, defer_enhancements=True)
+    window.preview_hydration_timer.stop()
+    window._hydrate_pending_preview()
+
+    tab = window.active_tab()
+    assert tab.preview_kind == preview_kind
+    assert isinstance(tab.placeholder, PreviewLoadingView)
+    assert tab.placeholder.timer.isActive()
+    assert tab.placeholder.message.text()
     window.close()
 
 

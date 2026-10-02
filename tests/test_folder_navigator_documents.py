@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import subprocess
 import time
+import zipfile
 
 from docx import Document
 import pytest
@@ -41,6 +42,24 @@ def test_docx_falls_back_to_portable_structured_html(tmp_path, monkeypatch):
     assert "<table>" in preview.html
     assert preview.html.index("Quarterly Review") < preview.html.index("Revenue")
     assert preview.html.index("Revenue") < preview.html.index("After the table")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "builder_name", "limit_name"),
+    [
+        (".docx", "build_docx_preview", "MAX_DOCX_UNCOMPRESSED_BYTES"),
+        (".pptx", "build_pptx_preview", "MAX_PPTX_UNCOMPRESSED_BYTES"),
+    ],
+)
+def test_office_preview_rejects_archive_expansion_bombs(
+        tmp_path, monkeypatch, suffix, builder_name, limit_name):
+    path = tmp_path / f"bomb{suffix}"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"x" * 256)
+    monkeypatch.setattr(documents, limit_name, 128)
+
+    with pytest.raises(ValueError, match="expands beyond"):
+        getattr(documents, builder_name)(path)
 
 
 def test_docx_libreoffice_conversion_is_fingerprint_cached(tmp_path, monkeypatch):

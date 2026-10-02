@@ -32,6 +32,7 @@ MAX_DIRECTORY_ENTRIES = int(
 MAX_INDEX_FILES = int(os.environ.get("STILLPOINT_FOLDER_MAX_INDEX_FILES", 100_000))
 MAX_INDEX_SECONDS = float(os.environ.get("STILLPOINT_FOLDER_MAX_INDEX_SECONDS", 10.0))
 DEFAULT_PRUNED_DIRECTORY_NAMES = frozenset({
+    ".stillpoint",
     ".sp_folder",
     ".git",
     ".hg",
@@ -102,6 +103,7 @@ DEFAULT_PRUNED_FILE_SUFFIXES = frozenset({
     ".wasm",
 })
 DEFAULT_PRUNED_FILE_GLOBS = frozenset({
+    ".stillpoint_folder_navigator.json",
     "*.css.map",
     "*.js.map",
     "*.min.css",

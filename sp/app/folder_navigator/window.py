@@ -7,6 +7,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 import json
+import math
 import mimetypes
 import os
 import re
@@ -23,7 +24,7 @@ from urllib.parse import quote
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -57,6 +58,7 @@ from sp.app.ui.keyboard_shortcuts import (
 )
 from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
 from sp.app.ui.theme import (
+    apply_menu_theme,
     chrome_colors,
     status_bar_stylesheet,
     tab_widget_stylesheet,
@@ -73,9 +75,19 @@ DOCUMENT_SUFFIXES = {".docx", ".pptx"}
 CHAT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DIAGRAM_PREVIEW_CACHE_ENTRIES = 128
 DIAGRAM_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
+DIAGRAM_PREVIEW_MAX_PIXELS = int(
+    os.environ.get("STILLPOINT_FOLDER_DIAGRAM_PREVIEW_MAX_PIXELS", 8_000_000)
+)
+DIAGRAM_PREVIEW_MAX_SVG_BYTES = int(
+    os.environ.get("STILLPOINT_FOLDER_DIAGRAM_PREVIEW_MAX_SVG_BYTES", 16 * 1024 * 1024)
+)
 IMAGE_PREVIEW_CACHE_ENTRIES = 32
 IMAGE_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
 IMAGE_FLYOVER_MAX_PIXELS = 2_000_000
+MAX_PDF_PREVIEW_BYTES = int(
+    os.environ.get("STILLPOINT_FOLDER_MAX_PDF_PREVIEW_BYTES", 256 * 1024 * 1024)
+)
+MAX_SEARCH_QUERY_CHARS = 4_096
 _BACKGROUND_SUBPROCESS_OPTIONS = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 )
@@ -1499,7 +1511,6 @@ class Tab(QWidget):
             label.setWordWrap(True)
             layout.addWidget(label)
             self.placeholder = label
-
     @property
     def dirty(self):
         return bool(self.editor and self.editor.document().isModified())
@@ -1583,6 +1594,75 @@ class Tab(QWidget):
                 return
             cursor = self.editor.textCursor()
         cursor.insertText(self.replace_query.text())
+
+
+class PreviewLoadingView(QWidget):
+    """Animated rich-preview placeholder matching the diagram editors."""
+
+    _SPINNERS = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        suffix = Path(path).suffix.casefold()
+        prefix = "plantuml_editor" if suffix == ".puml" else "mermaid_editor"
+        self.setObjectName("folderPreviewLoadingOverlay")
+        overlay_bg = theme_value(
+            "folder_navigator.preview_loading.overlay_bg",
+            theme_value(f"{prefix}.loading.overlay_bg", "rgba(12, 18, 28, 215)"),
+        )
+        label_color = theme_value(
+            "folder_navigator.preview_loading.label_text",
+            theme_value(f"{prefix}.loading.label_text", "#f4f7fb"),
+        )
+        spinner_color = theme_value(
+            "folder_navigator.preview_loading.spinner_color",
+            theme_value(f"{prefix}.loading.spinner_color", "#9ad1ff"),
+        )
+        label_size = theme_value("folder_navigator.preview_loading.label_size_px", 16)
+        label_weight = theme_value("folder_navigator.preview_loading.label_weight", "bold")
+        self.setStyleSheet(
+            "QWidget#folderPreviewLoadingOverlay {"
+            f"background-color: {overlay_bg};"
+            "}"
+            "QWidget#folderPreviewLoadingOverlay QLabel {"
+            f"color: {label_color}; font-size: {label_size}px; font-weight: {label_weight};"
+            "}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        self.spinner = QLabel(self._SPINNERS[0])
+        self.spinner.setObjectName("folderPreviewLoadingSpinner")
+        self.spinner.setAlignment(Qt.AlignCenter)
+        spinner_size = theme_value("folder_navigator.preview_loading.spinner_size_px", 80)
+        self.spinner.setStyleSheet(
+            f"font-size: {spinner_size}px; color: {spinner_color};"
+        )
+        layout.addWidget(self.spinner)
+        self.message = QLabel("Generating preview…")
+        self.message.setObjectName("folderPreviewLoadingMessage")
+        self.message.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.message)
+        self._spinner_index = 0
+        self.timer = QTimer(self)
+        self.timer.setInterval(100)
+        self.timer.timeout.connect(self._advance)
+
+    def setText(self, message):
+        self.message.setText(str(message))
+
+    def start(self, message="Generating preview…"):
+        self.setText(message)
+        self._spinner_index = 0
+        self.spinner.setText(self._SPINNERS[0])
+        self.show()
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+
+    def _advance(self):
+        self._spinner_index = (self._spinner_index + 1) % len(self._SPINNERS)
+        self.spinner.setText(self._SPINNERS[self._spinner_index])
 
 
 class ImageCanvasLabel(QLabel):
@@ -1670,11 +1750,13 @@ class ImageView(QWidget):
     def __init__(self, path, pixels, *, open_label=None, open_callback=None,
                  canvas_color=None, svg_text=None, source_dimensions=None,
                  preview_limited=False, full_resolution_callback=None,
-                 fit_upscale=False):
+                 fit_upscale=False, reveal_callback=None):
         super().__init__()
         self.original = QPixmap.fromImage(pixels)
+        self.path = Path(path)
         self.canvas_color = canvas_color
         self.svg_text = svg_text
+        self.reveal_callback = reveal_callback
         self.full_resolution_callback = full_resolution_callback
         self._full_resolution_requested = False
         self.zoom = 1.0
@@ -1683,26 +1765,25 @@ class ImageView(QWidget):
         self._fit_scheduled = False
         self._fitting = False
         self._last_fit_size = None
+        self._diagram_preview = bool(svg_text)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         controls = QHBoxLayout()
+        controls.setContentsMargins(6, 5, 6, 1)
         if open_label and open_callback:
-            open_button = QPushButton(open_label)
-            open_button.clicked.connect(open_callback)
-            controls.addWidget(open_button)
-            controls.addSpacing(10)
-        if svg_text:
-            copy_svg = QPushButton("Copy SVG")
-            copy_svg.clicked.connect(self.copy_svg)
-            controls.addWidget(copy_svg)
-            copy_png = QPushButton("Copy PNG")
-            copy_png.clicked.connect(self.copy_png)
-            controls.addWidget(copy_png)
+            self.open_button = QToolButton() if self._diagram_preview else QPushButton()
+            self.open_button.setText(open_label)
+            self.open_button.setToolTip(f"Edit {self.path.name} in the full diagram editor")
+            self.open_button.clicked.connect(open_callback)
+            controls.addWidget(self.open_button)
             controls.addSpacing(10)
         if preview_limited and full_resolution_callback:
             full_resolution = QPushButton("Load Full Resolution")
             full_resolution.clicked.connect(self.request_full_resolution)
             controls.addWidget(full_resolution)
             controls.addSpacing(10)
+        controls.addStretch()
         self.scroll = QScrollArea()
         self.label = ImageCanvasLabel()
         self.label.setAlignment(Qt.AlignCenter)
@@ -1717,24 +1798,128 @@ class ImageView(QWidget):
             canvas_palette.setColor(QPalette.Window, QColor(canvas_color))
             self.label.setPalette(canvas_palette)
             self.label.setAutoFillBackground(True)
+        if self._diagram_preview:
+            self.scroll.setStyleSheet(
+                f"QScrollArea {{ background-color: {theme_value('plantuml_editor.preview.bg', '#f0f0f0')}; "
+                "border: 0; }"
+            )
+            self.label.setStyleSheet(
+                "QLabel {"
+                f"background-color: {canvas_color or theme_value('plantuml_editor.preview.label_bg', '#ffffff')}; "
+                f"border: 1px solid {theme_value('plantuml_editor.preview.border', '#cccccc')};"
+                "}"
+            )
+            self.label.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.label.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.scroll.setWidget(self.label)
         self.scroll.setWidgetResizable(True)
         self.scroll.viewport().installEventFilter(self)
-        for title, callback in (("Fit to Window", self.fit), ("Actual Size", self.actual),
-                                ("Zoom In", self.zoom_in), ("Zoom Out", self.zoom_out),
-                                ("Reset Zoom", self.actual)):
-            button = QPushButton(title)
-            button.clicked.connect(callback)
-            controls.addWidget(button)
+        if self._diagram_preview:
+            self.fit_button = QToolButton()
+            self.fit_button.setText("Fit")
+            self.fit_button.setToolTip("Fit diagram to the preview area")
+            self.fit_button.clicked.connect(self.fit)
+            controls.addWidget(self.fit_button)
+
+            self.actual_button = QToolButton()
+            self.actual_button.setText("1:1")
+            self.actual_button.setToolTip("Show diagram at actual size")
+            self.actual_button.clicked.connect(self.actual)
+            controls.addWidget(self.actual_button)
+            controls.addSpacing(10)
+            controls.addWidget(QLabel("Zoom:"))
+
+            self.zoom_out_button = QToolButton()
+            self.zoom_out_button.setText("−")
+            self.zoom_out_button.setToolTip("Zoom out preview")
+            self.zoom_out_button.clicked.connect(self.zoom_out)
+            controls.addWidget(self.zoom_out_button)
+
+            self.zoom_in_button = QToolButton()
+            self.zoom_in_button.setText("+")
+            self.zoom_in_button.setToolTip("Zoom in preview")
+            self.zoom_in_button.clicked.connect(self.zoom_in)
+            controls.addWidget(self.zoom_in_button)
+            controls.addSpacing(10)
+
+            self.export_button = QToolButton()
+            self.export_button.setText("↓ Export")
+            self.export_button.setToolTip("Export or copy the rendered diagram")
+            self.export_button.clicked.connect(self._show_export_menu)
+            controls.addWidget(self.export_button)
+        else:
+            for title, callback in (("Fit to Window", self.fit), ("Actual Size", self.actual),
+                                    ("Zoom In", self.zoom_in), ("Zoom Out", self.zoom_out),
+                                    ("Reset Zoom", self.actual)):
+                button = QPushButton(title)
+                button.clicked.connect(callback)
+                controls.addWidget(button)
         layout.addLayout(controls)
         dimensions = source_dimensions or (pixels.width(), pixels.height())
         resolution_note = " · thumbnail preview" if preview_limited else ""
-        layout.addWidget(QLabel(
-            f"{dimensions[0]} × {dimensions[1]} pixels · "
-            f"{path.stat().st_size:,} bytes{resolution_note}"
-        ))
+        if not self._diagram_preview:
+            layout.addWidget(QLabel(
+                f"{dimensions[0]} × {dimensions[1]} pixels · "
+                f"{path.stat().st_size:,} bytes{resolution_note}"
+            ))
         layout.addWidget(self.scroll)
         self._schedule_fit()
+
+    def _diagram_menu(self):
+        menu = QMenu(self)
+        apply_menu_theme(menu, self)
+        menu.addAction("Export as SVG…", self.export_svg)
+        menu.addAction("Export as PNG…", self.export_png)
+        menu.addSeparator()
+        menu.addAction("Copy SVG", self.copy_svg)
+        menu.addAction("Copy PNG", self.copy_png)
+        if self.reveal_callback is not None:
+            menu.addSeparator()
+            menu.addAction("Reveal in Folder", self.reveal_callback)
+        return menu
+
+    def _show_export_menu(self):
+        menu = self._diagram_menu()
+        menu.exec(self.export_button.mapToGlobal(self.export_button.rect().bottomLeft()))
+
+    def _show_preview_context_menu(self, pos):
+        menu = self._diagram_menu()
+        menu.exec(self.label.mapToGlobal(pos))
+
+    def export_svg(self):
+        if not self.svg_text:
+            return
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "Export as SVG", str(self.path.with_suffix(".svg")),
+            "SVG Files (*.svg)",
+        )
+        if not destination:
+            return
+        try:
+            Path(destination).write_text(self.svg_text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not save the SVG:\n{exc}")
+
+    def export_png(self):
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "Export as PNG", str(self.path.with_suffix(".png")),
+            "PNG Files (*.png)",
+        )
+        if not destination:
+            return
+        if not self._composited_pixmap().save(destination, "PNG"):
+            QMessageBox.warning(self, "Export failed", "Could not save the PNG file.")
+
+    def _composited_pixmap(self):
+        pixmap = self.original
+        if self.canvas_color:
+            composited = QPixmap(pixmap.size())
+            composited.fill(QColor(self.canvas_color))
+            painter = QPainter(composited)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            pixmap = composited
+        return pixmap
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if (obj is self.scroll.viewport() and event.type() == QEvent.Resize
@@ -1791,17 +1976,9 @@ class ImageView(QWidget):
             QApplication.clipboard().setText(self.svg_text)
 
     def copy_png(self):
-        pixmap = self.original
-        if self.canvas_color:
-            # Match what the user sees instead of copying transparent pixels
-            # that can become unreadable when pasted onto a dark surface.
-            composited = QPixmap(pixmap.size())
-            composited.fill(QColor(self.canvas_color))
-            painter = QPainter(composited)
-            painter.drawPixmap(0, 0, pixmap)
-            painter.end()
-            pixmap = composited
-        QApplication.clipboard().setPixmap(pixmap)
+        # Match what the user sees instead of copying transparent pixels that
+        # can become unreadable when pasted onto a dark surface.
+        QApplication.clipboard().setPixmap(self._composited_pixmap())
 
     def actual(self):
         self._fit_mode = False
@@ -1828,6 +2005,15 @@ class ImageView(QWidget):
 
 
 def pdf_view(path):
+    try:
+        pdf_size = Path(path).stat().st_size
+    except OSError as exc:
+        raise ValueError(f"PDF is unavailable: {exc}") from exc
+    if pdf_size > MAX_PDF_PREVIEW_BYTES:
+        raise ValueError(
+            "PDF exceeds the "
+            f"{MAX_PDF_PREVIEW_BYTES // (1024 * 1024)} MB preview limit"
+        )
     from PySide6.QtPdf import QPdfDocument, QPdfSearchModel
     from PySide6.QtPdfWidgets import QPdfView
 
@@ -2304,7 +2490,11 @@ class Window(QMainWindow):
         self.preview_perf_enabled = os.environ.get(
             "STILLPOINT_FOLDER_PREVIEW_METRICS", ""
         ).strip().casefold() in {"1", "true", "yes", "on"}
-        self.bridge = Bridge(self)
+        self._closing_event = threading.Event()
+        # Workers can outlive the window briefly while bounded subprocesses
+        # finish. Parent the bridge to the application so emitting a late
+        # result can never target an already-destroyed child QObject.
+        self.bridge = Bridge(QApplication.instance())
         self.search_cancel = threading.Event()
         self.search_generation = 0
         self.new_file_edit = None
@@ -2357,8 +2547,11 @@ class Window(QMainWindow):
         self.setWindowTitle(f"Folder Navigator — {self.root.name}")
         self.resize(1100, 760)
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
-        self.settings = self._load_settings()
-        self.state = self.settings.setdefault(str(self.root), {})
+        loaded_settings = self._load_settings()
+        self.settings = loaded_settings if isinstance(loaded_settings, dict) else {}
+        stored_state = self.settings.get(str(self.root))
+        self.state = stored_state if isinstance(stored_state, dict) else {}
+        self.settings[str(self.root)] = self.state
         stored_masks = self.state.get("file_masks", [])
         self.file_masks = (
             [str(mask) for mask in stored_masks if str(mask).strip()]
@@ -2480,6 +2673,15 @@ class Window(QMainWindow):
                 self.chat_error = str(exc)
                 self.chat_panel = None
         splitter_sizes = self.state.get("splitter", [300, 800])
+        try:
+            if not isinstance(splitter_sizes, list) or len(splitter_sizes) not in (2, 3):
+                raise ValueError
+            splitter_sizes = [max(0, int(value)) for value in splitter_sizes]
+        except (TypeError, ValueError):
+            splitter_sizes = [300, 800]
+        # Keep the in-memory copy normalized too.  A hidden rail causes
+        # _persist() to reuse this value instead of asking QSplitter.
+        self.state["splitter"] = list(splitter_sizes)
         if self.chat_panel is not None and len(splitter_sizes) == 2:
             chat_width = self._chat_last_width if self.chat_visible else 28
             splitter_sizes = [
@@ -2495,9 +2697,11 @@ class Window(QMainWindow):
                 splitter_sizes[1] = max(1, splitter_sizes[1] + reclaimed)
                 splitter_sizes[2] = desired_chat_width
         self.splitter.setSizes(splitter_sizes)
-        self._rail_last_width = max(
-            160, int(self.state.get("rail_width", self.state.get("splitter", [300])[0]))
-        )
+        try:
+            stored_rail_width = int(self.state.get("rail_width", splitter_sizes[0]))
+        except (TypeError, ValueError):
+            stored_rail_width = 300
+        self._rail_last_width = max(160, stored_rail_width)
         self.rail.setVisible(bool(self.state.get("rail_visible", True)))
         outer = QWidget()
         layout = QVBoxLayout(outer)
@@ -2782,19 +2986,25 @@ class Window(QMainWindow):
                           geometry=bytes(self.saveGeometry().toBase64()).decode("ascii"))
         self._persist_sqlite_layout()
         temporary = self.settings_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-        temporary.replace(self.settings_path)
+        try:
+            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            temporary.replace(self.settings_path)
+        except (OSError, TypeError, ValueError):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _restore(self):
         from PySide6.QtCore import QByteArray
         geometry = self.catalog_ui_state.get("window_geometry") or self.state.get("geometry")
-        if geometry:
+        if isinstance(geometry, str) and geometry:
             self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
         splitter_state = self.catalog_ui_state.get("splitter_state")
-        if splitter_state:
+        if isinstance(splitter_state, str) and splitter_state:
             self.splitter.restoreState(QByteArray.fromBase64(splitter_state.encode("ascii")))
         header_state = self.catalog_ui_state.get("tree_header")
-        if header_state:
+        if isinstance(header_state, str) and header_state:
             self.tree.header().restoreState(
                 QByteArray.fromBase64(header_state.encode("ascii"))
             )
@@ -2806,13 +3016,22 @@ class Window(QMainWindow):
             except (TypeError, ValueError):
                 pass
         self._sync_column_actions()
-        self.rail.setCurrentIndex(self.state.get("rail", 0))
+        try:
+            rail_index = int(self.state.get("rail", 0))
+        except (TypeError, ValueError):
+            rail_index = 0
+        self.rail.setCurrentIndex(max(0, min(self.rail.count() - 1, rail_index)))
         selected = self.state.get("selected")
-        if selected:
+        if isinstance(selected, (str, os.PathLike)) and selected:
             selected_path = Path(selected)
             if inside(self.root, selected_path):
                 self._startup_selected_path = selected_path
-        for name in self.state.get("pinned", []):
+        pinned_names = self.state.get("pinned", [])
+        if not isinstance(pinned_names, list):
+            pinned_names = []
+        for name in pinned_names:
+            if not isinstance(name, (str, os.PathLike)):
+                continue
             path = Path(name)
             if path.is_file() and inside(self.root, path):
                 self.open_file(path, pinned=True)
@@ -2822,7 +3041,12 @@ class Window(QMainWindow):
         for index, tab in enumerate(self.all_tabs()):
             if str(tab.path) == active:
                 self.tabs.setCurrentIndex(index)
-        for name in self.state.get("expanded", []):
+        expanded_names = self.state.get("expanded", [])
+        if not isinstance(expanded_names, list):
+            expanded_names = []
+        for name in expanded_names:
+            if not isinstance(name, (str, os.PathLike)):
+                continue
             path = Path(name)
             if path.is_dir() and inside(self.root, path):
                 index = self.model.index(name)
@@ -2907,7 +3131,10 @@ class Window(QMainWindow):
 
     def _remember_expansion(self, index, expanded):
         name = self.model.filePath(index)
-        paths = self.state.setdefault("expanded", [])
+        paths = self.state.get("expanded")
+        if not isinstance(paths, list):
+            paths = []
+            self.state["expanded"] = paths
         if expanded and name not in paths:
             paths.append(name)
         elif not expanded and name in paths:
@@ -3072,6 +3299,26 @@ class Window(QMainWindow):
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._open_navigator_selection_in_system)
             self.native_open_shortcuts.append(shortcut)
+        scroll_sequences = [
+            ("Ctrl+Shift+J", 1),
+            ("Ctrl+Shift+K", -1),
+        ]
+        if sys.platform == "darwin":
+            # Support both Command+Shift and physical Control+Shift on macOS.
+            # Qt swaps the Ctrl/Meta names there, and native PDF/text views can
+            # report either spelling depending on which surface owns focus.
+            scroll_sequences.extend((
+                ("Meta+Shift+J", 1),
+                ("Meta+Shift+K", -1),
+            ))
+        self.preview_scroll_shortcuts = []
+        for sequence, direction in scroll_sequences:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(
+                lambda step=direction: self._scroll_active_view(step)
+            )
+            self.preview_scroll_shortcuts.append(shortcut)
         forward_sequence, backward_sequence = history_cycle_sequences()
         cycle_sequences = [(forward_sequence, False), (backward_sequence, True)]
         if sys.platform == "darwin":
@@ -3200,6 +3447,58 @@ class Window(QMainWindow):
         else:
             self.statusBar().showMessage("Zoom is not available for this preview", 2500)
 
+    @staticmethod
+    def _visible_scroll_area(root, focused=None):
+        """Find the scroll surface that best represents a compound preview."""
+        if root is None:
+            return None
+        current = focused
+        while current is not None:
+            if isinstance(current, QAbstractScrollArea):
+                return current
+            if current is root:
+                break
+            current = current.parentWidget()
+        if isinstance(root, QAbstractScrollArea):
+            return root
+        areas = root.findChildren(QAbstractScrollArea)
+        visible = [area for area in areas if area.isVisibleTo(root)]
+        candidates = visible or areas
+        if not candidates:
+            return None
+        # Prefer the largest visible viewport. This selects the PDF, document,
+        # spreadsheet, or image canvas instead of a small auxiliary control.
+        return max(
+            candidates,
+            key=lambda area: area.viewport().width() * area.viewport().height(),
+        )
+
+    def _scroll_active_view(self, direction):
+        """Page-scroll whichever Folder Navigator pane currently owns focus."""
+        direction = 1 if direction > 0 else -1
+        focused = self.focusWidget()
+        folder_focused = focused is self.rail or (
+            focused is not None and self.rail.isAncestorOf(focused)
+        )
+        if folder_focused:
+            page = self.rail.currentWidget()
+            area = self._visible_scroll_area(page, focused)
+        else:
+            tab = self.active_tab()
+            if tab is None:
+                return
+            root = tab.editor or getattr(tab, "viewer", None) or tab
+            area = self._visible_scroll_area(root, focused)
+        if area is None:
+            self.statusBar().showMessage(
+                "This view has no scrollable content", 2000
+            )
+            return
+        scrollbar = area.verticalScrollBar()
+        page_step = max(1, scrollbar.pageStep())
+        step = max(1, round(page_step * 0.85))
+        scrollbar.setValue(scrollbar.value() + direction * step)
+
     def _apply_folder_zoom(self):
         font = QFont(self._tree_base_font)
         base_size = font.pointSizeF()
@@ -3283,7 +3582,11 @@ class Window(QMainWindow):
         self.chat_container.addWidget(self.chat_tabs)
         self.chat_container.addWidget(self.chat_minibar)
         self.splitter.addWidget(self.chat_container)
-        self._chat_last_width = max(220, int(self.state.get("chat_width", 420)))
+        try:
+            stored_chat_width = int(self.state.get("chat_width", 420))
+        except (TypeError, ValueError):
+            stored_chat_width = 420
+        self._chat_last_width = max(220, stored_chat_width)
         self.chat_visible = bool(self.state.get("chat_visible", True))
         self._set_chat_panel_visible(self.chat_visible, focus=False, persist=False)
 
@@ -3506,6 +3809,24 @@ class Window(QMainWindow):
                 kind, "visible", (time.perf_counter() - started) * 1000
             )
 
+    def _emit_bridge_result(self, payload):
+        if self._closing_event.is_set():
+            return False
+        try:
+            self.bridge.result.emit(payload)
+            return True
+        except RuntimeError:
+            return False
+
+    def _emit_bridge_finished(self, payload):
+        if self._closing_event.is_set():
+            return False
+        try:
+            self.bridge.finished.emit(payload)
+            return True
+        except RuntimeError:
+            return False
+
     def _submit_preview_job(self, job, *, kind="preview", disposable=False, cleanup=None):
         started = time.perf_counter()
 
@@ -3517,7 +3838,16 @@ class Window(QMainWindow):
                     kind, "completed", (time.perf_counter() - started) * 1000
                 )
 
-        future = self.preview_executor.submit(measured_job)
+        if self._closing_event.is_set():
+            if cleanup is not None:
+                cleanup()
+            return None
+        try:
+            future = self.preview_executor.submit(measured_job)
+        except RuntimeError:
+            if cleanup is not None:
+                cleanup()
+            return None
         self.preview_futures.add(future)
         if disposable:
             self.disposable_preview_futures.add(future)
@@ -3666,6 +3996,12 @@ class Window(QMainWindow):
                 button.clicked.connect(callback)
                 buttons.addWidget(button)
             tab.layout().addLayout(buttons)
+        if getattr(tab, "preview_kind", None):
+            queued_label = tab.placeholder
+            tab.placeholder = PreviewLoadingView(path, tab)
+            tab.placeholder.setText(queued_label.text())
+            tab.layout().replaceWidget(queued_label, tab.placeholder)
+            queued_label.deleteLater()
         tab.pinned = pinned
         if getattr(tab, "preview_kind", None):
             tab.setProperty("folderPreviewHydrated", False)
@@ -3675,6 +4011,8 @@ class Window(QMainWindow):
         elif path.suffix.casefold() in DOCUMENT_SUFFIXES and not force_text:
             from .documents import document_signature
             tab.preview_signature = document_signature(path)
+        elif getattr(tab, "preview_kind", None) in {"table", "workbook"}:
+            tab.preview_signature = fingerprint(path)
         elif getattr(tab, "preview_kind", None) == "image":
             tab.preview_signature = fingerprint(path)
         self._update_tab_tooltip(tab)
@@ -3776,7 +4114,9 @@ class Window(QMainWindow):
             "image": "Decoding image preview…",
         }
         placeholder = getattr(tab, "placeholder", None)
-        if placeholder is not None:
+        if isinstance(placeholder, PreviewLoadingView):
+            placeholder.start(messages.get(kind, "Loading preview…"))
+        elif placeholder is not None:
             placeholder.setText(messages.get(kind, "Loading preview…"))
         disposable = not tab.pinned
         if kind == "table":
@@ -3799,28 +4139,48 @@ class Window(QMainWindow):
                 tab.viewer = view
                 tab.layout().addWidget(view)
                 if placeholder is not None:
+                    if isinstance(placeholder, PreviewLoadingView):
+                        placeholder.stop()
                     placeholder.hide()
                 self._install_preview_context_menu(tab, view)
                 self._record_preview_visible(tab.path, "pdf")
             except (ImportError, ValueError, RuntimeError) as exc:
+                self._finish_preview_loading(tab)
                 tab.show_notice(f"PDF preview unavailable: {exc}")
 
+    @staticmethod
+    def _finish_preview_loading(tab):
+        placeholder = getattr(tab, "placeholder", None)
+        if isinstance(placeholder, PreviewLoadingView):
+            placeholder.stop()
+            placeholder.hide()
+
     def _load_delimited_preview(self, path, *, disposable=False):
+        signature = fingerprint(path)
         def job():
             try:
                 preview = read_delimited_preview(path)
-                self.bridge.result.emit(("table", path, preview, True, None))
+                self._emit_bridge_result(
+                    ("table", path, signature, preview, True, None)
+                )
             except Exception as exc:
-                self.bridge.result.emit(("table", path, None, True, str(exc)))
+                self._emit_bridge_result(
+                    ("table", path, signature, None, True, str(exc))
+                )
         self._submit_preview_job(job, kind="table", disposable=disposable)
 
     def _load_workbook_preview(self, path, sheet_name=None, *, disposable=False):
+        signature = fingerprint(path)
         def job():
             try:
                 preview = read_workbook_preview(path, sheet_name)
-                self.bridge.result.emit(("table", path, preview, False, None))
+                self._emit_bridge_result(
+                    ("table", path, signature, preview, False, None)
+                )
             except Exception as exc:
-                self.bridge.result.emit(("table", path, None, False, str(exc)))
+                self._emit_bridge_result(
+                    ("table", path, signature, None, False, str(exc))
+                )
         self._submit_preview_job(job, kind="workbook", disposable=disposable)
 
     def _load_document_preview(self, path, *, disposable=False):
@@ -3833,9 +4193,9 @@ class Window(QMainWindow):
         def job():
             try:
                 preview = builder(path)
-                self.bridge.result.emit(("document", path, signature, preview, None))
+                self._emit_bridge_result(("document", path, signature, preview, None))
             except Exception as exc:
-                self.bridge.result.emit(("document", path, signature, None, str(exc)))
+                self._emit_bridge_result(("document", path, signature, None, str(exc)))
 
         self._submit_preview_job(job, kind="document", disposable=disposable)
 
@@ -3917,11 +4277,11 @@ class Window(QMainWindow):
                 image = reader.read()
                 if image.isNull():
                     raise ValueError(reader.errorString() or "Could not decode image")
-                self.bridge.result.emit((
+                self._emit_bridge_result((
                     "image", path, signature, quality, image, source_dimensions, None,
                 ))
             except Exception as exc:
-                self.bridge.result.emit((
+                self._emit_bridge_result((
                     "image", path, signature, quality, None, None, str(exc),
                 ))
 
@@ -3952,11 +4312,13 @@ class Window(QMainWindow):
         tab = self.tabs.widget(index)
         tab.preview_signature = signature
         if error or pixels is None or pixels.isNull():
+            self._finish_preview_loading(tab)
             tab.show_notice(f"Image preview failed: {error or 'unknown error'}")
             return
         if (quality == "thumbnail"
                 and getattr(tab, "requested_image_quality", "thumbnail") == "full"):
             return
+        self._finish_preview_loading(tab)
         placeholder = getattr(tab, "placeholder", None)
         if placeholder is not None:
             placeholder.hide()
@@ -4024,6 +4386,44 @@ class Window(QMainWindow):
                 pass
         return size
 
+    @staticmethod
+    def _rasterize_diagram_svg(svg):
+        """Rasterize generated SVG with explicit allocation limits."""
+        from PySide6.QtCore import QByteArray
+        from PySide6.QtSvg import QSvgRenderer
+
+        encoded = str(svg or "").encode("utf-8")
+        if len(encoded) > DIAGRAM_PREVIEW_MAX_SVG_BYTES:
+            raise ValueError(
+                "Rendered SVG exceeds the Folder Navigator preview limit"
+            )
+        renderer = QSvgRenderer(QByteArray(encoded))
+        if not renderer.isValid():
+            raise ValueError("Rendered SVG could not be displayed")
+        size = renderer.defaultSize()
+        view_box = renderer.viewBoxF()
+        view_width = view_box.width()
+        view_height = view_box.height()
+        if not math.isfinite(view_width) or not math.isfinite(view_height):
+            raise ValueError("Rendered SVG has invalid dimensions")
+        width = max(1, size.width(), round(view_width))
+        height = max(1, size.height(), round(view_height))
+        pixels = width * height
+        if pixels > DIAGRAM_PREVIEW_MAX_PIXELS:
+            factor = (DIAGRAM_PREVIEW_MAX_PIXELS / pixels) ** 0.5
+            width = max(1, int(width * factor))
+            height = max(1, int(height * factor))
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        if image.isNull():
+            raise ValueError("Rendered SVG could not allocate a safe preview image")
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        try:
+            renderer.render(painter)
+        finally:
+            painter.end()
+        return image
+
     def _cached_diagram_preview(self, path, signature):
         key = self._diagram_cache_key(path, signature)
         cached = self.diagram_preview_cache.get(key)
@@ -4083,18 +4483,33 @@ class Window(QMainWindow):
                         )
                     reader = QImageReader(str(sidecar))
                     reader.setAutoTransform(True)
+                    size = reader.size()
+                    if (size.isValid()
+                            and size.width() * size.height()
+                            > DIAGRAM_PREVIEW_MAX_PIXELS):
+                        factor = (
+                            DIAGRAM_PREVIEW_MAX_PIXELS
+                            / (size.width() * size.height())
+                        ) ** 0.5
+                        reader.setScaledSize(QSize(
+                            max(1, int(size.width() * factor)),
+                            max(1, int(size.height() * factor)),
+                        ))
                     image = reader.read()
                     if image.isNull():
                         raise ValueError(reader.errorString() or "Could not decode preview image")
-                    self.bridge.result.emit(("diagram", path, signature, None, image, None))
+                    self._emit_bridge_result(("diagram", path, signature, None, image, None))
                     return
                 source = read_text(path).text
                 result = self._diagram_renderer(suffix).render_svg(source)
                 if not result.success or not result.svg_content:
                     raise ValueError(result.error_message or result.stderr or "Diagram render failed")
-                self.bridge.result.emit(("diagram", path, signature, result.svg_content, None, None))
+                pixels = self._rasterize_diagram_svg(result.svg_content)
+                self._emit_bridge_result((
+                    "diagram", path, signature, result.svg_content, pixels, None,
+                ))
             except Exception as exc:
-                self.bridge.result.emit(("diagram", path, signature, None, None, str(exc)))
+                self._emit_bridge_result(("diagram", path, signature, None, None, str(exc)))
 
         try:
             self._submit_preview_job(
@@ -4116,11 +4531,10 @@ class Window(QMainWindow):
         # what makes repeat flyovers avoid both the external renderer and a
         # second Qt SVG rasterization on the UI path.
         if not error and pixels is None:
-            pixmap = QPixmap()
-            if pixmap.loadFromData(svg.encode("utf-8"), "SVG"):
-                pixels = pixmap.toImage()
-            else:
-                error = "Rendered SVG could not be displayed"
+            try:
+                pixels = self._rasterize_diagram_svg(svg)
+            except (ImportError, RuntimeError, ValueError) as exc:
+                error = str(exc)
         # Cache completed previews even if their disposable tab has already
         # been replaced. Transient renderer/tool failures intentionally retry.
         if cache_result and not error:
@@ -4130,6 +4544,7 @@ class Window(QMainWindow):
             return
         tab = self.tabs.widget(index)
         tab.preview_signature = signature
+        self._finish_preview_loading(tab)
         current = getattr(tab, "viewer", None)
         if current is not None:
             tab.layout().removeWidget(current)
@@ -4149,9 +4564,9 @@ class Window(QMainWindow):
             tab.layout().addWidget(fallback)
             self._install_preview_context_menu(tab, fallback)
             return
-        placeholder = tab.layout().itemAt(1)
-        if placeholder and placeholder.widget():
-            placeholder.widget().hide()
+        placeholder_item = tab.layout().itemAt(1)
+        if placeholder_item and placeholder_item.widget():
+            placeholder_item.widget().hide()
         tab.viewer = ImageView(
             path,
             pixels,
@@ -4160,6 +4575,7 @@ class Window(QMainWindow):
             canvas_color="#ffffff" if path.suffix.casefold() in {".puml", ".mmd"} else None,
             svg_text=svg if path.suffix.casefold() in {".puml", ".mmd"} else None,
             fit_upscale=True,
+            reveal_callback=lambda selected=path: self.reveal_tree(selected),
         )
         tab.layout().addWidget(tab.viewer)
         self._install_preview_context_menu(tab, tab.viewer)
@@ -4176,11 +4592,17 @@ class Window(QMainWindow):
             ".excalidraw": "Open in Excalidraw Editor",
         }.get(Path(path).suffix.casefold(), "Open Diagram Editor")
 
-    def _show_table_preview(self, path, preview, allow_source, error):
+    def _show_table_preview(
+            self, path, preview, allow_source, error, *, signature=None):
+        if signature is not None and signature != fingerprint(path):
+            return
         index = self._index_for(path)
         if index < 0:
             return
         tab = self.tabs.widget(index)
+        if signature is not None:
+            tab.preview_signature = signature
+        self._finish_preview_loading(tab)
         current_viewer = getattr(tab, "viewer", None)
         if error:
             tab.show_notice(f"Table preview failed: {error}")
@@ -4230,6 +4652,7 @@ class Window(QMainWindow):
             return
         tab = self.tabs.widget(index)
         tab.preview_signature = signature
+        self._finish_preview_loading(tab)
         current = getattr(tab, "viewer", None)
         if current is not None:
             tab.layout().removeWidget(current)
@@ -5139,6 +5562,7 @@ class Window(QMainWindow):
         if not self._review_dirty(self.all_tabs()):
             event.ignore()
             return
+        self._closing_event.set()
         self.search_cancel.set()
         self.catalog_cancel.set()
         if self.chat_panel is not None:
@@ -5534,7 +5958,11 @@ class Window(QMainWindow):
         self.statusBar().showMessage("File mask cleared", 2500)
 
     def _bookmarks(self):
-        return self.state.setdefault("bookmarks", [])
+        bookmarks = self.state.get("bookmarks")
+        if not isinstance(bookmarks, list):
+            bookmarks = []
+            self.state["bookmarks"] = bookmarks
+        return bookmarks
 
     def toggle_bookmark(self, path):
         if not inside(self.root, path):
@@ -6096,17 +6524,28 @@ class Window(QMainWindow):
 
     def _close_excalidraw_processes(self):
         self.excalidraw_process_timer.stop()
-        for process, grant, _path in self.excalidraw_processes:
+        processes = list(self.excalidraw_processes)
+        for process, _grant, _path in processes:
             if process.poll() is None:
                 try:
                     process.terminate()
                 except OSError:
                     pass
+        for process, grant, _path in processes:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=.5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                        process.wait(timeout=.5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
             if grant:
-                self._revoke_excalidraw_grant(grant)
+                self._revoke_excalidraw_grant(grant, timeout=.25)
         self.excalidraw_processes.clear()
         for grant in self.excalidraw_browser_grants:
-            self._revoke_excalidraw_grant(grant)
+            self._revoke_excalidraw_grant(grant, timeout=.25)
         self.excalidraw_browser_grants.clear()
 
     def _excalidraw_editor_url(self, path, *, include_grant=False):
@@ -6170,7 +6609,7 @@ class Window(QMainWindow):
             raise RuntimeError("StillPoint returned an invalid external-file grant")
         return access_path, grant_id
 
-    def _revoke_excalidraw_grant(self, grant_id):
+    def _revoke_excalidraw_grant(self, grant_id, *, timeout=3):
         api_base = (
             os.environ.get("SP_FOLDER_NAVIGATOR_API_BASE", "").strip()
             or self._stillpoint_state("api-base")
@@ -6184,7 +6623,7 @@ class Window(QMainWindow):
             headers={"X-Local-UI-Token": token},
         )
         try:
-            urllib.request.urlopen(request, timeout=3).close()
+            urllib.request.urlopen(request, timeout=timeout).close()
         except (OSError, urllib.error.URLError):
             pass
 
@@ -6433,7 +6872,7 @@ class Window(QMainWindow):
                 pass
         if self.catalog_db is not None:
             self.catalog_db.upsert_paths(batch, ignored, generation)
-        self.bridge.result.emit(("catalog", batch, ignored))
+        self._emit_bridge_result(("catalog", batch, ignored))
 
     def _git_catalog_paths(self):
         """Use Git's optimized index walk and never traverse ignored outputs."""
@@ -6525,7 +6964,7 @@ class Window(QMainWindow):
                         complete=complete,
                         state=state,
                     )
-                self.bridge.finished.emit(("catalog", state, indexed))
+                self._emit_bridge_finished(("catalog", state, indexed))
             except (OSError, sqlite3.Error) as exc:
                 if self.catalog_db is not None and generation is not None:
                     try:
@@ -6534,12 +6973,27 @@ class Window(QMainWindow):
                         )
                     except (OSError, sqlite3.Error):
                         pass
-                self.bridge.finished.emit(("catalog-error", str(exc)))
-        self.executor.submit(job)
+                self._emit_bridge_finished(("catalog-error", str(exc)))
+        try:
+            self.executor.submit(job)
+        except RuntimeError:
+            self.catalog_running = False
+            self.catalog_state = "canceled"
 
     def run_search(self):
         query = self.search_input.text()
         if not query:
+            return
+        if len(query) > MAX_SEARCH_QUERY_CHARS:
+            self.search_progress.setText(
+                f"Search query is limited to {MAX_SEARCH_QUERY_CHARS:,} characters"
+            )
+            return
+        rg = shutil.which("rg")
+        if self.search_regex.isChecked() and not rg:
+            self.search_progress.setText(
+                "Regex search requires ripgrep so expressions cannot hang the application"
+            )
             return
         self.search_cancel.set()
         self.search_cancel = threading.Event()
@@ -6549,7 +7003,6 @@ class Window(QMainWindow):
         self.search_results.clear()
         self.search_results.setFocus(Qt.OtherFocusReason)
         self._last_search_path = None
-        rg = shutil.which("rg")
         engine = "ripgrep" if rg else "filesystem fallback"
         self.search_progress.setText(
             f"Searching {self.scope} with {engine}… Cancel remains available"
@@ -6561,11 +7014,12 @@ class Window(QMainWindow):
             count = skipped = 0
             large_directories = []
             try:
-                name_expression = re.compile((rf"\b(?:{query if regex else re.escape(query)})\b" if whole
-                                              else query if regex else re.escape(query)),
-                                             0 if case else re.IGNORECASE)
+                name_expression = None if regex else re.compile(
+                    rf"\b(?:{re.escape(query)})\b" if whole else re.escape(query),
+                    0 if case else re.IGNORECASE,
+                )
                 if canceled.is_set():
-                    self.bridge.finished.emit((
+                    self._emit_bridge_finished((
                         "search", generation, 0, 0, True, False, [],
                     ))
                     return
@@ -6584,11 +7038,11 @@ class Window(QMainWindow):
                     for path, line, excerpt in records:
                         if canceled.is_set():
                             break
-                        self.bridge.result.emit(
+                        self._emit_bridge_result(
                             ("search", generation, path, line, excerpt)
                         )
                         count += 1
-                    self.bridge.finished.emit((
+                    self._emit_bridge_finished((
                         "search", generation, count, 0,
                         canceled.is_set(), count >= MAX_RESULTS, [],
                     ))
@@ -6605,27 +7059,30 @@ class Window(QMainWindow):
                         break
                     if count >= MAX_RESULTS:
                         break
-                    if name_expression.search(path.name):
-                        self.bridge.result.emit(("search", generation, path, None, "Filename match"))
+                    if name_expression is not None and name_expression.search(path.name):
+                        self._emit_bridge_result(("search", generation, path, None, "Filename match"))
                         count += 1
                     if count >= MAX_RESULTS:
                         break
                     try:
                         content = read_text(path, MAX_SEARCH_BYTES)
                         for line, excerpt in content_matches(content.text, query, case=case, whole=whole, regex=regex):
-                            self.bridge.result.emit(("search", generation, path, line, excerpt))
+                            self._emit_bridge_result(("search", generation, path, line, excerpt))
                             count += 1
                             if count >= MAX_RESULTS or canceled.is_set():
                                 break
                     except (OSError, ValueError, UnicodeError):
                         skipped += 1
-                self.bridge.finished.emit((
+                self._emit_bridge_finished((
                     "search", generation, count, skipped,
                     canceled.is_set(), count >= MAX_RESULTS, large_directories,
                 ))
             except Exception as exc:
-                self.bridge.finished.emit(("search-error", generation, str(exc)))
-        self.executor.submit(job)
+                self._emit_bridge_finished(("search-error", generation, str(exc)))
+        try:
+            self.executor.submit(job)
+        except RuntimeError:
+            self.search_progress.setText("Search canceled while the navigator was closing")
 
     def _ripgrep_search(
         self,
@@ -6693,19 +7150,65 @@ class Window(QMainWindow):
                         process.terminate()
                     except OSError:
                         pass
-                return_code = process.wait()
+                try:
+                    return_code = process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    return_code = process.wait(timeout=2)
             if exhausted and return_code not in (0, 1) and not canceled.is_set():
                 raise RuntimeError(f"ripgrep exited with status {return_code}")
 
         records = []
+        regex_names = {}
+        regex_file_count = 0
         files_command = [rg, "--files", *common, "--", target]
         for raw_path in lines(files_command):
             if canceled.is_set() or len(records) >= MAX_RESULTS:
                 break
             relative = raw_path.rstrip("\r\n")
             path = self.root / relative
-            if name_expression.search(path.name):
+            if regex:
+                if "\n" not in path.name and regex_file_count < MAX_INDEX_FILES:
+                    regex_names.setdefault(path.name, []).append(relative)
+                    regex_file_count += 1
+                if regex_file_count >= MAX_INDEX_FILES:
+                    break
+            elif name_expression is not None and name_expression.search(path.name):
                 records.append((path, None, "Filename match"))
+
+        if regex and regex_names and not canceled.is_set():
+            filename_command = [
+                rg,
+                "--no-messages",
+                "--no-filename",
+                "--case-sensitive" if case else "--ignore-case",
+            ]
+            if whole:
+                filename_command.append("--word-regexp")
+            filename_command.extend(("--", query, "-"))
+            try:
+                completed = subprocess.run(
+                    filename_command,
+                    input="\n".join(regex_names) + "\n",
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    **_BACKGROUND_SUBPROCESS_OPTIONS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Filename regex exceeded the 5 second limit") from exc
+            if completed.returncode not in (0, 1):
+                detail = completed.stderr.strip()
+                raise RuntimeError(detail or "Invalid or unsupported regular expression")
+            for name in completed.stdout.splitlines():
+                for relative in regex_names.get(name, ()):
+                    records.append((self.root / relative, None, "Filename match"))
+                    if len(records) >= MAX_RESULTS:
+                        break
+                if len(records) >= MAX_RESULTS:
+                    break
 
         if not canceled.is_set() and len(records) < MAX_RESULTS:
             content_command = [
@@ -6747,8 +7250,10 @@ class Window(QMainWindow):
 
     def _search_result(self, payload):
         if payload[0] == "table":
-            _, path, preview, allow_source, error = payload
-            self._show_table_preview(path, preview, allow_source, error)
+            _, path, signature, preview, allow_source, error = payload
+            self._show_table_preview(
+                path, preview, allow_source, error, signature=signature
+            )
             return
         if payload[0] == "diagram":
             _, path, signature, svg, pixels, error = payload
@@ -6922,7 +7427,7 @@ class Window(QMainWindow):
                         batch = []
             if batch:
                 self._catalog_batch(batch, None)
-            self.bridge.finished.emit(("drop-copy", copied, errors))
+            self._emit_bridge_finished(("drop-copy", copied, errors))
 
         try:
             self.executor.submit(job)
@@ -7076,6 +7581,22 @@ class Window(QMainWindow):
                         tab.show_notice("File reloaded after an external change")
                     except (OSError, ValueError) as exc:
                         tab.show_notice(f"Reload failed: {exc}")
+            elif (getattr(tab, "preview_kind", None) in {"table", "workbook"}
+                    and actual != getattr(tab, "preview_signature", None)):
+                tab.show_notice("Refreshing table preview…")
+                if tab.preview_kind == "workbook":
+                    viewer = getattr(tab, "viewer", None)
+                    sheet_name = (
+                        getattr(viewer, "requested_sheet", None)
+                        if isinstance(viewer, SpreadsheetView) else None
+                    )
+                    self._load_workbook_preview(
+                        tab.path, sheet_name, disposable=not tab.pinned
+                    )
+                else:
+                    self._load_delimited_preview(
+                        tab.path, disposable=not tab.pinned
+                    )
             elif (tab.path.suffix.casefold() in DIAGRAM_SUFFIXES
                     and self._diagram_preview_signature(tab.path)
                     != getattr(tab, "preview_signature", None)):

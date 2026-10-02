@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import codecs
 import csv
+import zipfile
 
 
 MAX_TABLE_ROWS = 10_000
@@ -12,6 +13,12 @@ MAX_TABLE_COLUMNS = 256
 MAX_TABLE_CELLS = 250_000
 MAX_CELL_CHARS = 4_096
 CSV_SAMPLE_BYTES = 64 * 1024
+MAX_DELIMITED_PREVIEW_BYTES = 128 * 1024 * 1024
+MAX_WORKBOOK_BYTES = 200 * 1024 * 1024
+MAX_WORKBOOK_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_WORKBOOK_ARCHIVE_MEMBERS = 20_000
+MAX_WORKBOOK_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
+ZIP_WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xlsb", ".ods"}
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,11 @@ def _text_encoding(path: Path) -> str:
 
 def read_delimited_preview(path: Path) -> TablePreview:
     """Read a bounded CSV/TSV preview without loading the whole file."""
+    if path.stat().st_size > MAX_DELIMITED_PREVIEW_BYTES:
+        raise ValueError(
+            "Delimited file exceeds the "
+            f"{MAX_DELIMITED_PREVIEW_BYTES // (1024 * 1024)} MB preview limit"
+        )
     encoding = _text_encoding(path)
     with path.open("r", encoding=encoding, errors="replace", newline="") as stream:
         sample = stream.read(CSV_SAMPLE_BYTES)
@@ -86,6 +98,33 @@ def read_delimited_preview(path: Path) -> TablePreview:
 
 def read_workbook_preview(path: Path, sheet_name: str | None = None) -> TablePreview:
     """Read one workbook sheet through the optional, lazily imported engine."""
+    path = Path(path)
+    if path.stat().st_size > MAX_WORKBOOK_BYTES:
+        raise ValueError(
+            "Workbook exceeds the "
+            f"{MAX_WORKBOOK_BYTES // (1024 * 1024)} MB preview limit"
+        )
+    if path.suffix.casefold() in ZIP_WORKBOOK_SUFFIXES:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = archive.infolist()
+                if len(members) > MAX_WORKBOOK_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        "Workbook archive contains too many entries to preview safely"
+                    )
+                total = 0
+                for member in members:
+                    if member.flag_bits & 0x1:
+                        raise ValueError("Encrypted workbooks cannot be previewed")
+                    if member.file_size > MAX_WORKBOOK_ARCHIVE_MEMBER_BYTES:
+                        raise ValueError("Workbook archive contains an oversized entry")
+                    total += member.file_size
+                    if total > MAX_WORKBOOK_UNCOMPRESSED_BYTES:
+                        raise ValueError(
+                            "Workbook archive expands beyond the safe preview limit"
+                        )
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Workbook is not a valid ZIP-based document") from exc
     try:
         from python_calamine import CalamineWorkbook
     except ImportError as exc:  # pragma: no cover - depends on optional runtime packaging

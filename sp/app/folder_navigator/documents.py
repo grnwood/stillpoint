@@ -11,11 +11,16 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import zipfile
 
 
 MAX_DOCX_BYTES = 100 * 1024 * 1024
 MAX_PPTX_BYTES = 200 * 1024 * 1024
 MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_DOCX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_PPTX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_OFFICE_ARCHIVE_MEMBERS = 20_000
+MAX_OFFICE_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
 MAX_OFFICE_CACHE_BYTES = 128 * 1024 * 1024
 MAX_OFFICE_CACHE_FILES = 100
 MAX_OFFICE_CACHE_AGE_SECONDS = 30 * 24 * 60 * 60
@@ -30,6 +35,28 @@ class DocumentPreview:
 
 
 DocxPreview = DocumentPreview
+
+
+def _validate_office_archive(path: Path, *, uncompressed_limit: int) -> None:
+    """Reject corrupt/encrypted archives and zip bombs before native parsing."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+            if len(members) > MAX_OFFICE_ARCHIVE_MEMBERS:
+                raise ValueError("Office archive contains too many entries to preview safely")
+            total = 0
+            for member in members:
+                if member.flag_bits & 0x1:
+                    raise ValueError("Encrypted Office files cannot be previewed")
+                if member.file_size > MAX_OFFICE_ARCHIVE_MEMBER_BYTES:
+                    raise ValueError("Office archive contains an oversized entry")
+                total += member.file_size
+                if total > uncompressed_limit:
+                    raise ValueError(
+                        "Office archive expands beyond the safe preview limit"
+                    )
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Office file is not a valid ZIP-based document") from exc
 
 
 def document_signature(path: Path) -> tuple[int, int]:
@@ -249,6 +276,7 @@ def build_docx_preview(path: Path, cache_dir: Path | None = None) -> DocumentPre
     path = Path(path)
     if path.stat().st_size > MAX_DOCX_BYTES:
         raise ValueError(f"DOCX exceeds the {MAX_DOCX_BYTES // (1024 * 1024)} MB preview limit")
+    _validate_office_archive(path, uncompressed_limit=MAX_DOCX_UNCOMPRESSED_BYTES)
     executable = _libreoffice_executable()
     if executable:
         try:
@@ -411,6 +439,7 @@ def build_pptx_preview(path: Path, cache_dir: Path | None = None) -> DocumentPre
     path = Path(path)
     if path.stat().st_size > MAX_PPTX_BYTES:
         raise ValueError(f"PPTX exceeds the {MAX_PPTX_BYTES // (1024 * 1024)} MB preview limit")
+    _validate_office_archive(path, uncompressed_limit=MAX_PPTX_UNCOMPRESSED_BYTES)
     executable = _libreoffice_executable()
     if executable:
         try:
