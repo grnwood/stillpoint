@@ -295,6 +295,7 @@ def test_daily_retention_keeps_a_prior_day_during_rapid_pulls(tmp_path):
 
 def test_recovery_manager_shows_event_and_on_demand_text_diff(tmp_path, qapp):
     from sp.app.ui.homebase_recovery import HomebaseRecoveryDialog
+    from PySide6.QtWidgets import QPushButton
 
     engine = engine_for(tmp_path)
     local = engine.cfg.vault_root / "Page.md"
@@ -319,5 +320,6 @@ def test_recovery_manager_shows_event_and_on_demand_text_diff(tmp_path, qapp):
         dialog.paths.setCurrentRow(0)
         assert "-before" in dialog.preview.toPlainText()
         assert "+after" in dialog.preview.toPlainText()
+        assert dialog.findChild(QPushButton, "homebaseOpenBackupFolderButton") is not None
     finally:
         dialog.close()

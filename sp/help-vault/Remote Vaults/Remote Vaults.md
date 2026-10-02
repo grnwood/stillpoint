@@ -50,6 +50,7 @@ Homebase supports account auth and user management APIs.
 ## Local Recovery
 - Homebase saves the previous local bytes before a pull overwrites or deletes a file. Recovery data stays on this device outside the vault, under `~/.stillpoint/homebase-recovery/`.
 - Open **Local Recovery** from the Homebase sync summary or the Remote Vault menu to inspect changes, restore selected files or an entire pull, export prior copies, and pin a recovery point.
+- Choose **Open Local Backup Folder** from the Homebase sync summary, Homebase menu, or Local Recovery window to inspect this device's recovery storage in the file manager.
 - A restore becomes a new local edit and syncs normally. It does not move the server checkpoint backward.
 - Large or unusually destructive pulls pause for review. If a pull is interrupted, Homebase pauses syncing until you review the recovery event and choose to continue.
 - Local recovery is enabled by default. Its storage quota and retention settings are in the Homebase sync summary.
@@ -67,7 +68,7 @@ Homebase never opens Local Recovery over the main window during startup. When re
 ## Choosing an Authoritative Copy
 
 - **Reset Sync State (Server Authoritative)** replaces matching local content with the current Homebase snapshot and protects affected local files through Local Recovery.
-- **Publish This Device as Authoritative** does the opposite: it previews path counts, requires the vault name as confirmation, and replaces the shared Homebase snapshot with this device's current files.
+- **Publish This Device as Authoritative** does the opposite: it lists every file that will be added, replaced, or removed; shows text contents or a Homebase-to-local diff where practical; requires the vault name as confirmation; and replaces the shared Homebase snapshot with this device's current files.
 - An authoritative local publish aborts if the Homebase head changes after the preview. Use it only when you deliberately want local files—including local deletions—to win.
 
 ## Practical Takeaway

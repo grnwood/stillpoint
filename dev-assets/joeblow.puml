@@ -1,0 +1,63 @@
+@startuml
+title Class Diagram (advanced features)
+skinparam backgroundColor #FFFFFF
+skinparam class {
+  BorderColor #24292F
+  BackgroundColor #F6F8FA
+  ArrowColor #57606A
+}
+
+abstract class BaseEntity {
+  +id: UUID
+  +createdAt: datetime
+}
+
+class Customer extends BaseEntity {
+  +email: string
+  +name: string
+}
+
+class Order extends BaseEntity {
+  +status: OrderStatus
+  +total: decimal
+  +addItem(sku: string, qty: int)
+}
+
+class OrderItem {
+  +sku: string
+  +qty: int
+  +unitPrice: decimal
+}
+
+enum OrderStatus {
+  Draft
+  Submitted
+  Paid
+  Shipped
+  Cancelled
+}
+
+interface PaymentProvider {
+  +authorize(amount: decimal): AuthResult
+  +capture(authId: string): Receipt
+}
+
+class StripeProvider
+PaymentProvider <|.. StripeProvider
+
+Customer "1" o-- "*" Order : places
+Order "1" *-- "1..*" OrderItem
+
+note right of Order #FFF8C5
+  Demonstrates:
+- abstract class
+- inheritance
+- enum
+- interface impl
+- composition/aggregation
+- multiplicity labels
+end note
+@enduml
+@startuml
+A -> B: message
+@enduml

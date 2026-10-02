@@ -250,14 +250,23 @@ class TestImageSyncPull:
         preview = local_engine.preview_local_authoritative()
         result = local_engine.publish_local_authoritative(preview["remote_head"])
 
-        assert preview == {
-            "remote_head": original_head,
-            "local_files": 2,
-            "remote_files": 2,
-            "local_only": 1,
-            "remote_only": 1,
-            "shared": 1,
-        }
+        assert preview["remote_head"] == original_head
+        assert preview["local_files"] == 2
+        assert preview["remote_files"] == 2
+        assert preview["local_only"] == 1
+        assert preview["remote_only"] == 1
+        assert preview["shared"] == 1
+        assert preview["changed"] == 1
+        assert preview["unchanged"] == 0
+        changes = {item["action"]: item for item in preview["changes"]}
+        assert set(changes) == {"add", "remove", "replace"}
+        assert changes["add"]["path"] == "local-only.md"
+        assert "add me" in changes["add"]["preview"]
+        assert changes["remove"]["path"] == "remote-only.md"
+        assert "remove me" in changes["remove"]["preview"]
+        assert changes["replace"]["path"] == "shared.md"
+        assert "-remote bytes" in changes["replace"]["preview"]
+        assert "+local bytes" in changes["replace"]["preview"]
         assert result["files"] == 2
         assert client.latest_checkpoint == result["checkpoint_id"]
         latest_manifest = json.loads(client.get_manifest(client.latest_checkpoint))

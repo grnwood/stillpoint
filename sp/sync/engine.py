@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import difflib
 import hashlib
 import errno
 import json
@@ -647,11 +648,12 @@ class HomebaseSyncEngine:
             if remote_head:
                 manifest = json.loads(client.get_manifest(remote_head).decode("utf-8"))
                 remote_entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
-            local_paths = {
-                self._canonical_rel_path(rel)
-                for rel, _full in self._iter_sync_files()
+            local_items = {
+                self._canonical_rel_path(rel): full
+                for rel, full in self._iter_sync_files()
                 if self._canonical_rel_path(rel)
             }
+            local_paths = set(local_items)
             remote_paths = {
                 self._canonical_rel_path(str(rel))
                 for rel, meta in remote_entries.items()
@@ -659,13 +661,155 @@ class HomebaseSyncEngine:
                 and not str(rel).startswith(".stillpoint/")
                 and self._canonical_rel_path(str(rel))
             }
+            key = derive_key_from_passphrase(self.cfg.passphrase, self.cfg.vault_id)
+            text_suffixes = {
+                ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".csv", ".tsv",
+            }
+            per_file_limit = 512 * 1024
+            local_object_ids: dict[str, str] = {}
+            local_sizes: dict[str, int] = {}
+            local_preview_bytes: dict[str, bytes] = {}
+            local_preview_notes: dict[str, str] = {}
+            local_preview_budget = 5 * 1024 * 1024
+            local_previewed_files = 0
+            changed_paths: set[str] = set()
+            for rel in sorted(local_paths):
+                data = read_bytes(local_items[rel])
+                object_id = object_id_from_ciphertext(encrypt_bytes(key, data))
+                local_object_ids[rel] = object_id
+                local_sizes[rel] = len(data)
+                remote_object_id = str(
+                    ((remote_entries.get(rel) or {}) if isinstance(remote_entries.get(rel), dict) else {}).get("object_id")
+                    or ""
+                ).strip().lower()
+                needs_preview = rel not in remote_paths or object_id != remote_object_id
+                if needs_preview and Path(rel).suffix.lower() in text_suffixes:
+                    if len(data) > per_file_limit:
+                        local_preview_notes[rel] = "Text preview omitted because the local file exceeds the preview limit."
+                    elif local_previewed_files >= 100 or len(data) > local_preview_budget:
+                        local_preview_notes[rel] = "Text preview omitted after the first 100 local files or 5 MiB."
+                    else:
+                        local_preview_bytes[rel] = data
+                        local_preview_budget -= len(data)
+                        local_previewed_files += 1
+                if rel in remote_paths and object_id != remote_object_id:
+                    changed_paths.add(rel)
+
+            shared_paths = local_paths & remote_paths
+            preview_budget = 5 * 1024 * 1024
+            previewed_remote_files = 0
+            changes: list[dict[str, Any]] = []
+
+            def _remote_plaintext(rel: str, meta: dict[str, Any]) -> tuple[Optional[bytes], str]:
+                nonlocal preview_budget, previewed_remote_files
+                object_id = str(meta.get("object_id") or "").strip().lower()
+                remote_size = int(meta.get("size", 0) or 0)
+                if Path(rel).suffix.lower() not in text_suffixes:
+                    return None, "Binary file; text comparison is unavailable."
+                if remote_size > per_file_limit or remote_size > preview_budget:
+                    return None, "Text preview omitted because the file exceeds the preview limit."
+                if previewed_remote_files >= 100:
+                    return None, "Text preview omitted after the first 100 remote files."
+                try:
+                    ciphertext = client.get_object(object_id)
+                    if object_id_from_ciphertext(ciphertext) != object_id:
+                        return None, "Remote preview failed its integrity check."
+                    plaintext = decrypt_bytes(key, ciphertext)
+                    preview_budget -= len(plaintext)
+                    previewed_remote_files += 1
+                    return plaintext, ""
+                except Exception as exc:
+                    return None, f"Remote preview unavailable: {exc}"
+
+            for rel in sorted(local_paths - remote_paths):
+                data = local_preview_bytes.get(rel)
+                preview = ""
+                if data is not None:
+                    try:
+                        preview = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        preview = "Binary file; text preview is unavailable."
+                elif Path(rel).suffix.lower() in text_suffixes:
+                    preview = local_preview_notes.get(
+                        rel, "Text preview omitted because the file exceeds the preview limit."
+                    )
+                else:
+                    preview = "Binary file; text preview is unavailable."
+                changes.append({
+                    "path": rel,
+                    "action": "add",
+                    "local_size": local_sizes[rel],
+                    "remote_size": None,
+                    "local_object_id": local_object_ids[rel],
+                    "remote_object_id": "",
+                    "preview": preview,
+                })
+
+            for rel in sorted(remote_paths - local_paths):
+                meta = remote_entries.get(rel) if isinstance(remote_entries.get(rel), dict) else {}
+                remote_data, note = _remote_plaintext(rel, meta)
+                preview = note
+                if remote_data is not None:
+                    try:
+                        preview = remote_data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        preview = "Binary file; text preview is unavailable."
+                changes.append({
+                    "path": rel,
+                    "action": "remove",
+                    "local_size": None,
+                    "remote_size": int(meta.get("size", 0) or 0),
+                    "local_object_id": "",
+                    "remote_object_id": str(meta.get("object_id") or "").strip().lower(),
+                    "preview": preview,
+                })
+
+            for rel in sorted(changed_paths):
+                meta = remote_entries.get(rel) if isinstance(remote_entries.get(rel), dict) else {}
+                local_data = local_preview_bytes.get(rel)
+                if local_data is None and Path(rel).suffix.lower() in text_suffixes:
+                    remote_data, note = None, local_preview_notes.get(
+                        rel, "Text diff omitted because the local file exceeds the preview limit."
+                    )
+                else:
+                    remote_data, note = _remote_plaintext(rel, meta)
+                preview = note
+                if remote_data is not None and local_data is not None:
+                    try:
+                        before = remote_data.decode("utf-8").splitlines(keepends=True)
+                        after = local_data.decode("utf-8").splitlines(keepends=True)
+                        preview = "".join(
+                            difflib.unified_diff(
+                                before,
+                                after,
+                                fromfile="Homebase version",
+                                tofile="This device",
+                            )
+                        ) or "Text content is equivalent after normalization."
+                        if len(preview) > 200_000:
+                            preview = preview[:200_000] + "\n\n…diff truncated…"
+                    except UnicodeDecodeError:
+                        preview = "Binary file; text comparison is unavailable."
+                changes.append({
+                    "path": rel,
+                    "action": "replace",
+                    "local_size": local_sizes[rel],
+                    "remote_size": int(meta.get("size", 0) or 0),
+                    "local_object_id": local_object_ids[rel],
+                    "remote_object_id": str(meta.get("object_id") or "").strip().lower(),
+                    "preview": preview,
+                })
+
             return {
                 "remote_head": remote_head,
                 "local_files": len(local_paths),
                 "remote_files": len(remote_paths),
                 "local_only": len(local_paths - remote_paths),
                 "remote_only": len(remote_paths - local_paths),
-                "shared": len(local_paths & remote_paths),
+                "shared": len(shared_paths),
+                "changed": len(changed_paths),
+                "unchanged": len(shared_paths - changed_paths),
+                "changes": changes,
             }
         finally:
             client.close()

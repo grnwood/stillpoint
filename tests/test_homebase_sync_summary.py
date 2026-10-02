@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QFrame, QPushButton, QScrollArea
+from PySide6.QtWidgets import QDialog, QFrame, QListWidget, QPushButton, QScrollArea, QTextEdit
 
 from sp.app.ui.main_window import MainWindow
 from sp.sync.engine import HomebaseSyncStatus
@@ -102,10 +102,12 @@ def test_homebase_recovery_buttons_remain_outside_scrolling_body(main_window, mo
     body_scroll = dialog.findChild(QScrollArea, "homebaseSyncBodyScroll")
     reset_auth = dialog.findChild(QPushButton, "homebaseResetAuthButton")
     reset_encryption = dialog.findChild(QPushButton, "homebaseResetEncryptionButton")
+    open_backup_folder = dialog.findChild(QPushButton, "homebaseOpenRecoveryFolderButton")
     assert recovery is not None
     assert body_scroll is not None
     assert reset_auth is not None and reset_auth.parentWidget() is recovery
     assert reset_encryption is not None and reset_encryption.parentWidget() is recovery
+    assert open_backup_folder is not None
     assert not body_scroll.isAncestorOf(reset_auth)
     assert not body_scroll.isAncestorOf(reset_encryption)
 
@@ -139,3 +141,55 @@ def test_sync_problem_dialog_treats_old_errors_as_history_and_hides_destructive_
     assert retry is not None and retry.isEnabled() is False
     assert dismiss is not None and dismiss.isEnabled() is True
     assert delete_remote is not None and delete_remote.isHidden() is True
+
+
+def test_local_authoritative_review_lists_files_and_displays_diff(main_window, monkeypatch) -> None:
+    captured: list[QDialog] = []
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: captured.append(dialog) or QDialog.Rejected)
+    preview = {
+        "local_only": 1,
+        "remote_only": 1,
+        "changed": 1,
+        "unchanged": 4,
+        "changes": [
+            {
+                "path": "Notes/Page.md",
+                "action": "replace",
+                "local_size": 12,
+                "remote_size": 13,
+                "local_object_id": "a" * 64,
+                "remote_object_id": "b" * 64,
+                "preview": "--- Homebase version\n+++ This device\n-old\n+new\n",
+            },
+            {
+                "path": "Notes/New.md",
+                "action": "add",
+                "local_size": 8,
+                "remote_size": None,
+                "local_object_id": "c" * 64,
+                "remote_object_id": "",
+                "preview": "new file",
+            },
+            {
+                "path": "Notes/RemoteOnly.md",
+                "action": "remove",
+                "local_size": None,
+                "remote_size": 9,
+                "local_object_id": "",
+                "remote_object_id": "d" * 64,
+                "preview": "old remote file",
+            },
+        ],
+    }
+
+    accepted = main_window._review_local_authoritative_preview(preview)
+
+    assert accepted is False
+    assert len(captured) == 1
+    dialog = captured[0]
+    changes = dialog.findChild(QListWidget, "homebaseAuthoritativeChangeList")
+    diff = dialog.findChild(QTextEdit, "homebaseAuthoritativeDiff")
+    publish = dialog.findChild(QPushButton, "homebaseAuthoritativePublishButton")
+    assert changes is not None and changes.count() == 3
+    assert diff is not None and "-old" in diff.toPlainText() and "+new" in diff.toPlainText()
+    assert publish is not None and publish.isEnabled() is True

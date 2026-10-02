@@ -3234,6 +3234,14 @@ class MainWindow(QMainWindow):
         self._action_homebase_recovery = QAction("Local Recovery...", self)
         self._action_homebase_recovery.triggered.connect(self._show_homebase_recovery_manager)
         self._remote_vault_menu.addAction(self._action_homebase_recovery)
+        self._action_homebase_open_recovery_folder = QAction("Open Local Backup Folder", self)
+        self._action_homebase_open_recovery_folder.setToolTip(
+            "Open this device's Homebase recovery storage in the file manager"
+        )
+        self._action_homebase_open_recovery_folder.triggered.connect(
+            self._open_homebase_recovery_folder
+        )
+        self._remote_vault_menu.addAction(self._action_homebase_open_recovery_folder)
         self._remote_vault_menu.addAction(self._action_homebase_publish_local)
         self._remote_vault_menu.addAction(self._action_homebase_reset_sync)
         self._action_new_vault = QAction("New Vault", self)
@@ -6049,6 +6057,9 @@ class MainWindow(QMainWindow):
             self._action_homebase_sync_now.setVisible(self._is_homebase_mode_enabled())
         if hasattr(self, "_action_homebase_recovery"):
             self._action_homebase_recovery.setVisible(self._is_homebase_mode_enabled())
+        if hasattr(self, "_action_homebase_open_recovery_folder"):
+            self._action_homebase_open_recovery_folder.setVisible(self._is_homebase_mode_enabled())
+            self._action_homebase_open_recovery_folder.setEnabled(bool(self._homebase_sync_engine))
         if hasattr(self, "_action_homebase_reset_sync"):
             self._action_homebase_reset_sync.setVisible(self._is_homebase_mode_enabled())
         if hasattr(self, "_action_homebase_publish_local"):
@@ -7055,6 +7066,24 @@ class MainWindow(QMainWindow):
 
         dialog = HomebaseRecoveryDialog(self, self._homebase_sync_engine, self._restore_homebase_recovery)
         dialog.exec()
+
+    def _open_homebase_recovery_folder(self) -> None:
+        if not self._homebase_sync_engine or not self._is_homebase_mode_enabled():
+            self.statusBar().showMessage("Homebase Local Recovery is not available for this vault.", 4000)
+            return
+        try:
+            folder = self._homebase_sync_engine.recovery.root
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase Local Recovery", f"Could not open backup folder: {exc}")
+            return
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "Homebase Local Recovery",
+                f"The file manager could not open:\n{folder}",
+            )
 
     def _show_homebase_interrupted_recovery(self, events: list[dict[str, Any]]) -> None:
         engine = self._homebase_sync_engine
@@ -8430,6 +8459,96 @@ class MainWindow(QMainWindow):
             recovery_daily_days=config.load_homebase_recovery_days(),
         )
 
+    def _review_local_authoritative_preview(self, preview: dict[str, Any]) -> bool:
+        changes = list(preview.get("changes") or [])
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review Local Authoritative Publish")
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            f"This device will add {int(preview.get('local_only', 0)):,} file(s), replace "
+            f"{int(preview.get('changed', 0)):,} changed file(s), and remove "
+            f"{int(preview.get('remote_only', 0)):,} Homebase-only file(s). "
+            f"{int(preview.get('unchanged', 0)):,} shared file(s) are unchanged."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        guidance = QLabel(
+            "Select a file to inspect what this device will publish. Text files show their contents "
+            "or a Homebase-to-local diff; binary files show size and identity details."
+        )
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+
+        splitter = QSplitter(Qt.Horizontal, dialog)
+        change_list = QListWidget(splitter)
+        change_list.setObjectName("homebaseAuthoritativeChangeList")
+        preview_text = QTextEdit(splitter)
+        preview_text.setObjectName("homebaseAuthoritativeDiff")
+        preview_text.setReadOnly(True)
+        splitter.addWidget(change_list)
+        splitter.addWidget(preview_text)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
+
+        action_labels = {
+            "add": "ADD from this device",
+            "replace": "REPLACE with this device",
+            "remove": "REMOVE from Homebase",
+        }
+        action_colors = {
+            "add": QColor("#2e7d32"),
+            "replace": QColor("#ed6c02"),
+            "remove": QColor("#c62828"),
+        }
+        for change in changes:
+            action = str(change.get("action") or "replace")
+            path = str(change.get("path") or "")
+            item = QListWidgetItem(f"{action_labels.get(action, action.upper())}  ·  /{path}")
+            item.setData(Qt.UserRole, change)
+            if action in action_colors:
+                item.setForeground(action_colors[action])
+            item.setToolTip(
+                f"Local size: {change.get('local_size') if change.get('local_size') is not None else 'absent'}\n"
+                f"Homebase size: {change.get('remote_size') if change.get('remote_size') is not None else 'absent'}\n"
+                f"Local object: {change.get('local_object_id') or 'none'}\n"
+                f"Homebase object: {change.get('remote_object_id') or 'none'}"
+            )
+            change_list.addItem(item)
+
+        def _show_change() -> None:
+            item = change_list.currentItem()
+            if item is None:
+                preview_text.clear()
+                return
+            change = item.data(Qt.UserRole) or {}
+            action = str(change.get("action") or "replace")
+            path = str(change.get("path") or "")
+            local_size = change.get("local_size")
+            remote_size = change.get("remote_size")
+            header = (
+                f"{action_labels.get(action, action.upper())}\n/{path}\n"
+                f"Local size: {local_size if local_size is not None else 'absent'} bytes\n"
+                f"Homebase size: {remote_size if remote_size is not None else 'absent'} bytes\n\n"
+            )
+            preview_text.setPlainText(header + str(change.get("preview") or "No text preview available."))
+
+        change_list.currentItemChanged.connect(lambda _current, _previous: _show_change())
+        if change_list.count():
+            change_list.setCurrentRow(0)
+        else:
+            preview_text.setPlainText("This device and Homebase already contain the same paths and content.")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel, parent=dialog)
+        publish_button = buttons.addButton("Publish This Device…", QDialogButtonBox.AcceptRole)
+        publish_button.setObjectName("homebaseAuthoritativePublishButton")
+        publish_button.setEnabled(bool(changes))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        fit_window_to_available_screen(dialog, QSize(1040, 680), parent=self)
+        return dialog.exec() == QDialog.Accepted
+
     def _start_homebase_local_authoritative(self) -> None:
         if not self.vault_root or not self._is_homebase_mode_enabled():
             self.statusBar().showMessage("Homebase sync is not configured for this vault.", 4000)
@@ -8473,23 +8592,7 @@ class MainWindow(QMainWindow):
             self._homebase_authoritative_worker = None
             preview_worker.deleteLater()
             remote_head = str(preview.get("remote_head") or "")
-            box = QMessageBox(self)
-            box.setWindowTitle("Publish This Device as Authoritative")
-            box.setIcon(QMessageBox.Warning)
-            box.setText("Replace the shared Homebase snapshot with this device?")
-            box.setInformativeText(
-                f"Local files: {int(preview.get('local_files', 0)):,}\n"
-                f"Files only on this device: {int(preview.get('local_only', 0)):,}\n"
-                f"Files only on Homebase that will be removed: {int(preview.get('remote_only', 0)):,}\n"
-                f"Shared paths that will use this device's bytes: {int(preview.get('shared', 0)):,}\n\n"
-                "Use this only when local changes are intentionally authoritative. "
-                "StillPoint will abort if Homebase changes after this preview."
-            )
-            publish_button = box.addButton("Continue…", QMessageBox.AcceptRole)
-            box.addButton(QMessageBox.Cancel)
-            box.setDefaultButton(QMessageBox.Cancel)
-            box.exec()
-            if box.clickedButton() != publish_button:
+            if not self._review_local_authoritative_preview(preview):
                 _restore_normal_sync()
                 return
             vault_name = Path(self.vault_root or "vault").name
@@ -8671,7 +8774,8 @@ class MainWindow(QMainWindow):
         action = getattr(self, "_action_homebase_sync_now", None)
         reset_action = getattr(self, "_action_homebase_reset_sync", None)
         publish_action = getattr(self, "_action_homebase_publish_local", None)
-        if action is None and reset_action is None and publish_action is None:
+        recovery_folder_action = getattr(self, "_action_homebase_open_recovery_folder", None)
+        if action is None and reset_action is None and publish_action is None and recovery_folder_action is None:
             return
         reset_in_progress = bool(
             getattr(self, "_homebase_reset_worker", None)
@@ -8709,6 +8813,8 @@ class MainWindow(QMainWindow):
                 publish_action.setToolTip("Disabled while another Homebase recovery operation is in progress.")
             else:
                 publish_action.setToolTip("Available when Homebase Remote mode is enabled for this vault.")
+        if recovery_folder_action is not None:
+            recovery_folder_action.setEnabled(enabled)
 
     def _homebase_activity_snapshot(self, status: Optional[HomebaseSyncStatus]) -> tuple[str, list[str]]:
         if not status:
@@ -9001,6 +9107,8 @@ class MainWindow(QMainWindow):
         reset_passphrase_btn.setObjectName("homebaseResetEncryptionButton")
         conflicts_btn = QPushButton(f"View Conflicts ({status.conflicts})")
         local_recovery_btn = QPushButton("Local Recovery...")
+        open_recovery_folder_btn = QPushButton("Open Local Backup Folder")
+        open_recovery_folder_btn.setObjectName("homebaseOpenRecoveryFolderButton")
         sync_errors = self._homebase_sync_engine.list_sync_errors(limit=200) if self._homebase_sync_engine else []
         error_summary = self._homebase_sync_error_summary()
         active_error_count = int(error_summary.get("active", 0) or 0)
@@ -9018,6 +9126,7 @@ class MainWindow(QMainWindow):
         status_actions = QVBoxLayout() if available.width() < 620 else QHBoxLayout()
         status_actions.addWidget(conflicts_btn)
         status_actions.addWidget(local_recovery_btn)
+        status_actions.addWidget(open_recovery_folder_btn)
         status_actions.addWidget(sync_errors_btn)
         if isinstance(status_actions, QHBoxLayout):
             status_actions.addStretch(1)
@@ -9106,6 +9215,7 @@ class MainWindow(QMainWindow):
         reset_passphrase_btn.clicked.connect(lambda: self._reset_homebase_passphrase(parent_dialog=dialog))
         conflicts_btn.clicked.connect(_view_conflicts)
         local_recovery_btn.clicked.connect(self._show_homebase_recovery_manager)
+        open_recovery_folder_btn.clicked.connect(self._open_homebase_recovery_folder)
         sync_errors_btn.clicked.connect(_view_sync_errors)
 
         def _refresh_dialog_status() -> None:

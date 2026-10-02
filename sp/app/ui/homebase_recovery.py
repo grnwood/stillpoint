@@ -5,8 +5,8 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
     QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
@@ -56,8 +56,11 @@ class HomebaseRecoveryDialog(QDialog):
             ("Restore Selected", self._restore_selected),
             ("Restore Everything in This Recovery Point", self._restore_all),
             ("Continue Sync", self._continue_sync),
+            ("Open Backup Folder", self._open_backup_folder),
         ):
             button = QPushButton(title)
+            if title == "Open Backup Folder":
+                button.setObjectName("homebaseOpenBackupFolderButton")
             button.clicked.connect(callback)
             primary_buttons.addWidget(button)
         primary_buttons.addStretch(1)
@@ -204,6 +207,20 @@ class HomebaseRecoveryDialog(QDialog):
 
     def _selected_paths(self) -> list[str]:
         return [item.data(Qt.UserRole) for item in self.paths.selectedItems()]
+
+    def _open_backup_folder(self) -> None:
+        try:
+            self.store.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.root)))
+        except Exception as exc:
+            QMessageBox.warning(self, "Homebase Local Recovery", f"Could not open backup folder: {exc}")
+            return
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "Homebase Local Recovery",
+                f"The file manager could not open:\n{self.store.root}",
+            )
 
     def _restore_selected(self) -> None:
         event = self._event()
