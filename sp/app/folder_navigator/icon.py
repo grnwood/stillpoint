@@ -123,10 +123,9 @@ def configure_folder_navigator_process() -> None:
     """Apply process identity that must be set before QApplication exists."""
     # Folder Navigator hosts several long-lived Qt widgets and background
     # workers. Never import QtWebEngine into this process: on Linux/macOS its
-    # teardown can abort or segfault the entire navigator. Excalidraw already
-    # runs in an isolated WebEngine child, while Mermaid retains its native
-    # SVG/PNG preview here.
-    os.environ["SP_DISABLE_MERMAID_WEB_PREVIEW"] = "1"
+    # teardown can abort or segfault the entire navigator. This disables only
+    # the WebEngine backend; Mermaid still uses its native inline SVG preview.
+    os.environ["SP_MERMAID_DISABLE_INPROCESS_WEBENGINE"] = "1"
     if sys.platform != "win32":
         return
     try:

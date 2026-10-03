@@ -353,6 +353,35 @@ def test_mermaid_macos_allows_explicit_inprocess_webengine_opt_in(monkeypatch):
     assert mermaid_editor_window._should_use_web_preview() is True
 
 
+def test_mermaid_windows_uses_inline_webengine_when_available(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(mermaid_editor_window.sys, "platform", "win32")
+    monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: True)
+    monkeypatch.delenv("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", raising=False)
+    monkeypatch.setattr(mermaid_editor_window, "_load_qwebengine_view_class", lambda: sentinel)
+
+    assert mermaid_editor_window._should_use_web_preview() is True
+
+
+def test_folder_navigator_webengine_guard_keeps_native_inline_preview(monkeypatch):
+    monkeypatch.setattr(
+        mermaid_editor_window.config,
+        "load_mermaid_inline_web_preview",
+        lambda: True,
+    )
+    monkeypatch.setenv("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", "1")
+    monkeypatch.delenv("SP_DISABLE_MERMAID_WEB_PREVIEW", raising=False)
+    monkeypatch.delenv("SP_ENABLE_MERMAID_WEB_PREVIEW", raising=False)
+    monkeypatch.setattr(
+        mermaid_editor_window,
+        "_load_qwebengine_view_class",
+        lambda: (_ for _ in ()).throw(AssertionError("WebEngine must not load")),
+    )
+
+    assert mermaid_editor_window._inline_preview_preference_enabled() is True
+    assert mermaid_editor_window._should_use_web_preview() is False
+
+
 def test_mermaid_inline_default_is_enabled(monkeypatch):
     monkeypatch.setattr("sp.app.config._read_global_config", lambda: {})
 

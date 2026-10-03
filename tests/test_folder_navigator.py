@@ -2962,13 +2962,15 @@ def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
     identity.close()
 
 
-def test_folder_navigator_process_disables_inprocess_mermaid_webengine(monkeypatch):
+def test_folder_navigator_process_disables_only_inprocess_mermaid_webengine(monkeypatch):
     from sp.app.folder_navigator.icon import configure_folder_navigator_process
 
-    monkeypatch.setenv("SP_DISABLE_MERMAID_WEB_PREVIEW", "0")
+    monkeypatch.delenv("SP_DISABLE_MERMAID_WEB_PREVIEW", raising=False)
+    monkeypatch.delenv("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", raising=False)
     configure_folder_navigator_process()
 
-    assert os.environ["SP_DISABLE_MERMAID_WEB_PREVIEW"] == "1"
+    assert os.environ["SP_MERMAID_DISABLE_INPROCESS_WEBENGINE"] == "1"
+    assert "SP_DISABLE_MERMAID_WEB_PREVIEW" not in os.environ
 
 
 @pytest.mark.parametrize("suffix", [".py", ".md"])

@@ -119,6 +119,8 @@ def _inline_preview_preference_enabled() -> bool:
 def _should_use_web_preview() -> bool:
     if not _inline_preview_preference_enabled():
         return False
+    if _truthy_env("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE"):
+        return False
     # Qt WebEngine can terminate the entire application with a native crash
     # while constructing QWebEngineView on Linux and macOS.  Python cannot
     # catch that failure, so keep it out of the main process by default on
