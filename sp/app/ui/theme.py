@@ -241,9 +241,24 @@ def status_bar_stylesheet(source: Any = None) -> str:
     colors = chrome_colors(source)
     horizontal = int(theme_value("ui.status_bar.horizontal_padding_px", 6))
     vertical = int(theme_value("ui.status_bar.vertical_padding_px", 2))
+    background = theme_color(
+        "ui.status_bar.bg",
+        theme_value("markdown_editor.base.bg", colors["window"]),
+    )
+    foreground = theme_color(
+        "ui.status_bar.text",
+        theme_value("markdown_editor.base.text", colors["text"]),
+    )
+    if not background.isValid():
+        background = QColor(colors["window"])
+    if not foreground.isValid():
+        foreground = QColor(colors["text"])
+    border = theme_color("ui.status_bar.border", None)
+    if not border.isValid():
+        border = QColor(_mixed_color(background, foreground, 0.22))
     return (
-        f"QStatusBar {{ color: {colors['muted']}; background: {colors['window']}; "
-        f"border-top: 1px solid {colors['border']}; padding: {vertical}px {horizontal}px; }}"
+        f"QStatusBar {{ color: {foreground.name()}; background: {background.name()}; "
+        f"border-top: 1px solid {border.name()}; padding: {vertical}px {horizontal}px; }}"
         "QStatusBar::item { border: 0; }"
     )
 

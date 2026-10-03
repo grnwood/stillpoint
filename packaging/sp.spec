@@ -72,7 +72,7 @@ hidden += _charset_hidden
 _calamine_datas, _calamine_binaries, _calamine_hidden = collect_all('python_calamine')
 hidden += _calamine_hidden
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.0').lstrip('v')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.1').lstrip('v')
 
 # Data files: templates + bundled assets
 _datas = [

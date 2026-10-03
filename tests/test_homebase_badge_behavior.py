@@ -49,6 +49,7 @@ class _DummyWindow:
         self._badge_base_style = ""
         self._dirty_flag = False
         self._homebase_has_unsynced_local_changes = False
+        self._homebase_has_confirmed_pending_local_change = False
         self._homebase_sync_blue_threshold_seconds = 0.5
         self._homebase_sync_activity_started_at = None
         self._homebase_sync_cycle_had_true_activity = False
@@ -90,8 +91,83 @@ def test_syncing_badge_stays_non_blue_without_true_activity() -> None:
     MainWindow._update_homebase_status_badge(window, status)
 
     assert window._homebase_status_label.visible is True
-    assert window._homebase_status_label.text == "HOMEBASE"
+    assert window._homebase_status_label.text == "SYNC"
     assert "#1565c0" not in window._homebase_status_label.stylesheet
+
+
+def test_startup_sync_request_does_not_show_pending_changes_dot() -> None:
+    window = _DummyWindow()
+    status = HomebaseSyncStatus(
+        state="syncing",
+        summary="Sync requested (vault open)",
+        pending=True,
+    )
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert window._homebase_status_label.text == "SYNC"
+    assert "Amber dot" not in window._homebase_status_label.tooltip
+
+
+def test_transient_navigation_dirty_state_does_not_show_pending_changes_dot() -> None:
+    window = _DummyWindow()
+    window._dirty_flag = True
+    status = HomebaseSyncStatus(state="idle", summary="Up to date", pending=False)
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert window._homebase_status_label.text == "SYNC"
+    assert "Amber dot" not in window._homebase_status_label.tooltip
+
+
+def test_unconfirmed_filesystem_change_does_not_show_pending_changes_dot() -> None:
+    window = _DummyWindow()
+    window._homebase_has_unsynced_local_changes = True
+    status = HomebaseSyncStatus(state="idle", summary="Up to date", pending=False)
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert window._homebase_status_label.text == "SYNC"
+    assert "Amber dot" not in window._homebase_status_label.tooltip
+
+
+def test_confirmed_saved_change_shows_pending_dot_before_manifest_scan() -> None:
+    window = _DummyWindow()
+    window._homebase_has_unsynced_local_changes = True
+    window._homebase_has_confirmed_pending_local_change = True
+    status = HomebaseSyncStatus(
+        state="idle",
+        summary="Sync scheduled (page save)",
+        pending=True,
+    )
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert "●" in window._homebase_status_label.text
+    assert "#ffd54f" in window._homebase_status_label.text
+    assert "Amber dot" in window._homebase_status_label.tooltip
+
+
+def test_page_save_marks_local_change_as_confirmed_pending() -> None:
+    source = inspect.getsource(MainWindow._finalize_save)
+
+    assert "_mark_homebase_unsynced_local_change(confirmed_pending=True)" in source
+
+
+def test_confirmed_pending_transfer_shows_pending_changes_dot() -> None:
+    window = _DummyWindow()
+    status = HomebaseSyncStatus(
+        state="idle",
+        summary="Changes queued",
+        pending=True,
+        pending_uploads=1,
+    )
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert "●" in window._homebase_status_label.text
+    assert "#ffd54f" in window._homebase_status_label.text
+    assert "Amber dot" in window._homebase_status_label.tooltip
 
 
 def test_syncing_badge_stays_non_blue_before_threshold() -> None:
@@ -106,6 +182,40 @@ def test_syncing_badge_stays_non_blue_before_threshold() -> None:
     MainWindow._update_homebase_status_badge(window, status)
 
     assert "#1565c0" not in window._homebase_status_label.stylesheet
+    assert "*" not in window._homebase_status_label.text
+    assert "●" in window._homebase_status_label.text
+    assert "#64b5f6" in window._homebase_status_label.text
+    assert "Pulsing dot" in window._homebase_status_label.tooltip
+
+
+def test_network_activity_dot_alternates_blue_and_green() -> None:
+    window = _DummyWindow()
+    status = HomebaseSyncStatus(
+        state="syncing",
+        summary="Uploading 1 object(s)...",
+        pending_uploads=1,
+    )
+
+    MainWindow._update_homebase_status_badge(window, status)
+    assert "#64b5f6" in window._homebase_status_label.text
+
+    window._homebase_network_pulse_phase = True
+    MainWindow._update_homebase_status_badge(window, status)
+    assert "#69f0ae" in window._homebase_status_label.text
+
+
+def test_local_vault_scan_does_not_pulse_network_activity_dot() -> None:
+    window = _DummyWindow()
+    status = HomebaseSyncStatus(
+        state="syncing",
+        summary="Checking local vault (12 file(s))...",
+        pending=False,
+    )
+
+    MainWindow._update_homebase_status_badge(window, status)
+
+    assert "●" not in window._homebase_status_label.text
+    assert "Pulsing dot" not in window._homebase_status_label.tooltip
 
 
 def test_syncing_badge_turns_blue_with_true_activity() -> None:
@@ -138,7 +248,7 @@ def test_recovery_review_badge_is_amber_and_actionable() -> None:
 
     MainWindow._update_homebase_status_badge(window, status)
 
-    assert window._homebase_status_label.text == "HOMEBASE REVIEW"
+    assert window._homebase_status_label.text == "SYNC REVIEW"
     assert "#ed6c02" in window._homebase_status_label.stylesheet
     assert "Click to review" in window._homebase_status_label.tooltip
 
@@ -155,7 +265,7 @@ def test_active_file_errors_make_idle_badge_red() -> None:
 
     MainWindow._update_homebase_status_badge(window, status)
 
-    assert window._homebase_status_label.text == "HOMEBASE ERROR (3)"
+    assert window._homebase_status_label.text == "SYNC ERROR (3)"
     assert "#d32f2f" in window._homebase_status_label.stylesheet
 
 

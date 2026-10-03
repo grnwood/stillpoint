@@ -7771,12 +7771,10 @@ class MarkdownEditor(QTextEdit):
             return True
         if mods == (Qt.ControlModifier | Qt.ShiftModifier) and key == Qt.Key_L:
             copied = self._copy_link_or_heading()
-            window = self.window()
-            try:
-                if copied and window and hasattr(window, "statusBar"):
-                    window.statusBar().showMessage(f"Copied link: {copied}", 2000)
-            except Exception:
-                pass
+            if not copied:
+                # Match the application shortcut: ordinary body text has no
+                # link/heading under the cursor, so copy the current page.
+                copied = self.copy_current_page_link()
             if copied:
                 self._vi_clipboard = copied
             return True

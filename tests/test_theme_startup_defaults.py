@@ -100,6 +100,11 @@ def test_apply_qt_palette_aligns_native_color_scheme(window_bg, expected_scheme,
 def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
     tabs = theme.tab_widget_stylesheet(qapp, accent_color="#4f8f8b")
     tree = theme.tree_view_stylesheet(qapp, accent_color="#4f8f8b")
+    status = theme.status_bar_stylesheet(qapp)
+    expected_status_text = theme.theme_color(
+        "ui.status_bar.text",
+        theme.theme_value("markdown_editor.base.text"),
+    ).name()
 
     assert "QTabWidget::pane { border: 1px solid" in tabs
     assert "border-bottom: 2px solid #4f8f8b" in tabs
@@ -107,6 +112,22 @@ def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
     assert "; }}" not in tabs
     assert "QTreeView::item { padding: 3px 6px; border: 0" in tree
     assert "border-bottom-color" not in tree
+    assert f"color: {expected_status_text}" in status
+
+
+def test_status_bar_inherits_partial_theme_override_editor_colors(qapp, monkeypatch) -> None:
+    values = {
+        "markdown_editor.base.bg": "#0d2b1f",
+        "markdown_editor.base.text": "#d6f5d6",
+        "ui.status_bar.horizontal_padding_px": 6,
+        "ui.status_bar.vertical_padding_px": 2,
+    }
+    monkeypatch.setattr(theme, "theme_value", lambda path, default=None: values.get(path, default))
+
+    status = theme.status_bar_stylesheet(qapp)
+
+    assert "color: #d6f5d6" in status
+    assert "background: #0d2b1f" in status
 
 
 def test_vault_theme_refresh_restyles_existing_navigation_tree(

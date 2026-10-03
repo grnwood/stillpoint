@@ -2555,7 +2555,7 @@ class Window(QMainWindow):
         self._startup_selected_path = None
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
-        self.setWindowTitle(f"Folder Navigator — {self.root.name}")
+        self.setWindowTitle(f"{self.root.name} — StillPoint Folder Navigator")
         self.resize(1100, 760)
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
         loaded_settings = self._load_settings()
@@ -5435,10 +5435,11 @@ class Window(QMainWindow):
         self._update_window_identity_title(self.active_tab())
 
     def _update_window_identity_title(self, tab=None):
-        title = f"Folder Navigator — {self.root.name}"
+        parts = [self.root.name]
         if tab is not None:
-            title += f" — {tab.path.name}"
-        self.setWindowTitle(title)
+            parts.append(tab.path.name)
+        parts.append("StillPoint Folder Navigator")
+        self.setWindowTitle(" — ".join(parts))
         self._update_folder_breadcrumb(tab.path if tab is not None else self.root)
 
     def _folder_breadcrumb_items(self, path: Path) -> list[tuple[str, object, str]]:

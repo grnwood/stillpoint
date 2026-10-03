@@ -991,7 +991,12 @@ class RemoteVaultSelectDialog(QDialog):
     def create_new(self) -> bool:
         return self._create_new
 
-from .markdown_editor import HEADING_MAX_LEVEL, MarkdownEditor
+from .markdown_editor import (
+    HEADING_MAX_LEVEL,
+    STRAY_SENTINEL_PATTERN,
+    WIKI_LINK_DISPLAY_PATTERN,
+    MarkdownEditor,
+)
 from .keyboard_shortcuts import (
     is_vi_navigation_chord,
     history_cycle_modifier_release_key,
@@ -2551,11 +2556,18 @@ class MainWindow(QMainWindow):
         self._dirty_flag: bool = False
         self._suspend_dirty_tracking: bool = False
         self._homebase_has_unsynced_local_changes: bool = False
+        self._homebase_has_confirmed_pending_local_change: bool = False
         self._homebase_unsynced_marked_at: Optional[datetime] = None
         self._homebase_sync_blue_threshold_seconds: float = 0.5
         self._homebase_sync_activity_started_at: Optional[float] = None
         self._homebase_sync_cycle_had_true_activity: bool = False
         self._homebase_last_real_sync_at: Optional[str] = None
+        self._homebase_badge_status: Optional[HomebaseSyncStatus] = None
+        self._homebase_network_pulse_active: bool = False
+        self._homebase_network_pulse_phase: bool = False
+        self._homebase_network_pulse_timer = QTimer(self)
+        self._homebase_network_pulse_timer.setInterval(220)
+        self._homebase_network_pulse_timer.timeout.connect(self._tick_homebase_network_pulse)
         self._homebase_tree_refresh_pending: bool = False
         self._homebase_tree_refresh_reason: str = ""
         self._suppress_focus_borders: bool = False
@@ -3572,6 +3584,23 @@ class MainWindow(QMainWindow):
             "padding: 2px 6px; border-radius: 3px;"
         )
 
+        self._save_status_path: Optional[str] = None
+        self._save_status_label = QLabel("")
+        self._save_status_label.setObjectName("saveStatusLabel")
+        self._save_status_label.setAccessibleName("Document save status")
+        self._save_status_label.setToolTip("Current document save state")
+        self._save_status_label.hide()
+        # Normal status widgets yield to transient messages and return when the
+        # message timeout expires; permanent widgets remain visible on the right.
+        self.statusBar().addWidget(self._save_status_label, 1)
+
+        self._editor_word_count = 0
+        self._editor_word_count_path: Optional[str] = None
+        self._word_count_timer = QTimer(self)
+        self._word_count_timer.setSingleShot(True)
+        self._word_count_timer.setInterval(150)
+        self._word_count_timer.timeout.connect(self._update_main_word_count)
+
         self._cursor_status_label = QLabel("")
         self._cursor_status_label.setObjectName("cursorStatusLabel")
         self._cursor_status_label.setAccessibleName("Editor cursor position")
@@ -3689,7 +3718,7 @@ class MainWindow(QMainWindow):
         self._remote_status_label.hide()
         self.statusBar().addPermanentWidget(self._remote_status_label, 0)
 
-        self._homebase_status_label = QLabel("HOMEBASE")
+        self._homebase_status_label = QLabel("SYNC")
         self._homebase_status_label.setObjectName("homebaseStatusLabel")
         self._homebase_status_label.setStyleSheet(
             self._badge_base_style
@@ -6993,6 +7022,7 @@ class MainWindow(QMainWindow):
         should_refresh_tree_for_local_sync = False
         if self._homebase_status_clears_unsynced_marker(status):
             self._homebase_has_unsynced_local_changes = False
+            self._homebase_has_confirmed_pending_local_change = False
             self._homebase_unsynced_marked_at = None
             self._homebase_sync_cycle_had_true_activity = True
             should_refresh_tree_for_local_sync = True
@@ -7265,7 +7295,6 @@ class MainWindow(QMainWindow):
             config.bump_sync_revision()
         except Exception:
             pass
-        self.statusBar().showMessage("Vault tree update ready; it will apply when navigation is used.", 2500)
 
     def _flush_pending_homebase_tree_refresh(self) -> None:
         if not self._homebase_tree_refresh_pending:
@@ -7297,10 +7326,12 @@ class MainWindow(QMainWindow):
         self._pending_selection = target_path
         self._populate_vault_tree()
 
-    def _mark_homebase_unsynced_local_change(self) -> None:
+    def _mark_homebase_unsynced_local_change(self, *, confirmed_pending: bool = False) -> None:
         if not self._is_homebase_mode_enabled():
             return
         self._homebase_has_unsynced_local_changes = True
+        if confirmed_pending:
+            self._homebase_has_confirmed_pending_local_change = True
         self._homebase_unsynced_marked_at = datetime.now(timezone.utc)
         status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
         self._update_homebase_status_badge(status)
@@ -8043,11 +8074,54 @@ class MainWindow(QMainWindow):
         finally:
             self._homebase_attention_dialog_open = False
 
+    @staticmethod
+    def _homebase_status_has_network_activity(status: Optional[HomebaseSyncStatus]) -> bool:
+        """Return whether the sync status represents active network I/O."""
+        if not status or status.state != "syncing":
+            return False
+        if int(getattr(status, "pending_uploads", 0) or 0) > 0:
+            return True
+        if int(getattr(status, "pending_downloads", 0) or 0) > 0:
+            return True
+        workers = list(getattr(status, "transfer_workers", None) or [])
+        if any(str(worker or "").strip().lower() not in {"", "idle"} for worker in workers):
+            return True
+        summary = str(status.summary or "").strip().lower()
+        return summary.startswith(("uploading", "publishing", "pulling", "downloading"))
+
+    def _set_homebase_network_pulse_active(self, active: bool) -> None:
+        active = bool(active)
+        self._homebase_network_pulse_active = active
+        timer = getattr(self, "_homebase_network_pulse_timer", None)
+        if timer is None:
+            return
+        if active:
+            if not timer.isActive():
+                timer.start()
+        else:
+            timer.stop()
+            self._homebase_network_pulse_phase = False
+
+    def _tick_homebase_network_pulse(self) -> None:
+        if not getattr(self, "_homebase_network_pulse_active", False):
+            self._set_homebase_network_pulse_active(False)
+            return
+        self._homebase_network_pulse_phase = not bool(
+            getattr(self, "_homebase_network_pulse_phase", False)
+        )
+        status = getattr(self, "_homebase_badge_status", None)
+        if status is not None:
+            self._update_homebase_status_badge(status)
+
     def _update_homebase_status_badge(self, status: Optional[HomebaseSyncStatus]) -> None:
         if not hasattr(self, "_homebase_status_label"):
             return
+        self._homebase_badge_status = status
         if not status or not self._is_homebase_mode_enabled():
             self._homebase_sync_activity_started_at = None
+            pulse_setter = getattr(self, "_set_homebase_network_pulse_active", None)
+            if callable(pulse_setter):
+                pulse_setter(False)
             self._homebase_status_label.hide()
             self._homebase_status_label.setToolTip("")
             return
@@ -8057,13 +8131,20 @@ class MainWindow(QMainWindow):
         state = status.state
         pending_uploads = int(getattr(status, "pending_uploads", 0) or 0)
         pending_downloads = int(getattr(status, "pending_downloads", 0) or 0)
+        # The dot reports work confirmed by the sync engine, not UI-side hints.
+        # `_dirty_flag` can briefly change while a page is rendered and the
+        # local-change marker is intentionally conservative while filesystem
+        # events are reconciled.  Using either here made launch and Ctrl+Tab
+        # navigation flash an amber dot even when no bytes needed syncing.
         has_pending_work = bool(
-            status.pending
-            or pending_uploads > 0
+            pending_uploads > 0
             or pending_downloads > 0
-            or bool(getattr(self, "_dirty_flag", False))
-            or bool(getattr(self, "_homebase_has_unsynced_local_changes", False))
+            or bool(getattr(self, "_homebase_has_confirmed_pending_local_change", False))
         )
+        network_active = MainWindow._homebase_status_has_network_activity(status)
+        pulse_setter = getattr(self, "_set_homebase_network_pulse_active", None)
+        if callable(pulse_setter):
+            pulse_setter(network_active)
         has_true_sync_activity = bool(
             status.pending
             or pending_uploads > 0
@@ -8096,8 +8177,7 @@ class MainWindow(QMainWindow):
             and has_true_sync_activity
             and sync_elapsed >= float(getattr(self, "_homebase_sync_blue_threshold_seconds", 0.5))
         )
-        star = "*" if has_pending_work else ""
-        text = f"HOMEBASE{star}"
+        text = "SYNC"
         summary_lower = str(status.summary or "").lower()
         last_error_lower = str(status.last_error or "").lower()
         error_summary_getter = getattr(self, "_homebase_sync_error_summary", None)
@@ -8116,19 +8196,19 @@ class MainWindow(QMainWindow):
             or "401" in last_error_lower
         )
         if needs_recovery_review:
-            text = f"HOMEBASE REVIEW{star}"
+            text = "SYNC REVIEW"
             bg = theme_value("main_window.homebase_badge.attention_bg", "#ed6c02")
         elif sync_paused:
-            text = f"HOMEBASE PAUSED{star}"
+            text = "SYNC PAUSED"
             bg = theme_value("main_window.homebase_badge.attention_bg", "#ed6c02")
         elif status.conflicts > 0:
-            text = f"HOMEBASE ({status.conflicts}){star}"
+            text = f"SYNC ({status.conflicts})"
             bg = theme_value("main_window.homebase_badge.conflict_bg", "#d32f2f")
         elif auth_error:
-            text = f"HOMEBASE AUTH{star}"
+            text = "SYNC AUTH"
             bg = theme_value("main_window.homebase_badge.auth_bg", "#d32f2f")
         elif active_sync_errors > 0 or state in {"error", "offline"}:
-            text = f"HOMEBASE ERROR ({active_sync_errors}){star}" if active_sync_errors else f"HOMEBASE ERROR{star}"
+            text = f"SYNC ERROR ({active_sync_errors})" if active_sync_errors else "SYNC ERROR"
             bg = theme_value("main_window.homebase_badge.error_bg", "#d32f2f")
         elif show_syncing_blue:
             bg = theme_value("main_window.homebase_badge.syncing_bg", "#1565c0")
@@ -8148,6 +8228,10 @@ class MainWindow(QMainWindow):
             tooltip += f"\nLast real sync: {format_sync_local(self._homebase_last_real_sync_at)}"
         if status.last_error:
             tooltip += f"\nLast error: {status.last_error}"
+        if network_active:
+            tooltip += "\nPulsing dot: communicating with Homebase."
+        elif has_pending_work:
+            tooltip += "\nAmber dot: changes are waiting to sync."
         if needs_recovery_review:
             tooltip += "\nClick to review protected local changes."
         elif sync_paused:
@@ -8156,7 +8240,32 @@ class MainWindow(QMainWindow):
             tooltip += f"\n{active_sync_errors} file problem(s) need attention. Click to review."
         elif status.conflicts > 0:
             tooltip += "\nClick to resolve Homebase conflicts."
+        if network_active:
+            accessible_text = f"{text}, communicating"
+            pulse_phase = bool(getattr(self, "_homebase_network_pulse_phase", False))
+            color_key = (
+                "main_window.homebase_badge.activity_green"
+                if pulse_phase
+                else "main_window.homebase_badge.activity_blue"
+            )
+            color_fallback = "#69f0ae" if pulse_phase else "#64b5f6"
+            activity_dot = theme_color(color_key, color_fallback)
+            dot_color = activity_dot.name() if activity_dot.isValid() else color_fallback
+            text = f'{text} <span style="color: {dot_color};">●</span>'
+        elif has_pending_work:
+            accessible_text = f"{text}, changes pending"
+            pending_dot = theme_color(
+                "main_window.homebase_badge.pending_dot",
+                "#ffd54f",
+            )
+            dot_color = pending_dot.name() if pending_dot.isValid() else "#ffd54f"
+            text = f'{text} <span style="color: {dot_color};">●</span>'
+        else:
+            accessible_text = text
         self._homebase_status_label.setText(text)
+        set_accessible_name = getattr(self._homebase_status_label, "setAccessibleName", None)
+        if callable(set_accessible_name):
+            set_accessible_name(accessible_text)
         self._homebase_status_label.setToolTip(tooltip)
         self._homebase_status_label.setStyleSheet(
             self._badge_base_style
@@ -11013,6 +11122,7 @@ class MainWindow(QMainWindow):
                     )
                     return False
             self._homebase_has_unsynced_local_changes = False
+            self._homebase_has_confirmed_pending_local_change = False
             self._homebase_unsynced_marked_at = None
             self._shutdown_homebase_sync()
             remote_ref_path = directory if self._remote_mode else None
@@ -13976,9 +14086,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._dirty_flag = False
-        self._last_saved_content = content
+        # Compare future edits against the editor's lossless round-trip form,
+        # not the raw response. Rendering can normalize harmless details such
+        # as a missing final newline; using the raw response made an untouched
+        # page look dirty as soon as focus moved to another file.
+        try:
+            loaded_editor_content = self.editor.to_markdown()
+        except Exception:
+            loaded_editor_content = content
+        self._last_saved_content = loaded_editor_content
         self._update_dirty_indicator()
-        self._capture_undo_snapshot(path, content, source="load")
+        self._capture_undo_snapshot(path, loaded_editor_content, source="load")
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
         remember_cursor_positions = bool(self._feature_remember_cursor_position_enabled)
         if not remember_cursor_positions:
@@ -14231,7 +14349,7 @@ class MainWindow(QMainWindow):
             fields={"metadata_changes": sorted(metadata_changes)},
         )
         if content_changed or was_virtual:
-            self._mark_homebase_unsynced_local_change()
+            self._mark_homebase_unsynced_local_change(confirmed_pending=True)
             self._mark_recent_self_saved_path(path)
         panels_started_at = performance_start()
         if config.has_active_vault():
@@ -14291,6 +14409,8 @@ class MainWindow(QMainWindow):
             self.right_panel.refresh_calendar()
 
         self.autosave_timer.stop()
+        saved_time = datetime.now().strftime("%I:%M %p").lstrip("0")
+        self._set_save_status(f"Saved {saved_time}")
         display_path = path_to_colon(path) if path else ""
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
         self._schedule_homebase_sync("page save")
@@ -16106,22 +16226,29 @@ class MainWindow(QMainWindow):
         # First try to copy the link under the cursor (includes slug links)
         copied = self.editor._copy_link_or_heading()
         if copied:
-            self.statusBar().showMessage(f"Copied link: {copied}", 3000)
+            self._show_link_copied_status(copied)
         else:
             # Fallback to copying current page
             copied = self.editor.copy_current_page_link()
             if copied:
-                self.statusBar().showMessage(f"Copied link: {copied}", 3000)
+                self._show_link_copied_status(copied)
             else:
                 colon_path = path_to_colon(self.current_path)
                 if colon_path:
                     rooted = ensure_root_colon_link(colon_path)
-                    self.statusBar().showMessage(f"Copied link: {rooted}", 3000)
+                    self._show_link_copied_status(rooted)
+
+    def _show_link_copied_status(self, link_text: str) -> None:
+        """Show copy confirmation without cursor-hover updates replacing it."""
+        self._link_copy_status_until = time.monotonic() + 3.0
+        status_bar = self.statusBar()
+        status_bar.show()
+        status_bar.showMessage(f"Copied link: {link_text}", 3000)
 
     def _on_link_copied(self, link_text: str) -> None:
         """Show status when links are copied via editor context menu."""
         if link_text:
-            self.statusBar().showMessage(f"Copied link: {link_text}", 3000)
+            self._show_link_copied_status(link_text)
 
     def _show_new_page_dialog(
         self,
@@ -19820,6 +19947,8 @@ class MainWindow(QMainWindow):
 
     def _on_link_hovered(self, link: str) -> None:
         """Update status bar when hovering over a link."""
+        if time.monotonic() < getattr(self, "_link_copy_status_until", 0.0):
+            return
         if link:
             self.statusBar().showMessage(f"Link: {link}")
         else:
@@ -23288,18 +23417,60 @@ class MainWindow(QMainWindow):
         if not self.current_path or not getattr(self, "editor", None):
             label.clear()
             label.hide()
+            self._set_save_status("")
             return
+        if getattr(self, "_editor_word_count_path", None) != self.current_path:
+            self._editor_word_count = self._calculate_main_word_count()
+            self._editor_word_count_path = self.current_path
         cursor = self.editor.textCursor()
-        text = f"Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
+        count = int(getattr(self, "_editor_word_count", 0))
+        noun = "word" if count == 1 else "words"
+        text = f"{count:,} {noun} · Ln {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
         if cursor.hasSelection():
             text += f" · {len(cursor.selectedText().replace(chr(0x2029), chr(10))):,} selected"
         label.setText(text)
         colors = chrome_colors(label, getattr(self, "_vault_accent_color", None))
+        status_text = theme_color(
+            "ui.status_bar.text",
+            theme_value("markdown_editor.base.text", colors["text"]),
+        )
+        text_name = status_text.name() if status_text.isValid() else colors["text"]
         label.setStyleSheet(
-            f"color: {colors['muted']}; background: transparent; border: 0; "
+            f"color: {text_name}; background: transparent; border: 0; "
             "padding: 0 6px;"
         )
         label.show()
+
+    def _calculate_main_word_count(self) -> int:
+        """Count visible editor words without rendered links' hidden targets."""
+        editor = getattr(self, "editor", None)
+        if editor is None:
+            return 0
+        text = editor.toPlainText()
+        text = WIKI_LINK_DISPLAY_PATTERN.sub(
+            lambda match: (match.group("label") or match.group("link") or "").strip(),
+            text,
+        )
+        text = STRAY_SENTINEL_PATTERN.sub("", text)
+        return len(re.findall(r"\b[\w]+(?:['’\-][\w]+)*\b", text, flags=re.UNICODE))
+
+    def _schedule_main_word_count_update(self) -> None:
+        timer = getattr(self, "_word_count_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _update_main_word_count(self) -> None:
+        self._editor_word_count = self._calculate_main_word_count()
+        self._editor_word_count_path = self.current_path
+        self._update_main_cursor_status()
+
+    def _set_save_status(self, text: str) -> None:
+        label = getattr(self, "_save_status_label", None)
+        if label is None:
+            return
+        label.setText(text)
+        self._save_status_path = self.current_path if text else None
+        label.setVisible(bool(text))
 
     def _edit_task_from_main_editor(self, block_number: int, anchor_pos) -> None:
         """Open the shared Task Editor for a task hovered in the main editor."""
@@ -24783,6 +24954,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_dirty_status_label"):
             return
         if self._read_only:
+            self._set_save_status("Read only")
             self._dirty_status_label.setText("O/")
             self._dirty_status_label.setStyleSheet(
                 self._badge_base_style
@@ -24796,6 +24968,7 @@ class MainWindow(QMainWindow):
             return
         dirty = bool(getattr(self, "_dirty_flag", False))
         if dirty:
+            self._set_save_status("Unsaved changes")
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
                 self._badge_base_style
@@ -24807,6 +24980,13 @@ class MainWindow(QMainWindow):
             )
             self._dirty_status_label.setToolTip("Unsaved changes")
         else:
+            if not self.current_path:
+                self._set_save_status("")
+            elif (
+                getattr(self, "_save_status_path", None) != self.current_path
+                or not self._save_status_label.text().startswith("Saved")
+            ):
+                self._set_save_status("Saved")
             self._dirty_status_label.setText("●")
             self._dirty_status_label.setStyleSheet(
                 self._badge_base_style
@@ -24849,6 +25029,9 @@ class MainWindow(QMainWindow):
     def _on_editor_text_changed(self) -> None:
         """Start autosave and reconcile dirty state from current editor content."""
         self._last_editor_activity = time.monotonic()
+        schedule_word_count = getattr(self, "_schedule_main_word_count_update", None)
+        if callable(schedule_word_count):
+            schedule_word_count()
         if getattr(self, "_suspend_autosave", False):
             return
         self.autosave_timer.start()

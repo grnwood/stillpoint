@@ -471,5 +471,5 @@ def test_main_window_status_bar_keeps_location_in_breadcrumb(main_window) -> Non
     main_window._open_file("/PageA/PageA.md")
 
     assert main_window.statusBar().currentMessage() == ""
-    assert main_window._cursor_status_label.text() == "Ln 1, Col 1"
+    assert " words · Ln 1, Col 1" in main_window._cursor_status_label.text()
     assert main_window._cursor_status_label.isVisibleTo(main_window.statusBar())

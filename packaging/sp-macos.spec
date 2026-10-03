@@ -14,7 +14,7 @@ def _find_root():
 ROOT = _find_root()
 MAIN = os.path.join(ROOT, 'sp', 'app', 'main.py')
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.0').lstrip('v')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.1').lstrip('v')
 
 hidden = (
     collect_submodules('sp')

@@ -12,6 +12,68 @@ from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow
 
 
+def test_copy_link_status_survives_editor_hover_refresh(main_window):
+    main_window._open_file("/PageA/PageA.md")
+    main_window.statusBar().hide()
+
+    main_window._copy_current_page_link()
+    copied_message = main_window.statusBar().currentMessage()
+    assert copied_message.startswith("Copied link: ")
+    assert not main_window.statusBar().isHidden()
+
+    # Cursor/link scans emit an empty hover immediately around keyboard actions
+    # on some platforms; that must not replace the copy confirmation.
+    main_window._on_link_hovered("")
+    assert main_window.statusBar().currentMessage() == copied_message
+
+
+def test_status_bar_surfaces_save_state_and_word_count(main_window):
+    main_window._open_file("/PageA/PageA.md")
+
+    assert main_window._save_status_label.text() == "Saved"
+    main_window.editor.setPlainText("one two\nthree can't")
+    main_window._update_main_word_count()
+    assert main_window._cursor_status_label.text().startswith("4 words · Ln ")
+
+    main_window._dirty_flag = True
+    main_window._update_dirty_indicator()
+    assert main_window._save_status_label.text() == "Unsaved changes"
+
+    main_window._dirty_flag = False
+    main_window._update_dirty_indicator()
+    assert main_window._save_status_label.text() == "Saved"
+
+
+def test_unedited_loaded_page_uses_editor_round_trip_as_clean_baseline(
+    main_window, monkeypatch
+):
+    original_post = main_window.http.post
+
+    class _ReadResponse:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            # Deliberately omit the final newline that the editor adds while
+            # rendering; this must not turn navigation into an implicit edit.
+            return {"content": "# Untouched\n\nNo edits", "rev": 1, "mtime_ns": 1}
+
+    def post(path, json=None, **kwargs):
+        if path == "/api/file/read" and (json or {}).get("path") == "/PageA/PageA.md":
+            return _ReadResponse()
+        return original_post(path, json=json, **kwargs)
+
+    monkeypatch.setattr(main_window.http, "post", post)
+    main_window._open_file("/PageA/PageA.md")
+
+    assert main_window._last_saved_content == main_window.editor.to_markdown()
+    assert main_window._is_editor_dirty() is False
+
+
 def test_macos_main_toolbar_is_compact_and_centers_icon_controls(qapp, monkeypatch):
     monkeypatch.setattr("sp.app.ui.main_window.platform.system", lambda: "Darwin")
     toolbar = QToolBar()

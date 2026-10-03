@@ -1,7 +1,7 @@
 import pytest
-from PySide6.QtCore import Qt, QMimeData
+from PySide6.QtCore import Qt, QEvent, QMimeData
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QKeyEvent, QTextCursor
 from PySide6.QtTest import QTest
 
 from sp.app.ui.markdown_editor import MarkdownEditor
@@ -75,6 +75,27 @@ def test_vi_paste_prefers_internal_markdown_payload(qapp: QApplication) -> None:
 
     assert inserted == "[:duck:duck:go|Duck Duck Go]"
     assert "[:duck:duck:go|Duck Duck Go]" in editor.to_markdown()
+    editor.close()
+
+
+def test_vi_copy_link_shortcut_falls_back_to_current_page(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    editor.setPlainText("ordinary body text")
+    editor._current_path = "/PageA/PageA.md"
+    editor.set_vi_mode_enabled(True)
+    copied_links: list[str] = []
+    editor.linkCopied.connect(copied_links.append)
+
+    handled = editor._handle_vi_keypress(QKeyEvent(
+        QEvent.KeyPress,
+        Qt.Key_L,
+        Qt.ControlModifier | Qt.ShiftModifier,
+        "L",
+    ))
+
+    assert handled is True
+    assert copied_links == [":PageA"]
+    assert editor._vi_clipboard == ":PageA"
     editor.close()
 
 

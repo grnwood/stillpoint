@@ -2904,7 +2904,7 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     document.write_text("notes")
     window = Window(tmp_path)
 
-    assert window.windowTitle() == f"Folder Navigator — {tmp_path.name}"
+    assert window.windowTitle() == f"{tmp_path.name} — StillPoint Folder Navigator"
     assert window.identity_bar.title_label.text() == "FOLDER NAVIGATOR"
     assert tmp_path.name in window.identity_bar.detail_label.text()
     assert window.identity_bar.detail_label.toolTip() == str(tmp_path)
@@ -2920,7 +2920,7 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
 
     window.open_file(document, pinned=True)
     assert window.windowTitle() == (
-        f"Folder Navigator — {tmp_path.name} — {document.name}"
+        f"{tmp_path.name} — {document.name} — StillPoint Folder Navigator"
     )
     breadcrumb = window.identity_bar.findChildren(QToolButton)
     assert [button.accessibleName() for button in breadcrumb] == [
