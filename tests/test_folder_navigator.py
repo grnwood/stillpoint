@@ -453,6 +453,42 @@ def test_csv_opens_in_incremental_table_and_can_switch_to_raw_text(
     window.close()
 
 
+@pytest.mark.parametrize("value", [
+    "A long description with details that should remain readable. " * 5,
+    "x" * 300,
+])
+def test_table_cell_tooltip_wraps_full_value_with_readable_contrast(app, value):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QHelpEvent, QTextOption
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import SpreadsheetView
+
+    view = SpreadsheetView(TablePreview([["description"], [value]], has_header=True))
+    view.resize(700, 380)
+    view.show()
+    app.processEvents()
+
+    index = view.model.index(0, 0)
+    position = view.table.visualRect(index).center()
+    global_position = view.table.viewport().mapToGlobal(position)
+    event = QHelpEvent(QEvent.ToolTip, position, global_position)
+    assert view.table.viewportEvent(event)
+
+    tip = view.table._cell_tooltip
+    assert tip.isVisible()
+    assert tip.toPlainText() == value
+    assert tip.wordWrapMode() == QTextOption.WrapAtWordBoundaryOrAnywhere
+    assert tip.font().pointSizeF() >= 12
+    assert tip.width() <= view.table.viewport().width() - 24
+    assert tip.height() > tip.fontMetrics().lineSpacing() * 2
+    assert "color: #f8fafc" in tip.styleSheet()
+    assert "background: #243041" in tip.styleSheet()
+
+    view.set_preview(TablePreview([["replacement"]]))
+    assert not tip.isVisible()
+    view.close()
+
+
 def test_stale_table_worker_result_cannot_replace_newer_file(
         tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.core import fingerprint
@@ -2699,7 +2735,7 @@ def test_tree_shift_enter_focuses_editor_and_applies_vi_cursor_style(tmp_path, m
     window.close()
 
 
-def test_markdown_tree_preview_and_plain_enter_keep_folder_focus(tmp_path, monkeypatch, app):
+def test_markdown_tree_preview_and_plain_enter_focuses_preview(tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     import sp.app.folder_navigator.editors as editors
@@ -2727,11 +2763,96 @@ def test_markdown_tree_preview_and_plain_enter_keep_folder_focus(tmp_path, monke
 
     QTest.keyClick(window.tree, Qt.Key_Return)
     app.processEvents()
-    assert window.tree.hasFocus()
-    assert window.active_tab().pinned
+    assert window.active_tab().editor.hasFocus()
+    assert not window.active_tab().pinned
     assert window.tabs.count() == 1
     for tab in window.all_tabs():
         tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_tree_shift_enter_keeps_preview_and_next_selection_gets_new_preview(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.tree.setCurrentIndex(window.model.index(str(first)))
+    window.tree.setFocus()
+    QTest.qWait(window.tree_source_open_delay_ms + 20)
+    app.processEvents()
+    preview_tab = window.active_tab()
+    assert preview_tab.path == first
+    assert not preview_tab.pinned
+
+    QTest.keyClick(window.tree, Qt.Key_Return, Qt.ShiftModifier)
+    app.processEvents()
+    first_tab = window.active_tab()
+    assert first_tab is preview_tab
+    assert first_tab.path == first
+    assert first_tab.pinned
+    assert first_tab.editor.hasFocus()
+    assert window.tabs.count() == 1
+
+    window.tree.setCurrentIndex(window.model.index(str(second)))
+    QTest.qWait(window.tree_source_open_delay_ms + 20)
+    app.processEvents()
+    assert window.tabs.count() == 2
+    assert window.active_tab().path == second
+    assert not window.active_tab().pinned
+    assert window.tabs.indexOf(first_tab) >= 0
+    window.close()
+
+
+def test_tree_double_click_opens_permanent_tab_without_replacing_preview(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    preview = tmp_path / "preview.txt"
+    opened = tmp_path / "opened.txt"
+    next_preview = tmp_path / "next.txt"
+    preview.write_text("preview\n", encoding="utf-8")
+    opened.write_text("opened\n", encoding="utf-8")
+    next_preview.write_text("next\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.tree.setCurrentIndex(window.model.index(str(preview)))
+    window.open_file(preview)
+    preview_tab = window.active_tab()
+
+    window.tree.doubleClicked.emit(window.model.index(str(opened)))
+    app.processEvents()
+
+    assert window.tabs.count() == 2
+    assert window.tabs.indexOf(preview_tab) >= 0
+    assert not preview_tab.pinned
+    assert window.active_tab().path == opened
+    assert window.active_tab().pinned
+    assert window.active_tab().editor.hasFocus()
+
+    window.open_file(next_preview)
+    assert window.tabs.count() == 2
+    assert window.tabs.widget(0).path == next_preview
+    assert not window.tabs.widget(0).pinned
+    assert window.tabs.widget(1).path == opened
+
+    window.tree.doubleClicked.emit(window.model.index(str(preview)))
+    app.processEvents()
+    assert window.tabs.count() == 3
+    assert window.active_tab().path == preview
+    assert window.active_tab().pinned
+
+    window.tree.doubleClicked.emit(window.model.index(str(opened)))
+    app.processEvents()
+    assert window.tabs.count() == 3
     window.close()
 
 

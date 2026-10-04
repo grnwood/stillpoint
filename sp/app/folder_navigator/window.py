@@ -25,7 +25,7 @@ from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEven
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QImageReader, QKeySequence, QPalette,
-    QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat)
+    QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat, QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListView, QListWidgetItem, QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
@@ -279,13 +279,18 @@ class NavigatorTree(QTreeView):
                 from PySide6.QtGui import QKeyEvent
                 event = QKeyEvent(event.type(), mapping[key], Qt.NoModifier)
         if key in (Qt.Key_Return, Qt.Key_Enter):
+            modifiers = mods & ~Qt.KeypadModifier
+            if modifiers not in (Qt.NoModifier, Qt.ShiftModifier):
+                super().keyPressEvent(event)
+                return
             index = self.currentIndex()
             model = self.model()
             if index.isValid() and model.isDir(index):
                 self.setExpanded(index, not self.isExpanded(index))
             elif index.isValid():
-                signal = self.openFileAndFocus if mods == Qt.ShiftModifier else self.openFile
-                signal.emit(model.filePath(index), True)
+                pinned = modifiers == Qt.ShiftModifier
+                signal = self.openFileAndFocus if pinned else self.openFile
+                signal.emit(model.filePath(index), pinned)
             return
         super().keyPressEvent(event)
 
@@ -956,6 +961,24 @@ class FilterHeaderView(QHeaderView):
 class PreviewTableView(QTableView):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._cell_tooltip = QTextEdit(self)
+        self._cell_tooltip.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
+        self._cell_tooltip.setObjectName("folderCellTooltip")
+        self._cell_tooltip.setReadOnly(True)
+        self._cell_tooltip.setFocusPolicy(Qt.NoFocus)
+        self._cell_tooltip.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self._cell_tooltip.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._cell_tooltip.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._cell_tooltip.document().setDocumentMargin(0)
+        self._cell_tooltip.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._cell_tooltip.setStyleSheet(
+            "QTextEdit#folderCellTooltip {"
+            "background: #243041; color: #f8fafc;"
+            "border: 1px solid #90a4b8; border-radius: 6px;"
+            "padding: 12px;"
+            "}"
+        )
+        self._tooltip_cell = None
         self.vi_enabled = False
         self.vi_page_shortcuts = []
         for sequence, page_key in zip(
@@ -966,6 +989,56 @@ class PreviewTableView(QTableView):
                 lambda selected=page_key: self._vi_page(selected)
             )
             self.vi_page_shortcuts.append(shortcut)
+
+    def hide_cell_tooltip(self):
+        self._tooltip_cell = None
+        self._cell_tooltip.hide()
+
+    def viewportEvent(self, event):  # type: ignore[override]
+        if event.type() == QEvent.ToolTip:
+            index = self.indexAt(event.pos())
+            value = index.data(Qt.ToolTipRole) if index.isValid() else None
+            if value is None and index.isValid():
+                value = index.data(Qt.DisplayRole)
+            text = str(value) if value is not None else ""
+            if text:
+                self._show_cell_tooltip(text, event.globalPos(), index)
+                event.accept()
+                return True
+            self.hide_cell_tooltip()
+            event.ignore()
+            return True
+        if event.type() in (QEvent.Leave, QEvent.Hide, QEvent.Wheel):
+            self.hide_cell_tooltip()
+        elif event.type() == QEvent.MouseMove and self._tooltip_cell is not None:
+            index = self.indexAt(event.pos())
+            if not index.isValid() or (index.row(), index.column()) != self._tooltip_cell:
+                self.hide_cell_tooltip()
+        return super().viewportEvent(event)
+
+    def _show_cell_tooltip(self, text, global_position, index):
+        tip = self._cell_tooltip
+        font = QFont(self.font())
+        font.setPointSizeF(max(12.0, font.pointSizeF() + 2.0))
+        tip.setFont(font)
+        screen = QApplication.screenAt(global_position) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        max_width = max(120, min(640, self.viewport().width() - 24, available.width() - 24))
+        text_width = max(tip.fontMetrics().horizontalAdvance(line) for line in text.splitlines() or [""])
+        tip.setFixedWidth(min(max_width, max(180, text_width + 32)))
+        tip.setPlainText(text)
+        tip.document().setTextWidth(tip.width() - 2 * tip.frameWidth())
+        height = int(tip.document().size().height()) + 2 * tip.frameWidth() + 2
+        tip.setFixedHeight(min(max(80, height), available.height() - 24))
+        x = min(global_position.x() + 16, available.right() - tip.width())
+        y = global_position.y() + 20
+        if y + tip.height() > available.bottom():
+            y = global_position.y() - tip.height() - 12
+        tip.move(max(available.left(), x), max(available.top(), y))
+        tip.show()
+        self._tooltip_cell = (index.row(), index.column())
 
     def _vi_page(self, page_key):
         if not self.vi_enabled:
@@ -1200,6 +1273,7 @@ class SpreadsheetView(QWidget):
     def set_preview(self, preview):
         self.preview = preview
         self.model = TablePreviewModel(preview, self)
+        self.table.hide_cell_tooltip()
         self.table.setModel(self.model)
         self._sort_column = -1
         self._sort_order = Qt.AscendingOrder
@@ -2254,6 +2328,7 @@ class Picker(QDialog):
             self.tree.setRootIndex(window.model.index(str(window.scope)))
             self.tree.vi_enabled = window.tree.vi_enabled
             self.tree.openFile.connect(self._opened)
+            self.tree.openFileAndFocus.connect(self._opened)
             self.tree.escapePressed.connect(self.reject)
             layout.addWidget(self.tree)
             active = window.active_tab()
@@ -2272,7 +2347,7 @@ class Picker(QDialog):
         self.tree.setFocus()
 
     def _opened(self, path, pinned):
-        self.window.open_file(Path(path))
+        self.window.open_file(Path(path), pinned=pinned)
         tab = self.window.active_tab()
         self.accept()
         QTimer.singleShot(0, lambda selected=tab: self.window._focus_tab_content(selected))
@@ -2595,13 +2670,13 @@ class Window(QMainWindow):
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
-        self.tree.openFile.connect(self._open_tree_file_keep_focus)
+        self.tree.openFile.connect(self._open_tree_file)
         self.tree.openFileAndFocus.connect(self._open_tree_file)
         self.tree.bookmarkPickerRequested.connect(self.bookmark_picker)
         self.tree.folderPickerRequested.connect(self.folder_picker)
         self.tree.pathsDropped.connect(self._copy_dropped_paths)
         self.tree.pathsMoved.connect(self._move_dropped_paths)
-        self.tree.doubleClicked.connect(lambda i: self.open_file(Path(self.model.filePath(i)), pinned=True) if not self.model.isDir(i) else None)
+        self.tree.doubleClicked.connect(self._tree_double_clicked)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
@@ -2662,7 +2737,10 @@ class Window(QMainWindow):
         self.tabs.tabBarDoubleClicked.connect(lambda i: self.keep_open(i))
         self.tabs.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
-        self.welcome = QLabel(f"{self.root.name}\n\nSelect a file to preview · Enter to keep it open · Ctrl+J to find a file")
+        self.welcome = QLabel(
+            f"{self.root.name}\n\nSelect a file to preview · Enter to focus\n"
+            "Shift+Enter or double-click to keep open · Ctrl+J to find a file"
+        )
         self.welcome.setAlignment(Qt.AlignCenter)
         self.content = QSplitter(Qt.Vertical)
         self.content.addWidget(self.tabs)
@@ -3897,11 +3975,6 @@ class Window(QMainWindow):
                 # appears.
                 self._schedule_markdown_preview(self.active_tab(), immediate=True)
 
-    def _open_tree_file_keep_focus(self, path, pinned):
-        self._cancel_pending_tree_markdown()
-        self.open_file(Path(path), pinned=pinned)
-        self._schedule_markdown_preview(self.active_tab(), immediate=True)
-
     def _open_tree_file(self, path, pinned):
         """Open a tree selection and hand keyboard control to its editor."""
         self._cancel_pending_tree_markdown()
@@ -3910,6 +3983,10 @@ class Window(QMainWindow):
         if tab and tab.editor:
             self._schedule_markdown_preview(tab, immediate=True)
         self._focus_tab_content(tab)
+
+    def _tree_double_clicked(self, index):
+        if index.isValid() and not self.model.isDir(index):
+            self._open_tree_file(self.model.filePath(index), True)
 
     def open_file(self, path: Path, pinned=False, line=None, defer_enhancements=False,
                   force_text=False, replace_preview=True):
@@ -3939,7 +4016,7 @@ class Window(QMainWindow):
             return
         preview = (
             next((i for i, tab in enumerate(self.all_tabs()) if not tab.pinned and not tab.dirty), -1)
-            if replace_preview else -1
+            if replace_preview and not pinned else -1
         )
         if preview >= 0:
             previous_preview = self.tabs.widget(preview)
@@ -4025,7 +4102,10 @@ class Window(QMainWindow):
         tab.pinned = pinned
         if getattr(tab, "preview_kind", None):
             tab.setProperty("folderPreviewHydrated", False)
-        index = self.tabs.addTab(tab, path.name)
+        index = (
+            self.tabs.insertTab(preview, tab, path.name)
+            if preview >= 0 else self.tabs.addTab(tab, path.name)
+        )
         if path.suffix.casefold() in DIAGRAM_SUFFIXES and not force_text:
             tab.preview_signature = self._diagram_preview_signature(path)
         elif path.suffix.casefold() in DOCUMENT_SUFFIXES and not force_text:
@@ -5211,7 +5291,7 @@ class Window(QMainWindow):
         index = self.tabs.indexOf(tab)
         if index < 0:
             return
-        state = "Pinned" if tab.pinned else "Preview · Enter or double-click to keep open"
+        state = "Pinned" if tab.pinned else "Preview · Shift+Enter or double-click to keep open"
         if tab.dirty:
             state = "Unsaved changes · pinned"
         self.tabs.setTabToolTip(index, f"{tab.path}\n{state}")
