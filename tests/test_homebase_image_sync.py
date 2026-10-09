@@ -582,6 +582,13 @@ class TestImageSyncPull:
         assert homebase["pending_missing_object_resolution_paths"] == ["Page.md"]
         assert engine.list_sync_errors(limit=10)[0]["active"] is True
 
+        engine._sync_once()
+
+        assert client.latest_checkpoint != checkpoint_id
+        assert engine.list_sync_errors(limit=10) == []
+        completed_state = sync_engine._read_json(engine._state_path, engine._default_state())
+        assert "pending_missing_object_resolution_paths" not in completed_state["homebase"]
+
     def test_preserve_local_files_repairs_an_exact_missing_object_without_snapshot(
         self, tmp_path, monkeypatch
     ):

@@ -565,17 +565,14 @@ class HomebaseSyncEngine:
         state = _read_json(self._state_path, self._default_state())
         hb = state.setdefault("homebase", {})
         key = derive_key_from_passphrase(self.cfg.passphrase, self.cfg.vault_id)
-        self.suspend_sync("missing Homebase object recovery")
-        resumed = False
-        client: Optional[HomebaseClient] = None
+        client = HomebaseClient(
+            base_url=self.cfg.remote_url,
+            token=self.cfg.auth_token,
+            vault_id=self.cfg.vault_id,
+            local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
+        )
         try:
-            client = HomebaseClient(
-                base_url=self.cfg.remote_url,
-                token=self.cfg.auth_token,
-                vault_id=self.cfg.vault_id,
-                local_ui_token=self.cfg.local_ui_token,
-                verify_ssl=self.cfg.verify_ssl,
-            )
             latest = client.get_latest()
             checkpoint_id = str(latest.get("checkpoint_id") or "").strip()
             if checkpoint_id:
@@ -593,7 +590,6 @@ class HomebaseSyncEngine:
             hb["last_error"] = None
             hb["error_count"] = 0
             hb["backoff_until"] = None
-            self._complete_missing_object_resolutions(hb)
             _write_json(self._state_path, state)
             _write_json(
                 self._conflict_path,
@@ -936,7 +932,6 @@ class HomebaseSyncEngine:
             hb["last_error"] = None
             hb["error_count"] = 0
             hb["backoff_until"] = None
-            self._complete_missing_object_resolutions(hb)
             _write_json(self._state_path, state)
             _write_json(
                 self._scan_path,
@@ -1251,14 +1246,17 @@ class HomebaseSyncEngine:
             plaintext = read_bytes(local_path)
             local_versions.append((rel_path, object_id, plaintext, encrypt_bytes(key, plaintext)))
 
-        client = HomebaseClient(
-            base_url=self.cfg.remote_url,
-            token=self.cfg.auth_token,
-            vault_id=self.cfg.vault_id,
-            local_ui_token=self.cfg.local_ui_token,
-            verify_ssl=self.cfg.verify_ssl,
-        )
+        self.suspend_sync("missing Homebase object recovery")
+        resumed = False
+        client: Optional[HomebaseClient] = None
         try:
+            client = HomebaseClient(
+                base_url=self.cfg.remote_url,
+                token=self.cfg.auth_token,
+                vault_id=self.cfg.vault_id,
+                local_ui_token=self.cfg.local_ui_token,
+                verify_ssl=self.cfg.verify_ssl,
+            )
             latest = client.get_latest()
             checkpoint_id = str(latest.get("checkpoint_id") or "").strip().lower()
             if not self._is_valid_object_id(checkpoint_id):
@@ -1992,7 +1990,12 @@ class HomebaseSyncEngine:
                 oid = str(meta.get("object_id") or "").strip().lower()
                 if rel_key and self._is_valid_object_id(oid):
                     current_object_map[rel_key] = oid
-            if current_object_map == object_cache and (hb.get("last_pushed_checkpoint_id") or remote_head):
+            resolving_missing_objects = bool(hb.get("pending_missing_object_resolution_paths"))
+            if (
+                not resolving_missing_objects
+                and current_object_map == object_cache
+                and (hb.get("last_pushed_checkpoint_id") or remote_head)
+            ):
                 hb["last_seen_latest_checkpoint_id"] = remote_head or hb.get("last_seen_latest_checkpoint_id")
                 if not hb.get("last_pushed_checkpoint_id") and remote_head:
                     # Treat an exactly matching pulled checkpoint as the local
@@ -2003,6 +2006,7 @@ class HomebaseSyncEngine:
                 hb["last_error"] = None
                 hb["error_count"] = 0
                 hb["backoff_until"] = None
+                self._complete_missing_object_resolutions(hb)
                 _write_json(self._state_path, state)
                 _write_json(self._scan_path, current_scan_payload)
                 if confirmed_local_deletions:
@@ -2037,6 +2041,7 @@ class HomebaseSyncEngine:
             hb["last_error"] = None
             hb["error_count"] = 0
             hb["backoff_until"] = None
+            self._complete_missing_object_resolutions(hb)
             _write_json(self._state_path, state)
             _write_json(self._scan_path, current_scan_payload)
             self._save_object_cache(current_object_map)
