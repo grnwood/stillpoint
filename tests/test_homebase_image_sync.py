@@ -619,6 +619,28 @@ class TestImageSyncPull:
         assert client.has_object(missing_id)
         assert engine.list_recovery_events() == []
 
+    def test_preserve_local_files_never_blocks_while_a_sync_is_active(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Page.md").write_text("local version\n", encoding="utf-8")
+        engine = HomebaseSyncEngine(_make_cfg(vault))
+        engine._record_sync_error(
+            path="Page.md",
+            phase="download",
+            reason="Object missing",
+            object_id="a" * 64,
+        )
+        with engine._cv:
+            engine._sync_in_progress = True
+
+        with pytest.raises(ValueError, match="finishing an active sync"):
+            engine.preserve_local_files_for_missing_objects()
+
+        with engine._cv:
+            assert engine._sync_suspended is True
+            engine._sync_in_progress = False
+        engine.resume_sync("test cleanup")
+
     def test_pull_rejects_object_whose_bytes_do_not_match_id(self, tmp_path):
         vault_a = tmp_path / "vault_a"
         vault_a.mkdir()

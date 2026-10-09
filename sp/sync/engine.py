@@ -519,6 +519,19 @@ class HomebaseSyncEngine:
                 self._cv.wait(timeout=0.1)
         _log(f"sync suspended ({reason})")
 
+    def try_suspend_sync(self, reason: str = "transaction") -> bool:
+        """Pause new cycles without blocking a caller on an active sync."""
+        with self._cv:
+            self._sync_suspended = True
+            self._hibernating = False
+            busy = self._sync_in_progress
+            self._cv.notify_all()
+        if busy:
+            _log(f"sync suspension pending active cycle ({reason})")
+            return False
+        _log(f"sync suspended ({reason})")
+        return True
+
     def resume_sync(self, reason: str = "transaction", *, sync_now: bool = False) -> None:
         """Resume cycles, optionally coalescing pending work into one immediate run."""
         with self._cv:
@@ -1246,7 +1259,11 @@ class HomebaseSyncEngine:
             plaintext = read_bytes(local_path)
             local_versions.append((rel_path, object_id, plaintext, encrypt_bytes(key, plaintext)))
 
-        self.suspend_sync("missing Homebase object recovery")
+        if not self.try_suspend_sync("missing Homebase object recovery"):
+            raise ValueError(
+                "Homebase is finishing an active sync. It has been paused; "
+                "select this recovery action again once the status stops changing."
+            )
         resumed = False
         client: Optional[HomebaseClient] = None
         try:
