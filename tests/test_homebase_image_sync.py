@@ -641,6 +641,34 @@ class TestImageSyncPull:
             engine._sync_in_progress = False
         engine.resume_sync("test cleanup")
 
+    def test_pending_missing_object_resolution_publishes_when_local_scan_is_unchanged(
+        self, tmp_path, monkeypatch
+    ):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Page.md").write_text("surviving local version\n", encoding="utf-8")
+        cfg = _make_cfg(vault)
+        client = FakeClient()
+        monkeypatch.setattr(sync_engine, "HomebaseClient", lambda **_kwargs: client)
+        engine = HomebaseSyncEngine(cfg)
+
+        engine._sync_once()
+        engine._record_sync_error(
+            path="Page.md",
+            phase="download",
+            reason="Object missing",
+            object_id="a" * 64,
+        )
+        state = sync_engine._read_json(engine._state_path, engine._default_state())
+        state["homebase"]["pending_missing_object_resolution_paths"] = ["Page.md"]
+        _write_json(engine._state_path, state)
+
+        engine._sync_once()
+
+        assert engine.list_sync_errors(limit=10) == []
+        completed_state = sync_engine._read_json(engine._state_path, engine._default_state())
+        assert "pending_missing_object_resolution_paths" not in completed_state["homebase"]
+
     def test_pull_rejects_object_whose_bytes_do_not_match_id(self, tmp_path):
         vault_a = tmp_path / "vault_a"
         vault_a.mkdir()

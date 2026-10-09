@@ -1757,6 +1757,7 @@ class HomebaseSyncEngine:
                 "entries": current_scan,
             }
             unchanged_scan = previous_scan == current_scan
+            resolving_missing_objects = bool(hb.get("pending_missing_object_resolution_paths"))
             _log(
                 f"scan complete files={len(current_scan)} unchanged_scan={unchanged_scan} "
                 f"hashed={hashed_files} reused_hashes={reused_hashes} "
@@ -1768,6 +1769,7 @@ class HomebaseSyncEngine:
                 and hb.get("last_pushed_checkpoint_id")
                 and not pulled_remote
                 and not confirmed_local_deletions
+                and not resolving_missing_objects
             ):
                 last_sync_at = _utc_now_iso()
                 self._no_change_streak = min(
@@ -1820,7 +1822,13 @@ class HomebaseSyncEngine:
             # or the last sync cycle ended in an error.  After a clean push
             # the objects in the cache are confirmed server-side and HEAD
             # requests for every unchanged file would be wasteful.
-            needs_cache_verify = not hb.get("last_pushed_checkpoint_id") or int(hb.get("error_count", 0)) > 0
+            needs_cache_verify = (
+                not resolving_missing_objects
+                and (
+                    not hb.get("last_pushed_checkpoint_id")
+                    or int(hb.get("error_count", 0)) > 0
+                )
+            )
             verified_missing = 0
             upload_jobs: list[tuple[str, str, bytes]] = []
             preparation_jobs: list[tuple[str, str, str, dict[str, Any]]] = []
@@ -2007,7 +2015,6 @@ class HomebaseSyncEngine:
                 oid = str(meta.get("object_id") or "").strip().lower()
                 if rel_key and self._is_valid_object_id(oid):
                     current_object_map[rel_key] = oid
-            resolving_missing_objects = bool(hb.get("pending_missing_object_resolution_paths"))
             if (
                 not resolving_missing_objects
                 and current_object_map == object_cache
