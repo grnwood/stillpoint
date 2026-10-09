@@ -7721,8 +7721,13 @@ class MainWindow(QMainWindow):
         remove_remote_btn.setObjectName("homebaseSyncDeleteRemoteButton")
         remove_remote_btn.hide()
         remove_remote_btn.setEnabled(False)
+        preserve_local_btn = QPushButton("Preserve local files and replace missing remote versions…", dialog)
+        preserve_local_btn.setObjectName("homebaseSyncPreserveMissingObjectsButton")
+        preserve_local_btn.hide()
+        preserve_local_btn.setEnabled(False)
         layout.addWidget(advanced_toggle)
         layout.addWidget(remove_remote_btn)
+        layout.addWidget(preserve_local_btn)
 
         buttons = QHBoxLayout()
         retry_btn = QPushButton("Retry Failed Files", dialog)
@@ -7741,7 +7746,10 @@ class MainWindow(QMainWindow):
 
         def _friendly_reason(phase: str) -> str:
             if phase == "download":
-                return "StillPoint could not download this file from Homebase. Retrying is usually safe."
+                return (
+                    "Homebase's checkpoint refers to content that is missing. "
+                    "Retrying cannot restore it unless another device still has the original version."
+                )
             if phase == "path":
                 return "This Homebase path could not be represented on this device's filesystem."
             if phase == "delete":
@@ -7791,6 +7799,28 @@ class MainWindow(QMainWindow):
                 if not can_delete_remote
                 else "Publish a deletion of this path to every Homebase device."
             )
+            missing_downloads = [
+                entry
+                for entry in errors
+                if entry.get("active")
+                and str(entry.get("phase") or "").strip().lower() == "download"
+                and str(entry.get("object_id") or "").strip()
+            ]
+            can_preserve_local = bool(missing_downloads and self._homebase_sync_engine and self.vault_root)
+            if can_preserve_local:
+                try:
+                    can_preserve_local = all(
+                        (Path(self.vault_root) / str(entry.get("path") or "")).is_file()
+                        for entry in missing_downloads
+                    )
+                except OSError:
+                    can_preserve_local = False
+            preserve_local_btn.setEnabled(can_preserve_local)
+            preserve_local_btn.setToolTip(
+                "Creates pinned recovery copies before replacing every missing remote version with this device's local files."
+                if can_preserve_local
+                else "Every missing remote file must still exist locally before it can be preserved safely."
+            )
 
         def _remove_from_homebase() -> None:
             item = list_widget.currentItem()
@@ -7826,6 +7856,33 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Homebase removal queued for /{path}.", 5000)
             dialog.accept()
 
+        def _preserve_local_files() -> None:
+            if not self._homebase_sync_engine:
+                return
+            answer = QMessageBox.question(
+                dialog,
+                "Preserve local files and replace missing remote versions",
+                "StillPoint will first create pinned recovery copies outside this vault. "
+                "It will then use this device's local versions to replace every active "
+                "missing-object version in Homebase.\n\n"
+                "This safely preserves the local files, but the original remote versions "
+                "remain unavailable unless another device still has them. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                outcome = self._homebase_sync_engine.preserve_local_files_for_missing_objects()
+            except Exception as exc:
+                QMessageBox.critical(dialog, "Homebase", f"Could not preserve local files: {exc}")
+                return
+            self.statusBar().showMessage(
+                f"Homebase recovery queued ({outcome['repaired']} repaired, {outcome['preserved']} preserved).",
+                6000,
+            )
+            dialog.accept()
+
         def _retry() -> None:
             if self._homebase_sync_engine:
                 self._homebase_sync_engine.sync_now("retry failed files")
@@ -7843,6 +7900,7 @@ class MainWindow(QMainWindow):
 
         list_widget.currentItemChanged.connect(lambda _cur, _prev: _update_detail())
         remove_remote_btn.clicked.connect(_remove_from_homebase)
+        preserve_local_btn.clicked.connect(_preserve_local_files)
         retry_btn.clicked.connect(_retry)
         dismiss_btn.clicked.connect(_dismiss_history)
         technical_toggle.toggled.connect(
@@ -7854,6 +7912,7 @@ class MainWindow(QMainWindow):
         advanced_toggle.toggled.connect(
             lambda checked: (
                 remove_remote_btn.setVisible(checked),
+                preserve_local_btn.setVisible(checked),
                 advanced_toggle.setText("Hide advanced actions" if checked else "Show advanced actions"),
             )
         )

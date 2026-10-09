@@ -288,13 +288,13 @@ class RecoveryStore:
                 rel = item["path"]
                 target = self.path(rel)
                 action = item["planned_action"]
-                if action not in {"create", "overwrite", "delete", "conflict-copy"}:
+                if action not in {"create", "overwrite", "delete", "conflict-copy", "preserve"}:
                     raise RecoveryError(f"Invalid recovery action: {action}")
                 current = target.read_bytes() if target.is_file() else None
                 expected = item.get("expected_old_hash")
                 if expected is not None and hashlib.sha256(current or b"").hexdigest() != expected:
                     raise RecoveryError(f"Local file changed during recovery preparation: {rel}")
-                if action in {"overwrite", "delete"} and current is None:
+                if action in {"overwrite", "delete", "preserve"} and current is None:
                     raise RecoveryError(f"Local file disappeared during recovery preparation: {rel}")
                 if action == "create" and current is not None:
                     raise RecoveryError(f"Local file appeared during recovery preparation: {rel}")
@@ -302,7 +302,7 @@ class RecoveryStore:
                 old_size = None
                 old_mtime_ns = None
                 old_mode = None
-                if action in {"overwrite", "delete"}:
+                if action in {"overwrite", "delete", "preserve"}:
                     old_id, _ = self._put_object(current)
                     stat = target.stat()
                     old_size = len(current)
@@ -458,7 +458,7 @@ class RecoveryStore:
                     raise RecoveryError(f"Created file changed since pull: {rel}")
             elif prior is None:
                 continue
-            elif action == "overwrite" and rel not in allowed and (current is None or hashlib.sha256(current).hexdigest() != item.get("new_object_id")):
+            elif action in {"overwrite", "preserve"} and rel not in allowed and (current is None or hashlib.sha256(current).hexdigest() != item.get("new_object_id")):
                 raise RecoveryError(f"File changed since pull: {rel}")
             elif action == "delete" and current is not None and rel not in allowed:
                 raise RecoveryError(f"Deleted file was recreated since pull: {rel}")

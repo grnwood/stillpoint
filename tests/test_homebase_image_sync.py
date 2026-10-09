@@ -539,6 +539,79 @@ class TestImageSyncPull:
             for item in sync_errors
         )
 
+    def test_preserve_local_files_snapshots_nonmatching_missing_objects_before_superseding(
+        self, tmp_path, monkeypatch
+    ):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "Page.md").write_text("remote version\n", encoding="utf-8")
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(HomebaseSyncEngine(_make_cfg(vault_a)), client)
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+        missing_id = manifest["entries"]["Page.md"]["object_id"]
+        del client.objects[missing_id]
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        (vault_b / "Page.md").write_text("surviving local version\n", encoding="utf-8")
+        cfg_b = _make_cfg(vault_b, device_id="device-b")
+        engine = HomebaseSyncEngine(cfg_b)
+        engine._record_sync_error(
+            path="Page.md",
+            phase="download",
+            reason="Object missing",
+            object_id=missing_id,
+        )
+        monkeypatch.setattr(sync_engine, "HomebaseClient", lambda **_kwargs: client)
+
+        outcome = engine.preserve_local_files_for_missing_objects()
+
+        assert outcome == {"repaired": 0, "preserved": 1}
+        events = engine.list_recovery_events()
+        assert len(events) == 1
+        event = events[0]
+        assert event["operation"] == "missing-object-local-resolution"
+        assert event["pinned"] is True
+        assert event["paths"][0]["planned_action"] == "preserve"
+        assert engine.recovery.read_object(event["paths"][0]["old_object_id"]) == (
+            vault_b / "Page.md"
+        ).read_bytes()
+        state = sync_engine._read_json(engine._state_path, engine._default_state())
+        homebase = state["homebase"]
+        assert homebase["last_seen_latest_checkpoint_id"] == checkpoint_id
+        assert homebase["pending_missing_object_resolution_paths"] == ["Page.md"]
+        assert engine.list_sync_errors(limit=10)[0]["active"] is True
+
+    def test_preserve_local_files_repairs_an_exact_missing_object_without_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        vault_a = tmp_path / "vault_a"
+        vault_a.mkdir()
+        (vault_a / "Page.md").write_text("shared version\n", encoding="utf-8")
+        client = FakeClient()
+        checkpoint_id = _push_via_engine(HomebaseSyncEngine(_make_cfg(vault_a)), client)
+        manifest = json.loads(client.get_manifest(checkpoint_id))
+        missing_id = manifest["entries"]["Page.md"]["object_id"]
+        del client.objects[missing_id]
+
+        vault_b = tmp_path / "vault_b"
+        vault_b.mkdir()
+        (vault_b / "Page.md").write_text("shared version\n", encoding="utf-8")
+        engine = HomebaseSyncEngine(_make_cfg(vault_b, device_id="device-b"))
+        engine._record_sync_error(
+            path="Page.md",
+            phase="download",
+            reason="Object missing",
+            object_id=missing_id,
+        )
+        monkeypatch.setattr(sync_engine, "HomebaseClient", lambda **_kwargs: client)
+
+        outcome = engine.preserve_local_files_for_missing_objects()
+
+        assert outcome == {"repaired": 1, "preserved": 0}
+        assert client.has_object(missing_id)
+        assert engine.list_recovery_events() == []
+
     def test_pull_rejects_object_whose_bytes_do_not_match_id(self, tmp_path):
         vault_a = tmp_path / "vault_a"
         vault_a.mkdir()

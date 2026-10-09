@@ -103,7 +103,7 @@ class HomebaseRecoveryDialog(QDialog):
         self.events.clear()
         self.usage.setText(f"Protected local copies: {self.store.usage_bytes() / 1024**2:.1f} MiB")
         for event in self.store.list_events():
-            counts = {action: 0 for action in ("create", "overwrite", "delete")}
+            counts = {action: 0 for action in ("create", "overwrite", "delete", "preserve")}
             for path in event["paths"]:
                 action = path["planned_action"]
                 if action in counts:
@@ -114,7 +114,7 @@ class HomebaseRecoveryDialog(QDialog):
                 for path in event["paths"]
                 if path.get("old_object_id") and self.store._object_path(path["old_object_id"]).is_file()
             )
-            affected = counts["create"] + counts["overwrite"] + counts["delete"]
+            affected = counts["create"] + counts["overwrite"] + counts["delete"] + counts["preserve"]
             state_label = {
                 "complete": "Ready to restore",
                 "protected": "Waiting for review",
@@ -134,6 +134,7 @@ class HomebaseRecoveryDialog(QDialog):
                 f"Created files: {counts['create']}\n"
                 f"Changed files: {counts['overwrite']}\n"
                 f"Removed files: {counts['delete']}\n"
+                f"Preserved local files: {counts['preserve']}\n"
                 f"Source device: {event.get('remote_device_id') or 'local'}\n"
                 f"Checkpoint: {event.get('target_checkpoint_id') or 'local'}\n"
                 f"Protected bytes: {size / 1024:.1f} KiB"
@@ -158,6 +159,7 @@ class HomebaseRecoveryDialog(QDialog):
                 "overwrite": "Changed by Homebase",
                 "delete": "Removed by Homebase",
                 "conflict-copy": "Saved as a conflict copy",
+                "preserve": "Saved before replacing a missing remote version",
             }.get(path["planned_action"], "Changed by Homebase")
             result = str(path.get("result") or "")
             suffix = " · needs attention" if result == "failed" else ""

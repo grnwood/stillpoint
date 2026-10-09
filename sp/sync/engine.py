@@ -565,14 +565,17 @@ class HomebaseSyncEngine:
         state = _read_json(self._state_path, self._default_state())
         hb = state.setdefault("homebase", {})
         key = derive_key_from_passphrase(self.cfg.passphrase, self.cfg.vault_id)
-        client = HomebaseClient(
-            base_url=self.cfg.remote_url,
-            token=self.cfg.auth_token,
-            vault_id=self.cfg.vault_id,
-            local_ui_token=self.cfg.local_ui_token,
-            verify_ssl=self.cfg.verify_ssl,
-        )
+        self.suspend_sync("missing Homebase object recovery")
+        resumed = False
+        client: Optional[HomebaseClient] = None
         try:
+            client = HomebaseClient(
+                base_url=self.cfg.remote_url,
+                token=self.cfg.auth_token,
+                vault_id=self.cfg.vault_id,
+                local_ui_token=self.cfg.local_ui_token,
+                verify_ssl=self.cfg.verify_ssl,
+            )
             latest = client.get_latest()
             checkpoint_id = str(latest.get("checkpoint_id") or "").strip()
             if checkpoint_id:
@@ -590,6 +593,7 @@ class HomebaseSyncEngine:
             hb["last_error"] = None
             hb["error_count"] = 0
             hb["backoff_until"] = None
+            self._complete_missing_object_resolutions(hb)
             _write_json(self._state_path, state)
             _write_json(
                 self._conflict_path,
@@ -932,6 +936,7 @@ class HomebaseSyncEngine:
             hb["last_error"] = None
             hb["error_count"] = 0
             hb["backoff_until"] = None
+            self._complete_missing_object_resolutions(hb)
             _write_json(self._state_path, state)
             _write_json(
                 self._scan_path,
@@ -1215,6 +1220,130 @@ class HomebaseSyncEngine:
         self._save_local_deletions(deletions)
         _log(f"local deletion confirmed path={rel_path}")
         return True
+
+    def preserve_local_files_for_missing_objects(self) -> dict[str, int]:
+        """Repair matching objects and safely supersede irrecoverable remote versions.
+
+        A missing object cannot be reconstructed from a different local version.
+        Before allowing that local version to replace the broken checkpoint, retain
+        a pinned recovery copy outside the vault.
+        """
+        errors = [
+            item
+            for item in self.list_sync_errors(limit=0)
+            if item.get("active")
+            and str(item.get("phase") or "").strip().lower() == "download"
+            and self._is_valid_object_id(str(item.get("object_id") or "").strip().lower())
+        ]
+        if not errors:
+            raise ValueError("There are no active missing Homebase objects to resolve")
+
+        key = derive_key_from_passphrase(self.cfg.passphrase, self.cfg.vault_id)
+        local_versions: list[tuple[str, str, bytes, bytes]] = []
+        for error in errors:
+            rel_path = self._canonical_rel_path(str(error.get("path") or ""))
+            object_id = str(error.get("object_id") or "").strip().lower()
+            if not rel_path or rel_path.startswith(".stillpoint/"):
+                raise ValueError("A missing Homebase object has an unsafe path")
+            local_path = self._local_path_for_rel(rel_path)
+            if not local_path.is_file():
+                raise ValueError(f"Local file required to preserve '/{rel_path}' is missing")
+            plaintext = read_bytes(local_path)
+            local_versions.append((rel_path, object_id, plaintext, encrypt_bytes(key, plaintext)))
+
+        client = HomebaseClient(
+            base_url=self.cfg.remote_url,
+            token=self.cfg.auth_token,
+            vault_id=self.cfg.vault_id,
+            local_ui_token=self.cfg.local_ui_token,
+            verify_ssl=self.cfg.verify_ssl,
+        )
+        try:
+            latest = client.get_latest()
+            checkpoint_id = str(latest.get("checkpoint_id") or "").strip().lower()
+            if not self._is_valid_object_id(checkpoint_id):
+                raise ValueError("Homebase no longer has the broken checkpoint")
+            manifest = json.loads(client.get_manifest(checkpoint_id).decode("utf-8"))
+            entries = self._canonicalize_manifest_entries(manifest.get("entries", {}))
+            for rel_path, object_id, _plaintext, _envelope in local_versions:
+                remote_id = str((entries.get(rel_path) or {}).get("object_id") or "").strip().lower()
+                if remote_id != object_id:
+                    raise ValueError(
+                        f"Homebase changed '/{rel_path}' since the missing-object error; retry sync first"
+                    )
+
+            repaired = 0
+            replacements: list[tuple[str, str, bytes]] = []
+            for rel_path, object_id, plaintext, envelope in local_versions:
+                if object_id_from_ciphertext(envelope) == object_id:
+                    client.put_object(object_id, envelope)
+                    if not client.has_object(object_id):
+                        raise ValueError(f"Homebase did not retain repaired object for '/{rel_path}'")
+                    repaired += 1
+                else:
+                    replacements.append((rel_path, object_id, plaintext))
+
+            if replacements:
+                plan = [
+                    {
+                        "path": rel_path,
+                        "planned_action": "preserve",
+                        "expected_old_hash": hashlib.sha256(plaintext).hexdigest(),
+                        "new_object_id": hashlib.sha256(plaintext).hexdigest(),
+                        "new_size": len(plaintext),
+                    }
+                    for rel_path, _object_id, plaintext in replacements
+                ]
+                event = self.recovery.begin(
+                    operation="missing-object-local-resolution",
+                    source_checkpoint_id=checkpoint_id,
+                    target_checkpoint_id=None,
+                    remote_device_id=str(manifest.get("device_id") or "remote"),
+                    plan=plan,
+                )
+                for rel_path, _object_id, _plaintext in replacements:
+                    self.recovery.mark(event, rel_path, "applied")
+                self.recovery.finish(event)
+                self.recovery.pin(
+                    event["event_id"],
+                    True,
+                    "Local files preserved before replacing missing Homebase objects",
+                )
+
+                state = _read_json(self._state_path, self._default_state())
+                hb = state.setdefault("homebase", {})
+                hb["last_seen_latest_checkpoint_id"] = checkpoint_id
+                pending = {
+                    self._canonical_rel_path(str(path or ""))
+                    for path in hb.get("pending_missing_object_resolution_paths", [])
+                    if self._canonical_rel_path(str(path or ""))
+                }
+                pending.update(rel_path for rel_path, _object_id, _plaintext in replacements)
+                hb["pending_missing_object_resolution_paths"] = sorted(pending)
+                _write_json(self._state_path, state)
+                _log(
+                    f"missing objects superseded locally checkpoint={checkpoint_id} "
+                    f"paths={len(replacements)} recovery_event={event['event_id']}"
+                )
+            if repaired:
+                _log(f"missing Homebase objects repaired count={repaired} checkpoint={checkpoint_id}")
+            self.resume_sync("resolve missing Homebase objects", sync_now=True)
+            resumed = True
+            return {"repaired": repaired, "preserved": len(replacements)}
+        finally:
+            if client is not None:
+                client.close()
+            if not resumed:
+                self.resume_sync("missing Homebase object recovery")
+
+    def _complete_missing_object_resolutions(self, homebase: dict[str, Any]) -> None:
+        paths = {
+            self._canonical_rel_path(str(path or ""))
+            for path in homebase.pop("pending_missing_object_resolution_paths", [])
+            if self._canonical_rel_path(str(path or ""))
+        }
+        if paths:
+            self._clear_sync_errors_for_paths(paths)
 
     def resolve_conflict_entry(self, conflict_copy_path: str, resolution: str = "merged") -> bool:
         cleaned = str(conflict_copy_path or "").strip().replace("\\", "/").lstrip("/")
