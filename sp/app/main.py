@@ -453,6 +453,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--excalidraw-webview", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-url", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-title", default="StillPoint Excalidraw", help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor", choices=("plantuml", "mermaid"), help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor-path", help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor-geometry-scope", default="default", help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor-initial-geometry", help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor-initial-hsplit", help=argparse.SUPPRESS)
+    parser.add_argument("--diagram-editor-initial-vsplit", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -913,6 +919,28 @@ def main() -> None:
                     args.excalidraw_webview_url,
                     "--title",
                     args.excalidraw_webview_title,
+                ]
+            )
+        )
+
+    if args.diagram_editor:
+        if not args.diagram_editor_path:
+            print("ERROR: --diagram-editor-path is required", file=sys.stderr)
+            sys.exit(2)
+        from sp.app.diagram_editor_process import main as diagram_editor_main
+
+        sys.exit(
+            diagram_editor_main(
+                [
+                    "--editor", args.diagram_editor,
+                    "--path", args.diagram_editor_path,
+                    "--geometry-scope", args.diagram_editor_geometry_scope,
+                    *(["--initial-geometry", args.diagram_editor_initial_geometry]
+                      if args.diagram_editor_initial_geometry else []),
+                    *(["--initial-hsplit", args.diagram_editor_initial_hsplit]
+                      if args.diagram_editor_initial_hsplit else []),
+                    *(["--initial-vsplit", args.diagram_editor_initial_vsplit]
+                      if args.diagram_editor_initial_vsplit else []),
                 ]
             )
         )

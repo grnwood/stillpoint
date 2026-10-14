@@ -106,7 +106,9 @@ def test_plantuml_scaled_preview_expands_scrollable_canvas(
 
 
 def _patch_common_editor_deps(monkeypatch) -> None:
-    monkeypatch.setattr("sp.app.main.get_app_icon", lambda: QIcon())
+    monkeypatch.setattr(
+        "sp.app.ui.diagram_editor_icons.get_diagram_editor_icon", lambda _editor: QIcon()
+    )
     monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_enable_ai_chats", lambda: False)
     monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_vi_mode_enabled", lambda: False)
     monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_vi_cursor_style", lambda: "line")
@@ -347,6 +349,7 @@ def test_mermaid_macos_allows_explicit_inprocess_webengine_opt_in(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(mermaid_editor_window.sys, "platform", "darwin")
     monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: True)
+    monkeypatch.delenv("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", raising=False)
     monkeypatch.setenv("SP_MERMAID_ALLOW_INPROCESS_WEBENGINE", "1")
     monkeypatch.setattr(mermaid_editor_window, "_load_qwebengine_view_class", lambda: sentinel)
 

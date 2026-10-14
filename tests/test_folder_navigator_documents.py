@@ -181,6 +181,92 @@ def test_office_preview_cache_is_bounded_by_file_count(tmp_path, monkeypatch):
     assert set(cache.iterdir()) == {files[-1], files[-2]}
 
 
+def test_recent_document_preview_cache_is_lru_bounded(tmp_path, monkeypatch, qapp):
+    import sp.app.folder_navigator.window as window_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(window_module, "DOCUMENT_PREVIEW_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(
+        window_module, "DOCUMENT_PREVIEW_CACHE_BYTES", 1024 * 1024
+    )
+    paths = [tmp_path / f"recent-{index}.docx" for index in range(3)]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    window = window_module.Window(tmp_path)
+    signatures = [documents.document_signature(path) for path in paths]
+    previews = [
+        documents.DocumentPreview(backend="python-docx", html=f"<p>{index}</p>")
+        for index in range(3)
+    ]
+
+    window._cache_document_preview(paths[0], signatures[0], previews[0])
+    window._cache_document_preview(paths[1], signatures[1], previews[1])
+    assert window._cached_document_preview(paths[0], signatures[0]) is previews[0]
+    window._cache_document_preview(paths[2], signatures[2], previews[2])
+
+    assert window._cached_document_preview(paths[1], signatures[1]) is None
+    assert window._cached_document_preview(paths[0], signatures[0]) is previews[0]
+    assert window._cached_document_preview(paths[2], signatures[2]) is previews[2]
+    assert len(window.document_preview_cache) == 2
+    window.close()
+
+
+@pytest.mark.parametrize("suffix", [".docx", ".pptx"])
+def test_recent_document_preview_bypasses_rebuild_until_source_changes(
+        tmp_path, monkeypatch, qapp, suffix):
+    import sp.app.folder_navigator.window as window_module
+
+    path = tmp_path / f"large{suffix}"
+    path.write_bytes(b"first version")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    builder_name = "build_pptx_preview" if suffix == ".pptx" else "build_docx_preview"
+    calls = []
+
+    def build(selected):
+        calls.append(documents.document_signature(selected))
+        return documents.DocumentPreview(
+            backend="python-pptx" if suffix == ".pptx" else "python-docx",
+            html=f"<p>render {len(calls)}</p>",
+        )
+
+    monkeypatch.setattr(documents, builder_name, build)
+    window = window_module.Window(tmp_path)
+
+    def open_and_wait(expected_text):
+        window.open_file(path, pinned=True)
+        deadline = time.monotonic() + 3
+        while True:
+            assert time.monotonic() < deadline
+            qapp.processEvents()
+            tab = window.active_tab()
+            viewer = getattr(tab, "viewer", None) if tab is not None else None
+            browser = viewer.findChild(window_module.QTextBrowser) if viewer else None
+            if browser is not None and browser.toPlainText() == expected_text:
+                break
+            time.sleep(.01)
+
+    def close_tab():
+        tab = window.active_tab()
+        window.tabs.removeTab(window.tabs.indexOf(tab))
+        tab.deleteLater()
+        qapp.processEvents()
+
+    open_and_wait("render 1")
+    assert len(calls) == 1
+    close_tab()
+
+    open_and_wait("render 1")
+    assert len(calls) == 1
+    assert window.preview_metrics["document"]["cache_hits"] == 1
+    close_tab()
+
+    path.write_bytes(b"second version with a different size")
+    open_and_wait("render 2")
+    assert len(calls) == 2
+    assert window.preview_metrics["document"]["cache_misses"] == 2
+    window.close()
+
+
 @pytest.mark.parametrize("suffix", [".docx", ".pptx"])
 def test_libreoffice_preview_can_switch_to_selectable_text(
         tmp_path, monkeypatch, qapp, suffix):
@@ -204,14 +290,19 @@ def test_libreoffice_preview_can_switch_to_selectable_text(
         ),
     )
 
-    def fake_pdf_view(_path):
+    layout_views = []
+
+    def fake_pdf_view(_path, **_kwargs):
         widget = QWidget()
+        widget.setProperty("folderNavigatorFocusTarget", True)
         widget.zoom_in = lambda: None
         widget.zoom_out = lambda: None
+        layout_views.append(widget)
         return widget
 
     monkeypatch.setattr(window_module, "pdf_view", fake_pdf_view)
     window = window_module.Window(tmp_path)
+    window.show()
     window.open_file(path, pinned=True)
 
     deadline = time.monotonic() + 2
@@ -230,5 +321,132 @@ def test_libreoffice_preview_can_switch_to_selectable_text(
 
     assert selectable.toPlainText() == "Select this document text"
     assert selectable.textInteractionFlags() & Qt.TextSelectableByMouse
-    assert window.active_tab().viewer.document_views.currentWidget() is selectable
+    viewer = window.active_tab().viewer
+    assert viewer.document_views.currentWidget() is viewer.selectable_text_view
+    assert selectable.hasFocus()
+    window._focus_tab_content(window.active_tab())
+    assert selectable.hasFocus()
+
+    buttons["Layout"].click()
+    assert viewer.document_views.currentWidget() is layout_views[0]
+    assert layout_views[0].hasFocus()
+    window.close()
+
+
+def test_office_selectable_text_has_pdf_search_focus_and_scroll_parity(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import document_text_view
+
+    paragraphs = [f"Line {number} with needle" for number in range(120)]
+    preview = document_text_view(
+        "".join(f"<p>{line}</p>" for line in paragraphs), vi_enabled=True
+    )
+    preview.resize(600, 300)
+    preview.show()
+    preview.activateWindow()
+    qapp.processEvents()
+    browser = preview.text_browser
+    browser.setFocus()
+
+    QTest.keyClick(browser, Qt.Key_F, Qt.ControlModifier)
+    assert preview.document_search.hasFocus()
+    assert not preview.document_search_bar.isHidden()
+    preview.document_search.setText("needle")
+    qapp.processEvents()
+    assert preview.document_search_status.text() == "1 of 120 · Start"
+    assert not preview.document_previous_match.isEnabled()
+    assert preview.document_next_match.isEnabled()
+
+    preview.document_next_match.click()
+    assert preview.document_search_status.text() == "2 of 120"
+    assert browser.textCursor().selectedText() == "needle"
+    preview.document_search.setText("Line 119")
+    assert preview.document_search_status.text() == "1 of 1 · Only match"
+
+    QTest.keyClick(preview.document_search, Qt.Key_Escape)
+    qapp.processEvents()
+    assert preview.document_search_bar.isHidden()
+    assert preview.document_search.text() == ""
+    assert browser.hasFocus()
+
+    scrollbar = browser.verticalScrollBar()
+    scrollbar.setValue(0)
+    page_step = scrollbar.pageStep()
+    QTest.keyClick(browser, Qt.Key_Down)
+    down_value = scrollbar.value()
+    assert 0 < down_value < page_step
+    QTest.keyClick(browser, Qt.Key_J)
+    assert down_value < scrollbar.value() < page_step
+    QTest.keyClick(browser, Qt.Key_K)
+    assert scrollbar.value() < page_step
+
+    QTest.keyClick(browser, Qt.Key_Slash)
+    assert preview.document_search.hasFocus()
+    preview.close()
+
+
+@pytest.mark.parametrize("suffix", [".docx", ".pptx"])
+def test_libreoffice_layout_preview_preserves_shift_enter_focus_after_loading(
+        tmp_path, monkeypatch, qapp, suffix):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QWidget
+    from sp.app.folder_navigator.window import Window
+
+    path = tmp_path / f"focus{suffix}"
+    path.write_bytes(b"placeholder")
+    pdf = tmp_path / "converted.pdf"
+    writer = QPdfWriter(str(pdf))
+    painter = QPainter(writer)
+    for page in range(3):
+        painter.drawText(100, 100, f"needle page {page + 1}")
+        if page < 2:
+            writer.newPage()
+    painter.end()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    builder_name = "build_pptx_preview" if suffix == ".pptx" else "build_docx_preview"
+    monkeypatch.setattr(
+        documents,
+        builder_name,
+        lambda _path: documents.DocumentPreview(
+            backend="libreoffice",
+            pdf_path=pdf,
+            html="<p>needle selectable text</p>",
+        ),
+    )
+
+    window = Window(tmp_path)
+    window.resize(900, 500)
+    window.tree.vi_enabled = True
+    window.show()
+    window._suppress_tree_preview = True
+    window.tree.setCurrentIndex(window.model.index(str(path)))
+    window._suppress_tree_preview = False
+    window.tree.setFocus()
+    QTest.keyClick(window.tree, Qt.Key_Return, Qt.ShiftModifier)
+
+    deadline = time.monotonic() + 3
+    pdf_viewer = None
+    while pdf_viewer is None or not pdf_viewer.hasFocus():
+        assert time.monotonic() < deadline
+        qapp.processEvents()
+        tab = window.active_tab()
+        viewer = getattr(tab, "viewer", None) if tab is not None else None
+        pdf_viewer = viewer.findChild(QPdfView) if viewer is not None else None
+        QTest.qWait(10)
+
+    assert pdf_viewer.hasFocus()
+    QTest.keyClick(pdf_viewer, Qt.Key_Slash)
+    qapp.processEvents()
+    pdf_container = next(
+        child for child in window.active_tab().viewer.findChildren(QWidget)
+        if hasattr(child, "pdf_search")
+    )
+    assert pdf_container.pdf_search.hasFocus()
+    QTest.keyClick(pdf_container.pdf_search, Qt.Key_Escape)
+    qapp.processEvents()
+    assert pdf_viewer.hasFocus()
     window.close()

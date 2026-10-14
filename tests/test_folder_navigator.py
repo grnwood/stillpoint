@@ -2659,6 +2659,274 @@ def test_pdf_preview_uses_shared_zoom_commands(tmp_path, monkeypatch, app):
     window.close()
 
 
+def test_pdf_search_shortcuts_counts_navigation_and_query_reset(tmp_path, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import pdf_view
+
+    pdf_path = tmp_path / "searchable.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    painter.drawText(100, 100, "needle alpha needle")
+    painter.drawText(100, 200, "other needle token token token")
+    painter.end()
+
+    preview = pdf_view(pdf_path, vi_enabled=True)
+    preview.show()
+    preview.activateWindow()
+    app.processEvents()
+    viewer = preview.findChild(QPdfView)
+    viewer.setFocus()
+    app.processEvents()
+    QTest.keyClick(viewer, Qt.Key_F, Qt.ControlModifier)
+    assert preview.pdf_search.hasFocus()
+    assert not preview.pdf_search_bar.isHidden()
+    viewer.setFocus()
+    QTest.keyClick(viewer, Qt.Key_Slash)
+    assert preview.pdf_search.hasFocus()
+
+    def wait_for_count(expected):
+        deadline = time.monotonic() + 3
+        while preview.search_model.count() != expected:
+            assert time.monotonic() < deadline
+            app.processEvents()
+            QTest.qWait(10)
+
+    preview.pdf_search.setText("needle")
+    wait_for_count(3)
+    app.processEvents()
+    assert preview.pdf_search_status.text() == "1 of 3 · Start"
+    assert not preview.pdf_previous_match.isEnabled()
+    assert preview.pdf_next_match.isEnabled()
+    assert preview.pdf_previous_match.text() == ""
+    assert preview.pdf_next_match.text() == ""
+    assert not preview.pdf_previous_match.icon().isNull()
+    assert not preview.pdf_next_match.icon().isNull()
+
+    # The current hit is painted in opaque orange with a dark outline, making
+    # it visually distinct from Qt's pale highlights for the other hits.
+    image = viewer.viewport().grab().toImage()
+    result = preview.search_model.resultAtIndex(0)
+    highlight_pixels = []
+    for pdf_rect in result.rectangles():
+        rect = viewer._viewport_rect_for_pdf_rect(0, pdf_rect).toAlignedRect()
+        for y in range(max(0, rect.top()), min(image.height(), rect.bottom() + 1)):
+            for x in range(max(0, rect.left()), min(image.width(), rect.right() + 1)):
+                highlight_pixels.append(image.pixelColor(x, y))
+    assert any(
+        color.red() - color.green() > 30
+        and color.green() - color.blue() > 30
+        for color in highlight_pixels
+    )
+
+    preview.pdf_next_match.click()
+    preview.pdf_next_match.click()
+    assert viewer.currentSearchResultIndex() == 2
+    assert preview.pdf_search_status.text() == "3 of 3 · End"
+    assert not preview.pdf_next_match.isEnabled()
+
+    preview.pdf_previous_match.click()
+    preview.pdf_previous_match.click()
+    assert viewer.currentSearchResultIndex() == 0
+    assert preview.pdf_search_status.text() == "1 of 3 · Start"
+    assert not preview.pdf_previous_match.isEnabled()
+    preview.pdf_next_match.click()
+    preview.pdf_next_match.click()
+
+    # Even when the new query has the same number of results, it starts from
+    # the first new match instead of retaining the previous query's index.
+    preview.pdf_search.setText("token")
+    wait_for_count(3)
+    app.processEvents()
+    assert viewer.currentSearchResultIndex() == 0
+    assert preview.pdf_search_status.text() == "1 of 3 · Start"
+
+    preview.pdf_search.setText("other")
+    wait_for_count(1)
+    app.processEvents()
+    assert viewer.currentSearchResultIndex() == 0
+    assert preview.pdf_search_status.text() == "1 of 1 · Only match"
+
+    preview.pdf_search.setText("missing")
+    wait_for_count(0)
+    app.processEvents()
+    assert preview.pdf_search_status.text() == "No matches"
+    assert not preview.pdf_previous_match.isEnabled()
+    assert not preview.pdf_next_match.isEnabled()
+
+    QTest.keyClick(preview.pdf_search, Qt.Key_Escape)
+    app.processEvents()
+    assert preview.pdf_search_bar.isHidden()
+    assert preview.pdf_search.text() == ""
+    assert preview.search_model.searchString() == ""
+    assert viewer.hasFocus()
+    preview.close()
+
+
+def test_pdf_search_navigation_scrolls_each_match_page_into_view(tmp_path, app):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import pdf_view
+
+    pdf_path = tmp_path / "search-pages.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    painter.drawText(100, 100, "needle on first page")
+    writer.newPage()
+    painter.drawText(100, 100, "needle on second page")
+    painter.end()
+    preview = pdf_view(pdf_path)
+    preview.show()
+    app.processEvents()
+    viewer = preview.findChild(QPdfView)
+    preview.pdf_search.setText("needle")
+    deadline = time.monotonic() + 3
+    while preview.search_model.count() != 2:
+        assert time.monotonic() < deadline
+        app.processEvents()
+        QTest.qWait(10)
+
+    assert viewer.pageNavigator().currentPage() == 0
+    preview.pdf_search.setFocus()
+    QTest.keyClick(preview.pdf_search, Qt.Key_Return)
+    app.processEvents()
+    assert viewer.currentSearchResultIndex() == 1
+    assert viewer.pageNavigator().currentPage() == 1
+
+    preview.pdf_previous_match.click()
+    app.processEvents()
+    assert viewer.currentSearchResultIndex() == 0
+    assert viewer.pageNavigator().currentPage() == 0
+    preview.close()
+
+
+def test_pdf_drag_selection_context_menu_copies_text(tmp_path, app):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from sp.app.folder_navigator.window import pdf_view
+
+    pdf_path = tmp_path / "selectable.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    painter.drawText(1000, 1000, "Copy this PDF text")
+    painter.end()
+
+    preview = pdf_view(pdf_path)
+    preview.resize(900, 600)
+    preview.show()
+    app.processEvents()
+    viewer = preview.findChild(QPdfView)
+
+    empty_menu = viewer.create_context_menu()
+    empty_copy = next(action for action in empty_menu.actions()
+                      if action.text() == "Copy")
+    assert not empty_copy.isEnabled()
+    empty_menu.deleteLater()
+
+    text_bounds = preview.document.getAllText(0).boundingRectangle()
+    viewport_bounds = viewer._viewport_rect_for_pdf_rect(0, text_bounds)
+    start = QPoint(
+        round(viewport_bounds.left() + 1), round(viewport_bounds.center().y())
+    )
+    end = QPoint(
+        round(viewport_bounds.right() - 1), round(viewport_bounds.center().y())
+    )
+    QTest.mousePress(viewer.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(viewer.viewport(), end, 20)
+    QTest.mouseRelease(viewer.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+    app.processEvents()
+
+    assert viewer.selected_text() == "Copy this PDF text"
+    menu = viewer.create_context_menu()
+    copy_action = next(action for action in menu.actions()
+                       if action.text() == "Copy")
+    assert copy_action.isEnabled()
+    QApplication.clipboard().clear()
+    copy_action.trigger()
+    assert QApplication.clipboard().text() == "Copy this PDF text"
+    menu.deleteLater()
+    preview.close()
+
+
+def test_pdf_shift_enter_focuses_pdf_keyboard_surface(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPdfWriter
+    from PySide6.QtPdfWidgets import QPdfView
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pdf_path = tmp_path / "keyboard.pdf"
+    writer = QPdfWriter(str(pdf_path))
+    painter = QPainter(writer)
+    for page in range(3):
+        painter.drawText(100, 100, f"page {page + 1}")
+        if page < 2:
+            writer.newPage()
+    painter.end()
+
+    window = Window(tmp_path)
+    window.resize(900, 500)
+    window.tree.vi_enabled = True
+    window.show()
+    window._suppress_tree_preview = True
+    index = window.model.index(str(pdf_path))
+    window.tree.setCurrentIndex(index)
+    window._suppress_tree_preview = False
+    window.tree.setFocus()
+    QTest.keyClick(window.tree, Qt.Key_Return, Qt.ShiftModifier)
+    app.processEvents()
+
+    preview = window.active_tab().viewer
+    viewer = preview.findChild(QPdfView)
+    assert viewer.hasFocus()
+    QTest.keyClick(viewer, Qt.Key_Slash)
+    app.processEvents()
+    assert preview.pdf_search.hasFocus()
+    assert not preview.pdf_search_bar.isHidden()
+
+    QTest.keyClick(preview.pdf_search, Qt.Key_Escape)
+    app.processEvents()
+    assert preview.pdf_search_bar.isHidden()
+    assert viewer.hasFocus()
+
+    scrollbar = viewer.verticalScrollBar()
+    scrollbar.setValue(0)
+    page_step = scrollbar.pageStep()
+    assert page_step > 1
+
+    QTest.keyClick(viewer, Qt.Key_Down)
+    app.processEvents()
+    down_value = scrollbar.value()
+    assert 0 < down_value < page_step
+
+    QTest.keyClick(viewer, Qt.Key_J)
+    app.processEvents()
+    j_value = scrollbar.value()
+    assert down_value < j_value < page_step
+
+    QTest.keyClick(viewer, Qt.Key_Up)
+    app.processEvents()
+    assert scrollbar.value() < j_value
+    QTest.keyClick(viewer, Qt.Key_K)
+    app.processEvents()
+    assert scrollbar.value() == 0
+
+    QTest.keyClick(viewer, Qt.Key_PageDown)
+    app.processEvents()
+    assert scrollbar.value() >= page_step
+    window.close()
+
+
 def test_scroll_shortcuts_page_source_and_pdf_previews(tmp_path, monkeypatch, app):
     from PySide6.QtGui import QPainter, QPdfWriter
     from PySide6.QtPdfWidgets import QPdfView
@@ -3391,10 +3659,76 @@ def test_window_activation_repairs_missing_folder_navigator_focus(
 def test_specialized_editor_labels_are_extension_specific():
     from sp.app.folder_navigator.window import Window
 
-    assert Window._specialized_editor_label(Path("diagram.puml")) == "Open PlantUML Editor"
-    assert Window._specialized_editor_label(Path("diagram.MMD")) == "Open Mermaid Editor"
+    assert Window._specialized_editor_label(Path("diagram.puml")) == "Open with PlantUML Editor"
+    assert Window._specialized_editor_label(Path("diagram.MMD")) == "Open with Mermaid Editor"
     assert Window._specialized_editor_label(Path("board.excalidraw")) == "Open Excalidraw"
     assert Window._specialized_editor_label(Path("notes.md")) is None
+
+
+@pytest.mark.parametrize(
+    ("suffix", "editor_label"),
+    [
+        (".puml", "Open with PlantUML Editor"),
+        (".mmd", "Open with Mermaid Editor"),
+    ],
+)
+def test_diagram_enter_and_double_click_open_specialized_editor_by_default(
+        tmp_path, monkeypatch, app, suffix, editor_label):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / f"diagram{suffix}"
+    source.write_text("diagram source\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    opened = []
+    monkeypatch.setattr(window, "_open_specialized_editor", opened.append)
+    index = window.model.index(str(source))
+    window.tree.setCurrentIndex(index)
+    window.tree.setFocus()
+
+    QTest.keyClick(window.tree, Qt.Key_Return)
+    window.tree.doubleClicked.emit(index)
+
+    assert opened == [source, source]
+    menu = window._create_tree_context_menu(index)
+    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+    assert labels[:3] == [
+        editor_label,
+        "Open File",
+        "Open in Default Application",
+    ]
+    menu.deleteLater()
+    window.close()
+
+
+@pytest.mark.parametrize("suffix", [".puml", ".mmd"])
+def test_diagram_context_open_file_replaces_preview_with_source_editor(
+        tmp_path, monkeypatch, app, suffix):
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / f"diagram{suffix}"
+    source.write_text("diagram source\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source)
+    assert window.active_tab().editor is None
+
+    menu = window._create_tree_context_menu(window.model.index(str(source)))
+    next(action for action in menu.actions() if action.text() == "Open File").trigger()
+    app.processEvents()
+
+    assert window.active_tab().path == source
+    assert window.active_tab().pinned
+    assert isinstance(window.active_tab().editor, SourceEditor)
+    assert window.active_tab().editor.hasFocus()
+    window.active_tab().editor.document().setModified(False)
+    menu.deleteLater()
+    window.close()
 
 
 @pytest.mark.parametrize("suffix", [".puml", ".mmd"])
@@ -3803,7 +4137,12 @@ def test_diagram_image_view_uses_standard_mouse_and_trackpad_navigation(
     path.write_text("@startuml\n@enduml\n", encoding="utf-8")
     image = QImage(1000, 1000, QImage.Format_ARGB32)
     image.fill(Qt.white)
-    viewer = ImageView(path, image, canvas_color="#ffffff")
+    viewer = ImageView(
+        path,
+        image,
+        canvas_color="#ffffff",
+        svg_text='<svg xmlns="http://www.w3.org/2000/svg"/>',
+    )
     viewer.resize(300, 300)
     viewer.show()
     app.processEvents()
@@ -3825,7 +4164,52 @@ def test_diagram_image_view_uses_standard_mouse_and_trackpad_navigation(
     )
     viewer.label.wheelEvent(mouse_wheel)
     assert viewer.zoom == pytest.approx(1.1)
+    assert viewer.hasFocus()
     viewer.close()
+
+
+@pytest.mark.parametrize("suffix", [".puml", ".mmd"])
+def test_interacting_with_diagram_preview_focuses_it_and_escape_returns_to_tree(
+        tmp_path, monkeypatch, app, suffix):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QImage, QWheelEvent
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import ImageView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / f"diagram{suffix}"
+    source.write_text("diagram source\n", encoding="utf-8")
+    image = QImage(200, 100, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    window = Window(tmp_path)
+    window.show()
+    monkeypatch.setattr(window, "_load_diagram_preview", lambda *_args, **_kwargs: None)
+    window.open_file(source)
+    tab = window.active_tab()
+    viewer = ImageView(
+        source,
+        image,
+        canvas_color="#ffffff",
+        svg_text='<svg xmlns="http://www.w3.org/2000/svg"/>',
+    )
+    tab.layout().addWidget(viewer)
+    tab.viewer = viewer
+    tab.placeholder.hide()
+    app.processEvents()
+    window.tree.setFocus()
+
+    zoom = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+    )
+    viewer.label.wheelEvent(zoom)
+    assert viewer.hasFocus()
+
+    QTest.keyClick(viewer, Qt.Key_Escape)
+    app.processEvents()
+    assert window.tree.hasFocus()
+    assert Path(window.model.filePath(window.tree.currentIndex())) == source
+    window.close()
 
 
 def test_diagram_preview_fits_window_until_manually_zoomed(tmp_path, app):
@@ -4127,29 +4511,157 @@ def test_file_delete_confirms_and_protects_unsaved_tab(tmp_path, monkeypatch, ap
     window.close()
 
 
-def test_specialized_editor_launcher_keeps_window_alive(tmp_path, monkeypatch, app):
-    import sp.app.ui.plantuml_editor_window as plantuml_editor
+def test_multiselect_context_menu_deletes_selected_files_with_one_confirmation(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QItemSelectionModel
+    from PySide6.QtWidgets import QMessageBox
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    files = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for path in files:
+        path.write_text(path.stem, encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    app.processEvents()
+
+    selection = window.tree.selectionModel()
+    for path in files:
+        selection.select(
+            window.model.index(str(path)),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+    menu = window._create_tree_context_menu(window.model.index(str(files[0])))
+    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+    assert "Delete File(s)..." in labels
+    assert "Delete File…" not in labels
+
+    questions = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda parent, title, prompt, *args: questions.append((title, prompt))
+        or QMessageBox.Yes,
+    )
+    moved = []
+    monkeypatch.setattr(
+        window,
+        "_move_file_to_trash",
+        lambda path: (moved.append(path), path.unlink(), True)[-1],
+    )
+    next(action for action in menu.actions()
+         if action.text() == "Delete File(s)...").trigger()
+
+    assert questions == [("Delete Files", "Are you sure you want to delete the 2 files?")]
+    assert moved == files
+    assert all(not path.exists() for path in files)
+    menu.deleteLater()
+    window.close()
+
+
+def test_multiselect_delete_aborts_when_any_selected_file_is_unsaved(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QMessageBox
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    files = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for path in files:
+        path.write_text(path.stem, encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(files[1], pinned=True)
+    window.active_tab().editor.insertPlainText("unsaved")
+    questions = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: questions.append(args) or QMessageBox.Yes,
+    )
+    moved = []
+    monkeypatch.setattr(window, "_move_file_to_trash", lambda path: moved.append(path) or True)
+
+    window._delete_files(files)
+
+    assert questions == []
+    assert moved == []
+    assert all(path.exists() for path in files)
+    assert "selected files" in window.statusBar().currentMessage()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "editor"), [(".puml", "plantuml"), (".mmd", "mermaid")]
+)
+@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
+def test_specialized_editor_uses_distinct_process_identity_on_every_platform(
+        tmp_path, monkeypatch, app, suffix, editor, platform):
+    from sp.app import diagram_editor_process
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(sys, "platform", platform)
+    diagram = tmp_path / f"diagram{suffix}"
+    diagram.write_text("diagram", encoding="utf-8")
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+    launched = []
+    monkeypatch.setattr(
+        diagram_editor_process,
+        "launch_diagram_editor_process",
+        lambda kind, path, **options: launched.append(
+            (kind, Path(path), options)
+        ) or FakeProcess(),
+    )
+    window = Window(tmp_path)
+    window.state["specialized_editor_geometry"] = {suffix: "saved-geometry"}
+    window._open_specialized_editor(diagram)
+
+    assert launched[0][:2] == (editor, diagram)
+    assert launched[0][2]["geometry_scope"] == f"folder-navigator:{tmp_path}"
+    assert launched[0][2]["initial_geometry"] == "saved-geometry"
+    assert len(window.excalidraw_processes) == 1
+    window.excalidraw_processes.clear()
+    window.close()
+
+
+@pytest.mark.parametrize("suffix", [".puml", ".mmd"])
+def test_folder_navigator_specialized_editors_remember_resized_geometry(
+        tmp_path, monkeypatch, app, suffix):
     from PySide6.QtWidgets import QMainWindow
     from sp.app.folder_navigator.window import Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    diagram = tmp_path / "diagram.puml"
-    diagram.write_text("@startuml\n@enduml\n", encoding="utf-8")
-    opened = []
+    navigator = Window(tmp_path)
+    monkeypatch.setattr(navigator, "_persist", lambda: None)
 
-    class FakePlantUMLEditor(QMainWindow):
-        def __init__(self, file_path, parent=None):
-            super().__init__(parent)
-            opened.append(file_path)
+    first = QMainWindow()
+    first.resize(320, 240)
+    navigator._restore_and_track_specialized_editor_geometry(first, suffix)
+    first.resize(777, 555)
+    navigator._save_specialized_editor_geometry(first, suffix)
 
-    monkeypatch.setattr(plantuml_editor, "PlantUMLEditorWindow", FakePlantUMLEditor)
-    window = Window(tmp_path)
-    window._open_specialized_editor(diagram)
+    saved = navigator.state["specialized_editor_geometry"][suffix]
+    assert saved
+    assert navigator.specialized_geometry_timer.isSingleShot()
+    assert navigator.specialized_geometry_timer.interval() == 400
 
-    assert opened == [str(diagram)]
-    assert len(window.specialized_editor_windows) == 1
-    window.specialized_editor_windows[0].close()
-    window.close()
+    second = QMainWindow()
+    second.resize(320, 240)
+    navigator._restore_and_track_specialized_editor_geometry(second, suffix)
+    assert second.size().width() == 777
+    assert second.size().height() == 555
+    first.removeEventFilter(navigator)
+    second.removeEventFilter(navigator)
+    first.close()
+    second.close()
+    navigator.close()
 
 
 def test_excalidraw_launcher_uses_isolated_webengine_process_and_revokes_grant(

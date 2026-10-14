@@ -793,8 +793,9 @@ class PlantUMLEditorWindow(QMainWindow):
         super().__init__(parent)
         
         # Set window icon explicitly (especially important on Windows)
-        from sp.app.main import get_app_icon
-        self.setWindowIcon(get_app_icon())
+        from sp.app.ui.diagram_editor_icons import get_diagram_editor_icon
+
+        self.setWindowIcon(get_diagram_editor_icon("plantuml"))
         
         self.file_path = Path(file_path)
         self._on_save = on_save

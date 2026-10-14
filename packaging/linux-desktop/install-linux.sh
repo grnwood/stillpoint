@@ -93,6 +93,17 @@ else
     echo "ℹ️  No Folder Navigator icon found at $FOLDER_NAV_ICON_SOURCE — skipping icon install"
 fi
 
+for editor in plantuml mermaid excalidraw; do
+    editor_icon_source="$DIST_DIR/_internal/sp/assets/icons/linux-png/$editor-512x512.png"
+    editor_icon_target="/usr/share/icons/stillpoint-$editor.png"
+    if [[ -f "$editor_icon_source" ]]; then
+        echo "➡️  Installing $editor editor icon to $editor_icon_target"
+        cp "$editor_icon_source" "$editor_icon_target"
+    else
+        echo "ℹ️  No $editor editor icon found — skipping icon install"
+    fi
+done
+
 # --- Desktop entry ---
 echo "➡️  Creating desktop entry at $DESKTOP_FILE"
 
@@ -127,6 +138,30 @@ StartupWMClass=stillpoint-folder-navigator
 EOF
 
 chmod 644 "$FOLDER_NAV_DESKTOP_FILE"
+
+# These hidden entries give standalone diagram-editor processes distinct
+# application identities in GNOME, KDE, and other Linux task switchers.
+for editor in plantuml mermaid excalidraw; do
+    case "$editor" in
+        plantuml) editor_name="StillPoint PlantUML" ;;
+        mermaid) editor_name="StillPoint Mermaid" ;;
+        excalidraw) editor_name="StillPoint Excalidraw" ;;
+    esac
+    editor_desktop_file="/usr/share/applications/stillpoint-$editor.desktop"
+    cat > "$editor_desktop_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$editor_name
+Exec=$INSTALL_DIR/$EXEC_NAME
+Icon=/usr/share/icons/stillpoint-$editor.png
+Terminal=false
+NoDisplay=true
+Categories=Office;Graphics;Utility;
+StartupNotify=true
+StartupWMClass=stillpoint-$editor
+EOF
+    chmod 644 "$editor_desktop_file"
+done
 
 # Update desktop database
 if command -v update-desktop-database &> /dev/null; then

@@ -203,8 +203,9 @@ class MermaidEditorWindow(QMainWindow):
     def __init__(self, file_path: str, parent=None, on_save=None) -> None:
         super().__init__(parent)
 
-        from sp.app.main import get_app_icon
-        self.setWindowIcon(get_app_icon())
+        from sp.app.ui.diagram_editor_icons import get_diagram_editor_icon
+
+        self.setWindowIcon(get_diagram_editor_icon("mermaid"))
 
         self.file_path = Path(file_path)
         self._on_save = on_save

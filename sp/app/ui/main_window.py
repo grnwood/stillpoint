@@ -18851,10 +18851,25 @@ class MainWindow(QMainWindow):
             return
         
         try:
-            from .plantuml_editor_window import PlantUMLEditorWindow
             if isinstance(file_path, dict) and file_path.get("kind") == "remote":
                 self._open_remote_plantuml_editor(file_path.get("path", ""), file_path.get("page_path"))
                 return
+            from sp.app.diagram_editor_process import launch_diagram_editor_process
+
+            process = launch_diagram_editor_process(
+                "plantuml",
+                file_path,
+                geometry_scope="main",
+                initial_geometry=config.load_puml_window_geometry(),
+                initial_hsplit=config.load_puml_hsplit_state(),
+                initial_vsplit=config.load_puml_vsplit_state(),
+            )
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(
+                    lambda p=process: p.terminate() if p.poll() is None else None
+                )
+            return
             if log_enabled("diagrams"):
                 print(f"[MainWindow] Opening PlantUML editor for: {file_path}")
             
@@ -18957,10 +18972,25 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
         try:
-            from .mermaid_editor_window import MermaidEditorWindow
             if isinstance(file_path, dict) and file_path.get("kind") == "remote":
                 self._open_remote_mermaid_editor(file_path.get("path", ""), file_path.get("page_path"))
                 return
+            from sp.app.diagram_editor_process import launch_diagram_editor_process
+
+            process = launch_diagram_editor_process(
+                "mermaid",
+                file_path,
+                geometry_scope="main",
+                initial_geometry=config.load_mermaid_window_geometry(),
+                initial_hsplit=config.load_mermaid_hsplit_state(),
+                initial_vsplit=config.load_mermaid_vsplit_state(),
+            )
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(
+                    lambda p=process: p.terminate() if p.poll() is None else None
+                )
+            return
             print(f"[MainWindow] Opening Mermaid editor for: {file_path}")
 
             window = MermaidEditorWindow(str(file_path), parent=None)
@@ -21955,6 +21985,12 @@ class MainWindow(QMainWindow):
             self._mark_homebase_unsynced_local_change()
             self._schedule_homebase_sync("page create")
         self._populate_vault_tree()
+        if file_path:
+            self._open_file(file_path, cursor_at_end=True, force=True)
+            # Tree repopulation defers selection until the next event-loop
+            # turn. Focus the editor after that selection settles so pressing
+            # Enter to create a page leaves it ready for immediate typing.
+            QTimer.singleShot(0, self._focus_editor)
 
     def _active_rename_target(self) -> Optional[str]:
         """Resolve a rename target without requiring it to be visible in the tree."""

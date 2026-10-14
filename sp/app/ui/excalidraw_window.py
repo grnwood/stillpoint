@@ -73,9 +73,9 @@ class ExcalidrawWindow(QMainWindow):
         self.web = None
 
         try:
-            from sp.app.main import get_app_icon
+            from sp.app.ui.diagram_editor_icons import get_diagram_editor_icon
 
-            self.setWindowIcon(get_app_icon())
+            self.setWindowIcon(get_diagram_editor_icon("excalidraw"))
         except Exception:
             pass
 

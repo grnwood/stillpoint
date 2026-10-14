@@ -60,6 +60,14 @@ def test_linux_installer_registers_folder_navigator_identity() -> None:
     assert "StartupWMClass=stillpoint-folder-navigator" in script
 
 
+def test_linux_installer_registers_diagram_editor_identities() -> None:
+    script = (ROOT / "packaging" / "linux-desktop" / "install-linux.sh").read_text()
+    assert "for editor in plantuml mermaid excalidraw" in script
+    assert "stillpoint-$editor.desktop" in script
+    assert "$editor-512x512.png" in script
+    assert "StartupWMClass=stillpoint-$editor" in script
+
+
 def test_macos_bundle_includes_companion_launcher_and_icon() -> None:
     script = (ROOT / "packaging" / "macos" / "build-macos.sh").read_text()
     assert "StillPoint Folder Navigator.app" in script

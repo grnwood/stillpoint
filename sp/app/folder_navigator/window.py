@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
-                            QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl, Signal)
+                            QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat, QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -75,6 +75,8 @@ DOCUMENT_SUFFIXES = {".docx", ".pptx"}
 CHAT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DIAGRAM_PREVIEW_CACHE_ENTRIES = 128
 DIAGRAM_PREVIEW_CACHE_BYTES = 128 * 1024 * 1024
+DOCUMENT_PREVIEW_CACHE_ENTRIES = 24
+DOCUMENT_PREVIEW_CACHE_BYTES = 64 * 1024 * 1024
 DIAGRAM_PREVIEW_MAX_PIXELS = int(
     os.environ.get("STILLPOINT_FOLDER_DIAGRAM_PREVIEW_MAX_PIXELS", 8_000_000)
 )
@@ -1754,6 +1756,7 @@ class ImageCanvasLabel(QLabel):
     """Image canvas using StillPoint's standard wheel and trackpad policy."""
 
     zoomRequested = Signal(float, object)
+    interactionStarted = Signal()
 
     def __init__(self):
         super().__init__()
@@ -1769,6 +1772,7 @@ class ImageCanvasLabel(QLabel):
         return None
 
     def wheelEvent(self, event):  # type: ignore[override]
+        self.interactionStarted.emit()
         action = wheel_action(event)
         if action.is_zoom:
             self.zoomRequested.emit(action.zoom_steps, QPointF(event.position()))
@@ -1790,6 +1794,7 @@ class ImageCanvasLabel(QLabel):
     def event(self, event):  # type: ignore[override]
         if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
             if event.value():
+                self.interactionStarted.emit()
                 self.zoomRequested.emit(
                     native_zoom_steps(event.value()), QPointF(event.position())
                 )
@@ -1798,6 +1803,7 @@ class ImageCanvasLabel(QLabel):
         return super().event(event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
+        self.interactionStarted.emit()
         if event.button() in (Qt.MiddleButton, Qt.RightButton) and self.pixmap():
             self._pan_start = event.globalPosition().toPoint()
             self.setCursor(Qt.ClosedHandCursor)
@@ -1851,6 +1857,8 @@ class ImageView(QWidget):
         self._fitting = False
         self._last_fit_size = None
         self._diagram_preview = bool(svg_text)
+        if self._diagram_preview:
+            self.setFocusPolicy(Qt.StrongFocus)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -1875,6 +1883,8 @@ class ImageView(QWidget):
         self.label.zoomRequested.connect(
             lambda steps, _anchor: self._zoom_requested(zoom_factor(steps))
         )
+        if self._diagram_preview:
+            self.label.interactionStarted.connect(self._focus_diagram_preview)
         if canvas_color:
             # Diagram SVGs commonly have a transparent root while their
             # default text and strokes assume light paper. Keep that canvas
@@ -2007,11 +2017,20 @@ class ImageView(QWidget):
         return pixmap
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if (self._diagram_preview and obj is self.scroll.viewport()
+                and event.type() in (QEvent.MouseButtonPress, QEvent.Wheel,
+                                     QEvent.NativeGesture)):
+            self._focus_diagram_preview()
         if (obj is self.scroll.viewport() and event.type() == QEvent.Resize
                 and self._fit_mode and not self._fitting
                 and event.size() != self._last_fit_size):
             self.fit()
         return super().eventFilter(obj, event)
+
+    def _focus_diagram_preview(self):
+        """Claim keyboard focus after direct interaction with a diagram."""
+        if self._diagram_preview:
+            self.setFocus(Qt.MouseFocusReason)
 
     def _schedule_fit(self):
         if self._fit_mode and not self._fit_scheduled:
@@ -2036,16 +2055,19 @@ class ImageView(QWidget):
         self.label.setPixmap(scaled)
 
     def zoom_in(self):
+        self._focus_diagram_preview()
         self._fit_mode = False
         self.request_full_resolution()
         self.scale(1.25)
 
     def zoom_out(self):
+        self._focus_diagram_preview()
         self._fit_mode = False
         self.request_full_resolution()
         self.scale(.8)
 
     def _zoom_requested(self, factor):
+        self._focus_diagram_preview()
         self._fit_mode = False
         self.request_full_resolution()
         self.scale(factor)
@@ -2066,6 +2088,7 @@ class ImageView(QWidget):
         QApplication.clipboard().setPixmap(self._composited_pixmap())
 
     def actual(self):
+        self._focus_diagram_preview()
         self._fit_mode = False
         self.request_full_resolution()
         self.zoom = 1.0
@@ -2089,7 +2112,7 @@ class ImageView(QWidget):
             self._fitting = False
 
 
-def pdf_view(path):
+def pdf_view(path, *, vi_enabled=False):
     try:
         pdf_size = Path(path).stat().st_size
     except OSError as exc:
@@ -2103,6 +2126,18 @@ def pdf_view(path):
     from PySide6.QtPdfWidgets import QPdfView
 
     class ZoomablePdfView(QPdfView):
+        ACTIVE_MATCH_FILL = QColor(255, 132, 0, 190)
+        ACTIVE_MATCH_OUTLINE = QColor(122, 38, 0)
+        TEXT_SELECTION_FILL = QColor(25, 118, 210, 125)
+        TEXT_SELECTION_OUTLINE = QColor(8, 67, 135)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._selection_anchor = None
+            self._selection_dragging = False
+            self._text_selection_parts = []
+            self.viewport().setCursor(Qt.IBeamCursor)
+
         def zoom_by(self, factor):
             self.setZoomMode(QPdfView.ZoomMode.Custom)
             self.setZoomFactor(max(0.1, min(8.0, self.zoomFactor() * factor)))
@@ -2124,6 +2159,234 @@ def pdf_view(path):
                     event.accept()
                     return
             super().wheelEvent(event)
+
+        def keyPressEvent(self, event):  # type: ignore[override]
+            if event.matches(QKeySequence.Copy) and self.selected_text():
+                self.copy_selected_text()
+                event.accept()
+                return
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            direction = 0
+            if modifiers == Qt.NoModifier:
+                if event.key() == Qt.Key_Down:
+                    direction = 1
+                elif event.key() == Qt.Key_Up:
+                    direction = -1
+                elif vi_enabled and event.key() == Qt.Key_J:
+                    direction = 1
+                elif vi_enabled and event.key() == Qt.Key_K:
+                    direction = -1
+            if direction:
+                scrollbar = self.verticalScrollBar()
+                page_step = max(1, scrollbar.pageStep())
+                distance = max(scrollbar.singleStep() * 3, page_step // 5)
+                distance = min(distance, max(1, page_step - 1))
+                scrollbar.setValue(scrollbar.value() + direction * distance)
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
+        def _pdf_scale(self):
+            document = self.document()
+            if document is None or document.pageCount() <= 0:
+                return 1.0
+            margins = self.documentMargins()
+            available_width = max(
+                1, self.viewport().width() - margins.left() - margins.right()
+            )
+            if self.zoomMode() == QPdfView.ZoomMode.Custom:
+                return self.zoomFactor() * self.logicalDpiX() / 72.0
+            widths = [
+                document.pagePointSize(page).width()
+                for page in range(document.pageCount())
+            ]
+            if self.zoomMode() == QPdfView.ZoomMode.FitToWidth:
+                return available_width / max(widths)
+            page = min(
+                max(0, self.pageNavigator().currentPage()),
+                document.pageCount() - 1,
+            )
+            size = document.pagePointSize(page)
+            available_height = max(
+                1, self.viewport().height() - margins.top() - margins.bottom()
+            )
+            return min(
+                available_width / max(1.0, size.width()),
+                available_height / max(1.0, size.height()),
+            )
+
+        def _page_viewport_rect(self, page):
+            document = self.document()
+            if document is None or page < 0 or page >= document.pageCount():
+                return QRectF()
+            scale = self._pdf_scale()
+            margins = self.documentMargins()
+            sizes = [
+                document.pagePointSize(number) * scale
+                for number in range(document.pageCount())
+            ]
+            content_width = max(
+                self.viewport().width(),
+                max(size.width() for size in sizes)
+                + margins.left() + margins.right(),
+            )
+            size = sizes[page]
+            available_width = content_width - margins.left() - margins.right()
+            left = margins.left() + max(0.0, (available_width - size.width()) / 2)
+            top = margins.top() + sum(
+                sizes[number].height() + self.pageSpacing()
+                for number in range(page)
+            )
+            return QRectF(
+                left - self.horizontalScrollBar().value(),
+                top - self.verticalScrollBar().value(),
+                size.width(),
+                size.height(),
+            )
+
+        def _pdf_point_at(self, viewport_position):
+            document = self.document()
+            if document is None:
+                return None
+            scale = self._pdf_scale()
+            for page in range(document.pageCount()):
+                page_rect = self._page_viewport_rect(page)
+                if page_rect.contains(viewport_position):
+                    return (
+                        page,
+                        QPointF(
+                            (viewport_position.x() - page_rect.left()) / scale,
+                            (viewport_position.y() - page_rect.top()) / scale,
+                        ),
+                    )
+            return None
+
+        def _viewport_rect_for_pdf_rect(self, page, pdf_rect):
+            page_rect = self._page_viewport_rect(page)
+            scale = self._pdf_scale()
+            return QRectF(
+                page_rect.left() + pdf_rect.left() * scale,
+                page_rect.top() + pdf_rect.top() * scale,
+                pdf_rect.width() * scale,
+                pdf_rect.height() * scale,
+            )
+
+        def _set_text_selection(self, anchor, current):
+            document = self.document()
+            if document is None:
+                return
+            if (anchor[0], anchor[1].y(), anchor[1].x()) > (
+                    current[0], current[1].y(), current[1].x()):
+                anchor, current = current, anchor
+            start_page, start_point = anchor
+            end_page, end_point = current
+            parts = []
+            if start_page == end_page:
+                selection = document.getSelection(
+                    start_page, start_point, end_point
+                )
+                if selection.isValid():
+                    parts.append((start_page, selection))
+            else:
+                first_size = document.pagePointSize(start_page)
+                first = document.getSelection(
+                    start_page, start_point,
+                    QPointF(first_size.width(), first_size.height()),
+                )
+                if first.isValid():
+                    parts.append((start_page, first))
+                for page in range(start_page + 1, end_page):
+                    selection = document.getAllText(page)
+                    if selection.isValid():
+                        parts.append((page, selection))
+                last = document.getSelection(
+                    end_page, QPointF(0, 0), end_point
+                )
+                if last.isValid():
+                    parts.append((end_page, last))
+            self._text_selection_parts = parts
+            self.viewport().update()
+
+        def selected_text(self):
+            return "\n".join(
+                selection.text() for _page, selection in self._text_selection_parts
+                if selection.text()
+            )
+
+        def copy_selected_text(self):
+            text = self.selected_text()
+            if text:
+                QApplication.clipboard().setText(text)
+
+        def create_context_menu(self):
+            menu = QMenu(self)
+            copy_action = menu.addAction("Copy")
+            copy_action.setShortcut(QKeySequence.Copy)
+            copy_action.setEnabled(bool(self.selected_text()))
+            copy_action.triggered.connect(self.copy_selected_text)
+            return menu
+
+        def contextMenuEvent(self, event):  # type: ignore[override]
+            menu = self.create_context_menu()
+            menu.exec(event.globalPos())
+            menu.deleteLater()
+            event.accept()
+
+        def mousePressEvent(self, event):  # type: ignore[override]
+            if event.button() == Qt.LeftButton:
+                self.setFocus(Qt.MouseFocusReason)
+                self._selection_anchor = self._pdf_point_at(event.position())
+                self._selection_dragging = False
+                self._text_selection_parts = []
+                self.viewport().update()
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):  # type: ignore[override]
+            if self._selection_anchor is not None and event.buttons() & Qt.LeftButton:
+                current = self._pdf_point_at(event.position())
+                if current is not None:
+                    self._selection_dragging = True
+                    self._set_text_selection(self._selection_anchor, current)
+                    event.accept()
+                    return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event):  # type: ignore[override]
+            if event.button() == Qt.LeftButton and self._selection_anchor is not None:
+                current = self._pdf_point_at(event.position())
+                if self._selection_dragging and current is not None:
+                    self._set_text_selection(self._selection_anchor, current)
+                    self._selection_anchor = None
+                    event.accept()
+                    return
+                self._selection_anchor = None
+            super().mouseReleaseEvent(event)
+
+        def paintEvent(self, event):  # type: ignore[override]
+            super().paintEvent(event)
+            painter = QPainter(self.viewport())
+            model = self.searchModel()
+            index = self.currentSearchResultIndex()
+            if model is not None and 0 <= index < model.count():
+                result = model.resultAtIndex(index)
+                if result.isValid():
+                    painter.setBrush(self.ACTIVE_MATCH_FILL)
+                    painter.setPen(QPen(self.ACTIVE_MATCH_OUTLINE, 2.5))
+                    for rect in result.rectangles():
+                        painter.drawRoundedRect(
+                            self._viewport_rect_for_pdf_rect(result.page(), rect),
+                            2, 2,
+                        )
+            painter.setBrush(self.TEXT_SELECTION_FILL)
+            painter.setPen(QPen(self.TEXT_SELECTION_OUTLINE, 1.5))
+            for page, selection in self._text_selection_parts:
+                for polygon in selection.bounds():
+                    painter.drawRect(
+                        self._viewport_rect_for_pdf_rect(
+                            page, polygon.boundingRect()
+                        )
+                    )
+            painter.end()
 
         def _handle_native_zoom(self, event):
             if (isinstance(event, QNativeGestureEvent)
@@ -2152,6 +2415,7 @@ def pdf_view(path):
     if status != QPdfDocument.Error.None_:
         raise ValueError(f"PDF could not be loaded: {status}")
     viewer = ZoomablePdfView()
+    viewer.setProperty("folderNavigatorFocusTarget", True)
     viewer.setDocument(document)
     viewer.setPageMode(QPdfView.PageMode.MultiPage)
     nav = viewer.pageNavigator()
@@ -2172,24 +2436,343 @@ def pdf_view(path):
     page_number.valueChanged.connect(lambda number: nav.jump(number - 1, nav.currentLocation(), nav.currentZoom()))
     nav.currentPageChanged.connect(lambda number: page_number.setValue(number + 1))
     controls.addWidget(page_number)
-    search = QLineEdit()
-    search.setPlaceholderText("Find in PDF")
-    model = QPdfSearchModel(widget)
-    model.setDocument(document)
-    search.textChanged.connect(model.setSearchString)
-    viewer.setSearchModel(model)
-    controls.addWidget(search)
-    for title, delta in (("Previous Match", -1), ("Next Match", 1)):
-        button = QPushButton(title)
-        button.clicked.connect(lambda _, step=delta: viewer.setCurrentSearchResultIndex(
-            max(0, min(model.rowCount() - 1, viewer.currentSearchResultIndex() + step))))
-        controls.addWidget(button)
     layout.addLayout(controls)
     layout.addWidget(viewer)
+
+    search_bar = QWidget(widget)
+    search_controls = QHBoxLayout(search_bar)
+    search_controls.setContentsMargins(0, 0, 0, 0)
+    search = QLineEdit()
+    search.setPlaceholderText("Find in PDF")
+    search.setAccessibleName("Find in PDF")
+    model = QPdfSearchModel(widget)
+    model.setDocument(document)
+    viewer.setSearchModel(model)
+    widget.setFocusProxy(viewer)
+    result_status = QLabel("No search")
+    result_status.setAccessibleName("PDF search results")
+    previous_match = QToolButton()
+    previous_match.setIcon(widget.style().standardIcon(QStyle.SP_ArrowLeft))
+    previous_match.setAccessibleName("Previous match")
+    previous_match.setToolTip("Previous match")
+    next_match = QToolButton()
+    next_match.setIcon(widget.style().standardIcon(QStyle.SP_ArrowRight))
+    next_match.setAccessibleName("Next match")
+    next_match.setToolTip("Next match")
+    previous_match.setEnabled(False)
+    next_match.setEnabled(False)
+
+    def update_search_status(boundary=None):
+        query = search.text()
+        count = model.count()
+        if not query:
+            result_status.setText("No search")
+            previous_match.setEnabled(False)
+            next_match.setEnabled(False)
+            return
+        if count <= 0:
+            result_status.setText("No matches")
+            previous_match.setEnabled(False)
+            next_match.setEnabled(False)
+            return
+        index = viewer.currentSearchResultIndex()
+        if index < 0 or index >= count:
+            index = 0
+            viewer.setCurrentSearchResultIndex(index)
+        previous_match.setEnabled(index > 0)
+        next_match.setEnabled(index < count - 1)
+        if boundary == "start":
+            suffix = " · Start"
+        elif boundary == "end":
+            suffix = " · End"
+        elif count == 1:
+            suffix = " · Only match"
+        elif index == 0:
+            suffix = " · Start"
+        elif index == count - 1:
+            suffix = " · End"
+        else:
+            suffix = ""
+        result_status.setText(f"{index + 1} of {count}{suffix}")
+
+    def reveal_search_result(index):
+        if index < 0 or index >= model.count():
+            return
+        result = model.resultAtIndex(index)
+        if not result.isValid():
+            return
+        nav.jump(result.page(), result.location(), nav.currentZoom())
+
+    def select_search_result(index):
+        unchanged = viewer.currentSearchResultIndex() == index
+        viewer.setCurrentSearchResultIndex(index)
+        if unchanged:
+            reveal_search_result(index)
+            update_search_status()
+
+    def search_changed(text):
+        # QPdfSearchModel updates asynchronously. Reset the viewer's index
+        # immediately so a prior query cannot leak into the new result set.
+        viewer.setCurrentSearchResultIndex(-1)
+        previous_match.setEnabled(False)
+        next_match.setEnabled(False)
+        result_status.setText("Searching…" if text else "No search")
+        model.setSearchString(text)
+        if not text:
+            update_search_status()
+
+    def search_count_changed():
+        if model.searchString() != search.text():
+            return
+        if model.count() > 0:
+            select_search_result(0)
+        update_search_status()
+
+    def move_search_result(delta):
+        count = model.count()
+        if count <= 0:
+            update_search_status()
+            return
+        current = viewer.currentSearchResultIndex()
+        if current < 0 or current >= count:
+            current = 0
+        target = current + delta
+        if target < 0:
+            select_search_result(0)
+            update_search_status("start")
+            return
+        if target >= count:
+            select_search_result(count - 1)
+            update_search_status("end")
+            return
+        select_search_result(target)
+
+    search.textChanged.connect(search_changed)
+    search.returnPressed.connect(lambda: move_search_result(1))
+    model.countChanged.connect(search_count_changed)
+    viewer.currentSearchResultIndexChanged.connect(
+        lambda index: (reveal_search_result(index), update_search_status())
+    )
+    previous_match.clicked.connect(lambda: move_search_result(-1))
+    next_match.clicked.connect(lambda: move_search_result(1))
+    search_controls.addWidget(search, 1)
+    search_controls.addWidget(result_status)
+    search_controls.addWidget(previous_match)
+    search_controls.addWidget(next_match)
+    layout.addWidget(search_bar)
+    search_bar.hide()
+
+    def focus_search():
+        search_bar.show()
+        search.setFocus(Qt.ShortcutFocusReason)
+        search.selectAll()
+
+    def close_search():
+        search.clear()
+        search_bar.hide()
+        viewer.setFocus(Qt.ShortcutFocusReason)
+
+    find_shortcut = QShortcut(QKeySequence.Find, widget)
+    find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+    find_shortcut.activated.connect(focus_search)
+    widget.find_shortcut = find_shortcut
+    close_find_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), search_bar)
+    close_find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+    close_find_shortcut.activated.connect(close_search)
+    widget.close_find_shortcut = close_find_shortcut
+    if vi_enabled:
+        vi_find_shortcut = QShortcut(QKeySequence(Qt.Key_Slash), viewer)
+        vi_find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        vi_find_shortcut.activated.connect(focus_search)
+        widget.vi_find_shortcut = vi_find_shortcut
     widget.document = document
     widget.search_model = model
+    widget.pdf_search = search
+    widget.pdf_search_bar = search_bar
+    widget.pdf_search_status = result_status
+    widget.pdf_previous_match = previous_match
+    widget.pdf_next_match = next_match
+    widget.move_search_result = move_search_result
     widget.zoom_in = viewer.zoom_in
     widget.zoom_out = viewer.zoom_out
+    return widget
+
+
+def document_text_view(html, *, vi_enabled=False):
+    """Selectable Office text with the same find and navigation contract as PDFs."""
+    widget = QWidget()
+    layout = QVBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+
+    class NavigableTextBrowser(QTextBrowser):
+        def keyPressEvent(self, event):  # type: ignore[override]
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            direction = 0
+            if modifiers == Qt.NoModifier:
+                if event.key() == Qt.Key_Down:
+                    direction = 1
+                elif event.key() == Qt.Key_Up:
+                    direction = -1
+                elif vi_enabled and event.key() == Qt.Key_J:
+                    direction = 1
+                elif vi_enabled and event.key() == Qt.Key_K:
+                    direction = -1
+            if direction:
+                scrollbar = self.verticalScrollBar()
+                page_step = max(1, scrollbar.pageStep())
+                distance = max(scrollbar.singleStep() * 3, page_step // 5)
+                distance = min(distance, max(1, page_step - 1))
+                scrollbar.setValue(scrollbar.value() + direction * distance)
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
+    browser = NavigableTextBrowser()
+    browser.setProperty("folderNavigatorFocusTarget", True)
+    browser.setAccessibleName("Selectable document text")
+    browser.setTextInteractionFlags(
+        Qt.TextSelectableByMouse
+        | Qt.TextSelectableByKeyboard
+        | Qt.LinksAccessibleByMouse
+    )
+    browser.setOpenExternalLinks(True)
+    browser.setHtml(html)
+    layout.addWidget(browser)
+    widget.setFocusProxy(browser)
+
+    search_bar = QWidget(widget)
+    search_layout = QHBoxLayout(search_bar)
+    search_layout.setContentsMargins(0, 0, 0, 0)
+    search = QLineEdit()
+    search.setPlaceholderText("Find in document")
+    search.setAccessibleName("Find in document")
+    result_status = QLabel("No search")
+    result_status.setAccessibleName("Document search results")
+    previous_match = QToolButton()
+    previous_match.setIcon(widget.style().standardIcon(QStyle.SP_ArrowLeft))
+    previous_match.setAccessibleName("Previous match")
+    previous_match.setToolTip("Previous match")
+    next_match = QToolButton()
+    next_match.setIcon(widget.style().standardIcon(QStyle.SP_ArrowRight))
+    next_match.setAccessibleName("Next match")
+    next_match.setToolTip("Next match")
+    search_layout.addWidget(search, 1)
+    search_layout.addWidget(result_status)
+    search_layout.addWidget(previous_match)
+    search_layout.addWidget(next_match)
+    layout.addWidget(search_bar)
+    search_bar.hide()
+    matches = []
+    current_index = -1
+
+    def update_status(boundary=None):
+        count = len(matches)
+        previous_match.setEnabled(count > 0 and current_index > 0)
+        next_match.setEnabled(count > 0 and current_index < count - 1)
+        if not search.text():
+            result_status.setText("No search")
+        elif not count:
+            result_status.setText("No matches")
+        else:
+            suffix = ""
+            if boundary == "start" or current_index == 0:
+                suffix = " · Start"
+            if boundary == "end" or current_index == count - 1:
+                suffix = " · End"
+            if count == 1:
+                suffix = " · Only match"
+            result_status.setText(f"{current_index + 1} of {count}{suffix}")
+
+    def show_current_match(boundary=None):
+        selections = []
+        for index, cursor in enumerate(matches):
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = QTextCursor(cursor)
+            if index == current_index:
+                selection.format.setBackground(QColor(255, 132, 0))
+                selection.format.setForeground(QColor(25, 12, 0))
+                selection.format.setProperty(
+                    QTextFormat.OutlinePen, QPen(QColor(122, 38, 0), 1.5)
+                )
+            else:
+                selection.format.setBackground(QColor(255, 230, 90, 150))
+            selections.append(selection)
+        browser.setExtraSelections(selections)
+        if 0 <= current_index < len(matches):
+            browser.setTextCursor(QTextCursor(matches[current_index]))
+            browser.ensureCursorVisible()
+        update_status(boundary)
+
+    def search_changed(query):
+        nonlocal matches, current_index
+        matches = []
+        current_index = -1
+        cursor = QTextCursor(browser.document())
+        while query:
+            cursor = browser.document().find(query, cursor)
+            if cursor.isNull():
+                break
+            matches.append(QTextCursor(cursor))
+        if matches:
+            current_index = 0
+        elif not query:
+            cursor = browser.textCursor()
+            cursor.clearSelection()
+            browser.setTextCursor(cursor)
+        show_current_match()
+
+    def move_search_result(delta):
+        nonlocal current_index
+        if not matches:
+            update_status()
+            return
+        target = current_index + delta
+        if target < 0:
+            current_index = 0
+            show_current_match("start")
+        elif target >= len(matches):
+            current_index = len(matches) - 1
+            show_current_match("end")
+        else:
+            current_index = target
+            show_current_match()
+
+    def focus_search():
+        search_bar.show()
+        search.setFocus(Qt.ShortcutFocusReason)
+        search.selectAll()
+
+    def close_search():
+        search.clear()
+        search_bar.hide()
+        browser.setFocus(Qt.ShortcutFocusReason)
+
+    search.textChanged.connect(search_changed)
+    search.returnPressed.connect(lambda: move_search_result(1))
+    previous_match.clicked.connect(lambda: move_search_result(-1))
+    next_match.clicked.connect(lambda: move_search_result(1))
+    find_shortcut = QShortcut(QKeySequence.Find, widget)
+    find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+    find_shortcut.activated.connect(focus_search)
+    close_find_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), search_bar)
+    close_find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+    close_find_shortcut.activated.connect(close_search)
+    widget.find_shortcut = find_shortcut
+    widget.close_find_shortcut = close_find_shortcut
+    if vi_enabled:
+        vi_find_shortcut = QShortcut(QKeySequence(Qt.Key_Slash), browser)
+        vi_find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        vi_find_shortcut.activated.connect(focus_search)
+        widget.vi_find_shortcut = vi_find_shortcut
+    widget.text_browser = browser
+    widget.document_search = search
+    widget.document_search_bar = search_bar
+    widget.document_search_status = result_status
+    widget.document_previous_match = previous_match
+    widget.document_next_match = next_match
+    widget.move_search_result = move_search_result
+    widget.zoom_in = browser.zoomIn
+    widget.zoom_out = browser.zoomOut
     return widget
 
 
@@ -2609,12 +3192,23 @@ class Window(QMainWindow):
         self.diagram_preview_cache = OrderedDict()
         self.diagram_preview_cache_bytes = 0
         self.diagram_preview_inflight = set()
+        self.document_preview_cache = OrderedDict()
+        self.document_preview_cache_bytes = 0
+        self.document_preview_inflight = set()
         self.image_preview_cache = OrderedDict()
         self.image_preview_cache_bytes = 0
         self.image_preview_inflight = set()
         self._diagram_renderers = {}
         self._diagram_renderer_lock = threading.Lock()
         self.specialized_editor_windows: list[QMainWindow] = []
+        self._specialized_geometry_windows: dict[QMainWindow, str] = {}
+        self._pending_specialized_geometry: dict[str, QMainWindow] = {}
+        self.specialized_geometry_timer = QTimer(self)
+        self.specialized_geometry_timer.setSingleShot(True)
+        self.specialized_geometry_timer.setInterval(400)
+        self.specialized_geometry_timer.timeout.connect(
+            self._save_pending_specialized_editor_geometry
+        )
         self.excalidraw_processes: list[tuple[subprocess.Popen, str | None, Path]] = []
         self.excalidraw_browser_grants: set[str] = set()
         self.excalidraw_process_timer = QTimer(self)
@@ -3978,7 +4572,11 @@ class Window(QMainWindow):
     def _open_tree_file(self, path, pinned):
         """Open a tree selection and hand keyboard control to its editor."""
         self._cancel_pending_tree_markdown()
-        self.open_file(Path(path), pinned=pinned)
+        path = Path(path)
+        if path.suffix.casefold() in {".puml", ".mmd"}:
+            self._open_specialized_editor(path)
+            return
+        self.open_file(path, pinned=pinned)
         tab = self.active_tab()
         if tab and tab.editor:
             self._schedule_markdown_preview(tab, immediate=True)
@@ -4235,7 +4833,7 @@ class Window(QMainWindow):
             )
         elif kind == "pdf":
             try:
-                view = pdf_view(tab.path)
+                view = pdf_view(tab.path, vi_enabled=self.tree.vi_enabled)
                 tab.viewer = view
                 tab.layout().addWidget(view)
                 if placeholder is not None:
@@ -4288,6 +4886,19 @@ class Window(QMainWindow):
 
         path = Path(path)
         signature = document_signature(path)
+        cached = self._cached_document_preview(path, signature)
+        if cached is not None:
+            QTimer.singleShot(
+                0,
+                lambda: self._show_document_preview(
+                    path, signature, cached, None, cache_result=False
+                ),
+            )
+            return
+        cache_key = self._document_cache_key(path, signature)
+        if cache_key in self.document_preview_inflight:
+            return
+        self.document_preview_inflight.add(cache_key)
         builder = build_pptx_preview if path.suffix.casefold() == ".pptx" else build_docx_preview
 
         def job():
@@ -4297,7 +4908,68 @@ class Window(QMainWindow):
             except Exception as exc:
                 self._emit_bridge_result(("document", path, signature, None, str(exc)))
 
-        self._submit_preview_job(job, kind="document", disposable=disposable)
+        self._submit_preview_job(
+            job,
+            kind="document",
+            disposable=disposable,
+            cleanup=lambda: self.document_preview_inflight.discard(cache_key),
+        )
+
+    @staticmethod
+    def _document_cache_key(path, signature):
+        return str(Path(path).resolve(strict=False)), signature
+
+    @staticmethod
+    def _document_preview_payload_size(preview):
+        return (
+            len((preview.html or "").encode("utf-8"))
+            + len((preview.notice or "").encode("utf-8"))
+            + len(str(preview.pdf_path or "").encode("utf-8"))
+        )
+
+    def _cached_document_preview(self, path, signature):
+        key = self._document_cache_key(path, signature)
+        cached = self.document_preview_cache.get(key)
+        if cached is None:
+            self._record_preview_metric("document", "cache_misses")
+            return None
+        preview, _size = cached
+        pdf_path = preview.pdf_path
+        if pdf_path is not None:
+            try:
+                if not pdf_path.is_file() or not pdf_path.stat().st_size:
+                    raise OSError
+                # Keep the persistent LibreOffice PDF cache's age-based LRU in
+                # sync with this faster in-memory recent-preview cache.
+                pdf_path.touch()
+            except OSError:
+                self.document_preview_cache.pop(key, None)
+                self.document_preview_cache_bytes -= _size
+                self._record_preview_metric("document", "cache_misses")
+                return None
+        self.document_preview_cache.move_to_end(key)
+        self._record_preview_metric("document", "cache_hits")
+        return preview
+
+    def _cache_document_preview(self, path, signature, preview):
+        key = self._document_cache_key(path, signature)
+        size = self._document_preview_payload_size(preview)
+        if size > DOCUMENT_PREVIEW_CACHE_BYTES:
+            return
+        # Retain only the newest signature for a given source path.
+        for existing_key in list(self.document_preview_cache):
+            if existing_key[0] != key[0]:
+                continue
+            _preview, existing_size = self.document_preview_cache.pop(existing_key)
+            self.document_preview_cache_bytes -= existing_size
+        self.document_preview_cache[key] = (preview, size)
+        self.document_preview_cache_bytes += size
+        while (len(self.document_preview_cache) > DOCUMENT_PREVIEW_CACHE_ENTRIES
+               or self.document_preview_cache_bytes > DOCUMENT_PREVIEW_CACHE_BYTES):
+            _old_key, (_preview, old_size) = (
+                self.document_preview_cache.popitem(last=False)
+            )
+            self.document_preview_cache_bytes -= old_size
 
     @staticmethod
     def _image_cache_key(path, signature, quality):
@@ -4643,6 +5315,11 @@ class Window(QMainWindow):
         if index < 0:
             return
         tab = self.tabs.widget(index)
+        # The user may have replaced an in-flight diagram preview with the
+        # raw source editor through "Open File". Do not attach a late preview
+        # result to that new text tab merely because it has the same path.
+        if getattr(tab, "preview_kind", None) != "diagram":
+            return
         tab.preview_signature = signature
         self._finish_preview_loading(tab)
         current = getattr(tab, "viewer", None)
@@ -4739,16 +5416,23 @@ class Window(QMainWindow):
         if tab is self.active_tab() and self.focusWidget() is self.tabs:
             viewer.setFocus(Qt.OtherFocusReason)
 
-    def _show_document_preview(self, path, signature, preview, error):
+    def _show_document_preview(
+            self, path, signature, preview, error, *, cache_result=True):
         from .documents import document_signature
 
-        index = self._index_for(path)
-        if index < 0:
-            return
+        cache_key = self._document_cache_key(path, signature)
+        self.document_preview_inflight.discard(cache_key)
         try:
             if signature != document_signature(path):
                 return
         except OSError:
+            return
+        # Like diagram previews, retain successful work even when a transient
+        # flyover tab was replaced before the background job completed.
+        if cache_result and preview is not None and not error:
+            self._cache_document_preview(path, signature, preview)
+        index = self._index_for(path)
+        if index < 0:
             return
         tab = self.tabs.widget(index)
         tab.preview_signature = signature
@@ -4781,21 +5465,18 @@ class Window(QMainWindow):
 
         try:
             if preview.pdf_path is not None:
-                layout_content = pdf_view(preview.pdf_path)
+                layout_content = pdf_view(
+                    preview.pdf_path, vi_enabled=self.tree.vi_enabled
+                )
                 content = layout_content
                 if preview.html:
-                    selectable_content = QTextBrowser()
-                    selectable_content.setAccessibleName("Selectable document text")
-                    selectable_content.setTextInteractionFlags(
-                        Qt.TextSelectableByMouse
-                        | Qt.TextSelectableByKeyboard
-                        | Qt.LinksAccessibleByMouse
+                    selectable_view = document_text_view(
+                        preview.html, vi_enabled=self.tree.vi_enabled
                     )
-                    selectable_content.setOpenExternalLinks(True)
-                    selectable_content.setHtml(preview.html)
+                    selectable_content = selectable_view.text_browser
                     views = QStackedWidget()
                     views.addWidget(layout_content)
-                    views.addWidget(selectable_content)
+                    views.addWidget(selectable_view)
                     layout_button = QPushButton("Layout")
                     text_button = QPushButton("Selectable Text")
                     layout_button.setCheckable(True)
@@ -4805,7 +5486,9 @@ class Window(QMainWindow):
                         views.setCurrentIndex(index)
                         layout_button.setChecked(index == 0)
                         text_button.setChecked(index == 1)
-                        views.currentWidget().setFocus(Qt.OtherFocusReason)
+                        self._viewer_keyboard_target(
+                            views.currentWidget()
+                        ).setFocus(Qt.OtherFocusReason)
 
                     layout_button.clicked.connect(lambda: select_document_view(0))
                     text_button.clicked.connect(lambda: select_document_view(1))
@@ -4814,6 +5497,7 @@ class Window(QMainWindow):
                     header.insertWidget(1, text_button)
                     content = views
                     container.selectable_content = selectable_content
+                    container.selectable_text_view = selectable_view
                     container.document_views = views
                     container.zoom_in = lambda: (
                         layout_content.zoom_in()
@@ -4829,17 +5513,13 @@ class Window(QMainWindow):
                     container.zoom_in = layout_content.zoom_in
                     container.zoom_out = layout_content.zoom_out
             else:
-                content = QTextBrowser()
-                content.setAccessibleName("Selectable document text")
-                content.setTextInteractionFlags(
-                    Qt.TextSelectableByMouse
-                    | Qt.TextSelectableByKeyboard
-                    | Qt.LinksAccessibleByMouse
+                content = document_text_view(
+                    preview.html, vi_enabled=self.tree.vi_enabled
                 )
-                content.setOpenExternalLinks(True)
-                content.setHtml(preview.html)
-                container.zoom_in = content.zoomIn
-                container.zoom_out = content.zoomOut
+                container.selectable_content = content.text_browser
+                container.selectable_text_view = content
+                container.zoom_in = content.zoom_in
+                container.zoom_out = content.zoom_out
         except (ImportError, ValueError, RuntimeError) as exc:
             tab.show_notice(f"Document preview failed: {exc}")
             container.deleteLater()
@@ -4853,8 +5533,19 @@ class Window(QMainWindow):
         self._install_preview_context_menu(tab, container)
         tab.notice.hide()
         self._record_preview_visible(path, "document")
-        if tab is self.active_tab() and self.focusWidget() is self.tabs:
-            content.setFocus(Qt.OtherFocusReason)
+        pending_focus = bool(tab.property("folderNavigatorPendingContentFocus"))
+        tab.setProperty("folderNavigatorPendingContentFocus", False)
+        if (tab is self.active_tab()
+                and (pending_focus or self.focusWidget() is self.tabs)):
+            target = self._viewer_keyboard_target(container)
+            target.setFocus(Qt.OtherFocusReason)
+            # QTabWidget can re-focus its tab bar while laying out a newly
+            # hydrated page. Reapply the explicit Shift-Enter focus request
+            # after that layout pass.
+            QTimer.singleShot(
+                0, target,
+                lambda current=target: current.setFocus(Qt.OtherFocusReason),
+            )
 
     def _request_workbook_sheet(self, path, sheet_name, viewer):
         viewer.requested_sheet = sheet_name
@@ -5151,6 +5842,17 @@ class Window(QMainWindow):
         self.statusBar().showMessage("Markdown table aligned", 3000)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        geometry_key = (
+            self._specialized_geometry_windows.get(obj)
+            if isinstance(obj, QMainWindow)
+            else None
+        )
+        if geometry_key:
+            if event.type() in (QEvent.Move, QEvent.Resize):
+                self._pending_specialized_geometry[geometry_key] = obj
+                self.specialized_geometry_timer.start()
+            elif event.type() == QEvent.Close:
+                self._save_specialized_editor_geometry(obj, geometry_key)
         if (event.type() == QEvent.KeyPress
                 and event.key() in (Qt.Key_F, Qt.Key_V)
                 and event.modifiers() == Qt.NoModifier):
@@ -5351,7 +6053,7 @@ class Window(QMainWindow):
             if tab.editor is not None:
                 tab.editor.setFocus(Qt.MouseFocusReason)
             elif getattr(tab, "viewer", None) is not None:
-                tab.viewer.setFocus(Qt.MouseFocusReason)
+                self._viewer_keyboard_target(tab.viewer).setFocus(Qt.MouseFocusReason)
             else:
                 self.tabs.setFocus(Qt.MouseFocusReason)
 
@@ -5367,9 +6069,35 @@ class Window(QMainWindow):
         if tab.editor is not None:
             tab.editor.setFocus(Qt.OtherFocusReason)
         elif getattr(tab, "viewer", None) is not None:
-            tab.viewer.setFocus(Qt.OtherFocusReason)
+            tab.setProperty("folderNavigatorPendingContentFocus", False)
+            self._viewer_keyboard_target(tab.viewer).setFocus(Qt.OtherFocusReason)
         else:
+            tab.setProperty("folderNavigatorPendingContentFocus", True)
             self.tabs.setFocus(Qt.OtherFocusReason)
+
+    @staticmethod
+    def _viewer_keyboard_target(viewer):
+        """Return a preview's concrete keyboard surface, if it declares one."""
+        if viewer.property("folderNavigatorFocusTarget"):
+            return viewer
+        stack = (
+            viewer if isinstance(viewer, QStackedWidget)
+            else getattr(viewer, "document_views", None)
+        )
+        if isinstance(stack, QStackedWidget) and stack.currentWidget() is not None:
+            return Window._viewer_keyboard_target(stack.currentWidget())
+        proxy = viewer.focusProxy()
+        if proxy is not None and proxy is not viewer:
+            return Window._viewer_keyboard_target(proxy)
+        candidates = [
+            child for child in viewer.findChildren(QWidget)
+            if child.property("folderNavigatorFocusTarget")
+        ]
+        target = next(
+            (child for child in candidates if child.isVisibleTo(viewer)),
+            candidates[0] if candidates else None,
+        )
+        return target or viewer
 
     def cycle_tab(self, delta):
         current = self.active_tab()
@@ -5669,6 +6397,8 @@ class Window(QMainWindow):
         if self.chat_panel is not None:
             self.chat_panel.close()
         self._cancel_pending_preview_hydration()
+        self.specialized_geometry_timer.stop()
+        self._save_pending_specialized_editor_geometry()
         self._close_excalidraw_processes()
         self._persist()
         registration = getattr(self, "instance_registration", None)
@@ -6171,16 +6901,27 @@ class Window(QMainWindow):
             if self.scope != self.root:
                 menu.addAction("Clear Filter", self.clear_filter)
         else:
-            menu.addAction("Open", lambda: self.open_file(path))
-            menu.addAction("Open in New Tab", lambda: self.open_file(path, pinned=True))
-            menu.addAction("Keep Open", lambda: self.keep_open(self._index_for(path)))
+            selected_files = self._selected_files_for_context(index)
             specialized_label = self._specialized_editor_label(path)
-            if specialized_label:
+            if path.suffix.casefold() in {".puml", ".mmd"}:
                 menu.addAction(specialized_label, lambda: self._open_specialized_editor(path))
+                menu.addAction("Open File", lambda: self._open_diagram_as_file(path))
+            else:
+                menu.addAction("Open", lambda: self.open_file(path))
+                menu.addAction("Open in New Tab", lambda: self.open_file(path, pinned=True))
+                menu.addAction("Keep Open", lambda: self.keep_open(self._index_for(path)))
+                if specialized_label:
+                    menu.addAction(specialized_label, lambda: self._open_specialized_editor(path))
             menu.addAction("Open in Default Application", lambda: self.system_open(path))
             menu.addSeparator()
             menu.addAction("Rename…", lambda: self._rename_file(path))
-            menu.addAction("Delete File…", lambda: self._delete_file(path))
+            if len(selected_files) > 1:
+                menu.addAction(
+                    "Delete File(s)...",
+                    lambda paths=selected_files: self._delete_files(paths),
+                )
+            else:
+                menu.addAction("Delete File…", lambda: self._delete_file(path))
         target_directory = path if folder else path.parent
         target_index = index if folder else index.parent()
         menu.addSeparator()
@@ -6197,6 +6938,23 @@ class Window(QMainWindow):
         copy_menu.addAction("Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         return menu
+
+    def _selected_files_for_context(self, clicked_index):
+        """Return selected files only when the context-clicked file is selected."""
+        clicked_path = Path(self.model.filePath(clicked_index))
+        selected = []
+        seen = set()
+        for index in self.tree.selectionModel().selectedRows(0):
+            if not index.isValid() or self.model.isDir(index):
+                continue
+            path = Path(self.model.filePath(index))
+            if path in seen or not path.is_file() or not inside(self.root, path):
+                continue
+            seen.add(path)
+            selected.append(path)
+        if clicked_path not in seen:
+            return [clicked_path]
+        return selected
 
     def _add_new_context_menu(self, menu, directory, directory_index):
         new_menu = QMenu("New", menu)
@@ -6309,27 +7067,67 @@ class Window(QMainWindow):
         return QFile.moveToTrash(str(path))
 
     def _delete_file(self, path):
-        path = Path(path)
-        if not path.is_file() or not inside(self.root, path):
-            self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+        self._delete_files([path])
+
+    def _delete_files(self, paths):
+        unique_paths = []
+        seen = set()
+        for value in paths:
+            path = Path(value)
+            if path not in seen:
+                seen.add(path)
+                unique_paths.append(path)
+        if not unique_paths:
             return
-        tab_index = self._index_for(path)
-        if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
-            self.statusBar().showMessage("Save or close unsaved changes before deleting this file", 8000)
+        for path in unique_paths:
+            if not path.is_file() or not inside(self.root, path):
+                self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+                return
+        tab_indexes = {path: self._index_for(path) for path in unique_paths}
+        dirty = [
+            path for path, index in tab_indexes.items()
+            if index >= 0 and self.tabs.widget(index).dirty
+        ]
+        if dirty:
+            message = (
+                "Save or close unsaved changes before deleting the selected files"
+                if len(unique_paths) > 1
+                else "Save or close unsaved changes before deleting this file"
+            )
+            self.statusBar().showMessage(message, 8000)
             return
+        if len(unique_paths) > 1:
+            title = "Delete Files"
+            prompt = f"Are you sure you want to delete the {len(unique_paths)} files?"
+        else:
+            title = "Delete File"
+            prompt = f"Move {unique_paths[0].name} to Trash?"
         answer = QMessageBox.question(
-            self, "Delete File", f"Move {path.name} to Trash?",
+            self, title, prompt,
             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
         )
         if answer != QMessageBox.Yes:
             return
-        if not self._move_file_to_trash(path):
-            self.statusBar().showMessage(f"Could not move {path.name} to Trash", 12000)
-            return
-        if tab_index >= 0:
-            self.close_tab(tab_index)
-        self._reconcile_file_change(path)
-        self.statusBar().showMessage(f"Moved {path.name} to Trash", 4000)
+
+        moved = []
+        for path in unique_paths:
+            if not self._move_file_to_trash(path):
+                self.statusBar().showMessage(
+                    f"Moved {len(moved)} of {len(unique_paths)} files; "
+                    f"could not move {path.name} to Trash",
+                    12000,
+                )
+                return
+            tab_index = self._index_for(path)
+            if tab_index >= 0:
+                self.close_tab(tab_index)
+            self._reconcile_file_change(path)
+            moved.append(path)
+        if len(moved) == 1:
+            message = f"Moved {moved[0].name} to Trash"
+        else:
+            message = f"Moved {len(moved)} files to Trash"
+        self.statusBar().showMessage(message, 4000)
 
     def _reconcile_file_change(self, old_path, new_path=None):
         self._cancel_pending_tree_markdown()
@@ -6509,10 +7307,31 @@ class Window(QMainWindow):
     @staticmethod
     def _specialized_editor_label(path):
         return {
-            ".puml": "Open PlantUML Editor",
-            ".mmd": "Open Mermaid Editor",
+            ".puml": "Open with PlantUML Editor",
+            ".mmd": "Open with Mermaid Editor",
             ".excalidraw": "Open Excalidraw",
         }.get(Path(path).suffix.casefold())
+
+    def _open_diagram_as_file(self, path):
+        """Open a PlantUML or Mermaid source file in the text editor."""
+        path = Path(path)
+        index = self._index_for(path)
+        if index >= 0:
+            existing = self.tabs.widget(index)
+            if existing.editor is not None:
+                self.keep_open(index)
+                self.tabs.setCurrentWidget(existing)
+                self._focus_tab_content(existing)
+                return
+            self.tabs.removeTab(index)
+            existing.deleteLater()
+        self.open_file(
+            path,
+            pinned=True,
+            force_text=True,
+            replace_preview=False,
+        )
+        self._focus_tab_content(self.active_tab())
 
     def _open_specialized_editor(self, path):
         """Open a diagram in the matching standalone StillPoint editor."""
@@ -6520,36 +7339,31 @@ class Window(QMainWindow):
         external_grant = None
         try:
             suffix = path.suffix.casefold()
-            if suffix == ".puml":
-                from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
-                window = PlantUMLEditorWindow(str(path), parent=None)
-            elif suffix == ".mmd":
-                from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
-                window = MermaidEditorWindow(str(path), parent=None)
-            elif suffix == ".excalidraw":
+            if suffix in (".puml", ".mmd"):
+                editor = "plantuml" if suffix == ".puml" else "mermaid"
+                from sp.app.diagram_editor_process import launch_diagram_editor_process
+
+                geometries = self.state.get("specialized_editor_geometry", {})
+                initial_geometry = (
+                    geometries.get(suffix) if isinstance(geometries, dict) else None
+                )
+                process = launch_diagram_editor_process(
+                    editor,
+                    path,
+                    geometry_scope=f"folder-navigator:{self.root}",
+                    initial_geometry=initial_geometry,
+                )
+                self.excalidraw_processes.append((process, None, path))
+                if not self.excalidraw_process_timer.isActive():
+                    self.excalidraw_process_timer.start()
+                return
+            if suffix == ".excalidraw":
                 editor_url, external_grant = self._excalidraw_editor_url(
                     path, include_grant=True
                 )
                 self._launch_excalidraw_process(path, editor_url, external_grant)
                 return
-            else:
-                return
-            window.setWindowFlag(Qt.Window, True)
-            window.setWindowFlag(Qt.Tool, False)
-            window.setWindowModality(Qt.NonModal)
-            window.setAttribute(Qt.WA_DeleteOnClose, True)
-            if hasattr(window, "fileSaved"):
-                window.fileSaved.connect(self._specialized_file_saved)
-            self.specialized_editor_windows.append(window)
-            window.destroyed.connect(
-                lambda _=None, item=window: self.specialized_editor_windows.remove(item)
-                if item in self.specialized_editor_windows else None
-            )
-            if suffix == ".excalidraw" and external_grant:
-                window.destroyed.connect(
-                    lambda _=None, grant=external_grant: self._revoke_excalidraw_grant(grant)
-                )
-            window.show()
+            return
         except Exception as exc:
             if external_grant:
                 self._revoke_excalidraw_grant(external_grant)
@@ -6558,6 +7372,48 @@ class Window(QMainWindow):
                 "Could not open diagram editor",
                 f"Could not open {path.name} in its StillPoint editor:\n{exc}",
             )
+
+    def _restore_and_track_specialized_editor_geometry(self, window, suffix):
+        """Restore geometry owned by this Folder Navigator and track changes."""
+        from PySide6.QtCore import QByteArray
+
+        geometries = self.state.get("specialized_editor_geometry", {})
+        encoded = geometries.get(suffix) if isinstance(geometries, dict) else None
+        if isinstance(encoded, str) and encoded:
+            try:
+                window.restoreGeometry(QByteArray.fromBase64(encoded.encode("ascii")))
+            except (RuntimeError, ValueError):
+                pass
+        self._specialized_geometry_windows[window] = suffix
+        window.installEventFilter(self)
+        window.destroyed.connect(
+            lambda _=None, item=window: self._forget_specialized_geometry_window(item)
+        )
+
+    def _forget_specialized_geometry_window(self, window):
+        key = self._specialized_geometry_windows.pop(window, None)
+        if key and self._pending_specialized_geometry.get(key) is window:
+            self._pending_specialized_geometry.pop(key, None)
+
+    def _save_specialized_editor_geometry(self, window, suffix):
+        try:
+            encoded = self._encode_qt_state(window.saveGeometry())
+        except RuntimeError:
+            return
+        geometries = self.state.get("specialized_editor_geometry")
+        if not isinstance(geometries, dict):
+            geometries = {}
+            self.state["specialized_editor_geometry"] = geometries
+        if geometries.get(suffix) == encoded:
+            return
+        geometries[suffix] = encoded
+        self._persist()
+
+    def _save_pending_specialized_editor_geometry(self):
+        pending = list(self._pending_specialized_geometry.items())
+        self._pending_specialized_geometry.clear()
+        for suffix, window in pending:
+            self._save_specialized_editor_geometry(window, suffix)
 
     def _launch_excalidraw_process(self, path, editor_url, external_grant=None):
         """Host WebEngine outside the navigator's Qt process.
