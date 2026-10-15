@@ -1,3 +1,6 @@
+import json
+
+
 def test_plantuml_cache_key_is_stable_after_tool_discovery(tmp_path, monkeypatch):
     from sp.app.plantuml_renderer import PlantUMLRenderer, RenderResult
 
@@ -86,6 +89,28 @@ def test_mermaid_windows_npm_wrapper_runs_through_cmd(tmp_path, monkeypatch):
         "/c",
         str(renderer._mmdc_path),
     ]
+
+
+def test_mermaid_windows_uses_installed_chrome_for_puppeteer(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    local_app_data = tmp_path / "Local"
+    chrome = local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.touch()
+    monkeypatch.setattr("sp.app.mermaid_renderer._is_windows_platform", lambda: True)
+    monkeypatch.setattr("sp.app.mermaid_renderer.shutil.which", lambda _name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    for name in ("PUPPETEER_EXECUTABLE_PATH", "CHROME_PATH", "PROGRAMFILES", "PROGRAMFILES(X86)", "ProgramW6432"):
+        monkeypatch.delenv(name, raising=False)
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    config_path = tmp_path / "puppeteer-config.json"
+    renderer._write_puppeteer_config(config_path)
+
+    assert renderer._discover_puppeteer_browser() == chrome
+    assert json.loads(config_path.read_text(encoding="utf-8"))["executablePath"] == str(chrome)
+    assert renderer._mmdc_env()["PUPPETEER_EXECUTABLE_PATH"] == str(chrome)
 
 
 def test_mermaid_failure_diagnostics_include_stdout_stderr_and_command(tmp_path):

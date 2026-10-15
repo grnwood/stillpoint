@@ -66,6 +66,7 @@ class MermaidRenderer:
         self.cache_dir = cache_dir or (Path.home() / ".stillpoint_cache" / "mermaid")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._mmdc_path: Optional[Path] = None
+        self._puppeteer_browser_path: Optional[Path] = None
         self._render_lock = threading.Lock()
 
     def discover_mmdc(self) -> Optional[Path]:
@@ -127,7 +128,41 @@ class MermaidRenderer:
             node_name = "node.exe" if os.name == "nt" else "node"
             if (self._mmdc_path.parent / node_name).is_file():
                 env["PATH"] = os.pathsep.join((str(self._mmdc_path.parent), env.get("PATH", "")))
+        if browser_path := self._discover_puppeteer_browser():
+            env["PUPPETEER_EXECUTABLE_PATH"] = str(browser_path)
         return env
+
+    def _discover_puppeteer_browser(self) -> Optional[Path]:
+        """Find a browser mmdc/Puppeteer can launch without its own download."""
+        if self._puppeteer_browser_path is not None:
+            return self._puppeteer_browser_path
+
+        candidates: list[Path] = []
+        for env_name in ("PUPPETEER_EXECUTABLE_PATH", "CHROME_PATH"):
+            if value := os.environ.get(env_name):
+                candidates.append(Path(value))
+
+        if _is_windows_platform():
+            browser_locations = (
+                ("Google", "Chrome", "chrome.exe"),
+                ("Microsoft", "Edge", "msedge.exe"),
+                ("BraveSoftware", "Brave-Browser", "brave.exe"),
+            )
+            for root_name in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "ProgramW6432"):
+                if root := os.environ.get(root_name):
+                    candidates.extend(
+                        Path(root) / vendor / product / "Application" / executable
+                        for vendor, product, executable in browser_locations
+                    )
+            for command_name in ("chrome.exe", "msedge.exe", "brave.exe"):
+                if executable := shutil.which(command_name):
+                    candidates.append(Path(executable))
+
+        for path in candidates:
+            if path.is_file():
+                self._puppeteer_browser_path = path
+                return path
+        return None
 
     def _mmdc_command(self) -> list[str]:
         """Return an executable command for native binaries and npm wrappers."""
@@ -150,6 +185,10 @@ class MermaidRenderer:
             f"Platform: {sys.platform}",
             f"Mermaid CLI: {self._mmdc_path or 'not found'}",
         ]
+        if _is_windows_platform():
+            details.append(
+                f"Puppeteer browser: {self._discover_puppeteer_browser() or 'not found'}"
+            )
         if command:
             details.append("Command: " + subprocess.list2cmdline(command))
         if exception is not None:
@@ -970,17 +1009,18 @@ class MermaidRenderer:
         if style_map:
             elem.set("style", "; ".join(f"{k}: {v}" for k, v in style_map.items()))
 
-    @staticmethod
-    def _write_puppeteer_config(path: Path) -> None:
-        if os.name != "posix":
-            return
-        payload = {
-            "args": [
+    def _write_puppeteer_config(self, path: Path) -> None:
+        payload: dict[str, object] = {}
+        if os.name == "posix":
+            payload["args"] = [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
             ]
-        }
+        if browser_path := self._discover_puppeteer_browser():
+            payload["executablePath"] = str(browser_path)
+        if not payload:
+            return
         path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
     def _read_from_cache(self, cache_key: str) -> Optional[str]:

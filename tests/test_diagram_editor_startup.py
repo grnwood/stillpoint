@@ -106,6 +106,29 @@ def test_preview_angle_only_precision_scroll_pans_like_windows_touchpad(qtbot) -
     assert zooms == []
 
 
+def test_preview_windows_angle_scroll_requires_primary_modifier(qtbot, monkeypatch) -> None:
+    from sp.app.ui import canvas_navigation
+
+    monkeypatch.setattr(canvas_navigation.sys, "platform", "win32")
+    area = QScrollArea()
+    label = ZoomablePreviewLabel()
+    label.resize(1000, 1000)
+    area.setWidget(label)
+    area.resize(200, 200)
+    qtbot.addWidget(area)
+    area.show()
+    area.verticalScrollBar().setValue(200)
+    zooms: list[int] = []
+    label.zoomRequested.connect(lambda direction, _anchor: zooms.append(direction))
+
+    label.wheelEvent(_wheel_event(angle_y=-120))
+    assert area.verticalScrollBar().value() == 240
+    assert zooms == []
+
+    label.wheelEvent(_wheel_event(angle_y=120, modifiers=Qt.ControlModifier))
+    assert zooms == [1]
+
+
 def test_source_editor_primary_modifier_wheel_requests_text_zoom(qtbot) -> None:
     from sp.app.ui.plantuml_editor_window import ViPlainTextEdit
 

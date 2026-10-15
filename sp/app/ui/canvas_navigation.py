@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import sys
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QInputDevice
@@ -48,6 +49,16 @@ def wheel_action(event) -> CanvasWheelAction:
         return CanvasWheelAction(pan=QPointF(x, y))
 
     angle_delta = event.angleDelta()
+    if sys.platform == "win32" and not primary_modifier:
+        # Windows precision touchpads frequently arrive as angle-only mouse
+        # wheel events with no scroll phase or TouchPad device metadata.  They
+        # cannot be distinguished reliably from a notched wheel, so use the
+        # suite-wide Windows rule: scrolling pans and Ctrl/Cmd+scroll zooms.
+        x = float(angle_delta.x()) / 3.0
+        y = float(angle_delta.y()) / 3.0
+        if modifiers & Qt.ShiftModifier and math.isclose(x, 0.0):
+            x, y = y, 0.0
+        return CanvasWheelAction(pan=QPointF(x, y))
     if _is_precision_scroll(event):
         if primary_modifier:
             delta = angle_delta.y() or angle_delta.x()

@@ -2339,7 +2339,7 @@ class MermaidEditorWindow(QMainWindow):
             }};
         }}
 
-        function fitDiagram() {{
+        function fitDiagram(fillFactor = 1.0) {{
             const svg = currentSvg();
             if (!svg || !viewport) return;
             const rect = viewport.getBoundingClientRect();
@@ -2348,16 +2348,16 @@ class MermaidEditorWindow(QMainWindow):
                 0.2,
                 Math.min(
                     4.0,
-                    Math.min(rect.width / bbox.width, rect.height / bbox.height) * 0.92
+                    Math.min(rect.width / bbox.width, rect.height / bbox.height) * 0.96 * fillFactor
                 )
             );
             centerSvgAtZoom(fitZoom);
         }}
 
-        function scheduleFitDiagram() {{
+        function scheduleFitDiagram(fillFactor = 1.0) {{
             window.requestAnimationFrame(() => {{
                 window.requestAnimationFrame(() => {{
-                    fitDiagram();
+                    fitDiagram(fillFactor);
                 }});
             }});
         }}
@@ -2770,7 +2770,10 @@ class MermaidEditorWindow(QMainWindow):
                 const id = `sp-mermaid-${{Date.now()}}`;
                 const rendered = await mermaid.render(id, source);
                 if (host) host.innerHTML = rendered.svg;
-                scheduleFitDiagram();
+                // Give a freshly rendered diagram a little more presence than
+                // a strict contain-fit. The Fit control still restores the
+                // complete diagram with comfortable margins.
+                scheduleFitDiagram(1.12);
                 setStatus(includeBrowserControls ? 'Rendered. Mouse wheel or Ctrl+scroll to zoom. Two-finger scroll or right-drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
             }} catch (err) {{
                 const errorDetail = err && err.stack ? err.stack : (err && err.message ? err.message : String(err));
