@@ -1032,6 +1032,9 @@ def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp
     assert "CDN fallback:" in html
     assert "const payloadJsUrl = \"\";" in html
     assert "const serializer = new XMLSerializer();" in html
+    assert "svg.style.width = `${viewBox.width}px`;" in html
+    assert "position: absolute; left: 0; top: 0;" in html
+    assert "scheduleFitDiagram(1.12);" in html
 
     window.close()
 

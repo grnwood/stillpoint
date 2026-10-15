@@ -113,6 +113,29 @@ def test_mermaid_windows_uses_installed_chrome_for_puppeteer(tmp_path, monkeypat
     assert renderer._mmdc_env()["PUPPETEER_EXECUTABLE_PATH"] == str(chrome)
 
 
+def test_mermaid_generated_output_retries_transient_permission_error(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    output = tmp_path / "diagram.svg"
+    output.write_bytes(b"<svg />")
+    original_read_bytes = Path.read_bytes
+    attempts = 0
+
+    def intermittently_locked(path):
+        nonlocal attempts
+        if path == output and attempts < 2:
+            attempts += 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", intermittently_locked)
+
+    assert MermaidRenderer._read_generated_output(output) == b"<svg />"
+    assert attempts == 2
+
+
 def test_mermaid_failure_diagnostics_include_stdout_stderr_and_command(tmp_path):
     from sp.app.mermaid_renderer import MermaidRenderer
 

@@ -2221,8 +2221,8 @@ class MermaidEditorWindow(QMainWindow):
         }}
         #browser-controls .spacer {{ flex: 1 1 auto; }}
         #viewport {{ width: 100%; flex: 1 1 auto; overflow: hidden; cursor: default; user-select: none; }}
-        #diagram-host {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
-        #diagram-host svg {{ max-width: none; max-height: none; transform-origin: 0 0; }}
+        #diagram-host {{ width: 100%; height: 100%; position: relative; overflow: visible; }}
+        #diagram-host svg {{ position: absolute; left: 0; top: 0; max-width: none; max-height: none; transform-origin: 0 0; }}
     </style>
     <script>
         let viewport = null;
@@ -2307,15 +2307,31 @@ class MermaidEditorWindow(QMainWindow):
         }}
 
         function fitSvgToCanvas(svg) {{
-            // Mermaid can emit SVGs whose nominal viewBox is not the same as the
-            // actual diagram extents. Prefer the content bounds when available.
+            // Mermaid normally emits width="100%". Resolve that responsive size
+            // to the intrinsic viewBox before applying our own transform;
+            // otherwise the browser scales once and Fit scales it a second time.
+            const viewBox = svg.viewBox && svg.viewBox.baseVal
+                ? svg.viewBox.baseVal
+                : null;
+            if (viewBox && viewBox.width > 0 && viewBox.height > 0) {{
+                svg.style.width = `${{viewBox.width}}px`;
+                svg.style.height = `${{viewBox.height}}px`;
+                return {{
+                    x: 0,
+                    y: 0,
+                    width: Math.max(1, Math.ceil(viewBox.width)),
+                    height: Math.max(1, Math.ceil(viewBox.height)),
+                }};
+            }}
             try {{
                 if (svg && typeof svg.getBBox === 'function') {{
                     const box = svg.getBBox();
                     if (box && box.width > 0 && box.height > 0) {{
+                        svg.style.width = `${{box.width}}px`;
+                        svg.style.height = `${{box.height}}px`;
                         return {{
-                            x: Number.isFinite(box.x) ? box.x : 0,
-                            y: Number.isFinite(box.y) ? box.y : 0,
+                            x: 0,
+                            y: 0,
                             width: Math.max(1, Math.ceil(box.width)),
                             height: Math.max(1, Math.ceil(box.height)),
                         }};
@@ -2324,16 +2340,13 @@ class MermaidEditorWindow(QMainWindow):
             }} catch (_err) {{
                 // Fall back to the intrinsic SVG box below.
             }}
-            const viewBox = svg.viewBox && svg.viewBox.baseVal
-                ? svg.viewBox.baseVal
-                : null;
-            const width = viewBox && viewBox.width ? viewBox.width : (svg.width && svg.width.baseVal ? svg.width.baseVal.value : 1200);
-            const height = viewBox && viewBox.height ? viewBox.height : (svg.height && svg.height.baseVal ? svg.height.baseVal.value : 800);
-            const x = viewBox && Number.isFinite(viewBox.x) ? viewBox.x : 0;
-            const y = viewBox && Number.isFinite(viewBox.y) ? viewBox.y : 0;
+            const width = svg.width && svg.width.baseVal ? svg.width.baseVal.value : 1200;
+            const height = svg.height && svg.height.baseVal ? svg.height.baseVal.value : 800;
+            svg.style.width = `${{Math.max(1, width || 1200)}}px`;
+            svg.style.height = `${{Math.max(1, height || 800)}}px`;
             return {{
-                x,
-                y,
+                x: 0,
+                y: 0,
                 width: Math.max(1, Math.ceil(width || 1200)),
                 height: Math.max(1, Math.ceil(height || 800)),
             }};

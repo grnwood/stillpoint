@@ -172,6 +172,18 @@ class MermaidRenderer:
             return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", executable]
         return [executable]
 
+    @staticmethod
+    def _read_generated_output(path: Path) -> bytes:
+        """Read mmdc output after transient Windows scanner/browser locks clear."""
+        for attempt in range(10):
+            try:
+                return path.read_bytes()
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        return b""  # pragma: no cover - the loop always returns or raises
+
     def _failure_diagnostics(
         self,
         *,
@@ -369,8 +381,8 @@ class MermaidRenderer:
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
                 stdout_text = result.stdout.decode("utf-8", errors="replace")
-                if output_path.exists():
-                    png_bytes = output_path.read_bytes()
+                if output_path.is_file():
+                    png_bytes = self._read_generated_output(output_path)
                     if png_bytes:
                         return RenderResult(success=True, png_bytes=png_bytes)
 
@@ -465,8 +477,10 @@ class MermaidRenderer:
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
                 stdout_text = result.stdout.decode("utf-8", errors="replace")
-                if output_path.exists():
-                    svg_content = output_path.read_text(encoding="utf-8", errors="replace")
+                if output_path.is_file():
+                    svg_content = self._read_generated_output(output_path).decode(
+                        "utf-8", errors="replace"
+                    )
                     if normalize_for_qtsvg:
                         svg_content = self._normalize_svg_for_qtsvg(svg_content)
                     if "<svg" in svg_content:
