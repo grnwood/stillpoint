@@ -22,7 +22,7 @@ def _wheel_event(*, pixel_x: int = 0, pixel_y: int = 0, angle_y: int = 0, modifi
         QPoint(0, angle_y),
         Qt.NoButton,
         modifiers,
-        Qt.ScrollUpdate,
+        Qt.NoScrollPhase,
         False,
     )
 
@@ -225,9 +225,13 @@ def test_link_graph_trackpad_pans_and_mouse_wheel_zooms(qtbot, qapp) -> None:
     assert view.verticalScrollBar().value() == old_y + 30
     assert view._zoom == 1.0
 
+    pointer_scene_before = view.mapToScene(QPoint(10, 10))
     view.wheelEvent(_wheel_event(angle_y=120))
+    pointer_scene_after = view.mapToScene(QPoint(10, 10))
 
     assert view._zoom == 1.1
+    assert abs(pointer_scene_after.x() - pointer_scene_before.x()) <= 1.0
+    assert abs(pointer_scene_after.y() - pointer_scene_before.y()) <= 1.0
 
 
 def test_link_graph_uses_vault_accent_and_readable_active_label(qtbot) -> None:

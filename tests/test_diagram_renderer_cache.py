@@ -69,4 +69,37 @@ def test_mermaid_discovers_nvm_cli_without_shell_path(tmp_path, monkeypatch):
     renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
     assert renderer.discover_mmdc() == mmdc
     assert renderer._mmdc_env()["PATH"].split(os.pathsep)[0] == str(nvm_bin)
+
+
+def test_mermaid_windows_npm_wrapper_runs_through_cmd(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    renderer._mmdc_path = tmp_path / "mmdc.cmd"
+    monkeypatch.setattr("sp.app.mermaid_renderer._is_windows_platform", lambda: True)
+    monkeypatch.setenv("COMSPEC", "C:/Windows/System32/cmd.exe")
+
+    assert renderer._mmdc_command() == [
+        "C:/Windows/System32/cmd.exe",
+        "/d",
+        "/s",
+        "/c",
+        str(renderer._mmdc_path),
+    ]
+
+
+def test_mermaid_failure_diagnostics_include_stdout_stderr_and_command(tmp_path):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    renderer._mmdc_path = tmp_path / "mmdc.cmd"
+    details = renderer._failure_diagnostics(
+        command=[str(renderer._mmdc_path), "-i", "diagram.mmd"],
+        stdout="browser output",
+        stderr="puppeteer error",
+    )
+
+    assert str(renderer._mmdc_path) in details
+    assert "browser output" in details
+    assert "puppeteer error" in details
 import os

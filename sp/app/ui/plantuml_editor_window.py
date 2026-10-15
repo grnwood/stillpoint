@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QPointF, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices, QNativeGestureEvent
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -40,6 +40,7 @@ from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .screen_positioning import fit_window_to_available_screen, popup_available_geometry
 from .keyboard_shortcuts import is_vi_navigation_chord
+from .canvas_navigation import wheel_action
 
 _LOGGING = log_enabled("diagrams")
 
@@ -90,6 +91,8 @@ class LineNumberArea(QWidget):
 
 class PlainTextEditWithLineNumbers(QPlainTextEdit):
     """PlainTextEdit with integrated line number area."""
+
+    zoomRequested = Signal(int)
     
     def __init__(self):
         super().__init__()
@@ -97,6 +100,7 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_numbers)
         self._update_line_number_area_width(0)
+        self._wheel_zoom_accumulator = 0.0
 
     def lineNumberAreaWidth(self):
         # Always allocate space for 3 digits (999 lines max before wrapping display)
@@ -119,6 +123,20 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        """Use primary-modifier wheel/trackpad gestures to resize source text."""
+        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            action = wheel_action(event)
+            if action.is_zoom:
+                self._wheel_zoom_accumulator += action.zoom_steps
+                while abs(self._wheel_zoom_accumulator) >= 1.0:
+                    direction = 1 if self._wheel_zoom_accumulator > 0 else -1
+                    self.zoomRequested.emit(direction)
+                    self._wheel_zoom_accumulator -= direction
+                event.accept()
+                return
+        super().wheelEvent(event)
 
     def createStandardContextMenu(self, *args, **kwargs):  # type: ignore[override]
         menu = super().createStandardContextMenu(*args, **kwargs)
@@ -629,7 +647,7 @@ class ChatLineEdit(QLineEdit):
 class ZoomablePreviewLabel(QLabel):
     """Preview label with map-style wheel zoom and right-click drag panning."""
     
-    zoomRequested = Signal(int)  # delta (positive = zoom in, negative = zoom out)
+    zoomRequested = Signal(int, object)  # direction and pointer anchor
     
     def __init__(self):
         super().__init__()
@@ -640,61 +658,37 @@ class ZoomablePreviewLabel(QLabel):
     
     def wheelEvent(self, event) -> None:
         """Zoom discrete mouse wheels; pan precision touchpad gestures."""
-        pixel_delta = event.pixelDelta()
-        if not pixel_delta.isNull():
-            # Qt supplies pixel deltas for precision touchpads.  Preserve both
-            # axes as scrolling unless Ctrl explicitly requests zoom.
-            if event.modifiers() & Qt.ControlModifier:
-                delta = pixel_delta.y() or event.angleDelta().y()
-                if delta:
-                    self._touchpad_zoom_accumulator += delta
-                    threshold = 40
-                    while abs(self._touchpad_zoom_accumulator) >= threshold:
-                        direction = 1 if self._touchpad_zoom_accumulator > 0 else -1
-                        self.zoomRequested.emit(direction)
-                        self._touchpad_zoom_accumulator -= direction * threshold
-                    event.accept()
-                    return
+        action = wheel_action(event)
+        if action.is_zoom:
+            self._touchpad_zoom_accumulator += action.zoom_steps
+            while abs(self._touchpad_zoom_accumulator) >= 1.0:
+                direction = 1 if self._touchpad_zoom_accumulator > 0 else -1
+                self.zoomRequested.emit(direction, QPointF(event.position()))
+                self._touchpad_zoom_accumulator -= direction
+            event.accept()
+            return
+        if action.is_pan:
             parent = self.parent()
             while parent:
                 if isinstance(parent, QScrollArea):
-                    horizontal = pixel_delta.x()
-                    vertical = pixel_delta.y()
-                    if event.modifiers() & Qt.ShiftModifier and not horizontal:
-                        horizontal, vertical = vertical, 0
                     parent.horizontalScrollBar().setValue(
-                        parent.horizontalScrollBar().value() - horizontal
+                        parent.horizontalScrollBar().value() - round(action.pan.x())
                     )
                     parent.verticalScrollBar().setValue(
-                        parent.verticalScrollBar().value() - vertical
+                        parent.verticalScrollBar().value() - round(action.pan.y())
                     )
                     event.accept()
                     return
                 parent = parent.parent()
-        if event.modifiers() & Qt.ShiftModifier:
-            delta = event.angleDelta().y()
-            if delta:
-                parent = self.parent()
-                while parent:
-                    if isinstance(parent, QScrollArea):
-                        parent.horizontalScrollBar().setValue(
-                            parent.horizontalScrollBar().value() - (int(delta / 120) * 40)
-                        )
-                        event.accept()
-                        return
-                    parent = parent.parent()
-        delta = event.angleDelta().y()
-        if delta:
-            self.zoomRequested.emit(1 if delta > 0 else -1)
-            event.accept()
-            return
         super().wheelEvent(event)
 
     def event(self, event):  # type: ignore[override]
         if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
             value = event.value()
             if value:
-                self.zoomRequested.emit(1 if value > 0 else -1)
+                self.zoomRequested.emit(
+                    1 if value > 0 else -1, QPointF(event.position())
+                )
                 event.accept()
                 return True
         return super().event(event)
@@ -987,6 +981,9 @@ class PlantUMLEditorWindow(QMainWindow):
         
         # LEFT: PlantUML code editor
         self.editor = ViPlainTextEdit()
+        self.editor.zoomRequested.connect(
+            lambda direction: self._zoom_in_editor() if direction > 0 else self._zoom_out_editor()
+        )
         self.editor.setPlaceholderText("Enter PlantUML diagram code here...")
         self.editor.setFont(self._get_monospace_font())
         # Style editor to look more like a code editor
@@ -2433,12 +2430,45 @@ B --> A: response
             if hasattr(self, "_geom_timer"):
                 self._geom_timer.start()
 
-    def _on_preview_wheel_zoom(self, delta: int) -> None:
+    def _preview_zoom_anchor_state(self, anchor):
+        if not isinstance(anchor, QPointF) or not self.preview_pixmap:
+            return None
+        displayed = self.preview_label.pixmap()
+        if displayed is None or displayed.isNull():
+            return None
+        viewport_point = QPointF(
+            self.preview_label.mapTo(self.preview_scroll.viewport(), anchor.toPoint())
+        )
+        offset_x = (self.preview_label.width() - displayed.width()) / 2.0
+        offset_y = (self.preview_label.height() - displayed.height()) / 2.0
+        source = QPointF(
+            (anchor.x() - offset_x) * self.preview_pixmap.width() / max(1, displayed.width()),
+            (anchor.y() - offset_y) * self.preview_pixmap.height() / max(1, displayed.height()),
+        )
+        return viewport_point, source
+
+    def _restore_preview_zoom_anchor(self, state) -> None:
+        if state is None:
+            return
+        viewport_point, source = state
+        displayed = self.preview_label.pixmap()
+        if displayed is None or displayed.isNull() or not self.preview_pixmap:
+            return
+        offset_x = (self.preview_label.width() - displayed.width()) / 2.0
+        offset_y = (self.preview_label.height() - displayed.height()) / 2.0
+        target_x = offset_x + source.x() * displayed.width() / max(1, self.preview_pixmap.width())
+        target_y = offset_y + source.y() * displayed.height() / max(1, self.preview_pixmap.height())
+        self.preview_scroll.horizontalScrollBar().setValue(round(target_x - viewport_point.x()))
+        self.preview_scroll.verticalScrollBar().setValue(round(target_y - viewport_point.y()))
+
+    def _on_preview_wheel_zoom(self, delta: int, anchor=None) -> None:
         """Handle Ctrl+MouseWheel zoom on preview."""
+        state = self._preview_zoom_anchor_state(anchor)
         if delta > 0:
             self._zoom_in_preview()
         else:
             self._zoom_out_preview()
+        self._restore_preview_zoom_anchor(state)
 
     def _show_export_menu(self) -> None:
         """Show export options menu."""

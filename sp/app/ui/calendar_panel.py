@@ -52,6 +52,7 @@ from sp.app import config
 from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
+from .canvas_navigation import install_primary_wheel_zoom
 from .path_utils import path_to_colon, ensure_root_colon_link
 from .task_style import (
     contrast_text_color,
@@ -893,6 +894,7 @@ class CalendarPanel(QWidget):
         root_layout.setSpacing(0)
         root_layout.addWidget(self.top_splitter)
         self.setLayout(root_layout)
+        install_primary_wheel_zoom(self, self.adjust_font_size)
 
         self.vault_root: Optional[str] = None
         self.setFocusPolicy(Qt.StrongFocus)

@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
+from .canvas_navigation import install_primary_wheel_zoom
 from sp.logging_flags import log_enabled
 
 _DETAILED_LOGGING = log_enabled("attachments_media")
@@ -161,6 +162,9 @@ class AttachmentsPanel(QWidget):
         layout.addLayout(toolbar)
         layout.addWidget(self.attachments_list)
         self.setLayout(layout)
+        install_primary_wheel_zoom(
+            self, lambda direction: self._zoom_in() if direction > 0 else self._zoom_out()
+        )
     
     def set_page(self, page_path: Optional[Path]) -> None:
         """Set the current page and update the attachments list."""

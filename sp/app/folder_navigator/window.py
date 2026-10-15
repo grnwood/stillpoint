@@ -56,7 +56,12 @@ from sp.app.ui.keyboard_shortcuts import (
     is_vi_navigation_chord,
     vi_navigation_sequences,
 )
-from sp.app.ui.canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
+from sp.app.ui.canvas_navigation import (
+    install_primary_wheel_zoom,
+    native_zoom_steps,
+    wheel_action,
+    zoom_factor,
+)
 from sp.app.ui.theme import (
     apply_menu_theme,
     chrome_colors,
@@ -1881,7 +1886,7 @@ class ImageView(QWidget):
         self.label = ImageCanvasLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.zoomRequested.connect(
-            lambda steps, _anchor: self._zoom_requested(zoom_factor(steps))
+            lambda steps, anchor: self._zoom_requested(zoom_factor(steps), anchor)
         )
         if self._diagram_preview:
             self.label.interactionStarted.connect(self._focus_diagram_preview)
@@ -2043,7 +2048,8 @@ class ImageView(QWidget):
         if self._fit_mode and size != self._last_fit_size:
             self.fit()
 
-    def scale(self, factor):
+    def scale(self, factor, anchor=None):
+        anchor_state = self._zoom_anchor_state(anchor)
         self.zoom = min(8, max(.05, self.zoom * factor))
         scaled = self.original.scaled(
             self.original.size() * self.zoom,
@@ -2053,6 +2059,40 @@ class ImageView(QWidget):
         self.label.setMinimumSize(scaled.size())
         self.label.resize(scaled.size())
         self.label.setPixmap(scaled)
+        self._restore_zoom_anchor(anchor_state)
+
+    def _zoom_anchor_state(self, anchor):
+        if not isinstance(anchor, QPointF) or self.original.isNull():
+            return None
+        pixmap = self.label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return None
+        viewport_point = QPointF(
+            self.label.mapTo(self.scroll.viewport(), anchor.toPoint())
+        )
+        offset_x = (self.label.width() - pixmap.width()) / 2.0
+        offset_y = (self.label.height() - pixmap.height()) / 2.0
+        source_x = (anchor.x() - offset_x) * self.original.width() / max(1, pixmap.width())
+        source_y = (anchor.y() - offset_y) * self.original.height() / max(1, pixmap.height())
+        return viewport_point, QPointF(source_x, source_y)
+
+    def _restore_zoom_anchor(self, anchor_state):
+        if anchor_state is None:
+            return
+        viewport_point, source_point = anchor_state
+        pixmap = self.label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        offset_x = (self.label.width() - pixmap.width()) / 2.0
+        offset_y = (self.label.height() - pixmap.height()) / 2.0
+        target_x = offset_x + source_point.x() * pixmap.width() / max(1, self.original.width())
+        target_y = offset_y + source_point.y() * pixmap.height() / max(1, self.original.height())
+        self.scroll.horizontalScrollBar().setValue(
+            round(target_x - viewport_point.x())
+        )
+        self.scroll.verticalScrollBar().setValue(
+            round(target_y - viewport_point.y())
+        )
 
     def zoom_in(self):
         self._focus_diagram_preview()
@@ -2066,11 +2106,11 @@ class ImageView(QWidget):
         self.request_full_resolution()
         self.scale(.8)
 
-    def _zoom_requested(self, factor):
+    def _zoom_requested(self, factor, anchor=None):
         self._focus_diagram_preview()
         self._fit_mode = False
         self.request_full_resolution()
-        self.scale(factor)
+        self.scale(factor, anchor)
 
     def request_full_resolution(self):
         if self._full_resolution_requested or not self.full_resolution_callback:
@@ -3261,6 +3301,7 @@ class Window(QMainWindow):
         self.tree.setColumnWidth(3, 170)
         self._tree_base_font = QFont(self.tree.font())
         self._apply_folder_zoom()
+        install_primary_wheel_zoom(self.tree, self._adjust_folder_zoom)
         self.tree.expanded.connect(lambda index: self._remember_expansion(index, True))
         self.tree.collapsed.connect(lambda index: self._remember_expansion(index, False))
         self.tree.selectionModel().currentChanged.connect(self._tree_selected)
@@ -4091,10 +4132,7 @@ class Window(QMainWindow):
         if folder_focused or (
                 focused is not None and self.command_palette.isAncestorOf(focused)
                 and self._last_focus_pane == "folder"):
-            self.folder_zoom_steps = max(-8, min(20, self.folder_zoom_steps + direction))
-            self.state["folder_zoom_steps"] = self.folder_zoom_steps
-            self._apply_folder_zoom()
-            self._persist()
+            self._adjust_folder_zoom(direction)
             return
         tab = self.active_tab()
         if tab is None:
@@ -4198,6 +4236,15 @@ class Window(QMainWindow):
             base_size = QApplication.font().pointSizeF()
         font.setPointSizeF(max(6.0, base_size + self.folder_zoom_steps))
         self.tree.setFont(font)
+
+    def _adjust_folder_zoom(self, direction):
+        new_steps = max(-8, min(20, self.folder_zoom_steps + int(direction)))
+        if new_steps == self.folder_zoom_steps:
+            return
+        self.folder_zoom_steps = new_steps
+        self.state["folder_zoom_steps"] = new_steps
+        self._apply_folder_zoom()
+        self._persist()
 
     def active_tab(self):
         widget = self.tabs.currentWidget()
@@ -5275,7 +5322,10 @@ class Window(QMainWindow):
                 source = read_text(path).text
                 result = self._diagram_renderer(suffix).render_svg(source)
                 if not result.success or not result.svg_content:
-                    raise ValueError(result.error_message or result.stderr or "Diagram render failed")
+                    details = [result.error_message or "Diagram render failed"]
+                    if result.stderr and result.stderr not in details:
+                        details.extend(("Details:", result.stderr))
+                    raise ValueError("\n\n".join(details))
                 pixels = self._rasterize_diagram_svg(result.svg_content)
                 self._emit_bridge_result((
                     "diagram", path, signature, result.svg_content, pixels, None,
@@ -5330,7 +5380,12 @@ class Window(QMainWindow):
             tab.show_notice(f"Diagram preview unavailable: {error}")
             fallback = QWidget()
             fallback_layout = QVBoxLayout(fallback)
-            fallback_layout.addWidget(QLabel(str(error)))
+            error_label = QLabel(str(error))
+            error_label.setWordWrap(True)
+            error_label.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+            )
+            fallback_layout.addWidget(error_label)
             open_button = QPushButton(self._diagram_editor_label(path))
             open_button.clicked.connect(
                 lambda checked=False, selected=path: self._open_specialized_editor(selected)

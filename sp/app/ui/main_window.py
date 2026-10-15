@@ -138,6 +138,7 @@ from .screen_positioning import (
     fit_window_to_available_screen,
     popup_available_geometry,
 )
+from .canvas_navigation import install_primary_wheel_zoom
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -2816,6 +2817,15 @@ class MainWindow(QMainWindow):
             base_md_size = 12
         self.font_size = config.load_global_editor_font_size(base_md_size)
         self.editor.set_font_point_size(self.font_size)
+        install_primary_wheel_zoom(self.editor, self._adjust_markdown_font_size)
+        tree_font_size = self.tree_view.font().pointSize()
+        if tree_font_size <= 0:
+            tree_font_size = app_font_size or 11
+        self.vault_tree_font_size = config.load_panel_font_size(
+            "vault_tree_font_size", int(tree_font_size)
+        )
+        self._apply_vault_tree_font_size()
+        install_primary_wheel_zoom(self.tree_view, self._adjust_vault_tree_font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
         self._apply_vi_preferences()
         self.toc_widget = TableOfContentsWidget(self)
@@ -20395,6 +20405,28 @@ class MainWindow(QMainWindow):
             self.editor.set_font_point_size(self.font_size)
             self.right_panel.set_calendar_font_size(self.font_size)
             config.save_global_editor_font_size(self.font_size)
+
+    def _adjust_markdown_font_size(self, delta: int) -> None:
+        new_size = max(6, min(24, self.font_size + int(delta)))
+        if new_size == self.font_size:
+            return
+        self.font_size = new_size
+        self.editor.set_font_point_size(new_size)
+        self.right_panel.set_calendar_font_size(new_size)
+        config.save_global_editor_font_size(new_size)
+
+    def _apply_vault_tree_font_size(self) -> None:
+        font = QFont(self.tree_view.font())
+        font.setPointSize(max(6, int(self.vault_tree_font_size)))
+        self.tree_view.setFont(font)
+
+    def _adjust_vault_tree_font_size(self, delta: int) -> None:
+        new_size = max(6, min(24, self.vault_tree_font_size + int(delta)))
+        if new_size == self.vault_tree_font_size:
+            return
+        self.vault_tree_font_size = new_size
+        self._apply_vault_tree_font_size()
+        config.save_panel_font_size("vault_tree_font_size", new_size)
 
     def _apply_navigation_focus(self, focus_target: str | None) -> None:
         """Set focus after navigation based on source (editor vs link navigator)."""

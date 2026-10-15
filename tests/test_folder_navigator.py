@@ -1428,6 +1428,8 @@ def test_print_outside_vault_stages_current_buffer_on_server(
 
 def test_zoom_is_shared_persisted_and_routes_to_folder_tree(
         tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
     from sp.app.folder_navigator.window import Window
 
     home = tmp_path / "home"
@@ -1454,7 +1456,11 @@ def test_zoom_is_shared_persisted_and_routes_to_folder_tree(
     tree_size = window.tree.font().pointSizeF()
     window.tree.setFocus()
     app.processEvents()
-    window._zoom_active_view(1)
+    tree_wheel = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False,
+    )
+    app.sendEvent(window.tree.viewport(), tree_wheel)
     assert window.tree.font().pointSizeF() == tree_size + 1
     assert window.editor_zoom_steps == 1
     assert window.folder_zoom_steps == 1
@@ -4160,9 +4166,17 @@ def test_diagram_image_view_uses_standard_mouse_and_trackpad_navigation(
 
     mouse_wheel = QWheelEvent(
         QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
-        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+        Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
     )
     viewer.label.wheelEvent(mouse_wheel)
+    assert viewer.zoom == pytest.approx(1.1)
+    assert viewer.scroll.verticalScrollBar().value() > 130
+
+    windows_trackpad = QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120),
+        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False,
+    )
+    viewer.label.wheelEvent(windows_trackpad)
     assert viewer.zoom == pytest.approx(1.1)
     assert viewer.hasFocus()
     viewer.close()

@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import sys
 import html
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -26,6 +27,10 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
 
 
 @dataclass
@@ -66,8 +71,23 @@ class MermaidRenderer:
     def discover_mmdc(self) -> Optional[Path]:
         """Locate mmdc, including nvm installs omitted from desktop PATH."""
         candidates = []
-        if mmdc_path := shutil.which("mmdc"):
-            candidates.append(Path(mmdc_path))
+        command_names = (
+            ("mmdc.cmd", "mmdc.exe", "mmdc.bat", "mmdc")
+            if _is_windows_platform()
+            else ("mmdc",)
+        )
+        for command_name in command_names:
+            if mmdc_path := shutil.which(command_name):
+                candidates.append(Path(mmdc_path))
+
+        if _is_windows_platform():
+            for env_name in ("APPDATA", "LOCALAPPDATA"):
+                npm_root = os.environ.get(env_name)
+                if npm_root:
+                    candidates.extend(
+                        Path(npm_root) / "npm" / command_name
+                        for command_name in command_names
+                    )
 
         nvm_bin = os.environ.get("NVM_BIN")
         if nvm_bin:
@@ -83,7 +103,7 @@ class MermaidRenderer:
             candidates.extend(version / "bin" / "mmdc" for version in versions)
 
         for path in candidates:
-            if path.is_file() and os.access(path, os.X_OK):
+            if path.is_file() and (_is_windows_platform() or os.access(path, os.X_OK)):
                 self._mmdc_path = path
                 return path
         return None
@@ -108,6 +128,37 @@ class MermaidRenderer:
             if (self._mmdc_path.parent / node_name).is_file():
                 env["PATH"] = os.pathsep.join((str(self._mmdc_path.parent), env.get("PATH", "")))
         return env
+
+    def _mmdc_command(self) -> list[str]:
+        """Return an executable command for native binaries and npm wrappers."""
+        executable = str(self._mmdc_path) if self._mmdc_path else "mmdc"
+        if (_is_windows_platform()
+                and os.path.splitext(executable)[1].casefold() in {".cmd", ".bat"}):
+            return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", executable]
+        return [executable]
+
+    def _failure_diagnostics(
+        self,
+        *,
+        command: Optional[list[str]] = None,
+        stdout: str = "",
+        stderr: str = "",
+        exception: Optional[BaseException] = None,
+    ) -> str:
+        """Build actionable renderer details suitable for displaying in the UI."""
+        details = [
+            f"Platform: {sys.platform}",
+            f"Mermaid CLI: {self._mmdc_path or 'not found'}",
+        ]
+        if command:
+            details.append("Command: " + subprocess.list2cmdline(command))
+        if exception is not None:
+            details.append(f"{type(exception).__name__}: {exception}")
+        if stderr.strip():
+            details.append("stderr:\n" + stderr.strip())
+        if stdout.strip():
+            details.append("stdout:\n" + stdout.strip())
+        return "\n".join(details)
 
     def is_configured(self) -> bool:
         """Check if Mermaid CLI is available."""
@@ -149,6 +200,7 @@ class MermaidRenderer:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found. Install with npm install -g @mermaid-js/mermaid-cli",
+                stderr=self._failure_diagnostics(),
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
@@ -198,6 +250,7 @@ class MermaidRenderer:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found. Install with npm install -g @mermaid-js/mermaid-cli",
+                stderr=self._failure_diagnostics(),
                 duration_ms=(time.perf_counter() - t0) * 1000,
             )
 
@@ -229,7 +282,7 @@ class MermaidRenderer:
         scale: float = 1.0,
     ) -> RenderResult:
         try:
-            mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
+            cmd: list[str] = []
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_path = Path(tmpdir) / "diagram.mmd"
                 output_path = Path(tmpdir) / "diagram.png"
@@ -255,7 +308,7 @@ class MermaidRenderer:
                 self._write_puppeteer_config(puppeteer_config_path)
 
                 cmd = [
-                    mmdc_cmd,
+                    *self._mmdc_command(),
                     "-i", str(input_path),
                     "-o", str(output_path),
                     "-t", effective_theme,
@@ -276,6 +329,7 @@ class MermaidRenderer:
                 )
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
+                stdout_text = result.stdout.decode("utf-8", errors="replace")
                 if output_path.exists():
                     png_bytes = output_path.read_bytes()
                     if png_bytes:
@@ -285,28 +339,35 @@ class MermaidRenderer:
                     return RenderResult(
                         success=False,
                         error_message=f"Mermaid render error (exit {result.returncode})",
-                        stderr=stderr_text,
+                        stderr=self._failure_diagnostics(
+                            command=cmd, stdout=stdout_text, stderr=stderr_text
+                        ),
                     )
 
                 return RenderResult(
                     success=False,
                     error_message="Invalid PNG output from Mermaid",
-                    stderr=stderr_text,
+                    stderr=self._failure_diagnostics(
+                        command=cmd, stdout=stdout_text, stderr=stderr_text
+                    ),
                 )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             return RenderResult(
                 success=False,
                 error_message="Mermaid render timed out (>15s)",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
         except Exception as exc:
             return RenderResult(
                 success=False,
                 error_message=f"Render error: {str(exc)}",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
 
     def _invoke_mmdc_svg(
@@ -318,7 +379,7 @@ class MermaidRenderer:
         normalize_for_qtsvg: bool = True,
     ) -> RenderResult:
         try:
-            mmdc_cmd = str(self._mmdc_path) if self._mmdc_path else "mmdc"
+            cmd: list[str] = []
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_path = Path(tmpdir) / "diagram.mmd"
                 output_path = Path(tmpdir) / "diagram.svg"
@@ -344,7 +405,7 @@ class MermaidRenderer:
                 self._write_puppeteer_config(puppeteer_config_path)
 
                 cmd = [
-                    mmdc_cmd,
+                    *self._mmdc_command(),
                     "-i", str(input_path),
                     "-o", str(output_path),
                     "-t", effective_theme,
@@ -364,6 +425,7 @@ class MermaidRenderer:
                 )
 
                 stderr_text = result.stderr.decode("utf-8", errors="replace")
+                stdout_text = result.stdout.decode("utf-8", errors="replace")
                 if output_path.exists():
                     svg_content = output_path.read_text(encoding="utf-8", errors="replace")
                     if normalize_for_qtsvg:
@@ -375,28 +437,35 @@ class MermaidRenderer:
                     return RenderResult(
                         success=False,
                         error_message=f"Mermaid render error (exit {result.returncode})",
-                        stderr=stderr_text,
+                        stderr=self._failure_diagnostics(
+                            command=cmd, stdout=stdout_text, stderr=stderr_text
+                        ),
                     )
 
                 return RenderResult(
                     success=False,
                     error_message="Invalid SVG output from Mermaid",
-                    stderr=stderr_text,
+                    stderr=self._failure_diagnostics(
+                        command=cmd, stdout=stdout_text, stderr=stderr_text
+                    ),
                 )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             return RenderResult(
                 success=False,
                 error_message="Mermaid render timed out (>15s)",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             return RenderResult(
                 success=False,
                 error_message="Mermaid CLI (mmdc) not found",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
         except Exception as exc:
             return RenderResult(
                 success=False,
                 error_message=f"Render error: {str(exc)}",
+                stderr=self._failure_diagnostics(command=cmd, exception=exc),
             )
 
     def _normalize_theme(self, theme: str, background_color: Optional[str]) -> str:

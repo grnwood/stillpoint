@@ -42,6 +42,7 @@ import html
 # Use stillpoint_config for global config storage
 from sp.app import config, config as stillpoint_config
 from .theme import apply_menu_theme, theme_color, theme_value
+from .canvas_navigation import install_primary_wheel_zoom
 from sp.ai.manager import AIManager, ContextItem
 from sp.ai.context import (
     MAX_VISION_IMAGES_PER_REQUEST, MAX_VISION_PAYLOAD_CHARS,
@@ -2165,6 +2166,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self.splitter.addWidget(right_container)
         layout.addWidget(self.splitter, 1)
         self._apply_theme_styles()
+        install_primary_wheel_zoom(
+            self, lambda direction: self.set_font_size(self.font_size + direction)
+        )
 
     def _apply_theme_styles(self) -> None:
         colors = _chat_surface_defaults(self)

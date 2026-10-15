@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import html
 import os
 import sys
+import textwrap
 import threading
 import time
 import base64
@@ -12,7 +14,7 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QPointF, QUrl, QByteArray, QBuffer, QIODevice, QMimeData, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -135,43 +137,41 @@ def _should_use_web_preview() -> bool:
 
 def _generate_error_svg(error_message: str, line_number: int = 0) -> str:
     line_info = f" (Line {line_number})" if line_number > 0 else ""
-    error_display = (
-        error_message.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\n", "<br>")
+    wrapped_lines: list[str] = []
+    for source_line in str(error_message or "Unknown Mermaid render error").splitlines():
+        wrapped_lines.extend(textwrap.wrap(source_line, width=105) or [""])
+    max_lines = 80
+    if len(wrapped_lines) > max_lines:
+        omitted = len(wrapped_lines) - max_lines
+        wrapped_lines = wrapped_lines[:max_lines]
+        wrapped_lines.append(f"… {omitted} additional lines omitted")
+    line_height = 18
+    canvas_height = max(400, 125 + (len(wrapped_lines) * line_height))
+    error_display = "\n".join(
+        f'<tspan x="40" dy="{0 if index == 0 else line_height}">{html.escape(line)}</tspan>'
+        for index, line in enumerate(wrapped_lines)
     )
     bg = theme_value("mermaid_editor.error.bg", "#f8f8f8")
     title = theme_value("mermaid_editor.error.title", "#cc0000")
     msg = theme_value("mermaid_editor.error.message", "#333333")
-    line = theme_value("mermaid_editor.error.line", "#666666")
     box_fill = theme_value("mermaid_editor.error.box_fill", "#ffe6e6")
     box_stroke = theme_value("mermaid_editor.error.box_stroke", "#ff9999")
-    box_text = theme_value("mermaid_editor.error.box_text", "#333333")
     error_font = theme_value("mermaid_editor.error.font_family", "monospace")
     title_size = theme_value("mermaid_editor.error.title_size_px", 24)
     title_weight = theme_value("mermaid_editor.error.title_weight", "bold")
-    message_size = theme_value("mermaid_editor.error.message_size_px", 14)
-    line_size = theme_value("mermaid_editor.error.line_size_px", 12)
     box_font_size = theme_value("mermaid_editor.error.box_font_size_px", 13)
-    box_line_height = theme_value("mermaid_editor.error.box_line_height", 1.4)
-    svg = f"""<svg width="800" height="400" xmlns="http://www.w3.org/2000/svg">
-    <rect width="800" height="400" fill="{bg}"/>
+    svg = f"""<svg width="900" height="{canvas_height}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="900" height="{canvas_height}" fill="{bg}"/>
     <defs>
         <style type="text/css"><![CDATA[
             .error-title {{ font-size: {title_size}px; font-weight: {title_weight}; fill: {title}; font-family: {error_font}; }}
-            .error-message {{ font-size: {message_size}px; fill: {msg}; font-family: {error_font}; word-wrap: break-word; }}
-            .error-line {{ font-size: {line_size}px; fill: {line}; font-family: {error_font}; }}
+            .error-message {{ font-size: {box_font_size}px; fill: {msg}; font-family: {error_font}; }}
             .error-box {{ fill: {box_fill}; stroke: {box_stroke}; stroke-width: 2; }}
         ]]></style>
     </defs>
-    <rect class="error-box" x="20" y="20" width="760" height="360" rx="5" ry="5"/>
+    <rect class="error-box" x="20" y="20" width="860" height="{canvas_height - 40}" rx="5" ry="5"/>
     <text class="error-title" x="40" y="60">Mermaid Render Error{line_info}</text>
-    <foreignObject x="40" y="90" width="720" height="280">
-        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: {error_font}; font-size: {box_font_size}px; color: {box_text}; white-space: pre-wrap; word-break: break-word; line-height: {box_line_height};">
-            {error_display}
-        </div>
-    </foreignObject>
+    <text class="error-message" x="40" y="100">{error_display}</text>
 </svg>"""
     return svg
 
@@ -210,6 +210,7 @@ class MermaidEditorWindow(QMainWindow):
         self.file_path = Path(file_path)
         self._on_save = on_save
         self._external_browser_preview = not _inline_preview_preference_enabled()
+        self._web_preview_failed = False
         self._use_web_preview = _should_use_web_preview()
         if self._external_browser_preview:
             self._use_web_preview = False
@@ -409,6 +410,9 @@ class MermaidEditorWindow(QMainWindow):
         main_h_splitter = QSplitter(Qt.Horizontal)
 
         self.editor = ViPlainTextEdit()
+        self.editor.zoomRequested.connect(
+            lambda direction: self._zoom_in_editor() if direction > 0 else self._zoom_out_editor()
+        )
         self.editor.setPlaceholderText("Enter Mermaid diagram code here...")
         self.editor.setFont(self._get_monospace_font())
         self.editor.setStyleSheet(
@@ -731,6 +735,17 @@ class MermaidEditorWindow(QMainWindow):
         self._render_in_progress = False
         self._hide_loading()
         self.render_btn.setText("Render OK" if ok else "Render Failed")
+        if not ok:
+            # A loaded document can display Mermaid's own detailed JS error.
+            # A failed document cannot, so retry through mmdc and surface its
+            # stdout/stderr in the label-based preview instead.
+            self._web_preview_failed = True
+            self._use_web_preview = False
+            if self.preview_web is not None:
+                self.preview_web.hide()
+            self.preview_scroll_area.show()
+            QTimer.singleShot(0, self._render)
+            return
         if self._render_requeued and not self._closing:
             QTimer.singleShot(0, self._render)
 
@@ -1565,7 +1580,7 @@ class MermaidEditorWindow(QMainWindow):
     def _refresh_preview_mode(self) -> None:
         if self._external_browser_preview:
             return
-        want_web = _should_use_web_preview()
+        want_web = _should_use_web_preview() and not self._web_preview_failed
         if want_web and self.preview_web is None:
             web_view_class = _load_qwebengine_view_class()
             if web_view_class is not None:
@@ -1884,11 +1899,48 @@ class MermaidEditorWindow(QMainWindow):
             if hasattr(self, "_geom_timer"):
                 self._geom_timer.start()
 
-    def _on_preview_wheel_zoom(self, delta: int) -> None:
+    def _preview_zoom_anchor_state(self, anchor):
+        if not isinstance(anchor, QPointF) or not self.preview_pixmap:
+            return None
+        displayed = self.preview_label.pixmap()
+        if displayed is None or displayed.isNull():
+            return None
+        viewport_point = QPointF(
+            self.preview_label.mapTo(self.preview_scroll_area.viewport(), anchor.toPoint())
+        )
+        offset_x = (self.preview_label.width() - displayed.width()) / 2.0
+        offset_y = (self.preview_label.height() - displayed.height()) / 2.0
+        source = QPointF(
+            (anchor.x() - offset_x) * self.preview_pixmap.width() / max(1, displayed.width()),
+            (anchor.y() - offset_y) * self.preview_pixmap.height() / max(1, displayed.height()),
+        )
+        return viewport_point, source
+
+    def _restore_preview_zoom_anchor(self, state) -> None:
+        if state is None:
+            return
+        viewport_point, source = state
+        displayed = self.preview_label.pixmap()
+        if displayed is None or displayed.isNull() or not self.preview_pixmap:
+            return
+        offset_x = (self.preview_label.width() - displayed.width()) / 2.0
+        offset_y = (self.preview_label.height() - displayed.height()) / 2.0
+        target_x = offset_x + source.x() * displayed.width() / max(1, self.preview_pixmap.width())
+        target_y = offset_y + source.y() * displayed.height() / max(1, self.preview_pixmap.height())
+        self.preview_scroll_area.horizontalScrollBar().setValue(
+            round(target_x - viewport_point.x())
+        )
+        self.preview_scroll_area.verticalScrollBar().setValue(
+            round(target_y - viewport_point.y())
+        )
+
+    def _on_preview_wheel_zoom(self, delta: int, anchor=None) -> None:
+        state = self._preview_zoom_anchor_state(anchor)
         if delta > 0:
             self._zoom_in_preview()
         else:
             self._zoom_out_preview()
+        self._restore_preview_zoom_anchor(state)
 
     def _show_export_menu(self) -> None:
         menu = QMenu(self)
@@ -2341,8 +2393,14 @@ class MermaidEditorWindow(QMainWindow):
             if (window.mermaid) return window.mermaid;
             try {{
                 await loadScript({local_mermaid_js});
-            }} catch (_localErr) {{
-                await loadScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js');
+            }} catch (localErr) {{
+                try {{
+                    await loadScript('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js');
+                }} catch (cdnErr) {{
+                    const localMessage = localErr && localErr.message ? localErr.message : String(localErr);
+                    const cdnMessage = cdnErr && cdnErr.message ? cdnErr.message : String(cdnErr);
+                    throw new Error(`Local Mermaid runtime: ${{localMessage}}\nCDN fallback: ${{cdnMessage}}`);
+                }}
             }}
             if (!window.mermaid) throw new Error('Mermaid runtime not available.');
             return window.mermaid;
@@ -2600,9 +2658,11 @@ class MermaidEditorWindow(QMainWindow):
                 event.preventDefault();
                 const rawDelta = Number(event.deltaY || 0);
                 const legacyWheelDelta = Math.abs(Number(event.wheelDeltaY || 0));
+                const windowsPlatform = /Win/.test(navigator.platform || '');
                 const discreteMouseWheel = event.deltaMode !== 0 ||
-                    (legacyWheelDelta >= 120 && legacyWheelDelta % 120 === 0 && !event.deltaX);
-                const wantsZoom = event.ctrlKey || discreteMouseWheel;
+                    (!windowsPlatform && legacyWheelDelta >= 120 && legacyWheelDelta % 120 === 0 && !event.deltaX);
+                const primaryModifier = event.ctrlKey || event.metaKey;
+                const wantsZoom = primaryModifier || discreteMouseWheel;
                 if (!wantsZoom) {{
                     // Precision touchpads report continuous pixel deltas. Pan
                     // the canvas on both axes, matching normal two-finger
@@ -2614,7 +2674,7 @@ class MermaidEditorWindow(QMainWindow):
                 }}
                 if (!rawDelta) return;
                 wheelState.accumulator += rawDelta;
-                const wheelStep = event.ctrlKey && !discreteMouseWheel ? 40 : 120;
+                const wheelStep = primaryModifier && !discreteMouseWheel ? 40 : 120;
                 if (Math.abs(wheelState.accumulator) < wheelStep) return;
                 const rect = viewport.getBoundingClientRect();
                 const cx = event.clientX - rect.left;
@@ -2713,7 +2773,8 @@ class MermaidEditorWindow(QMainWindow):
                 scheduleFitDiagram();
                 setStatus(includeBrowserControls ? 'Rendered. Mouse wheel or Ctrl+scroll to zoom. Two-finger scroll or right-drag to pan. Keys: +, -, 0. Export payloads loading...' : '');
             }} catch (err) {{
-                if (host) host.innerHTML = buildErrorSvg(err && err.message ? err.message : String(err));
+                const errorDetail = err && err.stack ? err.stack : (err && err.message ? err.message : String(err));
+                if (host) host.innerHTML = buildErrorSvg(errorDetail);
                 state.tx = 0;
                 state.ty = 0;
                 state.zoom = {initial_zoom};

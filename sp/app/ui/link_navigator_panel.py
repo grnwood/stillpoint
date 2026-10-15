@@ -262,7 +262,7 @@ class GalaxyGraphView(QGraphicsView):
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         action = wheel_action(event)
         if action.is_zoom:
-            self._apply_zoom_steps(action.zoom_steps)
+            self._apply_zoom_steps(action.zoom_steps, event.position())
             event.accept()
             return
         if action.is_pan:
@@ -276,20 +276,33 @@ class GalaxyGraphView(QGraphicsView):
             return
         super().wheelEvent(event)
 
-    def _apply_zoom_steps(self, steps: float) -> None:
+    def _apply_zoom_steps(self, steps: float, anchor=None) -> None:
         target = max(0.2, min(4.0, self._zoom * zoom_factor(steps)))
         if math.isclose(target, self._zoom):
             return
+        scene_anchor = None
+        if isinstance(anchor, QPointF):
+            scene_anchor = self.mapToScene(anchor.toPoint())
         factor = target / self._zoom
         self._zoom = target
         self.scale(factor, factor)
+        if scene_anchor is not None:
+            shifted_viewport = self.mapFromScene(scene_anchor)
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value()
+                + shifted_viewport.x() - anchor.toPoint().x()
+            )
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value()
+                + shifted_viewport.y() - anchor.toPoint().y()
+            )
         self._update_label_visibility()
 
     def _handle_native_zoom(self, event) -> bool:
         if isinstance(event, QNativeGestureEvent) and event.gestureType() == Qt.ZoomNativeGesture:
             value = event.value()
             if value:
-                self._apply_zoom_steps(native_zoom_steps(value))
+                self._apply_zoom_steps(native_zoom_steps(value), event.position())
                 event.accept()
                 return True
         return False

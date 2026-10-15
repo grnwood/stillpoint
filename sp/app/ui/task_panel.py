@@ -50,6 +50,7 @@ from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .keyboard_shortcuts import is_vi_navigation_chord, vi_navigation_sequences
+from .canvas_navigation import install_primary_wheel_zoom
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from .ai_chat_panel import (
     AIChatPanel,
@@ -599,6 +600,7 @@ class TaskPanel(QWidget):
         self._setup_focus_defaults()
         self._update_filter_indicator()
         self._apply_font_size()
+        install_primary_wheel_zoom(self, self.adjust_font_size)
         self._last_refresh_signature: Optional[tuple] = None
         self._vault_accent_color: Optional[str] = None
         self._apply_selection_style()

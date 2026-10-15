@@ -32,7 +32,10 @@ def _wait_for(qapp, predicate, timeout: float = 2.0) -> None:
     assert predicate()
 
 
-def _wheel_event(*, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier) -> QWheelEvent:
+def _wheel_event(
+    *, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier,
+    phase=Qt.NoScrollPhase,
+) -> QWheelEvent:
     return QWheelEvent(
         QPointF(10, 10),
         QPointF(10, 10),
@@ -40,7 +43,7 @@ def _wheel_event(*, pixel_y: int = 0, angle_y: int = 0, modifiers=Qt.NoModifier)
         QPoint(0, angle_y),
         Qt.NoButton,
         modifiers,
-        Qt.ScrollUpdate,
+        phase,
         False,
     )
 
@@ -55,7 +58,7 @@ def test_preview_touchpad_scroll_pans_but_mouse_wheel_zooms(qtbot) -> None:
     area.show()
     area.verticalScrollBar().setValue(200)
     zooms: list[int] = []
-    label.zoomRequested.connect(zooms.append)
+    label.zoomRequested.connect(lambda direction, _anchor: zooms.append(direction))
 
     label.wheelEvent(_wheel_event(pixel_y=-30))
 
@@ -77,11 +80,42 @@ def test_preview_ctrl_touchpad_scroll_zooms_without_panning(qtbot) -> None:
     area.show()
     area.verticalScrollBar().setValue(200)
     zooms: list[int] = []
-    label.zoomRequested.connect(zooms.append)
+    label.zoomRequested.connect(lambda direction, _anchor: zooms.append(direction))
 
     label.wheelEvent(_wheel_event(pixel_y=45, modifiers=Qt.ControlModifier))
 
     assert area.verticalScrollBar().value() == 200
+    assert zooms == [1]
+
+
+def test_preview_angle_only_precision_scroll_pans_like_windows_touchpad(qtbot) -> None:
+    area = QScrollArea()
+    label = ZoomablePreviewLabel()
+    label.resize(1000, 1000)
+    area.setWidget(label)
+    area.resize(200, 200)
+    qtbot.addWidget(area)
+    area.show()
+    area.verticalScrollBar().setValue(200)
+    zooms: list[int] = []
+    label.zoomRequested.connect(lambda direction, _anchor: zooms.append(direction))
+
+    label.wheelEvent(_wheel_event(angle_y=-120, phase=Qt.ScrollUpdate))
+
+    assert area.verticalScrollBar().value() == 240
+    assert zooms == []
+
+
+def test_source_editor_primary_modifier_wheel_requests_text_zoom(qtbot) -> None:
+    from sp.app.ui.plantuml_editor_window import ViPlainTextEdit
+
+    editor = ViPlainTextEdit()
+    qtbot.addWidget(editor)
+    zooms: list[int] = []
+    editor.zoomRequested.connect(zooms.append)
+
+    editor.wheelEvent(_wheel_event(angle_y=120, modifiers=Qt.MetaModifier))
+
     assert zooms == [1]
 
 
@@ -97,11 +131,24 @@ def test_plantuml_scaled_preview_expands_scrollable_canvas(
     qtbot.addWidget(window)
     window.preview_pixmap = QPixmap(800, 600)
     window.preview_zoom_level = 1
+    window.resize(700, 500)
+    window.show()
+    qapp.processEvents()
 
     window._update_preview_display()
+    qapp.processEvents()
 
     assert window.preview_label.minimumSize().width() == 880
     assert window.preview_label.minimumSize().height() == 660
+    window.preview_scroll.horizontalScrollBar().setValue(200)
+    window.preview_scroll.verticalScrollBar().setValue(150)
+    old_horizontal = window.preview_scroll.horizontalScrollBar().value()
+    old_vertical = window.preview_scroll.verticalScrollBar().value()
+
+    window._on_preview_wheel_zoom(1, QPointF(300, 250))
+
+    assert window.preview_scroll.horizontalScrollBar().value() > old_horizontal
+    assert window.preview_scroll.verticalScrollBar().value() > old_vertical
     window.close()
 
 
@@ -956,6 +1003,10 @@ def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp
     assert 'id="copy-png-btn"' in html
     assert "const includeBrowserControls = true;" in html
     assert "flowchart: { htmlLabels: false }" in html
+    assert "const windowsPlatform = /Win/.test(navigator.platform || '');" in html
+    assert "const primaryModifier = event.ctrlKey || event.metaKey;" in html
+    assert "Local Mermaid runtime:" in html
+    assert "CDN fallback:" in html
     assert "const payloadJsUrl = \"\";" in html
     assert "const serializer = new XMLSerializer();" in html
 
@@ -1131,6 +1182,20 @@ def test_render_failure_details_includes_stderr_and_traceback():
     assert "Mermaid render error (exit 1)" in details
     assert "stderr line 1" in details
     assert "stderr line 2" in details
+
+
+def test_mermaid_error_svg_uses_qtsvg_compatible_text():
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+
+    svg = mermaid_editor_window._generate_error_svg(
+        "Mermaid render error\nExecutable: C:/Users/Test/AppData/Roaming/npm/mmdc.cmd"
+    )
+
+    assert "<foreignObject" not in svg
+    assert "Mermaid render error" in svg
+    assert "mmdc.cmd" in svg
+    assert QSvgRenderer(QByteArray(svg.encode("utf-8"))).isValid()
 
     try:
         raise RuntimeError("boom")

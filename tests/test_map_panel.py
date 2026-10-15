@@ -19,7 +19,7 @@ def _wheel_event(*, pixel_x: int = 0, pixel_y: int = 0, angle_y: int = 0, modifi
         QPoint(0, angle_y),
         Qt.NoButton,
         modifiers,
-        Qt.ScrollUpdate,
+        Qt.NoScrollPhase,
         False,
     )
 
