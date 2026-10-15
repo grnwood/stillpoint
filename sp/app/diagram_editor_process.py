@@ -15,6 +15,12 @@ from PySide6.QtCore import QByteArray, QEvent, QObject, QSettings, QTimer
 EDITORS = ("plantuml", "mermaid")
 
 
+def _enable_windows_mermaid_web_preview(env) -> None:
+    env.pop("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", None)
+    env.pop("SP_DISABLE_MERMAID_WEB_PREVIEW", None)
+    env["SP_ENABLE_MERMAID_WEB_PREVIEW"] = "1"
+
+
 class StandaloneGeometryStore(QObject):
     """Persist standalone editor layout without requiring an active vault DB."""
 
@@ -155,10 +161,15 @@ def launch_diagram_editor_process(
     **geometry_options,
 ) -> subprocess.Popen:
     """Launch a local diagram editor with an independent OS application identity."""
+    env = os.environ.copy()
+    if editor == "mermaid" and sys.platform == "win32":
+        # Folder Navigator disables WebEngine in its own process. The Mermaid
+        # editor is isolated specifically so it can safely use WebEngine.
+        _enable_windows_mermaid_web_preview(env)
     return subprocess.Popen(
         editor_process_command(editor, file_path, **geometry_options),
         cwd=str(Path(__file__).resolve().parents[2]),
-        env=os.environ.copy(),
+        env=env,
     )
 
 
@@ -171,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--initial-hsplit")
     parser.add_argument("--initial-vsplit")
     args = parser.parse_args(argv)
+
+    if args.editor == "mermaid" and sys.platform == "win32":
+        _enable_windows_mermaid_web_preview(os.environ)
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication

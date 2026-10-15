@@ -42,6 +42,8 @@ hidden = (
         'sp.app.ui.task_panel',
         'sp.app.ui.toc_widget',
         'sp.app.excalidraw_webview_process',
+        'sp.app.mermaid_renderer_process',
+        'sp.app.mermaid_web_renderer',
         'sp.app.quickcapture',
         'sp.server.api',
         'sp.server.indexer',

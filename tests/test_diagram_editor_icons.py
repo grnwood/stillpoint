@@ -111,6 +111,29 @@ def test_frozen_editor_process_command_returns_to_desktop_entrypoint(
     ]
 
 
+def test_windows_mermaid_editor_child_enables_isolated_webengine(tmp_path, monkeypatch) -> None:
+    from sp.app import diagram_editor_process
+
+    captured = {}
+    monkeypatch.setattr(diagram_editor_process.sys, "platform", "win32")
+    monkeypatch.setattr(diagram_editor_process.sys, "frozen", False, raising=False)
+    monkeypatch.setenv("SP_MERMAID_DISABLE_INPROCESS_WEBENGINE", "1")
+    monkeypatch.setenv("SP_DISABLE_MERMAID_WEB_PREVIEW", "1")
+    monkeypatch.setattr(
+        diagram_editor_process.subprocess,
+        "Popen",
+        lambda command, **kwargs: captured.update(command=command, **kwargs) or object(),
+    )
+
+    diagram_editor_process.launch_diagram_editor_process(
+        "mermaid", tmp_path / "drawing.mmd"
+    )
+
+    assert "SP_MERMAID_DISABLE_INPROCESS_WEBENGINE" not in captured["env"]
+    assert "SP_DISABLE_MERMAID_WEB_PREVIEW" not in captured["env"]
+    assert captured["env"]["SP_ENABLE_MERMAID_WEB_PREVIEW"] == "1"
+
+
 def test_standalone_editor_geometry_and_splitters_persist(qapp, tmp_path) -> None:
     from PySide6.QtCore import QSettings, Qt
     from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter

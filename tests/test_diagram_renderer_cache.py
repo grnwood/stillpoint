@@ -136,6 +136,63 @@ def test_mermaid_generated_output_retries_transient_permission_error(tmp_path, m
     assert attempts == 2
 
 
+def test_mermaid_windows_prefers_isolated_web_renderer(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    calls = []
+
+    class FakeWebRenderer:
+        def render_svg(self, source, *, theme):
+            calls.append((source, theme))
+            return {"ok": True, "svg": "<svg viewBox='0 0 10 10'></svg>"}
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    monkeypatch.setattr("sp.app.mermaid_renderer._is_windows_platform", lambda: True)
+    monkeypatch.setattr(renderer, "discover_mmdc", lambda: None)
+    monkeypatch.setattr(
+        "sp.app.mermaid_web_renderer.shared_mermaid_web_renderer",
+        lambda: FakeWebRenderer(),
+    )
+
+    result = renderer.render_svg(
+        "flowchart TD\nA --> B",
+        theme="dark",
+        normalize_for_qtsvg=False,
+    )
+
+    assert result.success is True
+    assert result.svg_content == "<svg viewBox='0 0 10 10'></svg>"
+    assert calls == [("flowchart TD\nA --> B", "dark")]
+
+
+def test_mermaid_windows_surfaces_web_syntax_error_without_cli_fallback(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    class FakeWebRenderer:
+        def render_svg(self, source, *, theme):
+            return {"ok": False, "error": "Parse error", "details": "line 2"}
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    monkeypatch.setattr("sp.app.mermaid_renderer._is_windows_platform", lambda: True)
+    monkeypatch.setattr(renderer, "discover_mmdc", lambda: tmp_path / "mmdc.cmd")
+    monkeypatch.setattr(
+        "sp.app.mermaid_web_renderer.shared_mermaid_web_renderer",
+        lambda: FakeWebRenderer(),
+    )
+    monkeypatch.setattr(
+        renderer,
+        "_invoke_mmdc_svg",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("syntax errors must not invoke mmdc")
+        ),
+    )
+
+    result = renderer.render_svg("not valid mermaid")
+
+    assert result.success is False
+    assert "line 2" in (result.stderr or "")
+
+
 def test_mermaid_failure_diagnostics_include_stdout_stderr_and_command(tmp_path):
     from sp.app.mermaid_renderer import MermaidRenderer
 

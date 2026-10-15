@@ -450,6 +450,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--webserver", nargs="?", const="127.0.0.1:0", help="Start web server mode [bind:port]. Default: 127.0.0.1:0")
     parser.add_argument("--mcp-bridge", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mermaid-renderer", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-url", help=argparse.SUPPRESS)
     parser.add_argument("--excalidraw-webview-title", default="StillPoint Excalidraw", help=argparse.SUPPRESS)
@@ -900,6 +901,11 @@ def main() -> None:
         from sp.app.folder_navigator.window import main as folder_navigator_main
         raise SystemExit(folder_navigator_main(sys.argv[2:]))
     args = _parse_args(sys.argv[1:])
+
+    if args.mermaid_renderer:
+        from sp.app.mermaid_renderer_process import main as mermaid_renderer_main
+
+        raise SystemExit(mermaid_renderer_main())
 
     if args.mcp_bridge:
         from sp.app.mcp_bridge import run_stdio_bridge
