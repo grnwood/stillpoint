@@ -24,6 +24,12 @@ def _asset_url() -> QUrl:
     raise FileNotFoundError("Bundled Mermaid runtime was not found")
 
 
+def _asset_base_url(asset_url: QUrl) -> QUrl:
+    """Return a local directory URL without relying on Qt enum overloads."""
+    asset_path = Path(asset_url.toLocalFile())
+    return QUrl.fromLocalFile(str(asset_path.parent) + os.sep)
+
+
 class RequestInput(QObject):
     received = Signal(object)
     closed = Signal()
@@ -168,8 +174,8 @@ def main() -> int:
     bridge.delivered.connect(controller.delivered)
     view.loadFinished.connect(loaded)
     requests.start()
-    base = _asset_url().adjusted(QUrl.RemoveFilename)
-    view.setHtml(_shell_html(_asset_url().toString()), base)
+    asset_url = _asset_url()
+    view.setHtml(_shell_html(asset_url.toString()), _asset_base_url(asset_url))
     return int(app.exec())
 
 

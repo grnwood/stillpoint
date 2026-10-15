@@ -11,6 +11,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
 
@@ -78,10 +79,22 @@ class MermaidWebRendererClient:
         threading.Thread(
             target=self._stderr_reader, args=(self._process.stderr,), daemon=True
         ).start()
-        try:
-            ready = self._responses.get(timeout=15.0)
-        except queue.Empty as exc:
-            raise MermaidWebRendererError(self._diagnostic("renderer startup timed out")) from exc
+        deadline = time.monotonic() + 15.0
+        while True:
+            if self._process.poll() is not None:
+                raise MermaidWebRendererError(
+                    self._diagnostic("renderer exited during startup")
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MermaidWebRendererError(
+                    self._diagnostic("renderer startup timed out")
+                )
+            try:
+                ready = self._responses.get(timeout=min(0.1, remaining))
+                break
+            except queue.Empty:
+                continue
         if ready.get("type") != "ready":
             raise MermaidWebRendererError(self._diagnostic(ready.get("error") or "renderer failed to start"))
 

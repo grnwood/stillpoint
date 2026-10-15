@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 
 def test_plantuml_cache_key_is_stable_after_tool_discovery(tmp_path, monkeypatch):
@@ -191,6 +192,18 @@ def test_mermaid_windows_surfaces_web_syntax_error_without_cli_fallback(tmp_path
 
     assert result.success is False
     assert "line 2" in (result.stderr or "")
+
+
+def test_mermaid_worker_builds_base_url_without_qurl_adjusted_enum():
+    from sp.app.mermaid_renderer_process import _asset_base_url, _asset_url
+
+    asset_url = _asset_url()
+    base_url = _asset_base_url(asset_url)
+
+    assert base_url.isLocalFile()
+    assert Path(base_url.toLocalFile()).resolve() == Path(
+        asset_url.toLocalFile()
+    ).resolve().parent
 
 
 def test_mermaid_failure_diagnostics_include_stdout_stderr_and_command(tmp_path):
