@@ -263,14 +263,27 @@ def test_reading_images_reflow_with_the_content_column(
     assert wide_height == pytest.approx(wide_width / 2)
 
 
-def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) -> None:
+def test_reading_view_defaults_white_and_can_persist_theme_colors(
+    qtbot, monkeypatch
+) -> None:
     import sp.app.ui.markdown_preview as preview_module
 
+    state = {"enabled": False}
     values = {
         "markdown_preview.paper_bg": "#fdfaf2",
         "markdown_preview.text": "#201a16",
         "markdown_preview.table_header_bg": "#ddd2bf",
     }
+    monkeypatch.setattr(
+        preview_module.config,
+        "load_reading_view_use_theme_colors",
+        lambda: state["enabled"],
+    )
+    monkeypatch.setattr(
+        preview_module.config,
+        "save_reading_view_use_theme_colors",
+        lambda enabled: state.__setitem__("enabled", enabled),
+    )
     monkeypatch.setattr(
         preview_module,
         "theme_value",
@@ -279,12 +292,25 @@ def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) 
     view = MarkdownReadingView()
     qtbot.addWidget(view)
 
+    assert not view.theme_toggle.isChecked()
+    assert "background: #ffffff" in view._css
+    assert "background: #fdfaf2" not in view._css
+
+    view.theme_toggle.click()
+
+    assert state["enabled"] is True
+    assert view.theme_toggle.isChecked()
     assert "background: #fdfaf2" in view._css
     assert "font-size: 24.00pt" in view._css
     assert "border: 2px solid" in view._css
     assert "background: #ddd2bf" in view._css
     assert "margin-top: 0.2em" in view._css
     assert "table.reading-rule" in view._css
+
+    restored = MarkdownReadingView()
+    qtbot.addWidget(restored)
+    assert restored.theme_toggle.isChecked()
+    assert "background: #fdfaf2" in restored._css
 
 
 def test_reading_view_materializes_checkbox_glyphs(qtbot) -> None:

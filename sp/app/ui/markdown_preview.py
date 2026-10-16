@@ -4,12 +4,14 @@ from __future__ import annotations
 import os
 import re
 import sys
+import weakref
 from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve,
     QPoint,
     QRect,
+    QSize,
     QPropertyAnimation,
     QTimer,
     Qt,
@@ -18,6 +20,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QIcon,
     QImageReader,
     QKeyEvent,
     QKeySequence,
@@ -41,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from sp.app import config
 from sp.app.ui.theme import theme_value
 from sp.markdown_html import nearest_source_anchor, render_markdown_html
 
@@ -291,6 +295,7 @@ class MarkdownReadingView(QWidget):
     """A shared read-only Markdown surface used by both desktop editors."""
 
     ZOOM_DEBOUNCE_MS = 100
+    _instances: weakref.WeakSet = weakref.WeakSet()
 
     editRequested = Signal()
     linkActivated = Signal(str)
@@ -300,6 +305,7 @@ class MarkdownReadingView(QWidget):
         self.last_markdown = ""
         self.last_html = ""
         self.base_directory: Path | None = None
+        self._use_theme_colors = config.load_reading_view_use_theme_colors()
         self._base_font_point_size = 12.0
         self._zoom_steps = 0
         self._zoom_css_dirty = False
@@ -324,6 +330,14 @@ class MarkdownReadingView(QWidget):
         title = QLabel("Reading View", header)
         title.setAccessibleName("Reading View")
         header_layout.addWidget(title)
+        self.theme_toggle = QToolButton(header)
+        self.theme_toggle.setObjectName("readingThemeToggle")
+        self.theme_toggle.setCheckable(True)
+        self.theme_toggle.setChecked(self._use_theme_colors)
+        self.theme_toggle.setIconSize(QSize(18, 18))
+        self.theme_toggle.setAccessibleName("Use theme colors in Reading View")
+        self._update_theme_toggle_tooltip()
+        header_layout.addWidget(self.theme_toggle)
         header_layout.addStretch()
         self.find_button = QToolButton(header)
         self.find_button.setText("Find")
@@ -374,6 +388,8 @@ class MarkdownReadingView(QWidget):
         )
         layout.addWidget(self.browser, 1)
         self.setFocusProxy(self.browser)
+        self.theme_toggle.toggled.connect(self._theme_mode_toggled)
+        self._instances.add(self)
 
         find_shortcut = QShortcut(QKeySequence.Find, self)
         find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -399,6 +415,56 @@ class MarkdownReadingView(QWidget):
             self._page_shortcuts.append(shortcut)
         self._apply_palette()
 
+    @staticmethod
+    def _theme_icon_path() -> Path | None:
+        candidates = [Path(__file__).resolve().parents[2] / "assets" / "dark-light.svg"]
+        bundled = getattr(sys, "_MEIPASS", None)
+        if bundled:
+            root = Path(bundled)
+            candidates.extend(
+                (root / "sp" / "assets" / "dark-light.svg", root / "assets" / "dark-light.svg")
+            )
+        return next((path for path in candidates if path.exists()), None)
+
+    def _update_theme_toggle_icon(self) -> None:
+        path = self._theme_icon_path()
+        if path is None:
+            self.theme_toggle.setIcon(QIcon())
+            return
+        pixmap = QIcon(str(path)).pixmap(QSize(18, 18))
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), self.palette().color(QPalette.ButtonText))
+        painter.end()
+        self.theme_toggle.setIcon(QIcon(pixmap))
+
+    def _update_theme_toggle_tooltip(self) -> None:
+        self.theme_toggle.setToolTip(
+            "Use the white Reading View background"
+            if self._use_theme_colors
+            else "Use theme colors in Reading View"
+        )
+
+    def _theme_mode_toggled(self, enabled: bool) -> None:
+        config.save_reading_view_use_theme_colors(enabled)
+        for view in list(self._instances):
+            view._apply_theme_mode(enabled)
+
+    def _apply_theme_mode(self, enabled: bool) -> None:
+        source_line = self.current_source_line() if self.last_markdown else 1
+        self._use_theme_colors = bool(enabled)
+        blocked = self.theme_toggle.blockSignals(True)
+        self.theme_toggle.setChecked(self._use_theme_colors)
+        self.theme_toggle.blockSignals(blocked)
+        self._update_theme_toggle_tooltip()
+        self._apply_palette()
+        if self.last_markdown:
+            self.set_markdown(
+                self.last_markdown,
+                base_directory=self.base_directory,
+                source_line=source_line,
+            )
+
     def _apply_palette(self) -> None:
         palette = self.palette()
         scale = 1.1 ** self._zoom_steps
@@ -407,13 +473,22 @@ class MarkdownReadingView(QWidget):
             return f"{value * scale:.2f}pt"
 
         body_size = points(self._base_font_point_size)
-        paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
-        text = str(theme_value("markdown_preview.text", "#111111"))
-        muted = str(theme_value("markdown_preview.muted", "#666666"))
-        border = str(theme_value("markdown_preview.border", "#c6cbd1"))
-        table_header = str(theme_value("markdown_preview.table_header_bg", "#e9edf2"))
-        code_bg = str(theme_value("markdown_preview.code_bg", "#f6f8fa"))
-        highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
+        if self._use_theme_colors:
+            paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
+            text = str(theme_value("markdown_preview.text", "#111111"))
+            muted = str(theme_value("markdown_preview.muted", "#666666"))
+            border = str(theme_value("markdown_preview.border", "#c6cbd1"))
+            table_header = str(theme_value("markdown_preview.table_header_bg", "#e9edf2"))
+            code_bg = str(theme_value("markdown_preview.code_bg", "#f6f8fa"))
+            highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
+        else:
+            paper = "#ffffff"
+            text = "#111111"
+            muted = "#666666"
+            border = "#c6cbd1"
+            table_header = "#e9edf2"
+            code_bg = "#f6f8fa"
+            highlight = "#1a5fb4"
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
             body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.35;
@@ -455,6 +530,7 @@ class MarkdownReadingView(QWidget):
             f"background: {paper}; color: {text}; border: none;"
             "}"
         )
+        self._update_theme_toggle_icon()
         self.browser.refresh_reading_cursor()
 
     def set_vi_enabled(self, enabled: bool) -> None:

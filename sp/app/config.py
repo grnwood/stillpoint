@@ -311,6 +311,19 @@ def save_theme_preference(theme_name: str) -> None:
     _update_global_config({"theme_name": name or "default"})
 
 
+def load_reading_view_use_theme_colors() -> bool:
+    """Return whether Markdown Reading View should use the active theme palette."""
+    value = _read_global_config().get("reading_view_use_theme_colors", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def save_reading_view_use_theme_colors(enabled: bool) -> None:
+    """Persist the app-wide Markdown Reading View palette preference."""
+    _update_global_config({"reading_view_use_theme_colors": bool(enabled)})
+
+
 def load_vault_theme_override() -> Optional[str]:
     """Return per-vault theme override, or None when unset."""
     value = (_load_vault_kv("vault_theme_override") or "").strip()
