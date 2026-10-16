@@ -4979,6 +4979,10 @@ class Window(QMainWindow):
         if not tab.editor:
             self._install_preview_context_menu(tab, getattr(tab, "viewer", tab))
         if tab.editor:
+            if tab.reading_view is not None:
+                install_primary_wheel_zoom(
+                    tab.reading_view.browser, self._zoom_active_view
+                )
             if self.editor_zoom_steps > 0:
                 tab.editor.zoomIn(self.editor_zoom_steps)
                 if tab.reading_view is not None:

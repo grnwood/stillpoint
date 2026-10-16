@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
@@ -171,9 +172,38 @@ def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) 
     qtbot.addWidget(view)
 
     assert "background: #fdfaf2" in view._css
-    assert "font-size: 28pt" in view._css
+    assert "font-size: 28.00pt" in view._css
     assert "border: 2px solid" in view._css
     assert "background: #ddd2bf" in view._css
+
+
+def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown(
+        "# Heading\n\nParagraph\n\n| Column |\n| --- |\n| Cell |\n\n`Code`"
+    )
+
+    def sizes() -> dict[str, float]:
+        wanted = {"Heading", "Paragraph", "Column", "Cell", "Code"}
+        result: dict[str, float] = {}
+        block = view.browser.document().begin()
+        while block.isValid():
+            text = block.text().replace("\u200b", "").strip()
+            if text in wanted:
+                result[text] = block.charFormat().fontPointSize()
+            block = block.next()
+        return result
+
+    before = sizes()
+    view.zoom_in(2)
+    qapp.processEvents()
+    after = sizes()
+
+    assert before.keys() == after.keys()
+    for label in before:
+        assert after[label] > before[label]
+        assert after[label] / before[label] == pytest.approx(1.21, rel=0.03)
 
 
 def test_folder_markdown_ctrl_space_toggles_reading_view(
@@ -255,6 +285,7 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         qapp.processEvents()
 
         assert window.reading_view_action.isEnabled()
+        assert window.active_tab().reading_view.browser._primary_wheel_zoom_filters
         assert QKeySequence("Ctrl+Space") in {
             shortcut.key() for shortcut in window.active_tab().reading_view_shortcuts
         }

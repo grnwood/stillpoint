@@ -242,6 +242,7 @@ class MarkdownReadingView(QWidget):
         self.last_markdown = ""
         self.last_html = ""
         self.base_directory: Path | None = None
+        self._zoom_steps = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -331,6 +332,12 @@ class MarkdownReadingView(QWidget):
 
     def _apply_palette(self) -> None:
         palette = self.palette()
+        scale = 1.1 ** self._zoom_steps
+
+        def points(value: float) -> str:
+            return f"{value * scale:.2f}pt"
+
+        body_size = points(12)
         paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
         text = str(theme_value("markdown_preview.text", "#111111"))
         muted = str(theme_value("markdown_preview.muted", "#666666"))
@@ -340,14 +347,15 @@ class MarkdownReadingView(QWidget):
         highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
-            body {{ font-family: sans-serif; font-size: 12pt; line-height: 1.5;
+            body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.5;
                     margin: 30px 36px 42px 36px; }}
             h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 1.25em;
                    margin-bottom: 0.45em; font-weight: 700; }}
-            h1 {{ font-size: 28pt; border-bottom: 2px solid {border}; padding-bottom: 6px; }}
-            h2 {{ font-size: 22pt; border-bottom: 1px solid {border}; padding-bottom: 4px; }}
-            h3 {{ font-size: 18pt; }} h4 {{ font-size: 15pt; }}
-            h5 {{ font-size: 13pt; }} h6 {{ font-size: 12pt; color: {muted}; }}
+            h1 {{ font-size: {points(28)}; border-bottom: 2px solid {border}; padding-bottom: 6px; }}
+            h2 {{ font-size: {points(22)}; border-bottom: 1px solid {border}; padding-bottom: 4px; }}
+            h3 {{ font-size: {points(18)}; }} h4 {{ font-size: {points(15)}; }}
+            h5 {{ font-size: {points(13)}; }} h6 {{ font-size: {points(12)}; color: {muted}; }}
+            p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
             p {{ margin-top: 0.55em; margin-bottom: 0.55em; }}
             table {{ border-collapse: collapse; width: 100%; margin-top: 1em;
                      margin-bottom: 1em; border: 2px solid {border}; }}
@@ -511,7 +519,21 @@ class MarkdownReadingView(QWidget):
         self.browser.setFocus(Qt.ShortcutFocusReason)
 
     def zoom_in(self, steps: int = 1) -> None:
-        self.browser.zoomIn(max(1, int(steps)))
+        self._set_zoom_steps(self._zoom_steps + max(1, int(steps)))
 
     def zoom_out(self, steps: int = 1) -> None:
-        self.browser.zoomOut(max(1, int(steps)))
+        self._set_zoom_steps(self._zoom_steps - max(1, int(steps)))
+
+    def _set_zoom_steps(self, steps: int) -> None:
+        new_steps = max(-8, min(20, int(steps)))
+        if new_steps == self._zoom_steps:
+            return
+        source_line = self.current_source_line()
+        self._zoom_steps = new_steps
+        self._apply_palette()
+        if self.last_markdown:
+            self.set_markdown(
+                self.last_markdown,
+                base_directory=self.base_directory,
+                source_line=source_line,
+            )
