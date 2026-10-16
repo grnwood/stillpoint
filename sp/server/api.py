@@ -28,7 +28,6 @@ from typing import List, Literal, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
-import markdown as md
 import uvicorn
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -91,6 +90,7 @@ from sp.app.task_mutations import (
 )
 from sp.app.ui.ai_api import build_api_request
 from sp.logging_flags import log_enabled
+from sp.markdown_html import render_markdown_html
 from sp.vault_boundary import path_crosses_nested_vault, validate_vault_root
 from tools.homebase_seed_lib import create_homebase_vault, seed_homebase_vault
 
@@ -6242,17 +6242,7 @@ def _resolve_tree_root(root: Path, path: str) -> Path:
 
 
 def _render_markdown_html(text: str) -> str:
-    renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
-    normalized = _rewrite_zim_links(text)
-    normalized = _normalize_markdown_image_blocks(normalized)
-    normalized = _rewrite_markdown_image_sizes(normalized)
-    normalized = _rewrite_task_and_dash_markers(normalized)
-    normalized = _normalize_markdown_lists(normalized)
-    normalized = _rewrite_highlight(normalized)
-    normalized = _rewrite_strikethrough(normalized)
-    html = renderer.convert(normalized)
-    html = _rewrite_task_checkboxes(html)
-    return html
+    return render_markdown_html(text)
 
 
 def _rewrite_task_and_dash_markers(text: str) -> str:

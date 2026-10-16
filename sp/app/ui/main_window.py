@@ -139,6 +139,7 @@ from .screen_positioning import (
     popup_available_geometry,
 )
 from .canvas_navigation import install_primary_wheel_zoom
+from .markdown_preview import MarkdownReadingView
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -2984,11 +2985,33 @@ class MainWindow(QMainWindow):
 
         # Vi-mode state
        
+        self.reading_view = MarkdownReadingView()
+        self.reading_view.editRequested.connect(
+            lambda: self._set_reading_view_enabled(False)
+        )
+        self.reading_view.linkActivated.connect(self._open_reading_view_link)
+        self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
+        install_primary_wheel_zoom(
+            self.reading_view.browser, self._adjust_markdown_font_size
+        )
+        self._reading_view_enabled = False
+        self._reading_saved_path = None
+        self._reading_saved_cursor = None
+        self._reading_saved_scroll = 0
+        self.editor.textChanged.connect(self._schedule_reading_view_refresh)
+
+        self.editor_view_container = QWidget()
+        self._editor_view_stack = QStackedLayout(self.editor_view_container)
+        self._editor_view_stack.setContentsMargins(0, 0, 0, 0)
+        self._editor_view_stack.addWidget(self.editor)
+        self._editor_view_stack.addWidget(self.reading_view)
+        self._editor_view_stack.setCurrentWidget(self.editor)
+
         editor_container = QWidget()
         editor_layout = QVBoxLayout(editor_container)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(0)
-        editor_layout.addWidget(self.editor, 1)
+        editor_layout.addWidget(self.editor_view_container, 1)
         editor_layout.addWidget(self.find_bar)
 
         self.editor_split = QSplitter()
@@ -3322,6 +3345,20 @@ class MainWindow(QMainWindow):
         self._action_audience_mode.setToolTip("Open in Audience Mode")
         self._action_audience_mode.triggered.connect(lambda checked=False: self._toggle_mode_overlay("audience"))
         view_mode_menu.addAction(self._action_audience_mode)
+        self._action_reading_view = QAction("Reading View", self)
+        self._action_reading_view.setCheckable(True)
+        self._action_reading_view.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self._action_reading_view.setShortcutContext(Qt.ApplicationShortcut)
+        self._action_reading_view.setToolTip(
+            "Toggle the formatted Markdown reading view (Ctrl+Shift+R)"
+        )
+        self._action_reading_view.setIcon(
+            self.style().standardIcon(QStyle.SP_FileDialogContentsView)
+        )
+        self._action_reading_view.triggered.connect(self._set_reading_view_enabled)
+        view_mode_menu.addAction(self._action_reading_view)
+        self.toolbar.addAction(self._action_reading_view)
+        self._toolbar_reading_action = self._action_reading_view
         view_menu.addSeparator()
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -4671,6 +4708,8 @@ class MainWindow(QMainWindow):
 
     def _invoke_editor_style(self, formatter: Callable[[], None]) -> None:
         """Focus the editor before applying a format operation."""
+        if getattr(self, "_reading_view_enabled", False):
+            self._set_reading_view_enabled(False)
         self.editor.setFocus(Qt.ShortcutFocusReason)
         formatter()
 
@@ -4681,6 +4720,11 @@ class MainWindow(QMainWindow):
         return ""
 
     def _show_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
+        if getattr(self, "_reading_view_enabled", False):
+            if not replace:
+                self.reading_view.show_find()
+                return
+            self._set_reading_view_enabled(False)
         query = seed if seed is not None else self._selected_text_for_search()
         query = self._sanitize_find_query(query)
         if not query:
@@ -11066,6 +11110,10 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_theme_sensitive_controls(self) -> None:
+        if hasattr(self, "reading_view"):
+            self.reading_view._apply_palette()
+            if getattr(self, "_reading_view_enabled", False):
+                self._refresh_reading_view()
         icon_color = self._main_icon_color()
         for button, asset_name in (
             (getattr(self, "refresh_tree_button", None), "reload.svg"),
@@ -14250,6 +14298,7 @@ class MainWindow(QMainWindow):
                     self._history_scroll_positions[path] = scroll_bar.value()
             except Exception:
                 pass
+        self._refresh_reading_view()
         # The breadcrumb now carries the persistent page location. Keep the
         # status bar available for transient work, errors, and sync state.
         display_path = path_to_colon(path) or path
@@ -20403,8 +20452,14 @@ class MainWindow(QMainWindow):
         else:
             if new_size == self.font_size:
                 return
+            delta_applied = new_size - self.font_size
             self.font_size = new_size
             self.editor.set_font_point_size(self.font_size)
+            if hasattr(self, "reading_view"):
+                if delta_applied > 0:
+                    self.reading_view.zoom_in(delta_applied)
+                elif delta_applied < 0:
+                    self.reading_view.zoom_out(-delta_applied)
             self.right_panel.set_calendar_font_size(self.font_size)
             config.save_global_editor_font_size(self.font_size)
 
@@ -20414,6 +20469,11 @@ class MainWindow(QMainWindow):
             return
         self.font_size = new_size
         self.editor.set_font_point_size(new_size)
+        if hasattr(self, "reading_view"):
+            if int(delta) > 0:
+                self.reading_view.zoom_in(int(delta))
+            elif int(delta) < 0:
+                self.reading_view.zoom_out(-int(delta))
         self.right_panel.set_calendar_font_size(new_size)
         config.save_global_editor_font_size(new_size)
 
@@ -20494,6 +20554,9 @@ class MainWindow(QMainWindow):
 
     @measure_performance("navigation.focus_handoff")
     def _focus_editor(self) -> None:
+        if getattr(self, "_reading_view_enabled", False):
+            self.reading_view.focus_reader()
+            return
         try:
             if self.editor.hasFocus():
                 return
@@ -20507,6 +20570,86 @@ class MainWindow(QMainWindow):
             self.activateWindow()
         except Exception:
             pass
+        self.editor.setFocus(Qt.ShortcutFocusReason)
+
+    def _reading_view_base_directory(self) -> Optional[Path]:
+        if not self.vault_root:
+            return None
+        current = str(self.current_path or "").lstrip("/")
+        target = Path(self.vault_root) / current
+        return target.parent if current else Path(self.vault_root)
+
+    def _open_reading_view_link(self, target: str) -> None:
+        """Keep vault-page links inside Stillpoint while reading."""
+        url = QUrl(target)
+        if url.isLocalFile() and self.vault_root:
+            try:
+                local_path = Path(url.toLocalFile()).resolve()
+                relative = local_path.relative_to(Path(self.vault_root).resolve())
+            except (OSError, ValueError):
+                relative = None
+            if relative is not None and local_path.suffix.casefold() in PAGE_SUFFIXES:
+                self._open_file("/" + relative.as_posix())
+                fragment = url.fragment().strip()
+                if fragment:
+                    QTimer.singleShot(
+                        0, self, lambda value=fragment: self._scroll_to_anchor_slug(value)
+                    )
+                return
+        self._open_link_in_context(target)
+
+    def _remember_reading_editor_position(self) -> None:
+        cursor = self.editor.textCursor()
+        self._reading_saved_path = self.current_path
+        self._reading_saved_cursor = (cursor.anchor(), cursor.position())
+        self._reading_saved_scroll = self.editor.verticalScrollBar().value()
+
+    def _refresh_reading_view(self) -> None:
+        if not getattr(self, "_reading_view_enabled", False):
+            return
+        if self._reading_saved_path != self.current_path:
+            self._remember_reading_editor_position()
+        cursor = self.editor.textCursor()
+        self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
+        self.reading_view.set_markdown(
+            self.editor.to_markdown(),
+            base_directory=self._reading_view_base_directory(),
+            source_line=cursor.blockNumber() + 1,
+        )
+
+    def _schedule_reading_view_refresh(self) -> None:
+        if getattr(self, "_reading_view_enabled", False):
+            QTimer.singleShot(0, self, self._refresh_reading_view)
+
+    def _set_reading_view_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == getattr(self, "_reading_view_enabled", False):
+            return
+        self._reading_view_enabled = enabled
+        action = getattr(self, "_action_reading_view", None)
+        if action is not None and action.isChecked() != enabled:
+            action.blockSignals(True)
+            action.setChecked(enabled)
+            action.blockSignals(False)
+        self.find_bar.hide()
+        if enabled:
+            self._remember_reading_editor_position()
+            self._refresh_reading_view()
+            self._editor_view_stack.setCurrentWidget(self.reading_view)
+            self.reading_view.focus_reader()
+            self.statusBar().showMessage("Reading View — press Ctrl+Shift+R to edit", 3000)
+            return
+        self._editor_view_stack.setCurrentWidget(self.editor)
+        if self._reading_saved_path == self.current_path and self._reading_saved_cursor:
+            anchor, position = self._reading_saved_cursor
+            cursor = self.editor.textCursor()
+            maximum = max(0, self.editor.document().characterCount() - 1)
+            cursor.setPosition(max(0, min(int(anchor), maximum)))
+            cursor.setPosition(
+                max(0, min(int(position), maximum)), QTextCursor.KeepAnchor
+            )
+            self.editor.setTextCursor(cursor)
+            self.editor.verticalScrollBar().setValue(int(self._reading_saved_scroll))
         self.editor.setFocus(Qt.ShortcutFocusReason)
 
     def _focus_vault_tab(self) -> None:
@@ -20718,7 +20861,10 @@ class MainWindow(QMainWindow):
     def _set_focus_target(self, target: str) -> None:
         """Move focus to target and update MRU list."""
         if target == "editor":
-            self.editor.setFocus()
+            if getattr(self, "_reading_view_enabled", False):
+                self.reading_view.focus_reader()
+            else:
+                self.editor.setFocus()
         elif target == "tree":
             self.tree_view.setFocus()
         elif target == "left":
@@ -23990,6 +24136,10 @@ class MainWindow(QMainWindow):
 
     def _toc_jump_to_position(self, position: int) -> None:
         cursor = self._cursor_at_position(max(0, position))
+        if getattr(self, "_reading_view_enabled", False):
+            self.reading_view.scroll_to_source_line(cursor.blockNumber() + 1)
+            self.reading_view.focus_reader()
+            return
         self._animate_or_flash_to_cursor(cursor)
         QTimer.singleShot(180, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
@@ -25195,6 +25345,8 @@ class MainWindow(QMainWindow):
 
     def _apply_vi_preferences(self) -> None:
         self._vi_enabled = config.load_vi_mode_enabled()
+        if hasattr(self, "reading_view"):
+            self.reading_view.set_vi_enabled(self._vi_enabled)
         self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         if not self._vi_enabled:
             self._vi_enable_pending = False

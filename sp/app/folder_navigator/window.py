@@ -72,6 +72,7 @@ from sp.app.ui.theme import (
     tree_view_stylesheet,
 )
 from sp.app.ui.utility_header import CompactToolbarIdentity, UtilityPanelHeader
+from sp.app.ui.markdown_preview import MarkdownReadingView
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
@@ -1521,6 +1522,9 @@ class SpreadsheetView(QWidget):
 
 
 class Tab(QWidget):
+    readingLinkActivated = Signal(str)
+    readingViewChanged = Signal(bool)
+
     def __init__(self, path: Path, loaded: TextFile | None = None, *, markdown=False,
                  details="", root: Path | None = None, defer_enhancements=False):
         super().__init__()
@@ -1530,6 +1534,11 @@ class Tab(QWidget):
         self.markdown = markdown
         self.pinned = False
         self.detached = False
+        self.reading_view = None
+        self.editor_view_stack = None
+        self.reading_view_enabled = False
+        self._reading_saved_cursor = None
+        self._reading_saved_scroll = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.notice = QLabel("")
@@ -1584,7 +1593,37 @@ class Tab(QWidget):
                 self.editor.findRequested.connect(self._show_find)
             if self.editor.isReadOnly():
                 self.show_notice("Read-only file: editing and saving are disabled")
-            layout.addWidget(self.editor)
+            if markdown:
+                self.reading_view = MarkdownReadingView(self)
+                self.reading_view.set_vi_enabled(
+                    bool(getattr(self.editor, "_vi_feature_enabled", False))
+                )
+                self.reading_view.editRequested.connect(
+                    lambda: self.set_reading_view(False)
+                )
+                self.reading_view.linkActivated.connect(
+                    lambda target: self.readingLinkActivated.emit(target)
+                )
+                self.editor.textChanged.connect(
+                    lambda: QTimer.singleShot(
+                        0,
+                        self,
+                        lambda: self._refresh_reading_view()
+                        if self.reading_view_enabled
+                        else None,
+                    )
+                )
+                editor_views = QWidget(self)
+                self.editor_view_stack = QStackedWidget(editor_views)
+                editor_views_layout = QVBoxLayout(editor_views)
+                editor_views_layout.setContentsMargins(0, 0, 0, 0)
+                editor_views_layout.addWidget(self.editor_view_stack)
+                self.editor_view_stack.addWidget(self.editor)
+                self.editor_view_stack.addWidget(self.reading_view)
+                self.editor_view_stack.setCurrentWidget(self.editor)
+                layout.addWidget(editor_views, 1)
+            else:
+                layout.addWidget(self.editor, 1)
             self.editor_status = QFrame()
             self.editor_status.setObjectName("folderEditorStatus")
             status_layout = QHBoxLayout(self.editor_status)
@@ -1596,6 +1635,15 @@ class Tab(QWidget):
             self.file_status.setAccessibleName("File format and editor mode")
             status_layout.addWidget(self.cursor_status)
             status_layout.addStretch()
+            if markdown:
+                self.reading_toggle = QToolButton(self.editor_status)
+                self.reading_toggle.setText("Read")
+                self.reading_toggle.setCheckable(True)
+                self.reading_toggle.setToolTip(
+                    "Toggle the formatted Markdown reading view (Ctrl+Shift+R)"
+                )
+                self.reading_toggle.toggled.connect(self.set_reading_view)
+                status_layout.addWidget(self.reading_toggle)
             status_layout.addWidget(self.file_status)
             palette = QApplication.palette()
             self.editor_status.setStyleSheet(
@@ -1641,6 +1689,57 @@ class Tab(QWidget):
         self.editor.document().setModified(False)
         self.detached = False
         self._update_editor_status()
+        if self.reading_view_enabled:
+            self._refresh_reading_view()
+
+    def _refresh_reading_view(self) -> None:
+        if not self.markdown or self.editor is None or self.reading_view is None:
+            return
+        self.reading_view.set_markdown(
+            self.editor.to_markdown(),
+            base_directory=self.path.parent,
+            source_line=self.editor.textCursor().blockNumber() + 1,
+        )
+
+    def set_reading_view(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if (
+            not self.markdown
+            or self.editor is None
+            or self.reading_view is None
+            or self.editor_view_stack is None
+            or enabled == self.reading_view_enabled
+        ):
+            return
+        self.reading_view_enabled = enabled
+        toggle = getattr(self, "reading_toggle", None)
+        if toggle is not None:
+            toggle.blockSignals(True)
+            toggle.setChecked(enabled)
+            toggle.setText("Edit" if enabled else "Read")
+            toggle.blockSignals(False)
+        if enabled:
+            cursor = self.editor.textCursor()
+            self._reading_saved_cursor = (cursor.anchor(), cursor.position())
+            self._reading_saved_scroll = self.editor.verticalScrollBar().value()
+            self._refresh_reading_view()
+            self.editor_view_stack.setCurrentWidget(self.reading_view)
+            self.reading_view.focus_reader()
+        else:
+            self.editor_view_stack.setCurrentWidget(self.editor)
+            if self._reading_saved_cursor:
+                anchor, position = self._reading_saved_cursor
+                maximum = max(0, self.editor.document().characterCount() - 1)
+                cursor = self.editor.textCursor()
+                cursor.setPosition(max(0, min(int(anchor), maximum)))
+                cursor.setPosition(
+                    max(0, min(int(position), maximum)), QTextCursor.KeepAnchor
+                )
+                self.editor.setTextCursor(cursor)
+                self.editor.verticalScrollBar().setValue(self._reading_saved_scroll)
+            self.editor.setFocus(Qt.ShortcutFocusReason)
+        self._update_editor_status()
+        self.readingViewChanged.emit(enabled)
 
     def show_notice(self, message):
         self.notice.setText(message)
@@ -1674,7 +1773,10 @@ class Tab(QWidget):
             self.loaded.newline if self.loaded else "\n", "LF"
         )
         access = "Read-only" if self.editor.isReadOnly() else "Editable"
-        self.file_status.setText(f"{language}  ·  {encoding}  ·  {newline}  ·  {access}")
+        mode = "  ·  Reading View" if self.reading_view_enabled else ""
+        self.file_status.setText(
+            f"{language}  ·  {encoding}  ·  {newline}  ·  {access}{mode}"
+        )
 
     def _show_find(self):
         self.find_bar.show()
@@ -3965,6 +4067,14 @@ class Window(QMainWindow):
         self.toggle_hidden(self.hidden_action.isChecked())
         add(view_menu, "Zoom In", lambda: self._zoom_active_view(1), QKeySequence.ZoomIn)
         add(view_menu, "Zoom Out", lambda: self._zoom_active_view(-1), QKeySequence.ZoomOut)
+        self.reading_view_action = add(
+            view_menu,
+            "Reading View",
+            self._toggle_active_reading_view,
+            "Ctrl+Shift+R",
+        )
+        self.reading_view_action.setCheckable(True)
+        self.reading_view_action.setEnabled(False)
         self.rail_visibility_action = add(
             view_menu, "Show Folder Rail", self._toggle_folder_rail, "Ctrl+Shift+B"
         )
@@ -4139,6 +4249,47 @@ class Window(QMainWindow):
             action.setChecked(not self.tree.isColumnHidden(column))
             action.blockSignals(False)
 
+    def _toggle_active_reading_view(self, enabled: bool) -> None:
+        tab = self.active_tab()
+        if not tab or not tab.markdown:
+            if hasattr(self, "reading_view_action"):
+                self.reading_view_action.blockSignals(True)
+                self.reading_view_action.setChecked(False)
+                self.reading_view_action.blockSignals(False)
+            self.statusBar().showMessage(
+                "Reading View is available for Markdown files", 2500
+            )
+            return
+        tab.set_reading_view(bool(enabled))
+        self.statusBar().showMessage(
+            "Reading View — press Ctrl+Shift+R to edit"
+            if enabled
+            else "Markdown editor",
+            2500,
+        )
+
+    def _on_tab_reading_view_changed(self, tab: Tab, enabled: bool) -> None:
+        if tab is not self.active_tab() or not hasattr(self, "reading_view_action"):
+            return
+        self.reading_view_action.blockSignals(True)
+        self.reading_view_action.setChecked(bool(enabled))
+        self.reading_view_action.blockSignals(False)
+
+    def _open_reading_view_link(self, tab: Tab, target: str) -> None:
+        url = QUrl(target)
+        if url.scheme() in {"http", "https", "mailto"}:
+            QDesktopServices.openUrl(url)
+            return
+        local = Path(url.toLocalFile()) if url.isLocalFile() else tab.path.parent / url.path()
+        try:
+            local = local.resolve()
+        except OSError:
+            return
+        if local.is_file() and inside(self.root, local):
+            self.open_file(local, pinned=True)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(local)))
+
     def _zoom_active_view(self, direction):
         """Route StillPoint's standard zoom keys to the active viewer."""
         focused = self.focusWidget()
@@ -4166,6 +4317,11 @@ class Window(QMainWindow):
                         candidate.editor.zoomIn(applied)
                     else:
                         candidate.editor.zoomOut(-applied)
+                if candidate.reading_view is not None:
+                    if applied > 0:
+                        candidate.reading_view.zoom_in(applied)
+                    else:
+                        candidate.reading_view.zoom_out(-applied)
             self._persist()
             return
         viewer = getattr(tab, "viewer", None)
@@ -4233,7 +4389,11 @@ class Window(QMainWindow):
             tab = self.active_tab()
             if tab is None:
                 return
-            root = tab.editor or getattr(tab, "viewer", None) or tab
+            root = (
+                tab.reading_view
+                if tab.reading_view_enabled and tab.reading_view is not None
+                else tab.editor or getattr(tab, "viewer", None) or tab
+            )
             area = self._visible_scroll_area(root, focused)
         if area is None:
             self.statusBar().showMessage(
@@ -4783,8 +4943,12 @@ class Window(QMainWindow):
         if tab.editor:
             if self.editor_zoom_steps > 0:
                 tab.editor.zoomIn(self.editor_zoom_steps)
+                if tab.reading_view is not None:
+                    tab.reading_view.zoom_in(self.editor_zoom_steps)
             elif self.editor_zoom_steps < 0:
                 tab.editor.zoomOut(-self.editor_zoom_steps)
+                if tab.reading_view is not None:
+                    tab.reading_view.zoom_out(-self.editor_zoom_steps)
             # Folder Navigator owns a deliberately small editor context menu.
             # In particular, Markdown tabs must not expose StillPoint page,
             # link-graph, AI, or vault-navigation actions here.
@@ -4799,6 +4963,16 @@ class Window(QMainWindow):
             if isinstance(tab.editor, MarkdownEditor):
                 tab.editor.setProperty("folderNavigatorMarkdown", True)
                 tab.editor.highlighter.set_folder_navigator_table_style(True)
+                tab.readingLinkActivated.connect(
+                    lambda target, current=tab: self._open_reading_view_link(
+                        current, target
+                    )
+                )
+                tab.readingViewChanged.connect(
+                    lambda enabled, current=tab: self._on_tab_reading_view_changed(
+                        current, enabled
+                    )
+                )
                 tab.editor.headingPickerRequested.connect(
                     lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
                 )
@@ -5851,7 +6025,11 @@ class Window(QMainWindow):
         picker = HeadingPicker(headings, self)
         self._position_heading_picker(tab, picker)
         if picker.exec() == QDialog.Accepted and picker.selected_line:
-            self._reveal_editor_line(tab, picker.selected_line)
+            if tab.reading_view_enabled and tab.reading_view is not None:
+                tab.reading_view.scroll_to_source_line(picker.selected_line)
+                tab.reading_view.focus_reader()
+            else:
+                self._reveal_editor_line(tab, picker.selected_line)
 
     def _format_active_markdown_table(self):
         tab = self.active_tab()
@@ -5860,6 +6038,8 @@ class Window(QMainWindow):
                 "Format Table is available in a Markdown editor", 4000
             )
             return
+        if tab.reading_view_enabled:
+            tab.set_reading_view(False)
         source = tab.text_for_save()
         cursor_line = tab.editor.textCursor().blockNumber()
         formatted, changed = format_markdown_table(source, cursor_line)
@@ -6101,6 +6281,13 @@ class Window(QMainWindow):
             self.save_action.setEnabled(bool(tab and tab.editor and not tab.editor.isReadOnly()))
         if hasattr(self, "reveal_active_tab_action"):
             self.reveal_active_tab_action.setEnabled(tab is not None)
+        if hasattr(self, "reading_view_action"):
+            self.reading_view_action.blockSignals(True)
+            self.reading_view_action.setEnabled(bool(tab and tab.markdown))
+            self.reading_view_action.setChecked(
+                bool(tab and tab.markdown and tab.reading_view_enabled)
+            )
+            self.reading_view_action.blockSignals(False)
         if hasattr(self, "table_preview_action"):
             delimited = bool(tab and tab.path.suffix.casefold() in DELIMITED_SUFFIXES)
             table = isinstance(getattr(tab, "viewer", None), SpreadsheetView)
@@ -6122,7 +6309,10 @@ class Window(QMainWindow):
             if self.tabs.currentWidget() is not tab:
                 return
             if tab.editor is not None:
-                tab.editor.setFocus(Qt.MouseFocusReason)
+                if tab.reading_view_enabled and tab.reading_view is not None:
+                    tab.reading_view.focus_reader()
+                else:
+                    tab.editor.setFocus(Qt.MouseFocusReason)
             elif getattr(tab, "viewer", None) is not None:
                 self._viewer_keyboard_target(tab.viewer).setFocus(Qt.MouseFocusReason)
             else:
@@ -6138,7 +6328,10 @@ class Window(QMainWindow):
         self.activateWindow()
         self.tabs.setCurrentWidget(tab)
         if tab.editor is not None:
-            tab.editor.setFocus(Qt.OtherFocusReason)
+            if tab.reading_view_enabled and tab.reading_view is not None:
+                tab.reading_view.focus_reader()
+            else:
+                tab.editor.setFocus(Qt.OtherFocusReason)
         elif getattr(tab, "viewer", None) is not None:
             tab.setProperty("folderNavigatorPendingContentFocus", False)
             self._viewer_keyboard_target(tab.viewer).setFocus(Qt.OtherFocusReason)
