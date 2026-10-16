@@ -263,6 +263,12 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     cursor = main_window.editor.textCursor()
     cursor.setPosition(4)
     main_window.editor.setTextCursor(cursor)
+    initial_reading_zoom = main_window.reading_view._zoom_steps
+    initial_editor_size = main_window.font_size
+    main_window._adjust_markdown_font_size(1)
+    assert main_window.reading_view._zoom_steps == initial_reading_zoom
+    main_window._adjust_markdown_font_size(-1)
+    assert main_window.font_size == initial_editor_size
 
     main_window._action_reading_view.trigger()
 
@@ -273,6 +279,11 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     assert main_window._reading_view_enabled
     assert main_window._editor_view_stack.currentWidget() is main_window.reading_view
     assert "<table>" in main_window.reading_view.last_html
+    editor_size_in_reading_view = main_window.font_size
+    main_window._adjust_reading_view_zoom(1)
+    assert main_window.font_size == editor_size_in_reading_view
+    assert main_window.reading_view._zoom_steps == initial_reading_zoom + 1
+    main_window._adjust_reading_view_zoom(-1)
 
     main_window._action_reading_view.trigger()
 
@@ -320,11 +331,22 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         assert QKeySequence("Ctrl+Space") in {
             shortcut.key() for shortcut in window.active_tab().reading_view_shortcuts
         }
+        initial_editor_zoom = window.editor_zoom_steps
+        initial_reading_zoom = window.reading_zoom_steps
+        window._zoom_active_view(1)
+        assert window.editor_zoom_steps == initial_editor_zoom + 1
+        assert window.reading_zoom_steps == initial_reading_zoom
+        assert window.active_tab().reading_view._zoom_steps == initial_reading_zoom
         window.reading_view_action.trigger()
 
         assert window.active_tab().reading_view_enabled
         assert window.reading_view_action.isChecked()
         assert "Alpha" in window.active_tab().reading_view.browser.toPlainText()
+        editor_zoom_in_reading_view = window.editor_zoom_steps
+        window._zoom_active_view(1)
+        assert window.editor_zoom_steps == editor_zoom_in_reading_view
+        assert window.reading_zoom_steps == initial_reading_zoom + 1
+        assert window.active_tab().reading_view._zoom_steps == initial_reading_zoom + 1
         window.active_tab().reading_view.edit_button.click()
         assert not window.reading_view_action.isChecked()
     finally:

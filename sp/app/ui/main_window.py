@@ -2993,7 +2993,7 @@ class MainWindow(QMainWindow):
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
         self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
         install_primary_wheel_zoom(
-            self.reading_view.browser, self._adjust_markdown_font_size
+            self.reading_view.browser, self._adjust_reading_view_zoom
         )
         self._reading_view_enabled = False
         self._reading_saved_path = None
@@ -20454,6 +20454,9 @@ class MainWindow(QMainWindow):
         if map_panel and hasattr(map_panel, "contains_focus") and map_panel.contains_focus():
             if map_panel.zoom_selected_node(delta):
                 return
+        if getattr(self, "_reading_view_enabled", False):
+            self._adjust_reading_view_zoom(delta)
+            return
         new_size = max(6, min(24, self.font_size + delta))
         fw = self.focusWidget()
         ai_focus = False
@@ -20466,14 +20469,8 @@ class MainWindow(QMainWindow):
         else:
             if new_size == self.font_size:
                 return
-            delta_applied = new_size - self.font_size
             self.font_size = new_size
             self.editor.set_font_point_size(self.font_size)
-            if hasattr(self, "reading_view"):
-                if delta_applied > 0:
-                    self.reading_view.zoom_in(delta_applied)
-                elif delta_applied < 0:
-                    self.reading_view.zoom_out(-delta_applied)
             self.right_panel.set_calendar_font_size(self.font_size)
             config.save_global_editor_font_size(self.font_size)
 
@@ -20483,13 +20480,16 @@ class MainWindow(QMainWindow):
             return
         self.font_size = new_size
         self.editor.set_font_point_size(new_size)
-        if hasattr(self, "reading_view"):
-            if int(delta) > 0:
-                self.reading_view.zoom_in(int(delta))
-            elif int(delta) < 0:
-                self.reading_view.zoom_out(-int(delta))
         self.right_panel.set_calendar_font_size(new_size)
         config.save_global_editor_font_size(new_size)
+
+    def _adjust_reading_view_zoom(self, delta: int) -> None:
+        if not hasattr(self, "reading_view"):
+            return
+        if int(delta) > 0:
+            self.reading_view.zoom_in(int(delta))
+        elif int(delta) < 0:
+            self.reading_view.zoom_out(-int(delta))
 
     def _apply_vault_tree_font_size(self) -> None:
         font = QFont(self.tree_view.font())

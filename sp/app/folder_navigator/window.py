@@ -3433,9 +3433,11 @@ class Window(QMainWindow):
         )
         try:
             self.editor_zoom_steps = max(-8, min(20, int(self.state.get("editor_zoom_steps", 0))))
+            self.reading_zoom_steps = max(-8, min(20, int(self.state.get("reading_zoom_steps", 0))))
             self.folder_zoom_steps = max(-8, min(20, int(self.state.get("folder_zoom_steps", 0))))
         except (TypeError, ValueError):
             self.editor_zoom_steps = 0
+            self.reading_zoom_steps = 0
             self.folder_zoom_steps = 0
         self._last_focus_pane = "folder"
         self.model = FolderModel(self.root, self)
@@ -4340,6 +4342,21 @@ class Window(QMainWindow):
         if tab is None:
             return
         if tab.editor is not None:
+            if tab.reading_view_enabled and tab.reading_view is not None:
+                new_steps = max(-8, min(20, self.reading_zoom_steps + direction))
+                applied = new_steps - self.reading_zoom_steps
+                if not applied:
+                    return
+                self.reading_zoom_steps = new_steps
+                self.state["reading_zoom_steps"] = new_steps
+                for candidate in self.all_tabs():
+                    if candidate.reading_view is not None:
+                        if applied > 0:
+                            candidate.reading_view.zoom_in(applied)
+                        else:
+                            candidate.reading_view.zoom_out(-applied)
+                self._persist()
+                return
             new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
             applied = new_steps - self.editor_zoom_steps
             if not applied:
@@ -4352,11 +4369,6 @@ class Window(QMainWindow):
                         candidate.editor.zoomIn(applied)
                     else:
                         candidate.editor.zoomOut(-applied)
-                if candidate.reading_view is not None:
-                    if applied > 0:
-                        candidate.reading_view.zoom_in(applied)
-                    else:
-                        candidate.reading_view.zoom_out(-applied)
             self._persist()
             return
         viewer = getattr(tab, "viewer", None)
@@ -4986,12 +4998,13 @@ class Window(QMainWindow):
                 )
             if self.editor_zoom_steps > 0:
                 tab.editor.zoomIn(self.editor_zoom_steps)
-                if tab.reading_view is not None:
-                    tab.reading_view.zoom_in(self.editor_zoom_steps)
             elif self.editor_zoom_steps < 0:
                 tab.editor.zoomOut(-self.editor_zoom_steps)
-                if tab.reading_view is not None:
-                    tab.reading_view.zoom_out(-self.editor_zoom_steps)
+            if tab.reading_view is not None:
+                if self.reading_zoom_steps > 0:
+                    tab.reading_view.zoom_in(self.reading_zoom_steps)
+                elif self.reading_zoom_steps < 0:
+                    tab.reading_view.zoom_out(-self.reading_zoom_steps)
             # Folder Navigator owns a deliberately small editor context menu.
             # In particular, Markdown tabs must not expose StillPoint page,
             # link-graph, AI, or vault-navigation actions here.
