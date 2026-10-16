@@ -2005,6 +2005,63 @@ def test_external_drop_does_not_overwrite_existing_file(
     window.close()
 
 
+def test_tree_drag_out_publishes_native_file_urls(tmp_path):
+    import json
+    from sp.app.folder_navigator.window import NavigatorTree
+
+    file_path = tmp_path / "report with spaces Ω.txt"
+    folder_path = tmp_path / "reference folder"
+    file_path.write_text("report", encoding="utf-8")
+    folder_path.mkdir()
+
+    mime = NavigatorTree._drag_mime_data([file_path, folder_path])
+
+    assert mime.hasUrls()
+    assert mime.hasFormat("text/uri-list")
+    assert [Path(url.toLocalFile()) for url in mime.urls()] == [
+        file_path.absolute(),
+        folder_path.absolute(),
+    ]
+    assert json.loads(bytes(mime.data(NavigatorTree.INTERNAL_PATHS_MIME))) == [
+        str(file_path),
+        str(folder_path),
+    ]
+
+
+def test_tree_drag_out_defaults_to_copy_but_keeps_internal_move(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    import sp.app.folder_navigator.window as module
+
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    tree = module.NavigatorTree()
+    monkeypatch.setattr(tree, "_selected_drag_paths", lambda: [source])
+    captured = {}
+
+    class FakeDrag:
+        def __init__(self, parent):
+            captured["parent"] = parent
+
+        def setMimeData(self, mime):
+            captured["mime"] = mime
+
+        def exec(self, actions, default_action):
+            captured["actions"] = actions
+            captured["default"] = default_action
+
+    monkeypatch.setattr(module, "QDrag", FakeDrag)
+
+    tree.startDrag(Qt.CopyAction | Qt.MoveAction)
+
+    assert captured["parent"] is tree
+    assert captured["mime"].urls()[0].toLocalFile() == str(source.absolute())
+    assert captured["actions"] & Qt.CopyAction
+    assert captured["actions"] & Qt.MoveAction
+    assert captured["default"] == Qt.CopyAction
+    tree.close()
+
+
 def test_internal_drop_moves_selected_files_and_folder_and_updates_open_tabs(
         tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Window

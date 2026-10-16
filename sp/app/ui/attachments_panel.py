@@ -70,6 +70,8 @@ class AttachmentsPanel(QWidget):
     excalidrawEditorRequested = Signal(object)  # file_path or payload
     # Signal emitted when local attachment files changed on disk.
     attachmentsModified = Signal(str)
+    # Emitted only after the current page's attachment listing completed.
+    countReady = Signal(object, int)  # page path, definitive file count
 
     def __init__(
         self,
@@ -279,6 +281,7 @@ class AttachmentsPanel(QWidget):
         except (OSError, PermissionError):
             pass
         else:
+            self.countReady.emit(self.current_page_path, self.attachments_list.count())
             #if PAGE_LOGGING_ENABLED:
                 #print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
             self._sync_with_server(attachments)
@@ -337,6 +340,7 @@ class AttachmentsPanel(QWidget):
             if icon:
                 item.setIcon(icon)
             self.attachments_list.addItem(item)
+        self.countReady.emit(self.current_page_path, self.attachments_list.count())
         #if PAGE_LOGGING_ENABLED:
             #print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()

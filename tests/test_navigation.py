@@ -94,6 +94,13 @@ def test_macos_main_toolbar_is_compact_and_centers_icon_controls(qapp, monkeypat
 
 class TestHistoryNavigation:
     """Test history navigation (Alt+Left/Right, Alt+H/L)."""
+
+    def test_option_arrow_shortcuts_preempt_editor_cursor_navigation(self, main_window):
+        shortcuts = main_window.findChildren(QShortcut)
+        for sequence in ("Alt+Left", "Alt+Right"):
+            matches = [shortcut for shortcut in shortcuts if shortcut.key() == QKeySequence(sequence)]
+            assert matches
+            assert all(shortcut.context() == Qt.ApplicationShortcut for shortcut in matches)
     
     def test_history_back_navigation(self, main_window):
         """Test navigating backward through page history."""

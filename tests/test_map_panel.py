@@ -616,6 +616,42 @@ def test_visible_hover_tooltip_can_be_pinned_for_scrolling(qapp: QApplication) -
     assert panel._content_tooltip._close_btn.isVisible() is True
 
 
+def test_visible_hover_tooltip_remains_after_pointer_leaves_node(qapp: QApplication) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
+    parent = _node_by_label(panel, "Parent")
+
+    panel._toggle_content_previews(True)
+    panel._schedule_hover_tooltip(parent, panel.mapToGlobal(panel.rect().center()))
+    panel._show_hover_tooltip()
+    assert panel._content_tooltip.isVisible()
+
+    panel._schedule_hover_tooltip(None, panel.mapToGlobal(panel.rect().bottomRight()))
+    panel._on_tooltip_hover_changed(False)
+
+    assert panel._content_tooltip.isVisible()
+    assert not panel._tooltip_hide_timer.isActive()
+
+
+def test_existing_hover_tooltip_stays_visible_while_next_node_is_pending(
+    qapp: QApplication,
+) -> None:
+    panel = MapPanel()
+    panel.set_content("/Test.md", "# Root\n\n## First\none\n\n## Second\ntwo\n")
+    first = _node_by_label(panel, "First")
+    second = _node_by_label(panel, "Second")
+
+    panel._toggle_content_previews(True)
+    panel._schedule_hover_tooltip(first, panel.mapToGlobal(panel.rect().center()))
+    panel._show_hover_tooltip()
+
+    panel._schedule_hover_tooltip(second, panel.mapToGlobal(panel.rect().topRight()))
+
+    assert panel._content_tooltip.isVisible()
+    assert panel._tooltip_timer.isActive()
+    assert panel._hovered_node_id == second.node_id
+
+
 def test_transient_tooltip_click_pins_and_close_button_dismisses(qapp: QApplication) -> None:
     panel = MapPanel()
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")

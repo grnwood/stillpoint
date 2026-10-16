@@ -4255,6 +4255,8 @@ class MainWindow(QMainWindow):
         is_macos = platform.system() == "Darwin"
         nav_back = QShortcut(QKeySequence("Alt+Left"), self)
         nav_forward = QShortcut(QKeySequence("Alt+Right"), self)
+        nav_back.setContext(Qt.ApplicationShortcut)
+        nav_forward.setContext(Qt.ApplicationShortcut)
         nav_back_mac = QShortcut(QKeySequence("Meta+["), self) if is_macos else None
         nav_forward_mac = QShortcut(QKeySequence("Meta+]"), self) if is_macos else None
         nav_up = QShortcut(QKeySequence("Alt+Up"), self)

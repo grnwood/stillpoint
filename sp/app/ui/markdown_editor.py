@@ -22,6 +22,8 @@ from PySide6.QtCore import (
     QMimeData,
     Qt,
     QRegularExpression,
+    QEasingCurve,
+    QPropertyAnimation,
     Signal,
     QUrl,
     QPoint,
@@ -1811,6 +1813,8 @@ class MarkdownEditor(QTextEdit):
             self._vi_block_cursor_width = 8
         self._vi_saved_flash_time: Optional[int] = None
         self._vi_last_cursor_pos: int = -1
+        self._cursor_scroll_animation: Optional[QPropertyAnimation] = None
+        self._cursor_scroll_guard: bool = False
         self._vi_feature_enabled: bool = False
         self._vi_insert_mode: bool = False
         self._vi_last_edit: Optional[Callable[[], None]] = None
@@ -5120,6 +5124,12 @@ class MarkdownEditor(QTextEdit):
             Qt.Key_PageDown,
         }
         if key in nav_keys or (mods & Qt.ShiftModifier and key in nav_keys):
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                self._move_cursor_vertically(
+                    QTextCursor.Up if key == Qt.Key_Up else QTextCursor.Down,
+                    select=bool(mods & Qt.ShiftModifier),
+                )
+                return True
             super().keyPressEvent(event)
             return True
         if key in (Qt.Key_Return, Qt.Key_Enter):
@@ -5147,6 +5157,17 @@ class MarkdownEditor(QTextEdit):
             )
         if self._dialog_block_input:
             event.ignore()
+            return
+        navigation_modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if (
+            navigation_modifiers == Qt.AltModifier
+            and event.key() in (Qt.Key_Left, Qt.Key_Right)
+        ):
+            # On macOS, Option+Arrow is also a native QTextEdit word-navigation
+            # binding. Handle page history before Qt can move the caret. This is
+            # intentionally uniform across normal, insert, and vi navigation modes.
+            self._trigger_history_navigation(event.key())
+            event.accept()
             return
         if self._read_only_mode:
             if self._handle_read_only_keypress(event):
@@ -5456,6 +5477,16 @@ class MarkdownEditor(QTextEdit):
                 self._scroll_one_line_down()
                 event.accept()
                 return
+        if (
+            event.key() in (Qt.Key_Up, Qt.Key_Down)
+            and not (meaningful_modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+        ):
+            self._move_cursor_vertically(
+                QTextCursor.Up if event.key() == Qt.Key_Up else QTextCursor.Down,
+                select=bool(meaningful_modifiers & Qt.ShiftModifier),
+            )
+            event.accept()
+            return
         # Handle Left/Right arrow keys for proper link boundary navigation
         if event.key() in (Qt.Key_Left, Qt.Key_Right) and not meaningful_modifiers:
             if self._handle_link_boundary_navigation(event.key()):
@@ -5496,16 +5527,12 @@ class MarkdownEditor(QTextEdit):
     def _vi_page_up(self):
         # Simulate PageUp: move cursor up by visible lines
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
-        c = self.textCursor()
-        c.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, lines)
-        self.setTextCursor(c)
+        self._move_cursor_vertically(QTextCursor.Up, count=lines)
 
     def _vi_page_down(self):
         # Simulate PageDown: move cursor down by visible lines
         lines = max(1, self.viewport().height() // self.fontMetrics().lineSpacing())
-        c = self.textCursor()
-        c.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, lines)
-        self.setTextCursor(c)
+        self._move_cursor_vertically(QTextCursor.Down, count=lines)
 
     def keyReleaseEvent(self, event):  # type: ignore[override]
         super().keyReleaseEvent(event)
@@ -6716,6 +6743,9 @@ class MarkdownEditor(QTextEdit):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
+        self._stop_cursor_scroll_animation()
+        scrollbar = self.verticalScrollBar()
+        start_scroll_value = scrollbar.value() if scrollbar is not None else 0
         # Preserve selection on right-click (opening context menu should not unselect buffer).
         if event.button() == Qt.RightButton:
             cursor = self.textCursor()
@@ -6735,6 +6765,17 @@ class MarkdownEditor(QTextEdit):
                 event.accept()
                 return
         super().mousePressEvent(event)
+        if scrollbar is not None and self._cursor_block_has_image(self.textCursor()):
+            # Qt may already have jumped while placing the cursor. Derive the
+            # row's document position from that state, restore the pre-click
+            # viewport, then smoothly center the clicked image row.
+            after_value = scrollbar.value()
+            row_rect = self._image_row_cursor_rect(self.textCursor())
+            row_center = after_value + row_rect.center().y()
+            target = row_center - (self.viewport().height() / 2)
+            target = max(scrollbar.minimum(), min(scrollbar.maximum(), int(round(target))))
+            scrollbar.setValue(start_scroll_value)
+            self._animate_cursor_scroll(start_scroll_value, target)
 
     def mouseDoubleClickEvent(self, event):  # type: ignore[override]
         hit = self._image_at_position(event.pos())
@@ -8070,6 +8111,9 @@ class MarkdownEditor(QTextEdit):
         return False
 
     def _vi_move_cursor(self, op: QTextCursor.MoveOperation, select: bool = False, count: int = 1) -> None:
+        if op in (QTextCursor.Up, QTextCursor.Down):
+            self._move_cursor_vertically(op, select=select, count=count)
+            return
         cursor = self.textCursor()
         mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
         cursor.movePosition(op, mode, max(1, count))
@@ -8534,7 +8578,9 @@ class MarkdownEditor(QTextEdit):
         return cursor
 
     def _ensure_cursor_margin(self) -> None:
-        """Keep a small margin at the bottom of the viewport for visibility while editing."""
+        """Keep the caret visible without treating a tall image as one giant caret."""
+        if self._cursor_scroll_guard:
+            return
         sb = self.verticalScrollBar()
         if not sb:
             return
@@ -8544,9 +8590,118 @@ class MarkdownEditor(QTextEdit):
             return
         view_h = viewport.height()
         margin = 48
-        overshoot = rect.bottom() - (view_h - margin)
-        if overshoot > 0:
-            sb.setValue(min(sb.maximum(), sb.value() + overshoot))
+        # Image rows need centering rather than ordinary caret margins. Detect
+        # them from document fragments: a 364 px image is still an image row on
+        # a viewport tall enough that a height heuristic would miss it.
+        if self._cursor_block_has_image(self.textCursor()):
+            return
+        lower_bound = max(margin, view_h - margin)
+        if rect.bottom() > lower_bound:
+            sb.setValue(min(sb.maximum(), sb.value() + rect.bottom() - lower_bound))
+
+    def _stop_cursor_scroll_animation(self) -> None:
+        animation = self._cursor_scroll_animation
+        if animation is None:
+            return
+        if animation.state() == QPropertyAnimation.Running:
+            animation.stop()
+        self._cursor_scroll_animation = None
+        animation.deleteLater()
+
+    @staticmethod
+    def _cursor_block_has_image(cursor: QTextCursor) -> bool:
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid() and fragment.charFormat().isImageFormat():
+                return True
+            iterator += 1
+        return False
+
+    def _image_row_cursor_rect(self, cursor: QTextCursor) -> QRect:
+        """Return the full visual-line rectangle for the cursor's image row."""
+        row_cursor = QTextCursor(cursor.block())
+        return self.cursorRect(row_cursor)
+
+    def _animate_cursor_scroll(self, start_value: int, target: int) -> None:
+        scrollbar = self.verticalScrollBar()
+        target = max(scrollbar.minimum(), min(scrollbar.maximum(), int(target)))
+        scrollbar.setValue(start_value)
+        distance = abs(target - start_value)
+        if distance <= 2 or not self.isVisible():
+            scrollbar.setValue(target)
+            return
+
+        animation = QPropertyAnimation(scrollbar, b"value", self)
+        animation.setStartValue(start_value)
+        animation.setEndValue(target)
+        animation.setDuration(min(240, max(100, int(distance * 0.5))))
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.finished.connect(lambda: self._clear_cursor_scroll_animation(animation))
+        self._cursor_scroll_animation = animation
+        animation.start()
+
+    def _move_cursor_vertically(
+        self,
+        operation: QTextCursor.MoveOperation,
+        *,
+        select: bool = False,
+        count: int = 1,
+    ) -> None:
+        """Move vertically and smoothly reveal text or center an image row."""
+        scrollbar = self.verticalScrollBar()
+        viewport = self.viewport()
+        if scrollbar is None or viewport is None:
+            return
+
+        self._stop_cursor_scroll_animation()
+        start_value = scrollbar.value()
+        cursor = self.textCursor()
+        mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
+        if not cursor.movePosition(operation, mode, max(1, count)):
+            return
+        cursor = self._clamp_cursor(cursor)
+
+        self._cursor_scroll_guard = True
+        try:
+            self.setTextCursor(cursor)
+        finally:
+            self._cursor_scroll_guard = False
+        # setTextCursor() invokes Qt's built-in ensureCursorVisible(), which can
+        # jump to the far side of a tall inline image. Convert the resulting
+        # rectangle to document coordinates, restore the old viewport, and
+        # calculate our own direction-aware destination.
+        after_value = scrollbar.value()
+        rect = self.cursorRect(cursor)
+        view_h = max(1, viewport.height())
+        margin = min(48, max(8, view_h // 4))
+        if self._cursor_block_has_image(cursor):
+            row_rect = self._image_row_cursor_rect(cursor)
+            row_center_in_document = after_value + row_rect.center().y()
+            target = row_center_in_document - (view_h / 2)
+        elif operation == QTextCursor.Up:
+            edge_in_view = rect.top()
+            edge_in_document = after_value + edge_in_view
+            target = min(start_value, edge_in_document - margin)
+        else:
+            edge_in_view = rect.bottom()
+            edge_in_document = after_value + edge_in_view
+            target = max(start_value, edge_in_document - (view_h - margin))
+        target = max(scrollbar.minimum(), min(scrollbar.maximum(), int(round(target))))
+        self._animate_cursor_scroll(start_value, target)
+
+    def _clear_cursor_scroll_animation(self, animation: QPropertyAnimation) -> None:
+        if self._cursor_scroll_animation is animation:
+            self._cursor_scroll_animation = None
+        animation.deleteLater()
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Direct manipulation always wins over a caret-follow animation.
+        self._stop_cursor_scroll_animation()
+        super().wheelEvent(event)
 
     def _in_mode_window_transition(self) -> bool:
         """Return True if the editor lives in a ModeWindow that isn't settled yet."""

@@ -218,6 +218,33 @@ def test_non_vi_ctrl_alt_v_opens_vault_picker_signal(qapp: QApplication) -> None
     editor.close()
 
 
+@pytest.mark.parametrize("vi_state", ["off", "navigation", "insert"])
+def test_option_arrows_navigate_page_history_without_moving_cursor(
+    vi_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: QApplication,
+) -> None:
+    editor = MarkdownEditor()
+    editor.setPlainText("alpha beta gamma")
+    cursor = editor.textCursor()
+    cursor.setPosition(7)
+    editor.setTextCursor(cursor)
+    if vi_state != "off":
+        editor.set_vi_mode_enabled(True)
+        if vi_state == "insert":
+            editor._enter_vi_insert_mode()
+
+    navigated: list[int] = []
+    monkeypatch.setattr(editor, "_trigger_history_navigation", navigated.append)
+
+    QTest.keyClick(editor, Qt.Key_Left, Qt.AltModifier)
+    QTest.keyClick(editor, Qt.Key_Right, Qt.AltModifier)
+
+    assert navigated == [Qt.Key_Left, Qt.Key_Right]
+    assert editor.textCursor().position() == 7
+    editor.close()
+
+
 def test_vi_m_without_selection_uses_move_page_callback(qapp: QApplication) -> None:
     editor = MarkdownEditor()
     _force_initial_paint(editor, qapp)

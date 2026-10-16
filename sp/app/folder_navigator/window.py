@@ -207,15 +207,31 @@ class NavigatorTree(QTreeView):
                 if index.isValid() and (Path(model.filePath(index)).is_file()
                                         or Path(model.filePath(index)).is_dir())]
 
+    @classmethod
+    def _drag_mime_data(cls, paths):
+        """Build both Stillpoint-internal and native file-manager drag data."""
+        mime = QMimeData()
+        normalized = [Path(path) for path in paths]
+        mime.setData(
+            cls.INTERNAL_PATHS_MIME,
+            json.dumps([str(path) for path in normalized]).encode("utf-8"),
+        )
+        # setUrls publishes the standard text/uri-list representation consumed
+        # by Finder, Windows Explorer, and Linux file managers. QUrl handles
+        # platform separators, drive letters, spaces, and non-ASCII names.
+        mime.setUrls([QUrl.fromLocalFile(str(path.absolute())) for path in normalized])
+        return mime
+
     def startDrag(self, supported_actions):  # type: ignore[override]
         paths = self._selected_drag_paths()
         if not paths:
             return
-        mime = QMimeData()
-        mime.setData(self.INTERNAL_PATHS_MIME, json.dumps([str(path) for path in paths]).encode("utf-8"))
         drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.MoveAction)
+        drag.setMimeData(self._drag_mime_data(paths))
+        # External drops should copy by default so dragging out cannot silently
+        # remove a file from the navigator. Internal targets explicitly select
+        # MoveAction in dragEnterEvent/dropEvent, preserving move-to-folder.
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
 
     def _internal_drop_paths(self, event):
         if event.source() is not self or not event.mimeData().hasFormat(self.INTERNAL_PATHS_MIME):

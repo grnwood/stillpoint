@@ -2433,28 +2433,25 @@ class MapPanel(QWidget):
         self._tooltip_hide_timer.stop()
         node_id = node.node_id if node is not None else None
         if node_id is None:
-            if self._content_tooltip.isVisible():
-                self._tooltip_hide_timer.start()
-            else:
-                self._cancel_hover_tooltip()
+            # Leaving a node cancels a preview that has not appeared yet, but a
+            # visible preview is sticky. This lets the pointer travel across the
+            # map (or into the popup) without the text disappearing underneath it.
+            self._tooltip_timer.stop()
+            self._hovered_node_id = None
+            self._hover_global_pos = None
             return
         if node_id == self._hovered_node_id and self._content_tooltip.isVisible():
             return
         self._hovered_node_id = node_id
         self._hover_global_pos = QPoint(global_pos)
         self._tooltip_timer.start()
-        try:
-            self._content_tooltip.hide()
-        except Exception:
-            pass
 
     def _on_tooltip_hover_changed(self, hovered: bool) -> None:
         self._tooltip_hovered = bool(hovered)
         if hovered:
             self._tooltip_hide_timer.stop()
-            return
-        if not self._tooltip_pinned and self._content_tooltip.isVisible():
-            self._tooltip_hide_timer.start()
+        # Once shown, hover previews remain until an explicit map interaction,
+        # another node preview, or dismissal. Leaving the popup is not dismissal.
 
     def _hide_hover_tooltip_if_idle(self) -> None:
         if self._tooltip_pinned or self._tooltip_hovered:
@@ -3100,7 +3097,8 @@ class MapPanel(QWidget):
                 self._tooltip_debug_log("preview_leave:keep_pinned_popup")
                 return False
             if self._content_tooltip.isVisible():
-                self._tooltip_hide_timer.start()
+                self._tooltip_hide_timer.stop()
+                self._tooltip_debug_log("preview_leave:keep_hover_popup")
             else:
                 self._cancel_hover_tooltip()
         if watched is self.preview_label and isinstance(event, QMouseEvent):
@@ -3116,9 +3114,9 @@ class MapPanel(QWidget):
                 node = self._node_at_position(*svg_pos) if svg_pos else None
                 self._schedule_hover_tooltip(node, event.globalPos())
             if event.type() == event.Type.MouseButtonPress and self._content_tooltip.isVisible() and not self._tooltip_pinned:
-                self._pin_hover_tooltip()
-                event.accept()
-                return True
+                # A click in the popup itself pins it; a click back on the map
+                # dismisses the sticky hover preview and performs that map action.
+                self._cancel_hover_tooltip()
             if event.type() == event.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self._cancel_hover_tooltip()
                 self.preview_label.setFocus(Qt.MouseFocusReason)

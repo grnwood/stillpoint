@@ -90,6 +90,7 @@ class TabbedRightPanel(QWidget):
         self._pending_calendar_vault_root: Optional[str] = None
         self._pending_calendar_refresh: bool = False
         self._pending_attachments_refresh: bool = False
+        self._attachments_count: Optional[int] = None
         self._pending_link_refresh: bool = False
         self._pending_link_page: Optional[str] = None
         self._pending_ai_page: Optional[str] = None
@@ -113,6 +114,7 @@ class TabbedRightPanel(QWidget):
         
         # Create Attachments tab
         self.attachments_panel = AttachmentsPanel(api_client=http_client, auth_prompt=auth_prompt)
+        self.attachments_panel.countReady.connect(self._on_attachments_count_ready)
         self.tabs.addTab(self.attachments_panel, "Attachments")
 
         # Create Link Navigator tab
@@ -274,8 +276,12 @@ class TabbedRightPanel(QWidget):
     
     def set_current_page(self, page_path, relative_path=None, *, sync_calendar: bool = True) -> bool:
         """Update panels with the current page."""
+        page_changed = page_path != self._current_page_path
         self._current_page_path = page_path
         self._current_relative_path = relative_path
+        if page_changed:
+            self._attachments_count = None
+            self._update_attachments_tab_label()
         if self._is_panel_currently_visible(self.attachments_panel):
             self.attachments_panel.set_page(page_path)
             self._pending_attachments_refresh = False
@@ -936,11 +942,20 @@ class TabbedRightPanel(QWidget):
         except Exception:
             pass
     
+    def _on_attachments_count_ready(self, page_path, count: int) -> None:
+        """Publish a count only when it belongs to the active, fully listed page."""
+        if page_path != self._current_page_path:
+            return
+        self._attachments_count = max(0, int(count))
+        self._update_attachments_tab_label()
+
     def _update_attachments_tab_label(self) -> None:
-        """Update the Attachments tab label with the count of attachments."""
-        count = self.attachments_panel.attachments_list.count()
+        """Show the attachment count only after the listing is definitive."""
+        label = "Attachments"
+        if self._attachments_count is not None:
+            label = f"Attachments ({self._attachments_count})"
         # Find the attachments tab (should be index 1)
         for i in range(self.tabs.count()):
             if self.tabs.widget(i) == self.attachments_panel:
-                self.tabs.setTabText(i, f"Attachments ({count})")
+                self.tabs.setTabText(i, label)
                 break
