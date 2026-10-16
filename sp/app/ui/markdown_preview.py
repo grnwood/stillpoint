@@ -52,6 +52,8 @@ from sp.markdown_html import nearest_source_anchor, render_markdown_html
 class _ReadingBrowser(QTextBrowser):
     """Selectable HTML reader with optional vi-style scrolling."""
 
+    searchRequested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.vi_enabled = False
@@ -263,6 +265,11 @@ class _ReadingBrowser(QTextBrowser):
         if self.vi_enabled and modifiers == Qt.NoModifier:
             scrollbar = self.verticalScrollBar()
             key = event.key()
+            if key == Qt.Key_Slash:
+                self.searchRequested.emit()
+                self._pending_g = False
+                event.accept()
+                return
             if key in (Qt.Key_J, Qt.Key_K):
                 direction = 1 if key == Qt.Key_J else -1
                 self.line_scroll(direction)
@@ -386,6 +393,7 @@ class MarkdownReadingView(QWidget):
         self.browser.anchorClicked.connect(
             lambda url: self.linkActivated.emit(url.toString())
         )
+        self.browser.searchRequested.connect(self.show_find)
         layout.addWidget(self.browser, 1)
         self.setFocusProxy(self.browser)
         self.theme_toggle.toggled.connect(self._theme_mode_toggled)

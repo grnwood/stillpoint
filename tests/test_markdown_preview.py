@@ -186,6 +186,23 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     assert not view.browser.vi_rail_rect().isEmpty()
 
 
+def test_reading_view_vi_slash_opens_and_focuses_search(qtbot, qapp) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown("Alpha\n\nBeta")
+    view.set_vi_enabled(True)
+    view.show()
+    view.focus_reader()
+    qapp.processEvents()
+
+    assert view.find_bar.isHidden()
+    QTest.keyClick(view.browser, Qt.Key_Slash)
+    qapp.processEvents()
+
+    assert not view.find_bar.isHidden()
+    assert view.find_query.hasFocus()
+
+
 def test_reading_vi_cursor_crosses_a_tall_image_smoothly(
     qtbot, qapp, tmp_path: Path
 ) -> None:
