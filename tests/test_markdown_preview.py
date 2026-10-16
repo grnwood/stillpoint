@@ -49,6 +49,15 @@ def test_reading_view_renders_live_markdown_without_a_print_url(
     assert view.browser.textCursor().selectedText() == "Alpha"
 
 
+def test_reading_view_keeps_source_positions_for_image_only_blocks(qtbot) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown("First\n\n![image](missing.png)\n\nLast", source_line=3)
+
+    assert [line for _position, line in view._source_positions] == [1, 3, 5]
+    assert view.current_source_line() == 3
+
+
 def test_folder_markdown_tab_toggles_preview_and_restores_selection(
     qtbot, tmp_path: Path
 ) -> None:
@@ -74,6 +83,40 @@ def test_folder_markdown_tab_toggles_preview_and_restores_selection(
     assert tab.reading_toggle.text() == "Read"
     assert tab.editor.textCursor().anchor() == 2
     assert tab.editor.textCursor().position() == 8
+
+
+def test_folder_markdown_tab_hands_cursor_position_both_directions(
+    qtbot, qapp, tmp_path: Path
+) -> None:
+    markdown = "\n\n".join(f"Paragraph {index}" for index in range(40))
+    page = tmp_path / "handoff.md"
+    page.write_text(markdown, encoding="utf-8")
+    tab = Tab(page, read_text(page), markdown=True, root=tmp_path)
+    qtbot.addWidget(tab)
+    tab.resize(640, 320)
+    tab.show()
+
+    edit_line = 21
+    edit_block = tab.editor.document().findBlockByNumber(edit_line - 1)
+    cursor = QTextCursor(edit_block)
+    cursor.movePosition(QTextCursor.Right, QTextCursor.MoveAnchor, 4)
+    tab.editor.setTextCursor(cursor)
+    tab.set_reading_view(True)
+    qapp.processEvents()
+    qapp.processEvents()
+
+    assert tab.reading_view.current_source_line() == edit_line
+
+    reading_line = 61
+    reading_cursor = tab.reading_view._cursor_for_source_anchor(
+        f"sp-source-{reading_line}"
+    )
+    assert reading_cursor is not None
+    tab.reading_view.browser._reading_cursor = reading_cursor
+    tab.reading_view.browser.refresh_reading_cursor()
+    tab.set_reading_view(False)
+
+    assert tab.editor.textCursor().blockNumber() + 1 == reading_line
 
 
 def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:

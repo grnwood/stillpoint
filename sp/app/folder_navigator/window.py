@@ -1540,6 +1540,7 @@ class Tab(QWidget):
         self.reading_view_enabled = False
         self._reading_saved_cursor = None
         self._reading_saved_scroll = 0
+        self._reading_entry_source_line = 1
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.notice = QLabel("")
@@ -1740,11 +1741,29 @@ class Tab(QWidget):
             self._reading_saved_cursor = (cursor.anchor(), cursor.position())
             self._reading_saved_scroll = self.editor.verticalScrollBar().value()
             self._refresh_reading_view()
+            self._reading_entry_source_line = self.reading_view.source_block_line(
+                cursor.blockNumber() + 1
+            )
             self.editor_view_stack.setCurrentWidget(self.reading_view)
             self.reading_view.focus_reader()
         else:
             self.editor_view_stack.setCurrentWidget(self.editor)
-            if self._reading_saved_cursor:
+            reading_line = self.reading_view.current_source_line()
+            if reading_line != self._reading_entry_source_line:
+                block_number = max(
+                    0, min(reading_line - 1, self.editor.document().blockCount() - 1)
+                )
+                cursor = QTextCursor(self.editor.document().findBlockByNumber(block_number))
+                self.editor.setTextCursor(cursor)
+                self.editor.ensureCursorVisible()
+                cursor_rect = self.editor.cursorRect(cursor)
+                scrollbar = self.editor.verticalScrollBar()
+                scrollbar.setValue(
+                    scrollbar.value()
+                    + cursor_rect.center().y()
+                    - self.editor.viewport().height() // 2
+                )
+            elif self._reading_saved_cursor:
                 anchor, position = self._reading_saved_cursor
                 maximum = max(0, self.editor.document().characterCount() - 1)
                 cursor = self.editor.textCursor()

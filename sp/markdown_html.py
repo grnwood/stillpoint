@@ -64,7 +64,9 @@ def _add_source_anchors(text: str) -> str:
     output: list[str] = []
     for index, line in enumerate(text.splitlines(), start=1):
         if index in starts:
-            output.extend((f'<span id="sp-source-{index}"></span>', ""))
+            # A zero-width character keeps the anchor alive in QTextDocument.
+            # Qt can discard a truly empty span, notably before image blocks.
+            output.extend((f'<span id="sp-source-{index}">&#8203;</span>', ""))
         output.append(line)
     return "\n".join(output)
 

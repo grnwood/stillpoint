@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -52,6 +53,8 @@ class _ReadingBrowser(QTextBrowser):
         self._pending_g = False
         self._cursor_sync_pending = False
         self._reading_cursor = QTextCursor()
+        self._source_positions: list[tuple[int, int]] = []
+        self._requested_source_line = 1
         self._scroll_animation = QPropertyAnimation(
             self.verticalScrollBar(), b"value", self
         )
@@ -123,16 +126,16 @@ class _ReadingBrowser(QTextBrowser):
     def _nearest_content_cursor(cursor: QTextCursor) -> QTextCursor:
         """Skip the empty blocks emitted for source-position HTML anchors."""
         origin = cursor.block()
-        if origin.isValid() and origin.text().strip():
+        if origin.isValid() and origin.text().replace("\u200b", "").strip():
             return cursor
         block = origin.next()
         while block.isValid():
-            if block.text().strip():
+            if block.text().replace("\u200b", "").strip():
                 return QTextCursor(block)
             block = block.next()
         block = origin.previous()
         while block.isValid():
-            if block.text().strip():
+            if block.text().replace("\u200b", "").strip():
                 return QTextCursor(block)
             block = block.previous()
         return cursor
@@ -397,15 +400,84 @@ class MarkdownReadingView(QWidget):
             self.browser.document().setBaseUrl(QUrl())
         body = render_markdown_html(self.last_markdown, source_anchors=True)
         self.last_html = f"<html><head><style>{self._css}</style></head><body>{body}</body></html>"
+        self.browser._reading_cursor = QTextCursor()
         self.browser.setHtml(self.last_html)
+        self._index_source_positions()
+        self._requested_source_line = self.source_block_line(source_line)
         self.scroll_to_source_line(source_line)
+
+    def _index_source_positions(self) -> None:
+        positions: list[tuple[int, int]] = []
+        document = self.browser.document()
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    for name in fragment.charFormat().anchorNames():
+                        match = re.fullmatch(r"sp-source-(\d+)", name)
+                        if match:
+                            item = (fragment.position(), int(match.group(1)))
+                            if not positions or positions[-1][1] != item[1]:
+                                positions.append(item)
+                iterator += 1
+            block = block.next()
+        self._source_positions = positions
+
+    def source_block_line(self, source_line: int) -> int:
+        anchor = nearest_source_anchor(self.last_markdown, source_line)
+        match = re.fullmatch(r"sp-source-(\d+)", anchor)
+        return int(match.group(1)) if match else 1
+
+    def current_source_line(self) -> int:
+        """Return the Markdown block line nearest the reading rail marker."""
+        if not self._source_positions:
+            return 1
+        if self.browser._reading_cursor.isNull():
+            return self._requested_source_line
+        position = self.browser._reading_cursor.position()
+        line = self._source_positions[0][1]
+        for anchor_position, anchor_line in self._source_positions:
+            if anchor_position > position:
+                break
+            line = anchor_line
+        return line
+
+    def _cursor_for_source_anchor(self, anchor: str) -> QTextCursor | None:
+        match = re.fullmatch(r"sp-source-(\d+)", anchor)
+        if not match:
+            return None
+        line = int(match.group(1))
+        for position, source_line in self._source_positions:
+            if source_line == line:
+                cursor = QTextCursor(self.browser.document())
+                cursor.setPosition(position)
+                return self.browser._nearest_content_cursor(cursor)
+        return None
 
     def scroll_to_source_line(self, source_line: int) -> None:
         anchor = nearest_source_anchor(self.last_markdown, source_line)
         if anchor:
             def scroll_and_mark(value=anchor):
                 self.browser.scrollToAnchor(value)
-                self.browser._sync_cursor_to_viewport()
+
+                def place_source_cursor():
+                    cursor = self._cursor_for_source_anchor(value)
+                    if cursor is None:
+                        self.browser._sync_cursor_to_viewport()
+                        return
+                    cursor_rect = self.browser.cursorRect(cursor)
+                    scrollbar = self.browser.verticalScrollBar()
+                    scrollbar.setValue(
+                        scrollbar.value()
+                        + cursor_rect.center().y()
+                        - self.browser.viewport().height() // 2
+                    )
+                    self.browser._reading_cursor = QTextCursor(cursor)
+                    self.browser.refresh_reading_cursor()
+
+                QTimer.singleShot(0, self.browser, place_source_cursor)
 
             QTimer.singleShot(0, self.browser, scroll_and_mark)
 
