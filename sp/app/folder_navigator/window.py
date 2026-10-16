@@ -3454,6 +3454,10 @@ class Window(QMainWindow):
         self.tree.vi_enabled = bool(global_settings.get("enable_vi_mode", False))
         self.tree.setModel(self.model)
         self.tree.setRootIndex(self.model.index(str(self.root)))
+        self.model.rowsInserted.connect(self._apply_inserted_dotfile_visibility)
+        self.model.directoryLoaded.connect(
+            lambda _path: QTimer.singleShot(0, self._apply_dotfile_visibility)
+        )
         self.tree.setColumnWidth(0, 340)
         self.tree.setColumnWidth(1, 100)
         self.tree.setColumnWidth(2, 130)
@@ -3513,6 +3517,15 @@ class Window(QMainWindow):
         )
         self.folder_panel_header.detail_label.setMaximumWidth(160)
         self.folder_panel_header.set_detail(self.root.name, str(self.root))
+        self.hidden_files_button = QToolButton(self.folder_panel_header)
+        self.hidden_files_button.setObjectName("folderHiddenFilesToggle")
+        self.hidden_files_button.setCheckable(True)
+        self.hidden_files_button.setAutoRaise(True)
+        self.hidden_files_button.setIconSize(QSize(18, 18))
+        self.hidden_files_button.setChecked(bool(self.state.get("hidden", False)))
+        self.hidden_files_button.toggled.connect(self.toggle_hidden)
+        self.folder_panel_header.add_trailing_widget(self.hidden_files_button)
+        self._update_hidden_files_control(self.hidden_files_button.isChecked())
         folder_page_layout.addWidget(self.folder_panel_header)
         folder_page_layout.addWidget(self.tree)
         self.rail = QTabWidget()
@@ -4105,7 +4118,7 @@ class Window(QMainWindow):
         self.hidden_action = add(view_menu, "Show Hidden Files", self.toggle_hidden)
         self.hidden_action.setCheckable(True)
         self.hidden_action.setChecked(self.state.get("hidden", False))
-        self.toggle_hidden(self.hidden_action.isChecked())
+        self.toggle_hidden(self.hidden_action.isChecked(), persist=False)
         add(view_menu, "Zoom In", lambda: self._zoom_active_view(1), QKeySequence.ZoomIn)
         add(view_menu, "Zoom Out", lambda: self._zoom_active_view(-1), QKeySequence.ZoomOut)
         self.reading_view_action = add(
@@ -7018,12 +7031,74 @@ class Window(QMainWindow):
         finally:
             config.reset_active_vault_context(token)
 
-    def toggle_hidden(self, checked):
+    def _hidden_files_icon(self, visible: bool) -> QIcon:
+        name = "open-eye.svg" if visible else "closed-eye.svg"
+        candidates = [Path(__file__).resolve().parents[2] / "assets" / name]
+        bundled = getattr(sys, "_MEIPASS", None)
+        if bundled:
+            root = Path(bundled)
+            candidates.extend((root / "sp" / "assets" / name, root / "assets" / name))
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            return QIcon()
+        pixmap = QIcon(str(path)).pixmap(QSize(18, 18))
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), self.palette().color(QPalette.ButtonText))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _update_hidden_files_control(self, visible: bool) -> None:
+        icon = self._hidden_files_icon(visible)
+        tooltip = "Hide hidden files" if visible else "Show hidden files"
+        button = getattr(self, "hidden_files_button", None)
+        if button is not None:
+            blocked = button.blockSignals(True)
+            button.setChecked(visible)
+            button.blockSignals(blocked)
+            button.setIcon(icon)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+        action = getattr(self, "hidden_action", None)
+        if action is not None:
+            blocked = action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(blocked)
+            action.setIcon(icon)
+            action.setToolTip(tooltip)
+            action.setStatusTip(tooltip)
+
+    def _apply_inserted_dotfile_visibility(
+            self, parent: QModelIndex, first: int, last: int) -> None:
+        hide_dotfiles = not bool(self.state.get("hidden", False))
+        for row in range(first, last + 1):
+            index = self.model.index(row, 0, parent)
+            name = Path(self.model.filePath(index)).name if index.isValid() else ""
+            self.tree.setRowHidden(row, parent, hide_dotfiles and name.startswith("."))
+
+    def _apply_dotfile_visibility(self) -> None:
+        """Hide dot-prefixed rows even where the OS does not mark them hidden."""
+        pending = [self.tree.rootIndex()]
+        while pending:
+            parent = pending.pop()
+            row_count = self.model.rowCount(parent)
+            self._apply_inserted_dotfile_visibility(parent, 0, row_count - 1)
+            for row in range(row_count):
+                index = self.model.index(row, 0, parent)
+                if index.isValid() and self.model.isDir(index):
+                    pending.append(index)
+
+    def toggle_hidden(self, checked, *, persist=True):
+        checked = bool(checked)
         filters = QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs
         if checked:
             filters |= QDir.Hidden
         self.model.setFilter(filters)
         self.state["hidden"] = checked
+        self._update_hidden_files_control(checked)
+        QTimer.singleShot(0, self._apply_dotfile_visibility)
+        if persist:
+            self._persist()
 
     def _escape_tree(self):
         if self.scope != self.root:

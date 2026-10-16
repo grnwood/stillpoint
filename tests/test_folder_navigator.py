@@ -3366,6 +3366,8 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.rail.tabText(0) == "Files"
     assert window.folder_panel_header.title_label.text() == "FILES"
     assert window.folder_panel_header.detail_label.text() == tmp_path.name
+    assert window.folder_panel_header.isAncestorOf(window.hidden_files_button)
+    assert not window.hidden_files_button.icon().isNull()
     assert window._folder_identity_accent in window.identity_bar.styleSheet()
     assert "QTreeView::item:hover" in window.tree.styleSheet()
     assert "border-bottom-color" not in window.tree.styleSheet()
@@ -3382,6 +3384,35 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert breadcrumb[-1].toolTip() == str(document)
     window.active_tab().editor.document().setModified(False)
     window.close()
+
+
+def test_hidden_files_toggle_persists_and_syncs_with_view_action(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QDir
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".secret.txt").write_text("secret", encoding="utf-8")
+    window = Window(tmp_path)
+
+    assert not window.hidden_files_button.isChecked()
+    assert not window.hidden_action.isChecked()
+    closed_icon_key = window.hidden_files_button.icon().cacheKey()
+    window.hidden_files_button.click()
+
+    assert window.hidden_files_button.isChecked()
+    assert window.hidden_action.isChecked()
+    assert window.model.filter() & QDir.Hidden
+    assert window.hidden_files_button.icon().cacheKey() != closed_icon_key
+    saved = json.loads(window.settings_path.read_text(encoding="utf-8"))
+    assert saved[str(tmp_path)]["hidden"] is True
+    window.close()
+
+    restored = Window(tmp_path)
+    assert restored.hidden_files_button.isChecked()
+    assert restored.hidden_action.isChecked()
+    assert restored.model.filter() & QDir.Hidden
+    restored.close()
 
 
 def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
