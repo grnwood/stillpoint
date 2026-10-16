@@ -190,10 +190,7 @@
     "code_bg": "#f6f8fa",
     "link": "#1a5fb4",
     "cursor": {
-      "line_bg": "#b259ff",
-      "line_text": "#111111",
-      "block_bg": "#b259ff",
-      "block_text": "#111111"
+      "rail_bg": "#b259ff"
     }
   },
   "main_window": {

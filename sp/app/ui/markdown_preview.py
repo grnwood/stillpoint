@@ -5,17 +5,26 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QRect,
+    QPropertyAnimation,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
+    QPainter,
     QPalette,
     QShortcut,
     QTextCursor,
     QTextDocument,
-    QTextFormat,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -25,7 +34,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextBrowser,
     QToolButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -70,8 +78,9 @@ class _ReadingBrowser(QTextBrowser):
         self._sync_cursor_to_viewport()
 
     def refresh_reading_cursor(self) -> None:
+        self.setExtraSelections([])
         if not self.vi_enabled or self.document().isEmpty():
-            self.setExtraSelections([])
+            self.viewport().update()
             return
         cursor = QTextCursor(self._reading_cursor)
         if cursor.isNull():
@@ -81,26 +90,34 @@ class _ReadingBrowser(QTextBrowser):
         cursor = self._nearest_content_cursor(cursor)
         cursor.clearSelection()
         self._reading_cursor = QTextCursor(cursor)
-        selection = QTextEdit.ExtraSelection()
-        selection.cursor = QTextCursor(cursor)
-        if self.vi_cursor_style == "block" and not selection.cursor.atEnd():
-            selection.cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
-            selection.format.setProperty(QTextFormat.FullWidthSelection, False)
-            selection.format.setBackground(
-                QColor(str(theme_value("markdown_preview.cursor.block_bg", "#b259ff")))
+        self.viewport().update()
+
+    def vi_rail_rect(self) -> QRect:
+        """Return the compact viewport marker used for the reading position."""
+        if not self.vi_enabled or self._reading_cursor.isNull():
+            return QRect()
+        cursor_rect = self.cursorRect(self._reading_cursor)
+        line_height = max(8, self.fontMetrics().height() + 4)
+        width = max(18, self.fontMetrics().horizontalAdvance("MMM"))
+        return QRect(5, cursor_rect.top(), width, min(line_height, cursor_rect.height()))
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        marker = self.vi_rail_rect()
+        if marker.isEmpty() or not marker.intersects(self.viewport().rect()):
+            return
+        color = QColor(
+            str(
+                theme_value(
+                    "markdown_preview.cursor.rail_bg",
+                    theme_value("markdown_editor.vi_block_cursor.bg", "#b259ff"),
+                )
             )
-            selection.format.setForeground(
-                QColor(str(theme_value("markdown_preview.cursor.block_text", "#111111")))
-            )
-        else:
-            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
-            selection.format.setBackground(
-                QColor(str(theme_value("markdown_preview.cursor.line_bg", "#b259ff")))
-            )
-            selection.format.setForeground(
-                QColor(str(theme_value("markdown_preview.cursor.line_text", "#111111")))
-            )
-        self.setExtraSelections([selection])
+        )
+        painter = QPainter(self.viewport())
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(marker, 3, 3)
 
     @staticmethod
     def _nearest_content_cursor(cursor: QTextCursor) -> QTextCursor:

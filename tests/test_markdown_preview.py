@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QKeySequence, QTextCursor, QTextFormat
+from PySide6.QtGui import QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
@@ -87,11 +87,11 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     qapp.processEvents()
     scrollbar = view.browser.verticalScrollBar()
     assert scrollbar.maximum() > 0
-    assert view.browser.extraSelections()
-    assert (
-        view.browser.extraSelections()[0].format.property(QTextFormat.FullWidthSelection)
-        is True
-    )
+    assert not view.browser.extraSelections()
+    marker = view.browser.vi_rail_rect()
+    assert 18 <= marker.width() <= view.browser.fontMetrics().horizontalAdvance("MMMM")
+    assert marker.height() <= view.browser.fontMetrics().height() + 4
+    assert marker.right() < 40
 
     QTest.keyClick(view.browser, Qt.Key_G, Qt.ShiftModifier)
     assert scrollbar.value() == scrollbar.maximum()
@@ -106,7 +106,8 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     )
     QTest.qWait(160)
     assert scrollbar.value() > scrollbar.minimum()
-    assert view.browser.extraSelections()
+    assert not view.browser.extraSelections()
+    assert not view.browser.vi_rail_rect().isEmpty()
 
 
 def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) -> None:
