@@ -2991,6 +2991,7 @@ class MainWindow(QMainWindow):
         )
         self.reading_view.linkActivated.connect(self._open_reading_view_link)
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
+        self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
         install_primary_wheel_zoom(
             self.reading_view.browser, self._adjust_markdown_font_size
         )
@@ -3006,6 +3007,20 @@ class MainWindow(QMainWindow):
         self._editor_view_stack.addWidget(self.editor)
         self._editor_view_stack.addWidget(self.reading_view)
         self._editor_view_stack.setCurrentWidget(self.editor)
+        toggle_sequences = ["Ctrl+Space"]
+        if sys.platform == "darwin":
+            # Qt spells Command as Ctrl on macOS; retain physical Control too.
+            toggle_sequences.append("Meta+Space")
+        self._reading_view_shortcuts = []
+        for sequence in toggle_sequences:
+            shortcut = QShortcut(QKeySequence(sequence), self.editor_view_container)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda: self._set_reading_view_enabled(
+                    not getattr(self, "_reading_view_enabled", False)
+                )
+            )
+            self._reading_view_shortcuts.append(shortcut)
 
         editor_container = QWidget()
         editor_layout = QVBoxLayout(editor_container)
@@ -3347,10 +3362,8 @@ class MainWindow(QMainWindow):
         view_mode_menu.addAction(self._action_audience_mode)
         self._action_reading_view = QAction("Reading View", self)
         self._action_reading_view.setCheckable(True)
-        self._action_reading_view.setShortcut(QKeySequence("Ctrl+Shift+R"))
-        self._action_reading_view.setShortcutContext(Qt.ApplicationShortcut)
         self._action_reading_view.setToolTip(
-            "Toggle the formatted Markdown reading view (Ctrl+Shift+R)"
+            "Toggle the formatted Markdown reading view (Ctrl/Cmd+Space)"
         )
         self._action_reading_view.setIcon(
             self.style().standardIcon(QStyle.SP_FileDialogContentsView)
@@ -20637,7 +20650,7 @@ class MainWindow(QMainWindow):
             self._refresh_reading_view()
             self._editor_view_stack.setCurrentWidget(self.reading_view)
             self.reading_view.focus_reader()
-            self.statusBar().showMessage("Reading View — press Ctrl+Shift+R to edit", 3000)
+            self.statusBar().showMessage("Reading View — press Ctrl/Cmd+Space to edit", 3000)
             return
         self._editor_view_stack.setCurrentWidget(self.editor)
         if self._reading_saved_path == self.current_path and self._reading_saved_cursor:
@@ -25347,6 +25360,7 @@ class MainWindow(QMainWindow):
         self._vi_enabled = config.load_vi_mode_enabled()
         if hasattr(self, "reading_view"):
             self.reading_view.set_vi_enabled(self._vi_enabled)
+            self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
         self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
         if not self._vi_enabled:
             self._vi_enable_pending = False

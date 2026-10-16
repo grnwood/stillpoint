@@ -181,6 +181,21 @@
       "text": "#111111"
     }
   },
+  "markdown_preview": {
+    "paper_bg": "#ffffff",
+    "text": "#111111",
+    "muted": "#666666",
+    "border": "#c6cbd1",
+    "table_header_bg": "#e9edf2",
+    "code_bg": "#f6f8fa",
+    "link": "#1a5fb4",
+    "cursor": {
+      "line_bg": "#b259ff",
+      "line_text": "#111111",
+      "block_bg": "#b259ff",
+      "block_text": "#111111"
+    }
+  },
   "main_window": {
     "menu_command_bar": {
       "bg": "#000000",

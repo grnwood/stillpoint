@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QKeySequence, QTextCursor
+from PySide6.QtGui import QKeySequence, QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
@@ -82,16 +82,71 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     view.resize(420, 240)
     view.set_markdown("\n\n".join(f"Paragraph {index}" for index in range(80)))
     view.set_vi_enabled(True)
+    view.set_vi_cursor_style("line")
     view.show()
     qapp.processEvents()
     scrollbar = view.browser.verticalScrollBar()
     assert scrollbar.maximum() > 0
+    assert view.browser.extraSelections()
+    assert (
+        view.browser.extraSelections()[0].format.property(QTextFormat.FullWidthSelection)
+        is True
+    )
 
     QTest.keyClick(view.browser, Qt.Key_G, Qt.ShiftModifier)
     assert scrollbar.value() == scrollbar.maximum()
     QTest.keyClick(view.browser, Qt.Key_G)
     QTest.keyClick(view.browser, Qt.Key_G)
     assert scrollbar.value() == scrollbar.minimum()
+
+    QTest.keyClick(
+        view.browser,
+        Qt.Key_J,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    QTest.qWait(160)
+    assert scrollbar.value() > scrollbar.minimum()
+    assert view.browser.extraSelections()
+
+
+def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) -> None:
+    import sp.app.ui.markdown_preview as preview_module
+
+    values = {
+        "markdown_preview.paper_bg": "#fdfaf2",
+        "markdown_preview.text": "#201a16",
+        "markdown_preview.table_header_bg": "#ddd2bf",
+    }
+    monkeypatch.setattr(
+        preview_module,
+        "theme_value",
+        lambda path, default=None: values.get(path, default),
+    )
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+
+    assert "background: #fdfaf2" in view._css
+    assert "font-size: 28pt" in view._css
+    assert "border: 2px solid" in view._css
+    assert "background: #ddd2bf" in view._css
+
+
+def test_folder_markdown_ctrl_space_toggles_reading_view(
+    qtbot, qapp, tmp_path: Path
+) -> None:
+    page = tmp_path / "keyboard.md"
+    page.write_text(TABLE_MARKDOWN, encoding="utf-8")
+    tab = Tab(page, read_text(page), markdown=True, root=tmp_path)
+    qtbot.addWidget(tab)
+    tab.resize(640, 480)
+    tab.show()
+    tab.editor.setFocus()
+    qapp.processEvents()
+
+    QTest.keyClick(tab.editor, Qt.Key_Space, Qt.ControlModifier)
+    assert tab.reading_view_enabled
+    QTest.keyClick(tab.reading_view.browser, Qt.Key_Space, Qt.ControlModifier)
+    assert not tab.reading_view_enabled
 
 
 def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_cursor(
@@ -106,7 +161,9 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
 
     main_window._action_reading_view.trigger()
 
-    assert main_window._action_reading_view.shortcut() == QKeySequence("Ctrl+Shift+R")
+    assert QKeySequence("Ctrl+Space") in {
+        shortcut.key() for shortcut in main_window._reading_view_shortcuts
+    }
     assert main_window._action_reading_view in main_window.toolbar.actions()
     assert main_window._reading_view_enabled
     assert main_window._editor_view_stack.currentWidget() is main_window.reading_view
@@ -153,7 +210,9 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         qapp.processEvents()
 
         assert window.reading_view_action.isEnabled()
-        assert window.reading_view_action.shortcut() == QKeySequence("Ctrl+Shift+R")
+        assert QKeySequence("Ctrl+Space") in {
+            shortcut.key() for shortcut in window.active_tab().reading_view_shortcuts
+        }
         window.reading_view_action.trigger()
 
         assert window.active_tab().reading_view_enabled

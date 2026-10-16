@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
+    QColor,
     QKeyEvent,
     QKeySequence,
+    QMouseEvent,
     QPalette,
     QShortcut,
     QTextCursor,
     QTextDocument,
+    QTextFormat,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -21,10 +25,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextBrowser,
     QToolButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from sp.app.ui.theme import theme_value
 from sp.markdown_html import nearest_source_anchor, render_markdown_html
 
 
@@ -34,7 +40,134 @@ class _ReadingBrowser(QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.vi_enabled = False
+        self.vi_cursor_style = "line"
         self._pending_g = False
+        self._cursor_sync_pending = False
+        self._reading_cursor = QTextCursor()
+        self._scroll_animation = QPropertyAnimation(
+            self.verticalScrollBar(), b"value", self
+        )
+        self._scroll_animation.setDuration(120)
+        self._scroll_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._scroll_animation.finished.connect(self._schedule_cursor_sync)
+        self.verticalScrollBar().valueChanged.connect(self._schedule_cursor_sync)
+
+    def _schedule_cursor_sync(self, *_args) -> None:
+        if self._cursor_sync_pending:
+            return
+        self._cursor_sync_pending = True
+        QTimer.singleShot(0, self, self._run_scheduled_cursor_sync)
+
+    def _run_scheduled_cursor_sync(self) -> None:
+        self._cursor_sync_pending = False
+        self._sync_cursor_to_viewport()
+
+    def set_vi_state(self, enabled: bool, cursor_style: str = "line") -> None:
+        self.vi_enabled = bool(enabled)
+        self.setCursorWidth(0 if self.vi_enabled else 1)
+        normalized = str(cursor_style or "").strip().lower()
+        self.vi_cursor_style = normalized if normalized in {"block", "line"} else "line"
+        self._sync_cursor_to_viewport()
+
+    def refresh_reading_cursor(self) -> None:
+        if not self.vi_enabled or self.document().isEmpty():
+            self.setExtraSelections([])
+            return
+        cursor = QTextCursor(self._reading_cursor)
+        if cursor.isNull():
+            cursor = self.cursorForPosition(
+                QPoint(max(0, self.viewport().width() // 3), self.viewport().height() // 2)
+            )
+        cursor = self._nearest_content_cursor(cursor)
+        cursor.clearSelection()
+        self._reading_cursor = QTextCursor(cursor)
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = QTextCursor(cursor)
+        if self.vi_cursor_style == "block" and not selection.cursor.atEnd():
+            selection.cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, False)
+            selection.format.setBackground(
+                QColor(str(theme_value("markdown_preview.cursor.block_bg", "#b259ff")))
+            )
+            selection.format.setForeground(
+                QColor(str(theme_value("markdown_preview.cursor.block_text", "#111111")))
+            )
+        else:
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selection.format.setBackground(
+                QColor(str(theme_value("markdown_preview.cursor.line_bg", "#b259ff")))
+            )
+            selection.format.setForeground(
+                QColor(str(theme_value("markdown_preview.cursor.line_text", "#111111")))
+            )
+        self.setExtraSelections([selection])
+
+    @staticmethod
+    def _nearest_content_cursor(cursor: QTextCursor) -> QTextCursor:
+        """Skip the empty blocks emitted for source-position HTML anchors."""
+        origin = cursor.block()
+        if origin.isValid() and origin.text().strip():
+            return cursor
+        block = origin.next()
+        while block.isValid():
+            if block.text().strip():
+                return QTextCursor(block)
+            block = block.next()
+        block = origin.previous()
+        while block.isValid():
+            if block.text().strip():
+                return QTextCursor(block)
+            block = block.previous()
+        return cursor
+
+    def _sync_cursor_to_viewport(self) -> None:
+        if not self.vi_enabled or self.document().isEmpty():
+            self.refresh_reading_cursor()
+            return
+        self._reading_cursor = self._nearest_content_cursor(self.cursorForPosition(
+            QPoint(max(0, self.viewport().width() // 3), self.viewport().height() // 2)
+        ))
+        self.refresh_reading_cursor()
+
+    def page_scroll(self, direction: int, *, fraction: float = 0.85) -> None:
+        scrollbar = self.verticalScrollBar()
+        step = max(1, round(scrollbar.pageStep() * fraction))
+        target = max(
+            scrollbar.minimum(),
+            min(scrollbar.maximum(), scrollbar.value() + (1 if direction > 0 else -1) * step),
+        )
+        self._scroll_animation.stop()
+        self._scroll_animation.setDuration(120)
+        self._scroll_animation.setStartValue(scrollbar.value())
+        self._scroll_animation.setEndValue(target)
+        self._scroll_animation.start()
+
+    def line_scroll(self, direction: int) -> None:
+        scrollbar = self.verticalScrollBar()
+        step = max(24, scrollbar.singleStep() * 3)
+        target = max(
+            scrollbar.minimum(),
+            min(scrollbar.maximum(), scrollbar.value() + (1 if direction > 0 else -1) * step),
+        )
+        self._scroll_animation.stop()
+        self._scroll_animation.setDuration(80)
+        self._scroll_animation.setStartValue(scrollbar.value())
+        self._scroll_animation.setEndValue(target)
+        self._scroll_animation.start()
+
+    def jump_to_edge(self, *, end: bool) -> None:
+        self._scroll_animation.stop()
+        scrollbar = self.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum() if end else scrollbar.minimum())
+        self._sync_cursor_to_viewport()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        super().mousePressEvent(event)
+        if self.vi_enabled:
+            self._reading_cursor = self._nearest_content_cursor(
+                self.cursorForPosition(event.position().toPoint())
+            )
+            self.refresh_reading_cursor()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         modifiers = event.modifiers() & ~Qt.KeypadModifier
@@ -43,7 +176,7 @@ class _ReadingBrowser(QTextBrowser):
             and modifiers == Qt.ShiftModifier
             and event.key() == Qt.Key_G
         ):
-            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+            self.jump_to_edge(end=True)
             self._pending_g = False
             event.accept()
             return
@@ -52,13 +185,13 @@ class _ReadingBrowser(QTextBrowser):
             key = event.key()
             if key in (Qt.Key_J, Qt.Key_K):
                 direction = 1 if key == Qt.Key_J else -1
-                scrollbar.setValue(scrollbar.value() + direction * max(24, scrollbar.singleStep() * 3))
+                self.line_scroll(direction)
                 self._pending_g = False
                 event.accept()
                 return
             if key == Qt.Key_G:
                 if self._pending_g:
-                    scrollbar.setValue(scrollbar.minimum())
+                    self.jump_to_edge(end=False)
                     self._pending_g = False
                 else:
                     self._pending_g = True
@@ -66,9 +199,12 @@ class _ReadingBrowser(QTextBrowser):
                 return
             self._pending_g = False
         if self.vi_enabled and modifiers == Qt.ControlModifier and event.key() in (Qt.Key_D, Qt.Key_U):
-            scrollbar = self.verticalScrollBar()
             direction = 1 if event.key() == Qt.Key_D else -1
-            scrollbar.setValue(scrollbar.value() + direction * max(1, scrollbar.pageStep() // 2))
+            self.page_scroll(direction, fraction=0.5)
+            event.accept()
+            return
+        if modifiers == Qt.NoModifier and event.key() in (Qt.Key_PageDown, Qt.Key_PageUp):
+            self.page_scroll(1 if event.key() == Qt.Key_PageDown else -1)
             event.accept()
             return
         self._pending_g = False
@@ -157,32 +293,50 @@ class MarkdownReadingView(QWidget):
         close_find.setContext(Qt.WidgetWithChildrenShortcut)
         close_find.activated.connect(self.hide_find)
         self._close_find_shortcut = close_find
+        self._page_shortcuts = []
+        page_sequences = [
+            ("Ctrl+Shift+J", 1),
+            ("Ctrl+Shift+K", -1),
+        ]
+        if sys.platform == "darwin":
+            page_sequences.extend((("Meta+Shift+J", 1), ("Meta+Shift+K", -1)))
+        for sequence, direction in page_sequences:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda step=direction: self.page_scroll(step)
+            )
+            self._page_shortcuts.append(shortcut)
         self._apply_palette()
 
     def _apply_palette(self) -> None:
         palette = self.palette()
-        base = palette.color(QPalette.Base).name()
-        alternate = palette.color(QPalette.AlternateBase).name()
-        text = palette.color(QPalette.Text).name()
-        muted = palette.color(QPalette.PlaceholderText).name()
-        border = palette.color(QPalette.Mid).name()
-        highlight = palette.color(QPalette.Highlight).name()
+        paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
+        text = str(theme_value("markdown_preview.text", "#111111"))
+        muted = str(theme_value("markdown_preview.muted", "#666666"))
+        border = str(theme_value("markdown_preview.border", "#c6cbd1"))
+        table_header = str(theme_value("markdown_preview.table_header_bg", "#e9edf2"))
+        code_bg = str(theme_value("markdown_preview.code_bg", "#f6f8fa"))
+        highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
         self._css = f"""
-            body {{ color: {text}; background: {base}; font-family: sans-serif;
-                   font-size: 12pt; line-height: 1.45; margin: 24px; }}
+            html, body {{ color: {text}; background: {paper}; }}
+            body {{ font-family: sans-serif; font-size: 12pt; line-height: 1.5;
+                    margin: 30px 36px 42px 36px; }}
             h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 1.25em;
-                   margin-bottom: 0.45em; font-weight: 600; }}
-            h1 {{ font-size: 2em; }} h2 {{ font-size: 1.6em; }}
-            h3 {{ font-size: 1.3em; }} h4 {{ font-size: 1.1em; }}
+                   margin-bottom: 0.45em; font-weight: 700; }}
+            h1 {{ font-size: 28pt; border-bottom: 2px solid {border}; padding-bottom: 6px; }}
+            h2 {{ font-size: 22pt; border-bottom: 1px solid {border}; padding-bottom: 4px; }}
+            h3 {{ font-size: 18pt; }} h4 {{ font-size: 15pt; }}
+            h5 {{ font-size: 13pt; }} h6 {{ font-size: 12pt; color: {muted}; }}
             p {{ margin-top: 0.55em; margin-bottom: 0.55em; }}
             table {{ border-collapse: collapse; width: 100%; margin-top: 1em;
-                     margin-bottom: 1em; }}
-            th, td {{ border: 1px solid {border}; padding: 7px 10px; text-align: left; }}
-            th {{ background: {alternate}; color: {text}; font-weight: 600; }}
+                     margin-bottom: 1em; border: 2px solid {border}; }}
+            th, td {{ border: 1px solid {border}; padding: 9px 12px; text-align: left; }}
+            th {{ background: {table_header}; color: {text}; font-weight: 700; }}
             blockquote {{ color: {muted}; border-left: 4px solid {border};
                           margin-left: 0; padding-left: 1em; }}
-            code {{ background: {alternate}; font-family: monospace; }}
-            pre {{ background: {alternate}; border: 1px solid {border}; padding: 10px; }}
+            code {{ background: {code_bg}; font-family: monospace; }}
+            pre {{ background: {code_bg}; border: 1px solid {border}; padding: 10px; }}
             a {{ color: {highlight}; text-decoration: none; }}
             img {{ max-width: 100%; margin-top: 1em; margin-bottom: 1em; }}
             mark {{ color: {text}; background: transparent; text-decoration: underline; }}
@@ -192,12 +346,23 @@ class MarkdownReadingView(QWidget):
         """
         self.setStyleSheet(
             "QFrame#markdownReadingHeader {"
-            f"background: {alternate}; border-bottom: 1px solid {border};"
+            f"background: {palette.color(QPalette.AlternateBase).name()}; "
+            f"color: {palette.color(QPalette.Text).name()}; "
+            f"border-bottom: 1px solid {palette.color(QPalette.Mid).name()};"
+            "} QTextBrowser#markdownReadingBrowser {"
+            f"background: {paper}; color: {text}; border: none;"
             "}"
         )
+        self.browser.refresh_reading_cursor()
 
     def set_vi_enabled(self, enabled: bool) -> None:
-        self.browser.vi_enabled = bool(enabled)
+        self.browser.set_vi_state(enabled, self.browser.vi_cursor_style)
+
+    def set_vi_cursor_style(self, style: str) -> None:
+        self.browser.set_vi_state(self.browser.vi_enabled, style)
+
+    def page_scroll(self, direction: int) -> None:
+        self.browser.page_scroll(direction)
 
     def set_markdown(
         self,
@@ -221,7 +386,11 @@ class MarkdownReadingView(QWidget):
     def scroll_to_source_line(self, source_line: int) -> None:
         anchor = nearest_source_anchor(self.last_markdown, source_line)
         if anchor:
-            QTimer.singleShot(0, self.browser, lambda value=anchor: self.browser.scrollToAnchor(value))
+            def scroll_and_mark(value=anchor):
+                self.browser.scrollToAnchor(value)
+                self.browser._sync_cursor_to_viewport()
+
+            QTimer.singleShot(0, self.browser, scroll_and_mark)
 
     def show_find(self) -> None:
         self.find_bar.show()

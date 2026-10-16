@@ -73,6 +73,7 @@ from sp.app.ui.theme import (
 )
 from sp.app.ui.utility_header import CompactToolbarIdentity, UtilityPanelHeader
 from sp.app.ui.markdown_preview import MarkdownReadingView
+from sp.app import config
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
@@ -1595,9 +1596,14 @@ class Tab(QWidget):
                 self.show_notice("Read-only file: editing and saving are disabled")
             if markdown:
                 self.reading_view = MarkdownReadingView(self)
+                # Folder Navigator already owns cross-view page shortcuts and
+                # delegates them here; avoid an ambiguous duplicate binding.
+                for shortcut in self.reading_view._page_shortcuts:
+                    shortcut.setEnabled(False)
                 self.reading_view.set_vi_enabled(
                     bool(getattr(self.editor, "_vi_feature_enabled", False))
                 )
+                self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
                 self.reading_view.editRequested.connect(
                     lambda: self.set_reading_view(False)
                 )
@@ -1621,6 +1627,17 @@ class Tab(QWidget):
                 self.editor_view_stack.addWidget(self.editor)
                 self.editor_view_stack.addWidget(self.reading_view)
                 self.editor_view_stack.setCurrentWidget(self.editor)
+                toggle_sequences = ["Ctrl+Space"]
+                if sys.platform == "darwin":
+                    toggle_sequences.append("Meta+Space")
+                self.reading_view_shortcuts = []
+                for sequence in toggle_sequences:
+                    shortcut = QShortcut(QKeySequence(sequence), self)
+                    shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                    shortcut.activated.connect(
+                        lambda: self.set_reading_view(not self.reading_view_enabled)
+                    )
+                    self.reading_view_shortcuts.append(shortcut)
                 layout.addWidget(editor_views, 1)
             else:
                 layout.addWidget(self.editor, 1)
@@ -1640,7 +1657,7 @@ class Tab(QWidget):
                 self.reading_toggle.setText("Read")
                 self.reading_toggle.setCheckable(True)
                 self.reading_toggle.setToolTip(
-                    "Toggle the formatted Markdown reading view (Ctrl+Shift+R)"
+                    "Toggle the formatted Markdown reading view (Ctrl/Cmd+Space)"
                 )
                 self.reading_toggle.toggled.connect(self.set_reading_view)
                 status_layout.addWidget(self.reading_toggle)
@@ -4071,7 +4088,6 @@ class Window(QMainWindow):
             view_menu,
             "Reading View",
             self._toggle_active_reading_view,
-            "Ctrl+Shift+R",
         )
         self.reading_view_action.setCheckable(True)
         self.reading_view_action.setEnabled(False)
@@ -4262,7 +4278,7 @@ class Window(QMainWindow):
             return
         tab.set_reading_view(bool(enabled))
         self.statusBar().showMessage(
-            "Reading View — press Ctrl+Shift+R to edit"
+            "Reading View — press Ctrl/Cmd+Space to edit"
             if enabled
             else "Markdown editor",
             2500,
@@ -4388,6 +4404,9 @@ class Window(QMainWindow):
         else:
             tab = self.active_tab()
             if tab is None:
+                return
+            if tab.reading_view_enabled and tab.reading_view is not None:
+                tab.reading_view.page_scroll(direction)
                 return
             root = (
                 tab.reading_view
