@@ -474,13 +474,36 @@ class MarkdownReadingView(QWidget):
 
         body_size = points(self._base_font_point_size)
         if self._use_theme_colors:
-            paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
-            text = str(theme_value("markdown_preview.text", "#111111"))
-            muted = str(theme_value("markdown_preview.muted", "#666666"))
-            border = str(theme_value("markdown_preview.border", "#c6cbd1"))
-            table_header = str(theme_value("markdown_preview.table_header_bg", "#e9edf2"))
-            code_bg = str(theme_value("markdown_preview.code_bg", "#f6f8fa"))
-            highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
+            configured_paper = str(
+                theme_value("markdown_preview.paper_bg", "#ffffff")
+            )
+            configured_text = str(theme_value("markdown_preview.text", "#111111"))
+            custom_preview_palette = (
+                configured_paper.casefold() != "#ffffff"
+                or configured_text.casefold() != "#111111"
+            )
+            if custom_preview_palette:
+                paper = configured_paper
+                text = configured_text
+                muted = str(theme_value("markdown_preview.muted", "#666666"))
+                border = str(theme_value("markdown_preview.border", "#c6cbd1"))
+                table_header = str(
+                    theme_value("markdown_preview.table_header_bg", "#e9edf2")
+                )
+                code_bg = str(theme_value("markdown_preview.code_bg", "#f6f8fa"))
+                highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
+            else:
+                # The bundled reading palette is deliberately paper-white. In
+                # theme mode, use the live palette unless a theme explicitly
+                # replaces that reading palette. This follows vault overrides
+                # that have already been applied to the application.
+                paper = palette.color(QPalette.Base).name()
+                text = palette.color(QPalette.Text).name()
+                muted = palette.color(QPalette.Mid).name()
+                border = palette.color(QPalette.Mid).name()
+                table_header = palette.color(QPalette.AlternateBase).name()
+                code_bg = palette.color(QPalette.AlternateBase).name()
+                highlight = palette.color(QPalette.Link).name()
         else:
             paper = "#ffffff"
             text = "#111111"

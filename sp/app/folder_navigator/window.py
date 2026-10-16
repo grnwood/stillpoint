@@ -21,10 +21,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote
 
-from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData,
+from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData, QProcess,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QImage, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat, QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -108,6 +108,88 @@ VALUE_FILTER_MAX_DISTINCT = 20_000
 class Bridge(QObject):
     result = Signal(object)
     finished = Signal(object)
+
+
+class GitCommandDialog(QDialog):
+    """Run Git while streaming its literal output into a modal terminal."""
+
+    def __init__(self, root: Path, arguments: list[str], title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumSize(720, 420)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        self.output = QPlainTextEdit(self)
+        self.output.setObjectName("gitCommandTerminal")
+        self.output.setReadOnly(True)
+        self.output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.output.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.output.setStyleSheet(
+            "QPlainTextEdit { background: #07110a; color: #62ff86; "
+            "border: 1px solid #247a38; padding: 10px; "
+            "selection-background-color: #17652b; }"
+        )
+        self.output.setPlainText(f"$ git {' '.join(arguments)}\n\n")
+        layout.addWidget(self.output)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=self)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+        self.ok_button.setEnabled(False)
+        self.ok_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self.process = QProcess(self)
+        self.process.setWorkingDirectory(str(root))
+        self.process.setProgram("git")
+        self.process.setArguments(arguments)
+        self.process.setProcessChannelMode(QProcess.SeparateChannels)
+        self.process.readyReadStandardOutput.connect(self._read_stdout)
+        self.process.readyReadStandardError.connect(self._read_stderr)
+        self.process.errorOccurred.connect(self._process_error)
+        self.process.finished.connect(self._process_finished)
+        self.process.start()
+
+    def _append(self, value) -> None:
+        data = (
+            value
+            if isinstance(value, str)
+            else bytes(value).decode("utf-8", errors="replace")
+        )
+        if not data:
+            return
+        cursor = self.output.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(data)
+        self.output.setTextCursor(cursor)
+        self.output.ensureCursorVisible()
+
+    def _read_stdout(self) -> None:
+        self._append(self.process.readAllStandardOutput())
+
+    def _read_stderr(self) -> None:
+        self._append(self.process.readAllStandardError())
+
+    def _process_error(self, error) -> None:
+        if error == QProcess.FailedToStart:
+            self._append(
+                "Unable to start git. Make sure git is installed and available on PATH.\n"
+            )
+            self._complete()
+
+    def _process_finished(self, exit_code: int, _exit_status) -> None:
+        self._read_stdout()
+        self._read_stderr()
+        self._append(f"\n[git exited with code {exit_code}]\n")
+        self._complete()
+
+    def _complete(self) -> None:
+        self.ok_button.setEnabled(True)
+
+    def reject(self) -> None:
+        # Command results are intentionally acknowledged with the OK button.
+        return
 
 
 @lru_cache(maxsize=1)
@@ -3517,6 +3599,25 @@ class Window(QMainWindow):
         )
         self.folder_panel_header.detail_label.setMaximumWidth(160)
         self.folder_panel_header.set_detail(self.root.name, str(self.root))
+        self.git_pull_button = None
+        self.git_commit_button = None
+        self.git_push_button = None
+        if (self.root / ".git").exists():
+            self.git_pull_button = self._make_git_button(
+                "git-pull.svg", "Git pull", self._git_pull
+            )
+            self.git_commit_button = self._make_git_button(
+                "git-commit.svg", "Git commit", self._git_commit
+            )
+            self.git_push_button = self._make_git_button(
+                "git-push.svg", "Git push", self._git_push
+            )
+            for button in (
+                self.git_pull_button,
+                self.git_commit_button,
+                self.git_push_button,
+            ):
+                self.folder_panel_header.add_trailing_widget(button)
         self.hidden_files_button = QToolButton(self.folder_panel_header)
         self.hidden_files_button.setObjectName("folderHiddenFilesToggle")
         self.hidden_files_button.setCheckable(True)
@@ -7031,8 +7132,7 @@ class Window(QMainWindow):
         finally:
             config.reset_active_vault_context(token)
 
-    def _hidden_files_icon(self, visible: bool) -> QIcon:
-        name = "open-eye.svg" if visible else "closed-eye.svg"
+    def _header_asset_icon(self, name: str) -> QIcon:
         candidates = [Path(__file__).resolve().parents[2] / "assets" / name]
         bundled = getattr(sys, "_MEIPASS", None)
         if bundled:
@@ -7047,6 +7147,40 @@ class Window(QMainWindow):
         painter.fillRect(pixmap.rect(), self.palette().color(QPalette.ButtonText))
         painter.end()
         return QIcon(pixmap)
+
+    def _hidden_files_icon(self, visible: bool) -> QIcon:
+        return self._header_asset_icon(
+            "open-eye.svg" if visible else "closed-eye.svg"
+        )
+
+    def _make_git_button(self, asset: str, tooltip: str, callback) -> QToolButton:
+        button = QToolButton(self.folder_panel_header)
+        button.setAutoRaise(True)
+        button.setIconSize(QSize(18, 18))
+        button.setIcon(self._header_asset_icon(asset))
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.clicked.connect(callback)
+        return button
+
+    def _run_git_command(self, arguments: list[str], title: str) -> None:
+        GitCommandDialog(self.root, arguments, title, self).exec()
+
+    def _git_pull(self) -> None:
+        self._run_git_command(["pull"], "Git Pull")
+
+    def _git_push(self) -> None:
+        self._run_git_command(["push"], "Git Push")
+
+    def _git_commit(self) -> None:
+        message, accepted = QInputDialog.getText(
+            self,
+            "Git Commit",
+            "Commit message:",
+        )
+        message = message.strip()
+        if accepted and message:
+            self._run_git_command(["commit", "-m", message], "Git Commit")
 
     def _update_hidden_files_control(self, visible: bool) -> None:
         icon = self._hidden_files_icon(visible)

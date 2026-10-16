@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QImage, QKeySequence, QTextCursor
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
@@ -311,6 +311,38 @@ def test_reading_view_defaults_white_and_can_persist_theme_colors(
     qtbot.addWidget(restored)
     assert restored.theme_toggle.isChecked()
     assert "background: #fdfaf2" in restored._css
+
+
+def test_reading_view_theme_mode_uses_live_palette_when_preview_is_stock(
+    qtbot, monkeypatch
+) -> None:
+    import sp.app.ui.markdown_preview as preview_module
+
+    monkeypatch.setattr(
+        preview_module.config,
+        "load_reading_view_use_theme_colors",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        preview_module.config,
+        "save_reading_view_use_theme_colors",
+        lambda _enabled: None,
+    )
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    dark = QPalette(view.palette())
+    dark.setColor(QPalette.Base, QColor("#101826"))
+    dark.setColor(QPalette.Text, QColor("#e8edf5"))
+    dark.setColor(QPalette.AlternateBase, QColor("#172235"))
+    dark.setColor(QPalette.Mid, QColor("#52627a"))
+    dark.setColor(QPalette.Link, QColor("#77b7ff"))
+    view.setPalette(dark)
+
+    view.theme_toggle.click()
+
+    assert "background: #101826" in view._css
+    assert "color: #e8edf5" in view._css
+    assert "background: #172235" in view._css
 
 
 def test_reading_view_materializes_checkbox_glyphs(qtbot) -> None:

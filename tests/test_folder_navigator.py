@@ -3415,6 +3415,80 @@ def test_hidden_files_toggle_persists_and_syncs_with_view_action(
     restored.close()
 
 
+def test_git_repository_header_controls_run_expected_commands(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.window as module
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    calls = []
+    monkeypatch.setattr(
+        Window,
+        "_run_git_command",
+        lambda self, arguments, title: calls.append((arguments, title)),
+    )
+    monkeypatch.setattr(
+        module.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("Ship the reader", True),
+    )
+    window = Window(tmp_path)
+
+    for button in (
+        window.git_pull_button,
+        window.git_commit_button,
+        window.git_push_button,
+    ):
+        assert button is not None
+        assert window.folder_panel_header.isAncestorOf(button)
+        assert not button.icon().isNull()
+
+    window.git_pull_button.click()
+    window.git_commit_button.click()
+    window.git_push_button.click()
+
+    assert calls == [
+        (["pull"], "Git Pull"),
+        (["commit", "-m", "Ship the reader"], "Git Commit"),
+        (["push"], "Git Push"),
+    ]
+    window.close()
+
+
+def test_non_git_folder_omits_git_header_controls(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+
+    assert window.git_pull_button is None
+    assert window.git_commit_button is None
+    assert window.git_push_button is None
+    window.close()
+
+
+def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot):
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import GitCommandDialog
+
+    dialog = GitCommandDialog(tmp_path, ["--version"], "Git Version")
+    qtbot.addWidget(dialog)
+    dialog.show()
+    for _ in range(50):
+        if dialog.ok_button.isEnabled():
+            break
+        QTest.qWait(100)
+    assert dialog.ok_button.isEnabled()
+
+    output = dialog.output.toPlainText()
+    assert "$ git --version" in output
+    assert "git version" in output
+    assert "[git exited with code 0]" in output
+    assert "background: #07110a" in dialog.output.styleSheet()
+    dialog.ok_button.click()
+
+
 def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
     from PySide6.QtWidgets import QToolButton
     from sp.app.ui.utility_header import CompactToolbarIdentity
