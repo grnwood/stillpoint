@@ -18,11 +18,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QImageReader,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
     QPainter,
     QPalette,
+    QResizeEvent,
     QShortcut,
     QTextCursor,
     QTextDocument,
@@ -305,6 +307,11 @@ class MarkdownReadingView(QWidget):
         self._zoom_render_timer.setSingleShot(True)
         self._zoom_render_timer.setInterval(self.ZOOM_DEBOUNCE_MS)
         self._zoom_render_timer.timeout.connect(self._apply_pending_zoom)
+        self._image_layout: dict[int, tuple[int, float, float, float]] = {}
+        self._image_resize_timer = QTimer(self)
+        self._image_resize_timer.setSingleShot(True)
+        self._image_resize_timer.setInterval(self.ZOOM_DEBOUNCE_MS)
+        self._image_resize_timer.timeout.connect(self._fit_images_to_viewport)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -469,6 +476,86 @@ class MarkdownReadingView(QWidget):
     def page_scroll(self, direction: int) -> None:
         self.browser.page_scroll(direction)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self.last_html:
+            self._image_resize_timer.start()
+
+    def _image_source_size(self, source: str) -> tuple[float, float] | None:
+        source_url = QUrl(source)
+        resolved = self.browser.document().baseUrl().resolved(source_url)
+        if not resolved.isLocalFile():
+            return None
+        reader = QImageReader(resolved.toLocalFile())
+        size = reader.size()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+            return None
+        return float(size.width()), float(size.height())
+
+    def _fit_images_to_viewport(self, *, reset: bool = False) -> None:
+        """Give Qt explicit responsive image boxes so visual and layout sizes agree."""
+        available_width = max(64.0, float(self.browser.viewport().width() - 80))
+        document = self.browser.document()
+        if reset:
+            layouts: dict[int, tuple[int, float, float, float]] = {}
+            block = document.begin()
+            while block.isValid():
+                iterator = block.begin()
+                while not iterator.atEnd():
+                    fragment = iterator.fragment()
+                    if fragment.isValid() and fragment.charFormat().isImageFormat():
+                        image_format = fragment.charFormat().toImageFormat()
+                        source_size = self._image_source_size(image_format.name())
+                        if source_size is not None:
+                            natural_width, natural_height = source_size
+                            requested_width = image_format.width()
+                            maximum_width = (
+                                requested_width
+                                if requested_width > 0
+                                else natural_width
+                            )
+                            layouts[fragment.position()] = (
+                                fragment.length(),
+                                natural_width,
+                                natural_height,
+                                maximum_width,
+                            )
+                    iterator += 1
+                block = block.next()
+            self._image_layout = layouts
+
+        if not self._image_layout:
+            return
+        reading_cursor = QTextCursor(self.browser._reading_cursor)
+        cursor_y = (
+            self.browser.cursorRect(reading_cursor).top()
+            if not reading_cursor.isNull()
+            else None
+        )
+        for position, (length, natural_width, natural_height, maximum_width) in (
+            self._image_layout.items()
+        ):
+            target_width = max(1.0, min(maximum_width, available_width))
+            target_height = max(1.0, target_width * natural_height / natural_width)
+            cursor = QTextCursor(document)
+            cursor.setPosition(position)
+            cursor.setPosition(position + length, QTextCursor.KeepAnchor)
+            image_format = cursor.charFormat().toImageFormat()
+            if (
+                abs(image_format.width() - target_width) < 0.5
+                and abs(image_format.height() - target_height) < 0.5
+            ):
+                continue
+            image_format.setWidth(target_width)
+            image_format.setHeight(target_height)
+            cursor.setCharFormat(image_format)
+
+        if cursor_y is not None and not reading_cursor.isNull():
+            new_y = self.browser.cursorRect(reading_cursor).top()
+            scrollbar = self.browser.verticalScrollBar()
+            scrollbar.setValue(scrollbar.value() + new_y - cursor_y)
+        self.browser.refresh_reading_cursor()
+
     def set_markdown(
         self,
         markdown_text: str,
@@ -522,6 +609,10 @@ class MarkdownReadingView(QWidget):
         self.last_html = f"<html><head><style>{self._css}</style></head><body>{body}</body></html>"
         self.browser._reading_cursor = QTextCursor()
         self.browser.setHtml(self.last_html)
+        self._fit_images_to_viewport(reset=True)
+        # A newly visible vertical scrollbar narrows the viewport after the
+        # first layout pass; refit once more against that settled width.
+        self._image_resize_timer.start()
         self._index_source_positions()
         self._requested_source_line = max(1, int(source_line))
         self.scroll_to_source_line(source_line)

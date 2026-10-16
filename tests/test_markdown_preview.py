@@ -205,17 +205,62 @@ def test_reading_vi_cursor_crosses_a_tall_image_smoothly(
     view.show()
     qapp.processEvents()
     qapp.processEvents()
+    QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
+    assert view.browser.horizontalScrollBar().maximum() == 0
 
     QTest.keyClick(view.browser, Qt.Key_J)
     assert "\ufffc" in view.browser._reading_cursor.block().text()
-    QTest.keyClick(view.browser, Qt.Key_J)
-    QTest.qWait(240)
-    assert "\ufffc" in view.browser._reading_cursor.block().text()
-    assert view.browser.verticalScrollBar().value() > 0
-
     QTest.keyClick(view.browser, Qt.Key_J)
     QTest.qWait(240)
     assert "After" in view.browser._reading_cursor.block().text()
+    assert view.browser.verticalScrollBar().value() > 0
+
+
+def test_reading_images_reflow_with_the_content_column(
+    qtbot, qapp, tmp_path: Path
+) -> None:
+    image_path = tmp_path / "responsive.svg"
+    image_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" '
+        'viewBox="0 0 1200 600"><rect width="1200" height="600" '
+        'fill="#4488aa"/></svg>',
+        encoding="utf-8",
+    )
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(420, 300)
+    view.show()
+    view.set_markdown(
+        "Before\n\n![diagram](responsive.svg)\n\nAfter",
+        base_directory=tmp_path,
+    )
+    qapp.processEvents()
+    qapp.processEvents()
+
+    def image_dimensions() -> tuple[float, float]:
+        block = view.browser.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().isImageFormat():
+                    image_format = fragment.charFormat().toImageFormat()
+                    return image_format.width(), image_format.height()
+                iterator += 1
+            block = block.next()
+        raise AssertionError("Rendered image was not found")
+
+    narrow_width, narrow_height = image_dimensions()
+    assert narrow_width == pytest.approx(view.browser.viewport().width() - 80)
+    assert narrow_height == pytest.approx(narrow_width / 2)
+
+    view.resize(700, 300)
+    QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
+    qapp.processEvents()
+    wide_width, wide_height = image_dimensions()
+    assert wide_width > narrow_width
+    assert wide_width == pytest.approx(view.browser.viewport().width() - 80)
+    assert wide_height == pytest.approx(wide_width / 2)
 
 
 def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) -> None:
