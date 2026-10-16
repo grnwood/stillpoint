@@ -3468,6 +3468,64 @@ def test_non_git_folder_omits_git_header_controls(tmp_path, monkeypatch, app):
     window.close()
 
 
+def test_folder_header_terminal_button_opens_navigator_root(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    opened = []
+    monkeypatch.setattr(
+        Window,
+        "terminal",
+        lambda self, folder: opened.append(Path(folder)),
+    )
+    window = Window(tmp_path)
+
+    assert window.folder_panel_header.isAncestorOf(window.terminal_button)
+    assert not window.terminal_button.icon().isNull()
+    assert window.terminal_button.accessibleName() == "Open terminal here"
+
+    window.terminal_button.click()
+
+    assert opened == [tmp_path]
+    window.close()
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_command"),
+    [
+        ("darwin", ["open", "-a", "Terminal"]),
+        ("win32", ["cmd.exe", "/K", "cd", "/d"]),
+        ("linux", ["native-test-terminal", "--fresh"]),
+    ],
+)
+def test_folder_terminal_uses_native_platform_launcher(
+        tmp_path, monkeypatch, app, platform, expected_command):
+    import sp.app.folder_navigator.window as module
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(module.sys, "platform", platform)
+    monkeypatch.setenv("TERMINAL", "native-test-terminal --fresh")
+    calls = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+    window = Window(tmp_path)
+
+    window.terminal(tmp_path)
+
+    command, options = calls[-1]
+    assert command[:len(expected_command)] == expected_command
+    if platform == "darwin":
+        assert command[-1] == str(tmp_path.resolve())
+    else:
+        assert options["cwd"] == str(tmp_path.resolve())
+    window.close()
+
+
 def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot):
     from PySide6.QtTest import QTest
     from sp.app.folder_navigator.window import GitCommandDialog

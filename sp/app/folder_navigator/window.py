@@ -11,6 +11,7 @@ import math
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -3603,13 +3604,13 @@ class Window(QMainWindow):
         self.git_commit_button = None
         self.git_push_button = None
         if (self.root / ".git").exists():
-            self.git_pull_button = self._make_git_button(
+            self.git_pull_button = self._make_header_button(
                 "git-pull.svg", "Git pull", self._git_pull
             )
-            self.git_commit_button = self._make_git_button(
+            self.git_commit_button = self._make_header_button(
                 "git-commit.svg", "Git commit", self._git_commit
             )
-            self.git_push_button = self._make_git_button(
+            self.git_push_button = self._make_header_button(
                 "git-push.svg", "Git push", self._git_push
             )
             for button in (
@@ -3618,6 +3619,12 @@ class Window(QMainWindow):
                 self.git_push_button,
             ):
                 self.folder_panel_header.add_trailing_widget(button)
+        self.terminal_button = self._make_header_button(
+            "terminal.svg",
+            "Open terminal here",
+            lambda: self.terminal(self.root),
+        )
+        self.folder_panel_header.add_trailing_widget(self.terminal_button)
         self.hidden_files_button = QToolButton(self.folder_panel_header)
         self.hidden_files_button.setObjectName("folderHiddenFilesToggle")
         self.hidden_files_button.setCheckable(True)
@@ -7153,7 +7160,7 @@ class Window(QMainWindow):
             "open-eye.svg" if visible else "closed-eye.svg"
         )
 
-    def _make_git_button(self, asset: str, tooltip: str, callback) -> QToolButton:
+    def _make_header_button(self, asset: str, tooltip: str, callback) -> QToolButton:
         button = QToolButton(self.folder_panel_header)
         button.setAutoRaise(True)
         button.setIconSize(QSize(18, 18))
@@ -8248,17 +8255,43 @@ class Window(QMainWindow):
             self.statusBar().showMessage(f"Could not open file manager at {target}", 12000)
 
     def terminal(self, folder):
+        folder = Path(folder).expanduser().resolve()
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", "-a", "Terminal", str(folder)])
             elif sys.platform == "win32":
-                subprocess.Popen(["cmd.exe", "/K", "cd", "/d", str(folder)], creationflags=subprocess.CREATE_NEW_CONSOLE)
+                subprocess.Popen(
+                    ["cmd.exe", "/K", "cd", "/d", str(folder)],
+                    cwd=str(folder),
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
             else:
-                terminal = os.environ.get("TERMINAL")
-                if not terminal:
-                    raise OSError("Set the TERMINAL environment variable to your terminal application")
-                subprocess.Popen([terminal], cwd=folder)
-        except OSError as exc:
+                commands = []
+                configured = os.environ.get("TERMINAL", "").strip()
+                if configured:
+                    commands.append(shlex.split(configured))
+                commands.extend(
+                    [
+                        ["xdg-terminal-exec"],
+                        ["gnome-terminal", "--working-directory", str(folder)],
+                        ["konsole", "--workdir", str(folder)],
+                        ["xfce4-terminal", "--working-directory", str(folder)],
+                        ["kitty", "--directory", str(folder)],
+                        ["alacritty", "--working-directory", str(folder)],
+                        ["x-terminal-emulator"],
+                        ["xterm"],
+                    ]
+                )
+                for command in commands:
+                    try:
+                        subprocess.Popen(command, cwd=str(folder))
+                        break
+                    except FileNotFoundError:
+                        continue
+                else:
+                    raise OSError("No supported terminal application was found")
+            self.statusBar().showMessage(f"Opened terminal in {folder}", 3000)
+        except (OSError, ValueError) as exc:
             self.statusBar().showMessage(f"Could not open terminal: {exc}", 12000)
 
     def folder_picker(self):
