@@ -26,9 +26,10 @@ def test_shared_markdown_renderer_keeps_print_quality_and_source_anchors() -> No
     rendered = render_markdown_html(TABLE_MARKDOWN, source_anchors=True)
 
     assert "<table>" in rendered
-    assert "<th>Name</th>" in rendered
+    assert "Name</th>" in rendered
     assert 'style="width: 300px;"' in rendered
     assert 'id="sp-source-3"' in rendered
+    assert "&#8203;</span></p>" not in rendered
     assert nearest_source_anchor(TABLE_MARKDOWN, 5) == "sp-source-3"
 
 

@@ -16,6 +16,9 @@ _IMAGE_MD_ANY_RE = re.compile(
     re.MULTILINE,
 )
 _ZIM_LINK_RE = re.compile(r"\[(?P<target>[^\]|]+)\|(?P<label>[^\]]*)\]")
+_SOURCE_ANCHOR_BLOCK_RE = re.compile(
+    r'<p><span id="(?P<anchor>sp-source-\d+)">&#8203;</span></p>\s*'
+)
 
 
 def source_block_lines(text: str) -> list[int]:
@@ -83,7 +86,50 @@ def render_markdown_html(text: str, *, source_anchors: bool = False) -> str:
     normalized = _rewrite_strikethrough(normalized)
     renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
     rendered = renderer.convert(normalized)
+    if source_anchors:
+        rendered = _inline_source_anchors(rendered)
     return _rewrite_task_checkboxes(rendered)
+
+
+def _inline_source_anchors(rendered: str) -> str:
+    """Attach source anchors to content without creating empty layout rows."""
+    output: list[str] = []
+    cursor = 0
+    while True:
+        marker = _SOURCE_ANCHOR_BLOCK_RE.search(rendered, cursor)
+        if marker is None:
+            output.append(rendered[cursor:])
+            break
+        output.append(rendered[cursor:marker.start()])
+        content_start = marker.end()
+        opening = re.match(r"<(?P<tag>[a-zA-Z0-9]+)\b[^>]*>", rendered[content_start:])
+        if opening is None:
+            output.append(rendered[marker.start():marker.end()])
+            cursor = marker.end()
+            continue
+        tag = opening.group("tag").lower()
+        relative_insertion = opening.end()
+        if tag == "table":
+            target = re.search(r"<(?:th|td)\b[^>]*>", rendered[content_start:], re.DOTALL)
+            if target is not None:
+                relative_insertion = target.end()
+        elif tag in {"ul", "ol"}:
+            target = re.search(r"<li\b[^>]*>", rendered[content_start:], re.DOTALL)
+            if target is not None:
+                relative_insertion = target.end()
+        elif tag == "blockquote":
+            target = re.search(r"<(?:p|h[1-6])\b[^>]*>", rendered[content_start:], re.DOTALL)
+            if target is not None:
+                relative_insertion = target.end()
+        elif tag == "pre":
+            target = re.search(r"<code\b[^>]*>", rendered[content_start:], re.DOTALL)
+            if target is not None:
+                relative_insertion = target.end()
+        insertion = content_start + relative_insertion
+        output.append(rendered[content_start:insertion])
+        output.append(f'<span id="{marker.group("anchor")}">&#8203;</span>')
+        cursor = insertion
+    return "".join(output)
 
 
 def _rewrite_task_and_dash_markers(text: str) -> str:
