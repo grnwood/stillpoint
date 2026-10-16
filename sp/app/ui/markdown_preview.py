@@ -234,6 +234,8 @@ class _ReadingBrowser(QTextBrowser):
 class MarkdownReadingView(QWidget):
     """A shared read-only Markdown surface used by both desktop editors."""
 
+    ZOOM_DEBOUNCE_MS = 100
+
     editRequested = Signal()
     linkActivated = Signal(str)
 
@@ -243,6 +245,11 @@ class MarkdownReadingView(QWidget):
         self.last_html = ""
         self.base_directory: Path | None = None
         self._zoom_steps = 0
+        self._zoom_css_dirty = False
+        self._zoom_render_timer = QTimer(self)
+        self._zoom_render_timer.setSingleShot(True)
+        self._zoom_render_timer.setInterval(self.ZOOM_DEBOUNCE_MS)
+        self._zoom_render_timer.timeout.connect(self._apply_pending_zoom)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -399,6 +406,10 @@ class MarkdownReadingView(QWidget):
         base_directory: str | Path | None = None,
         source_line: int = 1,
     ) -> None:
+        if self._zoom_css_dirty:
+            self._zoom_render_timer.stop()
+            self._apply_palette()
+            self._zoom_css_dirty = False
         self.last_markdown = markdown_text or ""
         self.base_directory = Path(base_directory).resolve() if base_directory else None
         if self.base_directory is not None:
@@ -528,9 +539,17 @@ class MarkdownReadingView(QWidget):
         new_steps = max(-8, min(20, int(steps)))
         if new_steps == self._zoom_steps:
             return
-        source_line = self.current_source_line()
         self._zoom_steps = new_steps
+        self._zoom_css_dirty = True
+        if self.isVisible():
+            self._zoom_render_timer.start()
+
+    def _apply_pending_zoom(self) -> None:
+        if not self._zoom_css_dirty or not self.isVisible():
+            return
+        source_line = self.current_source_line()
         self._apply_palette()
+        self._zoom_css_dirty = False
         if self.last_markdown:
             self.set_markdown(
                 self.last_markdown,

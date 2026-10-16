@@ -180,6 +180,8 @@ def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) 
 def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
     view = MarkdownReadingView()
     qtbot.addWidget(view)
+    view.resize(640, 480)
+    view.show()
     view.set_markdown(
         "# Heading\n\nParagraph\n\n| Column |\n| --- |\n| Cell |\n\n`Code`"
     )
@@ -197,6 +199,7 @@ def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
 
     before = sizes()
     view.zoom_in(2)
+    QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
     qapp.processEvents()
     after = sizes()
 
@@ -204,6 +207,33 @@ def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
     for label in before:
         assert after[label] > before[label]
         assert after[label] / before[label] == pytest.approx(1.21, rel=0.03)
+
+
+def test_reading_view_zoom_debounces_expensive_renders(
+    qtbot, qapp, monkeypatch
+) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(640, 480)
+    view.set_markdown("# Heading\n\nParagraph")
+    view.show()
+    qapp.processEvents()
+    original_set_markdown = view.set_markdown
+    renders: list[int] = []
+
+    def record_render(*args, **kwargs):
+        renders.append(view._zoom_steps)
+        return original_set_markdown(*args, **kwargs)
+
+    monkeypatch.setattr(view, "set_markdown", record_render)
+    view.zoom_in()
+    view.zoom_in()
+    view.zoom_in()
+
+    assert renders == []
+    QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
+    qapp.processEvents()
+    assert renders == [3]
 
 
 def test_folder_markdown_ctrl_space_toggles_reading_view(
@@ -285,6 +315,7 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         qapp.processEvents()
 
         assert window.reading_view_action.isEnabled()
+        assert window.active_tab().editor._primary_wheel_zoom_filters
         assert window.active_tab().reading_view.browser._primary_wheel_zoom_filters
         assert QKeySequence("Ctrl+Space") in {
             shortcut.key() for shortcut in window.active_tab().reading_view_shortcuts
