@@ -2990,6 +2990,7 @@ class MainWindow(QMainWindow):
             lambda: self._set_reading_view_enabled(False)
         )
         self.reading_view.linkActivated.connect(self._open_reading_view_link)
+        self.reading_view.set_base_font_point_size(self.font_size)
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
         self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
         install_primary_wheel_zoom(

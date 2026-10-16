@@ -108,6 +108,16 @@ def _inline_source_anchors(rendered: str) -> str:
             cursor = marker.end()
             continue
         tag = opening.group("tag").lower()
+        opening_text = opening.group(0)
+        if opening_text.rstrip().endswith("/>"):
+            anchored_opening = re.sub(
+                r"\s*/>$",
+                f' id="{marker.group("anchor")}" />',
+                opening_text,
+            )
+            output.append(anchored_opening)
+            cursor = content_start + opening.end()
+            continue
         relative_insertion = opening.end()
         if tag == "table":
             target = re.search(r"<(?:th|td)\b[^>]*>", rendered[content_start:], re.DOTALL)

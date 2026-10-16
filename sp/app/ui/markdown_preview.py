@@ -244,6 +244,7 @@ class MarkdownReadingView(QWidget):
         self.last_markdown = ""
         self.last_html = ""
         self.base_directory: Path | None = None
+        self._base_font_point_size = 12.0
         self._zoom_steps = 0
         self._zoom_css_dirty = False
         self._zoom_render_timer = QTimer(self)
@@ -344,7 +345,7 @@ class MarkdownReadingView(QWidget):
         def points(value: float) -> str:
             return f"{value * scale:.2f}pt"
 
-        body_size = points(12)
+        body_size = points(self._base_font_point_size)
         paper = str(theme_value("markdown_preview.paper_bg", "#ffffff"))
         text = str(theme_value("markdown_preview.text", "#111111"))
         muted = str(theme_value("markdown_preview.muted", "#666666"))
@@ -354,30 +355,32 @@ class MarkdownReadingView(QWidget):
         highlight = str(theme_value("markdown_preview.link", "#1a5fb4"))
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
-            body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.5;
-                    margin: 30px 36px 42px 36px; }}
-            h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 1.25em;
-                   margin-bottom: 0.45em; font-weight: 700; }}
-            h1 {{ font-size: {points(28)}; border-bottom: 2px solid {border}; padding-bottom: 6px; }}
-            h2 {{ font-size: {points(22)}; border-bottom: 1px solid {border}; padding-bottom: 4px; }}
-            h3 {{ font-size: {points(18)}; }} h4 {{ font-size: {points(15)}; }}
-            h5 {{ font-size: {points(13)}; }} h6 {{ font-size: {points(12)}; color: {muted}; }}
+            body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.35;
+                    margin: 12px 36px 20px 36px; }}
+            h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 0.6em;
+                   margin-bottom: 0.2em; font-weight: 700; }}
+            h1 {{ font-size: {points(self._base_font_point_size * 2.0)}; }}
+            h2 {{ font-size: {points(self._base_font_point_size * 1.55)}; }}
+            h3 {{ font-size: {points(self._base_font_point_size * 1.3)}; }}
+            h4 {{ font-size: {points(self._base_font_point_size * 1.15)}; }}
+            h5 {{ font-size: {points(self._base_font_point_size)}; }}
+            h6 {{ font-size: {points(self._base_font_point_size)}; color: {muted}; }}
             p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
-            p {{ margin-top: 0.55em; margin-bottom: 0.55em; }}
-            table {{ border-collapse: collapse; width: 100%; margin-top: 1em;
-                     margin-bottom: 1em; border: 2px solid {border}; }}
-            th, td {{ border: 1px solid {border}; padding: 9px 12px; text-align: left; }}
+            p {{ margin-top: 0.25em; margin-bottom: 0.25em; }}
+            hr {{ margin-top: 6px; margin-bottom: 8px; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 0.55em;
+                     margin-bottom: 0.55em; border: 2px solid {border}; }}
+            th, td {{ border: 1px solid {border}; padding: 5px 8px; text-align: left; }}
             th {{ background: {table_header}; color: {text}; font-weight: 700; }}
             blockquote {{ color: {muted}; border-left: 4px solid {border};
                           margin-left: 0; padding-left: 1em; }}
             code {{ background: {code_bg}; font-family: monospace; }}
-            pre {{ background: {code_bg}; border: 1px solid {border}; padding: 10px; }}
+            pre {{ background: {code_bg}; border: 1px solid {border}; padding: 7px; }}
             a {{ color: {highlight}; text-decoration: none; }}
-            img {{ max-width: 100%; margin-top: 1em; margin-bottom: 1em; }}
+            img {{ max-width: 100%; margin-top: 0.2em; margin-bottom: 0.2em; }}
             mark {{ color: {text}; background: transparent; text-decoration: underline; }}
-            .md-checkbox {{ border: 1px solid {text}; padding-left: 0.55em;
-                            padding-right: 0.15em; margin-right: 0.35em; }}
-            .md-checkbox--checked {{ background: {highlight}; }}
+            .md-checkbox {{ margin-right: 0.35em; }}
+            .md-checkbox--checked {{ color: {highlight}; }}
         """
         self.setStyleSheet(
             "QFrame#markdownReadingHeader {"
@@ -395,6 +398,16 @@ class MarkdownReadingView(QWidget):
 
     def set_vi_cursor_style(self, style: str) -> None:
         self.browser.set_vi_state(self.browser.vi_enabled, style)
+
+    def set_base_font_point_size(self, size: float) -> None:
+        try:
+            value = max(6.0, min(24.0, float(size)))
+        except (TypeError, ValueError):
+            value = 12.0
+        if abs(value - self._base_font_point_size) < 0.01:
+            return
+        self._base_font_point_size = value
+        self._apply_palette()
 
     def page_scroll(self, direction: int) -> None:
         self.browser.page_scroll(direction)
@@ -418,6 +431,13 @@ class MarkdownReadingView(QWidget):
         else:
             self.browser.document().setBaseUrl(QUrl())
         body = render_markdown_html(self.last_markdown, source_anchors=True)
+        body = body.replace(
+            '<span class="md-checkbox md-checkbox--unchecked" aria-hidden="true"></span>',
+            '<span class="md-checkbox md-checkbox--unchecked" aria-hidden="true">☐</span>&nbsp;',
+        ).replace(
+            '<span class="md-checkbox md-checkbox--checked" aria-hidden="true"></span>',
+            '<span class="md-checkbox md-checkbox--checked" aria-hidden="true">☑</span>&nbsp;',
+        )
         self.last_html = f"<html><head><style>{self._css}</style></head><body>{body}</body></html>"
         self.browser._reading_cursor = QTextCursor()
         self.browser.setHtml(self.last_html)

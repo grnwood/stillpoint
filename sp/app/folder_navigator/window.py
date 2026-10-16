@@ -1597,6 +1597,9 @@ class Tab(QWidget):
                 self.show_notice("Read-only file: editing and saving are disabled")
             if markdown:
                 self.reading_view = MarkdownReadingView(self)
+                self.reading_view.set_base_font_point_size(
+                    self.editor.font().pointSizeF()
+                )
                 # Folder Navigator already owns cross-view page shortcuts and
                 # delegates them here; avoid an ambiguous duplicate binding.
                 for shortcut in self.reading_view._page_shortcuts:

@@ -33,6 +33,10 @@ def test_shared_markdown_renderer_keeps_print_quality_and_source_anchors() -> No
     assert "&#8203;</span></p>" not in rendered
     assert nearest_source_anchor(TABLE_MARKDOWN, 5) == "sp-source-3"
 
+    ruled = render_markdown_html("---\n\n# Heading", source_anchors=True)
+    assert '<hr id="sp-source-1" />' in ruled
+    assert "<hr /><span" not in ruled
+
 
 def test_reading_view_renders_live_markdown_without_a_print_url(
     qtbot, tmp_path: Path
@@ -172,9 +176,20 @@ def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) 
     qtbot.addWidget(view)
 
     assert "background: #fdfaf2" in view._css
-    assert "font-size: 28.00pt" in view._css
+    assert "font-size: 24.00pt" in view._css
     assert "border: 2px solid" in view._css
     assert "background: #ddd2bf" in view._css
+    assert "margin-top: 0.2em" in view._css
+
+
+def test_reading_view_materializes_checkbox_glyphs(qtbot) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown("[ ] Open item\n[x] Completed item")
+
+    rendered = view.browser.toPlainText()
+    assert "☐ Open item" in rendered
+    assert "☑ Completed item" in rendered
 
 
 def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
