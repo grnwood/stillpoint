@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QKeySequence, QTextCursor
+from PySide6.QtGui import QColor, QImage, QKeySequence, QTextCursor
 from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
@@ -37,6 +37,14 @@ def test_shared_markdown_renderer_keeps_print_quality_and_source_anchors() -> No
     assert '<hr id="sp-source-1" />' in ruled
     assert "<hr /><span" not in ruled
 
+    italic_rows = render_markdown_html(
+        "    *- A new virtual location will be configured*\n"
+        "    *- The EGC items will be configured*",
+        source_anchors=True,
+    )
+    assert "<pre>" not in italic_rows
+    assert "<em>- A new virtual location will be configured</em>" in italic_rows
+
 
 def test_reading_view_renders_live_markdown_without_a_print_url(
     qtbot, tmp_path: Path
@@ -61,6 +69,18 @@ def test_reading_view_keeps_source_positions_for_image_only_blocks(qtbot) -> Non
     view.set_markdown("First\n\n![image](missing.png)\n\nLast", source_line=3)
 
     assert [line for _position, line in view._source_positions] == [1, 3, 5]
+    assert view.current_source_line() == 3
+
+
+def test_reading_view_tracks_hard_break_source_lines(qtbot, qapp) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(500, 260)
+    view.show()
+    view.set_markdown("[ ] First\n[ ] Second\n[ ] Third", source_line=3)
+    qapp.processEvents()
+    qapp.processEvents()
+
     assert view.current_source_line() == 3
 
 
@@ -142,6 +162,13 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     assert marker.height() <= view.browser.fontMetrics().height() + 4
     assert marker.right() < 40
 
+    initial_position = view.browser._reading_cursor.position()
+    initial_marker_top = marker.top()
+    QTest.keyClick(view.browser, Qt.Key_J)
+    assert view.browser._reading_cursor.position() > initial_position
+    assert view.browser.verticalScrollBar().value() == scrollbar.minimum()
+    assert view.browser.vi_rail_rect().top() > initial_marker_top
+
     QTest.keyClick(view.browser, Qt.Key_G, Qt.ShiftModifier)
     assert scrollbar.value() == scrollbar.maximum()
     QTest.keyClick(view.browser, Qt.Key_G)
@@ -157,6 +184,38 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     assert scrollbar.value() > scrollbar.minimum()
     assert not view.browser.extraSelections()
     assert not view.browser.vi_rail_rect().isEmpty()
+
+
+def test_reading_vi_cursor_crosses_a_tall_image_smoothly(
+    qtbot, qapp, tmp_path: Path
+) -> None:
+    image_path = tmp_path / "tall.png"
+    image = QImage(493, 364, QImage.Format_RGB32)
+    image.fill(QColor("#4488aa"))
+    assert image.save(str(image_path))
+
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(420, 220)
+    view.set_markdown(
+        "Before\n\n![image](tall.png)\n\nAfter",
+        base_directory=tmp_path,
+    )
+    view.set_vi_enabled(True)
+    view.show()
+    qapp.processEvents()
+    qapp.processEvents()
+
+    QTest.keyClick(view.browser, Qt.Key_J)
+    assert "\ufffc" in view.browser._reading_cursor.block().text()
+    QTest.keyClick(view.browser, Qt.Key_J)
+    QTest.qWait(240)
+    assert "\ufffc" in view.browser._reading_cursor.block().text()
+    assert view.browser.verticalScrollBar().value() > 0
+
+    QTest.keyClick(view.browser, Qt.Key_J)
+    QTest.qWait(240)
+    assert "After" in view.browser._reading_cursor.block().text()
 
 
 def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) -> None:
@@ -180,6 +239,7 @@ def test_reading_view_uses_print_like_theme_override_colors(qtbot, monkeypatch) 
     assert "border: 2px solid" in view._css
     assert "background: #ddd2bf" in view._css
     assert "margin-top: 0.2em" in view._css
+    assert "table.reading-rule" in view._css
 
 
 def test_reading_view_materializes_checkbox_glyphs(qtbot) -> None:
@@ -213,6 +273,9 @@ def test_reading_view_zoom_scales_all_document_typography(qtbot, qapp) -> None:
         return result
 
     before = sizes()
+    assert before["Column"] == pytest.approx(before["Paragraph"])
+    assert before["Cell"] == pytest.approx(before["Paragraph"])
+    assert before["Code"] == pytest.approx(before["Paragraph"])
     view.zoom_in(2)
     QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
     qapp.processEvents()

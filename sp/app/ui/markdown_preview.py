@@ -52,6 +52,7 @@ class _ReadingBrowser(QTextBrowser):
         self.vi_cursor_style = "line"
         self._pending_g = False
         self._cursor_sync_pending = False
+        self._preserve_cursor_during_animation = False
         self._reading_cursor = QTextCursor()
         self._source_positions: list[tuple[int, int]] = []
         self._requested_source_line = 1
@@ -60,8 +61,12 @@ class _ReadingBrowser(QTextBrowser):
         )
         self._scroll_animation.setDuration(120)
         self._scroll_animation.setEasingCurve(QEasingCurve.OutCubic)
-        self._scroll_animation.finished.connect(self._schedule_cursor_sync)
+        self._scroll_animation.finished.connect(self._finish_scroll_animation)
         self.verticalScrollBar().valueChanged.connect(self._schedule_cursor_sync)
+
+    def _finish_scroll_animation(self) -> None:
+        self._preserve_cursor_during_animation = False
+        self._schedule_cursor_sync()
 
     def _schedule_cursor_sync(self, *_args) -> None:
         if self._cursor_sync_pending:
@@ -144,10 +149,55 @@ class _ReadingBrowser(QTextBrowser):
         if not self.vi_enabled or self.document().isEmpty():
             self.refresh_reading_cursor()
             return
-        self._reading_cursor = self._nearest_content_cursor(self.cursorForPosition(
-            QPoint(max(0, self.viewport().width() // 3), self.viewport().height() // 2)
-        ))
+        if self._preserve_cursor_during_animation:
+            self.refresh_reading_cursor()
+            return
+        viewport = self.viewport().rect()
+        if not self._reading_cursor.isNull():
+            cursor_rect = self.cursorRect(self._reading_cursor)
+            if (
+                cursor_rect.bottom() >= viewport.top()
+                and cursor_rect.top() <= viewport.bottom()
+            ):
+                self.refresh_reading_cursor()
+                return
+            y = (
+                4
+                if cursor_rect.bottom() < viewport.top()
+                else max(4, viewport.height() - 5)
+            )
+        else:
+            y = 4
+        self._reading_cursor = self._nearest_content_cursor(
+            self.cursorForPosition(QPoint(max(0, self.viewport().width() // 3), y))
+        )
         self.refresh_reading_cursor()
+
+    def _scroll_cursor_into_view(self, cursor: QTextCursor) -> None:
+        """Reveal ``cursor`` with the smallest smooth viewport adjustment."""
+        cursor_rect = self.cursorRect(cursor)
+        viewport_height = self.viewport().height()
+        margin = max(6, self.fontMetrics().height() // 2)
+        scrollbar = self.verticalScrollBar()
+        target = scrollbar.value()
+        available_height = max(1, viewport_height - (2 * margin))
+        if cursor_rect.height() > available_height:
+            target += cursor_rect.top() - margin
+        elif cursor_rect.top() < margin:
+            target += cursor_rect.top() - margin
+        elif cursor_rect.bottom() > viewport_height - margin:
+            target += cursor_rect.bottom() - (viewport_height - margin)
+        target = max(scrollbar.minimum(), min(scrollbar.maximum(), target))
+        if target == scrollbar.value():
+            self.refresh_reading_cursor()
+            return
+        distance = abs(target - scrollbar.value())
+        self._scroll_animation.stop()
+        self._preserve_cursor_during_animation = True
+        self._scroll_animation.setDuration(max(80, min(220, round(distance * 0.4))))
+        self._scroll_animation.setStartValue(scrollbar.value())
+        self._scroll_animation.setEndValue(target)
+        self._scroll_animation.start()
 
     def page_scroll(self, direction: int, *, fraction: float = 0.85) -> None:
         scrollbar = self.verticalScrollBar()
@@ -157,29 +207,33 @@ class _ReadingBrowser(QTextBrowser):
             min(scrollbar.maximum(), scrollbar.value() + (1 if direction > 0 else -1) * step),
         )
         self._scroll_animation.stop()
+        self._preserve_cursor_during_animation = False
         self._scroll_animation.setDuration(120)
         self._scroll_animation.setStartValue(scrollbar.value())
         self._scroll_animation.setEndValue(target)
         self._scroll_animation.start()
 
     def line_scroll(self, direction: int) -> None:
-        scrollbar = self.verticalScrollBar()
-        step = max(24, scrollbar.singleStep() * 3)
-        target = max(
-            scrollbar.minimum(),
-            min(scrollbar.maximum(), scrollbar.value() + (1 if direction > 0 else -1) * step),
-        )
-        self._scroll_animation.stop()
-        self._scroll_animation.setDuration(80)
-        self._scroll_animation.setStartValue(scrollbar.value())
-        self._scroll_animation.setEndValue(target)
-        self._scroll_animation.start()
+        if self._reading_cursor.isNull():
+            self._sync_cursor_to_viewport()
+        cursor = QTextCursor(self._reading_cursor)
+        operation = QTextCursor.Down if direction > 0 else QTextCursor.Up
+        if not cursor.movePosition(operation):
+            cursor.movePosition(QTextCursor.End if direction > 0 else QTextCursor.Start)
+        cursor = self._nearest_content_cursor(cursor)
+        cursor.clearSelection()
+        self._reading_cursor = cursor
+        self._scroll_cursor_into_view(cursor)
 
     def jump_to_edge(self, *, end: bool) -> None:
         self._scroll_animation.stop()
+        self._preserve_cursor_during_animation = False
         scrollbar = self.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum() if end else scrollbar.minimum())
-        self._sync_cursor_to_viewport()
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End if end else QTextCursor.Start)
+        self._reading_cursor = self._nearest_content_cursor(cursor)
+        self.refresh_reading_cursor()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         super().mousePressEvent(event)
@@ -357,8 +411,8 @@ class MarkdownReadingView(QWidget):
             html, body {{ color: {text}; background: {paper}; }}
             body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.35;
                     margin: 12px 36px 20px 36px; }}
-            h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 0.6em;
-                   margin-bottom: 0.2em; font-weight: 700; }}
+            h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 6px;
+                   margin-bottom: 3px; font-weight: 700; }}
             h1 {{ font-size: {points(self._base_font_point_size * 2.0)}; }}
             h2 {{ font-size: {points(self._base_font_point_size * 1.55)}; }}
             h3 {{ font-size: {points(self._base_font_point_size * 1.3)}; }}
@@ -367,11 +421,14 @@ class MarkdownReadingView(QWidget):
             h6 {{ font-size: {points(self._base_font_point_size)}; color: {muted}; }}
             p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
             p {{ margin-top: 0.25em; margin-bottom: 0.25em; }}
-            hr {{ margin-top: 6px; margin-bottom: 8px; }}
             table {{ border-collapse: collapse; width: 100%; margin-top: 0.55em;
                      margin-bottom: 0.55em; border: 2px solid {border}; }}
             th, td {{ border: 1px solid {border}; padding: 5px 8px; text-align: left; }}
             th {{ background: {table_header}; color: {text}; font-weight: 700; }}
+            table.reading-rule {{ width: 100%; border: none;
+                                  margin-top: 2px; margin-bottom: 3px; }}
+            table.reading-rule td {{ border: none; border-top: 1px solid {border};
+                                     padding: 0; height: 1px; font-size: 1px; }}
             blockquote {{ color: {muted}; border-left: 4px solid {border};
                           margin-left: 0; padding-left: 1em; }}
             code {{ background: {code_bg}; font-family: monospace; }}
@@ -431,6 +488,30 @@ class MarkdownReadingView(QWidget):
         else:
             self.browser.document().setBaseUrl(QUrl())
         body = render_markdown_html(self.last_markdown, source_anchors=True)
+        body = re.sub(
+            r'<hr\s+id="(?P<anchor>[^"]+)"\s*/>\s*'
+            r'(?P<opening><(?P<tag>(?!hr\b)[a-zA-Z0-9]+)\b[^>]*>)',
+            lambda match: (
+                '<hr />\n'
+                + match.group("opening")
+                + f'<span id="{match.group("anchor")}">&#8203;</span>'
+            ),
+            body,
+        )
+        body = re.sub(
+            r'<hr(?:\s+id="(?P<anchor>[^"]+)")?\s*/>',
+            lambda match: (
+                '<table class="reading-rule" width="100%" cellspacing="0" '
+                'cellpadding="0"><tr><td>'
+                + (
+                    f'<span id="{match.group("anchor")}">&#8203;</span>'
+                    if match.group("anchor")
+                    else ""
+                )
+                + "</td></tr></table>"
+            ),
+            body,
+        )
         body = body.replace(
             '<span class="md-checkbox md-checkbox--unchecked" aria-hidden="true"></span>',
             '<span class="md-checkbox md-checkbox--unchecked" aria-hidden="true">☐</span>&nbsp;',
@@ -442,7 +523,7 @@ class MarkdownReadingView(QWidget):
         self.browser._reading_cursor = QTextCursor()
         self.browser.setHtml(self.last_html)
         self._index_source_positions()
-        self._requested_source_line = self.source_block_line(source_line)
+        self._requested_source_line = max(1, int(source_line))
         self.scroll_to_source_line(source_line)
 
     def _index_source_positions(self) -> None:
@@ -475,13 +556,22 @@ class MarkdownReadingView(QWidget):
             return 1
         if self.browser._reading_cursor.isNull():
             return self._requested_source_line
-        position = self.browser._reading_cursor.position()
-        line = self._source_positions[0][1]
-        for anchor_position, anchor_line in self._source_positions:
-            if anchor_position > position:
+        cursor_position = self.browser._reading_cursor.position()
+        anchor_position, line = self._source_positions[0]
+        next_anchor_position = self.browser.document().characterCount()
+        for candidate_position, candidate_line in self._source_positions:
+            if candidate_position > cursor_position:
+                next_anchor_position = candidate_position
                 break
-            line = anchor_line
-        return line
+            anchor_position = candidate_position
+            line = candidate_line
+        cursor_position = min(
+            cursor_position, max(anchor_position, next_anchor_position - 1)
+        )
+        cursor = QTextCursor(self.browser.document())
+        cursor.setPosition(anchor_position)
+        cursor.setPosition(cursor_position, QTextCursor.KeepAnchor)
+        return line + cursor.selectedText().count("\u2028")
 
     def _cursor_for_source_anchor(self, anchor: str) -> QTextCursor | None:
         match = re.fullmatch(r"sp-source-(\d+)", anchor)
@@ -506,6 +596,22 @@ class MarkdownReadingView(QWidget):
                     if cursor is None:
                         self.browser._sync_cursor_to_viewport()
                         return
+                    block_line = self.source_block_line(source_line)
+                    hard_breaks = max(0, int(source_line) - block_line)
+                    if hard_breaks:
+                        block_text = cursor.block().text()
+                        relative = max(0, cursor.position() - cursor.block().position())
+                        for _index in range(hard_breaks):
+                            next_break = block_text.find("\u2028", relative)
+                            if next_break < 0:
+                                break
+                            relative = next_break + 1
+                        cursor.setPosition(
+                            min(
+                                cursor.block().position() + relative,
+                                cursor.block().position() + len(block_text),
+                            )
+                        )
                     cursor_rect = self.browser.cursorRect(cursor)
                     scrollbar = self.browser.verticalScrollBar()
                     scrollbar.setValue(

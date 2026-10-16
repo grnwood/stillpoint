@@ -227,6 +227,11 @@ def _normalize_markdown_lists(text: str) -> str:
         trimmed = value.lstrip()
         if trimmed.startswith(("* ", "- ", "+ ")):
             return True
+        # Stillpoint's editor permits italicized list rows such as
+        # ``    *- item text*``.  Treat their dash as the list marker when
+        # removing accidental code-block indentation for HTML rendering.
+        if trimmed.startswith(("*- ", "_- ")):
+            return True
         digits = ""
         for character in trimmed:
             if not character.isdigit():
