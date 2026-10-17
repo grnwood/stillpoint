@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import codecs
 import csv
+import os
+import shutil
+import tempfile
 import zipfile
 
 
@@ -33,7 +36,8 @@ class TablePreview:
     total_columns: int | None = None
 
 
-def _display_cell(value) -> str:
+def display_cell(value) -> str:
+    """Return a bounded string for painting while preserving source rows intact."""
     if value is None:
         return ""
     text = str(value)
@@ -50,7 +54,10 @@ def _bounded_rows(rows) -> tuple[list[list[str]], bool]:
         if len(result) >= MAX_TABLE_ROWS or cells >= MAX_TABLE_CELLS:
             truncated = True
             break
-        values = [_display_cell(value) for value in row[:MAX_TABLE_COLUMNS]]
+        values = [
+            "" if value is None else str(value)
+            for value in row[:MAX_TABLE_COLUMNS]
+        ]
         if len(row) > MAX_TABLE_COLUMNS:
             truncated = True
         if cells + len(values) > MAX_TABLE_CELLS:
@@ -68,7 +75,17 @@ def _text_encoding(path: Path) -> str:
         return "utf-8-sig"
     if prefix.startswith(codecs.BOM_UTF16_LE) or prefix.startswith(codecs.BOM_UTF16_BE):
         return "utf-16"
-    return "utf-8-sig"
+    return "utf-8"
+
+
+def _delimited_dialect(path: Path, stream):
+    sample = stream.read(CSV_SAMPLE_BYTES)
+    stream.seek(0)
+    fallback = "\t" if path.suffix.casefold() in (".tsv", ".tab") else ","
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",\t;|")
+    except csv.Error:
+        return csv.excel_tab if fallback == "\t" else csv.excel
 
 
 def read_delimited_preview(path: Path) -> TablePreview:
@@ -82,11 +99,7 @@ def read_delimited_preview(path: Path) -> TablePreview:
     with path.open("r", encoding=encoding, errors="replace", newline="") as stream:
         sample = stream.read(CSV_SAMPLE_BYTES)
         stream.seek(0)
-        fallback = "\t" if path.suffix.casefold() in (".tsv", ".tab") else ","
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
-        except csv.Error:
-            dialect = csv.excel_tab if fallback == "\t" else csv.excel
+        dialect = _delimited_dialect(path, stream)
         try:
             has_header = csv.Sniffer().has_header(sample)
         except csv.Error:
@@ -94,6 +107,86 @@ def read_delimited_preview(path: Path) -> TablePreview:
         reader = csv.reader(stream, dialect)
         rows, truncated = _bounded_rows(reader)
     return TablePreview(rows, truncated, dialect.delimiter, has_header)
+
+
+def update_delimited_cell(path: Path, row: int, column: int, value: str) -> None:
+    """Atomically update one physical CSV/TSV cell while preserving its dialect."""
+    path = Path(path)
+    if min(row, column) < 0:
+        raise ValueError("Cell coordinates must be non-negative")
+    if path.stat().st_size > MAX_DELIMITED_PREVIEW_BYTES:
+        raise ValueError("Delimited file exceeds the safe editing limit")
+    encoding = _text_encoding(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    found = False
+    try:
+        with path.open("r", encoding=encoding, errors="replace", newline="") as source:
+            dialect = _delimited_dialect(path, source)
+            with temporary.open("w", encoding=encoding, newline="") as destination:
+                writer = csv.writer(
+                    destination,
+                    delimiter=dialect.delimiter,
+                    quotechar=dialect.quotechar or '"',
+                    doublequote=True,
+                    escapechar=dialect.escapechar,
+                    lineterminator=dialect.lineterminator or "\n",
+                    quoting=csv.QUOTE_MINIMAL,
+                )
+                for row_index, values in enumerate(csv.reader(source, dialect)):
+                    if row_index == row:
+                        if len(values) <= column:
+                            values.extend([""] * (column + 1 - len(values)))
+                        values[column] = str(value)
+                        found = True
+                    writer.writerow(values)
+        if not found:
+            raise IndexError(f"Row {row + 1} is no longer present in the file")
+        shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def update_workbook_cell(
+    path: Path, sheet_name: str, row: int, column: int, value: str
+) -> None:
+    """Atomically update one cell in an OOXML workbook through openpyxl."""
+    path = Path(path)
+    suffix = path.suffix.casefold()
+    if suffix not in {".xlsx", ".xlsm"}:
+        raise ValueError(
+            f"Editing {suffix or 'this workbook format'} is not supported; "
+            "use .xlsx or .xlsm"
+        )
+    if min(row, column) < 0:
+        raise ValueError("Cell coordinates must be non-negative")
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:  # pragma: no cover - packaging/runtime dependency
+        raise RuntimeError("Spreadsheet editing requires openpyxl") from exc
+
+    workbook = load_workbook(path, keep_vba=suffix == ".xlsm")
+    try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"Worksheet no longer exists: {sheet_name}")
+        workbook[sheet_name].cell(row=row + 1, column=column + 1, value=str(value))
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.stem}.", suffix=suffix, dir=path.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            workbook.save(temporary)
+            shutil.copymode(path, temporary)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    finally:
+        workbook.close()
 
 
 def read_workbook_preview(path: Path, sheet_name: str | None = None) -> TablePreview:

@@ -62,6 +62,7 @@ class _ReadingBrowser(QTextBrowser):
         self._cursor_sync_pending = False
         self._preserve_cursor_during_animation = False
         self._reading_cursor = QTextCursor()
+        self._navigation_cursor_visible = False
         self._source_positions: list[tuple[int, int]] = []
         self._requested_source_line = 1
         self._scroll_animation = QPropertyAnimation(
@@ -88,6 +89,7 @@ class _ReadingBrowser(QTextBrowser):
 
     def set_vi_state(self, enabled: bool, cursor_style: str = "line") -> None:
         self.vi_enabled = bool(enabled)
+        self._navigation_cursor_visible = self.vi_enabled
         self.setCursorWidth(0 if self.vi_enabled else 1)
         normalized = str(cursor_style or "").strip().lower()
         self.vi_cursor_style = normalized if normalized in {"block", "line"} else "line"
@@ -95,7 +97,10 @@ class _ReadingBrowser(QTextBrowser):
 
     def refresh_reading_cursor(self) -> None:
         self.setExtraSelections([])
-        if not self.vi_enabled or self.document().isEmpty():
+        if (
+            not (self.vi_enabled or self._navigation_cursor_visible)
+            or self.document().isEmpty()
+        ):
             self.viewport().update()
             return
         cursor = QTextCursor(self._reading_cursor)
@@ -110,7 +115,10 @@ class _ReadingBrowser(QTextBrowser):
 
     def vi_rail_rect(self) -> QRect:
         """Return the compact viewport marker used for the reading position."""
-        if not self.vi_enabled or self._reading_cursor.isNull():
+        if (
+            not (self.vi_enabled or self._navigation_cursor_visible)
+            or self._reading_cursor.isNull()
+        ):
             return QRect()
         cursor_rect = self.cursorRect(self._reading_cursor)
         line_height = max(8, self.fontMetrics().height() + 4)
@@ -136,25 +144,32 @@ class _ReadingBrowser(QTextBrowser):
         painter.drawRoundedRect(marker, 3, 3)
 
     @staticmethod
-    def _nearest_content_cursor(cursor: QTextCursor) -> QTextCursor:
+    def _nearest_content_cursor(
+        cursor: QTextCursor, *, prefer_forward: bool = True
+    ) -> QTextCursor:
         """Skip the empty blocks emitted for source-position HTML anchors."""
         origin = cursor.block()
         if origin.isValid() and origin.text().replace("\u200b", "").strip():
             return cursor
-        block = origin.next()
-        while block.isValid():
-            if block.text().replace("\u200b", "").strip():
-                return QTextCursor(block)
-            block = block.next()
-        block = origin.previous()
-        while block.isValid():
-            if block.text().replace("\u200b", "").strip():
-                return QTextCursor(block)
-            block = block.previous()
+        directions = (
+            (origin.next, lambda block: block.next()),
+            (origin.previous, lambda block: block.previous()),
+        )
+        if not prefer_forward:
+            directions = tuple(reversed(directions))
+        for first, advance in directions:
+            block = first()
+            while block.isValid():
+                if block.text().replace("\u200b", "").strip():
+                    return QTextCursor(block)
+                block = advance(block)
         return cursor
 
     def _sync_cursor_to_viewport(self) -> None:
-        if not self.vi_enabled or self.document().isEmpty():
+        if (
+            not (self.vi_enabled or self._navigation_cursor_visible)
+            or self.document().isEmpty()
+        ):
             self.refresh_reading_cursor()
             return
         if self._preserve_cursor_during_animation:
@@ -222,13 +237,16 @@ class _ReadingBrowser(QTextBrowser):
         self._scroll_animation.start()
 
     def line_scroll(self, direction: int) -> None:
+        self._navigation_cursor_visible = True
         if self._reading_cursor.isNull():
             self._sync_cursor_to_viewport()
         cursor = QTextCursor(self._reading_cursor)
         operation = QTextCursor.Down if direction > 0 else QTextCursor.Up
         if not cursor.movePosition(operation):
             cursor.movePosition(QTextCursor.End if direction > 0 else QTextCursor.Start)
-        cursor = self._nearest_content_cursor(cursor)
+        cursor = self._nearest_content_cursor(
+            cursor, prefer_forward=direction > 0
+        )
         cursor.clearSelection()
         self._reading_cursor = cursor
         self._scroll_cursor_into_view(cursor)
@@ -253,6 +271,11 @@ class _ReadingBrowser(QTextBrowser):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if modifiers == Qt.NoModifier and event.key() in (Qt.Key_Down, Qt.Key_Up):
+            self.line_scroll(1 if event.key() == Qt.Key_Down else -1)
+            self._pending_g = False
+            event.accept()
+            return
         if (
             self.vi_enabled
             and modifiers == Qt.ShiftModifier

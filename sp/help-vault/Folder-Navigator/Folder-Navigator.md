@@ -50,8 +50,11 @@ When vi mode is enabled, use `h`, `j`, `k`, and `l` in the tree. In an editor, t
 - `Ctrl+Shift+P` opens the Folder Navigator command bar.
 - `Alt+G` is an alternate command-bar shortcut.
 - The Search rail performs an on-demand search across filenames and safely readable text content. It supports case-sensitive, whole-word, regular-expression, and include-ignored options.
+- Repository roots add a **Git** rail after Search. It groups conflicts, staged changes, unstaged changes, and untracked files; supports multi-select Stage, Unstage, Add to `.gitignore`, and removal of untracked files; and keeps Pull, Commit, Push, and status refresh controls together in that rail. Hover a changed file for quick stage/unstage controls, or an untracked file to stage it or move it to Trash.
 
 Quick Open maintains a filename-only SQLite catalog at `.sp_folder/catalog.sqlite3` under the selected root. It does not store file contents. Content search is performed only when requested and is not persisted as a content index. Hidden and Git-ignored paths are excluded by default from Quick Open and search, with controls to include them for the current operation.
+
+For Git repositories, Folder Navigator automatically adds `.sp_folder/` to the root `.gitignore` so its private filename catalog is never offered as a working-tree change.
 
 ## Editing and Tabs
 

@@ -411,7 +411,8 @@ def app(monkeypatch):
 def test_csv_opens_in_incremental_table_and_can_switch_to_raw_text(
         tmp_path, monkeypatch, app):
     import time
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
     from PySide6.QtTest import QTest
     from sp.app.folder_navigator.window import SpreadsheetView, Window
 
@@ -436,6 +437,19 @@ def test_csv_opens_in_incremental_table_and_can_switch_to_raw_text(
     viewer.model.fetchMore()
     assert viewer.model.rowCount() == 650
     assert viewer.model.headerData(0, Qt.Horizontal) == "name"
+
+    viewer.table.setFocus()
+    app.processEvents()
+    base_size = viewer.table.font().pointSizeF()
+    for modifier, delta, expected in (
+            (Qt.ControlModifier, 120, base_size + 1),
+            (Qt.MetaModifier, -120, base_size)):
+        wheel = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, delta),
+            Qt.NoButton, modifier, Qt.NoScrollPhase, False,
+        )
+        app.sendEvent(viewer.table.viewport(), wheel)
+        assert viewer.table.font().pointSizeF() == expected
 
     window._set_folder_rail_visible(False)
     viewer.table.setFocus()
@@ -486,6 +500,191 @@ def test_table_cell_tooltip_wraps_full_value_with_readable_contrast(app, value):
 
     view.set_preview(TablePreview([["replacement"]]))
     assert not tip.isVisible()
+    view.close()
+
+
+def test_large_table_cell_keeps_full_value_and_opens_editable_copy_buffer(
+        tmp_path, monkeypatch, app):
+    import csv
+    import sp.app.folder_navigator.window as module
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.tabular import MAX_CELL_CHARS, read_delimited_preview
+    from sp.app.folder_navigator.window import CellContentDialog, SpreadsheetView
+
+    payload = json.dumps(
+        {"items": [f"item-{index}" for index in range(900)]}, indent=2
+    )
+    assert len(payload) > MAX_CELL_CHARS
+    path = tmp_path / "large-cell.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["payload"])
+        writer.writerow([payload])
+
+    preview = read_delimited_preview(path)
+    assert preview.rows[1][0] == payload
+    view = SpreadsheetView(preview)
+    view.show()
+    app.processEvents()
+    index = view.model.index(0, 0)
+    assert len(index.data(Qt.DisplayRole)) < len(payload)
+    assert index.data(Qt.DisplayRole).endswith("…")
+    assert index.data(Qt.ToolTipRole) == payload
+
+    opened = []
+    monkeypatch.setattr(
+        module.CellContentDialog,
+        "exec",
+        lambda dialog: opened.append(dialog.editor.toPlainText()) or 0,
+    )
+    view.table.doubleClicked.emit(index)
+    assert opened == [payload]
+    view.table.setCurrentIndex(index)
+    view.table.setFocus()
+    QTest.keyClick(view.table, Qt.Key_Return)
+    assert opened == [payload, payload]
+
+    dialog = CellContentDialog(payload)
+    assert not dialog.editor.isReadOnly()
+    assert dialog.editor.lineWrapMode() == dialog.editor.LineWrapMode.WidgetWidth
+    assert not dialog.copy_button.icon().isNull()
+    dialog.editor.appendPlainText("edited in the buffer")
+    dialog.copy_button.click()
+    assert app.clipboard().text() == payload + "\nedited in the buffer"
+    assert dialog.copy_button.text() == "Copied"
+    dialog.close()
+    view.close()
+
+
+def test_table_cell_editor_save_request_updates_delimited_file(tmp_path, app):
+    import csv
+    from sp.app.folder_navigator.tabular import (
+        read_delimited_preview,
+        update_delimited_cell,
+    )
+
+    path = tmp_path / "editable.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["name", "payload"])
+        writer.writerow(["alpha", "old"])
+        writer.writerow(["omega", "untouched"])
+
+    edited = '{\n  "saved": true,\n  "items": [1, 2, 3]\n}'
+    update_delimited_cell(path, 1, 1, edited)
+    preview = read_delimited_preview(path)
+
+    assert preview.rows == [
+        ["name", "payload"],
+        ["alpha", edited],
+        ["omega", "untouched"],
+    ]
+
+
+def test_enter_on_csv_cell_opens_editor_and_saves_changed_buffer(
+        tmp_path, monkeypatch, app):
+    import time
+    import sp.app.folder_navigator.window as module
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.tabular import read_delimited_preview
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "editable.csv"
+    path.write_text("name,payload\nalpha,old\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(path, pinned=True)
+    deadline = time.monotonic() + 3
+    while not getattr(window.active_tab(), "viewer", None) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    viewer = window.active_tab().viewer
+    index = viewer.model.index(0, 1)
+    viewer.table.setCurrentIndex(index)
+    viewer.table.setFocus()
+
+    edited = "changed\nmultiline value"
+
+    def edit_and_save(dialog):
+        dialog.editor.setPlainText(edited)
+        return module.QDialog.Accepted
+
+    monkeypatch.setattr(module.CellContentDialog, "exec", edit_and_save)
+    QTest.keyClick(viewer.table, Qt.Key_Return)
+
+    assert read_delimited_preview(path).rows[1][1] == edited
+    assert viewer.preview.rows[1][1] == edited
+    assert "Saved row 2, column 2" in window.statusBar().currentMessage()
+    window.close()
+
+
+def test_table_zoom_scales_rendered_column_headers(app):
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import SpreadsheetView
+
+    view = SpreadsheetView(
+        TablePreview([["Column heading"], ["cell value"]], has_header=True)
+    )
+    view.show()
+    app.processEvents()
+    header = view.table.horizontalHeader()
+    initial_size = header.font().pointSizeF()
+    initial_height = header.sizeHint().height()
+
+    view.set_zoom_steps(5)
+    app.processEvents()
+
+    assert header.font().pointSizeF() == initial_size + 5
+    assert f"font-size: {initial_size + 5:.2f}pt" in header.styleSheet()
+    assert header.sizeHint().height() > initial_height
+    view.close()
+
+
+def test_workbook_ctrl_or_cmd_t_opens_quick_worksheet_picker(app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.tabular import TablePreview
+    from sp.app.folder_navigator.window import SpreadsheetView
+
+    view = SpreadsheetView(
+        TablePreview(
+            [["value"], ["two"]],
+            has_header=True,
+            sheet_names=("Alpha", "Beta", "Gamma"),
+            sheet_name="Beta",
+        )
+    )
+    chosen = []
+    view.sheetRequested.connect(chosen.append)
+    view.resize(700, 420)
+    view.show()
+    view.table.setFocus()
+    app.processEvents()
+
+    QTest.keyClick(view.table, Qt.Key_T, Qt.ControlModifier)
+    app.processEvents()
+    picker = view.sheet_picker
+    assert picker is not None
+    assert picker.isVisible()
+    assert picker.list_widget.currentItem().text() == "Beta"
+    assert "picker_popup.bg" not in picker.styleSheet()
+    QTest.keyClick(picker.list_widget, Qt.Key_Escape)
+    assert not picker.isVisible()
+
+    view.table.setFocus()
+    QTest.keyClick(view.table, Qt.Key_T, Qt.MetaModifier)
+    app.processEvents()
+    picker = view.sheet_picker
+    assert picker is not None
+    assert picker.isVisible()
+    QTest.keyClick(picker.list_widget, Qt.Key_Up)
+    QTest.keyClick(picker.list_widget, Qt.Key_Return)
+
+    assert chosen == ["Alpha"]
+    assert view.sheet_selector.currentText() == "Alpha"
     view.close()
 
 
@@ -3436,13 +3635,18 @@ def test_git_repository_header_controls_run_expected_commands(
     window = Window(tmp_path)
 
     for button in (
+        window.git_refresh_button,
         window.git_pull_button,
         window.git_commit_button,
         window.git_push_button,
     ):
         assert button is not None
-        assert window.folder_panel_header.isAncestorOf(button)
+        assert window.git_panel_header.isAncestorOf(button)
+        assert not window.folder_panel_header.isAncestorOf(button)
         assert not button.icon().isNull()
+
+    assert window.rail.indexOf(window.git_page) == 2
+    assert window.rail.tabText(2) == "Git"
 
     window.git_pull_button.click()
     window.git_commit_button.click()
@@ -3456,6 +3660,431 @@ def test_git_repository_header_controls_run_expected_commands(
     window.close()
 
 
+def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "tracked.txt"
+    both = tmp_path / "both.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    both.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt", "both.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(tmp_path),
+            "-c", "user.name=StillPoint Tests",
+            "-c", "user.email=tests@example.invalid",
+            "commit", "-qm", "initial",
+        ],
+        check=True,
+    )
+    tracked.write_text("working tree\n", encoding="utf-8")
+    both.write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "both.txt"], check=True)
+    both.write_text("staged and changed\n", encoding="utf-8")
+    (tmp_path / "new file.txt").write_text("new\n", encoding="utf-8")
+
+    window = Window(tmp_path)
+    window.refresh_git_status()
+
+    ignore_lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ignore_lines.count(".sp_folder/") == 1
+    assert window.rail.indexOf(window.git_page) == 2
+    labels = [window.git_status_list.item(i).text()
+              for i in range(window.git_status_list.count())]
+    assert any(label.startswith("Staged Changes") for label in labels)
+    assert any(label.startswith("Changes") for label in labels)
+    assert any(label.startswith("Untracked Files") for label in labels)
+    assert sum("both.txt" in label for label in labels) == 2
+    assert any("new file.txt" in label for label in labels)
+    assert not any(".sp_folder" in label for label in labels)
+
+    window._ensure_folder_metadata_ignored()
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines().count(
+        ".sp_folder/"
+    ) == 1
+    window.close()
+
+
+def test_git_status_single_click_opens_non_markdown_as_read_only_diff(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.editors import SourceEditor
+    from sp.app.folder_navigator.window import GitDiffView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "settings.json"
+    content = '{\n  "enabled": true\n}\n'
+    source.write_text(content, encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        window.refresh_git_status()
+        item = next(
+            window.git_status_list.item(row)
+            for row in range(window.git_status_list.count())
+            if isinstance(
+                window.git_status_list.item(row).data(Qt.UserRole), dict
+            )
+            and window.git_status_list.item(row).data(Qt.UserRole)["path"]
+            == source.name
+        )
+
+        window.git_status_list.itemClicked.emit(item)
+
+        tab = window.active_tab()
+        assert tab.path == source
+        assert tab.property("folderGitDiff")
+        assert isinstance(tab.viewer, GitDiffView)
+        assert tab.viewer.editor.isReadOnly()
+        assert '+  "enabled": true' in tab.viewer.diff_text
+
+        window.git_status_list.itemActivated.emit(item)
+        assert isinstance(window.active_tab().editor, SourceEditor)
+        assert window.active_tab().editor.toPlainText() == content
+    finally:
+        window.close()
+
+
+def test_git_diff_uses_section_specific_staged_and_worktree_baselines(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.window import GitDiffView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "both.txt"
+    source.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "both.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(tmp_path),
+            "-c", "user.name=StillPoint Tests",
+            "-c", "user.email=tests@example.invalid",
+            "commit", "-qm", "initial",
+        ],
+        check=True,
+    )
+    source.write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "both.txt"], check=True)
+    source.write_text("working\n", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        window.refresh_git_status()
+        items = [
+            window.git_status_list.item(row)
+            for row in range(window.git_status_list.count())
+            if isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+            and window.git_status_list.item(row).data(Qt.UserRole)["path"] == "both.txt"
+        ]
+        staged = next(
+            item for item in items
+            if item.data(Qt.UserRole + 2) == "staged"
+        )
+        changed = next(
+            item for item in items
+            if item.data(Qt.UserRole + 2) == "changed"
+        )
+
+        window.git_status_list.itemClicked.emit(staged)
+        viewer = window.active_tab().viewer
+        assert isinstance(viewer, GitDiffView)
+        assert "-original" in viewer.diff_text
+        assert "+staged" in viewer.diff_text
+        assert "+working" not in viewer.diff_text
+
+        window.git_status_list.itemClicked.emit(changed)
+        viewer = window.active_tab().viewer
+        assert "-staged" in viewer.diff_text
+        assert "+working" in viewer.diff_text
+        assert "+staged" not in viewer.diff_text
+    finally:
+        window.close()
+
+
+def test_git_diff_binary_summary_and_hunk_navigation(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage
+    from sp.app.folder_navigator.window import GitDiffView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    binary = tmp_path / "payload.bin"
+    binary.write_bytes(b"header\x00payload\xff")
+    window = Window(tmp_path)
+    try:
+        window.refresh_git_status()
+        item = next(
+            window.git_status_list.item(row)
+            for row in range(window.git_status_list.count())
+            if isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+            and window.git_status_list.item(row).data(Qt.UserRole)["path"]
+            == binary.name
+        )
+        window.git_status_list.itemClicked.emit(item)
+        viewer = window.active_tab().viewer
+        assert viewer.is_binary
+        assert "Binary file changed" in viewer.editor.toPlainText()
+        assert not viewer.next_button.isEnabled()
+
+        image_path = tmp_path / "preview.png"
+        image = QImage(5, 4, QImage.Format.Format_ARGB32)
+        image.fill(QColor("#3b82f6"))
+        assert image.save(str(image_path))
+        window.refresh_git_status()
+        image_item = next(
+            window.git_status_list.item(row)
+            for row in range(window.git_status_list.count())
+            if isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+            and window.git_status_list.item(row).data(Qt.UserRole)["path"]
+            == image_path.name
+        )
+        window.git_status_list.itemClicked.emit(image_item)
+        image_viewer = window.active_tab().viewer
+        assert image_viewer.is_binary
+        assert image_viewer.editor is None
+        assert image_viewer.image_splitter.count() == 2
+
+        text_viewer = GitDiffView(
+            tmp_path / "two-hunks.txt",
+            "changed",
+            "@@ -1 +1 @@\n-old\n+new\n context\n@@ -20 +20 @@\n-before\n+after\n",
+        )
+        assert text_viewer.hunk_lines == [0, 4]
+        assert text_viewer.current_hunk == 0
+        text_viewer.move_hunk(1)
+        assert text_viewer.current_hunk == 1
+        assert text_viewer.hunk_label.text() == "Change 2 of 2"
+        text_viewer.move_hunk(1)
+        assert text_viewer.current_hunk == 0
+        text_viewer.deleteLater()
+    finally:
+        window.close()
+
+
+def test_git_status_multiselect_context_actions(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    staged = tmp_path / "staged.txt"
+    changed = tmp_path / "changed name.txt"
+    staged.write_text("staged", encoding="utf-8")
+    changed.write_text("changed", encoding="utf-8")
+    window = Window(tmp_path)
+    window.git_status_list.clear()
+    entries = [
+        {"path": "staged.txt", "original": None, "index": "A", "worktree": " "},
+        {"path": "changed name.txt", "original": None, "index": " ", "worktree": "M"},
+    ]
+    for entry in entries:
+        item = QListWidgetItem(entry["path"])
+        item.setData(Qt.UserRole, entry)
+        window.git_status_list.addItem(item)
+        item.setSelected(True)
+
+    menu = window._create_git_context_menu()
+    labels = [action.text() for action in menu.actions()]
+    assert labels == ["Stage", "Unstage", "Add to .gitignore"]
+
+    quiet_calls = []
+    monkeypatch.setattr(
+        window,
+        "_run_git_quiet_command",
+        lambda arguments, message: quiet_calls.append((arguments, message)),
+    )
+    window._git_stage_entries(entries)
+    window._git_ignore_entries(entries)
+    ignored = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "/staged.txt" in ignored
+    assert "/changed\\ name.txt" in ignored
+    window._git_unstage_entries(entries)
+
+    assert quiet_calls == [
+        (["add", "-A", "--", "staged.txt", "changed name.txt"], "Staged 2 files"),
+        (
+            ["rm", "--cached", "-r", "--", "staged.txt", "changed name.txt"],
+            "Unstaged 2 files",
+        ),
+    ]
+    menu.deleteLater()
+    window.close()
+
+
+def test_git_untracked_multiselect_context_removes_only_untracked_files(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    window = Window(tmp_path)
+    window.git_status_list.clear()
+    entries = [
+        {"path": "one.txt", "original": None, "index": "?", "worktree": "?"},
+        {"path": "two.txt", "original": None, "index": "?", "worktree": "?"},
+        {"path": "tracked.txt", "original": None, "index": " ", "worktree": "M"},
+    ]
+    for entry in entries:
+        (tmp_path / entry["path"]).write_text(entry["path"], encoding="utf-8")
+        item = QListWidgetItem(entry["path"])
+        item.setData(Qt.UserRole, entry)
+        item.setData(
+            Qt.UserRole + 2,
+            "untracked" if entry["index"] == "?" else "changed",
+        )
+        window.git_status_list.addItem(item)
+        item.setSelected(True)
+
+    removed = []
+    monkeypatch.setattr(
+        window,
+        "_delete_files",
+        lambda selected: removed.extend(selected),
+    )
+    monkeypatch.setattr(window, "refresh_git_status", lambda: None)
+    menu = window._create_git_context_menu()
+    action = next(
+        action for action in menu.actions()
+        if action.text() == "Remove Untracked File(s)…"
+    )
+    action.trigger()
+
+    assert removed == [tmp_path / "one.txt", tmp_path / "two.txt"]
+    menu.deleteLater()
+    window.close()
+
+
+def test_git_status_hover_buttons_use_file_action_assets(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    window = Window(tmp_path)
+    status_list = window.git_status_list
+    status_list.clear()
+    calls = []
+    monkeypatch.setattr(
+        window,
+        "_git_hover_action",
+        lambda action, entry: calls.append((action, entry["path"])),
+    )
+    status_list.actionRequested.disconnect()
+    status_list.actionRequested.connect(window._git_hover_action)
+
+    specs = [
+        ("untracked.txt", "?", "?", "untracked", {"stage", "remove"}),
+        ("changed.txt", " ", "M", "changed", {"stage"}),
+        ("staged.txt", "A", " ", "staged", {"unstage"}),
+    ]
+    for path, index_code, worktree_code, category, expected in specs:
+        entry = {
+            "path": path,
+            "original": None,
+            "index": index_code,
+            "worktree": worktree_code,
+        }
+        item = QListWidgetItem(path)
+        item.setData(Qt.UserRole, entry)
+        item.setData(Qt.UserRole + 2, category)
+        status_list.addItem(item)
+        status_list._show_actions_for_item(item)
+        shown = {
+            name for name, button in status_list._hover_buttons.items()
+            if not button.isHidden()
+        }
+        assert shown == expected
+        assert all(
+            not status_list._hover_buttons[name].icon().isNull()
+            for name in expected
+        )
+
+    status_list._show_actions_for_item(status_list.item(0))
+    status_list._hover_buttons["remove"].click()
+    status_list._hover_buttons["stage"].click()
+    status_list._show_actions_for_item(status_list.item(2))
+    status_list._hover_buttons["unstage"].click()
+
+    assert calls == [
+        ("remove", "untracked.txt"),
+        ("stage", "untracked.txt"),
+        ("unstage", "staged.txt"),
+    ]
+    window.close()
+
+
+def test_git_status_hover_multiselect_anchors_first_and_applies_to_selection(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    window = Window(tmp_path)
+    status_list = window.git_status_list
+    status_list.clear()
+    specs = [
+        ("untracked.txt", "?", "?", "untracked"),
+        ("changed.txt", " ", "M", "changed"),
+        ("staged.txt", "A", " ", "staged"),
+    ]
+    for path, index_code, worktree_code, category in specs:
+        entry = {
+            "path": path,
+            "original": None,
+            "index": index_code,
+            "worktree": worktree_code,
+        }
+        item = QListWidgetItem(path)
+        item.setData(Qt.UserRole, entry)
+        item.setData(Qt.UserRole + 2, category)
+        status_list.addItem(item)
+        item.setSelected(True)
+
+    calls = []
+    monkeypatch.setattr(
+        window,
+        "_git_stage_entries",
+        lambda entries: calls.append(("stage", [entry["path"] for entry in entries])),
+    )
+    monkeypatch.setattr(
+        window,
+        "_git_unstage_entries",
+        lambda entries: calls.append(("unstage", [entry["path"] for entry in entries])),
+    )
+    monkeypatch.setattr(
+        window,
+        "_git_remove_untracked_entries",
+        lambda entries: calls.append(("remove", [entry["path"] for entry in entries])),
+    )
+
+    status_list._show_actions_for_item(status_list.item(2))
+
+    assert status_list._hover_item is status_list.item(0)
+    assert {
+        name for name, button in status_list._hover_buttons.items()
+        if not button.isHidden()
+    } == {"stage", "unstage", "remove"}
+    for action in ("stage", "unstage", "remove"):
+        status_list._hover_buttons[action].click()
+
+    assert calls == [
+        ("stage", ["untracked.txt", "changed.txt"]),
+        ("unstage", ["staged.txt"]),
+        ("remove", ["untracked.txt"]),
+    ]
+    window.close()
+
+
 def test_non_git_folder_omits_git_header_controls(tmp_path, monkeypatch, app):
     from sp.app.folder_navigator.window import Window
 
@@ -3465,6 +4094,27 @@ def test_non_git_folder_omits_git_header_controls(tmp_path, monkeypatch, app):
     assert window.git_pull_button is None
     assert window.git_commit_button is None
     assert window.git_push_button is None
+    assert window.git_refresh_button is None
+    assert window.git_page is None
+    window.close()
+
+
+def test_disabled_git_tab_still_ignores_folder_metadata(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".stillpoint_folder_navigator.json").write_text(
+        json.dumps({str(tmp_path): {"git_enabled": False}}),
+        encoding="utf-8",
+    )
+
+    window = Window(tmp_path)
+
+    assert window.git_page is None
+    assert ".sp_folder/" in (tmp_path / ".gitignore").read_text(
+        encoding="utf-8"
+    ).splitlines()
     window.close()
 
 
@@ -3526,7 +4176,9 @@ def test_folder_terminal_uses_native_platform_launcher(
     window.close()
 
 
-def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot):
+@pytest.mark.parametrize("dismiss_key", ["escape", "enter"])
+def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot, dismiss_key):
+    from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from sp.app.folder_navigator.window import GitCommandDialog
 
@@ -3544,7 +4196,12 @@ def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot):
     assert "git version" in output
     assert "[git exited with code 0]" in output
     assert "background: #07110a" in dialog.output.styleSheet()
-    dialog.ok_button.click()
+    QTest.keyClick(
+        dialog,
+        Qt.Key_Escape if dismiss_key == "escape" else Qt.Key_Return,
+    )
+    QTest.qWait(10)
+    assert not dialog.isVisible()
 
 
 def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):

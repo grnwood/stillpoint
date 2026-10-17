@@ -218,6 +218,58 @@ def test_non_vi_ctrl_alt_v_opens_vault_picker_signal(qapp: QApplication) -> None
     editor.close()
 
 
+def test_navigation_escape_is_not_swallowed_by_blank_or_read_only_lines(
+    qapp: QApplication,
+) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    fired: list[bool] = []
+    editor.navigationEscapePressed.connect(lambda: fired.append(True))
+
+    for text, read_only in (("content\n", False), ("content\n   ", False), ("content", True)):
+        editor._read_only_mode = read_only
+        editor.setPlainText(text)
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        editor.setTextCursor(cursor)
+        before = len(fired)
+
+        QTest.keyClick(editor, Qt.Key_Escape)
+
+        assert len(fired) == before + 1
+
+    editor._read_only_mode = False
+    editor.set_vi_mode_enabled(True)
+    editor.setPlainText("")
+    before = len(fired)
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+
+    assert len(fired) == before + 1
+
+    editor.close()
+
+
+def test_empty_list_escape_clears_marker_then_becomes_navigation_escape(
+    qapp: QApplication,
+) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("- ")
+    fired: list[bool] = []
+    editor.navigationEscapePressed.connect(lambda: fired.append(True))
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+
+    assert editor.toPlainText() == ""
+    assert fired == []
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+
+    assert fired == [True]
+    editor.close()
+
+
 @pytest.mark.parametrize("vi_state", ["off", "navigation", "insert"])
 def test_option_arrows_navigate_page_history_without_moving_cursor(
     vi_state: str,

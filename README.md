@@ -107,6 +107,7 @@ The companion includes:
 - Syntax highlighting, Markdown heading navigation, find, explicit save/save-all, and external-change conflict checks.
 - Filename Quick Open (`Ctrl+P` / `Cmd+P`) backed by a filename-only `.sp_folder/catalog.sqlite3` cache. File contents are not placed in this cache.
 - On-demand filename and text-content search; no persistent content index is created.
+- A repository-only Git rail with grouped working-tree status, multi-select stage/unstage/ignore actions, and Pull/Commit/Push controls. Folder Navigator automatically adds `.sp_folder/` to the repository's `.gitignore`.
 - StillPoint vi navigation settings, including `h/j/k/l` in the folder tree and `Escape` from editor navigation mode to return to the current file in the tree.
 - Bookmarks for files and folders inside the current root, plus vault-scoped shortcuts that launch commonly used Folder Navigator roots from StillPoint.
 

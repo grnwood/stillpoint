@@ -73,8 +73,10 @@ _charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normal
 hidden += _charset_hidden
 _calamine_datas, _calamine_binaries, _calamine_hidden = collect_all('python_calamine')
 hidden += _calamine_hidden
+_openpyxl_datas, _openpyxl_binaries, _openpyxl_hidden = collect_all('openpyxl')
+hidden += _openpyxl_hidden
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.5').lstrip('v')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.6').lstrip('v')
 
 # Data files: templates + bundled assets
 _datas = [
@@ -137,8 +139,8 @@ _assets_dir = os.path.join(ROOT, 'sp', 'assets')
 
 datas = _datas
 datas += _charset_datas
-datas += _calamine_datas
-binaries = _charset_binaries + _calamine_binaries
+datas += _calamine_datas + _openpyxl_datas
+binaries = _charset_binaries + _calamine_binaries + _openpyxl_binaries
 
 _ripgrep_name = 'rg.exe' if sys.platform == 'win32' else 'rg'
 _ripgrep_binary = os.path.join(ROOT, 'packaging', 'vendor', 'ripgrep', _ripgrep_name)

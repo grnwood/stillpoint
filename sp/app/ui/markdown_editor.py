@@ -1758,6 +1758,7 @@ class MarkdownEditor(QTextEdit):
     findBarRequested = Signal(bool, bool, str)  # replace_mode, backwards_first, seed_query
     viInsertModeChanged = Signal(bool)  # Emits True when editor is in insert mode
     viNavigationEscapePressed = Signal()  # Unused Esc while in vi navigation mode
+    navigationEscapePressed = Signal()  # Unused Esc outside vi insert mode
     headingPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     vaultPickerRequested = Signal(object, bool)  # QPoint(global), prefer_above
     bookmarkPickerRequested = Signal()  # Request bookmark quick picker
@@ -5113,6 +5114,10 @@ class MarkdownEditor(QTextEdit):
         # Let vi navigation continue to work; editing commands are guarded inside handler
         if self._vi_feature_enabled and self._handle_vi_keypress(event):
             return True
+        # An otherwise-unused Escape is handled by keyPressEvent so the host
+        # window can return focus to navigation even when the vault is read-only.
+        if key == Qt.Key_Escape:
+            return False
         nav_keys = {
             Qt.Key_Left,
             Qt.Key_Right,
@@ -5468,7 +5473,8 @@ class MarkdownEditor(QTextEdit):
             if self._handle_escape_clear_empty_line():
                 event.accept()
                 return
-            super().keyPressEvent(event)
+            self.navigationEscapePressed.emit()
+            event.accept()
             return
         # ...existing code...
         # When at end-of-buffer, Down should still scroll the viewport
@@ -7767,20 +7773,23 @@ class MarkdownEditor(QTextEdit):
         if not block.isValid():
             return False
         text = block.text()
-        if text.strip():
-            is_task, _, _, task_content = self._is_task_line(text)
-            if is_task and not task_content.strip():
+        # A genuinely blank line has nothing to clear. Returning True here
+        # used to consume every Escape forever and prevented pane navigation.
+        if not text.strip():
+            return False
+        is_task, _, _, task_content = self._is_task_line(text)
+        if is_task and not task_content.strip():
+            pass
+        else:
+            is_bullet, _, bullet_content = self._is_bullet_line(text)
+            if is_bullet and not bullet_content.strip():
                 pass
             else:
-                is_bullet, _, bullet_content = self._is_bullet_line(text)
-                if is_bullet and not bullet_content.strip():
+                is_dash, _, dash_content = self._is_dash_line(text)
+                if is_dash and not dash_content.strip():
                     pass
                 else:
-                    is_dash, _, dash_content = self._is_dash_line(text)
-                    if is_dash and not dash_content.strip():
-                        pass
-                    else:
-                        return False
+                    return False
         cursor.beginEditBlock()
         cursor.select(QTextCursor.LineUnderCursor)
         cursor.removeSelectedText()
@@ -7874,6 +7883,7 @@ class MarkdownEditor(QTextEdit):
             if self._handle_escape_clear_empty_line():
                 return True
             self.viNavigationEscapePressed.emit()
+            self.navigationEscapePressed.emit()
             return True
         if key == Qt.Key_G:
             if shift:

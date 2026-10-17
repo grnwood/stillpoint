@@ -6,6 +6,7 @@ from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+import difflib
 import json
 import math
 import mimetypes
@@ -50,7 +51,14 @@ from .icon import (
     get_folder_navigator_icon,
 )
 from .launch import launch
-from .tabular import TablePreview, read_delimited_preview, read_workbook_preview
+from .tabular import (
+    TablePreview,
+    display_cell,
+    read_delimited_preview,
+    read_workbook_preview,
+    update_delimited_cell,
+    update_workbook_cell,
+)
 from sp.app.ui.keyboard_shortcuts import (
     history_cycle_modifier_release_key,
     history_cycle_sequences,
@@ -74,6 +82,10 @@ from sp.app.ui.theme import (
 )
 from sp.app.ui.utility_header import CompactToolbarIdentity, UtilityPanelHeader
 from sp.app.ui.markdown_preview import MarkdownReadingView
+from sp.app.ui.screen_positioning import (
+    clamp_popup_top_left,
+    popup_available_geometry,
+)
 from sp.app import config
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
@@ -120,6 +132,7 @@ class GitCommandDialog(QDialog):
         self.setModal(True)
         self.setMinimumSize(720, 420)
         self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        self._completed = False
 
         layout = QVBoxLayout(self)
         self.output = QPlainTextEdit(self)
@@ -138,6 +151,8 @@ class GitCommandDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=self)
         self.ok_button = buttons.button(QDialogButtonBox.Ok)
         self.ok_button.setEnabled(False)
+        self.ok_button.setDefault(True)
+        self.ok_button.setAutoDefault(True)
         self.ok_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
 
@@ -186,11 +201,365 @@ class GitCommandDialog(QDialog):
         self._complete()
 
     def _complete(self) -> None:
+        self._completed = True
         self.ok_button.setEnabled(True)
+        self.ok_button.setFocus(Qt.OtherFocusReason)
 
     def reject(self) -> None:
-        # Command results are intentionally acknowledged with the OK button.
-        return
+        if self._completed:
+            self.accept()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if self._completed and event.key() in (
+            Qt.Key_Escape,
+            Qt.Key_Return,
+            Qt.Key_Enter,
+        ):
+            self.accept()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class GitStatusList(QListWidget):
+    """Git status list with compact per-row actions revealed on hover."""
+
+    actionRequested = Signal(str, object)
+
+    def __init__(self, icons: dict[str, QIcon], parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.setStyleSheet(
+            "QListWidget::item:hover {"
+            "background-color: palette(highlight);"
+            "color: palette(highlighted-text);"
+            "}"
+            "QListWidget::item:selected {"
+            "background-color: palette(highlight);"
+            "color: palette(highlighted-text);"
+            "}"
+            "QToolButton {"
+            "background-color: palette(base);"
+            "color: palette(text);"
+            "border: 2px solid palette(highlight);"
+            "border-radius: 4px;"
+            "}"
+            "QToolButton:hover, QToolButton:focus {"
+            "background-color: palette(highlight);"
+            "color: palette(highlighted-text);"
+            "border-color: palette(highlighted-text);"
+            "}"
+            "QToolButton:pressed {"
+            "background-color: palette(dark);"
+            "color: palette(bright-text);"
+            "}"
+        )
+        self._pointer_item = None
+        self._hover_item = None
+        self._hover_entry = None
+        self._hover_buttons: dict[str, QToolButton] = {}
+        tooltips = {
+            "remove": "Remove untracked file (move to Trash)",
+            "stage": "Stage file",
+            "unstage": "Unstage file",
+        }
+        for action_name in ("remove", "stage", "unstage"):
+            button = QToolButton(self.viewport())
+            button.setObjectName(f"gitStatus{action_name.title()}Button")
+            button.setAutoRaise(False)
+            button.setFixedSize(24, 22)
+            button.setIconSize(QSize(17, 17))
+            button.setIcon(icons.get(action_name, QIcon()))
+            button.setToolTip(tooltips[action_name])
+            button.setAccessibleName(tooltips[action_name])
+            button.clicked.connect(
+                lambda _checked=False, selected=action_name: self._request_action(selected)
+            )
+            button.hide()
+            self._hover_buttons[action_name] = button
+        self.itemSelectionChanged.connect(self._selection_changed)
+    def _request_action(self, action_name: str) -> None:
+        entry = self._hover_entry
+        if isinstance(entry, dict):
+            self.actionRequested.emit(action_name, dict(entry))
+
+    def _actions_for_item(self, item) -> list[str]:
+        entry = item.data(Qt.UserRole) if item is not None else None
+        category = item.data(Qt.UserRole + 2) if item is not None else None
+        if not isinstance(entry, dict):
+            return []
+        if category == "untracked":
+            return ["stage", "remove"]
+        if category == "staged":
+            return ["unstage"]
+        if category == "changed":
+            return ["stage"]
+        if category == "conflict":
+            actions = ["stage"]
+            if entry.get("index") not in {" ", "?"}:
+                actions.append("unstage")
+            return actions
+        return []
+
+    def _selected_file_items(self) -> list[QListWidgetItem]:
+        items = [
+            item for item in self.selectedItems()
+            if isinstance(item.data(Qt.UserRole), dict)
+        ]
+        return sorted(items, key=self.row)
+
+    def _actions_for_items(self, items: list[QListWidgetItem]) -> list[str]:
+        entries = [item.data(Qt.UserRole) for item in items]
+        actions = []
+        if any(
+                entry["worktree"] != " " or entry["index"] == "?"
+                for entry in entries):
+            actions.append("stage")
+        if any(entry["index"] not in {" ", "?"} for entry in entries):
+            actions.append("unstage")
+        if any(entry["index"] == "?" for entry in entries):
+            actions.append("remove")
+        return actions
+
+    def _hide_hover_actions(self) -> None:
+        self._pointer_item = None
+        self._hover_item = None
+        self._hover_entry = None
+        for button in self._hover_buttons.values():
+            button.hide()
+
+    def _show_actions_for_item(self, item) -> None:
+        selected = self._selected_file_items()
+        if len(selected) > 1:
+            item = selected[0]
+            actions = self._actions_for_items(selected)
+        else:
+            actions = self._actions_for_item(item)
+        if not actions:
+            self._hide_hover_actions()
+            return
+        self._hover_item = item
+        self._hover_entry = item.data(Qt.UserRole)
+        rect = self.visualItemRect(item)
+        right = self.viewport().width() - 5
+        for action_name in reversed(actions):
+            button = self._hover_buttons[action_name]
+            right -= button.width()
+            button.move(right, rect.center().y() - button.height() // 2)
+            button.show()
+            button.raise_()
+            right -= 2
+        for action_name, button in self._hover_buttons.items():
+            if action_name not in actions:
+                button.hide()
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        item = self.itemAt(event.pos())
+        if item is not self._pointer_item:
+            self._pointer_item = item
+            self._show_actions_for_item(item)
+        super().mouseMoveEvent(event)
+
+    def _selection_changed(self) -> None:
+        if self._pointer_item is not None:
+            pointer_item = self._pointer_item
+            self._show_actions_for_item(pointer_item)
+            self._pointer_item = pointer_item
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._hide_hover_actions()
+        super().leaveEvent(event)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:  # type: ignore[override]
+        self._hide_hover_actions()
+        super().scrollContentsBy(dx, dy)
+
+    def clear(self) -> None:  # type: ignore[override]
+        self._hide_hover_actions()
+        super().clear()
+
+
+class GitDiffView(QWidget):
+    """Read-only, hunk-navigable rendering of one Git status entry."""
+
+    openRequested = Signal()
+
+    def __init__(self, path: Path, category: str, text: str, *, binary=False,
+                 can_open=True, images=None, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.category = category
+        self.diff_text = text
+        self.is_binary = binary
+        self.current_hunk = -1
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        toolbar = QFrame(self)
+        toolbar.setObjectName("folderGitDiffToolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(8, 5, 8, 5)
+        toolbar_layout.setSpacing(6)
+        comparison = {
+            "staged": "HEAD → staged",
+            "changed": "staged → working file",
+            "untracked": "empty → working file",
+            "conflict": "conflict changes",
+        }.get(category, "Git changes")
+        self.title_label = QLabel(f"{path.name}  ·  {comparison}")
+        self.title_label.setAccessibleName("Git comparison")
+        toolbar_layout.addWidget(self.title_label, 1)
+        self.previous_button = QToolButton(toolbar)
+        self.previous_button.setText("Previous")
+        self.previous_button.setToolTip("Previous changed hunk (Shift+F7 or Alt+Up)")
+        self.previous_button.setAccessibleName("Previous changed hunk")
+        self.next_button = QToolButton(toolbar)
+        self.next_button.setText("Next")
+        self.next_button.setToolTip("Next changed hunk (F7 or Alt+Down)")
+        self.next_button.setAccessibleName("Next changed hunk")
+        self.hunk_label = QLabel("No line changes")
+        self.hunk_label.setAccessibleName("Current changed hunk")
+        self.open_button = QPushButton("Open File", toolbar)
+        self.open_button.setEnabled(can_open)
+        self.open_button.setToolTip(
+            "Open the working file in the normal editor"
+            if can_open else "The working file does not exist"
+        )
+        for control in (
+            self.previous_button,
+            self.next_button,
+            self.hunk_label,
+            self.open_button,
+        ):
+            toolbar_layout.addWidget(control)
+        layout.addWidget(toolbar)
+
+        self.image_splitter = None
+        if images:
+            summary = QLabel(text, self)
+            summary.setWordWrap(True)
+            summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            summary.setContentsMargins(10, 8, 10, 8)
+            layout.addWidget(summary)
+            self.image_splitter = QSplitter(Qt.Horizontal, self)
+            first_scroll = None
+            for label_text, pixels in images:
+                panel = QWidget(self.image_splitter)
+                panel_layout = QVBoxLayout(panel)
+                panel_layout.setContentsMargins(6, 6, 6, 6)
+                panel_layout.addWidget(QLabel(label_text))
+                if pixels is None or pixels.isNull():
+                    missing = QLabel("Not present", panel)
+                    missing.setAlignment(Qt.AlignCenter)
+                    panel_layout.addWidget(missing, 1)
+                else:
+                    scroll = QScrollArea(panel)
+                    scroll.setWidgetResizable(False)
+                    image_label = QLabel(scroll)
+                    image_label.setAlignment(Qt.AlignCenter)
+                    pixmap = QPixmap.fromImage(pixels)
+                    image_label.setPixmap(pixmap)
+                    image_label.resize(pixmap.size())
+                    scroll.setWidget(image_label)
+                    scroll.setAccessibleName(f"{label_text} image")
+                    panel_layout.addWidget(scroll, 1)
+                    if first_scroll is None:
+                        first_scroll = scroll
+                self.image_splitter.addWidget(panel)
+            layout.addWidget(self.image_splitter, 1)
+            self.editor = None
+            if first_scroll is not None:
+                first_scroll.setProperty("folderNavigatorFocusTarget", True)
+                self.setFocusProxy(first_scroll)
+        else:
+            self.editor = QPlainTextEdit(self)
+            self.editor.setObjectName("folderGitDiffText")
+            self.editor.setAccessibleName(
+                "Binary Git change summary" if binary else "Read-only Git diff"
+            )
+            self.editor.setProperty("folderNavigatorFocusTarget", True)
+            self.editor.setReadOnly(True)
+            self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self.editor.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+            self.editor.setPlainText(text)
+            layout.addWidget(self.editor, 1)
+            self.setFocusProxy(self.editor)
+
+        self.hunk_lines = [
+            line_number
+            for line_number, line in enumerate(text.splitlines())
+            if line.startswith("@@")
+        ]
+        enabled = bool(self.hunk_lines) and not binary
+        self.previous_button.setEnabled(enabled)
+        self.next_button.setEnabled(enabled)
+        self.previous_button.clicked.connect(lambda: self.move_hunk(-1))
+        self.next_button.clicked.connect(lambda: self.move_hunk(1))
+        self.open_button.clicked.connect(self.openRequested)
+        self._shortcuts = []
+        for sequence, direction in (
+            ("Shift+F7", -1),
+            ("Alt+Up", -1),
+            ("F7", 1),
+            ("Alt+Down", 1),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda selected=direction: self.move_hunk(selected)
+            )
+            self._shortcuts.append(shortcut)
+        self._apply_line_highlights()
+        if self.hunk_lines:
+            self.show_hunk(0)
+
+    def _apply_line_highlights(self) -> None:
+        if self.is_binary or self.editor is None:
+            return
+        selections = []
+        document = self.editor.document()
+        # Cap full-width formatting so generated or minified diffs remain responsive.
+        for line_number, line in enumerate(self.diff_text.splitlines()[:20_000]):
+            color = None
+            foreground = None
+            if line.startswith("+++") or line.startswith("---"):
+                color = QColor(80, 100, 140, 70)
+            elif line.startswith("+"):
+                color = QColor(38, 150, 80, 72)
+            elif line.startswith("-"):
+                color = QColor(210, 55, 65, 72)
+            elif line.startswith("@@"):
+                color = QColor(60, 125, 210, 95)
+                foreground = self.palette().color(QPalette.Text)
+            if color is None:
+                continue
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = QTextCursor(document.findBlockByNumber(line_number))
+            selection.format.setBackground(color)
+            if foreground is not None:
+                selection.format.setForeground(foreground)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selections.append(selection)
+        self.editor.setExtraSelections(selections)
+
+    def show_hunk(self, index: int) -> None:
+        if not self.hunk_lines or self.editor is None:
+            return
+        self.current_hunk = index % len(self.hunk_lines)
+        block = self.editor.document().findBlockByNumber(
+            self.hunk_lines[self.current_hunk]
+        )
+        self.editor.setTextCursor(QTextCursor(block))
+        self.editor.centerCursor()
+        self.hunk_label.setText(
+            f"Change {self.current_hunk + 1} of {len(self.hunk_lines)}"
+        )
+
+    def move_hunk(self, direction: int) -> None:
+        if self.hunk_lines:
+            self.show_hunk(self.current_hunk + (1 if direction > 0 else -1))
 
 
 @lru_cache(maxsize=1)
@@ -799,8 +1168,11 @@ class TablePreviewModel(QAbstractTableModel):
             return None
         source_row = self.row_order[index.row()]
         row = self.preview.rows[source_row]
-        if role in (Qt.DisplayRole, Qt.ToolTipRole):
-            return row[index.column()] if index.column() < len(row) else ""
+        value = row[index.column()] if index.column() < len(row) else ""
+        if role == Qt.DisplayRole:
+            return display_cell(value)
+        if role == Qt.ToolTipRole:
+            return value
         if role == Qt.BackgroundRole:
             color = QColor.fromHsl((index.column() * 47) % 360, 110, 128)
             color.setAlpha(18)
@@ -812,7 +1184,7 @@ class TablePreviewModel(QAbstractTableModel):
             if orientation == Qt.Vertical:
                 return section + 1 + (1 if self.header_row else 0)
             if self.header_row and section < len(self.preview.rows[0]):
-                return self.preview.rows[0][section]
+                return display_cell(self.preview.rows[0][section])
             return _spreadsheet_column_name(section)
         if role == Qt.ForegroundRole and orientation == Qt.Horizontal:
             return QColor.fromHsl((section * 47) % 360, 180, 115)
@@ -1030,6 +1402,7 @@ class FilterHeaderView(QHeaderView):
         button = self._filter_rect(rect)
         palette = self.palette()
         painter.save()
+        painter.setFont(self.font())
         painter.setPen(palette.color(QPalette.Mid))
         painter.setBrush(
             palette.color(QPalette.Highlight)
@@ -1066,7 +1439,179 @@ class FilterHeaderView(QHeaderView):
         super().mousePressEvent(event)
 
 
+class WorksheetPicker(QWidget):
+    """Vault-picker-style popup for quickly switching workbook worksheets."""
+
+    sheetChosen = Signal(str)
+
+    def __init__(self, sheet_names, current_sheet="", parent=None):
+        super().__init__(
+            parent,
+            Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint,
+        )
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+        self.setStyleSheet(
+            "QWidget { background: "
+            f"{theme_value('main_window.picker_popup.bg', 'rgba(32,32,32,240)')}; "
+            "border: 1px solid "
+            f"{theme_value('main_window.picker_popup.border', '#666666')}; "
+            "border-radius: 6px; }"
+            "QLabel { border: none; font-weight: bold; }"
+            "QListWidget { background: transparent; color: "
+            f"{theme_value('main_window.picker_popup.list_text', '#f5f5f5')}; "
+            "border: none; }"
+            "QListWidget::item { padding: 6px 8px; }"
+            "QListWidget::item:selected { background: "
+            f"{theme_value('main_window.picker_popup.list_selected_bg', 'rgba(90,161,255,80)')}; "
+            "}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.addWidget(QLabel("Worksheet tabs", self))
+        self.list_widget = QListWidget(self)
+        self.list_widget.setAccessibleName("Worksheet tab picker")
+        self.list_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.list_widget.addItems([str(name) for name in sheet_names])
+        layout.addWidget(self.list_widget, 1)
+        matches = self.list_widget.findItems(str(current_sheet), Qt.MatchExactly)
+        self.list_widget.setCurrentItem(
+            matches[0] if matches else self.list_widget.item(0)
+        )
+        self.list_widget.itemActivated.connect(self._activate_item)
+        self.list_widget.itemDoubleClicked.connect(self._activate_item)
+        self.list_widget.installEventFilter(self)
+
+    def open_at(self, anchor: QWidget) -> None:
+        anchor_rect = anchor.rect()
+        width = min(max(360, int(anchor_rect.width() * 0.6)), 620)
+        visible_rows = max(5, min(12, self.list_widget.count()))
+        height = min(
+            max(220, 58 + visible_rows * max(28, self.list_widget.sizeHintForRow(0))),
+            max(220, int(anchor_rect.height() * 0.75)),
+        )
+        center = anchor.mapToGlobal(anchor_rect.center())
+        bounds = popup_available_geometry(anchor=center, parent=anchor)
+        desired = QPoint(center.x() - width // 2, center.y() - height // 2)
+        self.resize(width, height)
+        self.move(clamp_popup_top_left(desired, self.size(), bounds))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        current = self.list_widget.currentItem()
+        if current is not None:
+            self.list_widget.scrollToItem(
+                current, QAbstractItemView.PositionAtCenter
+            )
+        self.list_widget.setFocus(Qt.OtherFocusReason)
+
+    def _activate_item(self, item) -> None:
+        if item is None:
+            return
+        self.sheetChosen.emit(item.text())
+        self.hide()
+
+    def eventFilter(self, watched, event):  # type: ignore[override]
+        if watched is self.list_widget and event.type() == QEvent.KeyPress:
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
+            if event.key() == Qt.Key_Escape:
+                self.hide()
+                return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._activate_item(self.list_widget.currentItem())
+                return True
+            if modifiers == Qt.NoModifier or is_vi_navigation_chord(modifiers):
+                if event.key() in (Qt.Key_J, Qt.Key_Down):
+                    self.list_widget.setCurrentRow(
+                        min(
+                            self.list_widget.count() - 1,
+                            self.list_widget.currentRow() + 1,
+                        )
+                    )
+                    return True
+                if event.key() in (Qt.Key_K, Qt.Key_Up):
+                    self.list_widget.setCurrentRow(
+                        max(0, self.list_widget.currentRow() - 1)
+                    )
+                    return True
+        return super().eventFilter(watched, event)
+
+
+class CellContentDialog(QDialog):
+    """Editable, scrollable working buffer for one full table-cell value."""
+
+    def __init__(self, text: str, *, title: str = "Cell Content", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(820, 580)
+        layout = QVBoxLayout(self)
+
+        self.editor = QPlainTextEdit(self)
+        self.editor.setObjectName("tableCellContentBuffer")
+        self.editor.setAccessibleName("Cell content editing buffer")
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.editor.setPlainText(str(text))
+        layout.addWidget(self.editor, 1)
+
+        footer = QHBoxLayout()
+        self.character_count = QLabel(self)
+        footer.addWidget(self.character_count)
+        footer.addStretch(1)
+        self.copy_button = QPushButton("Copy to Clipboard", self)
+        self.copy_button.setIcon(self._copy_icon())
+        self.copy_button.setToolTip("Copy the complete edited buffer to the clipboard")
+        self.copy_button.clicked.connect(self._copy_to_clipboard)
+        footer.addWidget(self.copy_button)
+        self.save_button = QPushButton("Save to File", self)
+        self.save_button.setAutoDefault(False)
+        self.save_button.clicked.connect(self.accept)
+        footer.addWidget(self.save_button)
+        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.clicked.connect(self.reject)
+        footer.addWidget(self.cancel_button)
+        layout.addLayout(footer)
+
+        self.editor.textChanged.connect(self._update_character_count)
+        self.save_shortcut = QShortcut(QKeySequence.Save, self)
+        self.save_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.save_shortcut.activated.connect(self.accept)
+        self._update_character_count()
+        self.editor.setFocus(Qt.OtherFocusReason)
+
+    def _copy_icon(self) -> QIcon:
+        candidates = [Path(__file__).resolve().parents[2] / "assets" / "copy.svg"]
+        bundled = getattr(sys, "_MEIPASS", None)
+        if bundled:
+            root = Path(bundled)
+            candidates.extend(
+                (root / "sp" / "assets" / "copy.svg", root / "assets" / "copy.svg")
+            )
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            return QIcon()
+        pixmap = QIcon(str(path)).pixmap(QSize(18, 18))
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), self.palette().color(QPalette.ButtonText))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _update_character_count(self) -> None:
+        count = len(self.editor.toPlainText())
+        self.character_count.setText(
+            f"Editable buffer · {count:,} character{'s' if count != 1 else ''}"
+        )
+
+    def _copy_to_clipboard(self) -> None:
+        QApplication.clipboard().setText(self.editor.toPlainText())
+        self.copy_button.setText("Copied")
+        QTimer.singleShot(1400, self, lambda: self.copy_button.setText("Copy to Clipboard"))
+
+
 class PreviewTableView(QTableView):
+    cellEditRequested = Signal(object, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cell_tooltip = QTextEdit(self)
@@ -1087,7 +1632,9 @@ class PreviewTableView(QTableView):
             "}"
         )
         self._tooltip_cell = None
+        self._cell_content_dialog = None
         self.vi_enabled = False
+        self.doubleClicked.connect(self._open_cell_content)
         self.vi_page_shortcuts = []
         for sequence, page_key in zip(
                 vi_navigation_sequences(), (Qt.Key_PageDown, Qt.Key_PageUp)):
@@ -1101,6 +1648,29 @@ class PreviewTableView(QTableView):
     def hide_cell_tooltip(self):
         self._tooltip_cell = None
         self._cell_tooltip.hide()
+
+    def _open_cell_content(self, index) -> None:
+        if not index.isValid():
+            return
+        value = index.data(Qt.ToolTipRole)
+        if value is None:
+            value = index.data(Qt.DisplayRole)
+        self.hide_cell_tooltip()
+        model = self.model()
+        column = str(model.headerData(index.column(), Qt.Horizontal) or "").strip()
+        title = f"Cell Content — Row {index.row() + 1}"
+        if column:
+            title += f", {column}"
+        dialog = CellContentDialog(str(value or ""), title=title, parent=self)
+        self._cell_content_dialog = dialog
+        try:
+            result = dialog.exec()
+            edited = dialog.editor.toPlainText()
+            if result == QDialog.Accepted and edited != str(value or ""):
+                self.cellEditRequested.emit(index, edited)
+        finally:
+            self._cell_content_dialog = None
+            dialog.deleteLater()
 
     def viewportEvent(self, event):  # type: ignore[override]
         if event.type() == QEvent.ToolTip:
@@ -1222,6 +1792,14 @@ class PreviewTableView(QTableView):
         self.scrollTo(target)
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if (
+            event.key() in (Qt.Key_Return, Qt.Key_Enter)
+            and event.modifiers() & ~Qt.KeypadModifier == Qt.NoModifier
+            and self.currentIndex().isValid()
+        ):
+            self._open_cell_content(self.currentIndex())
+            event.accept()
+            return
         if (self.vi_enabled
                 and event.key() in (Qt.Key_J, Qt.Key_K)
                 and is_vi_navigation_chord(event.modifiers() & ~Qt.KeypadModifier)):
@@ -1273,6 +1851,7 @@ class SpreadsheetView(QWidget):
     sheetRequested = Signal(str)
     sourceRequested = Signal()
     statusRequested = Signal(str, int)
+    cellEditRequested = Signal(int, int, str)
 
     @staticmethod
     def _filter_icon(palette, *, active=False):
@@ -1305,6 +1884,7 @@ class SpreadsheetView(QWidget):
         controls = QHBoxLayout()
         self.sheet_selector = QComboBox()
         self.sheet_selector.setAccessibleName("Worksheet")
+        self.sheet_selector.setToolTip("Choose worksheet (Ctrl/Cmd+T)")
         self.sheet_selector.currentTextChanged.connect(self._sheet_changed)
         controls.addWidget(self.sheet_selector)
         self.first_row_header = QCheckBox("First row contains headers")
@@ -1353,6 +1933,7 @@ class SpreadsheetView(QWidget):
         self.summary = QLabel()
         layout.addWidget(self.summary)
         self.table = PreviewTableView()
+        self.table.cellEditRequested.connect(self._request_cell_edit)
         self.filter_header = FilterHeaderView(self.table)
         self.filter_header.filterRequested.connect(self._show_column_filter)
         self.table.setHorizontalHeader(self.filter_header)
@@ -1371,6 +1952,13 @@ class SpreadsheetView(QWidget):
         find_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         find_shortcut.activated.connect(lambda: (self.search.setFocus(), self.search.selectAll()))
         self.find_shortcut = find_shortcut
+        self.sheet_picker = None
+        self.sheet_picker_shortcuts = []
+        for sequence in ("Ctrl+T", "Meta+T"):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self.show_sheet_picker)
+            self.sheet_picker_shortcuts.append(shortcut)
         self.filter_timer = QTimer(self)
         self.filter_timer.setSingleShot(True)
         self.filter_timer.setInterval(160)
@@ -1518,6 +2106,59 @@ class SpreadsheetView(QWidget):
             self.summary.setText(f"Loading {name}…")
             self.sheetRequested.emit(name)
 
+    def show_sheet_picker(self) -> None:
+        if not self.preview.sheet_names:
+            return
+        picker = self.sheet_picker
+        if picker is not None:
+            try:
+                if picker.isVisible():
+                    return
+                picker.close()
+                picker.deleteLater()
+            except RuntimeError:
+                pass
+        picker = WorksheetPicker(
+            self.preview.sheet_names,
+            self.sheet_selector.currentText() or self.preview.sheet_name or "",
+            self,
+        )
+        picker.sheetChosen.connect(self._choose_sheet_from_picker)
+        self.sheet_picker = picker
+        picker.open_at(self.table)
+
+    def _choose_sheet_from_picker(self, sheet_name: str) -> None:
+        index = self.sheet_selector.findText(sheet_name, Qt.MatchExactly)
+        if index >= 0:
+            self.sheet_selector.setCurrentIndex(index)
+        QTimer.singleShot(
+            0, self.table, lambda: self.table.setFocus(Qt.OtherFocusReason)
+        )
+
+    def _request_cell_edit(self, index, value):
+        if not index.isValid() or index.row() >= len(self.model.row_order):
+            return
+        source_row = self.model.row_order[index.row()]
+        self.cellEditRequested.emit(source_row, index.column(), value)
+
+    def apply_saved_cell(self, source_row: int, column: int, value: str) -> None:
+        if not (0 <= source_row < len(self.preview.rows)) or column < 0:
+            return
+        self.model.beginResetModel()
+        row = self.preview.rows[source_row]
+        if len(row) <= column:
+            row.extend([""] * (column + 1 - len(row)))
+        row[column] = value
+        self.model.columns = max(self.model.columns, len(row))
+        self.model._rebuild_row_order()
+        self.model.visible_rows = min(
+            max(self.model.visible_rows, self.model.CHUNK_ROWS),
+            self.model._data_row_count(),
+        )
+        self.model.endResetModel()
+        self._populate_filter_columns()
+        self._update_summary()
+
     def _header_toggled(self, enabled):
         self.model.set_header_row(enabled)
         self._sort_column = -1
@@ -1595,7 +2236,18 @@ class SpreadsheetView(QWidget):
         size = font.pointSizeF() if font.pointSizeF() > 0 else QApplication.font().pointSizeF()
         font.setPointSizeF(max(6.0, size + steps))
         self.table.setFont(font)
-        self.table.horizontalHeader().setFont(font)
+        horizontal_header = self.table.horizontalHeader()
+        horizontal_header.setFont(font)
+        # A global Qt stylesheet can override QHeaderView's widget font while
+        # painting individual sections. Set the section size explicitly so
+        # column labels follow table zoom consistently across themes.
+        horizontal_header.setStyleSheet(
+            "QHeaderView::section {"
+            f"font-size: {font.pointSizeF():.2f}pt;"
+            "}"
+        )
+        horizontal_header.updateGeometry()
+        horizontal_header.viewport().update()
         self.table.verticalHeader().setFont(font)
 
     def zoom_in(self):
@@ -3603,22 +4255,15 @@ class Window(QMainWindow):
         self.git_pull_button = None
         self.git_commit_button = None
         self.git_push_button = None
-        if (self.root / ".git").exists():
-            self.git_pull_button = self._make_header_button(
-                "git-pull.svg", "Git pull", self._git_pull
-            )
-            self.git_commit_button = self._make_header_button(
-                "git-commit.svg", "Git commit", self._git_commit
-            )
-            self.git_push_button = self._make_header_button(
-                "git-push.svg", "Git push", self._git_push
-            )
-            for button in (
-                self.git_pull_button,
-                self.git_commit_button,
-                self.git_push_button,
-            ):
-                self.folder_panel_header.add_trailing_widget(button)
+        self.git_refresh_button = None
+        self.git_repository = (self.root / ".git").exists()
+        self.git_enabled = bool(self.state.get("git_enabled", True)) and self.git_repository
+        self.git_page = None
+        self.git_panel_header = None
+        self.git_status_list = None
+        self.git_status_label = None
+        if self.git_repository:
+            self._ensure_folder_metadata_ignored()
         self.terminal_button = self._make_header_button(
             "terminal.svg",
             "Open terminal here",
@@ -3640,6 +4285,66 @@ class Window(QMainWindow):
         self.rail.setObjectName("folderNavigatorRail")
         self.rail.addTab(self.folder_page, "Files")
         self.rail.addTab(search_page, "Search")
+        if self.git_enabled:
+            self.git_page = QWidget()
+            git_layout = QVBoxLayout(self.git_page)
+            git_layout.setContentsMargins(0, 0, 0, 0)
+            git_layout.setSpacing(0)
+            self.git_panel_header = UtilityPanelHeader(
+                "Git",
+                self.root.name,
+                accent_color=identity_accent,
+            )
+            self.git_panel_header.detail_label.setMaximumWidth(160)
+            self.git_panel_header.set_detail(self.root.name, str(self.root))
+            self.git_pull_button = self._make_header_button(
+                "git-pull.svg", "Git pull", self._git_pull, self.git_panel_header
+            )
+            self.git_commit_button = self._make_header_button(
+                "git-commit.svg", "Git commit", self._git_commit, self.git_panel_header
+            )
+            self.git_push_button = self._make_header_button(
+                "git-push.svg", "Git push", self._git_push, self.git_panel_header
+            )
+            self.git_refresh_button = QToolButton(self.git_panel_header)
+            self.git_refresh_button.setAutoRaise(True)
+            self.git_refresh_button.setIconSize(QSize(18, 18))
+            self.git_refresh_button.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+            )
+            self.git_refresh_button.setToolTip("Refresh Git status")
+            self.git_refresh_button.setAccessibleName("Refresh Git status")
+            self.git_refresh_button.clicked.connect(self.refresh_git_status)
+            for button in (
+                self.git_refresh_button,
+                self.git_pull_button,
+                self.git_commit_button,
+                self.git_push_button,
+            ):
+                self.git_panel_header.add_trailing_widget(button)
+            git_layout.addWidget(self.git_panel_header)
+            self.git_status_label = QLabel("Loading Git status…")
+            self.git_status_label.setContentsMargins(8, 6, 8, 6)
+            git_layout.addWidget(self.git_status_label)
+            self.git_status_list = GitStatusList(
+                {
+                    "remove": self._header_asset_icon("reset-file.svg"),
+                    "stage": self._header_asset_icon("stage-file.svg"),
+                    "unstage": self._header_asset_icon("unstage-file.svg"),
+                }
+            )
+            self.git_status_list.setObjectName("folderNavigatorGitStatus")
+            self.git_status_list.setSelectionMode(
+                QAbstractItemView.SelectionMode.ExtendedSelection
+            )
+            self.git_status_list.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.git_status_list.customContextMenuRequested.connect(self._git_status_menu)
+            self.git_status_list.itemClicked.connect(self._open_git_status_item)
+            self.git_status_list.itemActivated.connect(self._open_git_status_file)
+            self.git_status_list.actionRequested.connect(self._git_hover_action)
+            git_layout.addWidget(self.git_status_list)
+            self.rail.addTab(self.git_page, "Git")
+            self.rail.currentChanged.connect(self._rail_changed)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("folderNavigatorEditors")
         self.tabs.setTabsClosable(True)
@@ -4284,6 +4989,15 @@ class Window(QMainWindow):
         columns_toolbar.addWidget(self.identity_bar)
         add(go_menu, "Folder", lambda: (self.rail.setCurrentIndex(0), self.tree.setFocus()))
         add(go_menu, "Search", lambda: (self.rail.setCurrentIndex(1), self.search_input.setFocus()))
+        if self.git_page is not None:
+            add(
+                go_menu,
+                "Git",
+                lambda: (
+                    self.rail.setCurrentWidget(self.git_page),
+                    self.git_status_list.setFocus(),
+                ),
+            )
         add(go_menu, "Editor", lambda: self._focus_tab_content(self.active_tab()))
         add(go_menu, "Markdown Headings…", self._show_active_heading_picker, "Ctrl+Alt+T")
         add(go_menu, "Quick Open", self.quick_open, "Ctrl+J")
@@ -4806,7 +5520,10 @@ class Window(QMainWindow):
         return [self.tabs.widget(i) for i in range(self.tabs.count())]
 
     def _index_for(self, path):
-        return next((i for i, tab in enumerate(self.all_tabs()) if tab.path == path), -1)
+        return next((
+            i for i, tab in enumerate(self.all_tabs())
+            if tab.path == path and not tab.property("folderGitDiff")
+        ), -1)
 
     def _tree_selected(self, current, previous):
         if self._suppress_tree_preview:
@@ -5821,11 +6538,16 @@ class Window(QMainWindow):
             preview, allow_source=allow_source, zoom_steps=self.editor_zoom_steps,
             vi_enabled=self.tree.vi_enabled,
         )
+        install_primary_wheel_zoom(viewer.table, self._zoom_active_view)
         viewer.requested_sheet = preview.sheet_name
         viewer.statusRequested.connect(self.statusBar().showMessage)
         if viewer.value_filter_disabled_reason:
             self.statusBar().showMessage(viewer.value_filter_disabled_reason, 8000)
         viewer.sourceRequested.connect(lambda selected=path: self._open_table_as_text(selected))
+        viewer.cellEditRequested.connect(
+            lambda row, column, value, selected=path, view=viewer:
+            self._save_table_cell(selected, view, row, column, value)
+        )
         viewer.sheetRequested.connect(
             lambda sheet, selected=path, view=viewer: self._request_workbook_sheet(
                 selected, sheet, view
@@ -5975,6 +6697,28 @@ class Window(QMainWindow):
     def _request_workbook_sheet(self, path, sheet_name, viewer):
         viewer.requested_sheet = sheet_name
         self._load_workbook_preview(path, sheet_name)
+
+    def _save_table_cell(self, path, viewer, row, column, value):
+        path = Path(path)
+        try:
+            if path.suffix.casefold() in DELIMITED_SUFFIXES:
+                update_delimited_cell(path, row, column, value)
+            else:
+                sheet_name = viewer.preview.sheet_name
+                if not sheet_name:
+                    raise ValueError("The workbook has no active worksheet")
+                update_workbook_cell(path, sheet_name, row, column, value)
+        except (OSError, RuntimeError, ValueError, IndexError) as exc:
+            self.statusBar().showMessage(f"Could not save cell: {exc}", 12000)
+            QMessageBox.warning(self, "Cell Save Failed", str(exc))
+            return
+        viewer.apply_saved_cell(row, column, value)
+        tab_index = self._index_for(path)
+        if tab_index >= 0:
+            self.tabs.widget(tab_index).preview_signature = fingerprint(path)
+        self.statusBar().showMessage(
+            f"Saved row {row + 1}, column {column + 1} to {path.name}", 4000
+        )
 
     def _open_table_as_text(self, path):
         index = self._index_for(path)
@@ -7148,20 +7892,34 @@ class Window(QMainWindow):
         path = next((candidate for candidate in candidates if candidate.exists()), None)
         if path is None:
             return QIcon()
-        pixmap = QIcon(str(path)).pixmap(QSize(18, 18))
-        painter = QPainter(pixmap)
-        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), self.palette().color(QPalette.ButtonText))
-        painter.end()
-        return QIcon(pixmap)
+        source = QIcon(str(path))
+
+        def tinted(color) -> QPixmap:
+            pixmap = source.pixmap(QSize(18, 18))
+            painter = QPainter(pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), color)
+            painter.end()
+            return pixmap
+
+        icon = QIcon()
+        icon.addPixmap(
+            tinted(self.palette().color(QPalette.ButtonText)),
+            QIcon.Mode.Normal,
+        )
+        active = tinted(self.palette().color(QPalette.HighlightedText))
+        icon.addPixmap(active, QIcon.Mode.Active)
+        icon.addPixmap(active, QIcon.Mode.Selected)
+        return icon
 
     def _hidden_files_icon(self, visible: bool) -> QIcon:
         return self._header_asset_icon(
             "open-eye.svg" if visible else "closed-eye.svg"
         )
 
-    def _make_header_button(self, asset: str, tooltip: str, callback) -> QToolButton:
-        button = QToolButton(self.folder_panel_header)
+    def _make_header_button(
+            self, asset: str, tooltip: str, callback, parent=None) -> QToolButton:
+        button = QToolButton(parent or self.folder_panel_header)
         button.setAutoRaise(True)
         button.setIconSize(QSize(18, 18))
         button.setIcon(self._header_asset_icon(asset))
@@ -7172,6 +7930,34 @@ class Window(QMainWindow):
 
     def _run_git_command(self, arguments: list[str], title: str) -> None:
         GitCommandDialog(self.root, arguments, title, self).exec()
+        self.refresh_git_status()
+
+    def _run_git_quiet_command(
+            self, arguments: list[str], success_message: str) -> bool:
+        """Run a short Git mutation without opening the terminal dialog."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), *arguments],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                check=False,
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.statusBar().showMessage(f"Git command failed: {exc}", 10000)
+            return False
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            failure = detail or f"exit code {result.returncode}"
+            self.statusBar().showMessage(
+                f"Git command failed: {failure}",
+                12000,
+            )
+            return False
+        self.statusBar().showMessage(success_message, 3500)
+        self.refresh_git_status()
+        return True
 
     def _git_pull(self) -> None:
         self._run_git_command(["pull"], "Git Pull")
@@ -7188,6 +7974,526 @@ class Window(QMainWindow):
         message = message.strip()
         if accepted and message:
             self._run_git_command(["commit", "-m", message], "Git Commit")
+
+    def _ensure_folder_metadata_ignored(self) -> None:
+        """Keep Folder Navigator's private cache out of the repository."""
+        ignore_path = self.root / ".gitignore"
+        entry = b".sp_folder/"
+        try:
+            current = ignore_path.read_bytes() if ignore_path.exists() else b""
+            normalized = {
+                line.strip().rstrip(b"/")
+                for line in current.splitlines()
+                if line.strip() and not line.lstrip().startswith(b"#")
+            }
+            if entry.rstrip(b"/") in normalized:
+                return
+            separator = b"" if not current or current.endswith((b"\n", b"\r")) else b"\n"
+            with ignore_path.open("ab") as stream:
+                stream.write(separator + entry + b"\n")
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Could not add .sp_folder to .gitignore: {exc}", 10000
+            )
+
+    @staticmethod
+    def _parse_git_status(output: bytes | str) -> list[dict]:
+        """Parse ``git status --porcelain=v1 -z`` without losing odd filenames."""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="surrogateescape")
+        records = output.split("\0")
+        parsed = []
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record or len(record) < 4 or record[2] != " ":
+                continue
+            code = record[:2]
+            path = record[3:]
+            original = None
+            if code[0] in "RC" or code[1] in "RC":
+                if index < len(records) and records[index]:
+                    original = records[index]
+                    index += 1
+            parsed.append(
+                {"path": path, "original": original, "index": code[0], "worktree": code[1]}
+            )
+        return parsed
+
+    @staticmethod
+    def _git_status_name(code: str) -> str:
+        return {
+            "M": "Modified",
+            "A": "Added",
+            "D": "Deleted",
+            "R": "Renamed",
+            "C": "Copied",
+            "T": "Type changed",
+            "U": "Conflict",
+            "?": "Untracked",
+        }.get(code, "Changed")
+
+    @staticmethod
+    def _git_entry_conflicted(entry: dict) -> bool:
+        code = entry["index"] + entry["worktree"]
+        return "U" in code or code in {"AA", "DD"}
+
+    def _rail_changed(self, index: int) -> None:
+        if self.git_page is not None and self.rail.widget(index) is self.git_page:
+            self.refresh_git_status()
+
+    def refresh_git_status(self) -> None:
+        if not self.git_enabled or self.git_status_list is None:
+            return
+        try:
+            result = subprocess.run(
+                [
+                    "git", "-C", str(self.root), "status", "--porcelain=v1", "-z",
+                    "--untracked-files=all",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.git_status_list.clear()
+            self.git_status_label.setText(f"Git status unavailable: {exc}")
+            return
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            self.git_status_list.clear()
+            self.git_status_label.setText(detail or "Git status unavailable")
+            return
+
+        entries = self._parse_git_status(result.stdout)
+        conflicts = [entry for entry in entries if self._git_entry_conflicted(entry)]
+        staged = [
+            entry for entry in entries
+            if not self._git_entry_conflicted(entry) and entry["index"] not in {" ", "?"}
+        ]
+        changed = [
+            entry for entry in entries
+            if not self._git_entry_conflicted(entry)
+            and entry["worktree"] not in {" ", "?"}
+        ]
+        untracked = [entry for entry in entries if entry["index"] == "?"]
+
+        self.git_status_list.clear()
+        for title, items, status_key, category in (
+            ("Conflicts", conflicts, None, "conflict"),
+            ("Staged Changes", staged, "index", "staged"),
+            ("Changes", changed, "worktree", "changed"),
+            ("Untracked Files", untracked, "index", "untracked"),
+        ):
+            if not items:
+                continue
+            heading = QListWidgetItem(f"{title} ({len(items)})")
+            heading.setFlags(Qt.NoItemFlags)
+            self.git_status_list.addItem(heading)
+            for entry in items:
+                code = "U" if status_key is None else entry[status_key]
+                label = f"  {code}  {entry['path']}"
+                if entry.get("original"):
+                    label += f"  ← {entry['original']}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, entry)
+                item.setData(Qt.UserRole + 2, category)
+                item.setToolTip(
+                    f"{self._git_status_name(code)}: {entry['path']}"
+                )
+                self.git_status_list.addItem(item)
+        count = len({entry["path"] for entry in entries})
+        self.git_status_label.setText(
+            "Working tree clean" if not count else f"{count} changed file{'s' if count != 1 else ''}"
+        )
+
+    def _open_git_status_item(self, item) -> None:
+        entry = item.data(Qt.UserRole)
+        if not isinstance(entry, dict):
+            return
+        category = item.data(Qt.UserRole + 2)
+        path = self._git_entry_path(entry)
+        if path is not None and isinstance(category, str):
+            self._show_git_diff(path, entry, category)
+
+    def _open_git_status_file(self, item) -> None:
+        entry = item.data(Qt.UserRole)
+        if not isinstance(entry, dict):
+            return
+        path = self._git_entry_path(entry)
+        if path is not None and path.is_file() and inside(self.root, path):
+            self.open_file(path, pinned=True)
+        else:
+            self._open_git_status_item(item)
+
+    def _git_entry_path(self, entry: dict) -> Path | None:
+        relative = Path(str(entry.get("path") or ""))
+        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            return None
+        candidate = self.root / relative
+        try:
+            root_path = os.path.normcase(str(self.root.resolve(strict=True)))
+            candidate_path = os.path.normcase(str(candidate.absolute()))
+            if os.path.commonpath((root_path, candidate_path)) != root_path:
+                return None
+        except (OSError, ValueError):
+            return None
+        return candidate
+
+    def _git_blob_size(self, revision: str) -> int | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), "cat-file", "-s", revision],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        return None
+
+    def _git_blob_bytes(self, revision: str) -> bytes | None:
+        size = self._git_blob_size(revision)
+        if size is None or size > 64 * 1024 * 1024:
+            return None
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), "show", revision],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
+            )
+            return result.stdout if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    @staticmethod
+    def _bounded_git_image(data: bytes | None) -> QImage | None:
+        if not data:
+            return None
+        image = QImage.fromData(data)
+        if image.isNull() or image.width() * image.height() > MAX_IMAGE_PIXELS:
+            return None
+        return image
+
+    def _git_working_image(self, path: Path) -> QImage | None:
+        if not path.is_file():
+            return None
+        reader = QImageReader(str(path))
+        size = reader.size()
+        if (size.isValid()
+                and size.width() * size.height() > MAX_IMAGE_PIXELS):
+            return None
+        image = reader.read()
+        return image if not image.isNull() else None
+
+    def _git_image_versions(self, path: Path, entry: dict, category: str):
+        if path.suffix.casefold() not in _image_suffixes():
+            return None
+        git_path = str(entry["path"])
+        original = str(entry.get("original") or git_path)
+        working = self._git_working_image(path)
+        index = self._bounded_git_image(self._git_blob_bytes(f":{git_path}"))
+        head = self._bounded_git_image(self._git_blob_bytes(f"HEAD:{original}"))
+        if category == "staged":
+            images = (("HEAD", head), ("Staged", index))
+        elif category == "changed":
+            images = (("Staged", index), ("Working file", working))
+        elif category == "untracked":
+            images = (("Before", None), ("Working file", working))
+        else:
+            images = (("Repository version", head), ("Working file", working))
+        return images if any(image is not None for _label, image in images) else None
+
+    @staticmethod
+    def _format_git_size(size: int | None) -> str:
+        return "missing" if size is None else f"{size:,} bytes"
+
+    def _git_binary_summary(self, path: Path, entry: dict, category: str) -> str:
+        git_path = str(entry["path"])
+        original = str(entry.get("original") or git_path)
+        working_size = path.stat().st_size if path.is_file() else None
+        index_size = self._git_blob_size(f":{git_path}")
+        head_size = self._git_blob_size(f"HEAD:{original}")
+        if category == "staged":
+            before_label, before_size = "HEAD", head_size
+            after_label, after_size = "Staged", index_size
+        elif category == "changed":
+            before_label, before_size = "Staged", index_size
+            after_label, after_size = "Working file", working_size
+        elif category == "untracked":
+            before_label, before_size = "Before", None
+            after_label, after_size = "Working file", working_size
+        else:
+            before_label, before_size = "Repository version", head_size
+            after_label, after_size = "Working file", working_size
+        return (
+            "Binary file changed\n\n"
+            f"Path: {entry['path']}\n"
+            f"Status: {category.title()}\n"
+            f"{before_label}: {self._format_git_size(before_size)}\n"
+            f"{after_label}: {self._format_git_size(after_size)}\n\n"
+            "A line-by-line text comparison is not available for this file. "
+            "Use Open File to inspect the working version in its normal viewer."
+        )
+
+    def _git_diff_content(
+            self, path: Path, entry: dict, category: str) -> tuple[str, bool]:
+        git_path = str(entry["path"])
+        if category == "untracked":
+            try:
+                loaded = read_text(path)
+                lines = loaded.text.splitlines(keepends=True)
+                text = "".join(difflib.unified_diff(
+                    [],
+                    lines,
+                    fromfile="/dev/null",
+                    tofile=f"b/{git_path}",
+                    n=3,
+                ))
+                return text or f"Untracked empty text file: {git_path}\n", False
+            except (OSError, ValueError, UnicodeError):
+                return self._git_binary_summary(path, entry, category), True
+
+        arguments = [
+            "git", "-C", str(self.root), "diff", "--no-ext-diff", "--no-color",
+            "--no-textconv", "--unified=3",
+        ]
+        if category == "staged":
+            arguments.append("--cached")
+        arguments.extend(["--", git_path])
+        try:
+            result = subprocess.run(
+                arguments,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=20,
+                check=False,
+                **_BACKGROUND_SUBPROCESS_OPTIONS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            result = None
+            error = str(exc)
+        else:
+            error = result.stderr.decode("utf-8", errors="replace").strip()
+        if result is not None and result.returncode == 0:
+            text = result.stdout.decode("utf-8", errors="replace")
+            if "Binary files " in text or "GIT binary patch" in text:
+                return self._git_binary_summary(path, entry, category), True
+            if text:
+                return text, False
+            return (
+                f"No line-by-line changes were reported for {git_path}.\n"
+                "The Git status may represent a mode or file-type change.\n",
+                False,
+            )
+
+        # If Git cannot construct the comparison, retain a useful read-only
+        # view of text files instead of leaving the content area blank.
+        try:
+            loaded = read_text(path)
+            return (
+                f"Git diff unavailable: {error or 'unknown Git error'}\n\n"
+                "Current file contents:\n\n"
+                f"{loaded.text}",
+                False,
+            )
+        except (OSError, ValueError, UnicodeError):
+            summary = self._git_binary_summary(path, entry, category)
+            return f"Git diff unavailable: {error or 'unknown Git error'}\n\n{summary}", True
+
+    def _show_git_diff(self, path: Path, entry: dict, category: str) -> None:
+        text, binary = self._git_diff_content(path, entry, category)
+        images = self._git_image_versions(path, entry, category) if binary else None
+        preview = next(
+            (
+                index for index, candidate in enumerate(self.all_tabs())
+                if not candidate.pinned and not candidate.dirty
+            ),
+            -1,
+        )
+        if preview >= 0:
+            previous = self.tabs.widget(preview)
+            self.tabs.removeTab(preview)
+            previous.deleteLater()
+        tab = Tab(path, details="", root=self.root)
+        tab.setProperty("folderGitDiff", True)
+        tab.git_diff_category = category
+        viewer = GitDiffView(
+            path,
+            category,
+            text,
+            binary=binary,
+            can_open=path.is_file() and inside(self.root, path),
+            images=images,
+            parent=tab,
+        )
+        placeholder = tab.placeholder
+        tab.layout().replaceWidget(placeholder, viewer)
+        placeholder.deleteLater()
+        tab.viewer = viewer
+        viewer.openRequested.connect(
+            lambda selected=path: self._open_git_worktree_file(selected)
+        )
+        index = (
+            self.tabs.insertTab(preview, tab, f"Δ {path.name}")
+            if preview >= 0 else self.tabs.addTab(tab, f"Δ {path.name}")
+        )
+        self.tabs.setCurrentIndex(index)
+        self._update_tab_tooltip(tab)
+        self._watch_files()
+        self._update_welcome()
+
+    def _open_git_worktree_file(self, path: Path) -> None:
+        if path.is_file() and inside(self.root, path):
+            self.open_file(path, pinned=True)
+
+    def _selected_git_entries(self) -> list[dict]:
+        if self.git_status_list is None:
+            return []
+        selected = []
+        seen = set()
+        for row in range(self.git_status_list.count()):
+            item = self.git_status_list.item(row)
+            if not item.isSelected():
+                continue
+            entry = item.data(Qt.UserRole)
+            if not isinstance(entry, dict) or entry["path"] in seen:
+                continue
+            seen.add(entry["path"])
+            selected.append(entry)
+        return selected
+
+    def _git_status_menu(self, point) -> None:
+        if self.git_status_list is None:
+            return
+        clicked = self.git_status_list.itemAt(point)
+        if clicked is not None and isinstance(clicked.data(Qt.UserRole), dict):
+            if not clicked.isSelected():
+                self.git_status_list.clearSelection()
+                clicked.setSelected(True)
+        menu = self._create_git_context_menu()
+        if menu.actions():
+            menu.exec(self.git_status_list.viewport().mapToGlobal(point))
+
+    def _create_git_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        entries = self._selected_git_entries()
+        if not entries:
+            return menu
+        if any(entry["worktree"] != " " or entry["index"] == "?" for entry in entries):
+            menu.addAction("Stage", lambda: self._git_stage_entries(entries))
+        if any(entry["index"] not in {" ", "?"} for entry in entries):
+            menu.addAction("Unstage", lambda: self._git_unstage_entries(entries))
+        menu.addAction("Add to .gitignore", lambda: self._git_ignore_entries(entries))
+        untracked = [entry for entry in entries if entry["index"] == "?"]
+        if untracked:
+            menu.addAction(
+                "Remove Untracked File(s)…",
+                lambda: self._git_remove_untracked_entries(untracked),
+            )
+        return menu
+
+    @staticmethod
+    def _git_paths(entries: list[dict]) -> list[str]:
+        return list(dict.fromkeys(entry["path"] for entry in entries))
+
+    def _git_stage_entries(self, entries: list[dict]) -> None:
+        paths = self._git_paths(entries)
+        if paths:
+            count = len(paths)
+            self._run_git_quiet_command(
+                ["add", "-A", "--", *paths],
+                f"Staged {count} file{'s' if count != 1 else ''}",
+            )
+
+    def _git_hover_action(self, action_name: str, entry: dict) -> None:
+        entries = self._selected_git_entries()
+        if not entries or not any(
+                selected.get("path") == entry.get("path") for selected in entries):
+            entries = [entry]
+        if action_name == "stage":
+            self._git_stage_entries([
+                selected for selected in entries
+                if selected["worktree"] != " " or selected["index"] == "?"
+            ])
+        elif action_name == "unstage":
+            self._git_unstage_entries([
+                selected for selected in entries
+                if selected["index"] not in {" ", "?"}
+            ])
+        elif action_name == "remove":
+            self._git_remove_untracked_entries([
+                selected for selected in entries if selected["index"] == "?"
+            ])
+
+    def _git_remove_untracked_entries(self, entries: list[dict]) -> None:
+        paths = []
+        for entry in entries:
+            if entry.get("index") != "?":
+                continue
+            candidate = self.root / str(entry.get("path") or "")
+            if candidate.is_file() and inside(self.root, candidate):
+                paths.append(candidate)
+        if paths:
+            self._delete_files(paths)
+            self.refresh_git_status()
+
+    def _git_unstage_entries(self, entries: list[dict]) -> None:
+        paths = self._git_paths(entries)
+        if not paths:
+            return
+        head = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--verify", "HEAD"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            **_BACKGROUND_SUBPROCESS_OPTIONS,
+        )
+        arguments = (
+            ["restore", "--staged", "--", *paths]
+            if head.returncode == 0
+            else ["rm", "--cached", "-r", "--", *paths]
+        )
+        count = len(paths)
+        self._run_git_quiet_command(
+            arguments,
+            f"Unstaged {count} file{'s' if count != 1 else ''}",
+        )
+
+    @staticmethod
+    def _gitignore_line(path: str) -> str:
+        escaped = path.replace("\\", "\\\\")
+        for character in (" ", "#", "!", "[", "]", "*", "?"):
+            escaped = escaped.replace(character, f"\\{character}")
+        return f"/{escaped}"
+
+    def _git_ignore_entries(self, entries: list[dict]) -> None:
+        ignore_path = self.root / ".gitignore"
+        try:
+            existing = ignore_path.read_text(encoding="utf-8") if ignore_path.exists() else ""
+            existing_lines = set(existing.splitlines())
+            additions = [
+                self._gitignore_line(path)
+                for path in self._git_paths(entries)
+                if self._gitignore_line(path) not in existing_lines
+            ]
+            if additions:
+                separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
+                with ignore_path.open("a", encoding="utf-8", newline="") as stream:
+                    stream.write(separator + "\n".join(additions) + "\n")
+            self.refresh_git_status()
+        except (OSError, UnicodeError) as exc:
+            self.statusBar().showMessage(f"Could not update .gitignore: {exc}", 10000)
 
     def _update_hidden_files_control(self, visible: bool) -> None:
         icon = self._hidden_files_icon(visible)
@@ -9085,6 +10391,8 @@ class Window(QMainWindow):
         if not self.root.is_dir():
             self.statusBar().showMessage("Root folder is missing, unmounted, or inaccessible", 15000)
         for tab in self.all_tabs():
+            if tab.property("folderGitDiff"):
+                continue
             actual = fingerprint(tab.path)
             if actual is None:
                 tab.detached = True
@@ -9146,6 +10454,8 @@ class Window(QMainWindow):
         self.catalog = {p for p in self.catalog if p.exists() and inside(self.root, p)}
         self.ignored_paths.intersection_update(self.catalog)
         self._watch_files()
+        if self.git_page is not None and self.rail.currentWidget() is self.git_page:
+            self.refresh_git_status()
 
 
 def main(argv=None):

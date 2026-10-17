@@ -9,7 +9,53 @@ from PySide6.QtGui import QDesktopServices, QKeyEvent, QTextCursor
 from PySide6.QtGui import QStandardItem
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtTest import QTest
-from sp.app.ui.main_window import MainWindow
+from sp.app.ui.main_window import MainWindow, OPEN_ROLE, PATH_ROLE
+
+
+def test_editor_escape_reveals_and_focuses_current_page_in_vault(main_window):
+    main_window.editor.set_vi_mode_enabled(False)
+    main_window._open_file("/PageA/PageA.md")
+    main_window.left_tab_widget.setCurrentWidget(main_window.search_tab)
+    main_window._set_left_panel_collapsed(True)
+    cursor = main_window.editor.textCursor()
+    cursor.setPosition(1)
+    main_window.editor.setTextCursor(cursor)
+    main_window.editor.setFocus()
+
+    QTest.keyClick(main_window.editor, Qt.Key_Escape)
+    QApplication.processEvents()
+
+    assert main_window._is_left_panel_expanded()
+    assert main_window.left_tab_widget.currentWidget() is main_window._vault_tab
+    assert main_window.tree_view.hasFocus()
+    current = main_window.tree_view.currentIndex()
+    assert (current.data(OPEN_ROLE) or current.data(PATH_ROLE)) == main_window.current_path
+
+
+def test_vi_insert_escape_exits_insert_before_returning_focus_to_vault(main_window):
+    main_window._open_file("/PageA/PageA.md")
+    main_window.editor.set_vi_mode_enabled(True)
+    main_window.editor._enter_vi_insert_mode()
+    main_window.left_tab_widget.setCurrentWidget(main_window.search_tab)
+    main_window._set_left_panel_collapsed(True)
+    cursor = main_window.editor.textCursor()
+    cursor.setPosition(1)
+    main_window.editor.setTextCursor(cursor)
+    main_window.editor.setFocus()
+
+    QTest.keyClick(main_window.editor, Qt.Key_Escape)
+    QApplication.processEvents()
+
+    assert not main_window.editor._vi_insert_mode
+    assert main_window.editor.hasFocus()
+    assert not main_window._is_left_panel_expanded()
+
+    QTest.keyClick(main_window.editor, Qt.Key_Escape)
+    QApplication.processEvents()
+
+    assert main_window._is_left_panel_expanded()
+    assert main_window.left_tab_widget.currentWidget() is main_window._vault_tab
+    assert main_window.tree_view.hasFocus()
 
 
 def test_copy_link_status_survives_editor_hover_refresh(main_window):

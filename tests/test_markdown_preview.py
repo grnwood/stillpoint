@@ -164,10 +164,15 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
 
     initial_position = view.browser._reading_cursor.position()
     initial_marker_top = marker.top()
-    QTest.keyClick(view.browser, Qt.Key_J)
+    QTest.keyClick(view.browser, Qt.Key_Down)
     assert view.browser._reading_cursor.position() > initial_position
     assert view.browser.verticalScrollBar().value() == scrollbar.minimum()
     assert view.browser.vi_rail_rect().top() > initial_marker_top
+
+    arrow_position = view.browser._reading_cursor.position()
+    QTest.keyClick(view.browser, Qt.Key_Up)
+    assert view.browser._reading_cursor.position() < arrow_position
+    QTest.keyClick(view.browser, Qt.Key_J)
 
     QTest.keyClick(view.browser, Qt.Key_G, Qt.ShiftModifier)
     assert scrollbar.value() == scrollbar.maximum()
@@ -184,6 +189,55 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     assert scrollbar.value() > scrollbar.minimum()
     assert not view.browser.extraSelections()
     assert not view.browser.vi_rail_rect().isEmpty()
+
+
+def test_reading_view_arrows_reveal_navigation_cursor_without_vi(qtbot, qapp) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(420, 240)
+    view.set_markdown("\n\n".join(f"Paragraph {index}" for index in range(20)))
+    view.set_vi_enabled(False)
+    view.show()
+    view.focus_reader()
+    qapp.processEvents()
+
+    initial_position = view.browser._reading_cursor.position()
+    assert view.browser.vi_rail_rect().isEmpty()
+
+    QTest.keyClick(view.browser, Qt.Key_Down)
+
+    assert view.browser._reading_cursor.position() > initial_position
+    assert not view.browser.vi_rail_rect().isEmpty()
+
+    down_position = view.browser._reading_cursor.position()
+    QTest.keyClick(view.browser, Qt.Key_Up)
+    assert view.browser._reading_cursor.position() < down_position
+
+
+def test_reading_view_arrows_cross_horizontal_rule_in_both_directions(
+    qtbot, qapp
+) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(420, 240)
+    view.set_markdown("Before the rule\n\n---\n\nAfter the rule")
+    view.set_vi_enabled(False)
+    view.show()
+    view.focus_reader()
+    qapp.processEvents()
+    before_cursor = view._cursor_for_source_anchor("sp-source-1")
+    assert before_cursor is not None
+    view.browser._reading_cursor = before_cursor
+
+    assert "Before the rule" in view.browser._reading_cursor.block().text()
+    QTest.keyClick(view.browser, Qt.Key_Down)
+    after_position = view.browser._reading_cursor.position()
+    assert "After the rule" in view.browser._reading_cursor.block().text()
+
+    QTest.keyClick(view.browser, Qt.Key_Up)
+
+    assert view.browser._reading_cursor.position() < after_position
+    assert "Before the rule" in view.browser._reading_cursor.block().text()
 
 
 def test_reading_view_vi_slash_opens_and_focuses_search(qtbot, qapp) -> None:

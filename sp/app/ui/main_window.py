@@ -2828,6 +2828,9 @@ class MainWindow(QMainWindow):
         self._apply_vault_tree_font_size()
         install_primary_wheel_zoom(self.tree_view, self._adjust_vault_tree_font_size)
         self.editor.viInsertModeChanged.connect(self._on_vi_insert_state_changed)
+        self.editor.navigationEscapePressed.connect(
+            self._return_editor_focus_to_vault
+        )
         self._apply_vi_preferences()
         self.toc_widget = TableOfContentsWidget(self)
         self.toc_widget.set_headings([])
@@ -20695,6 +20698,24 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.tree_view.setFocus(Qt.ShortcutFocusReason)
+        except Exception:
+            pass
+
+    def _return_editor_focus_to_vault(self) -> None:
+        """Reveal the Vault rail, select the active page, and focus its tree."""
+        self._ensure_left_panel_visible()
+        try:
+            self.left_tab_widget.setCurrentWidget(self._vault_tab)
+        except Exception:
+            self.left_tab_widget.setCurrentIndex(0)
+        self._locate_current_page_in_tree()
+        try:
+            self.tree_view.setFocus(Qt.ShortcutFocusReason)
+            QTimer.singleShot(
+                0,
+                self.tree_view,
+                lambda: self.tree_view.setFocus(Qt.ShortcutFocusReason),
+            )
         except Exception:
             pass
 
