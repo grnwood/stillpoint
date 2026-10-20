@@ -23,7 +23,13 @@ def test_ensure_user_theme_files_seeds_missing_files_in_existing_dir(tmp_path, m
     copied = app_main._ensure_user_theme_files()
     assert copied is True
     assert dark_path.read_text(encoding="utf-8") == sentinel
-    assert (theme_dir / "light-theme.json").exists()
+    assert {
+        "light-theme.json",
+        "aurora-borealis.json",
+        "neon-lagoon.json",
+        "sakura-night.json",
+        "citrus-pop.json",
+    }.issubset({path.name for path in theme_dir.iterdir()})
 
     copied_again = app_main._ensure_user_theme_files()
     assert copied_again is False
@@ -53,6 +59,22 @@ def test_apply_startup_theme_defaults_preserves_explicit_selection(qapp, monkeyp
 
     app_main._apply_startup_theme_defaults(qapp)
     assert saved == []
+
+
+def test_bundled_theme_loads_before_user_theme_seed(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(theme.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        theme.config,
+        "load_effective_theme_preference",
+        lambda: "aurora-borealis.json",
+    )
+    monkeypatch.delenv("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE", raising=False)
+
+    theme.reload_theme()
+
+    assert theme.theme_value("markdown_editor.base.bg") == "#071d27"
+    assert theme.theme_value("folder_navigator.identity.accent") == "#22d3ee"
+    theme.reload_theme()
 
 
 @pytest.mark.parametrize(

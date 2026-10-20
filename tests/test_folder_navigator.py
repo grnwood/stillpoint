@@ -6,6 +6,7 @@ import sys
 import types
 
 import pytest
+from PySide6.QtGui import QPalette
 
 from sp.app.folder_navigator.core import (ConflictError, atomic_save, content_matches,
     fuzzy_score, inside, pruned_relative_path, read_text,
@@ -3583,6 +3584,35 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert breadcrumb[-1].toolTip() == str(document)
     window.active_tab().editor.document().setModified(False)
     window.close()
+
+
+def test_folder_navigator_persists_root_specific_folder_color(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    document = tmp_path / "notes.txt"
+    document.write_text("folder color\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(document, pinned=True)
+    window._set_folder_identity_accent("#8b6fcb")
+
+    assert window._folder_identity_accent == "#8b6fcb"
+    assert window.state["identity_accent"] == "#8b6fcb"
+    assert window.folder_color_actions["#8b6fcb"].isChecked()
+    assert "#8b6fcb" in window.identity_bar.styleSheet()
+    assert window.palette().color(QPalette.Base).name() != app.palette().color(QPalette.Base).name()
+    assert window.active_tab().editor.palette().color(QPalette.Base) == window.palette().color(QPalette.Base)
+    assert window.active_tab().editor._folder_navigator_vi_cursor_color == "#8b6fcb"
+    window.close()
+
+    restored = Window(tmp_path)
+    try:
+        assert restored._folder_identity_accent == "#8b6fcb"
+        assert restored.state["identity_accent"] == "#8b6fcb"
+        assert restored.folder_color_actions["#8b6fcb"].isChecked()
+    finally:
+        restored.close()
 
 
 def test_hidden_files_toggle_persists_and_syncs_with_view_action(

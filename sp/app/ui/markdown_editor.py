@@ -4967,29 +4967,55 @@ class MarkdownEditor(QTextEdit):
         cleaned = TASK_DATE_RE.sub(" ", cleaned)
         return re.sub(r"\s{2,}", " ", cleaned).strip()
 
-    def _vi_remove_task_indicators_at_cursor(self) -> bool:
-        """Turn the task on the cursor line into a plain dash item."""
+    def remove_task_indicators(self) -> bool:
+        """Turn task lines at the cursor or in the selection into plain dash items."""
         cursor = QTextCursor(self.textCursor())
-        block = cursor.block()
-        is_task, indent, _state, content = self._is_task_line(block.text())
-        if not is_task:
-            self._status_message("Cursor is not on a task.")
+        blocks = self._selected_blocks() if cursor.hasSelection() else [cursor.block()]
+        tasks = [
+            (block, *self._is_task_line(block.text()))
+            for block in blocks
+            if block.isValid() and self._is_task_line(block.text())[0]
+        ]
+        if not tasks:
+            self._status_message("Cursor or selection contains no tasks.")
             return False
 
-        new_line = f"{indent}- {self._strip_task_metadata(content)}"
-        old_offset = cursor.position() - block.position()
-        line_cursor = QTextCursor(block)
-        line_cursor.beginEditBlock()
-        line_cursor.select(QTextCursor.LineUnderCursor)
-        line_cursor.insertText(new_line)
-        line_cursor.endEditBlock()
-
-        line_cursor.setPosition(block.position() + min(old_offset, len(new_line)))
-        self.setTextCursor(line_cursor)
-        self._refresh_hanging_indent(block, new_line)
+        first_pos = tasks[0][0].position()
+        last_block = tasks[-1][0]
+        cursor.beginEditBlock()
+        for block, _is_task, indent, _state, content in tasks:
+            new_line = f"{indent}- {self._strip_task_metadata(content)}"
+            line_cursor = QTextCursor(block)
+            line_cursor.select(QTextCursor.LineUnderCursor)
+            line_cursor.insertText(new_line)
+            self._refresh_hanging_indent(block, new_line)
+        cursor.endEditBlock()
+        if cursor.hasSelection():
+            selected = self.textCursor()
+            selected.setPosition(first_pos)
+            selected.setPosition(
+                last_block.position() + max(0, last_block.length() - 1),
+                QTextCursor.KeepAnchor,
+            )
+            self.setTextCursor(selected)
+        else:
+            cursor.setPosition(
+                first_pos + min(
+                    cursor.position() - first_pos,
+                    max(0, last_block.length() - 1),
+                )
+            )
+            self.setTextCursor(cursor)
         self._hide_task_hover_edit_button()
         self._schedule_heading_outline()
+        count = len(tasks)
+        self._status_message(
+            f"Removed task indicators from {count} task{'s' if count != 1 else ''}."
+        )
         return True
+
+    def _vi_remove_task_indicators_at_cursor(self) -> bool:
+        return self.remove_task_indicators()
 
     def _apply_escape_selection_transform(self) -> bool:
         """Apply Esc behavior for a selection in vi mode."""
@@ -5172,6 +5198,16 @@ class MarkdownEditor(QTextEdit):
             # binding. Handle page history before Qt can move the caret. This is
             # intentionally uniform across normal, insert, and vi navigation modes.
             self._trigger_history_navigation(event.key())
+            event.accept()
+            return
+        if (
+            navigation_modifiers == (Qt.ControlModifier | Qt.AltModifier)
+            and event.key() == Qt.Key_R
+        ):
+            if self._read_only_mode:
+                self._status_message("Vault is read-only; editing is disabled.")
+            else:
+                self.remove_task_indicators()
             event.accept()
             return
         if self._read_only_mode:
@@ -8794,7 +8830,11 @@ class MarkdownEditor(QTextEdit):
         self.setExtraSelections(existing)
 
     def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
-        accent_value = self._vault_accent_color or theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff").name()
+        accent_value = (
+            getattr(self, "_folder_navigator_vi_cursor_color", None)
+            or self._vault_accent_color
+            or theme_color("markdown_editor.vi_block_cursor.bg", "#b259ff").name()
+        )
         cached = self._vi_cursor_color_cache
         if cached is not None and cached[0] == accent_value:
             return QColor(cached[1]), QColor(cached[2])
@@ -8805,6 +8845,14 @@ class MarkdownEditor(QTextEdit):
         foreground = QColor("#111111" if luminance >= 160 else "#ffffff")
         self._vi_cursor_color_cache = (accent_value, QColor(accent), QColor(foreground))
         return accent, foreground
+
+    def set_folder_navigator_vi_cursor_color(self, color: str | None) -> None:
+        candidate = QColor(str(color or ""))
+        self._folder_navigator_vi_cursor_color = (
+            candidate.name() if candidate.isValid() else None
+        )
+        self._vi_cursor_color_cache = None
+        self._maybe_update_vi_cursor()
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if getattr(self, "_teardown_done", False):

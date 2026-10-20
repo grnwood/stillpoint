@@ -46,6 +46,21 @@ def test_source_editor_block_cursor_setting_highlights_character(qtbot) -> None:
     assert editor.cursorWidth() >= editor.fontMetrics().horizontalAdvance("M")
 
 
+def test_source_editor_vi_cursor_uses_folder_navigator_color(qtbot) -> None:
+    editor = SourceEditor("sample.py")
+    qtbot.addWidget(editor)
+    editor.setPlainText("one\n")
+    editor.set_vi_cursor_style("block")
+    editor.set_vi_mode_enabled(True)
+    editor.set_folder_navigator_vi_cursor_color("#8b6fcb")
+
+    selections = _cursor_selections(editor, editor._VI_BLOCK_EXTRA_KEY)
+
+    assert len(selections) == 1
+    assert selections[0].format.background().color().name() == "#8b6fcb"
+    assert selections[0].format.foreground().color().name() == "#ffffff"
+
+
 def test_source_editor_insert_mode_clears_navigation_cursor(qtbot) -> None:
     editor = SourceEditor("sample.py")
     qtbot.addWidget(editor)

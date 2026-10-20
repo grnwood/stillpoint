@@ -64,6 +64,7 @@ These shortcuts will speed up your workflow:
 ### Tasks
 - `F12` (cursor on a task in the editor): Toggle task completion in any editor mode
 - `Ctrl+Alt+E` (cursor on a task in the editor): Open the Task Editor in any editor mode
+- `Ctrl+Alt+R` (cursor on or selection containing tasks in the editor): Remove task markers, tags, priority, and dates while retaining each task's text
 - `Space` / `E` (cursor on a task in editor vi navigation mode): Toggle completion / open the Task Editor
 - `Ctrl+\`: Focus tasks search
 - `Enter` (task selected in Tasks or Calendar task list): Open task target and focus editor

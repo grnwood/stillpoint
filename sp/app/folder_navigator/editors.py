@@ -207,6 +207,7 @@ class SourceEditor(QPlainTextEdit):
         self._vi_feature_enabled = False
         self._vi_insert_mode = True
         self._vi_cursor_style = "block"
+        self._folder_navigator_vi_cursor_color: str | None = None
         self._pending_g = False
         self._default_cursor_width = max(1, self.cursorWidth())
         self._block_cursor_width = max(
@@ -237,6 +238,11 @@ class SourceEditor(QPlainTextEdit):
         normalized = str(style or "").strip().lower()
         self._vi_cursor_style = normalized if normalized in {"block", "line"} else "line"
         self._update_cursor_width()
+        self._update_vi_cursor_highlight()
+
+    def set_folder_navigator_vi_cursor_color(self, color: str | None) -> None:
+        candidate = QColor(str(color or ""))
+        self._folder_navigator_vi_cursor_color = candidate.name() if candidate.isValid() else None
         self._update_vi_cursor_highlight()
 
     def _set_vi_insert_mode(self, enabled: bool) -> None:
@@ -286,10 +292,10 @@ class SourceEditor(QPlainTextEdit):
         extra.format.setForeground(foreground)
         self.setExtraSelections(existing + [extra])
 
-    @staticmethod
-    def _vi_cursor_colors() -> tuple[QColor, QColor]:
+    def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
         accent_value = (
-            config.load_vault_accent_color()
+            self._folder_navigator_vi_cursor_color
+            or config.load_vault_accent_color()
             or theme_color("vi_navigation_line.bg", "#2a3950").name()
         )
         accent = QColor(accent_value)

@@ -131,11 +131,13 @@ class _ReadingBrowser(QTextBrowser):
         if marker.isEmpty() or not marker.intersects(self.viewport().rect()):
             return
         color = QColor(
-            str(
+            getattr(
+                self,
+                "_folder_navigator_vi_cursor_color",
                 theme_value(
                     "markdown_preview.cursor.rail_bg",
                     theme_value("markdown_editor.vi_block_cursor.bg", "#b259ff"),
-                )
+                ),
             )
         )
         painter = QPainter(self.viewport())
@@ -592,6 +594,13 @@ class MarkdownReadingView(QWidget):
 
     def set_vi_cursor_style(self, style: str) -> None:
         self.browser.set_vi_state(self.browser.vi_enabled, style)
+
+    def set_folder_navigator_vi_cursor_color(self, color: str | None) -> None:
+        candidate = QColor(str(color or ""))
+        self.browser._folder_navigator_vi_cursor_color = (
+            candidate.name() if candidate.isValid() else None
+        )
+        self.browser.refresh_reading_cursor()
 
     def set_base_font_point_size(self, size: float) -> None:
         try:

@@ -266,6 +266,10 @@ def _ensure_user_theme_files() -> bool:
         "charcoal-copper.json": app_dir / "charcoal-copper.json",
         "arctic-night.json": app_dir / "arctic-night.json",
         "ember-rose.json": app_dir / "ember-rose.json",
+        "aurora-borealis.json": app_dir / "aurora-borealis.json",
+        "neon-lagoon.json": app_dir / "neon-lagoon.json",
+        "sakura-night.json": app_dir / "sakura-night.json",
+        "citrus-pop.json": app_dir / "citrus-pop.json",
     }
     if not theme_sources["light-theme.json"].exists():
         # Dev fallback: allow bootstrapping directly from the repository sample.

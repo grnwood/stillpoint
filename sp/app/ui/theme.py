@@ -54,6 +54,9 @@ def _resolve_theme_path(theme_name: str | None = None) -> Path:
         candidate = _theme_dir() / candidate.name
     if candidate.exists():
         return candidate
+    bundled = _bundled_theme_path(theme_name)
+    if bundled != _default_theme_path():
+        return bundled
     return _default_theme_path()
 
 

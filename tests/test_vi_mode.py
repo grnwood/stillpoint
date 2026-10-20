@@ -270,6 +270,46 @@ def test_empty_list_escape_clears_marker_then_becomes_navigation_escape(
     editor.close()
 
 
+def test_ctrl_alt_r_removes_task_indicators_without_editor_escape(
+    qapp: QApplication,
+) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText(
+        "☐ First @work !! >2026-10-20\n"
+        "☑ Second @home ! <2026-10-21\n"
+        "ordinary text"
+    )
+    cursor = editor.textCursor()
+    cursor.setPosition(0)
+    cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, 1)
+    cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    QTest.keyClick(editor, Qt.Key_R, Qt.ControlModifier | Qt.AltModifier)
+
+    assert editor.toPlainText().splitlines() == [
+        "- First",
+        "- Second",
+        "ordinary text",
+    ]
+    editor.close()
+
+
+def test_ctrl_alt_r_removes_task_at_cursor(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("☐ Keep the text @work !! >2026-10-20")
+    cursor = editor.textCursor()
+    cursor.setPosition(4)
+    editor.setTextCursor(cursor)
+
+    QTest.keyClick(editor, Qt.Key_R, Qt.ControlModifier | Qt.AltModifier)
+
+    assert editor.toPlainText() == "- Keep the text"
+    editor.close()
+
+
 @pytest.mark.parametrize("vi_state", ["off", "navigation", "insert"])
 def test_option_arrows_navigate_page_history_without_moving_cursor(
     vi_state: str,

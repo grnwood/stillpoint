@@ -1,0 +1,103 @@
+{
+  "ui": {
+    "chrome": {
+      "accent": "#f472b6",
+      "border": "#60334d"
+    }
+  },
+  "folder_navigator": {
+    "identity": {
+      "accent": "#f472b6"
+    }
+  },
+  "page_editor_window": {
+    "base": {
+      "bg": "#25101f",
+      "text": "#ffe4f3"
+    }
+  },
+  "markdown_editor": {
+    "base": {
+      "bg": "#25101f",
+      "text": "#ffe4f3",
+      "selection_bg": "#74234f",
+      "selection_text": "#fff5fa"
+    },
+    "syntax": {
+      "heading": "#f9a8d4",
+      "bold": "#fbcfe8",
+      "italic": "#c4b5fd",
+      "bold_italic": "#fce7f3",
+      "code_text": "#ffe4f3",
+      "code_bg": "#37162c",
+      "code_block_text": "#ffe4f3",
+      "code_block_bg": "#37162c",
+      "code_fence": "#f472b6",
+      "quote": "#c084fc",
+      "list": "#ffe4f3",
+      "tag": "#fb7185",
+      "strikethrough": "#bf7498",
+      "link": "#f9a8d4"
+    },
+    "vi_block_cursor": {
+      "bg": "#f472b6"
+    }
+  },
+  "main_window": {
+    "menu_command_bar": {
+      "bg": "#25101f",
+      "text": "#ffe4f3",
+      "border": "#60334d",
+      "search_text": "#ffe4f3",
+      "search_bg": "rgba(244, 114, 182, 0.12)",
+      "search_border": "rgba(196, 181, 253, 0.38)",
+      "list_text": "#ffe4f3"
+    },
+    "tree": {
+      "collapse_button": "#ffe4f3",
+      "header_border": "#60334d",
+      "header_bg": "#37162c",
+      "item_divider": "rgba(249, 168, 212, 0.18)"
+    },
+    "history": {
+      "border": "#60334d",
+      "button_border": "#60334d"
+    },
+    "minibar": {
+      "selected_bg": "#4a1d3a",
+      "selected_text": "#fff5fa",
+      "unselected_text": "#f9a8d4"
+    },
+    "toc_widget": {
+      "bg": "#37162c",
+      "border": "#60334d",
+      "text": "#ffe4f3",
+      "hover_bg": "rgba(244, 114, 182, 0.22)",
+      "selected_bg": "rgba(244, 114, 182, 0.22)"
+    },
+    "focus_border": {
+      "default": "#f472b6",
+      "filtered": "#c4b5fd"
+    }
+  },
+  "ai_chat_panel": {
+    "chat_view": {
+      "bg": "#25101f",
+      "text": "#ffe4f3",
+      "border": "#60334d"
+    },
+    "chat_html": {
+      "base_bg": "#25101f",
+      "text": "#ffe4f3",
+      "accent": "#f472b6",
+      "user": "#fbcfe8",
+      "assistant": "#c4b5fd",
+      "summary_border": "#60334d",
+      "code_bg": "#37162c",
+      "code_text": "#ffe4f3",
+      "code_border": "#60334d",
+      "think_border": "#f472b6",
+      "think_text": "#fce7f3"
+    }
+  }
+}

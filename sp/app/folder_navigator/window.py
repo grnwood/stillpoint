@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListView, QListWidgetItem, QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
     QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
-    QSizePolicy)
+    QSizePolicy, QColorDialog)
 from PySide6.QtWidgets import QTextBrowser
 
 from .core import (DEFAULT_PRUNED_DIRECTORY_GLOBS, DEFAULT_PRUNED_DIRECTORY_NAMES,
@@ -870,7 +870,7 @@ class CommandBar(QWidget):
         self._apply_theme()
 
     def _apply_theme(self):
-        palette = QApplication.palette()
+        palette = self.palette()
         base = palette.color(QPalette.Base).name()
         alternate = palette.color(QPalette.AlternateBase).name()
         text = palette.color(QPalette.Text).name()
@@ -4156,6 +4156,7 @@ class Window(QMainWindow):
         self._startup_selected_path = None
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
+        self.setObjectName("folderNavigatorWindow")
         self.setWindowTitle(f"{self.root.name} — StillPoint Folder Navigator")
         self.resize(1100, 760)
         self.settings_path = Path.home() / ".stillpoint_folder_navigator.json"
@@ -4533,12 +4534,16 @@ class Window(QMainWindow):
 
     def _apply_identity_style(self):
         """Apply restrained Folder Navigator chrome without changing content themes."""
-        accent = QColor(str(theme_value(
-            "folder_navigator.identity.accent", "#4f8f8b"
-        )))
+        saved_accent = self.state.get("identity_accent")
+        accent = QColor(str(
+            saved_accent
+            if isinstance(saved_accent, str)
+            else theme_value("folder_navigator.identity.accent", "#4f8f8b")
+        ))
         if not accent.isValid():
             accent = QColor("#4f8f8b")
         self._folder_identity_accent = accent.name()
+        self._apply_folder_palette(accent)
         self.identity_bar.set_accent_color(accent.name())
         self.folder_panel_header.set_accent_color(accent.name())
         self.tree.setStyleSheet(
@@ -4546,6 +4551,151 @@ class Window(QMainWindow):
             + "QHeaderView::section { border: 0; border-bottom: 1px solid palette(mid); "
             "padding: 4px 6px; }"
         )
+        self._apply_chat_minibar_style()
+        self._apply_focus_borders()
+        self._sync_folder_color_actions()
+
+    @staticmethod
+    def _blend_folder_color(base: QColor, target: QColor, amount: float) -> QColor:
+        amount = max(0.0, min(1.0, amount))
+        return QColor(
+            round(base.red() * (1 - amount) + target.red() * amount),
+            round(base.green() * (1 - amount) + target.green() * amount),
+            round(base.blue() * (1 - amount) + target.blue() * amount),
+        )
+
+    def _apply_folder_palette(self, accent: QColor):
+        """Apply a full dark palette only when this root has its own color."""
+        saved_accent = self.state.get("identity_accent")
+        if not isinstance(saved_accent, str):
+            self.setStyleSheet("")
+            palette = QApplication.palette()
+        else:
+            background = self._blend_folder_color(QColor("#0b0e14"), accent, 0.30)
+            alternate = self._blend_folder_color(QColor("#121722"), accent, 0.36)
+            border = self._blend_folder_color(QColor("#5d6675"), accent, 0.42)
+            text = QColor("#f4f7fb")
+            selected_text = QColor(
+                "#111111" if accent.lightness() >= 160 else "#ffffff"
+            )
+            palette = QPalette(QApplication.palette())
+            palette.setColor(QPalette.Window, background)
+            palette.setColor(QPalette.Base, background)
+            palette.setColor(QPalette.AlternateBase, alternate)
+            palette.setColor(QPalette.Button, alternate)
+            palette.setColor(QPalette.WindowText, text)
+            palette.setColor(QPalette.Text, text)
+            palette.setColor(QPalette.ButtonText, text)
+            palette.setColor(QPalette.Mid, border)
+            palette.setColor(QPalette.Highlight, accent)
+            palette.setColor(QPalette.HighlightedText, selected_text)
+            self.setStyleSheet(
+                "QMainWindow#folderNavigatorWindow {"
+                f"background: {background.name()}; color: {text.name()};"
+                "}"
+                "QMainWindow#folderNavigatorWindow QPlainTextEdit, "
+                "QMainWindow#folderNavigatorWindow QTextEdit, "
+                "QMainWindow#folderNavigatorWindow QListWidget, "
+                "QMainWindow#folderNavigatorWindow QTableView {"
+                f"background: {background.name()}; color: {text.name()};"
+                f"selection-background-color: {accent.name()}; "
+                f"selection-color: {selected_text.name()};"
+                "}"
+                "QMainWindow#folderNavigatorWindow QLineEdit {"
+                f"background: {alternate.name()}; color: {text.name()}; "
+                f"border: 1px solid {border.name()};"
+                "}"
+            )
+
+        for widget in (
+            self,
+            self.tree,
+            self.rail,
+            self.tabs,
+            self.folder_page,
+            self.search_results,
+            self.statusBar(),
+            getattr(self, "chat_tabs", None),
+            getattr(self, "chat_minibar_tab", None),
+        ):
+            if widget is not None:
+                widget.setPalette(palette)
+        self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
+        for tab in self.all_tabs():
+            editor = getattr(tab, "editor", None)
+            if editor is not None:
+                editor.setPalette(palette)
+                set_cursor_color = getattr(
+                    editor, "set_folder_navigator_vi_cursor_color", None
+                )
+                if set_cursor_color is not None:
+                    set_cursor_color(accent.name() if isinstance(saved_accent, str) else None)
+            reading_view = getattr(tab, "reading_view", None)
+            if reading_view is not None:
+                reading_view.setPalette(palette)
+                reading_view.set_folder_navigator_vi_cursor_color(
+                    accent.name() if isinstance(saved_accent, str) else None
+                )
+            status = getattr(tab, "editor_status", None)
+            if status is not None:
+                status.setStyleSheet(
+                    "QFrame#folderEditorStatus {"
+                    f"background: {palette.color(QPalette.AlternateBase).name()};"
+                    f"color: {palette.color(QPalette.Text).name()};"
+                    f"border-top: 1px solid {palette.color(QPalette.Mid).name()};"
+                    "} QLabel { border: none; background: transparent; }"
+                )
+
+    def _apply_chat_minibar_style(self):
+        tab = getattr(self, "chat_minibar_tab", None)
+        if tab is None:
+            return
+        colors = chrome_colors(
+            tab,
+            getattr(
+                self,
+                "_folder_identity_accent",
+                theme_value("folder_navigator.identity.accent", "#4f8f8b"),
+            ),
+        )
+        tab.setStyleSheet(
+            f"QTabBar::tab {{ background: {colors['rail_inactive']}; "
+            f"color: {colors['rail_inactive_text']}; "
+            f"border: 1px solid {colors['border']}; "
+            "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
+            f"QTabBar::tab:selected {{ background: {colors['rail_active']}; "
+            f"color: {colors['rail_active_text']}; "
+            f"border: 1px solid {colors['accent']}; }}"
+        )
+
+    def _sync_folder_color_actions(self):
+        actions = getattr(self, "folder_color_actions", None)
+        if not actions:
+            return
+        saved_accent = self.state.get("identity_accent")
+        for color, action in actions.items():
+            action.setChecked(saved_accent == color)
+        self.default_folder_color_action.setChecked(not isinstance(saved_accent, str))
+
+    def _set_folder_identity_accent(self, color: str | None):
+        """Save and apply a root-specific navigator accent."""
+        if color is None:
+            self.state.pop("identity_accent", None)
+        else:
+            accent = QColor(color)
+            if not accent.isValid():
+                self.statusBar().showMessage("Choose a valid folder color", 5000)
+                return
+            self.state["identity_accent"] = accent.name()
+        self._apply_identity_style()
+        self._persist()
+
+    def _choose_custom_folder_color(self):
+        selected = QColorDialog.getColor(
+            QColor(self._folder_identity_accent), self, "Choose Folder Color"
+        )
+        if selected.isValid():
+            self._set_folder_identity_accent(selected.name())
 
     def _apply_focus_borders(self):
         """Highlight the active navigator pane like StillPoint's main window."""
@@ -4932,6 +5082,39 @@ class Window(QMainWindow):
         self.hidden_action.setCheckable(True)
         self.hidden_action.setChecked(self.state.get("hidden", False))
         self.toggle_hidden(self.hidden_action.isChecked(), persist=False)
+        folder_color_menu = view_menu.addMenu("Folder Color")
+        self.default_folder_color_action = QAction("Use Theme Default", self)
+        self.default_folder_color_action.setCheckable(True)
+        self.default_folder_color_action.triggered.connect(
+            lambda _checked=False: self._set_folder_identity_accent(None)
+        )
+        folder_color_menu.addAction(self.default_folder_color_action)
+        folder_color_menu.addSeparator()
+        self.folder_color_actions = {}
+        for label, color in (
+            ("Ocean", "#4f8f8b"),
+            ("Blue", "#4a90e2"),
+            ("Purple", "#8b6fcb"),
+            ("Rose", "#c95c7b"),
+            ("Orange", "#d9822b"),
+            ("Gold", "#b58b24"),
+            ("Green", "#4f9b67"),
+            ("Aurora", "#22d3ee"),
+            ("Neon Lagoon", "#2dd4bf"),
+            ("Sakura", "#f472b6"),
+            ("Citrus Pop", "#facc15"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selected=color: self._set_folder_identity_accent(selected)
+            )
+            folder_color_menu.addAction(action)
+            self.folder_color_actions[color] = action
+        folder_color_menu.addSeparator()
+        custom_color_action = QAction("Custom Color…", self)
+        custom_color_action.triggered.connect(self._choose_custom_folder_color)
+        folder_color_menu.addAction(custom_color_action)
         add(view_menu, "Zoom In", lambda: self._zoom_active_view(1), QKeySequence.ZoomIn)
         add(view_menu, "Zoom Out", lambda: self._zoom_active_view(-1), QKeySequence.ZoomOut)
         self.reading_view_action = add(
@@ -5353,19 +5536,7 @@ class Window(QMainWindow):
         self.chat_minibar_tab.tabBarClicked.connect(
             lambda _index: self._toggle_chat_panel(True)
         )
-        chat_tab_colors = chrome_colors(
-            self.chat_minibar_tab,
-            theme_value("folder_navigator.identity.accent", "#4f8f8b"),
-        )
-        self.chat_minibar_tab.setStyleSheet(
-            f"QTabBar::tab {{ background: {chat_tab_colors['rail_inactive']}; "
-            f"color: {chat_tab_colors['rail_inactive_text']}; "
-            f"border: 1px solid {chat_tab_colors['border']}; "
-            "border-radius: 4px; padding: 6px 10px; margin: 2px 0; }"
-            f"QTabBar::tab:selected {{ background: {chat_tab_colors['rail_active']}; "
-            f"color: {chat_tab_colors['rail_active_text']}; "
-            f"border: 1px solid {chat_tab_colors['accent']}; }}"
-        )
+        self._apply_chat_minibar_style()
         self.chat_minibar_toggle = QToolButton()
         self.chat_minibar_toggle.setAutoRaise(True)
         self.chat_minibar_toggle.setFocusPolicy(Qt.NoFocus)
@@ -5829,6 +6000,8 @@ class Window(QMainWindow):
             tab.preview_signature = fingerprint(path)
         self._update_tab_tooltip(tab)
         self.tabs.setCurrentIndex(index)
+        if isinstance(self.state.get("identity_accent"), str):
+            self._apply_folder_palette(QColor(self._folder_identity_accent))
         if not tab.editor:
             self._install_preview_context_menu(tab, getattr(tab, "viewer", tab))
         if tab.editor:
