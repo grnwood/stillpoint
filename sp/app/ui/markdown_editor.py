@@ -8707,7 +8707,16 @@ class MarkdownEditor(QTextEdit):
         start_value = scrollbar.value()
         cursor = self.textCursor()
         mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
-        if not cursor.movePosition(operation, mode, max(1, count)):
+        moved = False
+        # QTextCursor.movePosition(op, mode, n) returns False unless all n
+        # moves complete.  A page-wise vi command can request more logical
+        # lines than exist on a visually tall, image-heavy page; keep the
+        # valid partial movement instead of dropping the command entirely.
+        for _ in range(max(1, count)):
+            if not cursor.movePosition(operation, mode):
+                break
+            moved = True
+        if not moved:
             return
         cursor = self._clamp_cursor(cursor)
 

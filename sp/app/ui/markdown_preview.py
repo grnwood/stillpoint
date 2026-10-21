@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_value
 from sp.markdown_html import nearest_source_anchor, render_markdown_html
 
@@ -273,6 +274,15 @@ class _ReadingBrowser(QTextBrowser):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if (
+            self.vi_enabled
+            and is_vi_navigation_chord(modifiers)
+            and event.key() in (Qt.Key_J, Qt.Key_K)
+        ):
+            self.page_scroll(1 if event.key() == Qt.Key_J else -1)
+            self._pending_g = False
+            event.accept()
+            return
         if modifiers == Qt.NoModifier and event.key() in (Qt.Key_Down, Qt.Key_Up):
             self.line_scroll(1 if event.key() == Qt.Key_Down else -1)
             self._pending_g = False

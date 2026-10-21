@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPalette, QTextCursor
+from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QKeySequence, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
@@ -285,6 +285,43 @@ def test_reading_vi_cursor_crosses_a_tall_image_smoothly(
     QTest.qWait(240)
     assert "After" in view.browser._reading_cursor.block().text()
     assert view.browser.verticalScrollBar().value() > 0
+
+
+def test_reading_view_handles_macos_vi_page_chord_with_image(
+    qtbot, qapp, tmp_path: Path, monkeypatch
+) -> None:
+    import sp.app.ui.keyboard_shortcuts as keyboard_shortcuts
+
+    monkeypatch.setattr(keyboard_shortcuts.platform, "system", lambda: "Darwin")
+    image_path = tmp_path / "tall.png"
+    image = QImage(493, 364, QImage.Format_RGB32)
+    image.fill(QColor("#4488aa"))
+    assert image.save(str(image_path))
+
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.resize(420, 220)
+    view.set_markdown(
+        "Before\n\n![image](tall.png)\n\nAfter\n\n" + "More text\n\n" * 20,
+        base_directory=tmp_path,
+    )
+    view.set_vi_enabled(True)
+    view.show()
+    view.focus_reader()
+    qapp.processEvents()
+    start = view.browser.verticalScrollBar().value()
+
+    view.browser.keyPressEvent(
+        QKeyEvent(
+            QEvent.KeyPress,
+            Qt.Key_J,
+            Qt.MetaModifier | Qt.ShiftModifier,
+            "J",
+        )
+    )
+    QTest.qWait(160)
+
+    assert view.browser.verticalScrollBar().value() > start
 
 
 def test_reading_images_reflow_with_the_content_column(

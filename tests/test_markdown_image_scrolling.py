@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, QUrl
-from PySide6.QtGui import QImage, QTextCursor, QTextDocument, QTextImageFormat
+from PySide6.QtCore import QEvent, QPoint, Qt, QUrl
+from PySide6.QtGui import QImage, QKeyEvent, QTextCursor, QTextDocument, QTextImageFormat
 from PySide6.QtTest import QTest
 
 from sp.app.ui.markdown_editor import MarkdownEditor
@@ -119,6 +119,34 @@ def test_vi_navigation_enters_tall_image_row_without_full_height_jump(qapp) -> N
     assert editor.verticalScrollBar().value() == 0
     _finish_scroll_animation(editor)
     _assert_image_row_centered(editor)
+    editor.close()
+
+
+def test_macos_vi_page_chord_crosses_short_tall_image_page(qapp, monkeypatch) -> None:
+    import sp.app.ui.keyboard_shortcuts as keyboard_shortcuts
+
+    monkeypatch.setattr(keyboard_shortcuts.platform, "system", lambda: "Darwin")
+    editor = _editor_with_tall_image_row(qapp)
+    editor._vi_feature_enabled = True
+    editor._vi_mode_active = True
+    chord = Qt.MetaModifier | Qt.ShiftModifier
+
+    qapp.sendEvent(
+        editor,
+        QKeyEvent(QEvent.KeyPress, Qt.Key_J, chord, "J"),
+    )
+
+    assert editor.textCursor().blockNumber() == 2
+    _finish_scroll_animation(editor)
+    assert editor.verticalScrollBar().value() > 0
+
+    qapp.sendEvent(
+        editor,
+        QKeyEvent(QEvent.KeyPress, Qt.Key_K, chord, "K"),
+    )
+
+    assert editor.textCursor().blockNumber() == 0
+    editor._stop_cursor_scroll_animation()
     editor.close()
 
 
