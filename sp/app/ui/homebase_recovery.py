@@ -5,12 +5,139 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
-    QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QListWidget, QMessageBox, QPlainTextEdit, QPushButton,
+    QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+from .screen_positioning import fit_window_to_available_screen
+from .theme import chrome_colors
+
+
+class RecoveryDiffDialog(QDialog):
+    """Read-only comparison of the current file and its protected preimage."""
+
+    def __init__(self, path: str, current: bytes | None, protected: bytes, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("homebaseRecoveryDiffDialog")
+        self.setWindowTitle(f"Recovery Diff — /{path}")
+        layout = QVBoxLayout(self)
+        current_bytes = current or b""
+        current_missing = current is None
+        try:
+            current_text = current_bytes.decode("utf-8")
+            protected_text = protected.decode("utf-8")
+        except UnicodeDecodeError:
+            summary = QLabel(
+                "This file is binary and cannot be shown as a text diff.\n\n"
+                f"Current: {'missing' if current_missing else f'{len(current_bytes):,} bytes'}\n"
+                f"Protected copy: {len(protected):,} bytes"
+            )
+            summary.setWordWrap(True)
+            layout.addWidget(summary, 1)
+        else:
+            matcher = difflib.SequenceMatcher(
+                a=current_text.splitlines(),
+                b=protected_text.splitlines(),
+            )
+            changes = [opcode for opcode in matcher.get_opcodes() if opcode[0] != "equal"]
+            summary = QLabel(
+                f"/{path} · {len(changes)} changed section(s)"
+                + (" · current file is missing" if current_missing else "")
+            )
+            summary.setWordWrap(True)
+            layout.addWidget(summary)
+            splitter = QSplitter(Qt.Horizontal, self)
+            current_editor = self._diff_panel(
+                "Current vault file" + (" (missing)" if current_missing else ""),
+                current_text,
+                splitter,
+                "homebaseRecoveryCurrentText",
+            )
+            splitter.addWidget(current_editor.parentWidget())
+            protected_editor = self._diff_panel(
+                "Protected copy (before Homebase change)",
+                protected_text,
+                splitter,
+                "homebaseRecoveryProtectedText",
+            )
+            splitter.addWidget(protected_editor.parentWidget())
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 1)
+            layout.addWidget(splitter, 1)
+            self._highlight_changes(current_editor, protected_editor, changes)
+            current_editor.verticalScrollBar().valueChanged.connect(
+                protected_editor.verticalScrollBar().setValue
+            )
+            protected_editor.verticalScrollBar().valueChanged.connect(
+                current_editor.verticalScrollBar().setValue
+            )
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close_button = QPushButton("Close", self)
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        fit_window_to_available_screen(self, QSize(1180, 760), parent=parent)
+
+    @staticmethod
+    def _diff_panel(
+        title: str,
+        text: str,
+        parent: QWidget,
+        object_name: str,
+    ) -> QPlainTextEdit:
+        panel = QWidget(parent)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(title, panel)
+        label.setStyleSheet("font-weight: 600; padding: 4px 2px;")
+        editor = QPlainTextEdit(panel)
+        editor.setObjectName(object_name)
+        editor.setReadOnly(True)
+        editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        editor.setPlainText(text)
+        panel_layout.addWidget(label)
+        panel_layout.addWidget(editor, 1)
+        return editor
+
+    @staticmethod
+    def _selection(editor: QPlainTextEdit, start: int, end: int, color: QColor):
+        document = editor.document()
+        if document.blockCount() <= 0:
+            return None
+        start = min(max(0, start), document.blockCount() - 1)
+        end = min(max(start + 1, end), document.blockCount())
+        first = document.findBlockByNumber(start)
+        last = document.findBlockByNumber(end - 1)
+        if not first.isValid() or not last.isValid():
+            return None
+        cursor = QTextCursor(first)
+        cursor.setPosition(last.position() + max(0, last.length() - 1), QTextCursor.KeepAnchor)
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = cursor
+        selection.format = QTextCharFormat()
+        selection.format.setBackground(color)
+        return selection
+
+    @classmethod
+    def _highlight_changes(cls, current, protected, changes) -> None:
+        current_color = QColor(130, 70, 70, 110)
+        protected_color = QColor(55, 125, 90, 120)
+        current_selections = []
+        protected_selections = []
+        for _tag, i1, i2, j1, j2 in changes:
+            left = cls._selection(current, i1, i2, current_color)
+            right = cls._selection(protected, j1, j2, protected_color)
+            if left is not None:
+                current_selections.append(left)
+            if right is not None:
+                protected_selections.append(right)
+        current.setExtraSelections(current_selections)
+        protected.setExtraSelections(protected_selections)
 
 
 class HomebaseRecoveryDialog(QDialog):
@@ -20,7 +147,6 @@ class HomebaseRecoveryDialog(QDialog):
         self.store = engine.recovery
         self.restore_callback = restore_callback
         self.setWindowTitle("Homebase Local Recovery")
-        self.resize(850, 620)
         layout = QVBoxLayout(self)
         introduction = QLabel(
             "StillPoint keeps protected copies before Homebase replaces or removes local files. "
@@ -35,14 +161,59 @@ class HomebaseRecoveryDialog(QDialog):
         layout.addWidget(self.usage)
         row = QHBoxLayout()
         layout.addLayout(row, 1)
+        events_panel = QWidget(self)
+        events_layout = QVBoxLayout(events_panel)
+        events_layout.setContentsMargins(0, 0, 0, 0)
+        events_label = QLabel("Recovery points", events_panel)
+        events_label.setStyleSheet("font-weight: 600; padding: 2px 0 4px 0;")
+        events_layout.addWidget(events_label)
         self.events = QListWidget()
+        self.events.setObjectName("homebaseRecoveryEventList")
         self.events.setMinimumWidth(350)
-        row.addWidget(self.events, 1)
+        colors = chrome_colors(self)
+        self.events.setAlternatingRowColors(True)
+        self.events.setSpacing(3)
+        self.events.setStyleSheet(
+            "QListWidget {"
+            f" border: 1px solid {colors['border']}; padding: 4px;"
+            "}"
+            "QListWidget::item { padding: 9px 10px; border-bottom: 1px solid "
+            f"{colors['border']}; }}"
+            f"QListWidget::item:selected {{ background: {colors['selected']}; }}"
+        )
+        events_layout.addWidget(self.events, 1)
+        row.addWidget(events_panel, 1)
         right = QVBoxLayout()
         row.addLayout(right, 2)
-        self.paths = QListWidget()
+        paths_label = QLabel("Protected files — double-click a row to open the full diff")
+        paths_label.setStyleSheet("font-weight: 600; padding: 2px 0 4px 0;")
+        right.addWidget(paths_label)
+        self.paths = QTreeWidget()
+        self.paths.setObjectName("homebaseRecoveryProtectedFiles")
+        self.paths.setHeaderLabels(["Protected file", "Homebase action", "Status"])
+        self.paths.setRootIsDecorated(False)
+        self.paths.setAlternatingRowColors(True)
+        self.paths.setUniformRowHeights(False)
+        self.paths.setIndentation(0)
         self.paths.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.paths.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.paths.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.paths.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.paths.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.paths.setStyleSheet(
+            "QTreeWidget {"
+            f" border: 1px solid {colors['border']};"
+            "}"
+            "QTreeWidget::item { padding: 8px 10px; border-bottom: 1px solid "
+            f"{colors['border']}; border-right: 1px solid {colors['border']}; }}"
+            f"QTreeWidget::item:selected {{ background: {colors['selected']}; }}"
+            "QHeaderView::section { padding: 7px 10px; font-weight: 600; border: 0; "
+            f"border-right: 1px solid {colors['border']}; border-bottom: 1px solid {colors['border']}; }}"
+        )
         right.addWidget(self.paths, 1)
+        preview_label = QLabel("Quick diff preview")
+        preview_label.setStyleSheet("font-weight: 600; padding: 6px 0 2px 0;")
+        right.addWidget(preview_label)
         self.preview = QTextEdit()
         self.preview.setReadOnly(True)
         right.addWidget(self.preview, 2)
@@ -97,7 +268,9 @@ class HomebaseRecoveryDialog(QDialog):
         )
         self.events.currentItemChanged.connect(self._show_event)
         self.paths.currentItemChanged.connect(self._show_preview)
+        self.paths.itemDoubleClicked.connect(self._open_diff_viewer)
         self.refresh()
+        fit_window_to_available_screen(self, QSize(1100, 700), parent=parent)
 
     def refresh(self) -> None:
         self.events.clear()
@@ -127,6 +300,7 @@ class HomebaseRecoveryDialog(QDialog):
             )
             from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(text)
+            item.setSizeHint(QSize(0, 62))
             item.setData(Qt.UserRole, event["event_id"])
             item.setToolTip(
                 f"Created: {event['created_at']}\n"
@@ -152,7 +326,6 @@ class HomebaseRecoveryDialog(QDialog):
         event = self._event()
         if event is None:
             return
-        from PySide6.QtWidgets import QListWidgetItem
         for path in event["paths"]:
             action = {
                 "create": "Added by Homebase",
@@ -162,22 +335,31 @@ class HomebaseRecoveryDialog(QDialog):
                 "preserve": "Saved before replacing a missing remote version",
             }.get(path["planned_action"], "Changed by Homebase")
             result = str(path.get("result") or "")
-            suffix = " · needs attention" if result == "failed" else ""
-            item = QListWidgetItem(f"{action}: {path['path']}{suffix}")
-            item.setData(Qt.UserRole, path["path"])
-            item.setToolTip(
+            status = {
+                "applied": "Applied",
+                "failed": "Needs attention",
+                "pending": "Pending",
+            }.get(result, result.replace("-", " ").title() or "Protected")
+            item = QTreeWidgetItem([path["path"], action, status])
+            item.setData(0, Qt.UserRole, path["path"])
+            item.setSizeHint(0, QSize(0, 38))
+            tooltip = (
                 f"Action: {path.get('planned_action') or 'unknown'}\n"
-                f"Result: {result or 'unknown'}"
+                f"Result: {result or 'unknown'}\n"
+                "Double-click to compare the current file with this protected copy."
             )
-            self.paths.addItem(item)
+            for column in range(3):
+                item.setToolTip(column, tooltip)
+            self.paths.addTopLevelItem(item)
 
     def _show_preview(self, *_args) -> None:
         self.preview.clear()
+        self.image_preview.hide()
         event = self._event()
         item = self.paths.currentItem()
         if not event or not item:
             return
-        path = next((entry for entry in event["paths"] if entry["path"] == item.data(Qt.UserRole)), None)
+        path = next((entry for entry in event["paths"] if entry["path"] == item.data(0, Qt.UserRole)), None)
         if not path:
             return
         old_id = path.get("old_object_id")
@@ -207,8 +389,33 @@ class HomebaseRecoveryDialog(QDialog):
         diff = difflib.unified_diff(before, after, fromfile="before pull", tofile="current")
         self.preview.setPlainText("".join(diff) or "Text is identical.")
 
+    def _open_diff_viewer(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        event = self._event()
+        if not event or not item:
+            return
+        rel_path = item.data(0, Qt.UserRole)
+        path = next((entry for entry in event["paths"] if entry["path"] == rel_path), None)
+        if not path:
+            return
+        old_id = path.get("old_object_id")
+        if not old_id:
+            QMessageBox.information(
+                self,
+                "Recovery Diff",
+                "This file was created by the Homebase pull, so there is no protected earlier copy.",
+            )
+            return
+        try:
+            protected = self.store.read_object(old_id)
+            target = self.store.path(path["path"])
+            current = target.read_bytes() if target.is_file() else None
+        except Exception as exc:
+            QMessageBox.warning(self, "Recovery Diff", f"Could not open the diff: {exc}")
+            return
+        RecoveryDiffDialog(path["path"], current, protected, self).exec()
+
     def _selected_paths(self) -> list[str]:
-        return [item.data(Qt.UserRole) for item in self.paths.selectedItems()]
+        return [item.data(0, Qt.UserRole) for item in self.paths.selectedItems()]
 
     def _open_backup_folder(self) -> None:
         try:

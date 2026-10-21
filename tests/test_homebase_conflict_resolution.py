@@ -130,6 +130,69 @@ def test_apply_remote_checkpoint_ignores_non_material_title_only_markdown_differ
     assert engine.list_conflicts() == []
 
 
+def test_apply_remote_checkpoint_reuses_planned_conflict_path(tmp_path, monkeypatch) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    local_file = vault_root / "Page.md"
+    local_file.write_text("local version", encoding="utf-8")
+
+    cfg = HomebaseSyncConfig(
+        vault_root=vault_root,
+        vault_id="vault-123",
+        device_id="device-local",
+        remote_url="https://example.invalid",
+        verify_ssl=True,
+        auth_token="token",
+        passphrase="secret",
+        recovery_base_dir=tmp_path / "recovery",
+    )
+    engine = HomebaseSyncEngine(cfg)
+    key = derive_key_from_passphrase(cfg.passphrase, cfg.vault_id)
+    ciphertext = encrypt_bytes(key, b"server version")
+    object_id = object_id_from_ciphertext(ciphertext)
+    manifest = {
+        "schema_version": 1,
+        "vault_id": cfg.vault_id,
+        "device_id": "device-remote",
+        "entries": {
+            "Page.md": {
+                "object_id": object_id,
+                "mtime": 1,
+                "size": len(b"server version"),
+                "kind": "file",
+            }
+        },
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    generated_paths: list[str] = []
+
+    def changing_conflict_path(rel_path: str, device_id: str) -> str:
+        path = f"Page.sync-conflict-{len(generated_paths) + 1}-{device_id}.md"
+        generated_paths.append(path)
+        return path
+
+    monkeypatch.setattr("sp.sync.engine.conflict_copy_path", changing_conflict_path)
+    engine._record_sync_error(
+        path="Page.md",
+        phase="apply",
+        reason="Conflict path changed since recovery planning",
+        object_id=object_id,
+    )
+
+    applied_paths, _pulled_cache = engine._apply_remote_checkpoint(
+        _FakeClient(manifest_bytes, {object_id: ciphertext}),
+        key,
+        "checkpoint-path-stability",
+    )
+
+    planned_path = "Page.sync-conflict-1-device-remote.md"
+    assert generated_paths == [planned_path]
+    assert applied_paths == [planned_path]
+    assert (vault_root / planned_path).read_text(encoding="utf-8") == "server version"
+    assert local_file.read_text(encoding="utf-8") == "local version"
+    assert engine.list_sync_errors() == []
+
+
 def test_keep_local_resolution_removes_conflict_and_requests_sync(tmp_path, monkeypatch) -> None:
     class _DummyStatusBar:
         def __init__(self) -> None:

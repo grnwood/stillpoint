@@ -293,9 +293,9 @@ def test_daily_retention_keeps_a_prior_day_during_rapid_pulls(tmp_path):
     assert events[1]["event_id"] not in retained
 
 
-def test_recovery_manager_shows_event_and_on_demand_text_diff(tmp_path, qapp):
-    from sp.app.ui.homebase_recovery import HomebaseRecoveryDialog
-    from PySide6.QtWidgets import QPushButton
+def test_recovery_manager_shows_event_and_on_demand_text_diff(tmp_path, qapp, monkeypatch):
+    from sp.app.ui.homebase_recovery import HomebaseRecoveryDialog, RecoveryDiffDialog
+    from PySide6.QtWidgets import QPlainTextEdit, QPushButton
 
     engine = engine_for(tmp_path)
     local = engine.cfg.vault_root / "Page.md"
@@ -316,10 +316,26 @@ def test_recovery_manager_shows_event_and_on_demand_text_diff(tmp_path, qapp):
     try:
         assert dialog.events.count() == 1
         dialog.events.setCurrentRow(0)
-        assert dialog.paths.count() == 1
-        dialog.paths.setCurrentRow(0)
+        assert dialog.paths.topLevelItemCount() == 1
+        path_item = dialog.paths.topLevelItem(0)
+        assert [path_item.text(column) for column in range(3)] == [
+            "Page.md",
+            "Changed by Homebase",
+            "Applied",
+        ]
+        dialog.paths.setCurrentItem(path_item)
         assert "-before" in dialog.preview.toPlainText()
         assert "+after" in dialog.preview.toPlainText()
         assert dialog.findChild(QPushButton, "homebaseOpenBackupFolderButton") is not None
+
+        opened = []
+        monkeypatch.setattr(RecoveryDiffDialog, "exec", lambda diff: opened.append(diff))
+        dialog._open_diff_viewer(path_item)
+        assert len(opened) == 1
+        diff = opened[0]
+        current = diff.findChild(QPlainTextEdit, "homebaseRecoveryCurrentText")
+        protected = diff.findChild(QPlainTextEdit, "homebaseRecoveryProtectedText")
+        assert current is not None and current.toPlainText() == "after\n"
+        assert protected is not None and protected.toPlainText() == "before\n"
     finally:
         dialog.close()

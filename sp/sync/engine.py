@@ -2406,6 +2406,11 @@ class HomebaseSyncEngine:
         # Decide every mutation before touching the vault. The recovery event
         # is the write-ahead record for both deletions and downloaded files.
         plan: list[dict[str, Any]] = []
+        # Conflict copy names include a timestamp. Generate each name once and
+        # carry it through the apply phase; recomputing it after recovery
+        # protection (or a review pause) can cross a one-second boundary and
+        # make the apply phase reject its own plan.
+        planned_conflict_paths: dict[str, str] = {}
         for rel_key in sorted(remote_deleted_paths):
             local_path = self._local_path_for_rel(rel_key)
             if not local_path.is_file():
@@ -2453,6 +2458,7 @@ class HomebaseSyncEngine:
                 })
             elif self._resolved_conflict_resolution(rel_key, checkpoint_id) != "keep-local":
                 conflict_rel = conflict_copy_path(rel_key, remote_device_id)
+                planned_conflict_paths[rel_key] = conflict_rel
                 conflict_path = self.cfg.vault_root / conflict_rel
                 conflict_old = read_bytes(conflict_path) if conflict_path.is_file() else None
                 plan.append({
@@ -2704,7 +2710,9 @@ class HomebaseSyncEngine:
                         transfer_workers=["Idle"],
                     )
                     continue
-                conflict_rel = conflict_copy_path(rel_key, remote_device_id)
+                conflict_rel = planned_conflict_paths.get(rel_key)
+                if not conflict_rel:
+                    raise RecoveryError(f"Conflict path was not recorded during recovery planning: {rel_key}")
                 conflict_path = self.cfg.vault_root / conflict_rel
                 conflict_action = planned_actions.get(conflict_rel)
                 if self.cfg.recovery_enabled and not conflict_action:
@@ -2735,6 +2743,7 @@ class HomebaseSyncEngine:
                     remote_mtime=remote_mtime,
                     reason=reason,
                 )
+                resolved_error_paths.add(rel_key)
                 conflicts += 1
                 remaining_downloads = max(0, remaining_downloads - 1)
                 self._set_status_locked(
@@ -2751,7 +2760,11 @@ class HomebaseSyncEngine:
                 # represented on this platform (e.g., WinError 123).
                 pulled_cache.pop(rel_key, None)
                 if recovery_event:
-                    event_path = rel_key if rel_key in planned_actions else conflict_copy_path(rel_key, remote_device_id)
+                    event_path = (
+                        rel_key
+                        if rel_key in planned_actions
+                        else planned_conflict_paths.get(rel_key, "")
+                    )
                     if event_path in planned_actions:
                         self.recovery.mark(recovery_event, event_path, "failed", str(apply_exc))
                 self._last_pull_incomplete = True

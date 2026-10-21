@@ -76,7 +76,7 @@ hidden += _calamine_hidden
 _openpyxl_datas, _openpyxl_binaries, _openpyxl_hidden = collect_all('openpyxl')
 hidden += _openpyxl_hidden
 
-STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.6').lstrip('v')
+STILLPOINT_VERSION = os.getenv('STILLPOINT_VERSION', '1.6.7').lstrip('v')
 
 # Data files: templates + bundled assets
 _datas = [
