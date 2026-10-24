@@ -102,3 +102,47 @@ def test_macos_companion_builder_creates_app_in_requested_output(tmp_path: Path)
     assert "--folder-navigator" in executable.read_text()
     assert "<string>1.2.3</string>" in plist.read_text()
     assert (app / "Contents" / "Resources" / "FolderNavigator.icns").is_file()
+
+
+def test_macos_build_produces_three_app_bundles() -> None:
+    script = (ROOT / "packaging" / "macos" / "build-macos.sh").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "macos-build.yml").read_text()
+
+    for app_name in (
+        "StillPoint.app",
+        "StillPoint Folder Navigator.app",
+        "StillPoint Quick Capture.app",
+    ):
+        assert app_name in script
+        assert app_name in workflow
+    assert 'build-quick-capture-app.sh "$OUTPUT_DIR"' in script
+    assert "build-quick-capture-app.sh dist" in workflow
+
+
+def test_macos_quick_capture_builder_creates_self_contained_app(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "stillpoint-capture"
+    capture_dir.mkdir()
+    capture_binary = capture_dir / "stillpoint-capture"
+    capture_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    capture_binary.chmod(0o755)
+    support_file = capture_dir / "support.dat"
+    support_file.write_text("bundled dependency", encoding="utf-8")
+    script = ROOT / "packaging" / "macos" / "build-quick-capture-app.sh"
+
+    subprocess.run(
+        [str(script), str(tmp_path), "1.2.3"],
+        check=True,
+        env={**os.environ, "PLUTIL_BIN": "/bin/true"},
+    )
+
+    app = tmp_path / "StillPoint Quick Capture.app"
+    executable = app / "Contents" / "MacOS" / "stillpoint-quick-capture"
+    resources = app / "Contents" / "Resources"
+    plist = app / "Contents" / "Info.plist"
+    assert executable.stat().st_mode & 0o111
+    assert "Resources/stillpoint-capture/stillpoint-capture" in executable.read_text()
+    assert (resources / "stillpoint-capture" / "stillpoint-capture").stat().st_mode & 0o111
+    assert (resources / "stillpoint-capture" / "support.dat").read_text() == "bundled dependency"
+    assert (resources / "StillPoint.icns").is_file()
+    assert "app.stillpoint.quickcapture" in plist.read_text()
+    assert "<string>1.2.3</string>" in plist.read_text()

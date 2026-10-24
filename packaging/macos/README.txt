@@ -10,6 +10,7 @@ PACKAGE CONTENTS
 
 - StillPoint.app
 - StillPoint Folder Navigator.app (folder-badged companion launcher)
+- StillPoint Quick Capture.app (standalone quick-entry window)
 - stillpoint-capture (helper binary)
 - README.txt (this file)
 
@@ -17,9 +18,10 @@ INSTALL
 -------
 
 1. Unzip the download.
-2. Move StillPoint.app and StillPoint Folder Navigator.app to /Applications
-   (recommended). Keep the two apps beside each other so the companion launcher
-   can start Folder Navigator with its distinct Dock and app-switcher icon.
+2. Move all three .app bundles to /Applications (recommended). Keep StillPoint.app
+   and StillPoint Folder Navigator.app beside each other so the companion launcher
+   can start Folder Navigator with its distinct Dock and app-switcher icon. Quick
+   Capture is self-contained and can run independently.
 
 FIRST RUN (GUI METHOD)
 ----------------------
@@ -28,7 +30,8 @@ FIRST RUN (GUI METHOD)
 2. Right-click StillPoint.app.
 3. Click Open.
 4. Confirm Open in the macOS prompt.
-5. Repeat for StillPoint Folder Navigator.app the first time you use it.
+5. Repeat for StillPoint Folder Navigator.app and StillPoint Quick Capture.app
+   the first time you use each one.
 
 FIRST RUN (TERMINAL METHOD)
 ---------------------------
@@ -37,6 +40,7 @@ If Gatekeeper still blocks launch, clear quarantine:
 
   xattr -dr com.apple.quarantine /Applications/StillPoint.app
   xattr -dr com.apple.quarantine "/Applications/StillPoint Folder Navigator.app"
+  xattr -dr com.apple.quarantine "/Applications/StillPoint Quick Capture.app"
   open /Applications/StillPoint.app
 
 SYSTEM-WIDE HOTKEY FOR stillpoint-capture
@@ -74,6 +78,8 @@ UNINSTALL
 ---------
 
 - Remove /Applications/StillPoint.app
+- Remove "/Applications/StillPoint Folder Navigator.app"
+- Remove "/Applications/StillPoint Quick Capture.app"
 - Remove /usr/local/bin/stillpoint-capture (if installed)
 
 PROJECT
