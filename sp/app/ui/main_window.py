@@ -8161,6 +8161,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Homebase Conflict", f"Failed to read conflict copy: {exc}")
             return False
+        if not has_material_text_difference(local_text, conflict_text):
+            return self._apply_homebase_conflict_resolution(
+                entry,
+                local_text,
+                resolution="identical",
+            )
         page_path = "/" + path_rel
         merge_dialog = MergeConflictDialog(local_text, conflict_text, page_path, parent=self)
         if merge_dialog.exec() != QDialog.Accepted:

@@ -36,6 +36,7 @@ jobs:
           python packaging/fetch_ripgrep.py
           pyinstaller -y --clean packaging/sp-macos.spec
           pyinstaller -y --clean packaging/stillpoint-capture.spec
+          packaging/macos/build-folder-navigator-app.sh dist "${{ github.ref_name }}"
           ls -lah dist
 
       - name: Smoke test bundle
@@ -44,6 +45,8 @@ jobs:
           test -d dist/StillPoint.app
           test -f dist/StillPoint.app/Contents/Info.plist
           test -x dist/StillPoint.app/Contents/MacOS/StillPoint
+          test -f "dist/StillPoint Folder Navigator.app/Contents/Info.plist"
+          test -x "dist/StillPoint Folder Navigator.app/Contents/MacOS/stillpoint-folder-navigator"
           test -n "$(find dist/StillPoint.app -type f -name rg -perm -111 -print -quit)"
           test -x dist/stillpoint-capture/stillpoint-capture
 
@@ -65,6 +68,7 @@ jobs:
           rm -rf dist/bundle
           mkdir -p dist/bundle
           cp -R dist/StillPoint.app dist/bundle/
+          cp -R "dist/StillPoint Folder Navigator.app" dist/bundle/
           cp -R dist/stillpoint-capture dist/bundle/
           cp packaging/macos/README.txt dist/bundle/README.txt
           ditto -c -k --sequesterRsrc --keepParent dist/bundle StillPoint-macOS.zip

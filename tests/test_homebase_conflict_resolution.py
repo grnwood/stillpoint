@@ -130,6 +130,55 @@ def test_apply_remote_checkpoint_ignores_non_material_title_only_markdown_differ
     assert engine.list_conflicts() == []
 
 
+def test_list_conflicts_prunes_copy_that_matches_current_file(tmp_path) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    local_file = vault_root / "Page.md"
+    local_file.write_text("same content\n", encoding="utf-8")
+    conflict_rel = "Page.sync-conflict-20261022-device-remote.md"
+    conflict_file = vault_root / conflict_rel
+    conflict_file.write_text("same content\n\n", encoding="utf-8")
+
+    cfg = HomebaseSyncConfig(
+        vault_root=vault_root,
+        vault_id="vault-123",
+        device_id="device-local",
+        remote_url="https://example.invalid",
+        verify_ssl=True,
+        auth_token="token",
+        passphrase="secret",
+    )
+    statuses = []
+    engine = HomebaseSyncEngine(cfg, status_callback=statuses.append)
+    engine._conflict_path.parent.mkdir(parents=True, exist_ok=True)
+    engine._conflict_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "vault_id": cfg.vault_id,
+                "conflicts": [
+                    {
+                        "ts": "2026-10-22T00:00:00Z",
+                        "path": "Page.md",
+                        "conflict_copy_path": conflict_rel,
+                        "remote_checkpoint_id": "checkpoint-same",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    engine._status.conflicts = 1
+
+    assert engine.list_conflicts() == []
+    assert not conflict_file.exists()
+    payload = json.loads(engine._conflict_path.read_text(encoding="utf-8"))
+    assert payload["conflicts"][0]["resolution"] == "identical"
+    assert payload["conflicts"][0]["resolved_at"]
+    assert engine.get_status().conflicts == 0
+    assert statuses[-1].conflicts == 0
+
+
 def test_apply_remote_checkpoint_reuses_planned_conflict_path(tmp_path, monkeypatch) -> None:
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
@@ -285,3 +334,45 @@ def test_keep_local_resolution_removes_conflict_and_requests_sync(tmp_path, monk
     assert dummy.right_panel.task_refreshes == 1
     assert dummy.right_panel.link_refreshes == ["/Elsewhere.md"]
     assert dummy.refresh_tree_calls == 1
+
+
+def test_diff_resolution_auto_accepts_identical_content(tmp_path, monkeypatch) -> None:
+    class _Dummy:
+        def __init__(self, vault_root: str) -> None:
+            self.vault_root = vault_root
+            self._homebase_sync_engine = None
+            self.applied = []
+
+        def _apply_homebase_conflict_resolution(
+            self,
+            entry,
+            resolved_text: str,
+            *,
+            resolution: str,
+            applied_mtime=None,
+        ) -> bool:
+            self.applied.append((entry, resolved_text, resolution, applied_mtime))
+            return True
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    local_file = vault_root / "Page.md"
+    local_file.write_text("same content\n", encoding="utf-8")
+    conflict_file = vault_root / "Page.sync-conflict-20261022-device-remote.md"
+    conflict_file.write_text("same content\n\n", encoding="utf-8")
+    entry = {
+        "path": local_file.name,
+        "conflict_copy_path": conflict_file.name,
+    }
+    dummy = _Dummy(str(vault_root))
+    monkeypatch.setattr(
+        "sp.app.ui.main_window.MergeConflictDialog",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no-difference conflicts should not open the merge dialog")
+        ),
+    )
+
+    result = MainWindow._resolve_homebase_conflict_with_diff(dummy, entry)
+
+    assert result is True
+    assert dummy.applied == [(entry, "same content\n", "identical", None)]

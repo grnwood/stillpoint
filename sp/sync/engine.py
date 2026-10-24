@@ -218,6 +218,7 @@ class HomebaseSyncEngine:
         self._sync_suspended = False
         self._sync_in_progress = False
         self._status_lock = threading.Lock()
+        self._conflict_lock = threading.RLock()
         self._status = HomebaseSyncStatus()
         self._no_change_streak = 0
         self._hibernating = False
@@ -988,25 +989,73 @@ class HomebaseSyncEngine:
             return updates
 
     def list_conflicts(self, limit: int = 200) -> list[dict[str, Any]]:
-        payload = _read_json(self._conflict_path, {"conflicts": []})
-        conflicts = payload.get("conflicts")
-        if not isinstance(conflicts, list):
-            return []
-        unresolved: list[dict[str, Any]] = []
-        for item in conflicts:
-            if not isinstance(item, dict):
-                continue
-            if item.get("resolved_at"):
-                continue
-            conflict_copy = str(item.get("conflict_copy_path") or "").strip()
-            if not conflict_copy:
-                continue
-            if not (self.cfg.vault_root / conflict_copy).exists():
-                continue
-            unresolved.append(dict(item))
+        with self._conflict_lock:
+            payload = _read_json(self._conflict_path, {"conflicts": []})
+            conflicts = payload.get("conflicts")
+            if not isinstance(conflicts, list):
+                return []
+            pruned = self._prune_redundant_conflicts_locked(payload, conflicts)
+            unresolved: list[dict[str, Any]] = []
+            for item in conflicts:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("resolved_at"):
+                    continue
+                conflict_copy = str(item.get("conflict_copy_path") or "").strip()
+                if not conflict_copy:
+                    continue
+                if not (self.cfg.vault_root / conflict_copy).exists():
+                    continue
+                unresolved.append(dict(item))
+        if pruned:
+            self._set_status_locked(conflicts=len(unresolved))
         if limit > 0:
             unresolved = unresolved[-int(limit) :]
         return unresolved
+
+    def _prune_redundant_conflicts_locked(
+        self,
+        payload: dict[str, Any],
+        conflicts: list[Any],
+    ) -> int:
+        """Resolve generated conflict copies that no longer differ from their source."""
+        resolved_at = _utc_now_iso()
+        pruned = 0
+        for item in conflicts:
+            if not isinstance(item, dict) or item.get("resolved_at"):
+                continue
+            path_rel = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            copy_rel = str(item.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+            if not path_rel or not copy_rel:
+                continue
+            try:
+                local_path = self._local_path_for_rel(path_rel)
+                conflict_path = self._local_path_for_rel(copy_rel)
+                if not local_path.is_file() or not conflict_path.is_file():
+                    continue
+                local_bytes = read_bytes(local_path)
+                conflict_bytes = read_bytes(conflict_path)
+                redundant = bytes_equal(local_bytes, conflict_bytes)
+                if not redundant and path_rel.lower().endswith((".md", ".txt")):
+                    try:
+                        redundant = not has_material_text_difference(
+                            local_bytes.decode("utf-8"),
+                            conflict_bytes.decode("utf-8"),
+                        )
+                    except UnicodeDecodeError:
+                        pass
+                if not redundant:
+                    continue
+                conflict_path.unlink()
+            except (OSError, ValueError):
+                continue
+            item["resolved_at"] = resolved_at
+            item["resolution"] = "identical"
+            pruned += 1
+        if pruned:
+            _write_json(self._conflict_path, payload)
+            _log(f"auto-resolved redundant conflicts count={pruned}")
+        return pruned
 
     def _record_sync_error(self, *, path: str, phase: str, reason: str, object_id: str = "") -> None:
         rel_path = str(path or "").strip().replace("\\", "/").lstrip("/")
@@ -1364,25 +1413,27 @@ class HomebaseSyncEngine:
         cleaned = str(conflict_copy_path or "").strip().replace("\\", "/").lstrip("/")
         if not cleaned:
             return False
-        payload = _read_json(self._conflict_path, {"conflicts": []})
-        conflicts = payload.get("conflicts")
-        if not isinstance(conflicts, list):
-            return False
-        changed = False
-        resolved_at = _utc_now_iso()
-        for item in conflicts:
-            if not isinstance(item, dict):
-                continue
-            item_copy = str(item.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
-            if item_copy != cleaned:
-                continue
-            if item.get("resolved_at"):
-                continue
-            item["resolved_at"] = resolved_at
-            item["resolution"] = str(resolution or "merged")
-            changed = True
+        with self._conflict_lock:
+            payload = _read_json(self._conflict_path, {"conflicts": []})
+            conflicts = payload.get("conflicts")
+            if not isinstance(conflicts, list):
+                return False
+            changed = False
+            resolved_at = _utc_now_iso()
+            for item in conflicts:
+                if not isinstance(item, dict):
+                    continue
+                item_copy = str(item.get("conflict_copy_path") or "").strip().replace("\\", "/").lstrip("/")
+                if item_copy != cleaned:
+                    continue
+                if item.get("resolved_at"):
+                    continue
+                item["resolved_at"] = resolved_at
+                item["resolution"] = str(resolution or "merged")
+                changed = True
+            if changed:
+                _write_json(self._conflict_path, payload)
         if changed:
-            _write_json(self._conflict_path, payload)
             self._set_status_locked(conflicts=self._conflict_count())
         return changed
 
@@ -1391,21 +1442,22 @@ class HomebaseSyncEngine:
         cleaned_checkpoint = str(remote_checkpoint_id or "").strip()
         if not cleaned_path or not cleaned_checkpoint:
             return None
-        payload = _read_json(self._conflict_path, {"conflicts": []})
-        conflicts = payload.get("conflicts")
-        if not isinstance(conflicts, list):
-            return None
-        for item in reversed(conflicts):
-            if not isinstance(item, dict):
-                continue
-            if not item.get("resolved_at"):
-                continue
-            item_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
-            item_checkpoint = str(item.get("remote_checkpoint_id") or "").strip()
-            if item_path != cleaned_path or item_checkpoint != cleaned_checkpoint:
-                continue
-            resolution = str(item.get("resolution") or "").strip()
-            return resolution or None
+        with self._conflict_lock:
+            payload = _read_json(self._conflict_path, {"conflicts": []})
+            conflicts = payload.get("conflicts")
+            if not isinstance(conflicts, list):
+                return None
+            for item in reversed(conflicts):
+                if not isinstance(item, dict):
+                    continue
+                if not item.get("resolved_at"):
+                    continue
+                item_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+                item_checkpoint = str(item.get("remote_checkpoint_id") or "").strip()
+                if item_path != cleaned_path or item_checkpoint != cleaned_checkpoint:
+                    continue
+                resolution = str(item.get("resolution") or "").strip()
+                return resolution or None
         return None
 
     def _queue_remote_updates(self, paths: list[str]) -> None:
@@ -2918,6 +2970,27 @@ class HomebaseSyncEngine:
         return pulled_cache
 
     def _record_conflict(
+        self,
+        path: str,
+        conflict_copy: str,
+        remote_checkpoint_id: str,
+        remote_device_id: str,
+        local_mtime: int,
+        remote_mtime: int,
+        reason: str,
+    ) -> None:
+        with self._conflict_lock:
+            self._record_conflict_locked(
+                path,
+                conflict_copy,
+                remote_checkpoint_id,
+                remote_device_id,
+                local_mtime,
+                remote_mtime,
+                reason,
+            )
+
+    def _record_conflict_locked(
         self,
         path: str,
         conflict_copy: str,

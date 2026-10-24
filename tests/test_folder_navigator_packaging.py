@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import importlib.util
+import os
+import subprocess
 import sys
 
 
@@ -70,7 +72,33 @@ def test_linux_installer_registers_diagram_editor_identities() -> None:
 
 def test_macos_bundle_includes_companion_launcher_and_icon() -> None:
     script = (ROOT / "packaging" / "macos" / "build-macos.sh").read_text()
-    assert "StillPoint Folder Navigator.app" in script
-    assert "FolderNavigator.icns" in script
-    assert "app.stillpoint.foldernavigator" in script
-    assert 'exec "$STILLPOINT_EXECUTABLE" --folder-navigator "$@"' in script
+    launcher_script = (
+        ROOT / "packaging" / "macos" / "build-folder-navigator-app.sh"
+    ).read_text()
+    workflow = (ROOT / ".github" / "workflows" / "macos-build.yml").read_text()
+
+    assert 'FOLDER_NAV_APP="$OUTPUT_DIR/StillPoint Folder Navigator.app"' in script
+    assert 'build-folder-navigator-app.sh "$OUTPUT_DIR"' in script
+    assert "../../dist/StillPoint Folder Navigator.app" not in script
+    assert "FolderNavigator.icns" in launcher_script
+    assert "app.stillpoint.foldernavigator" in launcher_script
+    assert 'exec "$STILLPOINT_EXECUTABLE" --folder-navigator "$@"' in launcher_script
+    assert "build-folder-navigator-app.sh dist" in workflow
+    assert 'cp -R "dist/StillPoint Folder Navigator.app" dist/bundle/' in workflow
+
+
+def test_macos_companion_builder_creates_app_in_requested_output(tmp_path: Path) -> None:
+    script = ROOT / "packaging" / "macos" / "build-folder-navigator-app.sh"
+    subprocess.run(
+        [str(script), str(tmp_path), "1.2.3"],
+        check=True,
+        env={**os.environ, "PLUTIL_BIN": "/bin/true"},
+    )
+
+    app = tmp_path / "StillPoint Folder Navigator.app"
+    executable = app / "Contents" / "MacOS" / "stillpoint-folder-navigator"
+    plist = app / "Contents" / "Info.plist"
+    assert executable.stat().st_mode & 0o111
+    assert "--folder-navigator" in executable.read_text()
+    assert "<string>1.2.3</string>" in plist.read_text()
+    assert (app / "Contents" / "Resources" / "FolderNavigator.icns").is_file()
