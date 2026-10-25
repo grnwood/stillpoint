@@ -133,7 +133,8 @@ def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
     assert "QTabBar::tab { background: transparent" in tabs
     assert "; }}" not in tabs
     assert "QTreeView::item { padding: 3px 6px; border: 0" in tree
-    assert "border-bottom-color" not in tree
+    assert "border-bottom: 1px solid" in tree
+    assert "border-radius: 0" in tree
     assert f"color: {expected_status_text}" in status
 
 
@@ -183,6 +184,7 @@ def test_vault_theme_refresh_restyles_existing_navigation_tree(
     theme.reload_theme()
     main_window._apply_vault_accent_visuals()
     assert "background: #0f172a" in main_window.tree_view.styleSheet()
+    assert "border-bottom: 1px solid" in main_window.tree_view.styleSheet()
 
     selected_theme = "ember-rose.json"
     theme.reload_theme()

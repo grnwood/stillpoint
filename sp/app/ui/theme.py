@@ -231,7 +231,7 @@ def tree_view_stylesheet(
         f"background: {colors['base']}; color: {colors['text']}; }}"
         f"QTreeView::viewport {{ background: {colors['base']}; }}"
         f"QTreeView::item {{ padding: {vertical}px {horizontal}px; border: 0; "
-        f"border-radius: {radius}px; }}"
+        f"border-bottom: 1px solid {colors['border']}; border-radius: 0; }}"
         f"QTreeView::item:hover {{ background: {colors['hover']}; }}"
         f"QTreeView::item:selected, QTreeView::item:selected:active, "
         f"QTreeView::item:selected:!active {{ background: {colors['selected']}; "

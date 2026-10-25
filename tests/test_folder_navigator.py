@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -185,7 +186,13 @@ def test_supplied_wms_hover_files_keep_event_loop_responsive(tmp_path, app, monk
     from sp.app.ui.markdown_editor import MarkdownEditor
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    folder = Path(__file__).resolve().parents[1] / "dev-assets" / "mac-hang"
+    source_folder = Path(__file__).resolve().parents[1] / "dev-assets" / "mac-hang"
+    folder = tmp_path / "mac-hang"
+    shutil.copytree(
+        source_folder,
+        folder,
+        ignore=shutil.ignore_patterns(".sp_folder"),
+    )
     large = folder / "3.3 WMS Integration.md"
     regular = folder / "3.3.1 WMS Events and Payloads.md"
     window = Window(folder)
@@ -1870,7 +1877,11 @@ def test_quick_open_enter_focuses_opened_editor(tmp_path, monkeypatch, app):
     picker = Picker(window, quick=True)
     picker.show()
     picker.query.setText("target")
-    app.processEvents()
+    deadline = time.monotonic() + 2
+    while picker.list.count() < 1 and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert picker.list.count() >= 1
 
     QTest.keyClick(picker.query, Qt.Key_Return)
     deadline = time.monotonic() + 2
@@ -3568,9 +3579,16 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.folder_panel_header.detail_label.text() == tmp_path.name
     assert window.folder_panel_header.isAncestorOf(window.hidden_files_button)
     assert not window.hidden_files_button.icon().isNull()
+    assert window.folder_panel_header.isAncestorOf(window.collapse_all_button)
+    assert not window.collapse_all_button.icon().isNull()
+    assert window.collapse_all_button.toolTip() == "Collapse all folders"
+    assert (
+        window.folder_panel_header.header_layout.indexOf(window.collapse_all_button)
+        == window.folder_panel_header.header_layout.indexOf(window.hidden_files_button) + 1
+    )
     assert window._folder_identity_accent in window.identity_bar.styleSheet()
     assert "QTreeView::item:hover" in window.tree.styleSheet()
-    assert "border-bottom-color" not in window.tree.styleSheet()
+    assert "border-bottom: 1px solid" in window.tree.styleSheet()
 
     window.open_file(document, pinned=True)
     assert window.windowTitle() == (
@@ -3583,6 +3601,62 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     ]
     assert breadcrumb[-1].toolTip() == str(document)
     window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_folder_header_collapse_all_button_collapses_tree(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "folder"
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
+    window = Window(tmp_path)
+    window.show()
+    app.processEvents()
+    folder_index = window.model.index(str(folder))
+    window.tree.expand(folder_index)
+    assert window.tree.isExpanded(folder_index)
+
+    window.collapse_all_button.click()
+
+    assert not window.tree.isExpanded(folder_index)
+    assert window.tree.hasFocus()
+    window.close()
+
+
+def test_git_status_error_wraps_without_expanding_window(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.window as module
+    from PySide6.QtWidgets import QSizePolicy
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    window = Window(tmp_path)
+    window.resize(760, 600)
+    window.show()
+    app.processEvents()
+    initial_width = window.width()
+    long_error = "git failed at " + "/very-long-segment" * 100
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(long_error)),
+    )
+
+    window.refresh_git_status()
+    app.processEvents()
+
+    assert window.git_status_label.wordWrap()
+    assert window.git_status_label.minimumWidth() == 0
+    assert (
+        window.git_status_label.sizePolicy().horizontalPolicy()
+        == QSizePolicy.Policy.Ignored
+    )
+    assert window.width() == initial_width
+    assert long_error in window.git_status_label.text()
     window.close()
 
 
@@ -5341,7 +5415,7 @@ def test_file_context_menu_groups_actions_and_renames_open_file(
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
     assert labels == [
         "Open", "Open in New Tab", "Keep Open", "Open in Default Application",
-        "Rename…", "Delete File…", "New", "Add to AI Chat Context", "Remove Bookmark",
+        "Rename…", "Make a Copy", "Delete File…", "New", "Add to AI Chat Context", "Remove Bookmark",
         "Reveal in File Manager", "Copy Path", "Open Terminal Here",
     ]
     new_menu = next(action.menu() for action in menu.actions() if action.text() == "New")
@@ -5685,6 +5759,129 @@ def test_inline_new_file_creates_and_opens_editor(tmp_path, monkeypatch, app):
     assert window.active_tab().path == created
     assert window.active_tab().pinned
     assert window.active_tab().editor.hasFocus()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_inline_new_file_cancels_prior_selection_preview(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    previous = tmp_path / "previous.txt"
+    previous.write_text("old", encoding="utf-8")
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    window = Window(tmp_path)
+    window.show()
+    app.processEvents()
+    previous_index = window.model.index(str(previous))
+    window.tree.setCurrentIndex(previous_index)
+    window._tree_selected(previous_index, previous_index)
+    assert window.pending_tree_markdown_path == previous
+
+    window._begin_new_file(folder, window.model.index(str(folder)))
+    QTest.keyClicks(window.new_file_edit, "new-note.txt")
+    QTest.keyClick(window.new_file_edit, Qt.Key_Return)
+    QTest.qWait(window.tree_source_open_delay_ms + 50)
+    app.processEvents()
+
+    created = folder / "new-note.txt"
+    assert created.is_file()
+    assert window.active_tab().path == created
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_make_file_copy_uses_available_copy_name_and_opens_it(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "notes.md"
+    source.write_text("# Notes\n", encoding="utf-8")
+    first_copy = tmp_path / "notes-Copy.md"
+    first_copy.write_text("existing", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+
+    menu = window._create_tree_context_menu(window.model.index(str(source)))
+    copy_action = next(action for action in menu.actions() if action.text() == "Make a Copy")
+    copy_action.trigger()
+    app.processEvents()
+
+    created = tmp_path / "notes-Copy-2.md"
+    assert created.read_text(encoding="utf-8") == "# Notes\n"
+    assert window.active_tab().path == created
+    assert window.active_tab().pinned
+    assert window.active_tab().editor.hasFocus()
+    assert created in window.catalog_db.candidates("Copy-2", tmp_path)
+    assert "Created and opened notes-Copy-2.md" in window.statusBar().currentMessage()
+    menu.deleteLater()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_make_file_copy_requires_open_dirty_file_to_be_saved(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "notes.txt"
+    source.write_text("saved", encoding="utf-8")
+    window = Window(tmp_path)
+    window.open_file(source, pinned=True)
+    window.active_tab().editor.insertPlainText("dirty")
+
+    window._make_file_copy(source)
+
+    assert not (tmp_path / "notes-Copy.txt").exists()
+    assert "Save changes before copying" in window.statusBar().currentMessage()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
+
+
+def test_created_and_copied_files_are_sorted_without_manual_refresh(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    alpha = tmp_path / "alpha.txt"
+    alpha.write_text("alpha", encoding="utf-8")
+    (tmp_path / "zulu.txt").write_text("zulu", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    QTest.qWait(100)
+    window.tree.sortByColumn(0, Qt.AscendingOrder)
+
+    window._make_file_copy(alpha)
+    QTest.qWait(180)
+    app.processEvents()
+    root_index = window.tree.rootIndex()
+    assert window.active_tab().path == tmp_path / "alpha-Copy.txt"
+    names_after_copy = [
+        window.model.fileName(window.model.index(row, 0, root_index))
+        for row in range(window.model.rowCount(root_index))
+    ]
+    assert abs(
+        names_after_copy.index("alpha-Copy.txt") - names_after_copy.index("alpha.txt")
+    ) == 1
+    assert names_after_copy[-1] == "zulu.txt"
+
+    window._begin_new_file(tmp_path, root_index)
+    QTest.keyClicks(window.new_file_edit, "middle.txt")
+    QTest.keyClick(window.new_file_edit, Qt.Key_Return)
+    QTest.qWait(180)
+    app.processEvents()
+    names_after_create = [
+        window.model.fileName(window.model.index(row, 0, root_index))
+        for row in range(window.model.rowCount(root_index))
+    ]
+    assert names_after_create.index("middle.txt") < names_after_create.index("zulu.txt")
+    assert names_after_create[-1] == "zulu.txt"
     window.active_tab().editor.document().setModified(False)
     window.close()
 

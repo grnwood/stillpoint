@@ -4280,6 +4280,13 @@ class Window(QMainWindow):
         self.hidden_files_button.toggled.connect(self.toggle_hidden)
         self.folder_panel_header.add_trailing_widget(self.hidden_files_button)
         self._update_hidden_files_control(self.hidden_files_button.isChecked())
+        self.collapse_all_button = self._make_header_button(
+            "collapse-all.svg",
+            "Collapse all folders",
+            self._collapse_all_folders,
+        )
+        self.collapse_all_button.setObjectName("folderCollapseAllButton")
+        self.folder_panel_header.add_trailing_widget(self.collapse_all_button)
         folder_page_layout.addWidget(self.folder_panel_header)
         folder_page_layout.addWidget(self.tree)
         self.rail = QTabWidget()
@@ -4326,6 +4333,14 @@ class Window(QMainWindow):
             git_layout.addWidget(self.git_panel_header)
             self.git_status_label = QLabel("Loading Git status…")
             self.git_status_label.setContentsMargins(8, 6, 8, 6)
+            self.git_status_label.setTextFormat(Qt.PlainText)
+            self.git_status_label.setWordWrap(True)
+            self.git_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            self.git_status_label.setMinimumWidth(0)
+            self.git_status_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
             git_layout.addWidget(self.git_status_label)
             self.git_status_list = GitStatusList(
                 {
@@ -4337,6 +4352,15 @@ class Window(QMainWindow):
             self.git_status_list.setObjectName("folderNavigatorGitStatus")
             self.git_status_list.setSelectionMode(
                 QAbstractItemView.SelectionMode.ExtendedSelection
+            )
+            self.git_status_list.setWordWrap(True)
+            self.git_status_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+            self.git_status_list.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self.git_status_list.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Expanding,
             )
             self.git_status_list.setContextMenuPolicy(Qt.CustomContextMenu)
             self.git_status_list.customContextMenuRequested.connect(self._git_status_menu)
@@ -8688,6 +8712,10 @@ class Window(QMainWindow):
             action.setToolTip(tooltip)
             action.setStatusTip(tooltip)
 
+    def _collapse_all_folders(self) -> None:
+        self.tree.collapseAll()
+        self.tree.setFocus(Qt.OtherFocusReason)
+
     def _apply_inserted_dotfile_visibility(
             self, parent: QModelIndex, first: int, last: int) -> None:
         hide_dotfiles = not bool(self.state.get("hidden", False))
@@ -8933,6 +8961,7 @@ class Window(QMainWindow):
             menu.addAction("Open in Default Application", lambda: self.system_open(path))
             menu.addSeparator()
             menu.addAction("Rename…", lambda: self._rename_file(path))
+            menu.addAction("Make a Copy", lambda: self._make_file_copy(path))
             if len(selected_files) > 1:
                 menu.addAction(
                     "Delete File(s)...",
@@ -9086,6 +9115,114 @@ class Window(QMainWindow):
 
     def _delete_file(self, path):
         self._delete_files([path])
+
+    @staticmethod
+    def _copy_file_target(path: Path) -> Path:
+        """Return the first available sibling name using a -Copy suffix."""
+        path = Path(path)
+        suffix = path.suffix
+        basename = path.name[:-len(suffix)] if suffix else path.name
+        candidate = path.with_name(f"{basename}-Copy{suffix}")
+        number = 2
+        while candidate.exists() or candidate.is_symlink():
+            candidate = path.with_name(f"{basename}-Copy-{number}{suffix}")
+            number += 1
+        return candidate
+
+    def _make_file_copy(self, path) -> None:
+        path = Path(path)
+        if not path.is_file() or not inside(self.root, path):
+            self.statusBar().showMessage(f"File is unavailable: {path}", 8000)
+            return
+        tab_index = self._index_for(path)
+        if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
+            self.statusBar().showMessage("Save changes before copying this file", 8000)
+            return
+        target = self._copy_file_target(path)
+        try:
+            shutil.copy2(path, target)
+        except (OSError, shutil.Error) as exc:
+            self.statusBar().showMessage(f"Could not copy {path.name}: {exc}", 12000)
+            return
+        self.catalog.add(target)
+        if self.catalog_db is not None:
+            try:
+                self.catalog_db.upsert_paths([target])
+                self.catalog_count = self.catalog_db.count()
+            except (OSError, sqlite3.Error) as exc:
+                self.statusBar().showMessage(f"Quick Open cache update failed: {exc}", 8000)
+        self._watch_files()
+        self._refresh_quick_pickers()
+        self._open_created_file(target)
+        self.statusBar().showMessage(f"Created and opened {target.name}", 4000)
+
+    def _open_created_file(self, path: Path) -> None:
+        """Open a new file without an older tree selection taking over later."""
+        path = Path(path)
+        self._cancel_pending_tree_markdown()
+        was_suppressed = self._suppress_tree_preview
+        self._suppress_tree_preview = True
+        try:
+            self.tree.selectionModel().clearCurrentIndex()
+        finally:
+            self._suppress_tree_preview = was_suppressed
+        self.open_file(path, pinned=True, replace_preview=False)
+        self._focus_tab_content(self.active_tab())
+        QTimer.singleShot(0, lambda selected=path: self._select_created_file(selected))
+
+    def _select_created_file(
+        self,
+        path: Path,
+        attempts: int = 8,
+        settle_sort: bool = True,
+    ) -> None:
+        """Sort and select a new QFileSystemModel row without reopening it."""
+        tab = self.active_tab()
+        if tab is None or tab.path != path:
+            return
+        index = self.model.index(str(path))
+        if not index.isValid():
+            if attempts > 0:
+                QTimer.singleShot(
+                    50,
+                    lambda selected=path, remaining=attempts - 1:
+                        self._select_created_file(selected, remaining, settle_sort),
+                )
+            return
+        header = self.tree.header()
+        sort_column = header.sortIndicatorSection()
+        if sort_column < 0:
+            sort_column = 0
+        sort_order = header.sortIndicatorOrder()
+        # QFileSystemModel appends freshly discovered rows and can skip a sort
+        # request when its column is unchanged. Briefly sorting another column
+        # invalidates that cache before restoring the user's requested sort.
+        temporary_column = 1 if sort_column == 0 else 0
+        self.model.sort(temporary_column, sort_order)
+        self.model.sort(sort_column, sort_order)
+        self.tree.header().setSortIndicator(sort_column, sort_order)
+        # Sorting can invalidate an ordinary QModelIndex; resolve the path
+        # again so selection follows its newly ordered row.
+        index = self.model.index(str(path))
+        was_suppressed = self._suppress_tree_preview
+        self._suppress_tree_preview = True
+        try:
+            self.tree.setCurrentIndex(index)
+            self.tree.scrollTo(index)
+        finally:
+            self._suppress_tree_preview = was_suppressed
+        if settle_sort:
+            # The row can become addressable before QFileSystemModel finishes
+            # loading all of its sortable metadata. Run one settled pass after
+            # that asynchronous update rather than leaving the row at the end.
+            QTimer.singleShot(
+                100,
+                lambda selected=path: self._select_created_file(
+                    selected,
+                    attempts=0,
+                    settle_sort=False,
+                ),
+            )
 
     def _delete_files(self, paths):
         unique_paths = []
@@ -9300,7 +9437,7 @@ class Window(QMainWindow):
             self.tree.setFocus(Qt.OtherFocusReason)
             QTimer.singleShot(100, lambda: self.reveal_tree(target))
             return
-        self.open_file(target, pinned=True)
+        self._open_created_file(target)
         tab = self.active_tab()
         if tab and tab.editor:
             tab.editor.setFocus(Qt.OtherFocusReason)
