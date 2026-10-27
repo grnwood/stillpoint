@@ -41,6 +41,8 @@ from .theme import apply_menu_theme, theme_color, theme_value
 from .screen_positioning import fit_window_to_available_screen, popup_available_geometry
 from .keyboard_shortcuts import is_vi_navigation_chord
 from .canvas_navigation import wheel_action
+from .diagram_recovery import load_recovery, remove_recovery, write_recovery
+from .merge_conflict_dialog import MergeConflictDialog
 
 _LOGGING = log_enabled("diagrams")
 
@@ -802,6 +804,7 @@ class PlantUMLEditorWindow(QMainWindow):
         # Load auto-render setting (default: False)
         self._auto_render_enabled: bool = config.load_puml_auto_render(default=False)
         self._editor_dirty: bool = False
+        self._last_saved_content: str = ""
         self._last_svg: str = ""
         self._window_shown = False
         self._splitter_layout_initialized = False
@@ -1104,6 +1107,15 @@ class PlantUMLEditorWindow(QMainWindow):
         self.render_timer.setSingleShot(True)
         self.render_timer.setInterval(1000)  # 1 second debounce
         self.render_timer.timeout.connect(self._render)
+
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setInterval(30_000)
+        self._recovery_timer.timeout.connect(self._write_recovery_snapshot)
+        self._recovery_timer.start()
+        self._recovery_debounce = QTimer(self)
+        self._recovery_debounce.setSingleShot(True)
+        self._recovery_debounce.setInterval(2_000)
+        self._recovery_debounce.timeout.connect(self._write_recovery_snapshot)
         
         # Setup Ctrl+S shortcut for save
         QShortcut(QKeySequence.Save, self, self._save_file)
@@ -1404,15 +1416,6 @@ class PlantUMLEditorWindow(QMainWindow):
         super().moveEvent(event)
         if hasattr(self, "_geom_timer"):
             self._geom_timer.start()
-
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        try:
-            if hasattr(self, "_geom_timer"):
-                self._geom_timer.stop()
-        except Exception:
-            pass
-        self._save_geometry_prefs()
-        return super().closeEvent(event)
 
     def _get_monospace_font(self):
         """Get a monospace font suitable for code editing."""
@@ -2144,18 +2147,18 @@ class PlantUMLEditorWindow(QMainWindow):
 
     def _load_file(self) -> None:
         """Load PlantUML file content into editor."""
+        disk_content = ""
         if self.file_path.exists():
             try:
-                content = self.file_path.read_text(encoding="utf-8")
-                if content.strip():
-                    self.editor.setPlainText(content)
-                    return
+                disk_content = self.file_path.read_text(encoding="utf-8")
             except Exception as exc:
                 QMessageBox.warning(self, "Error", f"Failed to load file: {exc}")
-        # New or empty file
-        template = self._default_puml_template()
-        if not template:
-            template = """@startuml
+        self._last_saved_content = disk_content
+        content = disk_content
+        if not content.strip():
+            content = self._default_puml_template()
+        if not content:
+            content = """@startuml
 ' PlantUML diagram
 ' https://plantuml.com/
 
@@ -2164,7 +2167,46 @@ A -> B: message
 B --> A: response
 @enduml
 """
-        self.editor.setPlainText(template)
+        recovered = self._offer_recovery(disk_content)
+        if recovered is not None:
+            content = recovered
+        self.editor.setPlainText(content)
+        self._editor_dirty = content != self._last_saved_content
+        self.editor.document().setModified(self._editor_dirty)
+        self._update_render_status_label()
+
+    def _offer_recovery(self, disk_content: str) -> str | None:
+        snapshot = load_recovery(self.file_path)
+        if snapshot is None:
+            return None
+        if snapshot.content == disk_content:
+            remove_recovery(self.file_path)
+            return None
+        changed_note = (
+            " The saved file changed after this recovery began, so review both versions carefully."
+            if not snapshot.base_matches(disk_content) else ""
+        )
+        dialog = MergeConflictDialog(
+            disk_content,
+            snapshot.content,
+            str(self.file_path),
+            parent=self,
+            window_title="Recover Unsaved PlantUML Work",
+            title=(
+                f"StillPoint found autosaved work for {self.file_path.name}."
+                f"{changed_note} Choose a complete version or merge individual changes."
+            ),
+            local_label="Current saved file",
+            remote_label="Autosaved recovery",
+            local_action_label="Keep Current",
+            remote_action_label="Use Recovery",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        if dialog.selected_source == "local":
+            remove_recovery(self.file_path)
+            return None
+        return dialog.merged_text()
 
     def _default_puml_template(self) -> str:
         """Return the first simple_puml template from shortcuts, if available."""
@@ -2186,7 +2228,7 @@ B --> A: response
             return ""
         return ""
 
-    def _save_file(self) -> None:
+    def _save_file(self) -> bool:
         """Save editor content to file."""
         try:
             content = self.editor.toPlainText()
@@ -2194,17 +2236,38 @@ B --> A: response
                 ok, message = self._on_save(content)
                 if not ok:
                     QMessageBox.critical(self, "Error", message or "Failed to save file.")
-                    return
+                    return False
             self.file_path.write_text(content, encoding="utf-8")
+            self._last_saved_content = content
+            self._editor_dirty = False
             self.editor.document().setModified(False)
+            remove_recovery(self.file_path)
             self.fileSaved.emit(str(self.file_path))
             self.statusBar().showMessage(f"Saved {self.file_path.name}", 2500)
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")
+            return False
+
+    def _is_dirty(self) -> bool:
+        return self.editor.toPlainText() != self._last_saved_content
+
+    def _write_recovery_snapshot(self) -> None:
+        if not self._is_dirty():
+            return
+        try:
+            write_recovery(
+                self.file_path,
+                self.editor.toPlainText(),
+                self._last_saved_content,
+            )
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not autosave recovery: {exc}", 5000)
 
     def _on_editor_changed(self) -> None:
         """Debounce rendering when editor text changes."""
         self._editor_dirty = True
+        self._recovery_debounce.start()
         self._update_render_status_label()
         if self._auto_render_enabled:
             self.render_timer.start()
@@ -2569,7 +2632,18 @@ B --> A: response
         self.statusBar().showMessage("PNG copied to clipboard", 2000)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        """Save file and geometry before closing."""
+        """Confirm unsaved work and preserve a recovery snapshot on cancellation."""
+        if self._is_dirty():
+            self._write_recovery_snapshot()
+            choice = self._confirm_close_changes()
+            if choice == "cancel":
+                event.ignore()
+                return
+            if choice == "save" and not self._save_file():
+                event.ignore()
+                return
+            if choice == "discard":
+                remove_recovery(self.file_path)
         self._closing = True
         try:
             self.render_timer.stop()
@@ -2580,9 +2654,28 @@ B --> A: response
                 self._geom_timer.stop()
         except Exception:
             pass
-        try:
-            self._save_file()
-        except Exception:
-            pass
+        self._recovery_timer.stop()
+        self._recovery_debounce.stop()
         self._save_geometry_prefs()
         super().closeEvent(event)
+
+    def _confirm_close_changes(self) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Unsaved PlantUML Changes")
+        box.setText(f"Save changes to {self.file_path.name} before closing?")
+        box.setInformativeText(
+            "A recovery copy has been kept until you save or discard these changes."
+        )
+        save_button = box.addButton("Save and Close", QMessageBox.AcceptRole)
+        discard_button = box.addButton("Discard Changes", QMessageBox.DestructiveRole)
+        cancel_button = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(save_button)
+        box.exec()
+        if box.clickedButton() is save_button:
+            return "save"
+        if box.clickedButton() is discard_button:
+            return "discard"
+        if box.clickedButton() is cancel_button:
+            return "cancel"
+        return "cancel"

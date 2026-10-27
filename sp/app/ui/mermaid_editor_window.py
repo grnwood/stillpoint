@@ -86,6 +86,8 @@ from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
 from .plantuml_editor_window import BackgroundRenderNotifier, ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
 from .webengine_env import configure_linux_webengine_env
+from .diagram_recovery import load_recovery, remove_recovery, write_recovery
+from .merge_conflict_dialog import MergeConflictDialog
 
 _LOGGING = log_enabled("diagrams")
 
@@ -559,6 +561,15 @@ class MermaidEditorWindow(QMainWindow):
         self.render_timer.setInterval(1000)
         self.render_timer.timeout.connect(self._render)
 
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setInterval(30_000)
+        self._recovery_timer.timeout.connect(self._write_recovery_snapshot)
+        self._recovery_timer.start()
+        self._recovery_debounce = QTimer(self)
+        self._recovery_debounce.setSingleShot(True)
+        self._recovery_debounce.setInterval(2_000)
+        self._recovery_debounce.timeout.connect(self._write_recovery_snapshot)
+
         self.editor.textChanged.connect(self._on_editor_changed)
 
         QShortcut(QKeySequence.Save, self, self._save_file)
@@ -788,10 +799,6 @@ class MermaidEditorWindow(QMainWindow):
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
         self._geom_timer.start()
-
-    def closeEvent(self, event) -> None:
-        self._save_geometry_prefs()
-        super().closeEvent(event)
 
     # --- Preview panning (mouse drag to scroll) using eventFilter ---
     def eventFilter(self, obj, event):
@@ -1512,12 +1519,18 @@ class MermaidEditorWindow(QMainWindow):
             self._geom_timer.start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._is_dirty():
+            self._write_recovery_snapshot()
+            choice = self._confirm_close_changes()
+            if choice == "cancel":
+                event.ignore()
+                return
+            if choice == "save" and not self._save_file():
+                event.ignore()
+                return
+            if choice == "discard":
+                remove_recovery(self.file_path)
         self._closing = True
-        try:
-            if self._is_dirty():
-                self._save_file()
-        except Exception:
-            pass
         try:
             self.render_timer.stop()
         except Exception:
@@ -1527,52 +1540,126 @@ class MermaidEditorWindow(QMainWindow):
                 self._geom_timer.stop()
         except Exception:
             pass
+        self._recovery_timer.stop()
+        self._recovery_debounce.stop()
         self._save_geometry_prefs()
         return super().closeEvent(event)
 
+    def _confirm_close_changes(self) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Unsaved Mermaid Changes")
+        box.setText(f"Save changes to {self.file_path.name} before closing?")
+        box.setInformativeText(
+            "A recovery copy has been kept until you save or discard these changes."
+        )
+        save_button = box.addButton("Save and Close", QMessageBox.AcceptRole)
+        discard_button = box.addButton("Discard Changes", QMessageBox.DestructiveRole)
+        cancel_button = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(save_button)
+        box.exec()
+        if box.clickedButton() is save_button:
+            return "save"
+        if box.clickedButton() is discard_button:
+            return "discard"
+        if box.clickedButton() is cancel_button:
+            return "cancel"
+        return "cancel"
+
     def _load_file(self) -> None:
+        disk_content = ""
         if self.file_path.exists():
             try:
-                content = self.file_path.read_text(encoding="utf-8")
-                self.editor.setPlainText(content)
-                self._last_saved_content = content
-                self._editor_dirty = False
-                self._update_render_status_label()
+                disk_content = self.file_path.read_text(encoding="utf-8")
             except Exception as exc:
                 QMessageBox.warning(self, "Error", f"Failed to load file: {exc}")
-        else:
-            template = """flowchart TD
+        self._last_saved_content = disk_content
+        content = disk_content
+        if not self.file_path.exists():
+            content = """flowchart TD
   A[Start] --> B[End]
 """
-            self.editor.setPlainText(template)
-            self._last_saved_content = ""
-            self._editor_dirty = True
-            self._update_render_status_label()
+        recovered = self._offer_recovery(disk_content)
+        if recovered is not None:
+            content = recovered
+        self.editor.setPlainText(content)
+        self._editor_dirty = content != self._last_saved_content
+        self.editor.document().setModified(self._editor_dirty)
+        self._update_render_status_label()
 
-    def _save_file(self) -> None:
+    def _offer_recovery(self, disk_content: str) -> str | None:
+        snapshot = load_recovery(self.file_path)
+        if snapshot is None:
+            return None
+        if snapshot.content == disk_content:
+            remove_recovery(self.file_path)
+            return None
+        changed_note = (
+            " The saved file changed after this recovery began, so review both versions carefully."
+            if not snapshot.base_matches(disk_content) else ""
+        )
+        dialog = MergeConflictDialog(
+            disk_content,
+            snapshot.content,
+            str(self.file_path),
+            parent=self,
+            window_title="Recover Unsaved Mermaid Work",
+            title=(
+                f"StillPoint found autosaved work for {self.file_path.name}."
+                f"{changed_note} Choose a complete version or merge individual changes."
+            ),
+            local_label="Current saved file",
+            remote_label="Autosaved recovery",
+            local_action_label="Keep Current",
+            remote_action_label="Use Recovery",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        if dialog.selected_source == "local":
+            remove_recovery(self.file_path)
+            return None
+        return dialog.merged_text()
+
+    def _save_file(self) -> bool:
         try:
             content = self.editor.toPlainText()
             if self._on_save is not None:
                 ok, message = self._on_save(content)
                 if not ok:
                     QMessageBox.critical(self, "Error", message or "Failed to save file.")
-                    return
+                    return False
             self.file_path.write_text(content, encoding="utf-8")
             self._last_saved_content = content
             self._editor_dirty = False
             self.editor.document().setModified(False)
+            remove_recovery(self.file_path)
             self._update_render_status_label()
             self.fileSaved.emit(str(self.file_path))
             self.statusBar().showMessage(f"Saved {self.file_path.name}", 2500)
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save file: {exc}")
+            return False
 
     def _is_dirty(self) -> bool:
         current = self.editor.toPlainText()
         return current != (self._last_saved_content or "")
 
+    def _write_recovery_snapshot(self) -> None:
+        if not self._is_dirty():
+            return
+        try:
+            write_recovery(
+                self.file_path,
+                self.editor.toPlainText(),
+                self._last_saved_content or "",
+            )
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not autosave recovery: {exc}", 5000)
+
     def _on_editor_changed(self) -> None:
         self._editor_dirty = True
+        self._recovery_debounce.start()
         self._update_render_status_label()
         if self._auto_render_enabled and not self._external_browser_preview:
             self.render_timer.start()

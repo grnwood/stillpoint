@@ -25,9 +25,23 @@ from .screen_positioning import fit_window_to_available_screen, popup_available_
 class MergeConflictDialog(QDialog):
     """Resolve conflicts between local and remote text with per-diff decisions."""
 
-    def __init__(self, local_text: str, remote_text: str, path: str = "", parent=None) -> None:
+    def __init__(
+        self,
+        local_text: str,
+        remote_text: str,
+        path: str = "",
+        parent=None,
+        *,
+        window_title: str = "Resolve Conflict",
+        title: str | None = None,
+        local_label: str = "Current (local)",
+        remote_label: str = "Server revision",
+        local_action_label: str | None = None,
+        remote_action_label: str | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Resolve Conflict")
+        self.setWindowTitle(window_title)
+        self.selected_source: str | None = None
         available = popup_available_geometry(parent=parent if parent is not None else self)
         narrow = available.width() < 760
 
@@ -65,19 +79,23 @@ class MergeConflictDialog(QDialog):
             """
         )
         layout = QVBoxLayout(self)
-        title = QLabel(f"Resolve conflict for {path}" if path else "Resolve conflict")
-        title.setStyleSheet(
+        title_label = QLabel(
+            title if title is not None
+            else (f"Resolve conflict for {path}" if path else "Resolve conflict")
+        )
+        title_label.setWordWrap(True)
+        title_label.setStyleSheet(
             "font-weight: "
             f"{theme_value('merge_conflict.title.weight', 'bold')};"
         )
-        layout.addWidget(title)
+        layout.addWidget(title_label)
 
         splitter = QSplitter(Qt.Vertical if narrow else Qt.Horizontal)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_label = QLabel("Current (local)")
+        left_label = QLabel(local_label)
         self._left_edit = QPlainTextEdit()
         self._left_edit.setReadOnly(True)
         self._left_edit.setStyleSheet(
@@ -102,7 +120,7 @@ class MergeConflictDialog(QDialog):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_label = QLabel("Server revision")
+        right_label = QLabel(remote_label)
         self._right_edit = QPlainTextEdit()
         self._right_edit.setReadOnly(True)
         self._right_edit.setStyleSheet(
@@ -155,6 +173,14 @@ class MergeConflictDialog(QDialog):
         layout.addLayout(nav_layout)
 
         action_layout = QHBoxLayout()
+        if local_action_label:
+            local_action = QPushButton(local_action_label)
+            local_action.clicked.connect(self._choose_local_document)
+            action_layout.addWidget(local_action)
+        if remote_action_label:
+            remote_action = QPushButton(remote_action_label)
+            remote_action.clicked.connect(self._choose_remote_document)
+            action_layout.addWidget(remote_action)
         action_layout.addStretch()
         self._final_accept = QPushButton("Accept Merge")
         self._final_accept.setEnabled(False)
@@ -299,4 +325,15 @@ class MergeConflictDialog(QDialog):
         self._refresh_views()
 
     def _accept_merge(self) -> None:
+        self.selected_source = "merged"
+        self.accept()
+
+    def _choose_local_document(self) -> None:
+        self._merged_text = self._local_text
+        self.selected_source = "local"
+        self.accept()
+
+    def _choose_remote_document(self) -> None:
+        self._merged_text = self._remote_text
+        self.selected_source = "remote"
         self.accept()

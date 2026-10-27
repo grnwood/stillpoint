@@ -44,6 +44,18 @@ def test_docx_falls_back_to_portable_structured_html(tmp_path, monkeypatch):
     assert preview.html.index("Revenue") < preview.html.index("After the table")
 
 
+def test_libreoffice_detection_checks_macos_app_bundle_when_path_is_minimal(
+        tmp_path, monkeypatch):
+    executable = tmp_path / "LibreOffice.app" / "Contents" / "MacOS" / "soffice"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setattr(documents.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(documents, "_libreoffice_candidates", lambda: (executable,))
+
+    assert documents._libreoffice_executable() == str(executable)
+
+
 @pytest.mark.parametrize(
     ("suffix", "builder_name", "limit_name"),
     [

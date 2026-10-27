@@ -5,8 +5,9 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QIcon, QWheelEvent
+from PySide6.QtGui import QCloseEvent, QIcon, QWheelEvent
 from PySide6.QtWidgets import QListWidgetItem, QInputDialog, QScrollArea, QWidget
 
 from sp.app.mermaid_renderer import MermaidRenderer, RenderResult as MermaidRenderResult
@@ -292,6 +293,138 @@ def test_plantuml_and_mermaid_save_source_and_emit_refresh_signal(
         assert spy.at(0)[0] == str(path)
         assert not window.editor.document().isModified()
         window.close()
+
+
+def test_diagram_recovery_snapshot_is_atomic_and_tracks_baseline(
+        monkeypatch, tmp_path: Path) -> None:
+    from sp.app.ui.diagram_recovery import (
+        load_recovery,
+        recovery_path,
+        remove_recovery,
+        write_recovery,
+    )
+
+    monkeypatch.setenv("STILLPOINT_DIAGRAM_RECOVERY_DIR", str(tmp_path / "recovery"))
+    drawing = tmp_path / "diagram.mmd"
+    drawing.write_text("saved\n", encoding="utf-8")
+
+    write_recovery(drawing, "unsaved\n", "saved\n")
+    snapshot = load_recovery(drawing)
+
+    assert snapshot is not None
+    assert snapshot.content == "unsaved\n"
+    assert snapshot.base_matches("saved\n")
+    assert not snapshot.base_matches("changed elsewhere\n")
+    assert drawing.read_text(encoding="utf-8") == "saved\n"
+    assert recovery_path(drawing).is_file()
+
+    remove_recovery(drawing)
+    assert load_recovery(drawing) is None
+
+
+@pytest.mark.parametrize(
+    ("editor_class", "suffix", "initial", "updated"),
+    [
+        (PlantUMLEditorWindow, ".puml", "@startuml\nA -> B\n@enduml\n",
+         "@startuml\nA -> C\n@enduml\n"),
+        (MermaidEditorWindow, ".mmd", "flowchart TD\nA --> B\n",
+         "flowchart TD\nA --> C\n"),
+    ],
+)
+def test_dirty_diagram_close_can_cancel_and_keeps_recovery(
+        qapp, qtbot, monkeypatch, tmp_path: Path,
+        editor_class, suffix: str, initial: str, updated: str) -> None:
+    from sp.app.ui.diagram_recovery import load_recovery
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setenv("STILLPOINT_DIAGRAM_RECOVERY_DIR", str(tmp_path / "recovery"))
+    monkeypatch.setattr(editor_class, "_render", lambda self: None)
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False
+    )
+    drawing = tmp_path / f"drawing{suffix}"
+    drawing.write_text(initial, encoding="utf-8")
+    window = editor_class(str(drawing))
+    qtbot.addWidget(window)
+    window.show()
+    if isinstance(window, PlantUMLEditorWindow):
+        _wait_for(qapp, lambda: window._startup_initialized)
+    window.editor.setPlainText(updated)
+    monkeypatch.setattr(window, "_confirm_close_changes", lambda: "cancel")
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert drawing.read_text(encoding="utf-8") == initial
+    snapshot = load_recovery(drawing)
+    assert snapshot is not None
+    assert snapshot.content == updated
+
+    monkeypatch.setattr(window, "_confirm_close_changes", lambda: "discard")
+    window.close()
+    assert load_recovery(drawing) is None
+
+
+@pytest.mark.parametrize(
+    ("editor_class", "module_name", "suffix", "initial", "recovered"),
+    [
+        (PlantUMLEditorWindow, "sp.app.ui.plantuml_editor_window", ".puml",
+         "@startuml\nA -> B\n@enduml\n", "@startuml\nA -> C\n@enduml\n"),
+        (MermaidEditorWindow, "sp.app.ui.mermaid_editor_window", ".mmd",
+         "flowchart TD\nA --> B\n", "flowchart TD\nA --> C\n"),
+    ],
+)
+def test_diagram_recovery_is_reviewed_without_overwriting_current_file(
+        qapp, qtbot, monkeypatch, tmp_path: Path,
+        editor_class, module_name: str, suffix: str, initial: str, recovered: str) -> None:
+    from sp.app.ui.diagram_recovery import load_recovery, write_recovery
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setenv("STILLPOINT_DIAGRAM_RECOVERY_DIR", str(tmp_path / "recovery"))
+    monkeypatch.setattr(editor_class, "_render", lambda self: None)
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False
+    )
+    drawing = tmp_path / f"drawing{suffix}"
+    drawing.write_text(initial, encoding="utf-8")
+    write_recovery(drawing, recovered, initial)
+
+    class UseRecoveryDialog:
+        Accepted = 1
+
+        def __init__(self, local_text, remote_text, *_args, **_kwargs):
+            assert local_text == initial
+            assert remote_text == recovered
+            self.selected_source = "remote"
+
+        def exec(self):
+            return 1
+
+        def merged_text(self):
+            return recovered
+
+    monkeypatch.setattr(f"{module_name}.MergeConflictDialog", UseRecoveryDialog)
+    window = editor_class(str(drawing))
+    qtbot.addWidget(window)
+    window.show()
+    if isinstance(window, PlantUMLEditorWindow):
+        _wait_for(qapp, lambda: window._startup_initialized)
+
+    assert window.editor.toPlainText() == recovered
+    assert drawing.read_text(encoding="utf-8") == initial
+    assert window._is_dirty()
+
+    assert window._save_file()
+    assert drawing.read_text(encoding="utf-8") == recovered
+    assert load_recovery(drawing) is None
+    window.close()
 
 
 def test_plantuml_editor_without_ai_has_single_preview_pane(qapp, monkeypatch, tmp_path: Path):

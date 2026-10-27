@@ -118,6 +118,39 @@ VALUE_FILTER_MAX_CELLS = 500_000
 VALUE_FILTER_MAX_DISTINCT = 20_000
 
 
+@lru_cache(maxsize=1)
+def _is_apple_silicon() -> bool:
+    """Return true for native and Rosetta-translated Apple Silicon processes."""
+    if sys.platform != "darwin":
+        return False
+    if os.uname().machine in {"arm64", "arm64e"}:
+        return True
+    try:
+        translated = subprocess.run(
+            ["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return translated.returncode == 0 and translated.stdout.strip() == b"1"
+
+
+def _git_command(*arguments: str) -> list[str]:
+    """Build a Git command without inheriting the wrong macOS architecture."""
+    executable = shutil.which("git") or "git"
+    if (
+        _is_apple_silicon()
+        and Path(executable).resolve() == Path("/usr/bin/git")
+        and Path("/usr/bin/arch").is_file()
+    ):
+        return ["/usr/bin/arch", "-arm64", "/usr/bin/git", *arguments]
+    return [executable, *arguments]
+
+
 class Bridge(QObject):
     result = Signal(object)
     finished = Signal(object)
@@ -158,8 +191,9 @@ class GitCommandDialog(QDialog):
 
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(root))
-        self.process.setProgram("git")
-        self.process.setArguments(arguments)
+        command = _git_command(*arguments)
+        self.process.setProgram(command[0])
+        self.process.setArguments(command[1:])
         self.process.setProcessChannelMode(QProcess.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self._read_stdout)
         self.process.readyReadStandardError.connect(self._read_stderr)
@@ -8134,7 +8168,7 @@ class Window(QMainWindow):
         """Run a short Git mutation without opening the terminal dialog."""
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.root), *arguments],
+                _git_command("-C", str(self.root), *arguments),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=60,
@@ -8245,10 +8279,10 @@ class Window(QMainWindow):
             return
         try:
             result = subprocess.run(
-                [
-                    "git", "-C", str(self.root), "status", "--porcelain=v1", "-z",
+                _git_command(
+                    "-C", str(self.root), "status", "--porcelain=v1", "-z",
                     "--untracked-files=all",
-                ],
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=15,
@@ -8343,7 +8377,7 @@ class Window(QMainWindow):
     def _git_blob_size(self, revision: str) -> int | None:
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.root), "cat-file", "-s", revision],
+                _git_command("-C", str(self.root), "cat-file", "-s", revision),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -8362,7 +8396,7 @@ class Window(QMainWindow):
             return None
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.root), "show", revision],
+                _git_command("-C", str(self.root), "show", revision),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=15,
@@ -8461,10 +8495,10 @@ class Window(QMainWindow):
             except (OSError, ValueError, UnicodeError):
                 return self._git_binary_summary(path, entry, category), True
 
-        arguments = [
-            "git", "-C", str(self.root), "diff", "--no-ext-diff", "--no-color",
+        arguments = _git_command(
+            "-C", str(self.root), "diff", "--no-ext-diff", "--no-color",
             "--no-textconv", "--unified=3",
-        ]
+        )
         if category == "staged":
             arguments.append("--cached")
         arguments.extend(["--", git_path])
@@ -8650,7 +8684,7 @@ class Window(QMainWindow):
         if not paths:
             return
         head = subprocess.run(
-            ["git", "-C", str(self.root), "rev-parse", "--verify", "HEAD"],
+            _git_command("-C", str(self.root), "rev-parse", "--verify", "HEAD"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -8716,6 +8750,28 @@ class Window(QMainWindow):
         self.tree.collapseAll()
         self.tree.setFocus(Qt.OtherFocusReason)
 
+    def _collapse_selected_tree_level(self) -> bool:
+        """Collapse one visible hierarchy level and retain a useful selection."""
+        current = self.tree.currentIndex()
+        if not current.isValid():
+            return False
+        if self.model.isDir(current) and self.tree.isExpanded(current):
+            self.tree.collapse(current)
+            return True
+
+        parent = current.parent()
+        if not parent.isValid() or parent == self.tree.rootIndex():
+            return False
+        self.tree.collapse(parent)
+        was_suppressed = self._suppress_tree_preview
+        self._suppress_tree_preview = True
+        try:
+            self.tree.setCurrentIndex(parent)
+        finally:
+            self._suppress_tree_preview = was_suppressed
+        self.tree.scrollTo(parent)
+        return True
+
     def _apply_inserted_dotfile_visibility(
             self, parent: QModelIndex, first: int, last: int) -> None:
         hide_dotfiles = not bool(self.state.get("hidden", False))
@@ -8749,6 +8805,9 @@ class Window(QMainWindow):
             self._persist()
 
     def _escape_tree(self):
+        if self._collapse_selected_tree_level():
+            self._filtered_escape_at = 0.0
+            return
         if self.scope != self.root:
             now = time.monotonic()
             if self._filtered_escape_at and now - self._filtered_escape_at < 1.5:
@@ -9979,7 +10038,7 @@ class Window(QMainWindow):
 
     def _git_ignored(self, path):
         try:
-            result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-q", str(path)],
+            result = subprocess.run(_git_command("-C", str(self.root), "check-ignore", "-q", str(path)),
                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=1,
                                     **_BACKGROUND_SUBPROCESS_OPTIONS)
             return result.returncode == 0
@@ -10001,7 +10060,7 @@ class Window(QMainWindow):
         ignored = set()
         if not git_filtered:
             try:
-                result = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-z", "--stdin"],
+                result = subprocess.run(_git_command("-C", str(self.root), "check-ignore", "-z", "--stdin"),
                                         input=b"".join(os.fsencode(str(path)) + b"\0" for path in batch),
                                         capture_output=True, timeout=5,
                                         **_BACKGROUND_SUBPROCESS_OPTIONS)
@@ -10016,10 +10075,10 @@ class Window(QMainWindow):
         """Use Git's optimized index walk and never traverse ignored outputs."""
         try:
             result = subprocess.run(
-                [
-                    "git", "-C", str(self.root), "ls-files", "-z",
+                _git_command(
+                    "-C", str(self.root), "ls-files", "-z",
                     "--cached", "--others", "--exclude-standard",
-                ],
+                ),
                 capture_output=True,
                 timeout=max(10.0, MAX_INDEX_SECONDS),
                 **_BACKGROUND_SUBPROCESS_OPTIONS,

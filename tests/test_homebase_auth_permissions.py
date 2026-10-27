@@ -9,6 +9,20 @@ from sp.server import api
 from sp.server.homebase_api import collect_homebase_auth_file_permission_faults, register_homebase_routes
 
 
+def test_embedded_server_default_vaults_root_does_not_depend_on_cwd(tmp_path, monkeypatch) -> None:
+    fake_home = tmp_path / "home"
+    launchservices_cwd = tmp_path / "read-only-root"
+    fake_home.mkdir()
+    launchservices_cwd.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("STILLPOINT_EMBEDDED_SERVER", "1")
+    monkeypatch.delenv("STILLPOINT_VAULTS_ROOT", raising=False)
+    monkeypatch.chdir(launchservices_cwd)
+    api.set_vaults_root(None)
+
+    assert api._get_vaults_root() == fake_home / ".stillpoint" / "vaults"
+
+
 def test_homebase_auth_files_are_written_private(tmp_path) -> None:
     app = FastAPI()
     register_homebase_routes(

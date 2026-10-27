@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -73,8 +74,25 @@ def _cache_key(path: Path) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
+def _libreoffice_candidates() -> tuple[Path, ...]:
+    if sys.platform != "darwin":
+        return ()
+    return (
+        Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+        Path.home() / "Applications/LibreOffice.app/Contents/MacOS/soffice",
+        Path("/opt/homebrew/bin/soffice"),
+        Path("/usr/local/bin/soffice"),
+    )
+
+
 def _libreoffice_executable() -> str | None:
-    return shutil.which("libreoffice") or shutil.which("soffice")
+    discovered = shutil.which("libreoffice") or shutil.which("soffice")
+    if discovered:
+        return discovered
+    for candidate in _libreoffice_candidates():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def _trim_office_cache(cache_dir: Path, preserve: Path | None = None) -> None:

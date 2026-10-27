@@ -12,6 +12,7 @@ PACKAGE CONTENTS
 - StillPoint Folder Navigator.app (folder-badged companion launcher)
 - StillPoint Quick Capture.app (standalone quick-entry window)
 - stillpoint-capture (helper binary)
+- stillpoint.sh (fallback launcher for StillPoint.app)
 - README.txt (this file)
 
 INSTALL
@@ -42,6 +43,27 @@ If Gatekeeper still blocks launch, clear quarantine:
   xattr -dr com.apple.quarantine "/Applications/StillPoint Folder Navigator.app"
   xattr -dr com.apple.quarantine "/Applications/StillPoint Quick Capture.app"
   open /Applications/StillPoint.app
+
+FALLBACK LAUNCHER
+-----------------
+
+If "open /Applications/StillPoint.app" returns without showing a window, use
+the included launcher from the extracted download or mounted disk image:
+
+  ./stillpoint.sh
+
+The launcher starts /Applications/StillPoint.app directly with a stable
+per-user vaults root at ~/.stillpoint/vaults. If StillPoint is already running,
+it asks macOS to bring that instance forward. It does not use AppleScript and
+therefore does not require Automation access to System Events.
+
+If the launcher is not executable after copying it, run:
+
+  chmod +x stillpoint.sh
+
+Startup output is appended to:
+
+  ~/Library/Logs/StillPoint-launch.log
 
 SYSTEM-WIDE HOTKEY FOR stillpoint-capture
 -----------------------------------------

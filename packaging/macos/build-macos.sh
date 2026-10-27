@@ -51,7 +51,8 @@ for required_file in \
   "../../sp/requirements.txt" \
   "../../packaging/sp-macos.spec" \
   "../../packaging/stillpoint-capture.spec" \
-  "../../packaging/macos/README.txt"; do
+  "../../packaging/macos/README.txt" \
+  "../../packaging/macos/stillpoint.sh"; do
   if [[ ! -f "$required_file" ]]; then
     echo "ERROR: Missing $required_file. Run this script from the StillPoint repository." >&2
     exit 1
@@ -84,6 +85,13 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
 fi
 
 VENV_PYTHON="$VENV_DIR/bin/python"
+HOST_ARCH="$(uname -m)"
+PYTHON_ARCH="$("$VENV_PYTHON" -c 'import platform; print(platform.machine())')"
+if [[ "$PYTHON_ARCH" != "$HOST_ARCH" ]]; then
+  echo "ERROR: Build Python is ${PYTHON_ARCH}, but this Mac is ${HOST_ARCH}." >&2
+  echo "Remove packaging/macos/venv and rebuild with a native Python." >&2
+  exit 1
+fi
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install pyinstaller
 "$VENV_PYTHON" -m pip install --no-binary charset_normalizer -r ../../sp/requirements.txt
@@ -106,11 +114,16 @@ test -x "$QUICK_CAPTURE_APP/Contents/Resources/stillpoint-capture/stillpoint-cap
 test -f "$MAIN_APP/Contents/Info.plist"
 test -x "$MAIN_APP/Contents/MacOS/StillPoint"
 test -x "$CAPTURE_OUTPUT/stillpoint-capture"
+test -x ../../packaging/macos/stillpoint.sh
 
 MAIN_BINARY_TYPE="$(file "$MAIN_APP/Contents/MacOS/StillPoint")"
 echo "$MAIN_BINARY_TYPE"
 if [[ "$MAIN_BINARY_TYPE" != *"Mach-O"* ]]; then
   echo "ERROR: StillPoint executable is not a Mach-O binary." >&2
+  exit 1
+fi
+if ! lipo -archs "$MAIN_APP/Contents/MacOS/StillPoint" | tr ' ' '\n' | grep -qx "$HOST_ARCH"; then
+  echo "ERROR: StillPoint executable does not contain the host architecture (${HOST_ARCH})." >&2
   exit 1
 fi
 
@@ -128,6 +141,8 @@ cp -R "$FOLDER_NAV_APP" "$BUNDLE_DIR/"
 cp -R "$QUICK_CAPTURE_APP" "$BUNDLE_DIR/"
 cp -R "$CAPTURE_OUTPUT" "$BUNDLE_DIR/"
 cp ../../packaging/macos/README.txt "$BUNDLE_DIR/README.txt"
+cp ../../packaging/macos/stillpoint.sh "$BUNDLE_DIR/stillpoint.sh"
+test -x "$BUNDLE_DIR/stillpoint.sh"
 
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$BUNDLE_DIR" "$ZIP_PATH"
@@ -142,6 +157,8 @@ if (( BUILD_DMG )); then
   cp -R "$QUICK_CAPTURE_APP" "$DMG_STAGE/"
   cp -R "$CAPTURE_OUTPUT" "$DMG_STAGE/"
   cp ../../packaging/macos/README.txt "$DMG_STAGE/README.txt"
+  cp ../../packaging/macos/stillpoint.sh "$DMG_STAGE/stillpoint.sh"
+  test -x "$DMG_STAGE/stillpoint.sh"
   ln -s /Applications "$DMG_STAGE/Applications"
 
   rm -f "$DMG_PATH"

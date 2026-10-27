@@ -124,6 +124,7 @@ def test_quickcapture_lite_uses_destination_selected_in_overlay(tmp_path: Path, 
     selected = {"label": "Projects", "page_mode": "custom", "page_ref": ":Projects"}
     captures: list[tuple[str, str | None]] = []
     monkeypatch.setattr(quickcapture_lite.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture_lite, "_show_overlay_via_api", lambda _base, _token: False)
     monkeypatch.setattr(quickcapture_lite, "_resolve_local_vault_path", lambda _vault: str(tmp_path))
     monkeypatch.setattr(quickcapture_lite, "_resolve_page_mode", lambda _page: ("today", None))
     monkeypatch.setattr(quickcapture_lite, "_local_vault_options", lambda: [])
@@ -141,6 +142,80 @@ def test_quickcapture_lite_uses_destination_selected_in_overlay(tmp_path: Path, 
 
     assert quickcapture_lite.run_quick_capture_lite(vault=None, page=None, text=None) == 0
     assert captures == [("custom", ":Projects")]
+
+
+def test_quickcapture_lite_overlay_saves_before_reporting_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from sp.app import quickcapture_lite
+
+    recorded_history: list[dict] = []
+    monkeypatch.setattr(quickcapture_lite.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture_lite.config, "set_active_vault", lambda _path: None)
+    monkeypatch.setattr(
+        quickcapture_lite.config,
+        "add_quick_capture_history",
+        lambda receipt: recorded_history.append(dict(receipt)),
+    )
+
+    receipt = quickcapture_lite._submit_local_capture(
+        fallback_vault=str(tmp_path),
+        text="saved synchronously",
+        attachments=[],
+        selected_vault=str(tmp_path),
+        destination={"label": "INBOX", "page_mode": "custom", "page_ref": ":INBOX"},
+    )
+
+    assert receipt["ok"] is True
+    assert receipt["destination"] == f"INBOX — {tmp_path.name}"
+    assert receipt["vault_path"] == str(tmp_path)
+    assert "saved synchronously" in (tmp_path / "INBOX" / "INBOX.md").read_text(
+        encoding="utf-8"
+    )
+    assert recorded_history == [receipt]
+
+
+def test_quickcapture_lite_overlay_reports_write_failure(tmp_path: Path, monkeypatch) -> None:
+    from sp.app import quickcapture_lite
+
+    monkeypatch.setattr(
+        quickcapture_lite,
+        "_capture_to_files_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("vault missing")),
+    )
+
+    receipt = quickcapture_lite._submit_local_capture(
+        fallback_vault=str(tmp_path),
+        text="do not claim success",
+        attachments=[],
+        selected_vault=None,
+        destination={"label": "Today", "page_mode": "today", "page_ref": None},
+    )
+
+    assert receipt["ok"] is False
+    assert "vault missing" in receipt["error"]
+
+
+def test_quickcapture_lite_delegates_to_running_app_before_resolving_vault(monkeypatch) -> None:
+    from sp.app import quickcapture_lite
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(quickcapture_lite.config, "init_settings", lambda: None)
+    monkeypatch.setattr(quickcapture_lite, "_default_api_base", lambda: "http://127.0.0.1:8765")
+    monkeypatch.setattr(quickcapture_lite, "_load_local_ui_token", lambda: "token")
+    monkeypatch.setattr(
+        quickcapture_lite,
+        "_show_overlay_via_api",
+        lambda base, token: calls.append((base, token)) or True,
+    )
+    monkeypatch.setattr(
+        quickcapture_lite,
+        "_resolve_local_vault_path",
+        lambda _vault: (_ for _ in ()).throw(AssertionError("vault fallback should not run")),
+    )
+
+    assert quickcapture_lite.run_quick_capture_lite(vault=None, page=None, text=None) == 0
+    assert calls == [("http://127.0.0.1:8765", "token")]
 
 
 def test_quickcapture_fallback_uses_destination_selected_in_overlay(

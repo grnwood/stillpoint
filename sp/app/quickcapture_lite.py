@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+import os
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Callable, Optional
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from sp.app import config
 from sp.vault_boundary import validate_vault_root
@@ -20,6 +24,49 @@ from sp.server.adapters import files
 from sp.server.adapters.files import FileAccessError, PAGE_SUFFIX
 
 
+def _default_api_base() -> str:
+    base = os.getenv("ZIMX_API_BASE")
+    if base:
+        return base.rstrip("/")
+    base_path = Path.home() / ".stillpoint" / "api-base"
+    try:
+        stored = base_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        stored = ""
+    if stored:
+        return stored.rstrip("/")
+    host = os.getenv("SP_HOST", "127.0.0.1")
+    port = os.getenv("ZIMX_PORT", "8765")
+    return f"http://{host}:{port}"
+
+
+def _load_local_ui_token() -> Optional[str]:
+    env_token = os.getenv("ZIMX_LOCAL_UI_TOKEN")
+    if env_token:
+        return env_token.strip()
+    try:
+        return (Path.home() / ".stillpoint" / "local-ui-token").read_text(
+            encoding="utf-8"
+        ).strip() or None
+    except OSError:
+        return None
+
+
+def _show_overlay_via_api(base: str, token: Optional[str]) -> bool:
+    headers = {"X-Local-UI-Token": token} if token else {}
+    request = Request(
+        f"{base.rstrip('/')}/api/ui/quick-capture",
+        data=b"",
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=1.5) as response:
+            return response.status == 200
+    except (OSError, URLError):
+        return False
+
+
 def _parse_hotkey_text(text_arg: Optional[str]) -> Optional[str]:
     if text_arg is not None and text_arg.strip():
         return text_arg.strip()
@@ -33,6 +80,9 @@ def _prompt_overlay(
     show_vault_picker: bool = False,
     destination_options: list[dict],
     selected_destination: dict,
+    on_submit: Optional[
+        Callable[[str, list[dict], Optional[str], dict], dict]
+    ] = None,
 ) -> tuple[Optional[str], list[dict], Optional[str], dict]:
     from PySide6.QtWidgets import QApplication
 
@@ -57,6 +107,8 @@ def _prompt_overlay(
         vault_path: Optional[str],
         destination: dict,
     ) -> dict:
+        if on_submit is not None:
+            return on_submit(text, attachments, vault_path, destination)
         _on_capture(text, attachments, vault_path)
         result["destination"] = dict(destination)
         return {"ok": True, "destination": destination.get("label")}
@@ -214,6 +266,52 @@ def _capture_to_files_result(
     if len(_LOCAL_CAPTURE_UNDO) > 50:
         _LOCAL_CAPTURE_UNDO.pop(next(iter(_LOCAL_CAPTURE_UNDO)))
     return {"ok": True, "id": capture_id, "path": rel_path}
+
+
+def _submit_local_capture(
+    *,
+    fallback_vault: str,
+    text: str,
+    attachments: list[dict],
+    selected_vault: Optional[str],
+    destination: dict,
+) -> dict:
+    """Write an overlay capture before returning its success receipt."""
+    page_mode = str(destination.get("page_mode") or "today")
+    page_ref = destination.get("page_ref")
+    if page_mode == "custom" and not page_ref:
+        return {"ok": False, "error": "Custom capture page is required."}
+
+    vault_root = Path(str(selected_vault or fallback_vault)).expanduser().resolve()
+    try:
+        receipt = _capture_to_files_result(
+            vault_root,
+            page_mode,
+            page_ref,
+            text,
+            attachments,
+        )
+    except (FileAccessError, OSError, ValueError) as exc:
+        return {"ok": False, "error": f"Quick Capture error: {exc}"}
+    except Exception as exc:
+        return {"ok": False, "error": f"Quick Capture error: {exc}"}
+
+    destination_label = (
+        destination.get("label") or destination.get("page_ref") or "Today's Journal"
+    )
+    receipt.update(
+        {
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "destination": f"{destination_label} — {vault_root.name}",
+            "excerpt": text.replace("\n", " ")[:160],
+            "vault_path": str(vault_root),
+            "kind": "local",
+            "page_mode": page_mode,
+            "page_ref": str(page_ref or ""),
+        }
+    )
+    config.add_quick_capture_history(receipt)
+    return receipt
 
 
 def _undo_file_capture(capture_id: str) -> dict:
@@ -393,11 +491,15 @@ def run_quick_capture_lite(
     text: Optional[str],
 ) -> int:
     config.init_settings()
+    capture_text = _parse_hotkey_text(text)
+    if not capture_text and _show_overlay_via_api(
+        _default_api_base(), _load_local_ui_token()
+    ):
+        return 0
     path = _resolve_local_vault_path(vault)
     if not path:
         print("Quick Capture error: no local vault configured.")
         return 1
-    capture_text = _parse_hotkey_text(text)
     attachments: list[dict] = []
     selected_vault = path
     page_mode, page_ref = _resolve_page_mode(page)
@@ -406,13 +508,36 @@ def run_quick_capture_lite(
         destination_options, selected_destination = quick_capture_destination_options(
             page_mode, page_ref, config.load_quick_capture_history()
         )
+
+        saved_in_overlay = False
+
+        def _submit_overlay_capture(
+            overlay_text: str,
+            overlay_attachments: list[dict],
+            overlay_vault: Optional[str],
+            overlay_destination: dict,
+        ) -> dict:
+            nonlocal saved_in_overlay
+            receipt = _submit_local_capture(
+                fallback_vault=path,
+                text=overlay_text,
+                attachments=overlay_attachments,
+                selected_vault=overlay_vault,
+                destination=overlay_destination,
+            )
+            saved_in_overlay = bool(receipt.get("ok"))
+            return receipt
+
         capture_text, attachments, selected_vault, selected_destination = _prompt_overlay(
             vault_options=options,
             selected_vault=path,
             show_vault_picker=vault is None,
             destination_options=destination_options,
             selected_destination=selected_destination,
+            on_submit=_submit_overlay_capture,
         )
+        if saved_in_overlay:
+            return 0
         page_mode = str(selected_destination.get("page_mode") or "today")
         page_ref = selected_destination.get("page_ref")
     if not capture_text:

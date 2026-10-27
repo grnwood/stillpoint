@@ -109,14 +109,14 @@ def _homebase_permission_check_disabled() -> bool:
     return _env_flag_enabled("IGNORE__FILE_PERMISSION_CHECK", default=False)
 
 
-def _embedded_server_permission_repair_enabled() -> bool:
+def _embedded_server_mode() -> bool:
     return _env_flag_enabled("STILLPOINT_EMBEDDED_SERVER", default=False)
 
 
 def _raise_for_homebase_permission_faults(vaults_root: Path) -> None:
     if _homebase_permission_check_disabled():
         return
-    if _embedded_server_permission_repair_enabled():
+    if _embedded_server_mode():
         repaired = homebase_api.repair_homebase_auth_file_permissions(vaults_root)
         if repaired:
             sys.stderr.write("Repaired Homebase auth file permissions for embedded server startup:\n")
@@ -310,8 +310,18 @@ def set_vaults_root(path: Optional[str]) -> None:
 
 
 def _get_vaults_root() -> Path:
-    root = _VAULTS_ROOT or os.getenv("STILLPOINT_VAULTS_ROOT", "vaults")
-    root_path = Path(root).expanduser()
+    root = _VAULTS_ROOT or os.getenv("STILLPOINT_VAULTS_ROOT")
+    if root:
+        root_path = Path(root).expanduser()
+    elif _embedded_server_mode():
+        # Finder, Dock, and LaunchServices start GUI applications with `/` as
+        # their working directory. A cwd-relative default would therefore
+        # resolve to the read-only `/vaults` and abort desktop startup.
+        root_path = Path.home() / ".stillpoint" / "vaults"
+    else:
+        # Preserve the historical cwd-relative default for the standalone
+        # server and command-line workflows.
+        root_path = Path("vaults")
     if not root_path.is_absolute():
         root_path = (Path.cwd() / root_path).resolve()
     return root_path.resolve()

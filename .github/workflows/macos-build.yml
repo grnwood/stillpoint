@@ -53,10 +53,13 @@ jobs:
           test -x "dist/StillPoint Quick Capture.app/Contents/Resources/stillpoint-capture/stillpoint-capture"
           test -n "$(find dist/StillPoint.app -type f -name rg -perm -111 -print -quit)"
           test -x dist/stillpoint-capture/stillpoint-capture
+          test -x packaging/macos/stillpoint.sh
 
           # Ensure it's a real mac binary, not a stub script
           file dist/StillPoint.app/Contents/MacOS/StillPoint
           file dist/StillPoint.app/Contents/MacOS/StillPoint | grep -q "Mach-O"
+          HOST_ARCH="$(uname -m)"
+          lipo -archs dist/StillPoint.app/Contents/MacOS/StillPoint | tr ' ' '\n' | grep -qx "$HOST_ARCH"
 
           # Sanity size check
           SIZE=$(du -sm dist/StillPoint.app | cut -f1)
@@ -76,6 +79,8 @@ jobs:
           cp -R "dist/StillPoint Quick Capture.app" dist/bundle/
           cp -R dist/stillpoint-capture dist/bundle/
           cp packaging/macos/README.txt dist/bundle/README.txt
+          cp packaging/macos/stillpoint.sh dist/bundle/stillpoint.sh
+          test -x dist/bundle/stillpoint.sh
           ditto -c -k --sequesterRsrc --keepParent dist/bundle StillPoint-macOS.zip
 
       - name: Upload artifact

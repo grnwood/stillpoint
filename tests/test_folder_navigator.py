@@ -1789,6 +1789,11 @@ def test_filtered_escape_folds_scope_then_clears_filter(tmp_path, monkeypatch, a
         QTest.keyClick(window.tree, Qt.Key_Escape)
         assert window.scope == scope
         assert not window.tree.isExpanded(nested_index)
+        assert window.tree.currentIndex() == nested_index
+        assert not window.filter_label.isHidden()
+
+        QTest.keyClick(window.tree, Qt.Key_Escape)
+        assert window.scope == scope
         assert not window.tree.currentIndex().isValid()
         assert not window.filter_label.isHidden()
 
@@ -1796,6 +1801,40 @@ def test_filtered_escape_folds_scope_then_clears_filter(tmp_path, monkeypatch, a
         assert window.scope == tmp_path
         assert not window.clear_filter_action.isEnabled()
         assert window.filter_label.isHidden()
+    finally:
+        window.close()
+
+
+def test_tree_escape_collapses_and_selects_one_parent_per_press(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    grandchild = child / "grandchild"
+    grandchild.mkdir(parents=True)
+    window = Window(tmp_path)
+    try:
+        window.show()
+        parent_index = window.model.index(str(parent))
+        child_index = window.model.index(str(child))
+        grandchild_index = window.model.index(str(grandchild))
+        window.tree.expand(parent_index)
+        window.tree.expand(child_index)
+        window.tree.setCurrentIndex(grandchild_index)
+        window.tree.setFocus()
+
+        QTest.keyClick(window.tree, Qt.Key_Escape)
+        assert window.tree.currentIndex() == child_index
+        assert not window.tree.isExpanded(child_index)
+        assert window.tree.isExpanded(parent_index)
+
+        QTest.keyClick(window.tree, Qt.Key_Escape)
+        assert window.tree.currentIndex() == parent_index
+        assert not window.tree.isExpanded(parent_index)
     finally:
         window.close()
 
@@ -4306,6 +4345,26 @@ def test_git_command_dialog_streams_terminal_output(tmp_path, qtbot, dismiss_key
     )
     QTest.qWait(10)
     assert not dialog.isVisible()
+
+
+def test_system_git_forces_native_arm_slice_on_apple_silicon(monkeypatch):
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.setattr(module, "_is_apple_silicon", lambda: True)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/git")
+
+    assert module._git_command("status", "--short") == [
+        "/usr/bin/arch", "-arm64", "/usr/bin/git", "status", "--short",
+    ]
+
+
+def test_non_system_git_keeps_its_selected_executable(monkeypatch):
+    import sp.app.folder_navigator.window as module
+
+    monkeypatch.setattr(module, "_is_apple_silicon", lambda: True)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/opt/homebrew/bin/git")
+
+    assert module._git_command("status") == ["/opt/homebrew/bin/git", "status"]
 
 
 def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
