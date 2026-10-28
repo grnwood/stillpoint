@@ -793,6 +793,26 @@ class PreferencesDialog(QDialog):
         self.mermaid_inline_preview_checkbox.setChecked(config.load_mermaid_inline_web_preview())
         mermaid_layout.addWidget(self.mermaid_inline_preview_checkbox)
 
+        mmdc_row = QHBoxLayout()
+        mmdc_row.addWidget(QLabel("Mermaid CLI (mmdc) path:"))
+        self.mermaid_mmdc_edit = QLineEdit()
+        try:
+            mmdc_val = config.load_mermaid_mmdc_path() or ""
+            if not mmdc_val:
+                from sp.app.mermaid_renderer import MermaidRenderer
+
+                discovered_mmdc = MermaidRenderer().discover_mmdc()
+                mmdc_val = str(discovered_mmdc) if discovered_mmdc else ""
+        except Exception:
+            mmdc_val = ""
+        self.mermaid_mmdc_edit.setText(mmdc_val)
+        self.mermaid_mmdc_edit.setPlaceholderText("Auto-detect mmdc")
+        mmdc_row.addWidget(self.mermaid_mmdc_edit, 1)
+        mmdc_browse = QPushButton("Browse…")
+        mmdc_browse.clicked.connect(self._browse_mermaid_mmdc)
+        mmdc_row.addWidget(mmdc_browse)
+        mermaid_layout.addLayout(mmdc_row)
+
         mermaid_font_row = QHBoxLayout()
         mermaid_font_row.addWidget(QLabel("Editor font:"))
         self.mermaid_font_combo = self._build_font_combo("Default (Courier)")
@@ -814,6 +834,15 @@ class PreferencesDialog(QDialog):
             self.mermaid_font_size_spin.setValue(11)
         mermaid_font_size_row.addWidget(self.mermaid_font_size_spin, 1)
         mermaid_layout.addLayout(mermaid_font_size_row)
+
+        mermaid_test_row = QHBoxLayout()
+        self.mermaid_test_btn = QPushButton("Check Mermaid Rendering")
+        self.mermaid_test_btn.clicked.connect(self._run_mermaid_test)
+        self.mermaid_test_status = QLabel("Not checked")
+        self.mermaid_test_status.setStyleSheet("color: #888;")
+        mermaid_test_row.addWidget(self.mermaid_test_btn)
+        mermaid_test_row.addWidget(self.mermaid_test_status, 1)
+        mermaid_layout.addLayout(mermaid_test_row)
         
         mermaid_layout.addStretch(1)
 
@@ -1065,6 +1094,46 @@ class PreferencesDialog(QDialog):
         )
         if path:
             self.plantuml_java_edit.setText(path)
+
+    def _browse_mermaid_mmdc(self):
+        options = QFileDialog.Options()
+        if sys.platform == "win32":
+            options |= QFileDialog.DontUseNativeDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Mermaid CLI (mmdc)",
+            "",
+            "Executable Files (*)",
+            options=options,
+        )
+        if path:
+            self.mermaid_mmdc_edit.setText(path)
+
+    def _run_mermaid_test(self):
+        from sp.app.mermaid_renderer import MermaidRenderer
+
+        self.mermaid_test_status.setText("Checking…")
+        self.mermaid_test_status.setStyleSheet("color: #888;")
+        renderer = MermaidRenderer()
+        mmdc_path = self.mermaid_mmdc_edit.text().strip()
+        if mmdc_path and not renderer.set_mmdc_path(mmdc_path):
+            self.mermaid_test_status.setText("Failed: CLI path is not a file")
+            self.mermaid_test_status.setStyleSheet("color: #c00;")
+            return
+        result = renderer.test_setup()
+        resolved_path = renderer.get_mmdc_path()
+        if resolved_path:
+            self.mermaid_mmdc_edit.setText(str(resolved_path))
+        if result.success:
+            self.mermaid_test_status.setText(f"OK ({result.duration_ms:.0f} ms)")
+            self.mermaid_test_status.setStyleSheet("color: #2a8f2a;")
+        else:
+            self.mermaid_test_status.setText(
+                f"Failed: {result.error_message or 'Unknown error'}"
+            )
+            self.mermaid_test_status.setStyleSheet("color: #c00;")
+            if result.stderr:
+                QMessageBox.warning(self, "Mermaid Rendering Check", result.stderr)
 
     def _run_plantuml_test(self):
         from sp.app.plantuml_renderer import PlantUMLRenderer
@@ -1319,6 +1388,7 @@ class PreferencesDialog(QDialog):
             pass
         try:
             config.save_mermaid_enabled(self.mermaid_enable_checkbox.isChecked())
+            config.save_mermaid_mmdc_path(self.mermaid_mmdc_edit.text())
             config.save_mermaid_inline_web_preview(self.mermaid_inline_preview_checkbox.isChecked())
             # Save Mermaid editor font preferences
             mermaid_font = self.mermaid_font_combo.currentData()

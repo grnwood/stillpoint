@@ -1291,6 +1291,18 @@ def save_mermaid_enabled(enabled: bool) -> None:
     _update_global_config({"mermaid_enabled": bool(enabled)})
 
 
+def load_mermaid_mmdc_path() -> Optional[str]:
+    """Load the configured Mermaid CLI executable path, if any."""
+    payload = _read_global_config()
+    path = payload.get("mermaid_mmdc_path")
+    return path if isinstance(path, str) and path.strip() else None
+
+
+def save_mermaid_mmdc_path(mmdc_path: str) -> None:
+    """Save the configured Mermaid CLI executable path."""
+    _update_global_config({"mermaid_mmdc_path": mmdc_path.strip() if mmdc_path else ""})
+
+
 def load_mermaid_inline_web_preview() -> bool:
     """Load Mermaid inline web preview preference.
 
@@ -1956,7 +1968,7 @@ def delete_homebase_vault_profile(profile_id: str) -> None:
     save_homebase_vault_profiles(filtered)
 
 
-_VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote"}
+_VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote", "git"}
 
 
 def load_vault_remote_mode(default: str = "none") -> str:
@@ -1988,6 +2000,19 @@ def save_vault_remote_mode(mode: str) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         return
+
+
+def load_git_publish_versions(default: bool = False) -> bool:
+    """Return whether Save Version should publish after creating its local tag."""
+    value = _load_vault_kv("git_publish_versions")
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def save_git_publish_versions(enabled: bool) -> None:
+    """Remember the per-vault Save Version publishing choice."""
+    _save_vault_kv("git_publish_versions", "true" if enabled else "false")
 
 
 def load_homebase_vault_id() -> Optional[str]:

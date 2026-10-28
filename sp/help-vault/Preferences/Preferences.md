@@ -133,6 +133,18 @@ Available vault-specific settings:
 - **Vault Accent**: Sets an accent color for the current vault, or uses the theme default.
 - **Force read-only mode for this vault**: Opens the current vault without taking a write lock.
 
+### Versioning & Sync
+
+Each local vault can use one versioning/sync mode: **Local only**, **Homebase**, or **Git**. Git and Homebase cannot be active for the same vault.
+
+Git setup can initialize the current vault as a repository, configure a remote, and test the connection. StillPoint uses your existing Git, SSH, and credential-manager configuration and does not store Git passwords or access tokens. Ordinary Git remotes receive the vault's files as plaintext rather than Homebase-encrypted objects.
+
+Git synchronization is manual in this release. When Git is enabled, the left **Git** rail provides **Get updates**, **Save changes**, and **Publish** actions. Use **Vault → Save Version…** to create a named vault version; the same command is available from the command bar. **Publish after Save Version** is remembered for each vault.
+
+Right-click a vault page or folder and choose **Versions…** to browse named versions or the full change history. Restoring writes the selected historical content into the working vault as a new unsaved change. Restoring a folder never deletes files created after that version.
+
+Switching modes does not delete Homebase data or the local `.git` repository. StillPoint warns before a mode change and reports pending Git work when moving to Homebase.
+
 Available three-state overrides:
 - **Tasks**: Overrides whether task features are enabled in this vault.
 - **Calendar**: Overrides whether calendar features are enabled in this vault.
@@ -140,4 +152,4 @@ Available three-state overrides:
 - **Page Tags**: Overrides whether tag features are enabled in this vault.
 - **AI Chats**: Overrides whether AI chat is enabled in this vault.
 
-Use **Use Global Defaults** to reset the accent color and three-state overrides back to global behavior.
+Use **Use Global Defaults** to reset the accent color and three-state overrides back to global behavior. It does not change the vault's versioning/sync mode.

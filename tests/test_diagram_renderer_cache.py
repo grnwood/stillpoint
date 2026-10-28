@@ -75,6 +75,38 @@ def test_mermaid_discovers_nvm_cli_without_shell_path(tmp_path, monkeypatch):
     assert renderer._mmdc_env()["PATH"].split(os.pathsep)[0] == str(nvm_bin)
 
 
+def test_mermaid_discovers_homebrew_cli_without_shell_path(tmp_path, monkeypatch):
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    homebrew_bin = tmp_path / "homebrew" / "bin"
+    homebrew_bin.mkdir(parents=True)
+    mmdc = homebrew_bin / "mmdc"
+    node = homebrew_bin / "node"
+    mmdc.touch(mode=0o755)
+    node.touch(mode=0o755)
+    monkeypatch.setattr("sp.app.mermaid_renderer.sys.platform", "darwin")
+    monkeypatch.setattr("sp.app.mermaid_renderer.COMMON_MACOS_MMDC_PATHS", (mmdc,))
+    monkeypatch.setattr("sp.app.mermaid_renderer.shutil.which", lambda _name: None)
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    assert renderer.discover_mmdc() == mmdc
+    assert renderer._mmdc_env()["PATH"].split(os.pathsep)[0] == str(homebrew_bin)
+
+
+def test_mermaid_loads_configured_cli_path(tmp_path, monkeypatch):
+    from sp.app import config
+    from sp.app.mermaid_renderer import MermaidRenderer
+
+    mmdc = tmp_path / "custom" / "mmdc"
+    mmdc.parent.mkdir()
+    mmdc.touch(mode=0o755)
+    monkeypatch.setattr(config, "load_mermaid_mmdc_path", lambda: str(mmdc))
+
+    renderer = MermaidRenderer(cache_dir=tmp_path / "cache")
+    assert renderer.is_configured()
+    assert renderer.get_mmdc_path() == mmdc
+
+
 def test_mermaid_windows_npm_wrapper_runs_through_cmd(tmp_path, monkeypatch):
     from sp.app.mermaid_renderer import MermaidRenderer
 

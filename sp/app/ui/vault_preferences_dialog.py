@@ -5,18 +5,26 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from sp.app import config
+from sp.app import git_support
 
 
 class VaultPreferencesDialog(QDialog):
@@ -44,6 +52,8 @@ class VaultPreferencesDialog(QDialog):
         self.setMinimumSize(620, 560)
         self._remote_mode = bool(remote_mode)
         self._remote_read_only = bool(remote_read_only)
+        self._vault_root = Path(config.get_active_vault()).resolve() if config.get_active_vault() else None
+        self._initial_version_mode = config.load_vault_remote_mode()
 
         layout = QVBoxLayout(self)
         scroll = QScrollArea(self)
@@ -130,6 +140,80 @@ class VaultPreferencesDialog(QDialog):
             self.force_read_only_checkbox.setChecked(False)
         content_layout.addWidget(self.force_read_only_checkbox)
 
+        content_layout.addWidget(QLabel("<b>Versioning &amp; Sync</b>"))
+        version_box = QGroupBox("Choose one mode for this vault")
+        version_layout = QVBoxLayout(version_box)
+        self.version_mode_group = QButtonGroup(self)
+        self.local_mode_radio = QRadioButton("Local only")
+        self.homebase_mode_radio = QRadioButton("Homebase")
+        self.git_mode_radio = QRadioButton("Git")
+        for button in (self.local_mode_radio, self.homebase_mode_radio, self.git_mode_radio):
+            self.version_mode_group.addButton(button)
+            version_layout.addWidget(button)
+        if self._initial_version_mode == "homebase_remote":
+            self.homebase_mode_radio.setChecked(True)
+        elif self._initial_version_mode == "git":
+            self.git_mode_radio.setChecked(True)
+        else:
+            self.local_mode_radio.setChecked(True)
+        if self._remote_mode:
+            version_box.setEnabled(False)
+        elif self._initial_version_mode != "homebase_remote":
+            self.homebase_mode_radio.setEnabled(False)
+            self.homebase_mode_radio.setToolTip(
+                "Use Vault → Convert This Vault to Homebase to configure Homebase."
+            )
+
+        self.version_mode_warning = QLabel()
+        self.version_mode_warning.setWordWrap(True)
+        self.version_mode_warning.setStyleSheet("color: #b26a00; padding: 4px 0;")
+        version_layout.addWidget(self.version_mode_warning)
+
+        self.git_setup_widget = QWidget(version_box)
+        git_setup_layout = QVBoxLayout(self.git_setup_widget)
+        git_setup_layout.setContentsMargins(20, 4, 0, 0)
+        self.git_status_label = QLabel()
+        self.git_status_label.setWordWrap(True)
+        git_setup_layout.addWidget(self.git_status_label)
+        git_warning = QLabel(
+            "Git remotes normally receive your vault files as plaintext. StillPoint does not "
+            "store Git passwords or access tokens; authentication uses your existing Git, SSH, "
+            "or credential-manager setup. Git synchronization is manual in this release."
+        )
+        git_warning.setWordWrap(True)
+        git_warning.setStyleSheet("color: #b26a00;")
+        git_setup_layout.addWidget(git_warning)
+        self.git_init_button = QPushButton("Initialize Repository")
+        self.git_init_button.clicked.connect(self._initialize_git_repository)
+        git_setup_layout.addWidget(self.git_init_button)
+        remote_form = QFormLayout()
+        self.git_remote_edit = QLineEdit()
+        self.git_remote_edit.setPlaceholderText("git@host:owner/vault.git or https://…")
+        self._git_remote_name = "origin"
+        self.git_remote_label = QLabel("Remote (origin):")
+        remote_form.addRow(self.git_remote_label, self.git_remote_edit)
+        git_setup_layout.addLayout(remote_form)
+        remote_buttons = QHBoxLayout()
+        self.git_save_remote_button = QPushButton("Save Remote")
+        self.git_save_remote_button.clicked.connect(self._save_git_remote)
+        self.git_test_remote_button = QPushButton("Test Connection")
+        self.git_test_remote_button.clicked.connect(self._test_git_remote)
+        remote_buttons.addWidget(self.git_save_remote_button)
+        remote_buttons.addWidget(self.git_test_remote_button)
+        remote_buttons.addStretch(1)
+        git_setup_layout.addLayout(remote_buttons)
+        self.git_publish_versions_checkbox = QCheckBox("Publish after Save Version")
+        self.git_publish_versions_checkbox.setChecked(config.load_git_publish_versions(False))
+        git_setup_layout.addWidget(self.git_publish_versions_checkbox)
+        version_layout.addWidget(self.git_setup_widget)
+        content_layout.addWidget(version_box)
+
+        self.git_mode_radio.toggled.connect(self._on_git_mode_toggled)
+        self.homebase_mode_radio.toggled.connect(self._update_version_mode_ui)
+        self.local_mode_radio.toggled.connect(self._update_version_mode_ui)
+        self._refresh_git_setup_state()
+        self._update_version_mode_ui()
+
         content_layout.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -210,7 +294,170 @@ class VaultPreferencesDialog(QDialog):
         ):
             checkbox.setCheckState(Qt.PartiallyChecked)
 
+    def selected_version_mode(self) -> str:
+        if self.git_mode_radio.isChecked():
+            return "git"
+        if self.homebase_mode_radio.isChecked():
+            return "homebase_remote"
+        return "none"
+
+    def _update_version_mode_ui(self) -> None:
+        selected = self.selected_version_mode()
+        self.git_setup_widget.setVisible(selected == "git")
+        if selected == self._initial_version_mode:
+            message = ""
+        elif self._initial_version_mode == "homebase_remote":
+            message = "Changing modes stops Homebase synchronization. Existing Homebase data is not deleted."
+            if selected == "git":
+                message += " Git remotes do not receive Homebase-encrypted objects."
+        elif self._initial_version_mode == "git" and selected == "homebase_remote":
+            message = (
+                "Changing to Homebase disables Git operations in StillPoint. The .git repository "
+                "and its history remain on disk."
+            )
+        elif self._initial_version_mode == "git":
+            message = (
+                "Turning Git off hides Git operations in StillPoint. The .git repository and its "
+                "history remain on disk."
+            )
+        elif selected == "git":
+            message = "Git and Homebase cannot operate on this vault at the same time."
+        else:
+            message = ""
+        self.version_mode_warning.setText(message)
+
+    def _on_git_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            # Probe again when the user selects Git. The repository or remote
+            # may have been configured since this dialog was opened.
+            self._refresh_git_setup_state()
+        self._update_version_mode_ui()
+
+    def _refresh_git_setup_state(self) -> None:
+        if not self._vault_root:
+            self.git_status_label.setText("Open a local vault to configure Git.")
+            self.git_init_button.setEnabled(False)
+            self.git_save_remote_button.setEnabled(False)
+            self.git_test_remote_button.setEnabled(False)
+            return
+        try:
+            state = git_support.repository_state(self._vault_root)
+        except git_support.GitError as exc:
+            self.git_status_label.setText(f"Git unavailable: {exc}")
+            self.git_init_button.setEnabled(False)
+            self.git_save_remote_button.setEnabled(False)
+            self.git_test_remote_button.setEnabled(False)
+            return
+        if not state.initialized:
+            self.git_status_label.setText("Repository status: Not initialized")
+            self.git_init_button.setText("Initialize Repository")
+            self.git_init_button.setEnabled(True)
+            self._git_remote_name = "origin"
+            self.git_remote_label.setText("Remote (origin):")
+            ready = False
+        elif not state.exact_root:
+            self.git_status_label.setText(
+                "Repository status: This vault is inside a repository rooted elsewhere."
+            )
+            self.git_init_button.setText("Initialize Repository Here")
+            self.git_init_button.setEnabled(True)
+            ready = False
+        else:
+            branch = state.branch or "no commits yet"
+            remote_detail = (
+                f" · Remote: {state.remote_name} ({state.remote_url})"
+                if state.remote_url
+                else " · No remote configured"
+            )
+            self.git_status_label.setText(
+                f"Repository status: Existing repository detected · Branch: {branch}{remote_detail}"
+            )
+            self.git_init_button.setText("Repository Ready")
+            self.git_init_button.setEnabled(False)
+            ready = True
+            self._git_remote_name = state.remote_name or "origin"
+            self.git_remote_label.setText(f"Remote ({self._git_remote_name}):")
+            self.git_remote_edit.setText(state.remote_url)
+        self.git_save_remote_button.setEnabled(ready)
+        self.git_test_remote_button.setEnabled(ready and bool(self.git_remote_edit.text().strip()))
+
+    def _initialize_git_repository(self) -> None:
+        if not self._vault_root:
+            return
+        try:
+            git_support.initialize_repository(self._vault_root)
+        except git_support.GitError as exc:
+            QMessageBox.warning(self, "Could Not Initialize Repository", str(exc))
+            return
+        self._refresh_git_setup_state()
+
+    def _save_git_remote(self) -> None:
+        if not self._vault_root:
+            return
+        try:
+            git_support.set_remote(
+                self._vault_root,
+                self.git_remote_edit.text(),
+                name=self._git_remote_name,
+            )
+        except git_support.GitError as exc:
+            QMessageBox.warning(self, "Could Not Save Remote", str(exc))
+            return
+        self._refresh_git_setup_state()
+
+    def _test_git_remote(self) -> None:
+        if not self._vault_root:
+            return
+        try:
+            if self.git_remote_edit.text().strip() != git_support.remote_url(
+                self._vault_root, name=self._git_remote_name
+            ):
+                git_support.set_remote(
+                    self._vault_root,
+                    self.git_remote_edit.text(),
+                    name=self._git_remote_name,
+                )
+            git_support.test_remote(self._vault_root, name=self._git_remote_name)
+        except git_support.GitError as exc:
+            QMessageBox.warning(self, "Git Connection Failed", str(exc))
+            return
+        QMessageBox.information(self, "Git Connection", "The remote repository is reachable.")
+
     def accept(self) -> None:  # type: ignore[override]
+        selected_mode = self.selected_version_mode()
+        if selected_mode == "git":
+            if not self._vault_root:
+                QMessageBox.warning(self, "Git Setup Required", "Open a local vault first.")
+                return
+            try:
+                git_support.require_exact_repository(self._vault_root)
+            except git_support.GitError as exc:
+                QMessageBox.warning(self, "Git Setup Required", str(exc))
+                return
+        if selected_mode != self._initial_version_mode:
+            if selected_mode == "git":
+                detail = (
+                    "Enable Git for this vault? Homebase synchronization will be disabled. "
+                    "Vault files sent to a Git remote are not protected by Homebase encryption."
+                )
+            elif self._initial_version_mode == "homebase_remote":
+                detail = (
+                    "Stop Homebase synchronization for this vault? Existing Homebase data will not be deleted."
+                )
+            elif self._initial_version_mode == "git":
+                detail = (
+                    "Disable Git operations in StillPoint? The repository and history will remain on disk."
+                )
+            else:
+                detail = "Change this vault's versioning and sync mode?"
+            if QMessageBox.warning(
+                self,
+                "Change Versioning Mode",
+                detail,
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            ) != QMessageBox.Yes:
+                return
         values = self._collect_values()
         config.save_vault_theme_override(self.vault_theme_combo.currentData())
         config.save_vault_accent_color(self.vault_accent_combo.currentData() or None)
@@ -221,4 +468,6 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_remember_cursor_position_override(values["remember_cursor_position"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
+        config.save_vault_remote_mode(selected_mode)
+        config.save_git_publish_versions(self.git_publish_versions_checkbox.isChecked())
         super().accept()

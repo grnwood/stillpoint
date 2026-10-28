@@ -29,6 +29,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+COMMON_MACOS_MMDC_PATHS = (
+    Path("/opt/homebrew/bin/mmdc"),
+    Path("/usr/local/bin/mmdc"),
+)
+
+
 def _is_windows_platform() -> bool:
     return os.name == "nt"
 
@@ -69,6 +75,20 @@ class MermaidRenderer:
         self._puppeteer_browser_path: Optional[Path] = None
         self._web_renderer_error = ""
         self._render_lock = threading.Lock()
+        self._config_initialized = False
+
+    def initialize_from_config(self) -> None:
+        """Load an explicitly configured Mermaid CLI path once."""
+        if self._config_initialized:
+            return
+        try:
+            from sp.app import config
+
+            if configured_path := config.load_mermaid_mmdc_path():
+                self.set_mmdc_path(configured_path)
+        except (ImportError, AttributeError):
+            pass
+        self._config_initialized = True
 
     def discover_mmdc(self) -> Optional[Path]:
         """Locate mmdc, including nvm installs omitted from desktop PATH."""
@@ -104,6 +124,12 @@ class MermaidRenderer:
             )
             candidates.extend(version / "bin" / "mmdc" for version in versions)
 
+        # Finder-launched apps do not inherit shell initialization, so their
+        # PATH commonly omits Homebrew even when Terminal can find mmdc. Keep
+        # explicit shell/nvm installations ahead of these fallback locations.
+        if sys.platform == "darwin":
+            candidates.extend(COMMON_MACOS_MMDC_PATHS)
+
         for path in candidates:
             if path.is_file() and (_is_windows_platform() or os.access(path, os.X_OK)):
                 self._mmdc_path = path
@@ -115,6 +141,7 @@ class MermaidRenderer:
         path = Path(mmdc_path)
         if path.exists() and path.is_file():
             self._mmdc_path = path
+            self._config_initialized = True
             return True
         return False
 
@@ -218,6 +245,7 @@ class MermaidRenderer:
 
     def is_configured(self) -> bool:
         """Check if Mermaid CLI is available."""
+        self.initialize_from_config()
         if self._mmdc_path is None:
             self.discover_mmdc()
         return self._mmdc_path is not None
@@ -232,6 +260,8 @@ class MermaidRenderer:
     ) -> RenderResult:
         """Render Mermaid diagram to SVG."""
         t0 = time.perf_counter()
+
+        self.initialize_from_config()
 
         # Keep the persistent cache identity stable across the first discovery
         # and subsequent calls made through a reused renderer instance.
@@ -313,6 +343,8 @@ class MermaidRenderer:
     ) -> RenderResult:
         """Render Mermaid diagram to PNG."""
         t0 = time.perf_counter()
+
+        self.initialize_from_config()
 
         if self._mmdc_path is None:
             self.discover_mmdc()

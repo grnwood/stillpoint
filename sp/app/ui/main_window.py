@@ -119,6 +119,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config, eventloop_diag, indexer
+from sp.app import git_support
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
 from sp.vault_boundary import NestedVaultError, validate_vault_root
@@ -140,6 +141,7 @@ from .screen_positioning import (
 )
 from .canvas_navigation import install_primary_wheel_zoom
 from .markdown_preview import MarkdownReadingView
+from .git_widgets import GitDiffDialog, GitHistoryDialog, VaultGitPanel
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -3095,6 +3097,9 @@ class MainWindow(QMainWindow):
         self.search_tab.pageNavigationWithEditorFocusRequested.connect(self._on_search_result_selected_with_editor_focus)
         self.left_tab_widget.addTab(self.search_tab, "Search")
 
+        # Added dynamically after a local vault is selected and Git mode is active.
+        self.git_panel: Optional[VaultGitPanel] = None
+
         self.left_minibar, self._left_minibar_bar, self._left_minibar_toggle = self._build_minibar(
             self._left_minibar_labels(),
             side="left",
@@ -3251,6 +3256,26 @@ class MainWindow(QMainWindow):
         )
         self._action_convert_vault_to_homebase.triggered.connect(self._convert_current_vault_to_homebase)
         vault_menu.addAction(self._action_convert_vault_to_homebase)
+        self._action_git_save_changes = QAction("Save Changes…", self)
+        self._action_git_save_changes.setToolTip("Save the current vault changes to Git history")
+        self._action_git_save_changes.triggered.connect(self._git_save_changes)
+        self._action_git_save_changes.setVisible(False)
+        self._action_git_save_version = QAction("Save Version…", self)
+        self._action_git_save_version.setToolTip("Create a named version of this vault")
+        self._action_git_save_version.triggered.connect(self._git_save_version)
+        self._action_git_save_version.setVisible(False)
+        self._action_git_get_updates = QAction("Get Git Updates", self)
+        self._action_git_get_updates.setToolTip("Get updates from the Git remote")
+        self._action_git_get_updates.triggered.connect(self._git_pull)
+        self._action_git_get_updates.setVisible(False)
+        self._action_git_publish = QAction("Publish Git Changes", self)
+        self._action_git_publish.setToolTip("Publish saved changes and named versions to the Git remote")
+        self._action_git_publish.triggered.connect(self._git_push)
+        self._action_git_publish.setVisible(False)
+        vault_menu.addAction(self._action_git_save_changes)
+        vault_menu.addAction(self._action_git_save_version)
+        vault_menu.addAction(self._action_git_get_updates)
+        vault_menu.addAction(self._action_git_publish)
         self._action_homebase_sync_now = QAction("Sync Now", self)
         self._action_homebase_sync_now.setToolTip("Run Homebase sync immediately")
         self._action_homebase_sync_now.triggered.connect(
@@ -4608,6 +4633,13 @@ class MainWindow(QMainWindow):
             for action in menu.actions():
                 if action.isSeparator():
                     continue
+                if action in {
+                    getattr(self, "_action_git_save_changes", None),
+                    getattr(self, "_action_git_save_version", None),
+                    getattr(self, "_action_git_get_updates", None),
+                    getattr(self, "_action_git_publish", None),
+                } and not action.isVisible():
+                    continue
                 if action.menu():
                     label = self._menu_text(action.text())
                     walk(action.menu(), path + ([label] if label else []))
@@ -5604,8 +5636,28 @@ class MainWindow(QMainWindow):
             return None
         return None
 
-    def _apply_homebase_profile(self, profile: dict) -> None:
+    def _apply_homebase_profile(self, profile: dict, *, confirm_git_switch: bool = True) -> None:
         try:
+            if confirm_git_switch and self._is_git_mode_enabled():
+                try:
+                    state = git_support.repository_state(self.vault_root)
+                    pending = []
+                    if state.changed_files:
+                        pending.append(f"{state.changed_files} uncommitted file change(s)")
+                    if state.ahead:
+                        pending.append(f"{state.ahead} unpublished commit(s)")
+                    suffix = f"\n\nStill pending: {', '.join(pending)}." if pending else ""
+                except git_support.GitError as exc:
+                    suffix = f"\n\nGit status could not be checked: {exc}"
+                if QMessageBox.warning(
+                    self,
+                    "Switch from Git to Homebase",
+                    "Homebase will replace Git as StillPoint's active sync mode. The .git repository "
+                    f"and its history will remain on disk.{suffix}",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                ) != QMessageBox.Yes:
+                    return
             profile_path = self._normalize_vault_path(str(profile.get("path") or ""))
             profile_server = str(profile.get("server_url") or "").strip()
             profile_vault_id = str(profile.get("vault_id") or "").strip()
@@ -5652,6 +5704,7 @@ class MainWindow(QMainWindow):
             self._homebase_user_info_loaded = False
             self._configure_homebase_sync_for_vault()
             self._apply_remote_mode_ui()
+            self._refresh_git_mode_ui()
         except Exception as exc:
             _log_homebase_client(f"apply profile failed: {exc}")
             self.statusBar().showMessage(f"Homebase profile apply failed: {exc}", 5000)
@@ -5661,6 +5714,7 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         self._ensure_config_active_vault_context()
+        previous_version_mode = config.load_vault_remote_mode()
         dialog = VaultPreferencesDialog(
             self,
             remote_mode=bool(self._remote_mode),
@@ -5668,10 +5722,211 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._ensure_config_active_vault_context()
+            selected_version_mode = config.load_vault_remote_mode()
+            if previous_version_mode == "homebase_remote" and selected_version_mode == "git":
+                status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
+                unsafe_states = {"syncing", "pulling", "pushing", "review", "conflict", "interrupted"}
+                if status is not None and str(status.state or "").lower() in unsafe_states:
+                    config.save_vault_remote_mode(previous_version_mode)
+                    QMessageBox.warning(
+                        self,
+                        "Finish Homebase Sync First",
+                        "Homebase is currently syncing or needs attention. Resolve it before changing this vault to Git.",
+                    )
+                    return
             self._apply_feature_overrides()
             self._apply_vault_read_only_pref()
             self._configure_homebase_sync_for_vault()
+            self._refresh_git_mode_ui()
+            self._apply_remote_mode_ui()
             self._apply_vault_accent_visuals()
+
+    def _is_git_mode_enabled(self) -> bool:
+        if self._remote_mode or not self.vault_root:
+            return False
+        try:
+            self._ensure_config_active_vault_context()
+            return config.load_vault_remote_mode() == "git"
+        except Exception:
+            return False
+
+    def _refresh_git_mode_ui(self) -> None:
+        enabled = self._is_git_mode_enabled()
+        for action_name in (
+            "_action_git_save_changes",
+            "_action_git_save_version",
+            "_action_git_get_updates",
+            "_action_git_publish",
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setVisible(enabled)
+                action.setEnabled(enabled and not self._read_only)
+        panel = getattr(self, "git_panel", None)
+        if not enabled:
+            if panel is not None:
+                index = self.left_tab_widget.indexOf(panel)
+                if index >= 0:
+                    self.left_tab_widget.removeTab(index)
+                panel.deleteLater()
+                self.git_panel = None
+                self._refresh_left_minibar_tabs()
+            return
+        if panel is None and self.vault_root:
+            panel = VaultGitPanel(self.vault_root, self)
+            panel.getUpdatesRequested.connect(self._git_pull)
+            panel.saveChangesRequested.connect(self._git_save_changes)
+            panel.publishRequested.connect(self._git_push)
+            panel.changeActivated.connect(self._show_git_working_diff)
+            self.git_panel = panel
+            self.left_tab_widget.addTab(panel, "Git")
+            self._refresh_left_minibar_tabs()
+        elif panel is not None:
+            panel.refresh()
+
+    def _flush_editor_before_git(self) -> bool:
+        if self._read_only:
+            self._alert("This vault is read-only.")
+            return False
+        try:
+            if self.current_path and (
+                self._dirty_flag or self.editor.document().isModified()
+            ):
+                self._save_current_file(auto=False, reason="Git operation", force=True)
+                QApplication.processEvents()
+                if self._dirty_flag or self.editor.document().isModified():
+                    self._alert("Save the current page before continuing.")
+                    return False
+        except Exception:
+            return False
+        return True
+
+    def _git_error(self, title: str, exc: Exception) -> None:
+        QMessageBox.warning(self, title, str(exc))
+        if self.git_panel is not None:
+            self.git_panel.refresh()
+
+    def _git_save_changes(self) -> None:
+        if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
+            return
+        message, accepted = QInputDialog.getText(
+            self, "Save Changes", "Name these changes:"
+        )
+        if not accepted or not message.strip():
+            return
+        try:
+            committed = git_support.save_changes(self.vault_root, message)
+        except git_support.GitError as exc:
+            self._git_error("Could Not Save Changes", exc)
+            return
+        self.statusBar().showMessage(
+            "Changes saved to vault history." if committed else "There were no changes to save.",
+            4500,
+        )
+        self._refresh_git_mode_ui()
+
+    def _git_save_version(self) -> None:
+        if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Save Version")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("e.g. Project kickoff")
+        notes_edit = QTextEdit()
+        notes_edit.setPlaceholderText("Optional notes about this version")
+        notes_edit.setMaximumHeight(110)
+        publish_checkbox = QCheckBox("Publish after saving")
+        publish_checkbox.setChecked(config.load_git_publish_versions(False))
+        form.addRow("Version name:", name_edit)
+        form.addRow("Notes:", notes_edit)
+        form.addRow("", publish_checkbox)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_edit.setFocus()
+        if dialog.exec() != QDialog.Accepted:
+            return
+        version_name = name_edit.text().strip()
+        if not version_name:
+            self._alert("Enter a version name.")
+            return
+        config.save_git_publish_versions(publish_checkbox.isChecked())
+        try:
+            tag, _committed = git_support.save_version(
+                self.vault_root, version_name, notes_edit.toPlainText()
+            )
+        except git_support.GitError as exc:
+            self._git_error("Could Not Save Version", exc)
+            return
+        if publish_checkbox.isChecked():
+            try:
+                git_support.push(self.vault_root, include_versions=True)
+            except git_support.GitError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Version Saved Locally",
+                    f"‘{version_name}’ was saved locally, but could not be published.\n\n{exc}",
+                )
+                self._refresh_git_mode_ui()
+                return
+        self.statusBar().showMessage(f"Saved version: {version_name}", 5000)
+        self._refresh_git_mode_ui()
+
+    def _git_pull(self) -> None:
+        if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
+            return
+        try:
+            git_support.pull(self.vault_root)
+        except git_support.GitError as exc:
+            self._git_error("Could Not Get Updates", exc)
+            return
+        self._refresh_tree()
+        if self.current_path:
+            self._open_file(self.current_path, force=True)
+        self.statusBar().showMessage("Vault updates received.", 4500)
+        self._refresh_git_mode_ui()
+
+    def _git_push(self) -> None:
+        if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
+            return
+        try:
+            git_support.push(self.vault_root, include_versions=True)
+        except git_support.GitError as exc:
+            self._git_error("Could Not Publish Changes", exc)
+            return
+        self.statusBar().showMessage("Vault changes published.", 4500)
+        self._refresh_git_mode_ui()
+
+    def _show_git_working_diff(self, relative_path: str) -> None:
+        if not self.vault_root:
+            return
+        try:
+            if not git_support.has_head(self.vault_root):
+                diff = "This is a new file. Save changes once to establish the first comparison."
+            else:
+                diff = git_support.diff_from_revision(self.vault_root, "HEAD", relative_path)
+        except git_support.GitError as exc:
+            diff = str(exc)
+        GitDiffDialog(f"Changes · {relative_path}", diff, self).exec()
+
+    def _show_git_history(self, relative_path: str) -> None:
+        if not self.vault_root or not self._is_git_mode_enabled():
+            return
+        dialog = GitHistoryDialog(self.vault_root, relative_path, self)
+        dialog.restored.connect(self._on_git_paths_restored)
+        dialog.exec()
+
+    def _on_git_paths_restored(self, restored_paths: list[str]) -> None:
+        self._refresh_tree()
+        if self.current_path and self.vault_root:
+            current = str((Path(self.vault_root) / self.current_path.lstrip("/")).resolve())
+            if current in restored_paths:
+                self._open_file(self.current_path, force=True)
+        self._refresh_git_mode_ui()
 
     def _convert_current_vault_to_homebase(self) -> None:
         if self._remote_mode:
@@ -5683,6 +5938,26 @@ class MainWindow(QMainWindow):
         if self._is_homebase_mode_enabled():
             self._show_homebase_sync_summary()
             return
+        if self._is_git_mode_enabled():
+            try:
+                state = git_support.repository_state(self.vault_root)
+                details = []
+                if state.changed_files:
+                    details.append(f"{state.changed_files} uncommitted file change(s)")
+                if state.ahead:
+                    details.append(f"{state.ahead} unpublished commit(s)")
+                suffix = f"\n\nStill pending: {', '.join(details)}." if details else ""
+            except git_support.GitError as exc:
+                suffix = f"\n\nGit status could not be checked: {exc}"
+            if QMessageBox.warning(
+                self,
+                "Switch from Git to Homebase",
+                "Homebase will replace Git as StillPoint's active sync mode. The .git repository "
+                f"and its history will remain on disk.{suffix}",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            ) != QMessageBox.Yes:
+                return
         local_path = self._normalize_vault_path(self.vault_root)
         dlg = AddHomebaseVaultDialog(self)
         dlg.local_path_edit.setText(local_path)
@@ -5699,7 +5974,7 @@ class MainWindow(QMainWindow):
         config.upsert_homebase_vault_profile(profile)
         config.delete_known_vault(local_path)
         config.save_homebase_vault_metadata(local_path, profile)
-        self._apply_homebase_profile(profile)
+        self._apply_homebase_profile(profile, confirm_git_switch=False)
         try:
             if self.vault_root:
                 config.save_last_vault(self.vault_root)
@@ -11384,6 +11659,13 @@ class MainWindow(QMainWindow):
                     homebase_profile = self._homebase_profile_for_path(self.vault_root)
                     if not homebase_profile:
                         homebase_profile = self._homebase_profile_for_path(directory)
+                    # A retained Homebase profile is connection metadata, not
+                    # permission to override an explicitly selected Git mode.
+                    try:
+                        if config.load_vault_remote_mode() == "git":
+                            homebase_profile = None
+                    except Exception:
+                        pass
                 # Set active vault for both local and remote modes
                 # For remote vaults, we cache the index locally so we still need the DB connection
                 if self._remote_mode:
@@ -11413,6 +11695,7 @@ class MainWindow(QMainWindow):
                     self._apply_homebase_profile(homebase_profile)
                 else:
                     self._configure_homebase_sync_for_vault()
+                self._refresh_git_mode_ui()
                 finish_setup_phase(
                     "profile_services",
                     homebase=bool(homebase_profile),
@@ -21379,6 +21662,15 @@ class MainWindow(QMainWindow):
             if path:
                 open_window_action = menu.addAction("Open in Editor Window")
                 open_window_action.triggered.connect(lambda checked=False, p=path: self._open_page_editor_window(p))
+            if self._is_git_mode_enabled():
+                add_menu_section("Version History")
+                is_folder = bool(index.data(TYPE_ROLE))
+                version_path = path if is_folder else (open_path or file_path or path)
+                versions_action = menu.addAction("Versions…")
+                versions_action.triggered.connect(
+                    lambda checked=False, p=str(version_path or "").lstrip("/"):
+                        self._show_git_history(p)
+                )
             add_menu_section("Organize")
             reorg_subtree_action = menu.addAction("Reorganize this subtree…")
             reorg_subtree_action.triggered.connect(
@@ -25230,6 +25522,15 @@ class MainWindow(QMainWindow):
                 win.set_read_only(self._read_only)
             except Exception:
                 pass
+        for action_name in (
+            "_action_git_save_changes",
+            "_action_git_save_version",
+            "_action_git_get_updates",
+            "_action_git_publish",
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None and action.isVisible():
+                action.setEnabled(not self._read_only)
         self._update_dirty_indicator()
         self._update_window_title()
 
