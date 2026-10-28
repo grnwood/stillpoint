@@ -184,10 +184,38 @@ def test_icon_name_mapping_prefers_remote_icon_for_homebase(qtbot, monkeypatch) 
 
     assert dlg._vault_icon_name({"kind": "local"}) == "notebook.svg"
     assert dlg._vault_icon_name({"kind": "git"}) == "notebook.svg"
+    assert dlg._vault_icon_name({"kind": "cloud"}) == "notebook.svg"
     assert dlg._vault_icon_name({"kind": "homebase"}) == "notebook_remote.svg"
     assert dlg._vault_icon_name({"id": "homebase::https://server::vid::/vault", "path": "/vault"}) == "notebook_remote.svg"
     assert dlg._vault_icon_name({"server_url": "https://server", "vault_id": "vid", "path": "/vault"}) == "notebook_remote.svg"
     assert dlg._vault_icon_name({"kind": "remote"}) is None
+
+
+def test_open_vault_dialog_marks_cloud_vault_and_overlays_cloud_badge(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    from sp.app import config
+    from sp.app.ui.open_vault_dialog import OpenVaultDialog
+
+    vault = tmp_path / "OneDrive" / "Notes"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("SP_CLOUD_VAULT_STATE_ROOT", str(tmp_path / "device-state"))
+    config.set_active_vault(str(vault))
+    try:
+        config.transition_active_vault_remote_mode("cloud")
+    finally:
+        config.set_active_vault(None)
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [])
+    monkeypatch.setattr(config, "load_default_vault", lambda: None)
+    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
+
+    dialog = OpenVaultDialog(vaults=[{"name": "Notes", "path": str(vault)}])
+    qtbot.addWidget(dialog)
+    entry = dialog._combined_local_vault_entries()[0]
+
+    assert entry["kind"] == "cloud"
+    assert dialog._vault_type_icon(entry) is not None
+    assert "Cloud Folder vault" in dialog._vault_row_tooltip(entry)
 
 
 def test_homebase_svg_recolor_only_updates_notebook_outline() -> None:

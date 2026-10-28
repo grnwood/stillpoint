@@ -147,13 +147,21 @@ class VaultPreferencesDialog(QDialog):
         self.local_mode_radio = QRadioButton("Local only")
         self.homebase_mode_radio = QRadioButton("Homebase")
         self.git_mode_radio = QRadioButton("Git")
-        for button in (self.local_mode_radio, self.homebase_mode_radio, self.git_mode_radio):
+        self.cloud_mode_radio = QRadioButton("Cloud Folder (OneDrive / Google Drive)")
+        for button in (
+            self.local_mode_radio,
+            self.homebase_mode_radio,
+            self.git_mode_radio,
+            self.cloud_mode_radio,
+        ):
             self.version_mode_group.addButton(button)
             version_layout.addWidget(button)
         if self._initial_version_mode == "homebase_remote":
             self.homebase_mode_radio.setChecked(True)
         elif self._initial_version_mode == "git":
             self.git_mode_radio.setChecked(True)
+        elif self._initial_version_mode == "cloud":
+            self.cloud_mode_radio.setChecked(True)
         else:
             self.local_mode_radio.setChecked(True)
         if self._remote_mode:
@@ -235,11 +243,33 @@ class VaultPreferencesDialog(QDialog):
         self.git_auto_backup_checkbox.toggled.connect(self._update_git_backup_controls)
         git_setup_layout.addWidget(backup_box)
         version_layout.addWidget(self.git_setup_widget)
+
+        self.cloud_setup_widget = QWidget(version_box)
+        cloud_setup_layout = QVBoxLayout(self.cloud_setup_widget)
+        cloud_setup_layout.setContentsMargins(20, 4, 0, 0)
+        cloud_help = QLabel(
+            "StillPoint keeps databases, indexes, locks, and undo state on this device while "
+            "OneDrive or Google Drive synchronizes pages and attachments. On every computer, "
+            "mark this entire vault folder as Always keep on this device / Available offline. "
+            "Do not open the vault on two computers at the same time."
+        )
+        cloud_help.setWordWrap(True)
+        cloud_setup_layout.addWidget(cloud_help)
+        cloud_warning = QLabel(
+            "Cloud Folder is safer than syncing a live database, but same-page concurrent edits, "
+            "renames, deletes, and binary attachments can still conflict. StillPoint will offer "
+            "Current, Cloud, and Merge choices when it detects a text conflict."
+        )
+        cloud_warning.setWordWrap(True)
+        cloud_warning.setStyleSheet("color: #b26a00;")
+        cloud_setup_layout.addWidget(cloud_warning)
+        version_layout.addWidget(self.cloud_setup_widget)
         content_layout.addWidget(version_box)
 
         self.git_mode_radio.toggled.connect(self._on_git_mode_toggled)
         self.homebase_mode_radio.toggled.connect(self._update_version_mode_ui)
         self.local_mode_radio.toggled.connect(self._update_version_mode_ui)
+        self.cloud_mode_radio.toggled.connect(self._update_version_mode_ui)
         self._refresh_git_setup_state()
         self._update_version_mode_ui()
         self._update_git_backup_controls()
@@ -325,6 +355,8 @@ class VaultPreferencesDialog(QDialog):
             checkbox.setCheckState(Qt.PartiallyChecked)
 
     def selected_version_mode(self) -> str:
+        if self.cloud_mode_radio.isChecked():
+            return "cloud"
         if self.git_mode_radio.isChecked():
             return "git"
         if self.homebase_mode_radio.isChecked():
@@ -334,6 +366,7 @@ class VaultPreferencesDialog(QDialog):
     def _update_version_mode_ui(self) -> None:
         selected = self.selected_version_mode()
         self.git_setup_widget.setVisible(selected == "git")
+        self.cloud_setup_widget.setVisible(selected == "cloud")
         if selected == self._initial_version_mode:
             message = ""
         elif self._initial_version_mode == "homebase_remote":
@@ -349,6 +382,16 @@ class VaultPreferencesDialog(QDialog):
             message = (
                 "Turning Git off hides Git operations in StillPoint. The .git repository and its "
                 "history remain on disk."
+            )
+        elif self._initial_version_mode == "cloud":
+            message = (
+                "Leaving Cloud Folder moves this device's StillPoint state back into the vault. "
+                "Wait for the cloud client to finish syncing before opening it elsewhere."
+            )
+        elif selected == "cloud":
+            message = (
+                "Cloud Folder disables Git and Homebase operations. Existing Git history and "
+                "Homebase server data are not deleted."
             )
         elif selected == "git":
             message = "Git and Homebase cannot operate on this vault at the same time."
@@ -478,6 +521,13 @@ class VaultPreferencesDialog(QDialog):
                     "Enable Git for this vault? Homebase synchronization will be disabled. "
                     "Vault files sent to a Git remote are not protected by Homebase encryption."
                 )
+            elif selected_mode == "cloud":
+                detail = (
+                    "Enable Cloud Folder safety for this vault? StillPoint databases and runtime "
+                    "state will move to persistent storage on this device. Git and Homebase "
+                    "operations will be disabled. Ensure the entire vault folder is kept offline "
+                    "on every computer."
+                )
             elif self._initial_version_mode == "homebase_remote":
                 detail = (
                     "Stop Homebase synchronization for this vault? Existing Homebase data will not be deleted."
@@ -485,6 +535,11 @@ class VaultPreferencesDialog(QDialog):
             elif self._initial_version_mode == "git":
                 detail = (
                     "Disable Git operations in StillPoint? The repository and history will remain on disk."
+                )
+            elif self._initial_version_mode == "cloud":
+                detail = (
+                    "Leave Cloud Folder mode? This device's StillPoint state will move back into "
+                    "the vault and may be synchronized by the cloud provider."
                 )
             else:
                 detail = "Change this vault's versioning and sync mode?"
@@ -506,7 +561,7 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_remember_cursor_position_override(values["remember_cursor_position"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
-        config.save_vault_remote_mode(selected_mode)
+        config.transition_active_vault_remote_mode(selected_mode)
         config.save_git_publish_versions(self.git_publish_versions_checkbox.isChecked())
         config.save_git_auto_backup_enabled(self.git_auto_backup_checkbox.isChecked())
         config.save_git_auto_backup_interval_minutes(

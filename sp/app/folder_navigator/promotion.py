@@ -10,6 +10,7 @@ import sqlite3
 import uuid
 
 from sp.ai.manager import AIManager
+from sp.app import config
 from sp.app.ui.ai_chat_panel import AIChatStore
 from sp.vault_boundary import validate_vault_root
 
@@ -42,7 +43,7 @@ def promote_folder_chat(
     """Create a vault chat with a snapshot of the transcript and selected files."""
     source_root = source_root.resolve(strict=True)
     vault = validate_vault_root(destination_vault.resolve(strict=True))
-    if not (vault / ".stillpoint" / "settings.db").is_file():
+    if not config.vault_settings_db_path(vault).is_file():
         raise ValueError("The selected folder is not an initialized StillPoint vault")
     session = source_store.get_session_by_id(source_session_id)
     if not session or session.get("type") != "chat":
@@ -128,7 +129,7 @@ def promote_folder_chat(
         if prompt:
             target_store.update_session_system_prompt(target_id, str(prompt))
         if context_page:
-            connection = sqlite3.connect(vault / ".stillpoint" / "settings.db")
+            connection = sqlite3.connect(config.vault_settings_db_path(vault))
             manager = AIManager(conn=connection)
             conversation = manager.create_global_chat(title)
             conversation_id = conversation.id

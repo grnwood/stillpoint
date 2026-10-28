@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import sqlite3
 import re
 import time
@@ -19,6 +20,7 @@ from sp.logging_flags import log_enabled
 
 GLOBAL_CONFIG = Path.home() / ".stillpoint_config.json"
 HOMEBASE_VAULT_METADATA_FILENAME = "homebase.json"
+CLOUD_VAULT_METADATA_FILENAME = "cloud.json"
 
 _ACTIVE_CONN: Optional[sqlite3.Connection] = None
 _ACTIVE_ROOT: Optional[Path] = None
@@ -191,6 +193,117 @@ def _read_global_config() -> dict:
 
 def _homebase_vault_metadata_path(vault_root: str | Path) -> Path:
     return Path(vault_root) / ".stillpoint" / HOMEBASE_VAULT_METADATA_FILENAME
+
+
+def cloud_vault_metadata_path(vault_root: str | Path) -> Path:
+    """Return the small synced marker used to identify a cloud-folder vault."""
+    return Path(vault_root).expanduser().resolve() / ".stillpoint" / CLOUD_VAULT_METADATA_FILENAME
+
+
+def load_cloud_vault_metadata(vault_root: str | Path) -> Optional[dict[str, Any]]:
+    """Load cloud-folder metadata without opening the device-local database."""
+    try:
+        payload = json.loads(cloud_vault_metadata_path(vault_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    vault_id = str(payload.get("vault_id") or "").strip()
+    if payload.get("type") != "stillpoint-cloud-folder" or not vault_id:
+        return None
+    try:
+        marker_version = int(payload.get("version") or 1)
+    except (TypeError, ValueError):
+        marker_version = 1
+    return {
+        "type": "stillpoint-cloud-folder",
+        "version": marker_version,
+        "vault_id": vault_id,
+        "provider": str(payload.get("provider") or "OneDrive / Google Drive"),
+        "keep_offline": bool(payload.get("keep_offline", True)),
+    }
+
+
+def _cloud_vault_state_root() -> Path:
+    """Persistent per-device storage; deliberately not an OS temporary directory."""
+    override = str(os.environ.get("SP_CLOUD_VAULT_STATE_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".stillpoint" / "cloud-vaults"
+
+
+def vault_state_dir(vault_root: str | Path) -> Path:
+    """Return the runtime-state directory for a vault.
+
+    Cloud-folder vault content is replicated by a third-party client, so SQLite,
+    locks, indexes, and undo data remain device-local.
+    """
+    root = Path(vault_root).expanduser().resolve()
+    marker = load_cloud_vault_metadata(root)
+    if marker:
+        return _cloud_vault_state_root() / str(marker["vault_id"])
+    return root / ".stillpoint"
+
+
+def vault_settings_db_path(vault_root: str | Path) -> Path:
+    return vault_state_dir(vault_root) / "settings.db"
+
+
+def _move_vault_state(source: Path, destination: Path, *, excluded: set[str]) -> None:
+    """Move runtime state without discarding an existing destination entry."""
+    destination.mkdir(parents=True, exist_ok=True)
+    if not source.exists():
+        return
+    timestamp = int(time.time())
+    for entry in source.iterdir():
+        if entry.name in excluded:
+            continue
+        target = destination / entry.name
+        if target.exists():
+            target = destination / f"{entry.name}.migration-{timestamp}-{uuid.uuid4().hex[:6]}"
+        shutil.move(str(entry), str(target))
+
+
+def transition_active_vault_remote_mode(mode: str) -> None:
+    """Change mode and migrate cloud-unsafe runtime state when required."""
+    cleaned = str(mode or "").strip().lower()
+    if cleaned not in _VALID_REMOTE_MODES:
+        cleaned = "none"
+    root = _current_active_root()
+    if root is None:
+        return
+    was_cloud = load_cloud_vault_metadata(root) is not None
+    wants_cloud = cleaned == "cloud"
+    if was_cloud == wants_cloud:
+        save_vault_remote_mode(cleaned)
+        return
+
+    close_cached_vault_connections()
+    synced_state = root / ".stillpoint"
+    if wants_cloud:
+        marker = {
+            "type": "stillpoint-cloud-folder",
+            "version": 1,
+            "vault_id": str(uuid.uuid4()),
+            "provider": "OneDrive / Google Drive",
+            "keep_offline": True,
+        }
+        local_state = _cloud_vault_state_root() / marker["vault_id"]
+        _move_vault_state(synced_state, local_state, excluded={CLOUD_VAULT_METADATA_FILENAME})
+        synced_state.mkdir(parents=True, exist_ok=True)
+        cloud_vault_metadata_path(root).write_text(
+            json.dumps(marker, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        local_state = vault_state_dir(root)
+        synced_state.mkdir(parents=True, exist_ok=True)
+        _move_vault_state(local_state, synced_state, excluded=set())
+        marker_path = cloud_vault_metadata_path(root)
+        if marker_path.exists():
+            marker_path.replace(synced_state / f"cloud-disabled-{int(time.time())}.json")
+    _activate_root(root, persist_global=False)
+    save_vault_remote_mode(cleaned)
 
 
 def load_homebase_vault_metadata(vault_root: str | Path) -> Optional[dict[str, Any]]:
@@ -1981,11 +2094,14 @@ def delete_homebase_vault_profile(profile_id: str) -> None:
     save_homebase_vault_profiles(filtered)
 
 
-_VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote", "git"}
+_VALID_REMOTE_MODES = {"none", "plain_remote", "homebase_remote", "git", "cloud"}
 
 
 def load_vault_remote_mode(default: str = "none") -> str:
     """Return selected remote mode for the active vault."""
+    active_root = _current_active_root()
+    if active_root is not None and load_cloud_vault_metadata(active_root):
+        return "cloud"
     conn = _get_conn()
     if not conn:
         return default
@@ -2003,7 +2119,10 @@ def load_vault_remote_mode_for_path(
 ) -> str:
     """Read a vault's persisted mode before making that vault active."""
     try:
-        db_path = Path(vault_root).expanduser().resolve() / ".stillpoint" / "settings.db"
+        root = Path(vault_root).expanduser().resolve()
+        if load_cloud_vault_metadata(root):
+            return "cloud"
+        db_path = vault_settings_db_path(root)
         if not db_path.is_file():
             return default
         connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
@@ -5089,7 +5208,7 @@ def _activate_root(root_path: Optional[Path], *, persist_global: bool) -> None:
             _THREAD_LOCAL.conn = None
             _THREAD_LOCAL.db_path = None
             return
-        db_dir = root_path / ".stillpoint"
+        db_dir = vault_state_dir(root_path)
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "settings.db"
         setup_conn: Optional[sqlite3.Connection] = None
@@ -5171,7 +5290,7 @@ def close_context_vault_connection(expected_root: Optional[Path] = None) -> None
             _THREAD_LOCAL.db_path = None
             return
         if expected_root is not None:
-            expected_db_path = str(expected_root / ".stillpoint" / "settings.db")
+            expected_db_path = str(vault_settings_db_path(expected_root))
             if db_path != expected_db_path:
                 return
         try:
@@ -5234,7 +5353,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
         active_root = _current_active_root()
         if active_root is None:
             return None
-        db_path = str(active_root / ".stillpoint" / "settings.db")
+        db_path = str(vault_settings_db_path(active_root))
         conn = getattr(_THREAD_LOCAL, "conn", None)
         conn_db_path = getattr(_THREAD_LOCAL, "db_path", None)
         if conn is not None and conn_db_path == db_path:
@@ -5255,7 +5374,7 @@ def _vault_db_path() -> Optional[Path]:
     active_root = _current_active_root()
     if active_root is None:
         return None
-    return active_root / ".stillpoint" / "settings.db"
+    return vault_settings_db_path(active_root)
 
 
 def _connect_to_vault_db() -> sqlite3.Connection:

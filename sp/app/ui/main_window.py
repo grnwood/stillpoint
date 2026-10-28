@@ -4406,10 +4406,14 @@ class MainWindow(QMainWindow):
         history_forward_seq, history_backward_seq = history_cycle_sequences()
         history_cycle_forward = QShortcut(QKeySequence(history_forward_seq), self)
         history_cycle_forward.setContext(Qt.ApplicationShortcut)
-        history_cycle_forward.activated.connect(lambda: self._cycle_popup("history", reverse=False))
+        history_cycle_forward.activated.connect(
+            lambda: self._cycle_recent_pages_or_leave_git(reverse=False)
+        )
         history_cycle_backward = QShortcut(QKeySequence(history_backward_seq), self)
         history_cycle_backward.setContext(Qt.ApplicationShortcut)
-        history_cycle_backward.activated.connect(lambda: self._cycle_popup("history", reverse=True))
+        history_cycle_backward.activated.connect(
+            lambda: self._cycle_recent_pages_or_leave_git(reverse=True)
+        )
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         if nav_back_mac is not None:
@@ -5674,7 +5678,7 @@ class MainWindow(QMainWindow):
         target = self._normalize_vault_path(local_path)
         if not target:
             return None
-        if not include_git_vaults and self._vault_path_uses_git(target):
+        if not include_git_vaults and self._vault_path_uses_non_homebase_mode(target):
             return None
         try:
             for profile in config.load_homebase_vault_profiles():
@@ -5698,7 +5702,7 @@ class MainWindow(QMainWindow):
                 if str(profile.get("id") or "").strip() == target:
                     if (
                         not include_git_vaults
-                        and self._vault_path_uses_git(str(profile.get("path") or ""))
+                        and self._vault_path_uses_non_homebase_mode(str(profile.get("path") or ""))
                     ):
                         return None
                     return profile
@@ -5715,6 +5719,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    @staticmethod
+    def _vault_path_uses_non_homebase_mode(vault_path: Optional[str]) -> bool:
+        if not vault_path:
+            return False
+        try:
+            return config.load_vault_remote_mode_for_path(vault_path) in {"git", "cloud"}
+        except Exception:
+            return False
+
     def _promote_git_vault_to_local_defaults(
         self,
         vault_path: str,
@@ -5722,7 +5735,7 @@ class MainWindow(QMainWindow):
         *,
         stale_homebase_id: str = "",
     ) -> None:
-        """Make a Git vault reopen locally even if a Homebase profile remains."""
+        """Make a Git/Cloud vault reopen locally even if a Homebase profile remains."""
         local_path = self._normalize_vault_path(vault_path)
         if not local_path:
             return
@@ -5739,22 +5752,25 @@ class MainWindow(QMainWindow):
 
     def _apply_homebase_profile(self, profile: dict, *, confirm_git_switch: bool = True) -> None:
         try:
-            if confirm_git_switch and self._is_git_mode_enabled():
+            current_storage_mode = config.load_vault_remote_mode()
+            if confirm_git_switch and current_storage_mode in {"git", "cloud"}:
                 try:
-                    state = git_support.repository_state(self.vault_root)
                     pending = []
-                    if state.changed_files:
-                        pending.append(f"{state.changed_files} uncommitted file change(s)")
-                    if state.ahead:
-                        pending.append(f"{state.ahead} unpublished commit(s)")
+                    if current_storage_mode == "git":
+                        state = git_support.repository_state(self.vault_root)
+                        if state.changed_files:
+                            pending.append(f"{state.changed_files} uncommitted file change(s)")
+                        if state.ahead:
+                            pending.append(f"{state.ahead} unpublished commit(s)")
                     suffix = f"\n\nStill pending: {', '.join(pending)}." if pending else ""
                 except git_support.GitError as exc:
                     suffix = f"\n\nGit status could not be checked: {exc}"
+                prior_label = "Git" if current_storage_mode == "git" else "Cloud Folder"
                 if QMessageBox.warning(
                     self,
-                    "Switch from Git to Homebase",
-                    "Homebase will replace Git as StillPoint's active sync mode. The .git repository "
-                    f"and its history will remain on disk.{suffix}",
+                    f"Switch from {prior_label} to Homebase",
+                    f"Homebase will replace {prior_label} as StillPoint's active sync mode. "
+                    f"Existing provider data will not be deleted.{suffix}",
                     QMessageBox.Yes | QMessageBox.Cancel,
                     QMessageBox.Cancel,
                 ) != QMessageBox.Yes:
@@ -5778,7 +5794,7 @@ class MainWindow(QMainWindow):
             self._ensure_config_active_vault_context()
             if profile_passphrase:
                 self._remember_homebase_passphrase(profile_passphrase, profile_path)
-            config.save_vault_remote_mode("homebase_remote")
+            config.transition_active_vault_remote_mode("homebase_remote")
             config.save_homebase_remote_url(profile_server)
             config.save_homebase_verify_ssl(bool(profile.get("verify_ssl", True)))
             config.save_homebase_vault_id(profile_vault_id)
@@ -5824,18 +5840,18 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._ensure_config_active_vault_context()
             selected_version_mode = config.load_vault_remote_mode()
-            if previous_version_mode == "homebase_remote" and selected_version_mode == "git":
+            if previous_version_mode == "homebase_remote" and selected_version_mode != "homebase_remote":
                 status = self._homebase_sync_engine.get_status() if self._homebase_sync_engine else None
                 unsafe_states = {"syncing", "pulling", "pushing", "review", "conflict", "interrupted"}
                 if status is not None and str(status.state or "").lower() in unsafe_states:
-                    config.save_vault_remote_mode(previous_version_mode)
+                    config.transition_active_vault_remote_mode(previous_version_mode)
                     QMessageBox.warning(
                         self,
                         "Finish Homebase Sync First",
-                        "Homebase is currently syncing or needs attention. Resolve it before changing this vault to Git.",
+                        "Homebase is currently syncing or needs attention. Resolve it before changing this vault's storage mode.",
                     )
                     return
-            if selected_version_mode == "git" and self.vault_root:
+            if selected_version_mode in {"git", "cloud"} and self.vault_root:
                 retained_profile = self._homebase_profile_for_path(
                     self.vault_root,
                     include_git_vaults=True,
@@ -11375,7 +11391,7 @@ class MainWindow(QMainWindow):
         self._read_only = False
         root = Path(directory)
         is_help_vault = root.name == "help-vault"
-        lock_path = root / ".stillpoint" / "stillpoint.lock"
+        lock_path = config.vault_state_dir(root) / "stillpoint.lock"
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -12053,7 +12069,7 @@ class MainWindow(QMainWindow):
             self._update_remote_status_badge()
             index_dir_missing = False
             if self.vault_root and not self._remote_mode:
-                index_dir = Path(self.vault_root) / ".stillpoint"
+                index_dir = config.vault_state_dir(self.vault_root)
                 if not index_dir.exists():
                     reply = QMessageBox.question(
                         self,
@@ -12082,7 +12098,7 @@ class MainWindow(QMainWindow):
                         homebase_profile = self._homebase_profile_for_path(directory)
                     # A retained Homebase profile is connection metadata, not
                     # permission to override an explicitly selected Git mode.
-                    if self._vault_path_uses_git(self.vault_root or directory):
+                    if self._vault_path_uses_non_homebase_mode(self.vault_root or directory):
                         homebase_profile = None
                 # Set active vault for both local and remote modes
                 # For remote vaults, we cache the index locally so we still need the DB connection
@@ -15139,6 +15155,9 @@ class MainWindow(QMainWindow):
         info = self._page_revisions.get(path)
         if not info:
             return None
+        content_sha256 = str(info.get("content_sha256") or "").strip().lower()
+        if content_sha256:
+            return {"If-Match": f"sha256:{content_sha256}"}
         mtime_ns = info.get("mtime_ns")
         if mtime_ns is not None:
             try:
@@ -15174,7 +15193,12 @@ class MainWindow(QMainWindow):
             mtime_val = int(mtime_ns) if mtime_ns is not None else None
         except (TypeError, ValueError):
             mtime_val = None
-        self._page_revisions[path] = {"rev": rev_val, "mtime_ns": mtime_val}
+        content_sha256 = str(payload.get("content_sha256") or "").strip().lower()
+        self._page_revisions[path] = {
+            "rev": rev_val,
+            "mtime_ns": mtime_val,
+            "content_sha256": content_sha256 or None,
+        }
 
     def _extract_conflict_payload(self, resp: httpx.Response) -> Optional[dict]:
         try:
@@ -15279,7 +15303,7 @@ class MainWindow(QMainWindow):
             self._undo_cache_path = None
             self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
             return
-        cache_path = Path(self.vault_root) / ".stillpoint" / "undo_cache.json"
+        cache_path = config.vault_state_dir(self.vault_root) / "undo_cache.json"
         self._undo_cache_path = cache_path
         try:
             if cache_path.exists():
@@ -15449,6 +15473,7 @@ class MainWindow(QMainWindow):
         payload = {
             "rev": conflict.get("current_rev"),
             "mtime_ns": conflict.get("current_mtime_ns"),
+            "content_sha256": conflict.get("current_content_sha256"),
         }
         message = "Auto-saved" if auto else "Saved"
         self._finalize_save(path, content, payload, message)
@@ -15465,7 +15490,27 @@ class MainWindow(QMainWindow):
         if self._merge_dialog_open:
             return False
         remote_content = conflict.get("current_content", "")
-        dialog = MergeConflictDialog(local_content, remote_content, path, parent=self)
+        cloud_folder_mode = False
+        try:
+            cloud_folder_mode = config.load_vault_remote_mode() == "cloud"
+        except Exception:
+            pass
+        dialog = MergeConflictDialog(
+            local_content,
+            remote_content,
+            path,
+            parent=self,
+            window_title="Resolve Cloud Folder Conflict" if cloud_folder_mode else "Resolve Conflict",
+            title=(
+                f"The cloud copy of {path} changed after you opened it."
+                if cloud_folder_mode
+                else None
+            ),
+            local_label="Current edits" if cloud_folder_mode else "Current (local)",
+            remote_label="Cloud copy on disk" if cloud_folder_mode else "Server revision",
+            local_action_label="Keep Current" if cloud_folder_mode else None,
+            remote_action_label="Keep Cloud" if cloud_folder_mode else None,
+        )
         self._merge_dialog_open = True
         try:
             if dialog.exec() != QDialog.Accepted:
@@ -15478,7 +15523,10 @@ class MainWindow(QMainWindow):
         headers = None
         current_rev = conflict.get("current_rev")
         current_mtime = conflict.get("current_mtime_ns")
-        if current_mtime is not None:
+        current_hash = str(conflict.get("current_content_sha256") or "").strip().lower()
+        if current_hash:
+            headers = {"If-Match": f"sha256:{current_hash}"}
+        elif current_mtime is not None:
             try:
                 headers = {"If-Match": f"mtime:{int(current_mtime)}"}
             except (TypeError, ValueError):
@@ -24728,6 +24776,13 @@ class MainWindow(QMainWindow):
                 seen.add(path)
                 result.append(path)
         return result
+
+    def _cycle_recent_pages_or_leave_git(self, *, reverse: bool = False) -> None:
+        panel = getattr(self, "git_panel", None)
+        if panel is not None and self.left_tab_widget.currentWidget() is panel:
+            self._focus_vault_tab()
+            return
+        self._cycle_popup("history", reverse=reverse)
 
     @staticmethod
     def _is_history_path_allowed(path: Optional[str]) -> bool:

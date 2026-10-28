@@ -304,7 +304,7 @@ def _capture_to_files_result(
     files.write_file(vault_root, rel_path, updated)
     if triage:
         invalidate_triage_cache(vault_root)
-    db_path = vault_root / ".stillpoint" / "settings.db"
+    db_path = config.vault_settings_db_path(vault_root)
     try:
         import sqlite3
 
@@ -346,7 +346,7 @@ def _undo_file_capture(capture_id: str) -> dict:
     _LOCAL_CAPTURE_UNDO.pop(capture_id, None)
     config.remove_quick_capture_history(capture_id)
     try:
-        db_path = vault_root / ".stillpoint" / "settings.db"
+        db_path = config.vault_settings_db_path(vault_root)
         import sqlite3
 
         conn = sqlite3.connect(db_path, check_same_thread=False)

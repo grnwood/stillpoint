@@ -3,12 +3,13 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QKeySequence, QPalette, QShortcut
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QTableWidget
 
 from sp.app import config, git_support
 from sp.app.ui.git_widgets import GitDiffEditor, VaultGitPanel
+from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
 
 
 def test_git_mode_adds_vault_rail_and_command_palette_actions(main_window, monkeypatch) -> None:
@@ -78,6 +79,28 @@ def test_git_tab_restores_an_already_collapsed_right_rail(
     main_window.left_tab_widget.setCurrentWidget(main_window.search_tab)
 
     assert not main_window._is_right_panel_expanded()
+    assert main_window._git_right_rail_was_expanded is None
+
+
+def test_ctrl_tab_leaves_git_for_vault_and_restores_right_rail(
+    main_window, monkeypatch
+) -> None:
+    monkeypatch.setattr(config, "load_vault_remote_mode", lambda default="none": "git")
+    main_window._set_right_panel_collapsed(False)
+    main_window._refresh_git_mode_ui()
+    main_window._go_to_git()
+    assert not main_window._is_right_panel_expanded()
+
+    forward_sequence, _backward_sequence = history_cycle_sequences()
+    shortcut = next(
+        item
+        for item in main_window.findChildren(QShortcut)
+        if item.key().toString() == QKeySequence(forward_sequence).toString()
+    )
+    shortcut.activated.emit()
+
+    assert main_window.left_tab_widget.currentWidget() is main_window._vault_tab
+    assert main_window._is_right_panel_expanded()
     assert main_window._git_right_rail_was_expanded is None
 
 

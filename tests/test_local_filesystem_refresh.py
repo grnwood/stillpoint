@@ -76,6 +76,22 @@ def test_local_save_uses_loaded_mtime_as_write_precondition() -> None:
     }
 
 
+def test_local_save_prefers_loaded_content_hash_as_write_precondition() -> None:
+    class _Dummy:
+        _remote_mode = False
+        _page_revisions = {
+            "/PageA/PageA.md": {
+                "rev": 7,
+                "mtime_ns": 1_234_567_890,
+                "content_sha256": "abc123",
+            },
+        }
+
+    assert MainWindow._if_match_headers(_Dummy(), "/PageA/PageA.md") == {
+        "If-Match": "sha256:abc123",
+    }
+
+
 def test_local_save_does_not_use_index_revision_without_mtime() -> None:
     class _Dummy:
         _remote_mode = False

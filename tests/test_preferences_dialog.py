@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QMessageBox, QScrollArea
+from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QLabel, QMessageBox, QScrollArea
 
 
 def test_markdown_image_max_width_defaults_to_900_and_persists(monkeypatch, tmp_path) -> None:
@@ -175,6 +175,38 @@ def test_vault_preferences_git_setup_initializes_repository(qtbot, tmp_path) -> 
 
         assert git_support.is_exact_repository(tmp_path)
         assert dialog.git_init_button.isEnabled() is False
+    finally:
+        config.set_active_vault(None)
+
+
+def test_vault_preferences_cloud_mode_is_exclusive_and_persists(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    from sp.app import config
+    from sp.app.ui.vault_preferences_dialog import VaultPreferencesDialog
+
+    monkeypatch.setenv("SP_CLOUD_VAULT_STATE_ROOT", str(tmp_path / "device-state"))
+    vault = tmp_path / "OneDrive" / "Notes"
+    vault.mkdir(parents=True)
+    config.set_active_vault(str(vault))
+    try:
+        dialog = VaultPreferencesDialog()
+        qtbot.addWidget(dialog)
+        dialog.cloud_mode_radio.setChecked(True)
+
+        assert dialog.selected_version_mode() == "cloud"
+        assert not dialog.git_mode_radio.isChecked()
+        assert not dialog.homebase_mode_radio.isChecked()
+        cloud_copy = " ".join(
+            label.text() for label in dialog.cloud_setup_widget.findChildren(QLabel)
+        )
+        assert "Always keep on this device" in cloud_copy
+
+        monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Yes)
+        dialog.accept()
+
+        assert config.load_vault_remote_mode() == "cloud"
+        assert config.load_cloud_vault_metadata(vault) is not None
     finally:
         config.set_active_vault(None)
 

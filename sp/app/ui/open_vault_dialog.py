@@ -483,7 +483,7 @@ class OpenVaultDialog(QDialog):
         self.resize(520, 520)
 
         self.local_vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
-        git_homebase_paths = self._reload_homebase_vaults()
+        local_homebase_paths = self._reload_homebase_vaults()
         homebase_paths = {
             self._normalized_path_key(str(v.get("path") or ""))
             for v in self.homebase_vaults
@@ -502,10 +502,10 @@ class OpenVaultDialog(QDialog):
             and self._normalized_path_key(current_vault) not in homebase_paths
         ):
             self.local_vaults.append({"name": Path(current_vault).name, "path": current_vault})
-        self._mark_git_vault_entries()
+        self._mark_local_vault_modes()
         self.default_vault: Optional[str] = config.load_default_vault()
-        if self.default_vault in git_homebase_paths:
-            self.default_vault = git_homebase_paths[self.default_vault]
+        if self.default_vault in local_homebase_paths:
+            self.default_vault = local_homebase_paths[self.default_vault]
             config.save_default_vault(self.default_vault)
         self._selected: Optional[dict[str, str]] = None
         self._select_id = select_id
@@ -599,13 +599,14 @@ class OpenVaultDialog(QDialog):
         self._refresh_local_list(select_path=initial_select_path, select_id=initial_select_id)
 
     def _reload_homebase_vaults(self) -> dict[str, str]:
-        """Keep Git-mode vaults local even when a Homebase profile remains."""
+        """Keep non-Homebase modes local even when a stale Homebase profile remains."""
         active_profiles: list[dict[str, str]] = []
-        git_profiles: list[dict[str, str]] = []
+        local_profiles: list[tuple[dict[str, str], str]] = []
         for profile in config.load_homebase_vault_profiles():
             profile_path = str(profile.get("path") or "").strip()
-            if profile_path and config.load_vault_remote_mode_for_path(profile_path) == "git":
-                git_profiles.append(profile)
+            mode = config.load_vault_remote_mode_for_path(profile_path) if profile_path else "none"
+            if profile_path and mode in {"git", "cloud"}:
+                local_profiles.append((profile, mode))
             else:
                 active_profiles.append(profile)
         self.homebase_vaults = active_profiles
@@ -615,7 +616,7 @@ class OpenVaultDialog(QDialog):
             for vault in self.local_vaults
         }
         profile_paths: dict[str, str] = {}
-        for profile in git_profiles:
+        for profile, mode in local_profiles:
             profile_path = str(profile.get("path") or "").strip()
             if not profile_path:
                 continue
@@ -629,25 +630,26 @@ class OpenVaultDialog(QDialog):
                 {
                     "name": str(profile.get("name") or "").strip() or Path(profile_path).name,
                     "path": profile_path,
-                    "kind": "git",
+                    "kind": mode,
                     "id": profile_path,
                 }
             )
             local_path_keys.add(path_key)
-        self._mark_git_vault_entries()
+        self._mark_local_vault_modes()
         return profile_paths
 
-    def _mark_git_vault_entries(self) -> None:
+    def _mark_local_vault_modes(self) -> None:
         """Classify local rows from each vault's own persisted mode."""
         for vault in self.local_vaults:
             kind = str(vault.get("kind") or "").strip().lower()
             if kind in {"homebase", "remote"}:
                 continue
             path = str(vault.get("path") or "").strip()
-            if path and config.load_vault_remote_mode_for_path(path) == "git":
-                vault["kind"] = "git"
+            mode = config.load_vault_remote_mode_for_path(path) if path else "none"
+            if mode in {"git", "cloud"}:
+                vault["kind"] = mode
                 vault["id"] = path
-            elif kind == "git":
+            elif kind in {"git", "cloud"}:
                 vault["kind"] = "local"
 
     def selected_vault(self) -> Optional[dict[str, str]]:
@@ -811,6 +813,8 @@ class OpenVaultDialog(QDialog):
                 icon_label.setToolTip("Homebase vault (local + remote sync)")
             elif kind == "git":
                 icon_label.setToolTip("Git vault")
+            elif kind == "cloud":
+                icon_label.setToolTip("Cloud Folder vault (OneDrive / Google Drive)")
             elif kind == "remote" and quick_capture_vault and quick_capture_vault == vault_id_ref:
                 icon_label.setToolTip("Quick Capture homebase vault (remote)")
             elif kind != "remote":
@@ -888,29 +892,33 @@ class OpenVaultDialog(QDialog):
             return None
         asset = Path(__file__).resolve().parents[2] / "assets" / icon_name
         kind = str(vault.get("kind") or "").strip().lower()
-        if kind == "git":
-            cache_key = ("notebook+git", self.palette().color(QPalette.WindowText).name())
+        if kind in {"git", "cloud"}:
+            cache_key = (f"notebook+{kind}", self.palette().color(QPalette.WindowText).name())
             cached = self._vault_row_icon_cache.get(cache_key)
             if cached is not None or cache_key in self._vault_row_icon_cache:
                 return cached
             notebook_asset = Path(__file__).resolve().parents[2] / "assets" / "notebook.svg"
-            git_asset = Path(__file__).resolve().parents[2] / "assets" / "git-icon.svg"
+            badge_asset = Path(__file__).resolve().parents[2] / "assets" / (
+                "git-icon.svg" if kind == "git" else "cloud-logo.svg"
+            )
             try:
                 notebook_svg = notebook_asset.read_text(encoding="utf-8").replace(
                     'fill="#1C274C"',
                     f'fill="{self.palette().color(QPalette.WindowText).name()}"',
                     1,
                 )
-                git_svg = git_asset.read_text(encoding="utf-8").replace(
+                badge_svg = badge_asset.read_text(encoding="utf-8").replace(
                     'fill="#000000"',
-                    'fill="#F4511E"',
+                    'fill="#F4511E"' if kind == "git" else 'fill="#42A5F5"',
                 )
+                if kind == "cloud":
+                    badge_svg = badge_svg.replace('stroke="#000000"', 'stroke="#42A5F5"')
             except OSError:
                 self._vault_row_icon_cache[cache_key] = None
                 return None
             notebook_renderer = QSvgRenderer(QByteArray(notebook_svg.encode("utf-8")))
-            git_renderer = QSvgRenderer(QByteArray(git_svg.encode("utf-8")))
-            if not notebook_renderer.isValid() or not git_renderer.isValid():
+            badge_renderer = QSvgRenderer(QByteArray(badge_svg.encode("utf-8")))
+            if not notebook_renderer.isValid() or not badge_renderer.isValid():
                 self._vault_row_icon_cache[cache_key] = None
                 return None
             pixmap = QPixmap(self._vault_row_icon_px, self._vault_row_icon_px)
@@ -927,10 +935,10 @@ class OpenVaultDialog(QDialog):
                 badge_size,
                 badge_size,
             )
-            painter.setPen(QColor("#F4511E"))
+            painter.setPen(QColor("#F4511E" if kind == "git" else "#42A5F5"))
             painter.setBrush(self.palette().color(QPalette.Base))
             painter.drawEllipse(badge_rect)
-            git_renderer.render(painter, badge_rect.adjusted(1, 1, -1, -1))
+            badge_renderer.render(painter, badge_rect.adjusted(1, 1, -1, -1))
             painter.end()
             self._vault_row_icon_cache[cache_key] = pixmap
             return pixmap
@@ -992,7 +1000,7 @@ class OpenVaultDialog(QDialog):
         kind = str(vault.get("kind") or "").strip().lower()
         vault_id_ref = str(vault.get("id") or "").strip()
         vault_id_lower = vault_id_ref.lower()
-        if kind not in {"homebase", "git"}:
+        if kind not in {"homebase", "git", "cloud"}:
             # Backward/compat: some entries may miss `kind` but still be Homebase profiles.
             if vault_id_lower.startswith("homebase::") or (
                 bool(vault.get("vault_id")) and bool(vault.get("server_url"))
@@ -1009,6 +1017,8 @@ class OpenVaultDialog(QDialog):
         if kind == "homebase":
             return "notebook_remote.svg"
         if kind == "git":
+            return "notebook.svg"
+        if kind == "cloud":
             return "notebook.svg"
         return "notebook.svg"
 
@@ -1095,6 +1105,14 @@ class OpenVaultDialog(QDialog):
                 [
                     ("Type", "Git vault"),
                     ("Path", str(vault.get("path") or "")),
+                ]
+            )
+        elif kind == "cloud":
+            rows.extend(
+                [
+                    ("Type", "Cloud Folder vault (OneDrive / Google Drive)"),
+                    ("Path", str(vault.get("path") or "")),
+                    ("Offline", "Keep the entire vault available offline on every device"),
                 ]
             )
         else:
@@ -1298,7 +1316,9 @@ class OpenVaultDialog(QDialog):
                 f"{exc}\n\nThe parent folder was not added or initialized as a vault.",
             )
             return
-        detected_metadata = config.load_homebase_vault_metadata(result["path"])
+        detected_metadata = None
+        if not config.load_cloud_vault_metadata(result["path"]):
+            detected_metadata = config.load_homebase_vault_metadata(result["path"])
         if detected_metadata:
             profile = self._configure_homebase_vault_from_local_metadata(result, detected_metadata)
             if not profile:
@@ -1316,6 +1336,7 @@ class OpenVaultDialog(QDialog):
         self._seed_new_vault(Path(result["path"]))
         self.local_vaults = [v for v in self.local_vaults if v.get("path") != result["path"]]
         self.local_vaults.insert(0, result)
+        self._mark_local_vault_modes()
         config.remember_vault(result["path"], result["name"])
         self._refresh_local_list(select_path=result["path"])
 

@@ -831,7 +831,7 @@ class AIChatStore:
         if db_path:
             self.db_path = Path(db_path)
         elif vault_root:
-            self.db_path = Path(vault_root) / ".stillpoint" / "ai-chats.db"
+            self.db_path = config.vault_state_dir(vault_root) / "ai-chats.db"
         else:
             self.db_path = Path.home() / ".stillpoint" / "ai-chats.db"
         self._ensure_db()

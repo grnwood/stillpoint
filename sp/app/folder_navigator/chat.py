@@ -160,7 +160,7 @@ class FolderChatPanel(AIChatPanel):
                 path = Path(entry["path"]).expanduser().resolve(strict=True)
             except (KeyError, OSError):
                 continue
-            if path in seen or not (path / ".stillpoint" / "settings.db").is_file():
+            if path in seen or not config.vault_settings_db_path(path).is_file():
                 continue
             seen.add(path)
             choices.append((f"{entry.get('name') or path.name} — {path}", path))

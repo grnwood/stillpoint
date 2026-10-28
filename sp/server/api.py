@@ -3123,7 +3123,13 @@ def file_read(payload: FilePathPayload) -> dict:
             rev = row[0] if row else 0
         finally:
             conn.close()
-    return {"content": content, "rev": rev, "mtime_ns": mtime_ns}
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return {
+        "content": content,
+        "rev": rev,
+        "mtime_ns": mtime_ns,
+        "content_sha256": content_sha256,
+    }
 
 
 @app.post("/api/context/page")
@@ -4619,10 +4625,35 @@ def file_write(
 ) -> dict:
     root = vault_state.get_root()
     file_path = root / payload.path.lstrip("/")
+
+    def current_file_text() -> str:
+        try:
+            resolved = files._resolve(root, payload.path)
+            return resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
+        except (FileAccessError, OSError, UnicodeError):
+            return ""
     
     # Check If-Match header for conflict detection
     if if_match is not None:
-        if if_match.startswith("mtime:"):
+        if if_match.startswith("sha256:"):
+            expected_hash = if_match.split(":", 1)[1].strip().lower()
+            current_content = current_file_text()
+            current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+            if current_hash != expected_hash:
+                try:
+                    current_mtime = file_path.stat().st_mtime_ns
+                except OSError:
+                    current_mtime = 0
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "Conflict",
+                        "current_mtime_ns": current_mtime,
+                        "current_content": current_content,
+                        "current_content_sha256": current_hash,
+                    },
+                )
+        elif if_match.startswith("mtime:"):
             try:
                 expected_mtime = int(if_match.split(":", 1)[1])
             except ValueError:
@@ -4632,10 +4663,7 @@ def file_write(
             except OSError:
                 current_mtime = 0
             if current_mtime != expected_mtime:
-                try:
-                    current_content = files.read_file(root, payload.path)
-                except FileAccessError:
-                    current_content = ""
+                current_content = current_file_text()
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -4665,10 +4693,7 @@ def file_write(
                         
                         if current_rev != expected_rev:
                             # Conflict: return current state
-                            try:
-                                current_content = files.read_file(root, payload.path)
-                            except FileAccessError:
-                                current_content = ""
+                            current_content = current_file_text()
                             try:
                                 current_mtime = file_path.stat().st_mtime_ns
                             except OSError:
@@ -4714,7 +4739,12 @@ def file_write(
             try:
                 row = conn.execute("SELECT rev FROM pages WHERE path = ?", (payload.path,)).fetchone()
                 new_rev = row[0] if row else 0
-                return {"ok": True, "rev": new_rev, "mtime_ns": mtime_ns}
+                return {
+                    "ok": True,
+                    "rev": new_rev,
+                    "mtime_ns": mtime_ns,
+                    "content_sha256": hashlib.sha256(payload.content.encode("utf-8")).hexdigest(),
+                }
             finally:
                 conn.close()
     except FileAccessError as exc:
@@ -4726,7 +4756,11 @@ def file_write(
     except Exception as exc:
         _raise_file_http(500, f"Write file error for {payload.path}", exc)
     
-    return {"ok": True, "mtime_ns": mtime_ns}
+    return {
+        "ok": True,
+        "mtime_ns": mtime_ns,
+        "content_sha256": hashlib.sha256(payload.content.encode("utf-8")).hexdigest(),
+    }
 
 
 @app.post("/api/files/modified")

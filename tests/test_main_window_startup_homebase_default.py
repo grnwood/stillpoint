@@ -101,6 +101,31 @@ def test_startup_treats_git_vault_as_local_when_homebase_default_remains(
     assert not any(name == "apply_homebase" for name, _value in calls)
 
 
+def test_cloud_vault_ignores_retained_homebase_profile(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    vault = tmp_path / "OneDrive" / "cloud-vault"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("SP_CLOUD_VAULT_STATE_ROOT", str(tmp_path / "device-state"))
+    config.set_active_vault(str(vault))
+    try:
+        config.transition_active_vault_remote_mode("cloud")
+    finally:
+        config.set_active_vault(None)
+    profile = {
+        "id": f"homebase::https://server::vault123::{vault}",
+        "kind": "homebase",
+        "name": "Former Homebase Vault",
+        "path": str(vault),
+        "server_url": "https://server",
+        "vault_id": "vault123",
+    }
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [profile])
+
+    assert main_window._homebase_profile_for_path(str(vault)) is None
+    assert main_window._vault_path_uses_non_homebase_mode(str(vault)) is True
+
+
 def test_switching_homebase_to_git_does_not_create_a_default(
     main_window, monkeypatch, tmp_path
 ) -> None:
