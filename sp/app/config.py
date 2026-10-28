@@ -714,7 +714,20 @@ def load_default_vault() -> Optional[str]:
 
 
 def save_default_vault(path: Optional[str]) -> None:
-    _update_global_config({"default_vault": path})
+    # Keep a provenance marker so migrations can distinguish a user/default
+    # selection from older code that accidentally promoted a vault.
+    _update_global_config(
+        {
+            "default_vault": path,
+            "default_vault_confirmation": path,
+        }
+    )
+
+
+def load_default_vault_confirmation() -> Optional[str]:
+    payload = _read_global_config()
+    value = payload.get("default_vault_confirmation")
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def load_quick_capture_vault() -> Optional[str]:
@@ -1984,6 +1997,29 @@ def load_vault_remote_mode(default: str = "none") -> str:
     return value if value in _VALID_REMOTE_MODES else default
 
 
+def load_vault_remote_mode_for_path(
+    vault_root: str | Path,
+    default: str = "none",
+) -> str:
+    """Read a vault's persisted mode before making that vault active."""
+    try:
+        db_path = Path(vault_root).expanduser().resolve() / ".stillpoint" / "settings.db"
+        if not db_path.is_file():
+            return default
+        connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+        try:
+            connection.execute("PRAGMA busy_timeout = 1000")
+            row = connection.execute(
+                "SELECT value FROM kv WHERE key = 'vault_remote_mode'"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return default
+    value = str(row[0]).strip().lower() if row and row[0] is not None else default
+    return value if value in _VALID_REMOTE_MODES else default
+
+
 def save_vault_remote_mode(mode: str) -> None:
     """Persist selected remote mode for the active vault."""
     cleaned = str(mode or "").strip().lower()
@@ -2013,6 +2049,62 @@ def load_git_publish_versions(default: bool = False) -> bool:
 def save_git_publish_versions(enabled: bool) -> None:
     """Remember the per-vault Save Version publishing choice."""
     _save_vault_kv("git_publish_versions", "true" if enabled else "false")
+
+
+def load_git_auto_backup_enabled(default: bool = False) -> bool:
+    value = _load_vault_kv("git_auto_backup_enabled")
+    return bool(default) if value is None else value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def save_git_auto_backup_enabled(enabled: bool) -> None:
+    _save_vault_kv("git_auto_backup_enabled", "true" if enabled else "false")
+
+
+def load_git_auto_backup_interval_minutes(default: int = 15) -> int:
+    value = _load_vault_kv("git_auto_backup_interval_minutes")
+    try:
+        parsed = int(value) if value is not None else int(default)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return parsed if parsed in {15, 30, 60, 1440} else int(default)
+
+
+def save_git_auto_backup_interval_minutes(minutes: int) -> None:
+    try:
+        parsed = int(minutes)
+    except (TypeError, ValueError):
+        parsed = 15
+    cleaned = parsed if parsed in {15, 30, 60, 1440} else 15
+    _save_vault_kv("git_auto_backup_interval_minutes", str(cleaned))
+
+
+def load_git_auto_publish_enabled(default: bool = True) -> bool:
+    value = _load_vault_kv("git_auto_publish_enabled")
+    return bool(default) if value is None else value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def save_git_auto_publish_enabled(enabled: bool) -> None:
+    _save_vault_kv("git_auto_publish_enabled", "true" if enabled else "false")
+
+
+def load_git_backup_on_close(default: bool = True) -> bool:
+    value = _load_vault_kv("git_backup_on_close")
+    return bool(default) if value is None else value.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def save_git_backup_on_close(enabled: bool) -> None:
+    _save_vault_kv("git_backup_on_close", "true" if enabled else "false")
+
+
+def load_git_backup_timestamp(key: str) -> Optional[str]:
+    value = _load_vault_kv(f"git_{key}_timestamp")
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def save_git_backup_timestamp(key: str, value: str) -> None:
+    if key in {"last_backup", "last_publish"}:
+        _save_vault_kv(f"git_{key}_timestamp", str(value or "").strip())
 
 
 def load_homebase_vault_id() -> Optional[str]:

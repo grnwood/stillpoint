@@ -138,6 +138,12 @@ def test_vault_preferences_git_mode_is_exclusive_and_persists(qtbot, monkeypatch
         qtbot.addWidget(dialog)
 
         dialog.git_mode_radio.setChecked(True)
+        dialog.git_auto_backup_checkbox.setChecked(True)
+        dialog.git_auto_backup_interval_combo.setCurrentIndex(
+            dialog.git_auto_backup_interval_combo.findData(30)
+        )
+        dialog.git_auto_publish_checkbox.setChecked(False)
+        dialog.git_backup_on_close_checkbox.setChecked(False)
 
         assert dialog.selected_version_mode() == "git"
         assert dialog.homebase_mode_radio.isChecked() is False
@@ -147,6 +153,10 @@ def test_vault_preferences_git_mode_is_exclusive_and_persists(qtbot, monkeypatch
         dialog.accept()
 
         assert config.load_vault_remote_mode() == "git"
+        assert config.load_git_auto_backup_enabled() is True
+        assert config.load_git_auto_backup_interval_minutes() == 30
+        assert config.load_git_auto_publish_enabled() is False
+        assert config.load_git_backup_on_close() is False
     finally:
         config.set_active_vault(None)
 

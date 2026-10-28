@@ -53,6 +53,58 @@ def test_open_vault_dialog_lists_local_and_homebase_together(qtbot, monkeypatch)
     assert len(entries) == 2
 
 
+def test_open_vault_dialog_treats_retained_homebase_profile_as_local_for_git_mode(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    from sp.app.ui.open_vault_dialog import OpenVaultDialog
+    from sp.app import config
+
+    vault = tmp_path / "git-vault"
+    vault.mkdir()
+    config.set_active_vault(str(vault))
+    try:
+        config.save_vault_remote_mode("git")
+    finally:
+        config.set_active_vault(None)
+
+    homebase_profile = {
+        "id": f"homebase::https://server::vault123::{vault}",
+        "kind": "homebase",
+        "name": "Former Homebase Vault",
+        "path": str(vault),
+        "server_url": "https://server",
+        "vault_id": "vault123",
+    }
+    saved_defaults: list[str | None] = []
+    monkeypatch.setattr(config, "load_homebase_vault_profiles", lambda: [homebase_profile])
+    monkeypatch.setattr(config, "load_default_vault", lambda: homebase_profile["id"])
+    monkeypatch.setattr(config, "save_default_vault", saved_defaults.append)
+    monkeypatch.setattr(config, "load_feature_homebase_vaults_enabled", lambda: True)
+
+    dlg = OpenVaultDialog(vaults=[])
+    qtbot.addWidget(dlg)
+
+    entries = dlg._combined_local_vault_entries()
+    assert dlg.homebase_vaults == []
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "git"
+    assert entries[0]["path"] == str(vault)
+    assert dlg._vault_icon_name(entries[0]) == "notebook.svg"
+    git_pixmap = dlg._vault_type_icon(entries[0])
+    assert git_pixmap is not None
+    assert git_pixmap.width() == 28
+    git_image = git_pixmap.toImage()
+    assert any(
+        git_image.pixelColor(x, y).red() > 200
+        and 40 < git_image.pixelColor(x, y).green() < 140
+        for x in range(git_image.width() // 2, git_image.width())
+        for y in range(git_image.height() // 2, git_image.height())
+    )
+    assert "Git vault" in dlg._vault_row_tooltip(entries[0])
+    assert dlg.default_vault == str(vault)
+    assert saved_defaults == [str(vault)]
+
+
 def test_open_vault_dialog_dedupes_local_and_homebase_when_paths_differ_only_by_trailing_slash(
     qtbot, monkeypatch
 ) -> None:
@@ -131,6 +183,7 @@ def test_icon_name_mapping_prefers_remote_icon_for_homebase(qtbot, monkeypatch) 
     qtbot.addWidget(dlg)
 
     assert dlg._vault_icon_name({"kind": "local"}) == "notebook.svg"
+    assert dlg._vault_icon_name({"kind": "git"}) == "notebook.svg"
     assert dlg._vault_icon_name({"kind": "homebase"}) == "notebook_remote.svg"
     assert dlg._vault_icon_name({"id": "homebase::https://server::vid::/vault", "path": "/vault"}) == "notebook_remote.svg"
     assert dlg._vault_icon_name({"server_url": "https://server", "vault_id": "vid", "path": "/vault"}) == "notebook_remote.svg"

@@ -492,7 +492,11 @@ def test_convert_current_vault_to_homebase_persists_and_applies_profile(main_win
             sync_reasons.append(reason)
 
     monkeypatch.setattr(main_window, "_is_homebase_mode_enabled", lambda: False)
-    monkeypatch.setattr(main_window, "_apply_homebase_profile", lambda profile: applied_profiles.append(dict(profile)))
+    monkeypatch.setattr(
+        main_window,
+        "_apply_homebase_profile",
+        lambda profile, **_kwargs: applied_profiles.append(dict(profile)),
+    )
     monkeypatch.setattr("sp.app.ui.main_window.AddHomebaseVaultDialog", _DummyDialog)
     monkeypatch.setattr(
         "sp.app.ui.main_window._persist_homebase_passphrase_settings",

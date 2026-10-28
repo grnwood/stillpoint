@@ -178,7 +178,7 @@ class VaultPreferencesDialog(QDialog):
         git_warning = QLabel(
             "Git remotes normally receive your vault files as plaintext. StillPoint does not "
             "store Git passwords or access tokens; authentication uses your existing Git, SSH, "
-            "or credential-manager setup. Git synchronization is manual in this release."
+            "or credential-manager setup."
         )
         git_warning.setWordWrap(True)
         git_warning.setStyleSheet("color: #b26a00;")
@@ -205,6 +205,35 @@ class VaultPreferencesDialog(QDialog):
         self.git_publish_versions_checkbox = QCheckBox("Publish after Save Version")
         self.git_publish_versions_checkbox.setChecked(config.load_git_publish_versions(False))
         git_setup_layout.addWidget(self.git_publish_versions_checkbox)
+        backup_box = QGroupBox("Automatic backups")
+        backup_layout = QVBoxLayout(backup_box)
+        backup_help = QLabel(
+            "Automatic backups save ordinary Git history without creating named vault versions. "
+            "They run while StillPoint is open. StillPoint never pulls or merges in the background."
+        )
+        backup_help.setWordWrap(True)
+        backup_layout.addWidget(backup_help)
+        self.git_auto_backup_checkbox = QCheckBox("Back up changes automatically")
+        self.git_auto_backup_checkbox.setChecked(config.load_git_auto_backup_enabled(False))
+        backup_layout.addWidget(self.git_auto_backup_checkbox)
+        backup_form = QFormLayout()
+        self.git_auto_backup_interval_combo = QComboBox()
+        for label, minutes in (("Every 15 minutes", 15), ("Every 30 minutes", 30), ("Hourly", 60), ("Daily", 1440)):
+            self.git_auto_backup_interval_combo.addItem(label, minutes)
+        interval_index = self.git_auto_backup_interval_combo.findData(
+            config.load_git_auto_backup_interval_minutes(15)
+        )
+        self.git_auto_backup_interval_combo.setCurrentIndex(max(0, interval_index))
+        backup_form.addRow("Frequency:", self.git_auto_backup_interval_combo)
+        backup_layout.addLayout(backup_form)
+        self.git_auto_publish_checkbox = QCheckBox("Publish backups to the remote")
+        self.git_auto_publish_checkbox.setChecked(config.load_git_auto_publish_enabled(True))
+        backup_layout.addWidget(self.git_auto_publish_checkbox)
+        self.git_backup_on_close_checkbox = QCheckBox("Back up when closing StillPoint")
+        self.git_backup_on_close_checkbox.setChecked(config.load_git_backup_on_close(True))
+        backup_layout.addWidget(self.git_backup_on_close_checkbox)
+        self.git_auto_backup_checkbox.toggled.connect(self._update_git_backup_controls)
+        git_setup_layout.addWidget(backup_box)
         version_layout.addWidget(self.git_setup_widget)
         content_layout.addWidget(version_box)
 
@@ -213,6 +242,7 @@ class VaultPreferencesDialog(QDialog):
         self.local_mode_radio.toggled.connect(self._update_version_mode_ui)
         self._refresh_git_setup_state()
         self._update_version_mode_ui()
+        self._update_git_backup_controls()
 
         content_layout.addStretch(1)
 
@@ -325,6 +355,7 @@ class VaultPreferencesDialog(QDialog):
         else:
             message = ""
         self.version_mode_warning.setText(message)
+        self._update_git_backup_controls()
 
     def _on_git_mode_toggled(self, checked: bool) -> None:
         if checked:
@@ -332,6 +363,12 @@ class VaultPreferencesDialog(QDialog):
             # may have been configured since this dialog was opened.
             self._refresh_git_setup_state()
         self._update_version_mode_ui()
+
+    def _update_git_backup_controls(self) -> None:
+        enabled = self.git_mode_radio.isChecked() and self.git_auto_backup_checkbox.isChecked()
+        self.git_auto_backup_interval_combo.setEnabled(enabled)
+        self.git_auto_publish_checkbox.setEnabled(enabled)
+        self.git_backup_on_close_checkbox.setEnabled(enabled)
 
     def _refresh_git_setup_state(self) -> None:
         if not self._vault_root:
@@ -431,6 +468,7 @@ class VaultPreferencesDialog(QDialog):
                 return
             try:
                 git_support.require_exact_repository(self._vault_root)
+                git_support.ensure_metadata_ignored(self._vault_root)
             except git_support.GitError as exc:
                 QMessageBox.warning(self, "Git Setup Required", str(exc))
                 return
@@ -470,4 +508,10 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
         config.save_vault_remote_mode(selected_mode)
         config.save_git_publish_versions(self.git_publish_versions_checkbox.isChecked())
+        config.save_git_auto_backup_enabled(self.git_auto_backup_checkbox.isChecked())
+        config.save_git_auto_backup_interval_minutes(
+            int(self.git_auto_backup_interval_combo.currentData() or 15)
+        )
+        config.save_git_auto_publish_enabled(self.git_auto_publish_checkbox.isChecked())
+        config.save_git_backup_on_close(self.git_backup_on_close_checkbox.isChecked())
         super().accept()

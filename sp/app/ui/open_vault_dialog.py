@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 
 from PySide6.QtCore import QByteArray, QRectF, Qt, QUrl, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -483,7 +483,7 @@ class OpenVaultDialog(QDialog):
         self.resize(520, 520)
 
         self.local_vaults: list[dict[str, str]] = vaults if vaults is not None else config.load_known_vaults()
-        self.homebase_vaults: list[dict[str, str]] = config.load_homebase_vault_profiles()
+        git_homebase_paths = self._reload_homebase_vaults()
         homebase_paths = {
             self._normalized_path_key(str(v.get("path") or ""))
             for v in self.homebase_vaults
@@ -502,12 +502,16 @@ class OpenVaultDialog(QDialog):
             and self._normalized_path_key(current_vault) not in homebase_paths
         ):
             self.local_vaults.append({"name": Path(current_vault).name, "path": current_vault})
+        self._mark_git_vault_entries()
         self.default_vault: Optional[str] = config.load_default_vault()
+        if self.default_vault in git_homebase_paths:
+            self.default_vault = git_homebase_paths[self.default_vault]
+            config.save_default_vault(self.default_vault)
         self._selected: Optional[dict[str, str]] = None
         self._select_id = select_id
         self._homebase_vaults_enabled = config.load_feature_homebase_vaults_enabled()
         self._vault_row_icon_cache: dict[tuple[str, str], Optional[QPixmap]] = {}
-        self._vault_row_icon_px = 24
+        self._vault_row_icon_px = 28
         self._transient_homebase_profiles: dict[str, dict[str, str]] = {}
         self.remote_list_widget = None
         self.remote_vaults: list[dict[str, str]] = []
@@ -593,6 +597,58 @@ class OpenVaultDialog(QDialog):
         elif not initial_select_path and self.default_vault and not self.default_vault.startswith("homebase::"):
             initial_select_path = self.default_vault
         self._refresh_local_list(select_path=initial_select_path, select_id=initial_select_id)
+
+    def _reload_homebase_vaults(self) -> dict[str, str]:
+        """Keep Git-mode vaults local even when a Homebase profile remains."""
+        active_profiles: list[dict[str, str]] = []
+        git_profiles: list[dict[str, str]] = []
+        for profile in config.load_homebase_vault_profiles():
+            profile_path = str(profile.get("path") or "").strip()
+            if profile_path and config.load_vault_remote_mode_for_path(profile_path) == "git":
+                git_profiles.append(profile)
+            else:
+                active_profiles.append(profile)
+        self.homebase_vaults = active_profiles
+
+        local_path_keys = {
+            self._normalized_path_key(str(vault.get("path") or ""))
+            for vault in self.local_vaults
+        }
+        profile_paths: dict[str, str] = {}
+        for profile in git_profiles:
+            profile_path = str(profile.get("path") or "").strip()
+            if not profile_path:
+                continue
+            profile_id = str(profile.get("id") or "").strip()
+            if profile_id:
+                profile_paths[profile_id] = profile_path
+            path_key = self._normalized_path_key(profile_path)
+            if path_key in local_path_keys or self._is_help_vault_path(profile_path):
+                continue
+            self.local_vaults.append(
+                {
+                    "name": str(profile.get("name") or "").strip() or Path(profile_path).name,
+                    "path": profile_path,
+                    "kind": "git",
+                    "id": profile_path,
+                }
+            )
+            local_path_keys.add(path_key)
+        self._mark_git_vault_entries()
+        return profile_paths
+
+    def _mark_git_vault_entries(self) -> None:
+        """Classify local rows from each vault's own persisted mode."""
+        for vault in self.local_vaults:
+            kind = str(vault.get("kind") or "").strip().lower()
+            if kind in {"homebase", "remote"}:
+                continue
+            path = str(vault.get("path") or "").strip()
+            if path and config.load_vault_remote_mode_for_path(path) == "git":
+                vault["kind"] = "git"
+                vault["id"] = path
+            elif kind == "git":
+                vault["kind"] = "local"
 
     def selected_vault(self) -> Optional[dict[str, str]]:
         return self._selected
@@ -753,6 +809,8 @@ class OpenVaultDialog(QDialog):
             quick_capture_vault = config.load_quick_capture_vault()
             if kind == "homebase":
                 icon_label.setToolTip("Homebase vault (local + remote sync)")
+            elif kind == "git":
+                icon_label.setToolTip("Git vault")
             elif kind == "remote" and quick_capture_vault and quick_capture_vault == vault_id_ref:
                 icon_label.setToolTip("Quick Capture homebase vault (remote)")
             elif kind != "remote":
@@ -829,6 +887,53 @@ class OpenVaultDialog(QDialog):
         if not icon_name:
             return None
         asset = Path(__file__).resolve().parents[2] / "assets" / icon_name
+        kind = str(vault.get("kind") or "").strip().lower()
+        if kind == "git":
+            cache_key = ("notebook+git", self.palette().color(QPalette.WindowText).name())
+            cached = self._vault_row_icon_cache.get(cache_key)
+            if cached is not None or cache_key in self._vault_row_icon_cache:
+                return cached
+            notebook_asset = Path(__file__).resolve().parents[2] / "assets" / "notebook.svg"
+            git_asset = Path(__file__).resolve().parents[2] / "assets" / "git-icon.svg"
+            try:
+                notebook_svg = notebook_asset.read_text(encoding="utf-8").replace(
+                    'fill="#1C274C"',
+                    f'fill="{self.palette().color(QPalette.WindowText).name()}"',
+                    1,
+                )
+                git_svg = git_asset.read_text(encoding="utf-8").replace(
+                    'fill="#000000"',
+                    'fill="#F4511E"',
+                )
+            except OSError:
+                self._vault_row_icon_cache[cache_key] = None
+                return None
+            notebook_renderer = QSvgRenderer(QByteArray(notebook_svg.encode("utf-8")))
+            git_renderer = QSvgRenderer(QByteArray(git_svg.encode("utf-8")))
+            if not notebook_renderer.isValid() or not git_renderer.isValid():
+                self._vault_row_icon_cache[cache_key] = None
+                return None
+            pixmap = QPixmap(self._vault_row_icon_px, self._vault_row_icon_px)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            notebook_renderer.render(
+                painter,
+                QRectF(0, 0, self._vault_row_icon_px, self._vault_row_icon_px),
+            )
+            badge_size = round(self._vault_row_icon_px * 0.62)
+            badge_rect = QRectF(
+                self._vault_row_icon_px - badge_size,
+                self._vault_row_icon_px - badge_size,
+                badge_size,
+                badge_size,
+            )
+            painter.setPen(QColor("#F4511E"))
+            painter.setBrush(self.palette().color(QPalette.Base))
+            painter.drawEllipse(badge_rect)
+            git_renderer.render(painter, badge_rect.adjusted(1, 1, -1, -1))
+            painter.end()
+            self._vault_row_icon_cache[cache_key] = pixmap
+            return pixmap
         # For homebase icon, recolor only the notebook outline token;
         # keep the yellow badge/lightning styling unchanged.
         if icon_name == "notebook_remote.svg":
@@ -887,7 +992,7 @@ class OpenVaultDialog(QDialog):
         kind = str(vault.get("kind") or "").strip().lower()
         vault_id_ref = str(vault.get("id") or "").strip()
         vault_id_lower = vault_id_ref.lower()
-        if kind != "homebase":
+        if kind not in {"homebase", "git"}:
             # Backward/compat: some entries may miss `kind` but still be Homebase profiles.
             if vault_id_lower.startswith("homebase::") or (
                 bool(vault.get("vault_id")) and bool(vault.get("server_url"))
@@ -903,6 +1008,8 @@ class OpenVaultDialog(QDialog):
             return None
         if kind == "homebase":
             return "notebook_remote.svg"
+        if kind == "git":
+            return "notebook.svg"
         return "notebook.svg"
 
     @staticmethod
@@ -983,6 +1090,13 @@ class OpenVaultDialog(QDialog):
             error = str(vault.get("error") or "").strip()
             if error:
                 rows.append(("Error", error))
+        elif kind == "git":
+            rows.extend(
+                [
+                    ("Type", "Git vault"),
+                    ("Path", str(vault.get("path") or "")),
+                ]
+            )
         else:
             rows.extend(
                 [
@@ -1196,7 +1310,7 @@ class OpenVaultDialog(QDialog):
                 config.delete_known_vault(profile_path)
                 config.save_homebase_vault_metadata(profile_path, profile)
             config.upsert_homebase_vault_profile(profile)
-            self.homebase_vaults = config.load_homebase_vault_profiles()
+            self._reload_homebase_vaults()
             self._refresh_local_list(select_id=profile.get("id"))
             return
         self._seed_new_vault(Path(result["path"]))
@@ -1238,7 +1352,7 @@ class OpenVaultDialog(QDialog):
         if profile_path:
             config.delete_known_vault(profile_path)
             config.save_homebase_vault_metadata(profile_path, profile)
-        self.homebase_vaults = config.load_homebase_vault_profiles()
+        self._reload_homebase_vaults()
         self._refresh_local_list(select_id=profile.get("id"))
 
     def _remove_selected(self) -> None:
@@ -1258,7 +1372,7 @@ class OpenVaultDialog(QDialog):
                 if self.default_vault == profile_id:
                     self.default_vault = None
                     config.save_default_vault(None)
-            self.homebase_vaults = config.load_homebase_vault_profiles()
+            self._reload_homebase_vaults()
             combined = self._combined_local_vault_entries()
             next_selection = combined[0].get("id") if combined else None
             self._refresh_local_list(select_id=next_selection)

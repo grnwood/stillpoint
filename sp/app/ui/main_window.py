@@ -42,6 +42,7 @@ from PySide6.QtCore import (
     QElapsedTimer,
     QAbstractEventDispatcher,
     QByteArray,
+    QFile,
     QUrl,
     QPropertyAnimation,
     QMimeData,
@@ -141,7 +142,7 @@ from .screen_positioning import (
 )
 from .canvas_navigation import install_primary_wheel_zoom
 from .markdown_preview import MarkdownReadingView
-from .git_widgets import GitDiffDialog, GitHistoryDialog, VaultGitPanel
+from .git_widgets import GitDiffEditor, GitHistoryDialog, VaultGitPanel
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -2717,6 +2718,12 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
         self._last_editor_activity = 0.0
+        self.git_auto_backup_timer = QTimer(self)
+        self.git_auto_backup_timer.setSingleShot(True)
+        self.git_auto_backup_timer.timeout.connect(self._run_git_automatic_backup)
+        self._git_auto_backup_interval_ms = 0
+        self._git_auto_backup_running = False
+        self._git_auto_backup_attention = ""
         self._search_sync = PeriodicSearchIndexSync(
             self,
             is_enabled=lambda: config.load_global_feature_keep_search_index_sync_enabled(default=True),
@@ -3099,6 +3106,8 @@ class MainWindow(QMainWindow):
 
         # Added dynamically after a local vault is selected and Git mode is active.
         self.git_panel: Optional[VaultGitPanel] = None
+        self._git_right_rail_was_expanded: Optional[bool] = None
+        self._git_right_rail_splitter_state: Optional[str] = None
 
         self.left_minibar, self._left_minibar_bar, self._left_minibar_toggle = self._build_minibar(
             self._left_minibar_labels(),
@@ -3256,6 +3265,10 @@ class MainWindow(QMainWindow):
         )
         self._action_convert_vault_to_homebase.triggered.connect(self._convert_current_vault_to_homebase)
         vault_menu.addAction(self._action_convert_vault_to_homebase)
+        self._action_go_to_git = QAction("Go to Git", self)
+        self._action_go_to_git.setToolTip("Open this vault's Git changes")
+        self._action_go_to_git.triggered.connect(self._go_to_git)
+        self._action_go_to_git.setVisible(False)
         self._action_git_save_changes = QAction("Save Changes…", self)
         self._action_git_save_changes.setToolTip("Save the current vault changes to Git history")
         self._action_git_save_changes.triggered.connect(self._git_save_changes)
@@ -3272,6 +3285,7 @@ class MainWindow(QMainWindow):
         self._action_git_publish.setToolTip("Publish saved changes and named versions to the Git remote")
         self._action_git_publish.triggered.connect(self._git_push)
         self._action_git_publish.setVisible(False)
+        vault_menu.addAction(self._action_go_to_git)
         vault_menu.addAction(self._action_git_save_changes)
         vault_menu.addAction(self._action_git_save_version)
         vault_menu.addAction(self._action_git_get_updates)
@@ -3822,6 +3836,18 @@ class MainWindow(QMainWindow):
         self._homebase_status_label.mousePressEvent = lambda event: self._handle_homebase_badge_click()
         self._homebase_status_label.hide()
         self.statusBar().addPermanentWidget(self._homebase_status_label, 0)
+
+        self._git_status_label = QLabel("GIT")
+        self._git_status_label.setObjectName("gitStatusLabel")
+        self._git_status_label.setStyleSheet(
+            self._badge_base_style
+            + " background-color: #2e7d32; margin-right: 6px; color: #ffffff;"
+        )
+        self._git_status_label.setToolTip("Git status")
+        self._git_status_label.setCursor(QCursor(Qt.PointingHandCursor))
+        self._git_status_label.mousePressEvent = lambda event: self._handle_git_badge_click()
+        self._git_status_label.hide()
+        self.statusBar().addPermanentWidget(self._git_status_label, 0)
 
         self._detached_panels: list[QMainWindow] = []
         self._detached_link_panels: list[LinkNavigatorPanel] = []
@@ -4638,6 +4664,7 @@ class MainWindow(QMainWindow):
                     getattr(self, "_action_git_save_version", None),
                     getattr(self, "_action_git_get_updates", None),
                     getattr(self, "_action_git_publish", None),
+                    getattr(self, "_action_go_to_git", None),
                 } and not action.isVisible():
                     continue
                 if action.menu():
@@ -4811,6 +4838,23 @@ class MainWindow(QMainWindow):
         if force_select:
             return self._select_vault(startup=True)
         default_vault = vault_hint or config.load_default_vault()
+        if default_vault and not vault_hint:
+            kind, _server_url, local_path = self._decode_vault_ref(default_vault)
+            if (
+                kind == "local"
+                and local_path
+                and self._vault_path_uses_git(local_path)
+                and self._homebase_profile_for_path(local_path, include_git_vaults=True)
+            ):
+                confirmed = self._normalize_vault_path(
+                    config.load_default_vault_confirmation()
+                )
+                if confirmed != self._normalize_vault_path(local_path):
+                    # Repair defaults written by the earlier Homebase→Git
+                    # migration bug. A user-confirmed default carries the
+                    # marker above and remains eligible for automatic opening.
+                    config.save_default_vault(None)
+                    default_vault = None
         if default_vault:
             kind, server_url, path = self._decode_vault_ref(default_vault)
             if kind == "remote" and server_url and path:
@@ -4821,10 +4865,19 @@ class MainWindow(QMainWindow):
                     return True
                 return self._select_vault(startup=True)
             if kind == "homebase":
-                profile = self._homebase_profile_for_id(path or default_vault)
+                profile = self._homebase_profile_for_id(
+                    path or default_vault,
+                    include_git_vaults=True,
+                )
                 if profile:
                     local_path = str(profile.get("path") or "").strip()
                     self._switch_api_base(self._local_api_base, is_remote=False, verify_tls=True)
+                    if local_path and self._vault_path_uses_git(local_path):
+                        self._promote_git_vault_to_local_defaults(
+                            local_path,
+                            str(profile.get("name") or "").strip() or None,
+                            stale_homebase_id=str(profile.get("id") or default_vault),
+                        )
                     if local_path and self._set_vault(local_path, vault_name=profile.get("name")):
                         self._update_user_management_ui()
                         self._restore_recent_history()
@@ -5612,9 +5665,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return os.path.abspath(os.path.expanduser(str(path_value)))
 
-    def _homebase_profile_for_path(self, local_path: Optional[str]) -> Optional[dict]:
+    def _homebase_profile_for_path(
+        self,
+        local_path: Optional[str],
+        *,
+        include_git_vaults: bool = False,
+    ) -> Optional[dict]:
         target = self._normalize_vault_path(local_path)
         if not target:
+            return None
+        if not include_git_vaults and self._vault_path_uses_git(target):
             return None
         try:
             for profile in config.load_homebase_vault_profiles():
@@ -5624,17 +5684,58 @@ class MainWindow(QMainWindow):
             return None
         return None
 
-    def _homebase_profile_for_id(self, profile_id: Optional[str]) -> Optional[dict]:
+    def _homebase_profile_for_id(
+        self,
+        profile_id: Optional[str],
+        *,
+        include_git_vaults: bool = False,
+    ) -> Optional[dict]:
         target = str(profile_id or "").strip()
         if not target:
             return None
         try:
             for profile in config.load_homebase_vault_profiles():
                 if str(profile.get("id") or "").strip() == target:
+                    if (
+                        not include_git_vaults
+                        and self._vault_path_uses_git(str(profile.get("path") or ""))
+                    ):
+                        return None
                     return profile
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _vault_path_uses_git(vault_path: Optional[str]) -> bool:
+        if not vault_path:
+            return False
+        try:
+            return config.load_vault_remote_mode_for_path(vault_path) == "git"
+        except Exception:
+            return False
+
+    def _promote_git_vault_to_local_defaults(
+        self,
+        vault_path: str,
+        vault_name: Optional[str] = None,
+        *,
+        stale_homebase_id: str = "",
+    ) -> None:
+        """Make a Git vault reopen locally even if a Homebase profile remains."""
+        local_path = self._normalize_vault_path(vault_path)
+        if not local_path:
+            return
+        try:
+            config.remember_vault(local_path, vault_name or Path(local_path).name)
+            config.save_last_vault(local_path)
+            default_vault = str(config.load_default_vault() or "").strip()
+            # Preserve "No default". Only rewrite an existing default that
+            # explicitly pointed at this vault's former Homebase profile.
+            if stale_homebase_id and default_vault == stale_homebase_id:
+                config.save_default_vault(local_path)
+        except Exception:
+            pass
 
     def _apply_homebase_profile(self, profile: dict, *, confirm_git_switch: bool = True) -> None:
         try:
@@ -5734,6 +5835,16 @@ class MainWindow(QMainWindow):
                         "Homebase is currently syncing or needs attention. Resolve it before changing this vault to Git.",
                     )
                     return
+            if selected_version_mode == "git" and self.vault_root:
+                retained_profile = self._homebase_profile_for_path(
+                    self.vault_root,
+                    include_git_vaults=True,
+                )
+                self._promote_git_vault_to_local_defaults(
+                    self.vault_root,
+                    str((retained_profile or {}).get("name") or "").strip() or None,
+                    stale_homebase_id=str((retained_profile or {}).get("id") or "").strip(),
+                )
             self._apply_feature_overrides()
             self._apply_vault_read_only_pref()
             self._configure_homebase_sync_for_vault()
@@ -5752,6 +5863,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_git_mode_ui(self) -> None:
         enabled = self._is_git_mode_enabled()
+        self._configure_git_automatic_backup(enabled)
+        go_to_git_action = getattr(self, "_action_go_to_git", None)
+        if go_to_git_action is not None:
+            go_to_git_action.setVisible(enabled)
+            go_to_git_action.setEnabled(enabled)
         for action_name in (
             "_action_git_save_changes",
             "_action_git_save_version",
@@ -5764,6 +5880,8 @@ class MainWindow(QMainWindow):
                 action.setEnabled(enabled and not self._read_only)
         panel = getattr(self, "git_panel", None)
         if not enabled:
+            self._git_status_label.hide()
+            self._close_git_diff_editor()
             if panel is not None:
                 index = self.left_tab_widget.indexOf(panel)
                 if index >= 0:
@@ -5777,12 +5895,184 @@ class MainWindow(QMainWindow):
             panel.getUpdatesRequested.connect(self._git_pull)
             panel.saveChangesRequested.connect(self._git_save_changes)
             panel.publishRequested.connect(self._git_push)
-            panel.changeActivated.connect(self._show_git_working_diff)
+            panel.changePreviewRequested.connect(self._show_git_working_diff)
+            panel.resetRequested.connect(self._git_reset_files)
+            panel.statusChanged.connect(self._update_git_status_badge)
             self.git_panel = panel
             self.left_tab_widget.addTab(panel, "Git")
             self._refresh_left_minibar_tabs()
+            panel.refresh()
         elif panel is not None:
             panel.refresh()
+
+    def _handle_git_badge_click(self) -> None:
+        self._go_to_git()
+
+    def _go_to_git(self) -> None:
+        panel = getattr(self, "git_panel", None)
+        if panel is None:
+            return
+        panel.refresh()
+        index = self.left_tab_widget.indexOf(panel)
+        if index >= 0:
+            self._set_left_panel_collapsed(False)
+            self.left_tab_widget.setCurrentIndex(index)
+            self._enter_git_rail_layout()
+            panel.changes.setFocus(Qt.ShortcutFocusReason)
+
+    def _configure_git_automatic_backup(self, git_enabled: Optional[bool] = None) -> None:
+        enabled = self._is_git_mode_enabled() if git_enabled is None else bool(git_enabled)
+        enabled = enabled and not self._read_only and config.load_git_auto_backup_enabled(False)
+        if not enabled:
+            self.git_auto_backup_timer.stop()
+            self._git_auto_backup_interval_ms = 0
+            return
+        interval_ms = config.load_git_auto_backup_interval_minutes(15) * 60_000
+        if self._git_auto_backup_interval_ms != interval_ms or not self.git_auto_backup_timer.isActive():
+            self._git_auto_backup_interval_ms = interval_ms
+            self.git_auto_backup_timer.start(interval_ms)
+
+    def _run_git_automatic_backup(self, *, closing: bool = False) -> None:
+        if self._git_auto_backup_running or not self.vault_root:
+            return
+        if not self._is_git_mode_enabled() or not config.load_git_auto_backup_enabled(False):
+            return
+        if not closing:
+            idle_seconds = time.monotonic() - float(self._last_editor_activity or 0.0)
+            if idle_seconds < 60:
+                self.git_auto_backup_timer.start(max(1_000, int((60 - idle_seconds) * 1000)))
+                return
+        self._git_auto_backup_running = True
+        committed = False
+        published = False
+        try:
+            self._save_current_file(auto=True, reason="automatic Git backup")
+            committed = git_support.save_automatic_backup(self.vault_root)
+            now_text = datetime.now().astimezone().isoformat(timespec="minutes")
+            if committed:
+                config.save_git_backup_timestamp("last_backup", now_text)
+            if config.load_git_auto_publish_enabled(True) and git_support.has_head(self.vault_root):
+                published = git_support.publish_automatic_backup(
+                    self.vault_root,
+                    timeout=5 if closing else 15,
+                )
+                if published:
+                    config.save_git_backup_timestamp("last_publish", now_text)
+            self._git_auto_backup_attention = ""
+            if not closing and (committed or published):
+                message = "Automatic backup saved"
+                if published:
+                    message += " and published"
+                self.statusBar().showMessage(message + ".", 4000)
+        except git_support.GitError as exc:
+            self._git_auto_backup_attention = str(exc)
+            if not closing:
+                self.statusBar().showMessage(
+                    f"Automatic backup needs attention: {exc}", 7000
+                )
+        finally:
+            self._git_auto_backup_running = False
+            if not closing:
+                self._configure_git_automatic_backup()
+                if self.git_panel is not None:
+                    self.git_panel.refresh()
+
+    def _update_git_status_badge(self, state: object, details: object) -> None:
+        if not self._is_git_mode_enabled():
+            self._git_status_label.hide()
+            return
+        label = "GIT"
+        color = "#2e7d32"
+        tooltip_lines: list[str] = []
+        if state is None:
+            color = "#d32f2f"
+            label = "GIT !"
+            tooltip_lines = ["Git needs attention", str(details or "Unknown repository error")]
+        else:
+            entries = list(details) if isinstance(details, (list, tuple)) else []
+            active_diff = getattr(self, "_git_diff_editor", None)
+            active_diff_path = (
+                str(active_diff.property("gitDiffPath") or "")
+                if active_diff is not None
+                else ""
+            )
+            if active_diff_path and active_diff_path not in {
+                str(getattr(entry, "path", "")) for entry in entries
+            }:
+                self._close_git_diff_editor()
+            conflicts = [entry for entry in entries if getattr(entry, "conflicted", False)]
+            changed_count = len({str(getattr(entry, "path", "")) for entry in entries})
+            ahead = int(getattr(state, "ahead", 0) or 0)
+            behind = int(getattr(state, "behind", 0) or 0)
+            branch = str(getattr(state, "branch", "") or "No commits yet")
+            tooltip_lines.append(f"Branch: {branch}")
+            automatic_attention = str(getattr(self, "_git_auto_backup_attention", "") or "")
+            if conflicts or automatic_attention:
+                color = "#d32f2f"
+                label = "GIT !"
+                if conflicts:
+                    tooltip_lines.append(
+                        f"{len(conflicts)} conflict{'s' if len(conflicts) != 1 else ''} to resolve"
+                    )
+                if automatic_attention:
+                    tooltip_lines.append(f"Automatic backup: {automatic_attention}")
+            elif changed_count or ahead or behind:
+                color = "#edb400"
+                if changed_count:
+                    tooltip_lines.append(
+                        f"{changed_count} local file{'s' if changed_count != 1 else ''} changed"
+                    )
+                if ahead:
+                    tooltip_lines.append(f"{ahead} saved change{'s' if ahead != 1 else ''} to publish")
+                if behind:
+                    tooltip_lines.append(f"{behind} update{'s' if behind != 1 else ''} available")
+            else:
+                tooltip_lines.append("Local vault is clean")
+            if not bool(getattr(state, "remote_url", "")):
+                tooltip_lines.append("No remote repository configured")
+            if config.load_git_auto_backup_enabled(False):
+                tooltip_lines.append(
+                    "Last automatic backup: "
+                    + self._format_git_backup_age(
+                        config.load_git_backup_timestamp("last_backup")
+                    )
+                )
+                if config.load_git_auto_publish_enabled(True):
+                    tooltip_lines.append(
+                        "Last published: "
+                        + self._format_git_backup_age(
+                            config.load_git_backup_timestamp("last_publish")
+                        )
+                    )
+        self._git_status_label.setText(label)
+        self._git_status_label.setToolTip("\n".join(tooltip_lines))
+        self._git_status_label.setStyleSheet(
+            self._badge_base_style
+            + f" background-color: {color}; margin-right: 6px; color: #ffffff;"
+        )
+        self._git_status_label.show()
+
+    @staticmethod
+    def _format_git_backup_age(timestamp: Optional[str]) -> str:
+        if not timestamp:
+            return "Not yet"
+        try:
+            saved = datetime.fromisoformat(timestamp)
+            if saved.tzinfo is None:
+                saved = saved.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            seconds = max(0, int((datetime.now().astimezone() - saved).total_seconds()))
+        except (TypeError, ValueError):
+            return str(timestamp)
+        if seconds < 60:
+            return "Just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        days = hours // 24
+        return f"{days} day{'s' if days != 1 else ''} ago"
 
     def _flush_editor_before_git(self) -> bool:
         if self._read_only:
@@ -5805,6 +6095,93 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, title, str(exc))
         if self.git_panel is not None:
             self.git_panel.refresh()
+
+    def _git_reset_files(self, relative_paths: list[str]) -> None:
+        """Revert tracked changes and move selected untracked files to Trash."""
+        if not self.vault_root or not self._is_git_mode_enabled():
+            return
+        try:
+            entries = {entry.path: entry for entry in git_support.status(self.vault_root)}
+        except git_support.GitError as exc:
+            self._git_error("Could Not Reset Files", exc)
+            return
+        root = Path(self.vault_root).resolve()
+        new_files: list[Path] = []
+        tracked_paths: list[str] = []
+        seen: set[Path] = set()
+        for relative_path in relative_paths:
+            entry = entries.get(str(relative_path))
+            if entry is None:
+                continue
+            candidate = (root / entry.path).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if entry.index == "?" and candidate.is_file() and candidate not in seen:
+                seen.add(candidate)
+                new_files.append(candidate)
+            elif entry.index != "?":
+                tracked_paths.append(entry.path)
+        if not new_files and not tracked_paths:
+            self.statusBar().showMessage("The selected changes are no longer available.", 4000)
+            self._refresh_git_mode_ui()
+            return
+        count = len(new_files) + len(tracked_paths)
+        if tracked_paths and new_files:
+            prompt = (
+                f"Reset these {count} changes? Tracked files will return to the latest "
+                "saved version, and new files will move to Trash."
+            )
+        elif tracked_paths:
+            prompt = (
+                "Revert this file to the latest saved version?"
+                if count == 1
+                else f"Revert these {count} files to the latest saved version?"
+            )
+        else:
+            prompt = (
+                f"Move ‘{new_files[0].name}’ to Trash?"
+                if count == 1
+                else f"Move these {count} new files to Trash?"
+            )
+        if QMessageBox.question(
+            self,
+            "Reset Change" if count == 1 else "Reset Changes",
+            prompt + "\n\nThis cannot be undone from StillPoint.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        ) != QMessageBox.Yes:
+            return
+        if tracked_paths:
+            try:
+                git_support.restore_working_paths(self.vault_root, tracked_paths)
+            except git_support.GitError as exc:
+                self._git_error("Could Not Reset Files", exc)
+                return
+        moved = 0
+        for candidate in new_files:
+            result = QFile.moveToTrash(str(candidate))
+            succeeded = result[0] if isinstance(result, tuple) else bool(result)
+            if not succeeded:
+                QMessageBox.warning(
+                    self,
+                    "Could Not Reset Files",
+                    f"Moved {moved} of {len(new_files)} new files to Trash. Could not remove {candidate.name}.",
+                )
+                break
+            moved += 1
+        if moved or tracked_paths:
+            self._refresh_tree()
+            self.statusBar().showMessage(
+                f"Reset {len(tracked_paths) + moved} change{'s' if len(tracked_paths) + moved != 1 else ''}.",
+                4500,
+            )
+        self._refresh_git_mode_ui()
+
+    def _git_reset_new_files(self, relative_paths: list[str]) -> None:
+        """Compatibility entry point for the original new-file reset action."""
+        self._git_reset_files(relative_paths)
 
     def _git_save_changes(self) -> None:
         if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
@@ -5901,17 +6278,61 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Vault changes published.", 4500)
         self._refresh_git_mode_ui()
 
-    def _show_git_working_diff(self, relative_path: str) -> None:
+    def _close_git_diff_editor(self) -> None:
+        viewer = getattr(self, "_git_diff_editor", None)
+        if viewer is None or not hasattr(self, "_editor_view_stack"):
+            return
+        if self._editor_view_stack.currentWidget() is viewer:
+            target = self.reading_view if getattr(self, "_reading_view_enabled", False) else self.editor
+            self._editor_view_stack.setCurrentWidget(target)
+        self._editor_view_stack.removeWidget(viewer)
+        viewer.deleteLater()
+        self._git_diff_editor = None
+        self._update_toc_visibility(force=True)
+        self._position_toc_widget()
+
+    def _show_git_working_diff(
+        self,
+        relative_path: str,
+        focus_diff: bool = False,
+    ) -> None:
         if not self.vault_root:
             return
+        current_viewer = getattr(self, "_git_diff_editor", None)
+        if (
+            current_viewer is not None
+            and str(current_viewer.property("gitDiffPath") or "") == relative_path
+        ):
+            if focus_diff:
+                current_viewer.focus_diff()
+            return
         try:
-            if not git_support.has_head(self.vault_root):
-                diff = "This is a new file. Save changes once to establish the first comparison."
-            else:
-                diff = git_support.diff_from_revision(self.vault_root, "HEAD", relative_path)
+            entries = git_support.status(self.vault_root)
+            entry = next((item for item in entries if item.path == relative_path), None)
+            diff, binary = git_support.working_diff(self.vault_root, relative_path)
+            title_prefix = "New" if entry is not None and entry.index == "?" else "Changes"
         except git_support.GitError as exc:
             diff = str(exc)
-        GitDiffDialog(f"Changes · {relative_path}", diff, self).exec()
+            binary = False
+            title_prefix = "Changes"
+        if getattr(self, "_reading_view_enabled", False):
+            self._set_reading_view_enabled(False)
+        self._close_git_diff_editor()
+        viewer = GitDiffEditor(
+            f"{title_prefix} · {relative_path}",
+            diff,
+            self.editor_view_container,
+            binary=binary or "Binary files " in diff,
+        )
+        viewer.setProperty("gitDiffPath", relative_path)
+        self._git_diff_editor = viewer
+        self._editor_view_stack.addWidget(viewer)
+        self._editor_view_stack.setCurrentWidget(viewer)
+        self._update_toc_visibility()
+        self.find_bar.hide()
+        self.statusBar().showMessage(f"Viewing Git changes: {relative_path}", 3000)
+        if focus_diff:
+            QTimer.singleShot(0, viewer.focus_diff)
 
     def _show_git_history(self, relative_path: str) -> None:
         if not self.vault_root or not self._is_git_mode_enabled():
@@ -7274,9 +7695,6 @@ class MainWindow(QMainWindow):
 
     def _configure_homebase_sync_for_vault(self, *, recheck_remote: bool = False) -> None:
         self._shutdown_homebase_sync()
-        local_vault_root = Path(self.vault_root) if self.vault_root and not self._remote_mode else None
-        if local_vault_root is not None:
-            self._ensure_homebase_watcher(local_vault_root)
         if not self.vault_root or not self._is_homebase_mode_enabled():
             _log_homebase_client(
                 "sync config skipped: "
@@ -7285,6 +7703,9 @@ class MainWindow(QMainWindow):
             )
             self._update_homebase_sync_action_state()
             return
+        local_vault_root = Path(self.vault_root) if not self._remote_mode else None
+        if local_vault_root is not None:
+            self._ensure_homebase_watcher(local_vault_root)
         try:
             remote_url = config.load_homebase_remote_url().strip()
             passphrase = self._load_homebase_session_passphrase()
@@ -11661,11 +12082,8 @@ class MainWindow(QMainWindow):
                         homebase_profile = self._homebase_profile_for_path(directory)
                     # A retained Homebase profile is connection metadata, not
                     # permission to override an explicitly selected Git mode.
-                    try:
-                        if config.load_vault_remote_mode() == "git":
-                            homebase_profile = None
-                    except Exception:
-                        pass
+                    if self._vault_path_uses_git(self.vault_root or directory):
+                        homebase_profile = None
                 # Set active vault for both local and remote modes
                 # For remote vaults, we cache the index locally so we still need the DB connection
                 if self._remote_mode:
@@ -11932,14 +12350,22 @@ class MainWindow(QMainWindow):
             print(f"[Geometry] Saved main splitter state: {len(splitter_state)} chars")
         
         # Save editor splitter state (editor vs right panel)
-        editor_splitter_state = self.editor_split.saveState().toBase64().data().decode('ascii')
+        editor_splitter_state = (
+            getattr(self, "_git_right_rail_splitter_state", None)
+            or self.editor_split.saveState().toBase64().data().decode('ascii')
+        )
         config.save_editor_splitter_state(editor_splitter_state)
         if _DETAILED_LOGGING:
             print(f"[Geometry] Saved editor splitter state: {len(editor_splitter_state)} chars")
         # Save panel visibility
         try:
             left_visible = self._is_left_panel_expanded()
-            right_visible = self._is_right_panel_expanded()
+            remembered_right = getattr(self, "_git_right_rail_was_expanded", None)
+            right_visible = (
+                remembered_right
+                if remembered_right is not None
+                else self._is_right_panel_expanded()
+            )
             config.save_panel_visibility(left_visible, right_visible)
         except Exception:
             pass
@@ -13742,7 +14168,12 @@ class MainWindow(QMainWindow):
         """Persist current left/right panel visibility to config."""
         try:
             left_visible = self._is_left_panel_expanded()
-            right_visible = self._is_right_panel_expanded()
+            remembered_right = getattr(self, "_git_right_rail_was_expanded", None)
+            right_visible = (
+                remembered_right
+                if remembered_right is not None
+                else self._is_right_panel_expanded()
+            )
             config.save_panel_visibility(left_visible, right_visible)
         except Exception:
             pass
@@ -14394,6 +14825,7 @@ class MainWindow(QMainWindow):
     ) -> bool:
         if path:
             path = self._normalize_root_page_path(path)
+        self._close_git_diff_editor()
         self._clear_pending_tree_open()
         if not path or (path == self.current_path and not force):
             return
@@ -19867,11 +20299,41 @@ class MainWindow(QMainWindow):
         return labels
 
     def _sync_left_minibar_selection(self, index: int) -> None:
-        if not self._left_minibar_bar:
+        panel = getattr(self, "git_panel", None)
+        on_git_tab = panel is not None and self.left_tab_widget.widget(index) is panel
+        if on_git_tab:
+            self._enter_git_rail_layout()
+        else:
+            self._leave_git_rail_layout()
+        if self._left_minibar_bar:
+            blocker = QSignalBlocker(self._left_minibar_bar)
+            self._left_minibar_bar.setCurrentIndex(index)
+            del blocker
+        if panel is not None and not on_git_tab:
+            self._close_git_diff_editor()
+
+    def _enter_git_rail_layout(self) -> None:
+        if self._git_right_rail_was_expanded is not None:
             return
-        blocker = QSignalBlocker(self._left_minibar_bar)
-        self._left_minibar_bar.setCurrentIndex(index)
-        del blocker
+        self._git_right_rail_was_expanded = self._is_right_panel_expanded()
+        self._git_right_rail_splitter_state = (
+            self.editor_split.saveState().toBase64().data().decode("ascii")
+        )
+        self._set_right_panel_collapsed(True)
+
+    def _leave_git_rail_layout(self) -> None:
+        was_expanded = self._git_right_rail_was_expanded
+        if was_expanded is None:
+            return
+        splitter_state = self._git_right_rail_splitter_state
+        self._git_right_rail_was_expanded = None
+        self._git_right_rail_splitter_state = None
+        self._set_right_panel_collapsed(not was_expanded)
+        if was_expanded and splitter_state:
+            self.editor_split.restoreState(
+                QByteArray.fromBase64(splitter_state.encode("ascii"))
+            )
+            self._set_macos_splitter_handle_widths()
 
     def _sync_right_minibar_selection(self, index: int) -> None:
         if not self._right_minibar_bar:
@@ -24467,6 +24929,14 @@ class MainWindow(QMainWindow):
         """Show/hide/refresh the ToC based on headings and scrollability."""
         if not self.toc_widget:
             return
+        git_diff = getattr(self, "_git_diff_editor", None)
+        if (
+            git_diff is not None
+            and hasattr(self, "_editor_view_stack")
+            and self._editor_view_stack.currentWidget() is git_diff
+        ):
+            self.toc_widget.hide()
+            return
         # Check if TOC widget is enabled in preferences
         if not config.load_toc_widget_enabled():
             self.toc_widget.hide()
@@ -25533,6 +26003,8 @@ class MainWindow(QMainWindow):
                 action.setEnabled(not self._read_only)
         self._update_dirty_indicator()
         self._update_window_title()
+        if hasattr(self, "git_auto_backup_timer"):
+            self._configure_git_automatic_backup()
 
     def _is_tree_navigation_activity(self, obj: object, event_type: QEvent.Type) -> bool:
         tree_view = getattr(self, "tree_view", None)
@@ -25822,6 +26294,7 @@ class MainWindow(QMainWindow):
                 pass
         # Stop any pending timers
         self.autosave_timer.stop()
+        self.git_auto_backup_timer.stop()
         self._search_sync.stop()
         self._link_update_poll_timer.stop()
         self.geometry_save_timer.stop()
@@ -25852,6 +26325,12 @@ class MainWindow(QMainWindow):
         
         # Save current file and geometry
         self._save_current_file(auto=True, reason="window close")
+        if (
+            self._is_git_mode_enabled()
+            and config.load_git_auto_backup_enabled(False)
+            and config.load_git_backup_on_close(True)
+        ):
+            self._run_git_automatic_backup(closing=True)
         self._save_geometry()
         self._persist_recent_history()
         try:

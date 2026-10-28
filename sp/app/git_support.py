@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import platform
 import re
 import shutil
@@ -13,6 +14,12 @@ from typing import Iterable, Optional
 
 
 VERSION_TAG_PREFIX = "stillpoint/version/"
+AUTOMATIC_BACKUP_PREFIX = "Automatic backup · "
+DEFAULT_GITIGNORE_ENTRIES = (
+    ".stillpoint/",
+    ".codex/",
+    ".mcp.json",
+)
 
 
 class GitError(RuntimeError):
@@ -132,9 +139,9 @@ def require_exact_repository(root: str | Path) -> Path:
 
 
 def ensure_metadata_ignored(root: str | Path) -> None:
+    """Ignore and stop tracking StillPoint/Codex device-local metadata."""
     vault_root = Path(root).expanduser().resolve()
     ignore_path = vault_root / ".gitignore"
-    entry = ".stillpoint/"
     try:
         current = ignore_path.read_text(encoding="utf-8") if ignore_path.exists() else ""
         normalized = {
@@ -142,19 +149,38 @@ def ensure_metadata_ignored(root: str | Path) -> None:
             for line in current.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-        if entry.rstrip("/") not in normalized:
+        missing = [
+            entry
+            for entry in DEFAULT_GITIGNORE_ENTRIES
+            if entry.rstrip("/") not in normalized
+        ]
+        if missing:
             separator = "" if not current or current.endswith(("\n", "\r")) else "\n"
-            ignore_path.write_text(current + separator + entry + "\n", encoding="utf-8")
+            block = "\n".join(missing) + "\n"
+            ignore_path.write_text(current + separator + block, encoding="utf-8")
     except OSError as exc:
         raise GitError(f"Could not update .gitignore: {exc}") from exc
-    # Existing repositories may already track StillPoint's SQLite database or
-    # other device-local state. Stop tracking it without deleting local files.
+    # Existing repositories may already track device-local databases, agent
+    # settings, or MCP configuration. Stop tracking them without deleting the
+    # local files. This is especially important when converting Homebase to Git.
     if repository_root(vault_root) == vault_root:
-        tracked = _run(vault_root, ["ls-files", "-z", "--", ".stillpoint"], check=False)
+        protected_paths = [".stillpoint", ".codex", ".mcp.json"]
+        tracked = _run(
+            vault_root,
+            ["ls-files", "-z", "--", *protected_paths],
+            check=False,
+        )
         if tracked.returncode == 0 and tracked.stdout:
             _run(
                 vault_root,
-                ["rm", "-r", "--cached", "--ignore-unmatch", "--", ".stillpoint"],
+                [
+                    "rm",
+                    "-r",
+                    "--cached",
+                    "--ignore-unmatch",
+                    "--",
+                    *protected_paths,
+                ],
             )
 
 
@@ -308,6 +334,62 @@ def save_changes(root: str | Path, message: str) -> bool:
     return True
 
 
+def save_automatic_backup(root: str | Path, *, now: Optional[datetime] = None) -> bool:
+    """Commit outstanding vault changes as an identifiable automatic backup."""
+    vault_root = require_exact_repository(root)
+    entries = status(vault_root)
+    if any(entry.conflicted for entry in entries):
+        raise GitError("Resolve Git conflicts before automatic backups can continue.")
+    ensure_metadata_ignored(vault_root)
+    _run(vault_root, ["add", "--all"])
+    staged = _run(vault_root, ["diff", "--cached", "--quiet"], check=False)
+    if staged.returncode == 0:
+        return False
+    if staged.returncode != 1:
+        raise GitError("Could not inspect changes for automatic backup.")
+    timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M")
+    _run(
+        vault_root,
+        [
+            "commit",
+            "-m",
+            f"{AUTOMATIC_BACKUP_PREFIX}{timestamp}",
+            "-m",
+            "StillPoint-Backup: true",
+        ],
+        timeout=120,
+    )
+    return True
+
+
+def publish_automatic_backup(root: str | Path, *, timeout: int = 15) -> bool:
+    """Publish backups only when doing so requires no pull or merge."""
+    vault_root = require_exact_repository(root)
+    state = repository_state(vault_root)
+    if not state.remote_url:
+        raise GitError("No remote repository is configured; the backup remains local.")
+    remote_name = state.remote_name or "origin"
+    if state.has_upstream:
+        _run(vault_root, ["fetch", remote_name], timeout=timeout)
+        ahead, behind, _has_upstream = _ahead_behind(vault_root)
+        if behind:
+            raise GitError(
+                "Remote updates are available. Use Get Git Updates before automatic backups can be published."
+            )
+        if not ahead:
+            return False
+        _run(vault_root, ["push", remote_name], timeout=timeout)
+        return True
+    if not state.branch:
+        raise GitError("The current repository is not on a named branch.")
+    _run(
+        vault_root,
+        ["push", "--set-upstream", remote_name, state.branch],
+        timeout=timeout,
+    )
+    return True
+
+
 def _slug(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-.")
     return cleaned[:60] or "version"
@@ -371,7 +453,11 @@ def push(root: str | Path, *, include_versions: bool = False) -> None:
 def pull(root: str | Path) -> None:
     vault_root = require_exact_repository(root)
     if status(vault_root):
-        raise GitError("Save or discard the current changes before getting updates.")
+        raise GitError(
+            "This vault has local changes. Use Save Changes to record them, or reset "
+            "them, before getting updates. Git cannot combine remote updates with "
+            "unsaved local changes."
+        )
     state = repository_state(vault_root)
     if not state.remote_url:
         raise GitError("No remote repository is configured.")
@@ -441,6 +527,7 @@ def history(
     relative_path: str,
     *,
     versions_only: bool = True,
+    include_automatic_backups: bool = False,
     limit: int = 200,
 ) -> list[GitHistoryEntry]:
     vault_root = require_exact_repository(root)
@@ -481,14 +568,16 @@ def history(
                     )
                 )
         else:
-            commits.append(
-                GitHistoryEntry(
-                    commit,
-                    fields[offset + 1].strip(),
-                    fields[offset + 2].strip(),
-                    fields[offset + 3].strip(),
+            subject = fields[offset + 3].strip()
+            if include_automatic_backups or not subject.startswith(AUTOMATIC_BACKUP_PREFIX):
+                commits.append(
+                    GitHistoryEntry(
+                        commit,
+                        fields[offset + 1].strip(),
+                        fields[offset + 2].strip(),
+                        subject,
+                    )
                 )
-            )
     return commits
 
 
@@ -503,6 +592,85 @@ def diff_from_revision(root: str | Path, revision: str, relative_path: str) -> s
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise GitError(detail or "Could not compare this version.")
     return result.stdout.decode("utf-8", errors="replace")
+
+
+def working_diff(root: str | Path, relative_path: str) -> tuple[str, bool]:
+    """Return a readable HEAD-to-working diff, including untracked new files."""
+    vault_root = require_exact_repository(root)
+    cleaned_path = str(relative_path or "").replace("\\", "/").strip("/")
+    entry = next((item for item in status(vault_root) if item.path == cleaned_path), None)
+    if entry is None:
+        return "This file has no unsaved Git changes.", False
+    if entry.index != "?":
+        if not has_head(vault_root):
+            revision = "--root"
+        else:
+            revision = "HEAD"
+        if revision == "HEAD":
+            rendered = diff_from_revision(vault_root, revision, cleaned_path)
+            if "Binary files " in rendered and " differ" in rendered:
+                deleted = "D" in {entry.index, entry.worktree}
+                description = "Deleted binary file" if deleted else "Binary file changed"
+                return f"{description}: {cleaned_path}\n", True
+            return rendered, False
+        # A repository without HEAD contains only new content. Handle it like
+        # an untracked file instead of asking Git to diff an invalid revision.
+
+    path = _safe_destination(vault_root, cleaned_path)
+    if not path.is_file():
+        return f"New file: {cleaned_path}\n", False
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise GitError(f"Could not read new file '{cleaned_path}': {exc}") from exc
+    if b"\0" in data:
+        return f"New binary file: {cleaned_path} ({len(data)} bytes)\n", True
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"New binary file: {cleaned_path} ({len(data)} bytes)\n", True
+    lines = text.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        [],
+        lines,
+        fromfile="/dev/null",
+        tofile=f"b/{cleaned_path}",
+        lineterm="",
+    )
+    rendered = "\n".join(diff)
+    return rendered or f"New empty file: {cleaned_path}\n", False
+
+
+def restore_working_paths(root: str | Path, relative_paths: list[str]) -> list[str]:
+    """Restore tracked working-copy paths to HEAD without touching untracked files."""
+    vault_root = require_exact_repository(root)
+    if not has_head(vault_root):
+        raise GitError("This vault has no saved version to restore.")
+    entries = {entry.path: entry for entry in status(vault_root)}
+    paths: list[str] = []
+    for value in relative_paths:
+        cleaned = str(value or "").replace("\\", "/").strip("/")
+        entry = entries.get(cleaned)
+        if entry is None or entry.index == "?":
+            continue
+        _safe_destination(vault_root, cleaned)
+        paths.append(cleaned)
+        if entry.original_path:
+            original = str(entry.original_path).replace("\\", "/").strip("/")
+            _safe_destination(vault_root, original)
+            paths.append(original)
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        return []
+    result = _run(
+        vault_root,
+        ["restore", "--source=HEAD", "--staged", "--worktree", "--", *paths],
+        check=False,
+    )
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise GitError(detail or "Could not restore the selected files.")
+    return paths
 
 
 def _safe_destination(root: Path, relative_path: str) -> Path:
