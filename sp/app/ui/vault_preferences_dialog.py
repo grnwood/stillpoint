@@ -561,7 +561,16 @@ class VaultPreferencesDialog(QDialog):
         config.save_vault_feature_remember_cursor_position_override(values["remember_cursor_position"])
         config.save_vault_enable_ai_chats_override(values["ai_chats"])
         config.save_vault_force_read_only(self.force_read_only_checkbox.isChecked())
-        config.transition_active_vault_remote_mode(selected_mode)
+        try:
+            config.transition_active_vault_remote_mode(selected_mode)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Could Not Change Storage Mode",
+                "StillPoint could not safely migrate this vault's local state. "
+                f"No new storage mode was activated.\n\n{exc}",
+            )
+            return
         config.save_git_publish_versions(self.git_publish_versions_checkbox.isChecked())
         config.save_git_auto_backup_enabled(self.git_auto_backup_checkbox.isChecked())
         config.save_git_auto_backup_interval_minutes(

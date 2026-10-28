@@ -250,18 +250,92 @@ def vault_settings_db_path(vault_root: str | Path) -> Path:
 
 
 def _move_vault_state(source: Path, destination: Path, *, excluded: set[str]) -> None:
-    """Move runtime state without discarding an existing destination entry."""
+    """Move runtime state without discarding an existing destination entry.
+
+    SQLite files need special handling on Windows because another StillPoint
+    thread may still hold a shared handle after the UI connection is closed.
+    SQLite's online backup produces a consistent destination while the legacy
+    source can safely remain in place until the process releases it.
+    """
     destination.mkdir(parents=True, exist_ok=True)
     if not source.exists():
         return
     timestamp = int(time.time())
-    for entry in source.iterdir():
+    entries = sorted(source.iterdir(), key=lambda path: (path.suffix.lower() != ".db", path.name))
+    for entry in entries:
         if entry.name in excluded:
+            continue
+        if entry.name.endswith((".db-wal", ".db-shm")):
+            try:
+                entry.unlink()
+            except OSError:
+                pass
             continue
         target = destination / entry.name
         if target.exists():
-            target = destination / f"{entry.name}.migration-{timestamp}-{uuid.uuid4().hex[:6]}"
+            backup = destination / f"{entry.name}.migration-{timestamp}-{uuid.uuid4().hex[:6]}"
+            target.replace(backup)
+        if entry.is_file() and entry.suffix.lower() == ".db":
+            for suffix in ("-wal", "-shm"):
+                sidecar = destination / f"{entry.name}{suffix}"
+                if sidecar.exists():
+                    sidecar.replace(
+                        destination
+                        / f"{sidecar.name}.migration-{timestamp}-{uuid.uuid4().hex[:6]}"
+                    )
+            source_conn: Optional[sqlite3.Connection] = None
+            target_conn: Optional[sqlite3.Connection] = None
+            try:
+                source_conn = sqlite3.connect(entry, check_same_thread=False)
+                source_conn.execute("PRAGMA busy_timeout = 5000")
+                target_conn = sqlite3.connect(target, check_same_thread=False)
+                source_conn.backup(target_conn)
+                target_conn.commit()
+            finally:
+                if target_conn is not None:
+                    target_conn.close()
+                if source_conn is not None:
+                    source_conn.close()
+            try:
+                entry.unlink()
+            except OSError:
+                # A frozen source DB is harmless after cloud.json redirects all
+                # future StillPoint access to the device-local state directory.
+                pass
+            continue
         shutil.move(str(entry), str(target))
+
+
+def _copy_vault_state_for_cloud(source: Path, destination: Path) -> None:
+    """Create a complete device-local snapshot before activating Cloud Folder.
+
+    The synced source is intentionally left untouched. Once cloud.json exists it
+    becomes a frozen legacy snapshot and is no longer opened or written by
+    StillPoint. This avoids partial migrations and Windows/OneDrive lock races.
+    """
+    destination.mkdir(parents=True, exist_ok=False)
+    for entry in sorted(source.iterdir(), key=lambda path: (path.suffix.lower() != ".db", path.name)):
+        if entry.name == CLOUD_VAULT_METADATA_FILENAME or entry.name.endswith((".db-wal", ".db-shm")):
+            continue
+        target = destination / entry.name
+        if entry.is_file() and entry.suffix.lower() == ".db":
+            source_conn: Optional[sqlite3.Connection] = None
+            target_conn: Optional[sqlite3.Connection] = None
+            try:
+                source_conn = sqlite3.connect(entry, check_same_thread=False)
+                source_conn.execute("PRAGMA busy_timeout = 5000")
+                target_conn = sqlite3.connect(target, check_same_thread=False)
+                source_conn.backup(target_conn)
+                target_conn.commit()
+            finally:
+                if target_conn is not None:
+                    target_conn.close()
+                if source_conn is not None:
+                    source_conn.close()
+        elif entry.is_dir() and not entry.is_symlink():
+            shutil.copytree(entry, target)
+        else:
+            shutil.copy2(entry, target)
 
 
 def transition_active_vault_remote_mode(mode: str) -> None:
@@ -289,7 +363,7 @@ def transition_active_vault_remote_mode(mode: str) -> None:
             "keep_offline": True,
         }
         local_state = _cloud_vault_state_root() / marker["vault_id"]
-        _move_vault_state(synced_state, local_state, excluded={CLOUD_VAULT_METADATA_FILENAME})
+        _copy_vault_state_for_cloud(synced_state, local_state)
         synced_state.mkdir(parents=True, exist_ok=True)
         cloud_vault_metadata_path(root).write_text(
             json.dumps(marker, indent=2, sort_keys=True) + "\n",

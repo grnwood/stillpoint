@@ -211,6 +211,38 @@ def test_vault_preferences_cloud_mode_is_exclusive_and_persists(
         config.set_active_vault(None)
 
 
+def test_vault_preferences_reports_cloud_migration_failure_without_accepting(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    from sp.app import config
+    from sp.app.ui.vault_preferences_dialog import VaultPreferencesDialog
+
+    config.set_active_vault(str(tmp_path))
+    critical_messages: list[str] = []
+    try:
+        dialog = VaultPreferencesDialog()
+        qtbot.addWidget(dialog)
+        dialog.cloud_mode_radio.setChecked(True)
+        monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Yes)
+        monkeypatch.setattr(
+            QMessageBox,
+            "critical",
+            lambda _parent, _title, message, *args, **kwargs: critical_messages.append(message),
+        )
+        monkeypatch.setattr(
+            config,
+            "transition_active_vault_remote_mode",
+            lambda _mode: (_ for _ in ()).throw(PermissionError("locked")),
+        )
+
+        dialog.accept()
+
+        assert dialog.result() == 0
+        assert critical_messages and "locked" in critical_messages[0]
+    finally:
+        config.set_active_vault(None)
+
+
 def test_vault_preferences_suggests_existing_git_remote(qtbot, tmp_path) -> None:
     from sp.app import config, git_support
     from sp.app.ui.vault_preferences_dialog import VaultPreferencesDialog
