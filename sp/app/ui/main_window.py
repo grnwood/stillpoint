@@ -5861,6 +5861,11 @@ class MainWindow(QMainWindow):
                     str((retained_profile or {}).get("name") or "").strip() or None,
                     stale_homebase_id=str((retained_profile or {}).get("id") or "").strip(),
                 )
+            if (
+                previous_version_mode != selected_version_mode
+                and "cloud" in {previous_version_mode, selected_version_mode}
+            ):
+                self._relocate_vault_lock_after_storage_mode_change()
             self._apply_feature_overrides()
             self._apply_vault_read_only_pref()
             self._configure_homebase_sync_for_vault()
@@ -11409,7 +11414,19 @@ class MainWindow(QMainWindow):
             pid = existing.get("pid")
             host = existing.get("host")
             active = False
-            if isinstance(pid, int) and isinstance(host, str):
+            expected_scope = ""
+            existing_scope = str(existing.get("state_dir") or "").strip()
+            try:
+                expected_scope = os.path.normcase(str(lock_path.parent.resolve()))
+            except Exception:
+                expected_scope = os.path.normcase(str(lock_path.parent))
+            is_cloud_folder = config.load_cloud_vault_metadata(root) is not None
+            scope_matches = bool(existing_scope) and os.path.normcase(existing_scope) == expected_scope
+            if is_cloud_folder and not scope_matches:
+                # Cloud conversion in early builds copied the live vault lock
+                # into device-local state. It is not ownership of this state dir.
+                active = False
+            elif isinstance(pid, int) and isinstance(host, str):
                 active = self._is_pid_active(pid, host)
             owner_text = f"{host or '?'} (pid {pid})"
             if active:
@@ -11456,7 +11473,16 @@ class MainWindow(QMainWindow):
             self._vault_lock_owner = None
             self._apply_read_only_state()
             return True
-        owner = {"pid": os.getpid(), "host": socket.gethostname(), "ts": time.time()}
+        try:
+            state_dir = str(lock_path.parent.resolve())
+        except Exception:
+            state_dir = str(lock_path.parent)
+        owner = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "ts": time.time(),
+            "state_dir": state_dir,
+        }
         try:
             lock_path.write_text(json.dumps(owner), encoding="utf-8")
             self._vault_lock_path = lock_path
@@ -11466,6 +11492,22 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Warning: could not write vault lock.", 5000)
         self._apply_read_only_state()
         return True
+
+    def _relocate_vault_lock_after_storage_mode_change(self) -> None:
+        """Move this window's lock to the newly selected state location."""
+        if self._remote_mode or not self.vault_root:
+            return
+        self._release_vault_lock(reset_read_only=False)
+        try:
+            prefer_read_only = config.load_vault_force_read_only()
+        except Exception:
+            prefer_read_only = False
+        if prefer_read_only:
+            self._read_only = True
+            self._apply_read_only_state()
+            return
+        self._read_only = False
+        self._check_and_acquire_vault_lock(self.vault_root)
 
     def _release_vault_lock(self, reset_read_only: bool = True) -> None:
         """Release the lock if we own it."""

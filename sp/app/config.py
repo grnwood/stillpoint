@@ -315,7 +315,7 @@ def _copy_vault_state_for_cloud(source: Path, destination: Path) -> None:
     """
     destination.mkdir(parents=True, exist_ok=False)
     for entry in sorted(source.iterdir(), key=lambda path: (path.suffix.lower() != ".db", path.name)):
-        if entry.name == CLOUD_VAULT_METADATA_FILENAME or entry.name.endswith((".db-wal", ".db-shm")):
+        if entry.name in {CLOUD_VAULT_METADATA_FILENAME, "stillpoint.lock"} or entry.name.endswith((".db-wal", ".db-shm")):
             continue
         target = destination / entry.name
         if entry.is_file() and entry.suffix.lower() == ".db":
@@ -372,7 +372,7 @@ def transition_active_vault_remote_mode(mode: str) -> None:
     else:
         local_state = vault_state_dir(root)
         synced_state.mkdir(parents=True, exist_ok=True)
-        _move_vault_state(local_state, synced_state, excluded=set())
+        _move_vault_state(local_state, synced_state, excluded={"stillpoint.lock"})
         marker_path = cloud_vault_metadata_path(root)
         if marker_path.exists():
             marker_path.replace(synced_state / f"cloud-disabled-{int(time.time())}.json")

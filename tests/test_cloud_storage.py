@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import socket
 import sqlite3
 
 import pytest
@@ -21,6 +24,11 @@ def test_cloud_mode_redirects_runtime_state_out_of_synced_vault_and_back(
     try:
         original_db = vault / ".stillpoint" / "settings.db"
         assert original_db.is_file()
+        legacy_lock = vault / ".stillpoint" / "stillpoint.lock"
+        legacy_lock.write_text(
+            json.dumps({"pid": os.getpid(), "host": "conversion-host"}),
+            encoding="utf-8",
+        )
         config.save_vault_remote_mode("none")
 
         config.transition_active_vault_remote_mode("cloud")
@@ -31,6 +39,7 @@ def test_cloud_mode_redirects_runtime_state_out_of_synced_vault_and_back(
         assert config.load_vault_remote_mode() == "cloud"
         assert config.vault_state_dir(vault) == local_state
         assert (local_state / "settings.db").is_file()
+        assert not (local_state / "stillpoint.lock").exists()
         assert original_db.is_file()  # Frozen legacy snapshot; no longer opened.
         with sqlite3.connect(local_state / "settings.db") as connection:
             assert connection.execute(
@@ -112,3 +121,30 @@ def test_file_write_content_hash_detects_cloud_change_even_without_mtime_check(
     assert raised.value.status_code == 409
     assert raised.value.detail["current_content"] == "# Page\n\nchanged elsewhere\n"
     assert raised.value.detail["current_content_sha256"] != loaded["content_sha256"]
+
+
+def test_cloud_vault_discards_legacy_copied_lock_and_writes_scoped_lock(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    vault = tmp_path / "OneDrive" / "Notes"
+    vault.mkdir(parents=True)
+    monkeypatch.setenv("SP_CLOUD_VAULT_STATE_ROOT", str(tmp_path / "device-state"))
+    config.set_active_vault(str(vault))
+    try:
+        config.transition_active_vault_remote_mode("cloud")
+        lock_path = config.vault_state_dir(vault) / "stillpoint.lock"
+        lock_path.write_text(
+            json.dumps({"pid": os.getpid(), "host": socket.gethostname()}),
+            encoding="utf-8",
+        )
+        main_window.vault_root = str(vault)
+
+        assert main_window._check_and_acquire_vault_lock(str(vault)) is True
+
+        owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert owner["pid"] == os.getpid()
+        assert owner["state_dir"] == str(lock_path.parent.resolve())
+        assert main_window._read_only is False
+    finally:
+        main_window._release_vault_lock()
+        config.set_active_vault(None)
