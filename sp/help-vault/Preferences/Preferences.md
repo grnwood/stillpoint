@@ -135,7 +135,14 @@ Available vault-specific settings:
 
 ### Versioning & Sync
 
-Each local vault can use one versioning/sync mode: **Local only**, **Homebase**, or **Git**. Git and Homebase cannot be active for the same vault.
+Each vault uses one versioning/sync mode at a time: **Local only**, **Cloud Folder**, **Git**, or **Homebase**. This lets every vault choose its own balance of simplicity, history, collaboration, privacy, and control.
+
+- **Local only** keeps the vault on this device with no sharing service.
+- **Cloud Folder** lets OneDrive or Google Drive synchronize pages and attachments while StillPoint keeps databases, indexes, locks, and undo state safely on each device. Mark the whole vault as available offline and do not open it on two computers at once.
+- **Git** adds inspectable history, named versions, deliberate get/save/publish actions, and optional automatic backups.
+- **Homebase** adds StillPoint-native encrypted object sync, accounts and roles, conflict review, and Local Recovery through a Homebase server.
+
+See [:Remote-Vaults|Sync & Sharing] for a friendly side-by-side guide, full pros and cons, and setup checklists.
 
 Git setup can initialize the current vault as a repository, configure a remote, and test the connection. StillPoint uses your existing Git, SSH, and credential-manager configuration and does not store Git passwords or access tokens. Ordinary Git remotes receive the vault's files as plaintext rather than Homebase-encrypted objects. Setup automatically ignores and stops tracking device-local `.stillpoint/`, `.codex/`, and `.mcp.json` data without deleting those local files.
 
@@ -147,7 +154,7 @@ The **GIT** badge at the bottom right is green when the local vault is clean, ye
 
 Right-click a vault page or folder and choose **Versions…** to browse named versions or the full change history. Restoring writes the selected historical content into the working vault as a new unsaved change. Restoring a folder never deletes files created after that version.
 
-Switching modes does not delete Homebase data or the local `.git` repository. StillPoint warns before a mode change and reports pending Git work when moving to Homebase.
+Switching modes does not delete Homebase server data or the local `.git` repository. StillPoint warns before a mode change, reports pending Git work when moving to Homebase, and migrates cloud-unsafe runtime state when entering or leaving Cloud Folder mode. Git and Homebase cannot be active for the same vault.
 
 Available three-state overrides:
 - **Tasks**: Overrides whether task features are enabled in this vault.

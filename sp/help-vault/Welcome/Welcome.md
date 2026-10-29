@@ -58,6 +58,7 @@ You can enable or disable most panels in Preferences.
 - [:Diagramming|Diagramming] - PlantUML and Mermaid diagramming.
 - [:AI|AI] - Optional AI features and workflows.
 - [:Web-Client|Web Client] - Access your vault in a browser.
+- [:Remote-Vaults|Sync & Sharing] - Choose Cloud Folder, Git, or Homebase and understand the tradeoffs.
 - [:Shortcuts|Shortcuts] - Speed up common actions.
 - [:Preferences|Preferences] - Global and vault-specific settings.
 - [:Troubleshooting|Troubleshooting] - Fix common issues.

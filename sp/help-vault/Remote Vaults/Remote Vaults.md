@@ -1,114 +1,183 @@
-# Homebase Vaults
+# Sync & Sharing
 
 ![paste_image_001](./paste_image_001.png){width=600}
 
-StillPoint is now a local-first system:
-- **Local Vaults** live directly on your filesystem.
-- **Homebase Vaults** add sync on top of that local filesystem model.
+Your vault is yours: a real folder of Markdown pages and attachments that works locally first. When you want that vault on another computer—or want to collaborate—StillPoint gives you three strong ways to take it further:
 
-Homebase is the only remote-capable vault model. Each device keeps a real local copy of the vault, and Homebase synchronizes those copies through the server.
+- **Cloud Folder** for familiar, low-friction sync through OneDrive or Google Drive.
+- **Git** for precise history, deliberate publishing, and technical collaboration.
+- **Homebase** for StillPoint-native, encrypted, offline-first sync that you control.
 
-## What Homebase Is
+There is no single “correct” choice. Pick the superpower that matches the vault. You can keep a private journal local, put family notes in a Cloud Folder, run a project vault through Git, and host a sensitive knowledge base on Homebase. StillPoint has you covered.
 
-Homebase Vaults are local-first with distributed sync.
-- Each device keeps a local working copy.
-- Devices sync by pushing/pulling through the Homebase server.
-- The model is **Git-like**: local work first, then synchronize.
-- Your vault is still a normal folder full of Markdown files and attachments.
+## Pick Your Mode
 
-## Sync Model
-- Push/pull with **eventual consistency**.
-- Works offline, then syncs when connected.
-- Conflict-aware workflow when concurrent edits happen.
-- Filesystem changes made by StillPoint, your editor, scripts, or CLI tools all flow into the same local vault and can then sync through Homebase.
+| Mode | Best for | Biggest strengths | Know before you choose |
+| --- | --- | --- | --- |
+| **Cloud Folder** | Personal vaults across a few computers | Easiest setup; uses OneDrive or Google Drive you already know; automatic file sync | Keep the entire vault available offline and do not open it on two computers at once |
+| **Git** | Developers, teams, auditable projects, and publishing workflows | Exact history; branches and hosting options; reviewable changes; deliberate pull/save/publish flow | Requires Git comfort; normal Git remotes receive plaintext vault files; conflicts need an explicit decision |
+| **Homebase** | Private multi-device vaults, self-hosting, and managed team access | Encrypted server objects; local-first/offline work; user roles; conflict review and local recovery | Requires a Homebase server, account, and encryption passphrase management |
 
-## User Management
-Homebase supports account auth and user management APIs.
-- Roles and write permissions are enforced by server auth.
-- Admin users can manage users.
-- Normal read users can authenticate and view, but writes are blocked.
+**Want the shortest answer?** Choose Cloud Folder for convenience, Git for history and collaboration, or Homebase for private StillPoint-native sync and control.
 
-## When To Choose Homebase
-- You need multi-device continuity with offline-first behavior.
-- You want a distributed sync mental model similar to Git.
-- You prefer local-first work with periodic synchronization.
-- You want the server to be outside your plaintext trust boundary.
-- You want to use local editors, coding agents, or TUIs against the vault files themselves.
+## The Foundation: Local First
 
-## Security Model
-- Server stores encrypted blobs and sync metadata.
-- Encryption passphrase stays local on client devices.
-- Auth tokens control access, but tokens are not your encryption key.
+Every mode starts with the same durable idea: your working vault is a normal folder on your computer.
 
-## Passphrase Storage
-- By default, StillPoint does not store your Homebase encryption passphrase on disk.
-- During Homebase setup or `Reset Encryption Passphrase`, you can opt into `Store passphrase on this device`.
-- Only enable that option if you trust the device. The passphrase is then stored in the vault's local StillPoint config.
-- Passwords are still not stored. You authenticate once, then StillPoint reuses Homebase access and refresh tokens.
-- StillPoint also writes non-secret Homebase recovery metadata into the vault under `.stillpoint/homebase.json` so re-adding the vault later can prefill the server URL, SSL mode, vault ID, and vault name.
+- Pages remain readable Markdown files.
+- Attachments live beside the pages that use them.
+- StillPoint, editors, scripts, terminals, TUIs, and coding agents can work against the same files.
+- You can work without a network connection.
+- Local-only remains available when a vault does not need to travel anywhere.
 
-## Local Recovery
-- Homebase saves the previous local bytes before a pull overwrites or deletes a file. Recovery data stays on this device outside the vault, under `~/.stillpoint/homebase-recovery/`.
-- Open **Local Recovery** from the Homebase sync summary or the Remote Vault menu to inspect changes, restore selected files or an entire pull, export prior copies, and pin a recovery point.
-- Choose **Open Local Backup Folder** from the Homebase sync summary, Homebase menu, or Local Recovery window to inspect this device's recovery storage in the file manager.
-- A restore becomes a new local edit and syncs normally. It does not move the server checkpoint backward.
-- Large or unusually destructive pulls pause for review. If a pull is interrupted, Homebase pauses syncing until you review the recovery event and choose to continue.
-- Local recovery is enabled by default. Its storage quota and retention settings are in the Homebase sync summary.
+Only one versioning/sync mode is active for a vault at a time. Choose it in **Preferences → Vault → Versioning & Sync**. Converting a vault to Homebase starts from **Vault → Convert This Vault to Homebase**.
 
-Homebase never opens Local Recovery over the main window during startup. When review is needed, the Homebase status badge turns amber. Click the badge to review protected changes or an interrupted pull.
+## Cloud Folder: Familiar and Effortless
 
-## Sync Problems
+Cloud Folder mode is the quickest path to “my vault is on my other computer.” Place the vault in a OneDrive or Google Drive folder and let the provider synchronize its pages and attachments.
 
-- A red Homebase badge means an active authentication, connection, conflict, or per-file sync problem needs attention.
-- Click the badge to open the relevant review screen. **Retry Failed Files** retries an incomplete pull before local uploads continue.
-- A file problem that predates a later successful sync is shown as resolved history and does not block uploads. Resolved history can be dismissed.
-- Raw operating-system errors, object IDs, checkpoints, and device IDs are available under technical details or tooltips.
-- **Delete selected path from shared Homebase** is an advanced destructive action. It is available only for an unrepresentable path that is absent locally.
+StillPoint makes this safer than casually syncing a live application folder: databases, indexes, locks, and undo state stay on each device. The cloud provider sees the portable content, not StillPoint's active local runtime state.
 
-## Choosing an Authoritative Copy
+### Why you will love it
 
-- **Reset Sync State (Server Authoritative)** replaces matching local content with the current Homebase snapshot and protects affected local files through Local Recovery.
-- **Publish This Device as Authoritative** does the opposite: it lists every file that will be added, replaced, or removed; shows text contents or a Homebase-to-local diff where practical; requires the vault name as confirmation; and replaces the shared Homebase snapshot with this device's current files.
-- An authoritative local publish aborts if the Homebase head changes after the preview. Use it only when you deliberately want local files—including local deletions—to win.
+- Uses a cloud account and desktop sync app you may already have.
+- Changes travel automatically without Git commands or a server to operate.
+- Files remain ordinary files that work outside StillPoint.
+- Great for one person moving between a desktop and laptop.
 
-## Practical Takeaway
-- Use a **Local Vault** when you only need files on one machine.
-- Use a **Homebase Vault** when you want sync, offline-first behavior, and a stronger local-first trust boundary.
+### Tradeoffs
 
-## Coding Agents and TUIs
-StillPoint works especially well with coding agents and terminal workflows because the vault is a real local folder.
+- Mark the **entire vault** as **Always keep on this device** or **Available offline** on every computer.
+- Do not keep the vault open on two computers at the same time.
+- Same-page edits, renames, deletions, and binary attachments can still conflict.
+- When StillPoint detects a text conflict, it offers **Current**, **Cloud**, and **Merge** choices. Binary conflicts require choosing the copy you want.
+- Your cloud provider's storage, privacy, retention, and account rules apply.
 
-Recommended workflow:
+Cloud Folder is the best “just sync my files” choice—especially when the vault belongs to one person and simplicity beats workflow ceremony.
+
+## Git: History You Can See and Trust
+
+Git turns a vault into a versioned knowledge project. StillPoint can initialize the repository, configure and test a remote, show changed files and rich diffs, save named versions, get remote updates, and publish your work.
+
+### Why you will love it
+
+- Every saved version has inspectable history and a clear diff.
+- Git hosting makes sharing, backup, branching, and review flexible.
+- StillPoint's Git rail keeps common actions visual: **Get updates**, **Save changes**, and **Publish**.
+- Automatic backups can create ordinary Git history on a schedule and optionally publish it.
+- Named vault versions stay distinct from routine automatic backups.
+- Ideal for technical notes, documentation, research, and vaults that evolve alongside code.
+
+### Tradeoffs
+
+- Git rewards a little Git knowledge, especially when two people edit the same file.
+- StillPoint never pulls or merges in the background. Getting remote changes is deliberate so an unexpected merge cannot interrupt your writing.
+- Ordinary Git remotes receive the vault files as plaintext. Use a private remote and the hosting/security controls appropriate for the content.
+- StillPoint uses your existing Git, SSH, and credential-manager setup; it does not store Git passwords or access tokens.
+
+StillPoint automatically ignores and stops tracking device-local `.stillpoint/`, `.codex/`, and `.mcp.json` data without deleting those files.
+
+Git is the best choice when the journey matters as much as the current page: you want history, review, automation, or collaboration built around explicit versions.
+
+## Homebase: Private Sync on Your Terms
+
+Homebase is StillPoint's native distributed sync system. Each device keeps a real local working copy, then pushes and pulls through a Homebase server. You can work offline and synchronize when the network returns.
+
+### Why you will love it
+
+- The server stores encrypted blobs and sync metadata; plaintext work stays on client devices.
+- Your encryption passphrase remains a client-side secret.
+- Accounts, roles, and write permissions support managed sharing.
+- Conflict-aware sync helps concurrent work land safely.
+- Local Recovery protects prior local bytes before a pull overwrites or deletes a file.
+- You choose where Homebase runs and who can reach it.
+
+### Tradeoffs
+
+- You need access to a Homebase server and must manage its availability, backups, TLS, and updates.
+- Each trusted device needs authentication and the correct encryption passphrase.
+- Like any distributed system, simultaneous edits can require conflict review.
+- Losing an unstored encryption passphrase means the encrypted server objects cannot be decrypted.
+
+Homebase is the best choice when privacy, self-hosting, user access control, and an integrated StillPoint sync experience matter most.
+
+## Homebase Security and Access
+
+- Auth tokens control access, but tokens are not the encryption key.
+- Roles and write permissions are enforced by server authentication.
+- Admin users can manage users; read-only users can authenticate and view, but writes are blocked.
+- By default, StillPoint does not store the Homebase encryption passphrase on disk.
+- During setup or **Reset Encryption Passphrase**, you can choose **Store passphrase on this device**. Enable it only on a device you trust.
+- Passwords are not stored. StillPoint can reuse access and refresh tokens after authentication.
+- Non-secret recovery metadata in `.stillpoint/homebase.json` helps StillPoint rediscover the server URL, SSL mode, vault ID, and vault name.
+
+## Homebase Local Recovery
+
+Before a Homebase pull overwrites or deletes a file, StillPoint saves the previous local bytes outside the vault under `~/.stillpoint/homebase-recovery/`.
+
+- Open **Local Recovery** from the Homebase sync summary or Homebase menu to inspect a pull, restore selected files or an entire event, export prior copies, or pin a recovery point.
+- **Open Local Backup Folder** reveals this device's recovery storage in the file manager.
+- A restore becomes a new local edit and syncs normally; it does not move the server checkpoint backward.
+- Large or unusually destructive pulls pause for review.
+- If a pull is interrupted, Homebase pauses sync until you review the recovery event and continue.
+- Local Recovery is enabled by default. Its quota and retention controls are in the Homebase sync summary.
+
+An amber Homebase badge means protected changes need review. A red badge means an authentication, connection, conflict, or file-level problem needs attention. Click the badge to open the relevant review screen.
+
+## Choosing an Authoritative Homebase Copy
+
+- **Reset Sync State (Server Authoritative)** replaces matching local content with the current Homebase snapshot and protects affected files through Local Recovery.
+- **Publish This Device as Authoritative** previews every addition, replacement, and removal; shows text contents or diffs where practical; requires the vault name as confirmation; and replaces the shared snapshot with this device's files.
+- An authoritative local publish stops if the Homebase head changes after the preview. Use it only when local files—including local deletions—should win.
+
+## Switching Modes Safely
+
+You can change direction as a vault evolves. StillPoint warns before switching and preserves the underlying data:
+
+- Leaving Git does not delete the local `.git` repository or its history.
+- Leaving Homebase does not delete data already stored on the Homebase server.
+- Cloud Folder mode moves active StillPoint runtime state to device-local storage; leaving it moves that state back safely.
+- Git and Homebase never operate on the same vault at the same time.
+- Before switching, let the current mode finish syncing or publishing and make a normal backup of the vault.
+
+## Coding Agents, Scripts, and TUIs
+
+All three sharing modes keep the working vault as real local files, so the same power-user workflow applies:
+
 1. Open the vault locally.
-2. Use `Vault -> Open Vault in Terminal`.
-3. Run your coding agent, TUI, or CLI tool in that vault root.
-4. Let StillPoint detect filesystem changes and refresh the tree.
-5. If Homebase is enabled, let sync push those local changes to the server.
+2. Use **Vault → Open Vault in Terminal**.
+3. Run a coding agent, TUI, importer, or script in the vault root.
+4. Let StillPoint detect the filesystem changes and refresh the tree.
+5. Let Cloud Folder sync the files, save/publish them with Git, or let Homebase synchronize them.
 
-StillPoint seeds an `AGENTS.md` file at the vault root if that preference is enabled. That file teaches agents the StillPoint page structure, colon-link rules, and page-folder conventions.
+If enabled, StillPoint seeds an `AGENTS.md` file at the vault root to explain page structure, colon-link rules, and page-folder conventions.
 
-This makes Homebase a strong fit for:
-- AI-assisted research vault growth
-- script-driven imports
-- TUI note workflows
-- code-generated pages and attachments
+## Setup Checklist
 
-## Setup Notes
+### Cloud Folder
 
-### Local Vault
-1. Create or open a vault folder on disk.
-2. Work directly against that folder in StillPoint or other local tools.
+1. Put the vault inside OneDrive or Google Drive.
+2. Open **Preferences → Vault → Versioning & Sync** and choose **Cloud Folder**.
+3. Mark the entire vault as always available offline on every computer.
+4. Let the provider finish syncing before opening it on another computer.
+5. Close the vault on one computer before opening it on another.
 
-### Homebase Vault
-1. Create/connect a Homebase vault profile.
+### Git
+
+1. Choose **Git** under **Preferences → Vault → Versioning & Sync**.
+2. Initialize the repository if needed.
+3. Add and test the remote.
+4. Choose whether named versions and automatic backups should publish.
+5. Use the Git rail to get updates, save changes, review diffs, and publish.
+
+### Homebase
+
+1. Use **Vault → Convert This Vault to Homebase** and create or connect a profile.
 2. Authenticate to Homebase.
-3. Decide whether to keep the encryption passphrase session-only or store it on this trusted device.
-4. Let local sync engine pull/push changes.
-5. Use sync status and conflict tools from the Homebase UI.
+3. Enter the encryption passphrase and decide whether this trusted device may store it.
+4. Let the initial pull or push finish.
+5. Use the Homebase badge and sync summary for status, conflicts, recovery, and manual sync.
 
-## Operational Tips
-- Back up your local vault and Homebase server data regularly.
-- Use TLS for any non-local network use.
-- Review user roles periodically.
-- For agent or CLI workflows, prefer additive page creation and let StillPoint/Homebase handle the sync layer.
-- The Homebase Sync dialog keeps **Reset Auth** and **Reset Encryption Passphrase** in its always-visible Recovery row. Sync settings, manual sync, conflicts, sync errors, and Close remain available in the same dialog.
+## The StillPoint Promise
+
+Convenient cloud sync, serious Git history, or encrypted self-hosted Homebase: you do not have to give up local files, offline work, or tool freedom to get the sharing model you want. Start simple, grow when you need to, and choose differently for every vault.

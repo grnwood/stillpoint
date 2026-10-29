@@ -88,13 +88,33 @@ Try these first:
 6. Check network access and server availability.
 7. If needed, use `Vault -> Homebase -> Sync Now`.
 
+## Cloud Folder Is Not Updating or Shows Conflicts
+- **Symptom**: Changes do not arrive on another computer, files appear as online-only placeholders, or StillPoint asks you to choose between Current, Cloud, and Merge.
+- **Checks**:
+1. Confirm the vault uses **Cloud Folder** under `Preferences -> Vault -> Versioning & Sync`.
+2. Mark the entire vault folder as **Always keep on this device** or **Available offline** on every computer.
+3. Close StillPoint on the first computer and let OneDrive or Google Drive finish before opening the vault on the next one.
+4. Do not keep the same vault open on two computers at once.
+5. For a text conflict, review **Current**, **Cloud**, and **Merge** before saving. Binary files cannot be merged; keep the copy you trust.
+6. Check the cloud provider's own status, storage quota, and error messages.
+
+## Git Is Not Publishing or Has Conflicts
+- **Symptom**: Publish is rejected, the Git badge is red, or files show a conflict status.
+- **Checks**:
+1. Open the Git rail and refresh its status.
+2. Use **Get updates** when the remote has work you do not have locally. StillPoint never pulls or merges in the background.
+3. Open each conflicted file, compare the versions, and resolve the conflict before saving and publishing again.
+4. Test the remote under `Preferences -> Vault -> Versioning & Sync`.
+5. Confirm your existing Git/SSH credential setup can access the remote; StillPoint does not store Git passwords or access tokens.
+6. Remember that a successful local automatic backup can remain unpublished when the remote changed first.
+
 ## Files Created in Terminal or by an Agent Do Not Appear
 - **Symptom**: Files exist in the vault folder but the tree has not updated yet.
 - **Checks**:
 1. Wait for the local filesystem quiet period to complete.
 2. Confirm the files were created inside the actual vault root.
 3. Use `Tools -> Rebuild Vault Index` if the structure was created outside StillPoint.
-4. If Homebase is enabled, wait for sync or use `Vault -> Homebase -> Sync Now`.
+4. If the vault is shared, let Cloud Folder finish, publish the Git change, or use `Vault -> Homebase -> Sync Now` as appropriate.
 5. Make sure the generated files follow StillPoint page structure rules and are not writing into `.stillpoint/`.
 
 ## If You Still Need to Reset
@@ -115,7 +135,7 @@ There will be detailed logging on `stdout` in the terminal.  Often times you can
 ## Reporting a Problem
 Include:
 - OS and StillPoint version
-- local vault or Homebase vault
+- versioning/sync mode: Local only, Cloud Folder, Git, or Homebase
 - exact steps to reproduce
 - error message text (or screenshot)
 - whether `Tools -> Rebuild Vault Index` or `Rebuild Vault Search Index` changed behavior

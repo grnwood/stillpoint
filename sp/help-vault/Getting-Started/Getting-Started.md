@@ -14,7 +14,7 @@ update: talk about setting default vault or not.
 ## Create or Open a Vault
 - Use Vault -> New Vault to create a new vault.
 - Use Vault -> Open Vault in New Window to open a different vault.
-- If you want sync across devices, configure Homebase for the vault after opening it locally.
+- If you want the vault on other devices, choose the sharing style that fits: **Cloud Folder** for easy OneDrive/Google Drive sync, **Git** for version history and collaboration, or **Homebase** for encrypted StillPoint-native sync. See [:Remote-Vaults|Sync & Sharing].
 
 ## Vault Structure
 StillPoint stores pages in matching folders.
@@ -58,7 +58,7 @@ Templates help you create consistent pages quickly.
 - Use `Vault -> Open Vault in Terminal` to open the actual vault folder in your system terminal.
 - Run coding agents, TUIs, scripts, or other local tools directly in that folder.
 - StillPoint understands the StillPoint page-folder structure and can refresh when files are created locally.
-- If Homebase is enabled, those local filesystem changes can sync to your other devices.
+- Those local filesystem changes can travel through Cloud Folder, be saved and published through Git, or synchronize through Homebase—whichever mode the vault uses.
 
 ## Switching Vaults
 - Use Vault -> Open Vault in New Window to work in multiple vaults at once.

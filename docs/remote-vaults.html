@@ -4,22 +4,23 @@
     <script src="ga.js"></script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Homebase Vaults · StillPoint</title>
+    <meta name="description" content="Choose Cloud Folder, Git, or encrypted Homebase sync for every StillPoint vault." />
+    <title>Sync &amp; Sharing · StillPoint</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&amp;family=Source+Sans+3:wght@300;400;600&amp;display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="site.css" />
     <script src="site.js" defer></script>
-</head>
+  </head>
   <body>
     <header class="site-header">
       <div class="nav">
         <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
         <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
-              <nav class="nav-links">
+        <nav class="nav-links">
           <a href="index.html">Home</a>
           <a href="philo.html">Philosophy</a>
           <a href="cal.html">Journal</a>
@@ -30,25 +31,208 @@
           <a href="thegraph.html">The Graph</a>
           <a href="dia.html">Diagramming</a>
           <a href="uses.html">Use Cases</a>
-          <a href="remote-vaults.html">Homebase</a>
+          <a href="remote-vaults.html">Sync &amp; Sharing</a>
           <a href="ai.html">AI Infused</a>
           <a href="howitcompares.html">Comparisons</a>
           <a href="power.html">Power</a>
           <a href="folder-navigator.html">Folder Navigator</a>
         </nav>
-
       </div>
     </header>
 
     <main class="page">
       <section class="hero reveal" style="--d: 0.05s">
         <div>
-          <span class="pill">Vaults</span>
-          <h1>Homebase keeps StillPoint local first.</h1>
+          <span class="pill">Sync &amp; Sharing</span>
+          <h1>Your vault. Your rules. Three great ways to share it.</h1>
           <p>
-            StillPoint vaults live on your filesystem. When you want sync across devices,
-            Homebase is the remote option: local copies first, synchronized through a server
-            without turning the server into the source of truth.
+            Want effortless cloud sync, Git-powered history, or private encrypted
+            infrastructure? StillPoint can do all three—without giving up local files,
+            offline work, or ownership of your notes.
+          </p>
+          <div class="cta-row">
+            <a class="button primary" href="#compare">Compare the modes</a>
+            <a class="button ghost" href="#choose">Help me choose</a>
+          </div>
+        </div>
+        <div class="boundary-card">
+          <h3>Local first is the constant</h3>
+          <p>
+            Every mode starts with a real folder of Markdown pages and attachments on your
+            computer. StillPoint changes how the vault travels—not who owns it.
+          </p>
+          <ul>
+            <li><strong>Cloud Folder:</strong> familiar and automatic</li>
+            <li><strong>Git:</strong> versioned and inspectable</li>
+            <li><strong>Homebase:</strong> encrypted and under your control</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section reveal" id="choose" style="--d: 0.15s">
+        <div class="eyebrow">Choose your superpower</div>
+        <h2>There is a mode for the way you actually work.</h2>
+        <p>
+          Keep one vault local, put another in the cloud, run a project through Git, and
+          host your most private knowledge on Homebase. Each vault gets its own answer.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <h3>☁ Cloud Folder</h3>
+            <p>
+              The quickest route to “my notes are on my other computer.” OneDrive or Google
+              Drive carries pages and attachments while StillPoint keeps its live databases,
+              indexes, locks, and undo state safely on each device.
+            </p>
+            <p><strong>Pick it for:</strong> personal vaults, familiar setup, and low-friction sync.</p>
+          </div>
+          <div class="card">
+            <h3>&lt;/&gt; Git</h3>
+            <p>
+              Turn your vault into a versioned knowledge project. Review beautiful diffs,
+              save named versions, get remote updates, publish deliberately, and optionally
+              create automatic backup commits.
+            </p>
+            <p><strong>Pick it for:</strong> exact history, technical teams, review, and automation.</p>
+          </div>
+          <div class="card">
+            <h3>⌂ Homebase</h3>
+            <p>
+              StillPoint-native distributed sync with encrypted server objects, offline-first
+              local copies, user roles, conflict review, and device-local recovery before a
+              pull replaces anything.
+            </p>
+            <p><strong>Pick it for:</strong> privacy, self-hosting, managed access, and control.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="compare" style="--d: 0.22s">
+        <div class="eyebrow">The honest comparison</div>
+        <h2>Great choices get even better when you know the tradeoffs.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>What matters</th>
+                <th>Cloud Folder</th>
+                <th>Git</th>
+                <th>Homebase</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Best fit</td>
+                <td>Easy personal multi-device sync</td>
+                <td>History, review, and collaboration</td>
+                <td>Private native sync and managed sharing</td>
+              </tr>
+              <tr>
+                <td>Setup</td>
+                <td>Use OneDrive or Google Drive</td>
+                <td>Initialize a repo and add a remote</td>
+                <td>Connect to a Homebase server</td>
+              </tr>
+              <tr>
+                <td>History</td>
+                <td>Provider-dependent</td>
+                <td>First-class commits, diffs, and named versions</td>
+                <td>Checkpoints, conflicts, and local recovery</td>
+              </tr>
+              <tr>
+                <td>Remote privacy</td>
+                <td>Uses provider protections</td>
+                <td>Ordinary remotes receive plaintext files</td>
+                <td>Server stores encrypted objects</td>
+              </tr>
+              <tr>
+                <td>Offline work</td>
+                <td>Yes, when the vault stays available offline</td>
+                <td>Yes</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>Collaboration style</td>
+                <td>Best used one computer at a time</td>
+                <td>Explicit get, merge, save, and publish</td>
+                <td>Account-based sync with conflict review</td>
+              </tr>
+              <tr>
+                <td>What you manage</td>
+                <td>Cloud account and desktop sync</td>
+                <td>Git knowledge, credentials, and remote</td>
+                <td>Server, TLS, backups, accounts, and passphrase</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.28s">
+        <div>
+          <div class="eyebrow">Cloud Folder</div>
+          <h2>Use the cloud you already know.</h2>
+          <p>
+            Cloud Folder is deliberately boring in the best way. Put the vault in OneDrive
+            or Google Drive, mark the whole folder available offline, and let the provider
+            move your portable content between computers.
+          </p>
+          <p>
+            The important nerdy bit: StillPoint relocates databases, indexes, locks, and undo
+            state to device-local storage. That avoids asking a file-sync service to replicate
+            a live application database.
+          </p>
+        </div>
+        <div class="boundary-card">
+          <h3>Cloud Folder ground rules</h3>
+          <ul>
+            <li>Keep the entire vault available offline.</li>
+            <li>Close it on one computer before opening it on another.</li>
+            <li>Let the provider finish syncing before switching devices.</li>
+            <li>Review Current, Cloud, and Merge when a text conflict appears.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.34s">
+        <div class="boundary-card">
+          <h3>Git without leaving StillPoint</h3>
+          <ul>
+            <li>See every changed file and its status.</li>
+            <li>Review rich side-by-side or unified diffs.</li>
+            <li>Save named vault versions or routine backup commits.</li>
+            <li>Get updates and publish when you decide.</li>
+          </ul>
+        </div>
+        <div>
+          <div class="eyebrow">Git</div>
+          <h2>Your notes can have engineering-grade history.</h2>
+          <p>
+            Git is for people who want to know exactly what changed, when, and why. StillPoint
+            brings the everyday workflow into a friendly visual rail while leaving the repository
+            completely usable from your terminal and favorite hosting service.
+          </p>
+          <p>
+            StillPoint never pulls or merges in the background. Remote changes stay deliberate,
+            and normal Git remotes receive plaintext files—so choose a private remote when the
+            content calls for it.
+          </p>
+        </div>
+      </section>
+
+      <section class="section split reveal" style="--d: 0.4s">
+        <div>
+          <div class="eyebrow">Homebase</div>
+          <h2>Encrypted, local-first sync on your infrastructure.</h2>
+          <p>
+            Homebase keeps a full working copy on every device and synchronizes encrypted objects
+            through a server you choose. Accounts and roles manage access; your client-side
+            passphrase protects the content.
+          </p>
+          <p>
+            Before a pull overwrites or removes a local file, Local Recovery preserves the prior
+            bytes on that device. Large or unusual pulls pause for review instead of quietly
+            rolling over your work.
           </p>
         </div>
         <div class="image-stack">
@@ -56,123 +240,42 @@
             class="lightbox-trigger"
             type="button"
             data-lightbox="img/remote-vault-approaches.png"
-            data-lightbox-caption="Homebase local-first architecture overview."
+            data-lightbox-caption="Homebase local-first encrypted sync architecture."
             style="width: 100%; border: none; background: none; padding: 0; cursor: zoom-in;"
           >
-            <img
-              src="img/remote-vault-approaches.png"
-              alt="Homebase local-first architecture diagram"
-            />
+            <img src="img/remote-vault-approaches.png" alt="Homebase local-first encrypted sync architecture" />
           </button>
         </div>
       </section>
 
-      <section class="section reveal" style="--d: 0.15s">
-        <div class="eyebrow">Local First</div>
-        <h2>One vault model on disk, with Homebase for sync.</h2>
-        <div class="grid">
+      <section class="section reveal" style="--d: 0.46s">
+        <div class="eyebrow">Power-user friendly</div>
+        <h2>The vault stays open to your whole toolkit.</h2>
+        <p>
+          Whichever mode you choose, the working vault remains real local files. Open it in a
+          terminal and let editors, scripts, importers, TUIs, or coding agents create and improve
+          pages. Then let Cloud Folder sync, Git save and publish, or Homebase synchronize the result.
+        </p>
+        <div class="grid compact-grid">
           <div class="card">
-            <h3>Local vaults</h3>
-            <p>
-              Your vault is a normal local folder full of Markdown pages and attachments.
-              That keeps the model simple and makes the files usable from StillPoint,
-              editors, scripts, and the terminal.
-            </p>
-          </div>
-          <div class="card">
-            <h3>Homebase Vaults</h3>
-            <p>
-              Homebase adds sync on top of that same local vault model. Each device keeps
-              a full local copy and synchronizes through the Homebase server.
-            </p>
+            <h3>Start simple</h3>
+            <p>A vault can stay completely local until sharing becomes useful.</p>
           </div>
           <div class="card">
-            <h3>Zero-trust direction</h3>
-            <p>
-              The server stores encrypted blobs and sync metadata while your local device
-              remains the place where plaintext work happens.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section class="section split reveal" style="--d: 0.25s">
-        <div>
-          <h2>Why Homebase fits StillPoint</h2>
-          <p>
-            Homebase preserves the filesystem-first workflow instead of replacing it.
-            You keep a real local vault, work offline when needed, and sync later.
-          </p>
-          <div class="grid">
-            <div class="card">
-              <h3>Offline first</h3>
-              <p>Work locally and let sync catch up when the network is available.</p>
-            </div>
-            <div class="card">
-              <h3>Multi-device continuity</h3>
-              <p>Use the same vault on your laptop, desktop, or travel machine.</p>
-            </div>
-            <div class="card">
-              <h3>Conflict aware</h3>
-              <p>StillPoint can surface sync conflicts instead of silently overwriting work.</p>
-            </div>
-          </div>
-        </div>
-        <div>
-          <h2>Use coding agents and TUIs directly against the vault.</h2>
-          <p>
-            Because the vault stays local, coding agents, TUIs, and CLI tools can create or
-            expand pages directly into the vault folder.
-          </p>
-          <p>
-            StillPoint can seed an <code>AGENTS.md</code> file at the vault root so tools understand
-            StillPoint page folders, colon links, and naming rules.
-          </p>
-          <div class="grid">
-            <div class="card">
-              <h3>Open the vault in a terminal</h3>
-              <p>Run local tools against the actual vault root, not a cache or export copy.</p>
-            </div>
-            <div class="card">
-              <h3>Generate pages locally</h3>
-              <p>Let agents write Markdown pages and attachments using StillPoint's structure.</p>
-            </div>
-            <div class="card">
-              <h3>Let Homebase sync it</h3>
-              <p>After local work lands, Homebase can synchronize those files to your other devices.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section reveal" style="--d: 0.35s">
-        <div class="eyebrow">Practical Setup</div>
-        <h2>Start local, then add Homebase when you need sync.</h2>
-        <div class="grid">
-          <div class="card">
-            <h3>1. Create or open a local vault</h3>
-            <p>StillPoint works directly against a normal folder on disk.</p>
+            <h3>Change your mind</h3>
+            <p>Switch modes as the vault grows; StillPoint preserves Git and Homebase data.</p>
           </div>
           <div class="card">
-            <h3>2. Work locally first</h3>
-            <p>Use StillPoint, your editor, or the terminal to build out the vault.</p>
+            <h3>Mix and match</h3>
+            <p>Choose independently for every vault. One workflow does not have to rule them all.</p>
           </div>
-          <div class="card">
-            <h3>3. Enable Homebase</h3>
-            <p>Authenticate, pair the vault, and let sync handle multi-device continuity.</p>
-          </div>
-        </div>
-        <div class="card" style="margin-top: 1.25rem;">
-          <h3>Passphrase trust choice</h3>
-          <p>StillPoint does not store your Homebase encryption passphrase by default. You can opt into storing it on a trusted device, but passwords are still not stored.</p>
-          <p>After first login, StillPoint can reuse Homebase access and refresh tokens. It also writes non-secret recovery metadata into the vault under <code>.stillpoint/homebase.json</code> so the server URL, SSL mode, vault ID, and vault name can be rediscovered later.</p>
         </div>
       </section>
 
       <footer class="site-footer">
-        <span>Local first, synced when you want it.</span>
+        <span>Local files. Your choice of superpowers.</span>
         <span>Docs for GitHub Pages · StillPoint</span>
-              <span><a href="philo.html#funding-support">Support the project</a></span>
+        <span><a href="philo.html#funding-support">Support the project</a></span>
       </footer>
     </main>
   </body>

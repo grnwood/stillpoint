@@ -22,9 +22,10 @@ Attachments keep files in context with the page you are working on.
 - Keep related docs, exports, and media next to the page that explains them.
 - For bigger topics, combine page links + attachment links so everything stays navigable.
 
-## Homebase and Local Behavior
+## Sharing and Local Behavior
 - Attachments live next to the page in the local vault folder.
-- If Homebase is enabled, those local attachment files are included in sync.
+- Cloud Folder and Homebase include those files in sync; Git includes them when you save and publish changes.
+- Large or binary attachments can take longer to transfer and usually cannot be merged. If two devices change the same binary file, choose the copy you want to keep.
 - This also makes attachments easy to generate or update from local tools, scripts, and coding agents.
 
 ## Practical Tips
