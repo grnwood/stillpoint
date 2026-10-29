@@ -3598,6 +3598,7 @@ def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, 
 
 def test_folder_navigator_has_distinct_restrained_window_identity(
         tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QSize
     from PySide6.QtWidgets import QToolButton
     from sp.app.folder_navigator.window import Window
 
@@ -3613,6 +3614,11 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.identity_bar.minimumHeight() == 28
     assert window.identity_bar.maximumHeight() == 28
     assert window.columns_toolbar.isAncestorOf(window.identity_bar)
+    assert window.columns_toolbar.iconSize() == QSize(18, 18)
+    if sys.platform == "darwin":
+        assert window.columns_toolbar.minimumHeight() == 34
+        assert window.columns_toolbar.maximumHeight() == 34
+    assert "min-width: 28px" in window.columns_toolbar.styleSheet()
     assert window.rail.tabText(0) == "Files"
     assert window.folder_panel_header.title_label.text() == "FILES"
     assert window.folder_panel_header.detail_label.text() == tmp_path.name

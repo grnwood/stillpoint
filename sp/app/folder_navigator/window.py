@@ -4529,7 +4529,8 @@ class Window(QMainWindow):
             self._open_folder_breadcrumb
         )
         self.bookmarks_bar = QHBoxLayout()
-        self.bookmarks_bar.setContentsMargins(7, 4, 7, 4)
+        self.bookmarks_bar.setContentsMargins(7, 2, 7, 2)
+        self.bookmarks_bar.setSpacing(3)
         layout.addLayout(self.bookmarks_bar)
         layout.addWidget(self.splitter)
         self.setCentralWidget(outer)
@@ -5247,6 +5248,24 @@ class Window(QMainWindow):
         self.columns_toolbar = columns_toolbar
         columns_toolbar.setObjectName("folder_navigator_columns")
         columns_toolbar.setMovable(False)
+        columns_toolbar.setFloatable(False)
+        columns_toolbar.setIconSize(QSize(18, 18))
+        columns_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        if sys.platform == "darwin":
+            columns_toolbar.setFixedHeight(34)
+        columns_toolbar.setStyleSheet(
+            "QToolBar#folder_navigator_columns {"
+            "padding: 3px 6px; spacing: 4px;"
+            "}"
+            "QToolBar#folder_navigator_columns QToolButton {"
+            "min-width: 28px; max-width: 28px;"
+            "min-height: 28px; max-height: 28px;"
+            "padding: 0; margin: 0;"
+            "}"
+            "QToolBar#folder_navigator_columns::separator {"
+            "width: 1px; height: 20px; margin: 4px 5px;"
+            "}"
+        )
         self.column_actions = {}
         column_specs = (
             (1, "Size", QStyle.StandardPixmap.SP_DriveHDIcon),
@@ -8995,6 +9014,11 @@ class Window(QMainWindow):
         for name in self._bookmarks():
             path = Path(name)
             button = QPushButton(("⚠ " if not path.exists() else "") + path.name)
+            button.setObjectName("folderNavigatorBookmarkButton")
+            button.setFixedHeight(26)
+            button.setStyleSheet(
+                "QPushButton#folderNavigatorBookmarkButton { padding: 2px 8px; }"
+            )
             button.setToolTip(name + (" — missing (right-click to remove)" if not path.exists() else ""))
             button.clicked.connect(lambda _, p=path: self._activate_bookmark(p))
             button.setContextMenuPolicy(Qt.CustomContextMenu)
