@@ -366,6 +366,7 @@ class MarkdownReadingView(QWidget):
         layout.setSpacing(0)
 
         header = QFrame(self)
+        self.header = header
         header.setObjectName("markdownReadingHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 4, 8, 4)
@@ -412,7 +413,6 @@ class MarkdownReadingView(QWidget):
         close.clicked.connect(self.hide_find)
         find_layout.addWidget(close)
         self.find_bar.hide()
-        layout.addWidget(self.find_bar)
 
         self.browser = _ReadingBrowser(self)
         self.browser.setObjectName("markdownReadingBrowser")
@@ -430,6 +430,7 @@ class MarkdownReadingView(QWidget):
         )
         self.browser.searchRequested.connect(self.show_find)
         layout.addWidget(self.browser, 1)
+        layout.addWidget(self.find_bar)
         self.setFocusProxy(self.browser)
         self.theme_toggle.toggled.connect(self._theme_mode_toggled)
         self._instances.add(self)
@@ -457,6 +458,10 @@ class MarkdownReadingView(QWidget):
             )
             self._page_shortcuts.append(shortcut)
         self._apply_palette()
+
+    def set_header_visible(self, visible: bool) -> None:
+        """Show shared reader controls when the host does not provide its own."""
+        self.header.setVisible(bool(visible))
 
     @staticmethod
     def _theme_icon_path() -> Path | None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtCore import QEvent, QPoint, Qt, QUrl
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QKeySequence, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 
@@ -58,6 +58,7 @@ def test_reading_view_renders_live_markdown_without_a_print_url(
     assert "print-token" not in view.last_html
     assert view.browser.document().baseUrl() == QUrl.fromLocalFile(str(tmp_path) + "/")
     assert "Alpha" in view.browser.toPlainText()
+    assert view.layout().indexOf(view.browser) < view.layout().indexOf(view.find_bar)
     view.find_query.setText("Alpha")
     view.find_next()
     assert view.browser.textCursor().selectedText() == "Alpha"
@@ -585,7 +586,20 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     assert QKeySequence("Ctrl+Space") in {
         shortcut.key() for shortcut in main_window._reading_view_shortcuts
     }
-    assert main_window._action_reading_view in main_window.toolbar.actions()
+    assert main_window._action_reading_view not in main_window.toolbar.actions()
+    assert (
+        main_window._reading_mode_button.defaultAction()
+        is main_window._action_reading_view
+    )
+    main_window._update_main_cursor_status()
+    qapp.processEvents()
+    assert main_window._reading_mode_button.isVisible()
+    assert main_window._reading_mode_button.mapTo(
+        main_window.statusBar(), QPoint()
+    ).x() < main_window._cursor_status_label.mapTo(
+        main_window.statusBar(), QPoint()
+    ).x()
+    assert main_window.reading_view.header.isHidden()
     assert main_window._reading_view_enabled
     assert main_window._action_reading_view.text() == "Edit View"
     assert main_window._action_reading_view.toolTip().startswith("Switch to edit mode")

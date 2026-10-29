@@ -2998,6 +2998,7 @@ class MainWindow(QMainWindow):
         # Vi-mode state
        
         self.reading_view = MarkdownReadingView()
+        self.reading_view.set_header_visible(False)
         self.reading_view.editRequested.connect(
             lambda: self._set_reading_view_enabled(False)
         )
@@ -3409,8 +3410,21 @@ class MainWindow(QMainWindow):
         self._update_reading_view_action()
         self._action_reading_view.triggered.connect(self._set_reading_view_enabled)
         view_mode_menu.addAction(self._action_reading_view)
-        self.toolbar.addAction(self._action_reading_view)
-        self._toolbar_reading_action = self._action_reading_view
+        self._action_reading_theme_colors = QAction(
+            "Use Theme Colors in Reading View",
+            self,
+        )
+        self._action_reading_theme_colors.setCheckable(True)
+        self._action_reading_theme_colors.setChecked(
+            self.reading_view.theme_toggle.isChecked()
+        )
+        self._action_reading_theme_colors.toggled.connect(
+            self.reading_view.theme_toggle.setChecked
+        )
+        self.reading_view.theme_toggle.toggled.connect(
+            self._sync_reading_theme_action
+        )
+        view_mode_menu.addAction(self._action_reading_theme_colors)
         view_menu.addSeparator()
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -3705,6 +3719,17 @@ class MainWindow(QMainWindow):
         self._cursor_status_label.setAccessibleName("Editor cursor position")
         self._cursor_status_label.setToolTip("Current editor line, column, and selection")
         self._cursor_status_label.hide()
+        self._reading_mode_button = QToolButton(self.statusBar())
+        self._reading_mode_button.setObjectName("readingModeToggle")
+        self._reading_mode_button.setAutoRaise(True)
+        self._reading_mode_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._reading_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._reading_mode_button.setIconSize(QSize(16, 16))
+        self._reading_mode_button.setFixedSize(24, 22)
+        self._reading_mode_button.setDefaultAction(self._action_reading_view)
+        self._reading_mode_button.setStyleSheet(self._mode_button_style())
+        self._reading_mode_button.hide()
+        self.statusBar().addPermanentWidget(self._reading_mode_button, 0)
         self.statusBar().addPermanentWidget(self._cursor_status_label, 0)
         self._update_main_cursor_status()
 
@@ -21558,6 +21583,14 @@ class MainWindow(QMainWindow):
         if icon is not None:
             action.setIcon(icon)
 
+    def _sync_reading_theme_action(self, enabled: bool) -> None:
+        action = getattr(self, "_action_reading_theme_colors", None)
+        if action is None or action.isChecked() == bool(enabled):
+            return
+        blocked = action.blockSignals(True)
+        action.setChecked(bool(enabled))
+        action.blockSignals(blocked)
+
     def _focus_vault_tab(self) -> None:
         """Switch to Vault tab and focus the tree."""
         self._ensure_left_panel_visible()
@@ -24625,6 +24658,9 @@ class MainWindow(QMainWindow):
         if not self.current_path or not getattr(self, "editor", None):
             label.clear()
             label.hide()
+            button = getattr(self, "_reading_mode_button", None)
+            if button is not None:
+                button.hide()
             self._set_save_status("")
             return
         if getattr(self, "_editor_word_count_path", None) != self.current_path:
@@ -24647,6 +24683,9 @@ class MainWindow(QMainWindow):
             f"color: {text_name}; background: transparent; border: 0; "
             "padding: 0 6px;"
         )
+        button = getattr(self, "_reading_mode_button", None)
+        if button is not None:
+            button.show()
         label.show()
 
     def _calculate_main_word_count(self) -> int:
