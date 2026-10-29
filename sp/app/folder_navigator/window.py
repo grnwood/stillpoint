@@ -8392,8 +8392,12 @@ class Window(QMainWindow):
         ):
             if not items:
                 continue
-            heading = QListWidgetItem(f"{title} ({len(items)})")
+            # The item widget owns all visible text. Keeping fallback text on the
+            # QListWidgetItem makes Qt paint it underneath the transparent row,
+            # producing doubled/overlapping labels on some themes and platforms.
+            heading = QListWidgetItem()
             heading.setFlags(Qt.NoItemFlags)
+            heading.setData(Qt.AccessibleTextRole, f"{title}, {len(items)}")
             heading.setSizeHint(QSize(0, 30))
             self.git_status_list.addItem(heading)
             self.git_status_list.setItemWidget(
@@ -8401,12 +8405,13 @@ class Window(QMainWindow):
             )
             for entry in items:
                 code = "U" if status_key is None else entry[status_key]
-                label = f"  {code}  {entry['path']}"
-                if entry.get("original"):
-                    label += f"  ← {entry['original']}"
-                item = QListWidgetItem(label)
+                item = QListWidgetItem()
                 item.setData(Qt.UserRole, entry)
                 item.setData(Qt.UserRole + 2, category)
+                item.setData(
+                    Qt.AccessibleTextRole,
+                    f"{self._git_status_name(code)}: {entry['path']}",
+                )
                 tooltip = f"{self._git_status_name(code)}: {entry['path']}"
                 if entry.get("original"):
                     tooltip += f"\nPrevious path: {entry['original']}"

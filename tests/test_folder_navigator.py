@@ -3847,13 +3847,21 @@ def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
     ignore_lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ignore_lines.count(".sp_folder/") == 1
     assert window.rail.indexOf(window.git_page) == 2
-    labels = [window.git_status_list.item(i).text()
-              for i in range(window.git_status_list.count())]
-    assert any(label.startswith("Staged Changes") for label in labels)
-    assert any(label.startswith("Changes") for label in labels)
-    assert any(label.startswith("Untracked Files") for label in labels)
-    assert sum("both.txt" in label for label in labels) == 2
-    assert any("new file.txt" in label for label in labels)
+    entries = [
+        window.git_status_list.item(i).data(Qt.UserRole)
+        for i in range(window.git_status_list.count())
+        if isinstance(window.git_status_list.item(i).data(Qt.UserRole), dict)
+    ]
+    categories = [
+        window.git_status_list.item(i).data(Qt.UserRole + 2)
+        for i in range(window.git_status_list.count())
+        if isinstance(window.git_status_list.item(i).data(Qt.UserRole), dict)
+    ]
+    assert "staged" in categories
+    assert "changed" in categories
+    assert "untracked" in categories
+    assert sum(entry["path"] == "both.txt" for entry in entries) == 2
+    assert any(entry["path"] == "new file.txt" for entry in entries)
     nested_item = next(
         window.git_status_list.item(row)
         for row in range(window.git_status_list.count())
@@ -3861,7 +3869,7 @@ def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
         and window.git_status_list.item(row).data(Qt.UserRole)["path"]
         == nested_path.as_posix()
     )
-    assert nested_item.text().endswith(nested_path.as_posix())
+    assert nested_item.text() == ""
     assert nested_path.as_posix() in nested_item.toolTip()
     assert not window.git_status_list.wordWrap()
     assert window.git_status_list.textElideMode() == Qt.TextElideMode.ElideMiddle
@@ -3875,10 +3883,11 @@ def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
         window.git_status_list.itemWidget(item).objectName() == "vaultGitSectionRow"
         for item in headings
     )
+    assert all(item.text() == "" for item in headings)
     nested_row = window.git_status_list.itemWidget(nested_item)
     assert nested_row.findChild(QLabel, "vaultGitStatusCode").text() == "NEW"
     assert nested_row.findChild(QLabel, "vaultGitFilePath").toolTip() == nested_path.as_posix()
-    assert not any(".sp_folder" in label for label in labels)
+    assert not any(".sp_folder" in entry["path"] for entry in entries)
 
     nested_item.setSelected(True)
     window.git_status_list.setCurrentItem(nested_item)
