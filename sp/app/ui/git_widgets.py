@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,9 @@ from PySide6.QtWidgets import (
 from sp.app import git_support
 from .canvas_navigation import install_primary_wheel_zoom
 from .utility_header import UtilityPanelHeader
+
+
+_WINDOWS = sys.platform == "win32"
 
 
 def git_status_info(code: str) -> tuple[str, str, str]:
@@ -105,12 +109,17 @@ def git_change_row(
     row.setAttribute(Qt.WA_StyledBackground, True)
     row.setStyleSheet("QWidget#vaultGitChangeRow { background: transparent; }")
     row_layout = QHBoxLayout(row)
-    row_layout.setContentsMargins(8, 5, trailing_margin, 5)
-    row_layout.setSpacing(8)
+    row_layout.setContentsMargins(
+        10 if _WINDOWS else 8,
+        7 if _WINDOWS else 5,
+        trailing_margin,
+        7 if _WINDOWS else 5,
+    )
+    row_layout.setSpacing(9 if _WINDOWS else 8)
 
     status = QLabel(abbreviation)
     status.setObjectName("vaultGitStatusCode")
-    status.setFixedWidth(38)
+    status.setFixedWidth(42 if _WINDOWS else 38)
     status.setAlignment(Qt.AlignCenter)
     status.setToolTip(f"{name} — {explanation}")
     status.setAccessibleName(f"Git status: {name}")
@@ -133,6 +142,10 @@ def git_change_row(
     path_label = GitPathLabel(display_path)
     path_label.setObjectName("vaultGitFilePath")
     path_label.setAccessibleName(f"Changed file: {path}")
+    if _WINDOWS:
+        path_font = path_label.font()
+        path_font.setPointSize(max(10, path_font.pointSize()))
+        path_label.setFont(path_font)
     row_layout.addWidget(path_label, 1)
     return row
 
@@ -142,10 +155,18 @@ def git_section_row(title: str, count: int) -> QWidget:
     row = QWidget()
     row.setObjectName("vaultGitSectionRow")
     layout = QHBoxLayout(row)
-    layout.setContentsMargins(8, 7, 8, 4)
+    layout.setContentsMargins(
+        10 if _WINDOWS else 8,
+        8 if _WINDOWS else 7,
+        8,
+        6 if _WINDOWS else 4,
+    )
     label = QLabel(f"{title.upper()}  ·  {count}")
     label.setObjectName("vaultGitSectionLabel")
-    label.setStyleSheet("font-size: 10px; font-weight: 600; color: palette(text);")
+    label.setStyleSheet(
+        f"font-size: {'9pt' if _WINDOWS else '10px'}; "
+        "font-weight: 600; color: palette(text);"
+    )
     layout.addWidget(label)
     layout.addStretch(1)
     return row

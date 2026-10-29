@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -19,6 +20,9 @@ from PySide6.QtWidgets import (
 from .theme import chrome_colors, theme_value
 
 
+_WINDOWS = sys.platform == "win32"
+
+
 class UtilityPanelHeader(QFrame):
     """A restrained heading that identifies a rail utility without wasting space."""
 
@@ -32,11 +36,19 @@ class UtilityPanelHeader(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("utilityPanelHeader")
-        self.setFixedHeight(int(theme_value("ui.utility_header.height_px", 30)))
+        default_height = 36 if _WINDOWS else 30
+        self.setFixedHeight(
+            int(theme_value("ui.utility_header.height_px", default_height))
+        )
         self._accent_color = accent_color
         self.header_layout = QHBoxLayout(self)
-        self.header_layout.setContentsMargins(8, 3, 8, 3)
-        self.header_layout.setSpacing(6)
+        self.header_layout.setContentsMargins(
+            9 if _WINDOWS else 8,
+            4 if _WINDOWS else 3,
+            9 if _WINDOWS else 8,
+            4 if _WINDOWS else 3,
+        )
+        self.header_layout.setSpacing(7 if _WINDOWS else 6)
         self.title_label = QLabel(title.upper(), self)
         self.title_label.setObjectName("utilityPanelTitle")
         self.header_layout.addWidget(self.title_label)
@@ -68,12 +80,14 @@ class UtilityPanelHeader(QFrame):
             f"background: {colors['alternate']}; border-bottom: 1px solid {colors['border']};"
             "}"
             "QLabel#utilityPanelTitle {"
-            f"color: {colors['accent']}; font-size: 10px; font-weight: 700;"
+            f"color: {colors['accent']}; "
+            f"font-size: {'9pt' if _WINDOWS else '10px'}; font-weight: 700;"
             "}"
             "QLabel#utilityPanelDetail {"
             f"background: {colors['base']}; color: {colors['text']}; "
             f"border: 1px solid {colors['border']}; border-radius: {radius}px; "
-            "padding: 1px 6px; font-size: 10px;"
+            f"padding: {'2px 7px' if _WINDOWS else '1px 6px'}; "
+            f"font-size: {'9pt' if _WINDOWS else '10px'};"
             "}"
         )
 
@@ -95,11 +109,19 @@ class CompactToolbarIdentity(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("compactToolbarIdentity")
-        self.setFixedHeight(int(theme_value("ui.toolbar_identity.height_px", 28)))
+        default_height = 34 if _WINDOWS else 28
+        self.setFixedHeight(
+            int(theme_value("ui.toolbar_identity.height_px", default_height))
+        )
         self._accent_color = accent_color
         self.identity_layout = QHBoxLayout(self)
-        self.identity_layout.setContentsMargins(7, 2, 7, 2)
-        self.identity_layout.setSpacing(5)
+        self.identity_layout.setContentsMargins(
+            8 if _WINDOWS else 7,
+            3 if _WINDOWS else 2,
+            8 if _WINDOWS else 7,
+            3 if _WINDOWS else 2,
+        )
+        self.identity_layout.setSpacing(6 if _WINDOWS else 5)
         self.icon_label = QLabel(self)
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setVisible(False)
@@ -231,17 +253,19 @@ class CompactToolbarIdentity(QFrame):
             f"background: transparent; border-left: 2px solid {colors['accent']};"
             "}"
             "QLabel#compactToolbarIdentityTitle {"
-            f"color: {colors['accent']}; font-size: 10px; font-weight: 700;"
+            f"color: {colors['accent']}; "
+            f"font-size: {'9pt' if _WINDOWS else '10px'}; font-weight: 700;"
             "}"
             "QLabel#compactToolbarIdentityDetail {"
-            f"color: {colors['text']}; font-size: 10px;"
+            f"color: {colors['text']}; font-size: {'9pt' if _WINDOWS else '10px'};"
             "}"
             "QLabel#compactBreadcrumbSeparator, QLabel#compactBreadcrumbEllipsis {"
-            f"color: {colors['muted']}; font-size: 11px;"
+            f"color: {colors['muted']}; font-size: {'10pt' if _WINDOWS else '11px'};"
             "}"
             "QToolButton[breadcrumbSegment=\"true\"] {"
             f"color: {colors['text']}; background: transparent; border: 0; "
-            "padding: 1px 3px; font-size: 10px;"
+            f"padding: {'2px 4px' if _WINDOWS else '1px 3px'}; "
+            f"font-size: {'9pt' if _WINDOWS else '10px'};"
             "}"
             "QToolButton[breadcrumbSegment=\"true\"]:hover {"
             f"background: {colors['hover']}; border-radius: "

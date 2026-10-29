@@ -307,13 +307,27 @@ class GitStatusList(QListWidget):
             "stage": "Stage file",
             "unstage": "Unstage file",
         }
+        fallback_symbols = {"remove": "×", "stage": "+", "unstage": "−"}
         for action_name in ("remove", "stage", "unstage"):
             button = QToolButton(self.viewport())
             button.setObjectName(f"gitStatus{action_name.title()}Button")
             button.setAutoRaise(False)
-            button.setFixedSize(24, 22)
-            button.setIconSize(QSize(17, 17))
-            button.setIcon(icons.get(action_name, QIcon()))
+            button.setFixedSize(
+                28 if sys.platform == "win32" else 24,
+                26 if sys.platform == "win32" else 22,
+            )
+            action_icon_size = 19 if sys.platform == "win32" else 17
+            button.setIconSize(QSize(action_icon_size, action_icon_size))
+            icon = icons.get(action_name, QIcon())
+            if (
+                sys.platform == "win32"
+                or icon.isNull()
+                or icon.pixmap(17, 17).isNull()
+            ):
+                button.setText(fallback_symbols[action_name])
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            else:
+                button.setIcon(icon)
             button.setToolTip(tooltips[action_name])
             button.setAccessibleName(tooltips[action_name])
             button.clicked.connect(
@@ -4356,7 +4370,13 @@ class Window(QMainWindow):
         self.hidden_files_button.setObjectName("folderHiddenFilesToggle")
         self.hidden_files_button.setCheckable(True)
         self.hidden_files_button.setAutoRaise(True)
-        self.hidden_files_button.setIconSize(QSize(18, 18))
+        hidden_icon_size = 20 if sys.platform == "win32" else 18
+        self.hidden_files_button.setIconSize(
+            QSize(hidden_icon_size, hidden_icon_size)
+        )
+        self.hidden_files_button.setProperty("folderHeaderAsset", "closed-eye.svg")
+        if sys.platform == "win32":
+            self.hidden_files_button.setFixedSize(30, 28)
         self.hidden_files_button.setChecked(bool(self.state.get("hidden", False)))
         self.hidden_files_button.toggled.connect(self.toggle_hidden)
         self.folder_panel_header.add_trailing_widget(self.hidden_files_button)
@@ -4397,7 +4417,12 @@ class Window(QMainWindow):
             )
             self.git_refresh_button = QToolButton(self.git_panel_header)
             self.git_refresh_button.setAutoRaise(True)
-            self.git_refresh_button.setIconSize(QSize(18, 18))
+            refresh_icon_size = 20 if sys.platform == "win32" else 18
+            self.git_refresh_button.setIconSize(
+                QSize(refresh_icon_size, refresh_icon_size)
+            )
+            if sys.platform == "win32":
+                self.git_refresh_button.setFixedSize(30, 28)
             self.git_refresh_button.setIcon(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
             )
@@ -4422,6 +4447,11 @@ class Window(QMainWindow):
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
+            if sys.platform == "win32":
+                summary_font = self.git_status_label.font()
+                summary_font.setPointSize(max(10, summary_font.pointSize()))
+                self.git_status_label.setFont(summary_font)
+                self.git_status_label.setMinimumHeight(36)
             git_layout.addWidget(self.git_status_label)
             self.git_status_list = GitStatusList(
                 {
@@ -4645,6 +4675,7 @@ class Window(QMainWindow):
             accent = QColor("#4f8f8b")
         self._folder_identity_accent = accent.name()
         self._apply_folder_palette(accent)
+        self._refresh_header_icons()
         self.identity_bar.set_accent_color(accent.name())
         self.folder_panel_header.set_accent_color(accent.name())
         self.tree.setStyleSheet(
@@ -4816,24 +4847,31 @@ class Window(QMainWindow):
             return
         accent = getattr(self, "_folder_identity_accent", "#4f8f8b")
         neutral = QApplication.palette().color(QPalette.Mid).name()
-        self.rail.setStyleSheet(
-            tab_widget_stylesheet(
-                self.rail,
-                object_name="folderNavigatorRail",
-                accent_color=accent,
-                pane_border=accent if folder_has_focus else neutral,
-                readable_rail_tabs=True,
-            )
+        rail_style = tab_widget_stylesheet(
+            self.rail,
+            object_name="folderNavigatorRail",
+            accent_color=accent,
+            pane_border=accent if folder_has_focus else neutral,
+            readable_rail_tabs=True,
         )
-        self.tabs.setStyleSheet(
-            tab_widget_stylesheet(
-                self.tabs,
-                object_name="folderNavigatorEditors",
-                accent_color=accent,
-                pane_border=accent if editor_has_focus else neutral,
-                readable_rail_tabs=True,
-            )
+        editor_style = tab_widget_stylesheet(
+            self.tabs,
+            object_name="folderNavigatorEditors",
+            accent_color=accent,
+            pane_border=accent if editor_has_focus else neutral,
+            readable_rail_tabs=True,
         )
+        if sys.platform == "win32":
+            rail_style += (
+                "QTabWidget#folderNavigatorRail QTabBar::tab {"
+                "padding: 7px 12px; font-size: 10pt; }"
+            )
+            editor_style += (
+                "QTabWidget#folderNavigatorEditors QTabBar::tab {"
+                "padding: 7px 12px; font-size: 10pt; }"
+            )
+        self.rail.setStyleSheet(rail_style)
+        self.tabs.setStyleSheet(editor_style)
         if self.chat_tabs is not None:
             self.chat_tabs.setStyleSheet(
                 tab_widget_stylesheet(
@@ -5249,18 +5287,29 @@ class Window(QMainWindow):
         columns_toolbar.setObjectName("folder_navigator_columns")
         columns_toolbar.setMovable(False)
         columns_toolbar.setFloatable(False)
-        columns_toolbar.setIconSize(QSize(18, 18))
+        toolbar_icon_size = 20 if sys.platform == "win32" else 18
+        toolbar_button_size = 32 if sys.platform == "win32" else 28
+        columns_toolbar.setIconSize(QSize(toolbar_icon_size, toolbar_icon_size))
         columns_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        if sys.platform == "darwin":
+        if sys.platform == "win32":
+            columns_toolbar.setFixedHeight(42)
+        elif sys.platform == "darwin":
             columns_toolbar.setFixedHeight(34)
         columns_toolbar.setStyleSheet(
             "QToolBar#folder_navigator_columns {"
-            "padding: 3px 6px; spacing: 4px;"
+            f"padding: {'5px 7px' if sys.platform == 'win32' else '3px 6px'}; "
+            "spacing: 4px;"
             "}"
             "QToolBar#folder_navigator_columns QToolButton {"
-            "min-width: 28px; max-width: 28px;"
-            "min-height: 28px; max-height: 28px;"
-            "padding: 0; margin: 0;"
+            f"min-width: {toolbar_button_size}px; max-width: {toolbar_button_size}px;"
+            f"min-height: {toolbar_button_size}px; max-height: {toolbar_button_size}px;"
+            "padding: 0; margin: 0; border: 1px solid transparent; border-radius: 5px;"
+            "}"
+            "QToolBar#folder_navigator_columns QToolButton:hover {"
+            "background: palette(alternate-base); border-color: palette(mid);"
+            "}"
+            "QToolBar#folder_navigator_columns QToolButton:checked {"
+            "background: palette(alternate-base); border-color: palette(highlight);"
             "}"
             "QToolBar#folder_navigator_columns::separator {"
             "width: 1px; height: 20px; margin: 4px 5px;"
@@ -8204,6 +8253,76 @@ class Window(QMainWindow):
         icon.addPixmap(active, QIcon.Mode.Selected)
         return icon
 
+    @staticmethod
+    def _header_asset_fallback(name: str) -> str:
+        return {
+            "terminal.svg": ">_",
+            "closed-eye.svg": "○",
+            "open-eye.svg": "●",
+            "collapse-all.svg": "⇤",
+            "git-pull.svg": "↓",
+            "git-commit.svg": "●",
+            "git-push.svg": "↑",
+        }.get(name, "•")
+
+    def _configure_header_button_icon(
+        self,
+        button: QToolButton,
+        asset: str,
+        *,
+        force_symbol: bool = False,
+    ) -> None:
+        """Apply a palette-correct icon with a reliable text fallback.
+
+        Windows can initialize the Folder Navigator with its native palette and
+        switch to the StillPoint palette afterward. Rebuilding here prevents a
+        dark, pre-palette SVG from disappearing against the final dark header.
+        The Git symbols deliberately use text on Windows because those glyphs
+        stay sharp across Qt SVG plugin and display-scale combinations.
+        """
+        icon = self._header_asset_icon(asset)
+        use_symbol = (
+            force_symbol
+            or icon.isNull()
+            or icon.pixmap(QSize(18, 18)).isNull()
+        )
+        button.setIcon(QIcon())
+        button.setText("")
+        if use_symbol:
+            button.setText(self._header_asset_fallback(asset))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            symbol_font = button.font()
+            symbol_font.setPointSize(max(11, symbol_font.pointSize()))
+            symbol_font.setBold(True)
+            button.setFont(symbol_font)
+        else:
+            button.setIcon(icon)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setProperty("folderHeaderAsset", asset)
+
+    def _refresh_header_icons(self) -> None:
+        for button in (
+            getattr(self, "terminal_button", None),
+            getattr(self, "collapse_all_button", None),
+            getattr(self, "git_pull_button", None),
+            getattr(self, "git_commit_button", None),
+            getattr(self, "git_push_button", None),
+        ):
+            if not isinstance(button, QToolButton):
+                continue
+            asset = str(button.property("folderHeaderAsset") or "")
+            if asset:
+                self._configure_header_button_icon(
+                    button,
+                    asset,
+                    force_symbol=(
+                        sys.platform == "win32" and asset.startswith("git-")
+                    ),
+                )
+        hidden = getattr(self, "hidden_files_button", None)
+        if isinstance(hidden, QToolButton):
+            self._update_hidden_files_control(hidden.isChecked())
+
     def _hidden_files_icon(self, visible: bool) -> QIcon:
         return self._header_asset_icon(
             "open-eye.svg" if visible else "closed-eye.svg"
@@ -8213,8 +8332,15 @@ class Window(QMainWindow):
             self, asset: str, tooltip: str, callback, parent=None) -> QToolButton:
         button = QToolButton(parent or self.folder_panel_header)
         button.setAutoRaise(True)
-        button.setIconSize(QSize(18, 18))
-        button.setIcon(self._header_asset_icon(asset))
+        icon_size = 20 if sys.platform == "win32" else 18
+        button.setIconSize(QSize(icon_size, icon_size))
+        if sys.platform == "win32":
+            button.setFixedSize(30, 28)
+        self._configure_header_button_icon(
+            button,
+            asset,
+            force_symbol=(sys.platform == "win32" and asset.startswith("git-")),
+        )
         button.setToolTip(tooltip)
         button.setAccessibleName(tooltip)
         button.clicked.connect(callback)
@@ -8398,7 +8524,7 @@ class Window(QMainWindow):
             heading = QListWidgetItem()
             heading.setFlags(Qt.NoItemFlags)
             heading.setData(Qt.AccessibleTextRole, f"{title}, {len(items)}")
-            heading.setSizeHint(QSize(0, 30))
+            heading.setSizeHint(QSize(0, 34 if sys.platform == "win32" else 30))
             self.git_status_list.addItem(heading)
             self.git_status_list.setItemWidget(
                 heading, git_section_row(title, len(items))
@@ -8416,7 +8542,7 @@ class Window(QMainWindow):
                 if entry.get("original"):
                     tooltip += f"\nPrevious path: {entry['original']}"
                 item.setToolTip(tooltip)
-                item.setSizeHint(QSize(0, 34))
+                item.setSizeHint(QSize(0, 40 if sys.platform == "win32" else 34))
                 self.git_status_list.addItem(item)
                 self.git_status_list.setItemWidget(
                     item,
@@ -8825,14 +8951,15 @@ class Window(QMainWindow):
             self.statusBar().showMessage(f"Could not update .gitignore: {exc}", 10000)
 
     def _update_hidden_files_control(self, visible: bool) -> None:
-        icon = self._hidden_files_icon(visible)
+        asset = "open-eye.svg" if visible else "closed-eye.svg"
+        icon = self._header_asset_icon(asset)
         tooltip = "Hide hidden files" if visible else "Show hidden files"
         button = getattr(self, "hidden_files_button", None)
         if button is not None:
             blocked = button.blockSignals(True)
             button.setChecked(visible)
             button.blockSignals(blocked)
-            button.setIcon(icon)
+            self._configure_header_button_icon(button, asset)
             button.setToolTip(tooltip)
             button.setAccessibleName(tooltip)
         action = getattr(self, "hidden_action", None)

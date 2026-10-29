@@ -3792,7 +3792,7 @@ def test_git_repository_header_controls_run_expected_commands(
         assert button is not None
         assert window.git_panel_header.isAncestorOf(button)
         assert not window.folder_panel_header.isAncestorOf(button)
-        assert not button.icon().isNull()
+        assert not button.icon().isNull() or bool(button.text())
 
     assert window.rail.indexOf(window.git_page) == 2
     assert window.rail.tabText(2) == "Git"
@@ -3806,6 +3806,29 @@ def test_git_repository_header_controls_run_expected_commands(
         (["commit", "-m", "Ship the reader"], "Git Commit"),
         (["push"], "Git Push"),
     ]
+    window.close()
+
+
+def test_git_header_icon_has_visible_symbol_fallback(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    window = Window(tmp_path)
+
+    window._configure_header_button_icon(
+        window.git_pull_button,
+        "git-pull.svg",
+        force_symbol=True,
+    )
+
+    assert window.git_pull_button.text() == "↓"
+    assert window.git_pull_button.icon().isNull()
+    assert (
+        window.git_pull_button.toolButtonStyle()
+        == Qt.ToolButtonStyle.ToolButtonTextOnly
+    )
     window.close()
 
 
