@@ -302,6 +302,10 @@ def test_folder_navigator_shows_chat_when_enabled(tmp_path, monkeypatch, qapp):
     assert window.chat_panel is not None
     assert window.chat_tabs.count() == 1
     assert window.chat_tabs.tabText(0) == "AI Chat"
+    assert not window.chat_panel.new_chat_btn.icon().isNull()
+    assert not window.chat_panel.server_config_btn.icon().isNull()
+    assert not window.chat_panel.show_chats_btn.icon().isNull()
+    assert not window.chat_panel.send_btn.icon().isNull()
     assert window.chat_container.currentWidget() is window.chat_tabs
     assert window.chat_visibility_action.shortcut().toString() == "Ctrl+Shift+N"
 

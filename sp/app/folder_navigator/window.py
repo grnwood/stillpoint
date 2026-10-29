@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
     QStackedLayout, QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
     QSizePolicy, QColorDialog)
 from PySide6.QtWidgets import QTextBrowser
+from PySide6.QtSvg import QSvgRenderer
 
 from .core import (DEFAULT_PRUNED_DIRECTORY_GLOBS, DEFAULT_PRUNED_DIRECTORY_NAMES,
     DEFAULT_PRUNED_FILE_GLOBS, DEFAULT_PRUNED_FILE_SUFFIXES,
@@ -88,6 +89,33 @@ from sp.app.ui.screen_positioning import (
     popup_available_geometry,
 )
 from sp.app import config
+
+
+def _folder_navigator_asset_icon(
+    name: str,
+    source: QWidget,
+    size: QSize = QSize(16, 16),
+) -> QIcon:
+    """Render a palette-aware SVG reliably in packaged desktop builds."""
+    candidates = [Path(__file__).resolve().parents[2] / "assets" / name]
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        root = Path(bundled)
+        candidates.extend((root / "sp" / "assets" / name, root / "assets" / name))
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
+        return QIcon()
+    renderer = QSvgRenderer(str(path))
+    if not renderer.isValid():
+        return QIcon()
+    pixmap = QPixmap(size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), source.palette().color(QPalette.ButtonText))
+    painter.end()
+    return QIcon(pixmap)
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".tab"}
 WORKBOOK_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
@@ -2487,18 +2515,19 @@ class Tab(QWidget):
             self.cursor_status = QLabel()
             self.cursor_status.setAccessibleName("Cursor position and selection")
             self.file_status = QLabel()
-            self.file_status.setAccessibleName("File format and editor mode")
-            status_layout.addWidget(self.cursor_status)
-            status_layout.addStretch()
+            self.file_status.setAccessibleName("File format and access")
             if markdown:
                 self.reading_toggle = QToolButton(self.editor_status)
-                self.reading_toggle.setText("Read")
                 self.reading_toggle.setCheckable(True)
-                self.reading_toggle.setToolTip(
-                    "Toggle the formatted Markdown reading view (Ctrl/Cmd+Space)"
-                )
+                self.reading_toggle.setAutoRaise(True)
+                self.reading_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                self.reading_toggle.setFixedSize(24, 22)
+                self.reading_toggle.setIconSize(QSize(16, 16))
+                self._update_reading_toggle()
                 self.reading_toggle.toggled.connect(self.set_reading_view)
                 status_layout.addWidget(self.reading_toggle)
+            status_layout.addWidget(self.cursor_status)
+            status_layout.addStretch()
             status_layout.addWidget(self.file_status)
             palette = QApplication.palette()
             self.editor_status.setStyleSheet(
@@ -2571,7 +2600,7 @@ class Tab(QWidget):
         if toggle is not None:
             toggle.blockSignals(True)
             toggle.setChecked(enabled)
-            toggle.setText("Edit" if enabled else "Read")
+            self._update_reading_toggle()
             toggle.blockSignals(False)
         if enabled:
             cursor = self.editor.textCursor()
@@ -2614,6 +2643,21 @@ class Tab(QWidget):
         self._update_editor_status()
         self.readingViewChanged.emit(enabled)
 
+    def _update_reading_toggle(self) -> None:
+        toggle = getattr(self, "reading_toggle", None)
+        if toggle is None:
+            return
+        if self.reading_view_enabled:
+            action = "Switch to edit mode"
+            asset = "edit-mode.svg"
+        else:
+            action = "Switch to reading mode"
+            asset = "read-mode.svg"
+        toggle.setText("")
+        toggle.setIcon(_folder_navigator_asset_icon(asset, toggle))
+        toggle.setAccessibleName(action)
+        toggle.setToolTip(f"{action} (Ctrl/Cmd+Space)")
+
     def show_notice(self, message):
         self.notice.setText(message)
         self.notice.show()
@@ -2646,9 +2690,8 @@ class Tab(QWidget):
             self.loaded.newline if self.loaded else "\n", "LF"
         )
         access = "Read-only" if self.editor.isReadOnly() else "Editable"
-        mode = "  ·  Reading View" if self.reading_view_enabled else ""
         self.file_status.setText(
-            f"{language}  ·  {encoding}  ·  {newline}  ·  {access}{mode}"
+            f"{language}  ·  {encoding}  ·  {newline}  ·  {access}"
         )
 
     def _show_find(self):

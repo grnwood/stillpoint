@@ -95,18 +95,33 @@ def test_folder_markdown_tab_toggles_preview_and_restores_selection(
     cursor.setPosition(2)
     cursor.setPosition(8, QTextCursor.KeepAnchor)
     tab.editor.setTextCursor(cursor)
+    status_layout = tab.editor_status.layout()
+    assert status_layout.indexOf(tab.reading_toggle) < status_layout.indexOf(
+        tab.cursor_status
+    )
+    assert tab.reading_toggle.text() == ""
+    assert not tab.reading_toggle.icon().isNull()
+    read_icon_key = tab.reading_toggle.icon().cacheKey()
+    file_status = tab.file_status.text()
 
     tab.set_reading_view(True)
 
     assert tab.reading_view_enabled
-    assert tab.reading_toggle.text() == "Edit"
+    assert tab.reading_toggle.isChecked()
+    assert tab.reading_toggle.text() == ""
+    assert tab.reading_toggle.accessibleName() == "Switch to edit mode"
+    assert tab.reading_toggle.icon().cacheKey() != read_icon_key
+    assert tab.file_status.text() == file_status
     assert tab.editor_view_stack.currentWidget() is tab.reading_view
     assert "<table>" in tab.reading_view.last_html
 
     tab.set_reading_view(False)
 
     assert tab.editor_view_stack.currentWidget() is tab.editor
-    assert tab.reading_toggle.text() == "Read"
+    assert not tab.reading_toggle.isChecked()
+    assert tab.reading_toggle.text() == ""
+    assert tab.reading_toggle.accessibleName() == "Switch to reading mode"
+    assert tab.file_status.text() == file_status
     assert tab.editor.textCursor().anchor() == 2
     assert tab.editor.textCursor().position() == 8
 
@@ -558,6 +573,12 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     assert main_window.reading_view._zoom_steps == initial_reading_zoom
     main_window._adjust_markdown_font_size(-1)
     assert main_window.font_size == initial_editor_size
+    assert main_window._action_reading_view.text() == "Reading View"
+    assert main_window._action_reading_view.toolTip().startswith(
+        "Switch to reading mode"
+    )
+    assert not main_window._action_reading_view.icon().isNull()
+    read_icon_key = main_window._action_reading_view.icon().cacheKey()
 
     main_window._action_reading_view.trigger()
 
@@ -566,6 +587,10 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     }
     assert main_window._action_reading_view in main_window.toolbar.actions()
     assert main_window._reading_view_enabled
+    assert main_window._action_reading_view.text() == "Edit View"
+    assert main_window._action_reading_view.toolTip().startswith("Switch to edit mode")
+    assert main_window._action_reading_view.icon().cacheKey() != read_icon_key
+    edit_icon_key = main_window._action_reading_view.icon().cacheKey()
     assert main_window._editor_view_stack.currentWidget() is main_window.reading_view
     assert "<table>" in main_window.reading_view.last_html
     editor_size_in_reading_view = main_window.font_size
@@ -577,6 +602,8 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     main_window._action_reading_view.trigger()
 
     assert not main_window._reading_view_enabled
+    assert main_window._action_reading_view.text() == "Reading View"
+    assert main_window._action_reading_view.icon().cacheKey() != edit_icon_key
     assert main_window._editor_view_stack.currentWidget() is main_window.editor
     assert main_window.editor.textCursor().position() == 4
 

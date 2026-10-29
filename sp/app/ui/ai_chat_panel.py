@@ -90,14 +90,28 @@ def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
     tint = _icon_tint_color()
     if not path.exists():
         return QIcon()
+    target_size = size or QSize(24, 24)
+    if path.suffix.casefold() == ".svg":
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return QIcon()
+        pixmap = QPixmap(target_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), tint)
+        painter.end()
+        return QIcon(pixmap)
     pixmap = QPixmap(str(path))
-    if size:
-        pixmap = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    mask = pixmap.createMaskFromColor(Qt.transparent)
-    colored = QPixmap(pixmap.size())
-    colored.fill(tint)
-    colored.setMask(mask)
-    return QIcon(colored)
+    if pixmap.isNull():
+        return QIcon()
+    pixmap = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), tint)
+    painter.end()
+    return QIcon(pixmap)
 
 def _log_llm_response(message: str) -> None:
     if log_enabled("ai_chat"):

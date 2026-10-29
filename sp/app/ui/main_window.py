@@ -3404,14 +3404,9 @@ class MainWindow(QMainWindow):
         self._action_audience_mode.setToolTip("Open in Audience Mode")
         self._action_audience_mode.triggered.connect(lambda checked=False: self._toggle_mode_overlay("audience"))
         view_mode_menu.addAction(self._action_audience_mode)
-        self._action_reading_view = QAction("Reading View", self)
+        self._action_reading_view = QAction(self)
         self._action_reading_view.setCheckable(True)
-        self._action_reading_view.setToolTip(
-            "Toggle the formatted Markdown reading view (Ctrl/Cmd+Space)"
-        )
-        self._action_reading_view.setIcon(
-            self.style().standardIcon(QStyle.SP_FileDialogContentsView)
-        )
+        self._update_reading_view_action()
         self._action_reading_view.triggered.connect(self._set_reading_view_enabled)
         view_mode_menu.addAction(self._action_reading_view)
         self.toolbar.addAction(self._action_reading_view)
@@ -11902,6 +11897,7 @@ class MainWindow(QMainWindow):
             self.reading_view._apply_palette()
             if getattr(self, "_reading_view_enabled", False):
                 self._refresh_reading_view()
+        self._update_reading_view_action()
         icon_color = self._main_icon_color()
         for button, asset_name in (
             (getattr(self, "refresh_tree_button", None), "reload.svg"),
@@ -21500,6 +21496,7 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(enabled)
             action.blockSignals(False)
+        self._update_reading_view_action()
         self.find_bar.hide()
         if enabled:
             self._remember_reading_editor_position()
@@ -21539,6 +21536,27 @@ class MainWindow(QMainWindow):
                 self.editor.setTextCursor(cursor)
                 self.editor.verticalScrollBar().setValue(int(self._reading_saved_scroll))
         self.editor.setFocus(Qt.ShortcutFocusReason)
+
+    def _update_reading_view_action(self) -> None:
+        action = getattr(self, "_action_reading_view", None)
+        if action is None:
+            return
+        reading = bool(getattr(self, "_reading_view_enabled", False))
+        if reading:
+            action.setText("Edit View")
+            action.setToolTip("Switch to edit mode (Ctrl/Cmd+Space)")
+            asset = "edit-mode.svg"
+        else:
+            action.setText("Reading View")
+            action.setToolTip("Switch to reading mode (Ctrl/Cmd+Space)")
+            asset = "read-mode.svg"
+        icon = self._load_icon(
+            self._find_asset(asset),
+            self._main_icon_color(),
+            size=18,
+        )
+        if icon is not None:
+            action.setIcon(icon)
 
     def _focus_vault_tab(self) -> None:
         """Switch to Vault tab and focus the tree."""
