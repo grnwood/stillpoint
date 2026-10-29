@@ -721,6 +721,10 @@ class NavigatorTree(QTreeView):
         self.header().setSectionsMovable(True)
         self.header().setStretchLastSection(False)
         self.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Match StillPoint's compact vault tree and VS Code-style hierarchy.
+        # Qt's platform default is much wider and quickly consumes the file-name
+        # column when several folders are expanded.
+        self.setIndentation(12)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setUniformRowHeights(True)

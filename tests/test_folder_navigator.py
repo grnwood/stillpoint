@@ -3614,6 +3614,7 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.menuBar().cornerWidget(Qt.Corner.TopRightCorner) is window.identity_bar
     assert not hasattr(window, "columns_toolbar")
     assert window.rail.tabText(0) == "Files"
+    assert window.tree.indentation() == 12
     assert window.folder_panel_header.title_label.text() == "FILES"
     assert window.folder_panel_header.detail_label.text() == tmp_path.name
     assert window.folder_panel_header.isAncestorOf(window.hidden_files_button)
