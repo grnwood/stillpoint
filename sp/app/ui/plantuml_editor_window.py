@@ -8,8 +8,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QPointF, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject
-from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QDesktopServices, QNativeGestureEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QPointF, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject, QRegularExpression, QEvent
+from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QFontDatabase, QDesktopServices, QNativeGestureEvent, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -47,6 +47,144 @@ from .merge_conflict_dialog import MergeConflictDialog
 _LOGGING = log_enabled("diagrams")
 
 
+def diagram_code_font(configured_family: str | None, point_size: int) -> QFont:
+    """Return a crisp coding font while honoring an explicit preference."""
+    if configured_family:
+        font = QFont(configured_family)
+    else:
+        available = set(QFontDatabase.families())
+        family = next(
+            (
+                candidate
+                for candidate in (
+                    "JetBrains Mono",
+                    "Hack",
+                    "Cascadia Code",
+                    "SF Mono",
+                    "Menlo",
+                    "Consolas",
+                    "DejaVu Sans Mono",
+                    "Liberation Mono",
+                )
+                if candidate in available
+            ),
+            "",
+        )
+        font = (
+            QFont(family)
+            if family
+            else QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        )
+    font.setPointSize(max(6, int(point_size)))
+    font.setFixedPitch(True)
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setWeight(QFont.Weight.Medium)
+    font.setKerning(False)
+    return font
+
+
+class DiagramSyntaxHighlighter(QSyntaxHighlighter):
+    """Small, fast highlighter for the two diagram source languages."""
+
+    def __init__(self, document, language: str, theme_prefix: str) -> None:
+        super().__init__(document)
+        self.language = language
+        bg = theme_color(f"{theme_prefix}.editor.bg", "#10151c")
+        light = bg.lightness() >= 128
+        defaults = (
+            {
+                "keyword": "#075985",
+                "directive": "#9d174d",
+                "string": "#92400e",
+                "comment": "#64748b",
+                "operator": "#6d28d9",
+            }
+            if light
+            else {
+                "keyword": "#7dd3fc",
+                "directive": "#f472b6",
+                "string": "#facc15",
+                "comment": "#718096",
+                "operator": "#c4b5fd",
+            }
+        )
+        self.formats = {}
+        for name, default in defaults.items():
+            char_format = QTextCharFormat()
+            char_format.setForeground(
+                theme_color(f"{theme_prefix}.editor.syntax_{name}", default)
+            )
+            if name in {"keyword", "directive"}:
+                char_format.setFontWeight(QFont.Weight.DemiBold)
+            if name == "comment":
+                char_format.setFontItalic(True)
+            self.formats[name] = char_format
+        self.rules = self._rules(language)
+
+    def _rules(self, language: str):
+        if language == "plantuml":
+            keywords = (
+                "actor|participant|boundary|control|entity|database|collections|queue|"
+                "class|interface|enum|annotation|component|node|cloud|rectangle|package|"
+                "frame|folder|alt|else|end|loop|opt|group|note|legend|title|caption|"
+                "header|footer|skinparam|left|right|top|bottom|if|then|elseif|endif|"
+                "start|stop|while|endwhile|repeat|fork|split"
+            )
+            comment = r"(?:^|\s)'[^\n]*$"
+            directive = r"@[A-Za-z][A-Za-z0-9_]*"
+        else:
+            keywords = (
+                "flowchart|graph|sequenceDiagram|classDiagram|stateDiagram-v2|erDiagram|"
+                "journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|xychart-beta|"
+                "block-beta|architecture-beta|packet-beta|kanban|radar-beta|eventModel|"
+                "treemap-beta|venn|ishikawa|wardley|treeview|subgraph|end|participant|"
+                "actor|autonumber|title|section|classDef|style|linkStyle|note|loop|alt|"
+                "else|opt|par|and|critical|break"
+            )
+            comment = r"%%(?!\{)[^\n]*$"
+            directive = r"%%\{.*\}%%"
+        return (
+            (QRegularExpression(rf"\b(?:{keywords})\b"), self.formats["keyword"]),
+            (QRegularExpression(directive), self.formats["directive"]),
+            (QRegularExpression(r'"(?:[^"\\]|\\.)*"'), self.formats["string"]),
+            (QRegularExpression(r"<?[-.=ox*]+(?:\|[^|]*\|)?[-.=ox*>]+"), self.formats["operator"]),
+            (QRegularExpression(comment), self.formats["comment"]),
+        )
+
+    def highlightBlock(self, text: str) -> None:  # type: ignore[override]
+        for expression, char_format in self.rules:
+            iterator = expression.globalMatch(text)
+            while iterator.hasNext():
+                match = iterator.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), char_format)
+
+
+def style_diagram_code_editor(
+    editor: "PlainTextEditWithLineNumbers", theme_prefix: str, language: str
+) -> None:
+    """Apply the shared code-workbench treatment to a diagram editor."""
+    background = theme_color(f"{theme_prefix}.editor.bg", "#10151c")
+    text = theme_color(f"{theme_prefix}.editor.text", "#d7e0ea")
+    border = theme_color(f"{theme_prefix}.editor.border", "#283442")
+    accent = theme_color("ui.chrome.accent", "#4f8f8b")
+    editor.setObjectName("diagramSourceEditor")
+    editor.set_diagram_theme_prefix(theme_prefix)
+    editor.setCursorWidth(2)
+    editor.setStyleSheet(
+        "QPlainTextEdit#diagramSourceEditor {"
+        f"background-color: {background.name()}; color: {text.name()};"
+        f"border: 1px solid {border.name()}; border-left: 3px solid {accent.name()};"
+        "padding: 10px 10px 10px 8px;"
+        f"selection-background-color: {theme_value(f'{theme_prefix}.editor.selection_bg', '#264f78')};"
+        f"selection-color: {theme_value(f'{theme_prefix}.editor.selection_text', '#ffffff')};"
+        "}"
+    )
+    editor.setTabStopDistance(editor.fontMetrics().horizontalAdvance(" ") * 2)
+    editor._diagram_syntax_highlighter = DiagramSyntaxHighlighter(
+        editor.document(), language, theme_prefix
+    )
+
+
 class BackgroundRenderNotifier(QObject):
     """Thread-safe notifier used to return render results to the UI thread."""
 
@@ -65,10 +203,12 @@ class LineNumberArea(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        # Slightly lighter than editor background (editor is ~30, line numbers ~40)
+        prefix = self.editor.diagram_theme_prefix()
+        editor_bg = theme_color(f"{prefix}.editor.bg", "#10151c")
+        gutter_default = editor_bg.darker(118) if editor_bg.lightness() < 128 else editor_bg.darker(104)
         painter.fillRect(
             event.rect(),
-            theme_color("plantuml_editor.line_number.bg", "#282828"),
+            theme_color(f"{prefix}.line_number.bg", gutter_default),
         )
         
         block = self.editor.firstVisibleBlock()
@@ -76,12 +216,21 @@ class LineNumberArea(QWidget):
         top = self.editor.blockBoundingGeometry(block).translated(self.editor.contentOffset()).top()
         bottom = top + self.editor.blockBoundingRect(block).height()
         
-        # Line number text color: light gray
-        painter.setPen(theme_color("plantuml_editor.line_number.text", "#808080"))
+        normal_pen = theme_color(f"{prefix}.line_number.text", "#718096")
+        active_pen = theme_color(
+            f"{prefix}.line_number.active_text",
+            theme_color("ui.chrome.accent", "#7fd4a7"),
+        )
+        current_block = self.editor.textCursor().blockNumber()
+        normal_font = painter.font()
+        active_font = QFont(normal_font)
+        active_font.setWeight(QFont.Weight.DemiBold)
         
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 lineNum = blockNumber + 1
+                painter.setPen(active_pen if blockNumber == current_block else normal_pen)
+                painter.setFont(active_font if blockNumber == current_block else normal_font)
                 painter.drawText(5, int(top), self.editor.lineNumberAreaWidth() - 10, 
                                 int(self.editor.blockBoundingRect(block).height()),
                                 Qt.AlignRight, str(lineNum))
@@ -89,12 +238,15 @@ class LineNumberArea(QWidget):
             top = bottom
             bottom = top + self.editor.blockBoundingRect(block).height()
             blockNumber += 1
+        painter.setPen(theme_color(f"{prefix}.line_number.border", "#26313d"))
+        painter.drawLine(self.width() - 1, event.rect().top(), self.width() - 1, event.rect().bottom())
 
 
 class PlainTextEditWithLineNumbers(QPlainTextEdit):
     """PlainTextEdit with integrated line number area."""
 
     zoomRequested = Signal(int)
+    _CURRENT_LINE_EXTRA_KEY = int(QTextFormat.UserProperty) + 4099
     
     def __init__(self):
         super().__init__()
@@ -103,10 +255,48 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         self.updateRequest.connect(self._update_line_numbers)
         self._update_line_number_area_width(0)
         self._wheel_zoom_accumulator = 0.0
+        self._diagram_theme_prefix = "plantuml_editor"
+        self.cursorPositionChanged.connect(self._highlight_current_line)
+
+    def set_diagram_theme_prefix(self, prefix: str) -> None:
+        self._diagram_theme_prefix = str(prefix or "plantuml_editor")
+        self._highlight_current_line()
+        self.line_number_area.update()
+
+    def diagram_theme_prefix(self) -> str:
+        return self._diagram_theme_prefix
+
+    def _highlight_current_line(self) -> None:
+        selections = [
+            selection
+            for selection in self.extraSelections()
+            if selection.format.property(self._CURRENT_LINE_EXTRA_KEY) is None
+        ]
+        if not self.isReadOnly():
+            editor_background = theme_color(
+                f"{self._diagram_theme_prefix}.editor.bg", "#10151c"
+            )
+            default_current_line = (
+                editor_background.lighter(122)
+                if editor_background.lightness() < 128
+                else editor_background.darker(104)
+            )
+            background = theme_color(
+                f"{self._diagram_theme_prefix}.editor.current_line_bg",
+                default_current_line,
+            )
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            selection.format.setBackground(background)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selection.format.setProperty(self._CURRENT_LINE_EXTRA_KEY, True)
+            selections.append(selection)
+        self.setExtraSelections(selections)
+        self.line_number_area.update()
 
     def lineNumberAreaWidth(self):
-        # Always allocate space for 3 digits (999 lines max before wrapping display)
-        digits = 3
+        digits = max(3, len(str(max(1, self.blockCount()))))
         space = 3 + self.fontMetrics().horizontalAdvance('9') * digits
         return space
 
@@ -125,6 +315,14 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange and hasattr(self, "line_number_area"):
+            self.line_number_area.setFont(self.font())
+            self._update_line_number_area_width(0)
+            self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 2)
+            self.line_number_area.update()
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         """Use primary-modifier wheel/trackpad gestures to resize source text."""
@@ -989,20 +1187,8 @@ class PlantUMLEditorWindow(QMainWindow):
         )
         self.editor.setPlaceholderText("Enter PlantUML diagram code here...")
         self.editor.setFont(self._get_monospace_font())
-        # Style editor to look more like a code editor
-        self.editor.setStyleSheet(
-            f"""
-            QPlainTextEdit {{
-                background-color: {theme_value('plantuml_editor.editor.bg', '#1e1e1e')};
-                color: {theme_value('plantuml_editor.editor.text', '#d4d4d4')};
-                border: 1px solid {theme_value('plantuml_editor.editor.border', '#3e3e3e')};
-                padding: 8px;
-                selection-background-color: {theme_value('plantuml_editor.editor.selection_bg', '#264f78')};
-                selection-color: {theme_value('plantuml_editor.editor.selection_text', '#ffffff')};
-            }}
-        """
-        )
-        self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
+        self._editor_base_point_size = self.editor.font().pointSize()
+        style_diagram_code_editor(self.editor, "plantuml_editor", "plantuml")
         main_h_splitter.addWidget(self.editor)
         
         # RIGHT: Vertical splitter with Preview (top) and Chat (bottom)
@@ -1139,7 +1325,7 @@ class PlantUMLEditorWindow(QMainWindow):
         self.preview_pixmap: Optional[QPixmap] = None
         # Apply editor zoom immediately
         try:
-            base_pt = 11
+            base_pt = self._editor_base_point_size
             font = self.editor.font()
             font.setPointSize(max(6, base_pt + self.editor_zoom_level))
             self.editor.setFont(font)
@@ -1419,22 +1605,9 @@ class PlantUMLEditorWindow(QMainWindow):
 
     def _get_monospace_font(self):
         """Get a monospace font suitable for code editing."""
-        from PySide6.QtGui import QFont
-        font = QFont()
-        
-        # Load font preferences
-        font_family = config.load_puml_editor_font()
-        font_size = config.load_puml_editor_font_size()
-        
-        if font_family:
-            font.setFamily(font_family)
-        else:
-            # Default to platform-specific monospace
-            font.setFamily("Courier New" if os.name == "nt" else "Courier")
-        
-        font.setPointSize(font_size)
-        font.setFixedPitch(True)
-        return font
+        return diagram_code_font(
+            config.load_puml_editor_font(), config.load_puml_editor_font_size()
+        )
 
     # --- AI prompt handling ----------------------------------------------------
 
@@ -2441,7 +2614,7 @@ B --> A: response
         """Zoom in editor text."""
         self.editor_zoom_level += 1
         font = self.editor.font()
-        font.setPointSize(11 + self.editor_zoom_level)
+        font.setPointSize(self._editor_base_point_size + self.editor_zoom_level)
         self.editor.setFont(font)
         try:
             config.save_puml_editor_zoom(self.editor_zoom_level)
@@ -2455,7 +2628,7 @@ B --> A: response
         if self.editor_zoom_level > -5:  # Min size 6pt
             self.editor_zoom_level -= 1
             font = self.editor.font()
-            font.setPointSize(11 + self.editor_zoom_level)
+            font.setPointSize(self._editor_base_point_size + self.editor_zoom_level)
             self.editor.setFont(font)
             try:
                 config.save_puml_editor_zoom(self.editor_zoom_level)

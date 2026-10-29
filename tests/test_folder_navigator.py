@@ -3805,6 +3805,8 @@ def test_git_repository_header_controls_run_expected_commands(
 
 def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
         tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel
     from sp.app.folder_navigator.window import Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -3828,6 +3830,10 @@ def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
     subprocess.run(["git", "-C", str(tmp_path), "add", "both.txt"], check=True)
     both.write_text("staged and changed\n", encoding="utf-8")
     (tmp_path / "new file.txt").write_text("new\n", encoding="utf-8")
+    nested_path = Path("a-very-long-folder-name") / "another-long-folder-name" / "visible-file-name.txt"
+    nested_file = tmp_path / nested_path
+    nested_file.parent.mkdir(parents=True)
+    nested_file.write_text("nested\n", encoding="utf-8")
 
     window = Window(tmp_path)
     window.refresh_git_status()
@@ -3842,13 +3848,81 @@ def test_git_status_tab_groups_actionable_states_and_ignores_folder_cache(
     assert any(label.startswith("Untracked Files") for label in labels)
     assert sum("both.txt" in label for label in labels) == 2
     assert any("new file.txt" in label for label in labels)
+    nested_item = next(
+        window.git_status_list.item(row)
+        for row in range(window.git_status_list.count())
+        if isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+        and window.git_status_list.item(row).data(Qt.UserRole)["path"]
+        == nested_path.as_posix()
+    )
+    assert nested_item.text().endswith(nested_path.as_posix())
+    assert nested_path.as_posix() in nested_item.toolTip()
+    assert not window.git_status_list.wordWrap()
+    assert window.git_status_list.textElideMode() == Qt.TextElideMode.ElideMiddle
+    assert "border-bottom: 1px solid palette(mid)" in window.git_status_list.styleSheet()
+    headings = [
+        window.git_status_list.item(row)
+        for row in range(window.git_status_list.count())
+        if not isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+    ]
+    assert headings and all(
+        window.git_status_list.itemWidget(item).objectName() == "vaultGitSectionRow"
+        for item in headings
+    )
+    nested_row = window.git_status_list.itemWidget(nested_item)
+    assert nested_row.findChild(QLabel, "vaultGitStatusCode").text() == "NEW"
+    assert nested_row.findChild(QLabel, "vaultGitFilePath").toolTip() == nested_path.as_posix()
     assert not any(".sp_folder" in label for label in labels)
+
+    nested_item.setSelected(True)
+    window.git_status_list.setCurrentItem(nested_item)
+    window.refresh_git_status()
+    refreshed_nested = next(
+        window.git_status_list.item(row)
+        for row in range(window.git_status_list.count())
+        if isinstance(window.git_status_list.item(row).data(Qt.UserRole), dict)
+        and window.git_status_list.item(row).data(Qt.UserRole)["path"]
+        == nested_path.as_posix()
+    )
+    assert refreshed_nested.isSelected()
+    assert window.git_status_list.currentItem() is refreshed_nested
 
     window._ensure_folder_metadata_ignored()
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines().count(
         ".sp_folder/"
     ) == 1
     window.close()
+
+
+def test_git_status_keyboard_navigation_skips_headings_and_activates_files(app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QListWidgetItem
+    from sp.app.folder_navigator.window import GitStatusList
+
+    status_list = GitStatusList({})
+    heading = QListWidgetItem("Changes")
+    heading.setFlags(Qt.NoItemFlags)
+    status_list.addItem(heading)
+    items = []
+    for path in ("one.txt", "two.txt"):
+        item = QListWidgetItem(path)
+        item.setData(Qt.UserRole, {"path": path})
+        status_list.addItem(item)
+        items.append(item)
+    clicked = []
+    activated = []
+    status_list.itemClicked.connect(lambda item: clicked.append(item.text()))
+    status_list.itemActivated.connect(lambda item: activated.append(item.text()))
+    status_list.setCurrentItem(items[0])
+
+    QTest.keyClick(status_list, Qt.Key_Down)
+    QTest.keyClick(status_list, Qt.Key_K)
+    QTest.keyClick(status_list, Qt.Key_Return, Qt.ShiftModifier)
+
+    assert clicked == ["two.txt", "one.txt"]
+    assert activated == ["one.txt"]
+    status_list.deleteLater()
 
 
 def test_git_status_single_click_opens_non_markdown_as_read_only_diff(

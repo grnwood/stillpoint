@@ -84,7 +84,7 @@ from sp.app.mermaid_renderer import MermaidRenderer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
 from .ai_chat_panel import ApiWorker, ServerManager
-from .plantuml_editor_window import BackgroundRenderNotifier, ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel
+from .plantuml_editor_window import BackgroundRenderNotifier, ChatLineEdit, ViPlainTextEdit, ZoomablePreviewLabel, diagram_code_font, style_diagram_code_editor
 from .webengine_env import configure_linux_webengine_env
 from .diagram_recovery import load_recovery, remove_recovery, write_recovery
 from .merge_conflict_dialog import MergeConflictDialog
@@ -417,19 +417,8 @@ class MermaidEditorWindow(QMainWindow):
         )
         self.editor.setPlaceholderText("Enter Mermaid diagram code here...")
         self.editor.setFont(self._get_monospace_font())
-        self.editor.setStyleSheet(
-            f"""
-            QPlainTextEdit {{
-                background-color: {theme_value('mermaid_editor.editor.bg', '#1e1e1e')};
-                color: {theme_value('mermaid_editor.editor.text', '#d4d4d4')};
-                border: 1px solid {theme_value('mermaid_editor.editor.border', '#3e3e3e')};
-                padding: 8px;
-                selection-background-color: {theme_value('mermaid_editor.editor.selection_bg', '#264f78')};
-                selection-color: {theme_value('mermaid_editor.editor.selection_text', '#ffffff')};
-            }}
-        """
-        )
-        self.editor.setTabStopDistance(self.editor.fontMetrics().horizontalAdvance(' ') * 2)
+        self._editor_base_point_size = self.editor.font().pointSize()
+        style_diagram_code_editor(self.editor, "mermaid_editor", "mermaid")
 
         editor_container = QWidget()
         editor_layout = QVBoxLayout()
@@ -588,7 +577,7 @@ class MermaidEditorWindow(QMainWindow):
             self.preview_zoom_level = 0
         self.preview_pixmap: Optional[QPixmap] = None
         try:
-            base_pt = 11
+            base_pt = self._editor_base_point_size
             font = self.editor.font()
             font.setPointSize(max(6, base_pt + self.editor_zoom_level))
             self.editor.setFont(font)
@@ -828,22 +817,9 @@ class MermaidEditorWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _get_monospace_font(self):
-        from PySide6.QtGui import QFont
-        font = QFont()
-        
-        # Load font preferences
-        font_family = config.load_mermaid_editor_font()
-        font_size = config.load_mermaid_editor_font_size()
-        
-        if font_family:
-            font.setFamily(font_family)
-        else:
-            # Default to platform-specific monospace
-            font.setFamily("Courier New" if os.name == "nt" else "Courier")
-        
-        font.setPointSize(font_size)
-        font.setFixedPitch(True)
-        return font
+        return diagram_code_font(
+            config.load_mermaid_editor_font(), config.load_mermaid_editor_font_size()
+        )
 
     def _load_shortcuts(self) -> None:
         """Load Mermaid diagram templates from mmd_shortcuts.json into two-level combos."""
@@ -1937,7 +1913,7 @@ class MermaidEditorWindow(QMainWindow):
     def _zoom_in_editor(self) -> None:
         self.editor_zoom_level += 1
         font = self.editor.font()
-        font.setPointSize(11 + self.editor_zoom_level)
+        font.setPointSize(self._editor_base_point_size + self.editor_zoom_level)
         self.editor.setFont(font)
         try:
             config.save_mermaid_editor_zoom(self.editor_zoom_level)
@@ -1950,7 +1926,7 @@ class MermaidEditorWindow(QMainWindow):
         if self.editor_zoom_level > -5:
             self.editor_zoom_level -= 1
             font = self.editor.font()
-            font.setPointSize(11 + self.editor_zoom_level)
+            font.setPointSize(self._editor_base_point_size + self.editor_zoom_level)
             self.editor.setFont(font)
             try:
                 config.save_mermaid_editor_zoom(self.editor_zoom_level)

@@ -65,6 +65,7 @@ from sp.app.ui.keyboard_shortcuts import (
     is_vi_navigation_chord,
     vi_navigation_sequences,
 )
+from sp.app.ui.git_widgets import git_change_row, git_section_row
 from sp.app.ui.canvas_navigation import (
     install_primary_wheel_zoom,
     native_zoom_steps,
@@ -264,7 +265,15 @@ class GitStatusList(QListWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet(
+            "QListWidget { outline: 0; }"
+            "QListWidget::item {"
+            "padding: 6px 8px;"
+            "border-bottom: 1px solid palette(mid);"
+            "}"
             "QListWidget::item:hover {"
             "background-color: palette(highlight);"
             "color: palette(highlighted-text);"
@@ -400,6 +409,44 @@ class GitStatusList(QListWidget):
             pointer_item = self._pointer_item
             self._show_actions_for_item(pointer_item)
             self._pointer_item = pointer_item
+
+    def _move_file_selection(self, direction: int) -> None:
+        row = self.currentRow()
+        if row < 0:
+            row = -1 if direction > 0 else self.count()
+        candidate = row + direction
+        while 0 <= candidate < self.count():
+            item = self.item(candidate)
+            if isinstance(item.data(Qt.UserRole), dict):
+                self.setCurrentItem(item)
+                self.itemClicked.emit(item)
+                return
+            candidate += direction
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if modifiers == Qt.NoModifier and event.key() in {
+            Qt.Key_Down,
+            Qt.Key_Up,
+            Qt.Key_J,
+            Qt.Key_K,
+        }:
+            self._move_file_selection(
+                1 if event.key() in {Qt.Key_Down, Qt.Key_J} else -1
+            )
+            event.accept()
+            return
+        if event.key() in {Qt.Key_Return, Qt.Key_Enter} and modifiers in {
+            Qt.NoModifier,
+            Qt.ShiftModifier,
+        }:
+            item = self.currentItem()
+            if isinstance(item.data(Qt.UserRole), dict):
+                signal = self.itemActivated if modifiers == Qt.ShiftModifier else self.itemClicked
+                signal.emit(item)
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
         self._hide_hover_actions()
@@ -4387,11 +4434,6 @@ class Window(QMainWindow):
             self.git_status_list.setSelectionMode(
                 QAbstractItemView.SelectionMode.ExtendedSelection
             )
-            self.git_status_list.setWordWrap(True)
-            self.git_status_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-            self.git_status_list.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
             self.git_status_list.setSizePolicy(
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Expanding,
@@ -8312,6 +8354,16 @@ class Window(QMainWindow):
         ]
         untracked = [entry for entry in entries if entry["index"] == "?"]
 
+        current_item = self.git_status_list.currentItem()
+        current_key = None
+        if current_item is not None and isinstance(current_item.data(Qt.UserRole), dict):
+            current_entry = current_item.data(Qt.UserRole)
+            current_key = (current_entry.get("path"), current_item.data(Qt.UserRole + 2))
+        selected_keys = {
+            (item.data(Qt.UserRole).get("path"), item.data(Qt.UserRole + 2))
+            for item in self.git_status_list.selectedItems()
+            if isinstance(item.data(Qt.UserRole), dict)
+        }
         self.git_status_list.clear()
         for title, items, status_key, category in (
             ("Conflicts", conflicts, None, "conflict"),
@@ -8323,7 +8375,11 @@ class Window(QMainWindow):
                 continue
             heading = QListWidgetItem(f"{title} ({len(items)})")
             heading.setFlags(Qt.NoItemFlags)
+            heading.setSizeHint(QSize(0, 30))
             self.git_status_list.addItem(heading)
+            self.git_status_list.setItemWidget(
+                heading, git_section_row(title, len(items))
+            )
             for entry in items:
                 code = "U" if status_key is None else entry[status_key]
                 label = f"  {code}  {entry['path']}"
@@ -8332,10 +8388,28 @@ class Window(QMainWindow):
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, entry)
                 item.setData(Qt.UserRole + 2, category)
-                item.setToolTip(
-                    f"{self._git_status_name(code)}: {entry['path']}"
-                )
+                tooltip = f"{self._git_status_name(code)}: {entry['path']}"
+                if entry.get("original"):
+                    tooltip += f"\nPrevious path: {entry['original']}"
+                item.setToolTip(tooltip)
+                item.setSizeHint(QSize(0, 34))
                 self.git_status_list.addItem(item)
+                self.git_status_list.setItemWidget(
+                    item,
+                    git_change_row(
+                        entry["path"],
+                        code,
+                        original_path=entry.get("original"),
+                        trailing_margin=64,
+                    ),
+                )
+                key = (entry["path"], category)
+                if key in selected_keys:
+                    item.setSelected(True)
+                if key == current_key:
+                    self.git_status_list.setCurrentItem(
+                        item, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
         count = len({entry["path"] for entry in entries})
         self.git_status_label.setText(
             "Working tree clean" if not count else f"{count} changed file{'s' if count != 1 else ''}"

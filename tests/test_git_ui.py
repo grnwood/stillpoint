@@ -8,7 +8,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QTableWidget
 
 from sp.app import config, git_support
-from sp.app.ui.git_widgets import GitDiffEditor, VaultGitPanel
+from sp.app.ui.git_widgets import GitDiffEditor, GitPathLabel, VaultGitPanel
 from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
 
 
@@ -202,6 +202,23 @@ def test_git_panel_status_codes_are_fixed_three_letter_labels() -> None:
     assert VaultGitPanel._status_info("?")[:2] == ("NEW", "New")
     assert VaultGitPanel._status_info("U")[:2] == ("CNF", "Conflict")
     assert all(len(VaultGitPanel._status_info(code)[0]) == 3 for code in "MADRCTU?")
+
+
+def test_git_path_label_elides_directories_and_restores_full_path(qtbot) -> None:
+    path = "a-very-long-folder/another-long-folder/visible-file-name.md"
+    label = GitPathLabel(path)
+    qtbot.addWidget(label)
+    label.resize(170, 24)
+    label.show()
+    QTest.qWait(1)
+
+    assert label.text().startswith("…/")
+    assert label.text().endswith(".md")
+    assert label.toolTip() == path
+
+    label.resize(900, 24)
+    QTest.qWait(1)
+    assert label.text() == path
 
 
 def test_git_panel_reset_hover_is_available_for_modified_files(qtbot, tmp_path) -> None:

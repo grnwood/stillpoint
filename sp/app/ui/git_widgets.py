@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QKeySequence, QPalette, QShortcut, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -33,6 +33,122 @@ from PySide6.QtWidgets import (
 from sp.app import git_support
 from .canvas_navigation import install_primary_wheel_zoom
 from .utility_header import UtilityPanelHeader
+
+
+def git_status_info(code: str) -> tuple[str, str, str]:
+    """Return the compact badge, name, and explanation for a Git status."""
+    return {
+        "M": ("MOD", "Modified", "Content differs from the latest saved version."),
+        "A": ("ADD", "Added", "Ready to be included in the next saved version."),
+        "D": ("DEL", "Deleted", "Will be removed in the next saved version."),
+        "R": ("REN", "Renamed", "Moved or renamed since the latest saved version."),
+        "C": ("CPY", "Copied", "Copied since the latest saved version."),
+        "T": ("TYP", "Type changed", "The file type or storage mode changed."),
+        "U": ("CNF", "Conflict", "Conflicting changes must be resolved before saving."),
+        "?": ("NEW", "New", "Not yet included in Git history."),
+    }.get(code, ("CHG", "Changed", "Changed since the latest saved version."))
+
+
+class GitPathLabel(QLabel):
+    """Single-line path label that keeps the filename visible when narrow."""
+
+    def __init__(self, path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._full_path = str(path)
+        self.setMinimumWidth(0)
+        self.setWordWrap(False)
+        self.setToolTip(self._full_path)
+        self._update_elided_text()
+
+    def fullPath(self) -> str:
+        return self._full_path
+
+    def _elided_path(self, width: int) -> str:
+        metrics = self.fontMetrics()
+        if width <= 0 or metrics.horizontalAdvance(self._full_path) <= width:
+            return self._full_path
+        if "  →  " in self._full_path:
+            return metrics.elidedText(
+                self._full_path, Qt.TextElideMode.ElideMiddle, width
+            )
+        normalized = self._full_path.replace("\\", "/")
+        parts = normalized.split("/")
+        for count in range(len(parts), 0, -1):
+            candidate = "…/" + "/".join(parts[-count:])
+            if metrics.horizontalAdvance(candidate) <= width:
+                return candidate
+        prefix = "…/"
+        filename_width = max(0, width - metrics.horizontalAdvance(prefix))
+        return prefix + metrics.elidedText(
+            parts[-1], Qt.TextElideMode.ElideMiddle, filename_width
+        )
+
+    def _update_elided_text(self) -> None:
+        QLabel.setText(self, self._elided_path(self.contentsRect().width()))
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_elided_text()
+
+
+def git_change_row(
+    path: str,
+    code: str,
+    *,
+    original_path: str | None = None,
+    trailing_margin: int = 34,
+) -> QWidget:
+    """Build the shared status-badge and responsive-path row."""
+    abbreviation, name, explanation = git_status_info(code)
+    row = QWidget()
+    row.setObjectName("vaultGitChangeRow")
+    row.setAttribute(Qt.WA_StyledBackground, True)
+    row.setStyleSheet("QWidget#vaultGitChangeRow { background: transparent; }")
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(8, 5, trailing_margin, 5)
+    row_layout.setSpacing(8)
+
+    status = QLabel(abbreviation)
+    status.setObjectName("vaultGitStatusCode")
+    status.setFixedWidth(38)
+    status.setAlignment(Qt.AlignCenter)
+    status.setToolTip(f"{name} — {explanation}")
+    status.setAccessibleName(f"Git status: {name}")
+    color = {
+        "CNF": "#c62828",
+        "DEL": "#c62828",
+        "NEW": "#2e7d32",
+        "ADD": "#2e7d32",
+        "MOD": "#ad6800",
+    }.get(abbreviation, "#546e7a")
+    status.setStyleSheet(
+        "font-family: monospace; font-weight: 700; padding: 2px 3px; "
+        f"border-radius: 3px; color: {color}; background: transparent;"
+    )
+    row_layout.addWidget(status, 0)
+
+    display_path = str(path)
+    if original_path and code == "R":
+        display_path = f"{original_path}  →  {path}"
+    path_label = GitPathLabel(display_path)
+    path_label.setObjectName("vaultGitFilePath")
+    path_label.setAccessibleName(f"Changed file: {path}")
+    row_layout.addWidget(path_label, 1)
+    return row
+
+
+def git_section_row(title: str, count: int) -> QWidget:
+    """Build the shared compact heading for a Git status group."""
+    row = QWidget()
+    row.setObjectName("vaultGitSectionRow")
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(8, 7, 8, 4)
+    label = QLabel(f"{title.upper()}  ·  {count}")
+    label.setObjectName("vaultGitSectionLabel")
+    label.setStyleSheet("font-size: 10px; font-weight: 600; color: palette(text);")
+    layout.addWidget(label)
+    layout.addStretch(1)
+    return row
 
 
 class VaultGitStatusList(QListWidget):
@@ -273,7 +389,7 @@ class VaultGitPanel(QWidget):
         layout.addWidget(self.summary)
         self.changes = VaultGitStatusList()
         self.changes.setObjectName("vaultGitChanges")
-        self.changes.setWordWrap(True)
+        self.changes.setWordWrap(False)
         self.changes.resetRequested.connect(self.resetRequested)
         self.changes.previewRequested.connect(self.changePreviewRequested)
         layout.addWidget(self.changes, 1)
@@ -285,71 +401,19 @@ class VaultGitPanel(QWidget):
 
     @staticmethod
     def _status_info(code: str) -> tuple[str, str, str]:
-        return {
-            "M": ("MOD", "Modified", "Content differs from the latest saved version."),
-            "A": ("ADD", "Added", "Ready to be included in the next saved version."),
-            "D": ("DEL", "Deleted", "Will be removed in the next saved version."),
-            "R": ("REN", "Renamed", "Moved or renamed since the latest saved version."),
-            "C": ("CPY", "Copied", "Copied since the latest saved version."),
-            "T": ("TYP", "Type changed", "The file type or storage mode changed."),
-            "U": ("CNF", "Conflict", "Conflicting changes must be resolved before saving."),
-            "?": ("NEW", "New", "Not yet included in Git history."),
-        }.get(code, ("CHG", "Changed", "Changed since the latest saved version."))
+        return git_status_info(code)
 
     @classmethod
     def _change_row(cls, entry: git_support.GitStatusEntry, code: str) -> QWidget:
-        abbreviation, name, explanation = cls._status_info(code)
-        row = QWidget()
-        row.setObjectName("vaultGitChangeRow")
-        row.setAttribute(Qt.WA_StyledBackground, True)
-        row.setStyleSheet("QWidget#vaultGitChangeRow { background: transparent; }")
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(8, 5, 34, 5)
-        row_layout.setSpacing(8)
-
-        status = QLabel(abbreviation)
-        status.setObjectName("vaultGitStatusCode")
-        status.setFixedWidth(38)
-        status.setAlignment(Qt.AlignCenter)
-        status.setToolTip(f"{name} — {explanation}")
-        status.setAccessibleName(f"Git status: {name}")
-        color = {
-            "CNF": "#c62828",
-            "DEL": "#c62828",
-            "NEW": "#2e7d32",
-            "ADD": "#2e7d32",
-            "MOD": "#ad6800",
-        }.get(abbreviation, "#546e7a")
-        status.setStyleSheet(
-            "font-family: monospace; font-weight: 700; padding: 2px 3px; "
-            f"border-radius: 3px; color: {color}; background: transparent;"
+        return git_change_row(
+            entry.path,
+            code,
+            original_path=entry.original_path,
         )
-        row_layout.addWidget(status, 0)
-
-        display_path = entry.path
-        if entry.original_path and code == "R":
-            display_path = f"{entry.original_path}  →  {entry.path}"
-        path_label = QLabel(display_path)
-        path_label.setObjectName("vaultGitFilePath")
-        path_label.setMinimumWidth(0)
-        path_label.setWordWrap(False)
-        path_label.setToolTip(entry.path)
-        path_label.setAccessibleName(f"Changed file: {entry.path}")
-        row_layout.addWidget(path_label, 1)
-        return row
 
     @staticmethod
     def _section_row(title: str, count: int) -> QWidget:
-        row = QWidget()
-        row.setObjectName("vaultGitSectionRow")
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(8, 7, 8, 4)
-        label = QLabel(f"{title.upper()}  ·  {count}")
-        label.setObjectName("vaultGitSectionLabel")
-        label.setStyleSheet("font-size: 10px; font-weight: 600; color: palette(text);")
-        layout.addWidget(label)
-        layout.addStretch(1)
-        return row
+        return git_section_row(title, count)
 
     def refresh(self) -> None:
         current_path = self.changes._item_path(self.changes.currentItem())
@@ -403,7 +467,9 @@ class VaultGitPanel(QWidget):
                 if entry.path in selected_paths:
                     item.setSelected(True)
                 if entry.path == current_path:
-                    self.changes.setCurrentItem(item)
+                    self.changes.setCurrentItem(
+                        item, QItemSelectionModel.SelectionFlag.NoUpdate
+                    )
 
 class GitDiffEditor(QWidget):
     """A visual, side-by-side working-copy comparison for the editor pane."""

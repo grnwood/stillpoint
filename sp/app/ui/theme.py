@@ -200,7 +200,8 @@ def tab_widget_stylesheet(
             f"{tab}:selected {{ background: {colors['rail_active']}; color: {colors['rail_active_text']}; "
             f"border: 1px solid {colors['accent']}; "
             f"border-bottom: 2px solid {colors['accent']}; font-weight: 600; }}"
-            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; color: {colors['rail_inactive_text']}; }}"
+            f"{tab}:hover {{ color: {colors['rail_inactive_text']}; }}"
+            f"{tab}:!selected:hover {{ background: {colors['rail_hover']}; }}"
         )
     return (
         f"{widget}::pane {{ border: 1px solid {border}; border-radius: {radius}px; "

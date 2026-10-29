@@ -138,6 +138,21 @@ def test_shared_chrome_styles_use_quiet_tabs_and_tree_rows(qapp) -> None:
     assert f"color: {expected_status_text}" in status
 
 
+def test_readable_rail_tabs_keep_hover_text_readable(qapp) -> None:
+    tabs = theme.tab_widget_stylesheet(
+        qapp,
+        object_name="folderNavigatorEditors",
+        accent_color="#4f8f8b",
+        readable_rail_tabs=True,
+    )
+    hover_text = theme.chrome_colors(qapp, "#4f8f8b")["rail_inactive_text"]
+
+    assert (
+        "QTabWidget#folderNavigatorEditors QTabBar::tab:hover "
+        f"{{ color: {hover_text}; }}"
+    ) in tabs
+
+
 def test_status_bar_inherits_partial_theme_override_editor_colors(qapp, monkeypatch) -> None:
     values = {
         "markdown_editor.base.bg": "#0d2b1f",
