@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 from PySide6 import QtCore
 
-from sp.app.ui.ai_api import build_api_request, is_unsupported_vision_response, with_vision_images
+from sp.app.ui.ai_api import build_api_request, format_api_error, is_unsupported_vision_response, with_vision_images
 from sp.app.ui.agent_tool_loop import AGENT_MESSAGE_SCHEMA, parse_agent_message
 from sp.rag.attachment_text import extract_attachment_text
 from .core import DEFAULT_PRUNED_DIRECTORY_NAMES, ConflictError, atomic_save, read_text
@@ -302,4 +302,4 @@ class FolderAgentChatWorker(QtCore.QThread):
             else:
                 self.failed.emit("Folder tool loop exceeded its step limit")
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(format_api_error(exc, self.model))

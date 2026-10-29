@@ -56,7 +56,7 @@ from .agent_tool_loop import (
     parse_agent_message,
 )
 from .ai_api import (
-    build_api_request, build_auth_headers, build_httpx_timeout, compose_url,
+    build_api_request, build_auth_headers, build_httpx_timeout, compose_url, format_api_error,
     is_unsupported_vision_response, with_vision_images,
 )
 from .path_utils import path_to_colon, ensure_root_colon_link
@@ -633,7 +633,7 @@ def fetch_and_cache_models(server_config: dict) -> List[str]:
     headers = build_auth_headers(server)
     verify = bool(server.get("verify_ssl", True))
     try:
-        _log_ai_chat(f"[AIChat][models request] url={url} headers={headers}")
+        _log_ai_chat(f"[AIChat][models request] url={url}")
         with httpx.Client(timeout=build_httpx_timeout(server), verify=verify) as client:
             resp = client.get(url, headers=headers)
             resp.raise_for_status()
@@ -1553,7 +1553,7 @@ class ApiWorker(QtCore.QThread):
                         continue
                     raise
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(format_api_error(exc, self.model))
 
 
 class ServerConfigDialog(QtWidgets.QDialog):
@@ -3678,7 +3678,7 @@ class AIChatPanel(QtWidgets.QWidget):
         """Heuristic: detect if the markdown output is just a <p> block without rich tags."""
         if not rendered_html.startswith("<p>") or not rendered_html.endswith("</p>"):
             return False
-        heavy_tags = ("<ul", "<ol", "<pre", "<code", "<h", "<table", "<blockquote", "<li", "<hr", "<img", "<a ")
+        heavy_tags = ("<strong", "<em", "<b>", "<i>", "<del", "<ul", "<ol", "<pre", "<code", "<h", "<table", "<blockquote", "<li", "<hr", "<img", "<a ")
         return not any(tag in rendered_html for tag in heavy_tags)
 
     def _on_history_context_menu(self, pos: QtCore.QPoint) -> None:
@@ -5217,6 +5217,9 @@ class AIChatPanel(QtWidgets.QWidget):
             pass
 
     def _delete_chat_session(self, data: Dict) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before deleting chats.", "#f6c343")
+            return
         session_id = data.get("id")
         if not session_id:
             return
@@ -5571,6 +5574,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self._load_chat_tree(select_id=data["id"])
 
     def _delete_folder(self, data: Dict) -> None:
+        if self._has_active_operation():
+            self._set_status("Wait for the active run to finish before deleting chats.", "#f6c343")
+            return
         folder_path = data.get("path")
         if not folder_path:
             return

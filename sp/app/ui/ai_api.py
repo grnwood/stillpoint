@@ -5,6 +5,30 @@ import httpx
 
 from sp.app import config
 
+def format_api_error(exc: Exception, model: str = "") -> str:
+    """Keep the provider's explanation when reporting a failed AI request."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return str(exc)
+    response = exc.response
+    detail = ""
+    try:
+        body = response.json()
+        error = body.get("error", body) if isinstance(body, dict) else {}
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error.get("detail") or "")
+            code = error.get("code")
+            if code:
+                detail = f"{detail} ({code})" if detail else str(code)
+        elif isinstance(error, str):
+            detail = error
+    except (ValueError, httpx.ResponseNotRead):
+        pass
+    context = f"HTTP {response.status_code} from {response.request.url}"
+    if model:
+        context += f" (model: {model})"
+    return f"{context}: {detail[:2000]}" if detail else context
+
+
 def normalize_base_url(url: str) -> str:
     if not url:
         return ""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 import pytest
 
 from sp.app.folder_navigator.catalog import FolderCatalog
@@ -341,3 +342,67 @@ def test_chat_storage_failure_does_not_block_folder_navigator(tmp_path, monkeypa
     assert window.chat_error
     assert "AI chat could not open" in window.statusBar().currentMessage()
     window.close()
+
+
+def test_folder_chat_preserves_inline_markdown(tmp_path, monkeypatch, qapp):
+    from PySide6.QtGui import QFont
+
+    monkeypatch.setattr(folder_chat, "folder_chat_database", lambda _root: tmp_path / "chat.db")
+    panel = folder_chat.FolderChatPanel(tmp_path, lambda _q, _s: [], lambda _q, _s: [], lambda _p: None)
+    panel.messages = [("assistant", "This is **bold** and *italic*." )]
+    panel._render_messages()
+    document = panel.chat_view.document()
+    assert "**bold**" not in panel.chat_view.toPlainText()
+    cursor = document.find("bold")
+    assert cursor.charFormat().fontWeight() >= QFont.Bold
+    cursor = document.find("italic")
+    assert cursor.charFormat().fontItalic()
+    panel.close()
+
+
+def test_navigator_chat_delete_suppresses_focus_restyle(tmp_path, monkeypatch, qapp):
+    from PySide6 import QtCore, QtWidgets
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    window = Window(tmp_path)
+    window._set_chat_panel_visible(True, focus=True, persist=False)
+    window.show()
+    qapp.processEvents()
+    panel = window.chat_panel
+    session_id = panel.current_session_id
+    panel.store.save_message(session_id, "assistant", "Saved response")
+    panel._load_chat_messages(session_id)
+    checks = []
+
+    def confirm(*_args):
+        checks.append(window._suppress_focus_borders)
+        # A modal confirmation processes focus events before deletion proceeds.
+        window._on_focus_changed(panel.chat_tree, panel.input_edit)
+        qapp.processEvents()
+        return QtWidgets.QMessageBox.Yes
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", confirm)
+    panel.chat_tree.setFocus()
+    QTest.keyClick(panel.chat_tree, QtCore.Qt.Key_Delete)
+    qapp.processEvents()
+    assert checks == [True]
+    assert panel.store.get_session_by_id(session_id) is None
+    assert panel.current_session_id != session_id
+    assert not window._suppress_focus_borders
+    window.close()
+
+
+def test_folder_chat_cannot_delete_during_agent_run(tmp_path, monkeypatch, qapp):
+    monkeypatch.setattr(folder_chat, "folder_chat_database", lambda _root: tmp_path / "chat.db")
+    panel = folder_chat.FolderChatPanel(tmp_path, lambda _q, _s: [], lambda _q, _s: [], lambda _p: None)
+    session_id = panel.current_session_id
+    panel._agent_tool_worker = object()
+    try:
+        panel._delete_chat_session(panel.store.get_session_by_id(session_id))
+        assert panel.store.get_session_by_id(session_id) is not None
+        assert panel.current_session_id == session_id
+    finally:
+        panel._agent_tool_worker = None
+        panel.close()

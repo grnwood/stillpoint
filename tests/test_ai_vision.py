@@ -133,3 +133,23 @@ def test_agent_chat_retries_with_ocr_and_keeps_text_for_next_step(monkeypatch) -
         {"role": "user", "content": "describe"},
     ]
     assert payloads[2]["messages"] == payloads[1]["messages"]
+
+
+def test_chat_reports_provider_error_and_model(monkeypatch) -> None:
+    @contextmanager
+    def fake_stream(*_args, **_kwargs):
+        yield httpx.Response(
+            404, json={"error": {"message": "The model has been deprecated", "code": "model_not_found"}},
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        )
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    worker = ApiWorker({"base_url": "https://api.openai.com"}, [], "retired-model")
+    failed: list[str] = []
+    worker.failed.connect(failed.append)
+    worker.run()
+    assert len(failed) == 1
+    assert "The model has been deprecated" in failed[0]
+    assert "model_not_found" in failed[0]
+    assert "retired-model" in failed[0]
+    assert "HTTP 404" in failed[0]

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Optional
 import httpx
 from PySide6 import QtCore
 
-from .ai_api import build_api_request, is_unsupported_vision_response, with_vision_images
+from .ai_api import build_api_request, format_api_error, is_unsupported_vision_response, with_vision_images
 from .path_utils import colon_to_path, ensure_root_colon_link, normalize_link_target, path_to_colon
 from sp.app import config
 
@@ -1725,7 +1725,7 @@ class AgentToolLoopWorker(QtCore.QThread):
             else:
                 self.failed.emit("Agent tool loop exceeded max steps.")
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(format_api_error(exc, self._config.model))
         finally:
             try:
                 client.close()
@@ -2026,7 +2026,7 @@ class AgentToolChatWorker(QtCore.QThread):
             else:
                 self.failed.emit("Agent tool loop exceeded max steps.")
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(format_api_error(exc, self._config.model))
         finally:
             try:
                 client.close()

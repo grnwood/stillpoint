@@ -4190,6 +4190,7 @@ class Picker(QDialog):
 
 class Window(QMainWindow):
     def __init__(self, root: Path):
+        self._suppress_focus_borders = False
         super().__init__()
         icon = get_folder_navigator_icon()
         if not icon.isNull():
@@ -4777,6 +4778,8 @@ class Window(QMainWindow):
             return {}
 
     def _on_focus_changed(self, _old, _current):
+        if self._suppress_focus_borders:
+            return
         try:
             if _current is self.rail or (
                     _current is not None and self.rail.isAncestorOf(_current)):
@@ -4959,6 +4962,8 @@ class Window(QMainWindow):
 
     def _apply_focus_borders(self):
         """Highlight the active navigator pane like StillPoint's main window."""
+        if self._suppress_focus_borders:
+            return
         try:
             focused = self.focusWidget()
             folder_has_focus = focused is self.rail or (
