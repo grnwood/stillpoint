@@ -4505,7 +4505,7 @@ def test_breadcrumb_reuses_segments_without_showing_detached_windows(app):
 
     identity.set_breadcrumb([("root", "root", "root")])
     assert all(not widget.isVisible() for widget in widgets)
-    assert all(widget.parent() is identity for widget in widgets)
+    assert all(widget.parent() is identity.breadcrumb_container for widget in widgets)
     identity.close()
 
 
@@ -4783,6 +4783,38 @@ def test_ctrl_shift_b_toggles_and_persists_folder_rail(
     restored = Window(tmp_path)
     assert restored.rail.isHidden()
     restored.close()
+
+
+def test_collapsed_folder_rail_uses_minibar_and_reopens_selected_tab(
+        tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    source = tmp_path / "sample.txt"
+    source.write_text("minibar\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source, pinned=True)
+    app.processEvents()
+
+    window._set_folder_rail_visible(False)
+    app.processEvents()
+    assert window.rail.isHidden()
+    assert window.folder_rail_minibar.isVisible()
+    assert window.folder_rail_container.width() == 28
+    assert [
+        window.folder_rail_minibar_bar.tabText(index)
+        for index in range(window.folder_rail_minibar_bar.count())
+    ] == ["Files", "Search", "Git"]
+
+    window._expand_folder_rail_from_minibar(1)
+    app.processEvents()
+    assert not window.rail.isHidden()
+    assert window.rail.currentIndex() == 1
+    assert window.folder_rail_minibar.isHidden()
+    window.active_tab().editor.document().setModified(False)
+    window.close()
 
 
 def test_window_activation_repairs_missing_folder_navigator_focus(

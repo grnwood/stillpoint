@@ -31,7 +31,7 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListView, QListWidgetItem, QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QTabWidget, QToolButton,
-    QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
+    QStackedLayout, QStackedWidget, QStyle, QTabBar, QTableView, QTextEdit, QPlainTextEdit, QTreeView, QVBoxLayout, QWidget, QScrollArea, QSpinBox,
     QSizePolicy, QColorDialog)
 from PySide6.QtWidgets import QTextBrowser
 
@@ -4496,8 +4496,65 @@ class Window(QMainWindow):
         self.content = QSplitter(Qt.Vertical)
         self.content.addWidget(self.tabs)
         self.content.addWidget(self.welcome)
+
+        self._folder_rail_minibar_width = 28
+        self.folder_rail_toggle_button = QToolButton(self.rail)
+        self.folder_rail_toggle_button.setAutoRaise(True)
+        self.folder_rail_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.folder_rail_toggle_button.setToolTip("Hide folder rail")
+        self.folder_rail_toggle_button.clicked.connect(self._toggle_folder_rail)
+        self._configure_header_button_icon(
+            self.folder_rail_toggle_button,
+            "hide-sidebar.svg",
+        )
+        self.rail.setCornerWidget(
+            self.folder_rail_toggle_button,
+            Qt.Corner.TopRightCorner,
+        )
+
+        self.folder_rail_minibar = QWidget()
+        self.folder_rail_minibar.setObjectName("folderNavigatorRailMinibar")
+        self.folder_rail_minibar.setFixedWidth(self._folder_rail_minibar_width)
+        minibar_layout = QVBoxLayout(self.folder_rail_minibar)
+        minibar_layout.setContentsMargins(0, 0, 0, 0)
+        minibar_layout.setSpacing(0)
+        minibar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.folder_rail_minibar_toggle = QToolButton(self.folder_rail_minibar)
+        self.folder_rail_minibar_toggle.setAutoRaise(True)
+        self.folder_rail_minibar_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.folder_rail_minibar_toggle.setToolTip("Show folder rail")
+        self.folder_rail_minibar_toggle.clicked.connect(
+            lambda *_: self._set_folder_rail_visible(True)
+        )
+        self._configure_header_button_icon(
+            self.folder_rail_minibar_toggle,
+            "show-sidebar.svg",
+        )
+        minibar_layout.addWidget(self.folder_rail_minibar_toggle)
+        self.folder_rail_minibar_bar = QTabBar(self.folder_rail_minibar)
+        self.folder_rail_minibar_bar.setDocumentMode(True)
+        self.folder_rail_minibar_bar.setExpanding(False)
+        self.folder_rail_minibar_bar.setUsesScrollButtons(False)
+        self.folder_rail_minibar_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.folder_rail_minibar_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        self.folder_rail_minibar_bar.setShape(QTabBar.Shape.RoundedWest)
+        for index in range(self.rail.count()):
+            self.folder_rail_minibar_bar.addTab(self.rail.tabText(index))
+        self.folder_rail_minibar_bar.tabBarClicked.connect(
+            self._expand_folder_rail_from_minibar
+        )
+        self.rail.currentChanged.connect(self._sync_folder_rail_minibar)
+        minibar_layout.addWidget(self.folder_rail_minibar_bar)
+
+        self.folder_rail_container = QWidget()
+        self._folder_rail_stack = QStackedLayout(self.folder_rail_container)
+        self._folder_rail_stack.setContentsMargins(0, 0, 0, 0)
+        self._folder_rail_stack.addWidget(self.rail)
+        self._folder_rail_stack.addWidget(self.folder_rail_minibar)
+        self._folder_rail_stack.setCurrentWidget(self.rail)
+        self._sync_folder_rail_minibar(self.rail.currentIndex())
         self.splitter = QSplitter()
-        self.splitter.addWidget(self.rail)
+        self.splitter.addWidget(self.folder_rail_container)
         self.splitter.addWidget(self.content)
         self._set_macos_splitter_handle_widths()
         self.chat_panel = None
@@ -4543,7 +4600,31 @@ class Window(QMainWindow):
         except (TypeError, ValueError):
             stored_rail_width = 300
         self._rail_last_width = max(160, stored_rail_width)
-        self.rail.setVisible(bool(self.state.get("rail_visible", True)))
+        if bool(self.state.get("rail_visible", True)):
+            self._folder_rail_stack.setCurrentWidget(self.rail)
+            self.rail.show()
+            self.folder_rail_minibar.hide()
+            self.folder_rail_container.setMinimumWidth(80)
+            self.folder_rail_container.setMaximumWidth(16777215)
+        else:
+            self._folder_rail_stack.setCurrentWidget(self.folder_rail_minibar)
+            self.rail.hide()
+            self.folder_rail_minibar.show()
+            self.folder_rail_container.setFixedWidth(self._folder_rail_minibar_width)
+            total = sum(splitter_sizes) or 1100
+            if self.chat_panel is not None:
+                chat_width = splitter_sizes[2]
+                self.splitter.setSizes([
+                    self._folder_rail_minibar_width,
+                    max(1, total - self._folder_rail_minibar_width - chat_width),
+                    chat_width,
+                ])
+            else:
+                self.splitter.setSizes([
+                    self._folder_rail_minibar_width,
+                    max(1, total - self._folder_rail_minibar_width),
+                ])
+        self._update_folder_rail_toggle_icons()
         outer = QWidget()
         layout = QVBoxLayout(outer)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4678,6 +4759,9 @@ class Window(QMainWindow):
         self._refresh_header_icons()
         self.identity_bar.set_accent_color(accent.name())
         self.folder_panel_header.set_accent_color(accent.name())
+        self.folder_rail_minibar_bar.setStyleSheet(
+            self._folder_rail_minibar_stylesheet()
+        )
         self.tree.setStyleSheet(
             tree_view_stylesheet(self.tree, accent_color=accent.name())
             + "QHeaderView::section { border: 0; border-bottom: 1px solid palette(mid); "
@@ -5288,16 +5372,14 @@ class Window(QMainWindow):
         columns_toolbar.setMovable(False)
         columns_toolbar.setFloatable(False)
         toolbar_icon_size = 20 if sys.platform == "win32" else 18
-        toolbar_button_size = 32 if sys.platform == "win32" else 28
+        toolbar_button_size = 28
         columns_toolbar.setIconSize(QSize(toolbar_icon_size, toolbar_icon_size))
         columns_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        if sys.platform == "win32":
-            columns_toolbar.setFixedHeight(42)
-        elif sys.platform == "darwin":
+        if sys.platform in {"darwin", "win32"}:
             columns_toolbar.setFixedHeight(34)
         columns_toolbar.setStyleSheet(
             "QToolBar#folder_navigator_columns {"
-            f"padding: {'5px 7px' if sys.platform == 'win32' else '3px 6px'}; "
+            "padding: 3px 6px; "
             "spacing: 4px;"
             "}"
             "QToolBar#folder_navigator_columns QToolButton {"
@@ -5334,8 +5416,22 @@ class Window(QMainWindow):
             columns_toolbar.addAction(action)
             self.commands.append(action)
             self.column_actions[column] = action
+        self.folder_toolbar_breadcrumb = self.identity_bar.detach_breadcrumb(
+            columns_toolbar
+        )
+        self.folder_toolbar_breadcrumb.setMinimumWidth(220)
+        self.folder_toolbar_breadcrumb.setMaximumWidth(640)
+        self.folder_toolbar_breadcrumb.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._update_folder_breadcrumb(self.root)
+        columns_toolbar.addWidget(self.folder_toolbar_breadcrumb)
         identity_spacer = QWidget(columns_toolbar)
-        identity_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        identity_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         columns_toolbar.addWidget(identity_spacer)
         columns_toolbar.addWidget(self.identity_bar)
         add(go_menu, "Folder", lambda: (self.rail.setCurrentIndex(0), self.tree.setFocus()))
@@ -5428,11 +5524,60 @@ class Window(QMainWindow):
         self.layout_save_timer.start(250)
 
     def _toggle_folder_rail(self):
-        self._set_folder_rail_visible(self.rail.isHidden())
+        self._set_folder_rail_visible(not self._is_folder_rail_expanded())
+
+    def _is_folder_rail_expanded(self) -> bool:
+        stack = getattr(self, "_folder_rail_stack", None)
+        return bool(stack is not None and stack.currentWidget() is self.rail)
+
+    def _sync_folder_rail_minibar(self, index: int) -> None:
+        bar = getattr(self, "folder_rail_minibar_bar", None)
+        if bar is None:
+            return
+        blocked = bar.blockSignals(True)
+        bar.setCurrentIndex(max(0, min(bar.count() - 1, int(index))))
+        bar.blockSignals(blocked)
+
+    def _expand_folder_rail_from_minibar(self, index: int) -> None:
+        self.rail.setCurrentIndex(index)
+        self._set_folder_rail_visible(True)
+
+    def _folder_rail_minibar_stylesheet(self) -> str:
+        colors = chrome_colors(
+            self.folder_rail_minibar,
+            getattr(self, "_folder_identity_accent", "#4f8f8b"),
+        )
+        return (
+            f"QTabBar::tab {{ background: {colors['rail_inactive']}; "
+            f"color: {colors['rail_inactive_text']}; "
+            f"border: 1px solid {colors['border']}; border-radius: 4px; "
+            "padding: 6px 10px; margin: 2px 0; }"
+            f"QTabBar::tab:selected {{ background: {colors['rail_active']}; "
+            f"color: {colors['rail_active_text']}; "
+            f"border: 1px solid {colors['accent']}; }}"
+            f"QTabBar::tab:!selected:hover {{ background: {colors['rail_hover']}; "
+            f"color: {colors['rail_inactive_text']}; }}"
+        )
+
+    def _update_folder_rail_toggle_icons(self) -> None:
+        expanded = self._is_folder_rail_expanded()
+        corner = getattr(self, "folder_rail_toggle_button", None)
+        if isinstance(corner, QToolButton):
+            self._configure_header_button_icon(corner, "hide-sidebar.svg")
+            corner.setToolTip("Hide folder rail")
+        minibar = getattr(self, "folder_rail_minibar_toggle", None)
+        if isinstance(minibar, QToolButton):
+            self._configure_header_button_icon(minibar, "show-sidebar.svg")
+            minibar.setToolTip("Show folder rail")
+        action = getattr(self, "rail_visibility_action", None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(expanded)
+            action.blockSignals(False)
 
     def _set_folder_rail_visible(self, visible):
         visible = bool(visible)
-        if visible == (not self.rail.isHidden()):
+        if visible == self._is_folder_rail_expanded():
             return
         focused = self.focusWidget()
         rail_had_focus = focused is self.rail or (
@@ -5441,10 +5586,27 @@ class Window(QMainWindow):
         sizes = self.splitter.sizes()
         total = sum(sizes) or max(1, self.splitter.width())
         if not visible:
-            if sizes and sizes[0] > 0:
+            if sizes and sizes[0] > self._folder_rail_minibar_width:
                 self._rail_last_width = sizes[0]
                 self.state["splitter"] = list(sizes)
+            self._folder_rail_stack.setCurrentWidget(self.folder_rail_minibar)
             self.rail.hide()
+            self.folder_rail_minibar.show()
+            self.folder_rail_container.setFixedWidth(
+                self._folder_rail_minibar_width
+            )
+            if self.chat_container is not None:
+                chat_width = sizes[2] if len(sizes) > 2 else self.chat_container.width()
+                self.splitter.setSizes([
+                    self._folder_rail_minibar_width,
+                    max(1, total - self._folder_rail_minibar_width - chat_width),
+                    chat_width,
+                ])
+            else:
+                self.splitter.setSizes([
+                    self._folder_rail_minibar_width,
+                    max(1, total - self._folder_rail_minibar_width),
+                ])
             if rail_had_focus:
                 tab = self.active_tab()
                 if tab is not None:
@@ -5452,7 +5614,11 @@ class Window(QMainWindow):
                 else:
                     self.content.setFocus(Qt.OtherFocusReason)
         else:
+            self._folder_rail_stack.setCurrentWidget(self.rail)
+            self.folder_rail_minibar.hide()
             self.rail.show()
+            self.folder_rail_container.setMinimumWidth(80)
+            self.folder_rail_container.setMaximumWidth(16777215)
             width = min(self._rail_last_width, max(160, total - 160))
             if self.chat_container is not None:
                 chat_width = self.chat_container.width()
@@ -5463,9 +5629,8 @@ class Window(QMainWindow):
                 self.splitter.setSizes([width, max(1, total - width)])
             if self.active_tab() is None:
                 self.tree.setFocus(Qt.OtherFocusReason)
-        self.rail_visibility_action.blockSignals(True)
-        self.rail_visibility_action.setChecked(visible)
-        self.rail_visibility_action.blockSignals(False)
+        self._sync_folder_rail_minibar(self.rail.currentIndex())
+        self._update_folder_rail_toggle_icons()
         self.state["rail_visible"] = visible
         self._persist()
 
@@ -8260,6 +8425,8 @@ class Window(QMainWindow):
             "closed-eye.svg": "○",
             "open-eye.svg": "●",
             "collapse-all.svg": "⇤",
+            "hide-sidebar.svg": "‹",
+            "show-sidebar.svg": "›",
             "git-pull.svg": "↓",
             "git-commit.svg": "●",
             "git-push.svg": "↑",
@@ -8322,6 +8489,7 @@ class Window(QMainWindow):
         hidden = getattr(self, "hidden_files_button", None)
         if isinstance(hidden, QToolButton):
             self._update_hidden_files_control(hidden.isChecked())
+        self._update_folder_rail_toggle_icons()
 
     def _hidden_files_icon(self, visible: bool) -> QIcon:
         return self._header_asset_icon(

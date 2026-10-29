@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QToolButton,
     QWidget,
 )
@@ -109,7 +110,7 @@ class CompactToolbarIdentity(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("compactToolbarIdentity")
-        default_height = 34 if _WINDOWS else 28
+        default_height = 28
         self.setFixedHeight(
             int(theme_value("ui.toolbar_identity.height_px", default_height))
         )
@@ -132,6 +133,21 @@ class CompactToolbarIdentity(QFrame):
         self.detail_label = QLabel(self)
         self.detail_label.setObjectName("compactToolbarIdentityDetail")
         self.identity_layout.addWidget(self.detail_label)
+        self.breadcrumb_container = QWidget(self)
+        self.breadcrumb_container.setObjectName("compactBreadcrumbBar")
+        self.breadcrumb_container.setMinimumWidth(0)
+        self.breadcrumb_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.breadcrumb_container.setFixedHeight(self.height())
+        self.breadcrumb_layout = QHBoxLayout(self.breadcrumb_container)
+        self.breadcrumb_layout.setContentsMargins(4, 0, 4, 0)
+        self.breadcrumb_layout.setSpacing(3)
+        self.breadcrumb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.breadcrumb_container.hide()
+        self.identity_layout.addWidget(self.breadcrumb_container, 1)
+        self._breadcrumb_detached = False
         self._breadcrumb_widgets: list[QWidget] = []
         self._breadcrumb_display: list[tuple[str, object, str] | None] = []
         self.set_icon(icon or QIcon())
@@ -153,11 +169,24 @@ class CompactToolbarIdentity(QFrame):
     def clear_breadcrumb(self) -> None:
         for widget in self._breadcrumb_widgets:
             widget.hide()
-            self.identity_layout.removeWidget(widget)
+            self.breadcrumb_layout.removeWidget(widget)
             widget.deleteLater()
         self._breadcrumb_widgets.clear()
         self._breadcrumb_display.clear()
+        self.breadcrumb_container.setVisible(self._breadcrumb_detached)
         self.detail_label.setVisible(bool(self.detail_label.text()))
+
+    def detach_breadcrumb(self, parent: Optional[QWidget] = None) -> QWidget:
+        """Return the breadcrumb strip as a separately placeable toolbar widget."""
+        self.identity_layout.removeWidget(self.breadcrumb_container)
+        self._breadcrumb_detached = True
+        self.breadcrumb_container.setParent(parent)
+        # QToolBar creates a disabled QWidgetAction when a hidden widget is
+        # added. Keep the detached middle strip present even before its first
+        # path so later breadcrumb buttons remain clickable and the identity
+        # stays pinned at the right edge.
+        self.breadcrumb_container.show()
+        return self.breadcrumb_container
 
     @staticmethod
     def _set_breadcrumb_button(button: QToolButton, item: tuple[str, object, str]) -> None:
@@ -211,18 +240,19 @@ class CompactToolbarIdentity(QFrame):
 
         self.clear_breadcrumb()
         self.detail_label.hide()
+        self.breadcrumb_container.show()
         for item in display:
-            separator = QLabel("›", self)
+            separator = QLabel("›", self.breadcrumb_container)
             separator.setObjectName("compactBreadcrumbSeparator")
-            self.identity_layout.addWidget(separator)
+            self.breadcrumb_layout.addWidget(separator)
             self._breadcrumb_widgets.append(separator)
             if item is None:
-                ellipsis = QLabel("…", self)
+                ellipsis = QLabel("…", self.breadcrumb_container)
                 ellipsis.setObjectName("compactBreadcrumbEllipsis")
-                self.identity_layout.addWidget(ellipsis)
+                self.breadcrumb_layout.addWidget(ellipsis)
                 self._breadcrumb_widgets.append(ellipsis)
                 continue
-            button = QToolButton(self)
+            button = QToolButton(self.breadcrumb_container)
             button.setProperty("breadcrumbSegment", True)
             button.setAutoRaise(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -232,7 +262,7 @@ class CompactToolbarIdentity(QFrame):
                 lambda checked=False, control=button:
                     self._activate_breadcrumb(control._breadcrumb_target)
             )
-            self.identity_layout.addWidget(button)
+            self.breadcrumb_layout.addWidget(button)
             self._breadcrumb_widgets.append(button)
         self._breadcrumb_display = display
         self.apply_theme()
@@ -248,7 +278,7 @@ class CompactToolbarIdentity(QFrame):
 
     def apply_theme(self) -> None:
         colors = chrome_colors(self, self._accent_color)
-        self.setStyleSheet(
+        stylesheet = (
             "QFrame#compactToolbarIdentity {"
             f"background: transparent; border-left: 2px solid {colors['accent']};"
             "}"
@@ -272,6 +302,8 @@ class CompactToolbarIdentity(QFrame):
             f"{int(theme_value('ui.chrome.radius_px', 4))}px;"
             "}"
         )
+        self.setStyleSheet(stylesheet)
+        self.breadcrumb_container.setStyleSheet(stylesheet)
 
 
 def install_utility_header(

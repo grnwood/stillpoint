@@ -4202,6 +4202,16 @@ class MainWindow(QMainWindow):
             accent_color=getattr(self, "_vault_accent_color", None),
         )
         self.main_toolbar_identity.breadcrumbActivated.connect(self._open_main_breadcrumb)
+        self.main_toolbar_breadcrumb = self.main_toolbar_identity.detach_breadcrumb(
+            self.toolbar
+        )
+        self.main_toolbar_breadcrumb.setMinimumWidth(240)
+        self.main_toolbar_breadcrumb.setMaximumWidth(640)
+        self.main_toolbar_breadcrumb.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.toolbar.addWidget(self.main_toolbar_breadcrumb)
         self.toolbar.addWidget(self.main_toolbar_identity)
         self._update_main_utility_identity()
         

@@ -450,6 +450,10 @@ def test_main_window_utility_identity_uses_existing_toolbar_and_rail(main_window
     main_window._update_main_utility_identity()
 
     assert main_window.toolbar.isAncestorOf(main_window.main_toolbar_identity)
+    assert main_window.toolbar.isAncestorOf(main_window.main_toolbar_breadcrumb)
+    assert not main_window.main_toolbar_identity.isAncestorOf(
+        main_window.main_toolbar_breadcrumb
+    )
     assert main_window.main_toolbar_identity.title_label.text() == "STILLPOINT"
     assert main_window.main_toolbar_identity.detail_label.text().endswith("test_vault")
     assert main_window.tree_header_widget.title_label.text() == "VAULT"
@@ -463,7 +467,7 @@ def test_main_window_identity_breadcrumb_tracks_and_opens_page(main_window, monk
     main_window.current_path = "/PageA/Child1/Child1.md"
     main_window._update_main_utility_identity()
 
-    buttons = main_window.main_toolbar_identity.findChildren(QToolButton)
+    buttons = main_window.main_toolbar_breadcrumb.findChildren(QToolButton)
     assert [button.text() for button in buttons] == ["test_vault", "PageA", "Child1"]
     assert buttons[-1].toolTip() == "/PageA/Child1"
 
