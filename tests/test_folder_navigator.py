@@ -3598,8 +3598,7 @@ def test_folder_navigator_uses_distinct_application_icon(tmp_path, monkeypatch, 
 
 def test_folder_navigator_has_distinct_restrained_window_identity(
         tmp_path, monkeypatch, app):
-    from PySide6.QtCore import QSize
-    from PySide6.QtWidgets import QToolButton
+    from PySide6.QtCore import Qt
     from sp.app.folder_navigator.window import Window
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -3609,16 +3608,11 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
 
     assert window.windowTitle() == f"{tmp_path.name} — StillPoint Folder Navigator"
     assert window.identity_bar.title_label.text() == "FOLDER NAVIGATOR"
-    assert tmp_path.name in window.identity_bar.detail_label.text()
-    assert window.identity_bar.detail_label.toolTip() == str(tmp_path)
+    assert not window.identity_bar.detail_label.isVisible()
     assert window.identity_bar.minimumHeight() == 28
     assert window.identity_bar.maximumHeight() == 28
-    assert window.columns_toolbar.isAncestorOf(window.identity_bar)
-    assert window.columns_toolbar.iconSize() == QSize(18, 18)
-    if sys.platform == "darwin":
-        assert window.columns_toolbar.minimumHeight() == 34
-        assert window.columns_toolbar.maximumHeight() == 34
-    assert "min-width: 28px" in window.columns_toolbar.styleSheet()
+    assert window.menuBar().cornerWidget(Qt.Corner.TopRightCorner) is window.identity_bar
+    assert not hasattr(window, "columns_toolbar")
     assert window.rail.tabText(0) == "Files"
     assert window.folder_panel_header.title_label.text() == "FILES"
     assert window.folder_panel_header.detail_label.text() == tmp_path.name
@@ -3627,6 +3621,11 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.folder_panel_header.isAncestorOf(window.collapse_all_button)
     assert not window.collapse_all_button.icon().isNull()
     assert window.collapse_all_button.toolTip() == "Collapse all folders"
+    assert set(window.column_buttons) == {1, 2, 3}
+    for column, button in window.column_buttons.items():
+        assert window.folder_panel_header.isAncestorOf(button)
+        assert button.defaultAction() is window.column_actions[column]
+        assert button.isCheckable()
     assert (
         window.folder_panel_header.header_layout.indexOf(window.collapse_all_button)
         == window.folder_panel_header.header_layout.indexOf(window.hidden_files_button) + 1
@@ -3639,12 +3638,6 @@ def test_folder_navigator_has_distinct_restrained_window_identity(
     assert window.windowTitle() == (
         f"{tmp_path.name} — {document.name} — StillPoint Folder Navigator"
     )
-    breadcrumb = window.identity_bar.findChildren(QToolButton)
-    assert [button.accessibleName() for button in breadcrumb] == [
-        f"Open {tmp_path.name}",
-        f"Open {document.name}",
-    ]
-    assert breadcrumb[-1].toolTip() == str(document)
     window.active_tab().editor.document().setModified(False)
     window.close()
 

@@ -4631,14 +4631,11 @@ class Window(QMainWindow):
         layout.setSpacing(0)
         self.identity_bar = CompactToolbarIdentity(
             "Folder Navigator",
-            self.root.name,
+            "",
             icon=icon,
             accent_color=identity_accent,
         )
-        self.identity_bar.set_detail(self.root.name, str(self.root))
-        self.identity_bar.breadcrumbActivatedWithModifiers.connect(
-            self._open_folder_breadcrumb
-        )
+        self.identity_bar.set_detail("")
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 2, 7, 2)
         self.bookmarks_bar.setSpacing(3)
@@ -5366,38 +5363,8 @@ class Window(QMainWindow):
         self.table_preview_action.setEnabled(False)
         self.raw_text_action.setEnabled(False)
         columns_menu = view_menu.addMenu("Columns")
-        columns_toolbar = self.addToolBar("File columns")
-        self.columns_toolbar = columns_toolbar
-        columns_toolbar.setObjectName("folder_navigator_columns")
-        columns_toolbar.setMovable(False)
-        columns_toolbar.setFloatable(False)
-        toolbar_icon_size = 20 if sys.platform == "win32" else 18
-        toolbar_button_size = 28
-        columns_toolbar.setIconSize(QSize(toolbar_icon_size, toolbar_icon_size))
-        columns_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        if sys.platform in {"darwin", "win32"}:
-            columns_toolbar.setFixedHeight(34)
-        columns_toolbar.setStyleSheet(
-            "QToolBar#folder_navigator_columns {"
-            "padding: 3px 6px; "
-            "spacing: 4px;"
-            "}"
-            "QToolBar#folder_navigator_columns QToolButton {"
-            f"min-width: {toolbar_button_size}px; max-width: {toolbar_button_size}px;"
-            f"min-height: {toolbar_button_size}px; max-height: {toolbar_button_size}px;"
-            "padding: 0; margin: 0; border: 1px solid transparent; border-radius: 5px;"
-            "}"
-            "QToolBar#folder_navigator_columns QToolButton:hover {"
-            "background: palette(alternate-base); border-color: palette(mid);"
-            "}"
-            "QToolBar#folder_navigator_columns QToolButton:checked {"
-            "background: palette(alternate-base); border-color: palette(highlight);"
-            "}"
-            "QToolBar#folder_navigator_columns::separator {"
-            "width: 1px; height: 20px; margin: 4px 5px;"
-            "}"
-        )
         self.column_actions = {}
+        self.column_buttons = {}
         column_specs = (
             (1, "Size", QStyle.StandardPixmap.SP_DriveHDIcon),
             (2, "Type", QStyle.StandardPixmap.SP_FileIcon),
@@ -5413,27 +5380,21 @@ class Window(QMainWindow):
                 lambda visible, selected=column: self._set_column_visible(selected, visible)
             )
             columns_menu.addAction(action)
-            columns_toolbar.addAction(action)
+            button = QToolButton(self.folder_panel_header)
+            button.setObjectName(f"folder{title}ColumnToggle")
+            button.setAutoRaise(True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setIconSize(QSize(16, 16))
+            button.setFixedSize(24, 22)
+            button.setDefaultAction(action)
+            self.folder_panel_header.add_trailing_widget(button)
             self.commands.append(action)
             self.column_actions[column] = action
-        self.folder_toolbar_breadcrumb = self.identity_bar.detach_breadcrumb(
-            columns_toolbar
+            self.column_buttons[column] = button
+        self.menuBar().setCornerWidget(
+            self.identity_bar,
+            Qt.Corner.TopRightCorner,
         )
-        self.folder_toolbar_breadcrumb.setMinimumWidth(220)
-        self.folder_toolbar_breadcrumb.setMaximumWidth(640)
-        self.folder_toolbar_breadcrumb.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self._update_folder_breadcrumb(self.root)
-        columns_toolbar.addWidget(self.folder_toolbar_breadcrumb)
-        identity_spacer = QWidget(columns_toolbar)
-        identity_spacer.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Preferred,
-        )
-        columns_toolbar.addWidget(identity_spacer)
-        columns_toolbar.addWidget(self.identity_bar)
         add(go_menu, "Folder", lambda: (self.rail.setCurrentIndex(0), self.tree.setFocus()))
         add(go_menu, "Search", lambda: (self.rail.setCurrentIndex(1), self.search_input.setFocus()))
         if self.git_page is not None:
@@ -7942,29 +7903,6 @@ class Window(QMainWindow):
             parts.append(tab.path.name)
         parts.append("StillPoint Folder Navigator")
         self.setWindowTitle(" — ".join(parts))
-        self._update_folder_breadcrumb(tab.path if tab is not None else self.root)
-
-    def _folder_breadcrumb_items(self, path: Path) -> list[tuple[str, object, str]]:
-        target = path if inside(self.root, path) else self.root
-        items: list[tuple[str, object, str]] = [
-            (self.root.name, self.root, str(self.root))
-        ]
-        if target == self.root:
-            return items
-        try:
-            relative_parts = target.relative_to(self.root).parts
-        except ValueError:
-            return items
-        current = self.root
-        for part in relative_parts:
-            current = current / part
-            items.append((part, current, str(current)))
-        return items
-
-    def _update_folder_breadcrumb(self, path: Path) -> None:
-        identity = getattr(self, "identity_bar", None)
-        if identity is not None:
-            identity.set_breadcrumb(self._folder_breadcrumb_items(path))
 
     def _open_folder_breadcrumb(self, target: object, modifiers=Qt.NoModifier) -> None:
         path = Path(str(target))
