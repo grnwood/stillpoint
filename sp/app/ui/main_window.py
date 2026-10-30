@@ -3043,6 +3043,14 @@ class MainWindow(QMainWindow):
         editor_layout.setSpacing(0)
         editor_layout.addWidget(self.editor_view_container, 1)
         editor_layout.addWidget(self.find_bar)
+        self._editor_status = QFrame(editor_container)
+        self._editor_status.setObjectName("mainEditorStatus")
+        self._apply_editor_status_theme()
+        self._editor_status_layout = QHBoxLayout(self._editor_status)
+        self._editor_status_layout.setContentsMargins(8, 2, 8, 2)
+        self._editor_status_layout.setSpacing(14)
+        editor_layout.addWidget(self._editor_status)
+        self._editor_status.hide()
 
         self.editor_split = QSplitter()
         self.editor_split.addWidget(editor_container)
@@ -3204,6 +3212,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.history_bar)
+        self.history_bar.hide()
         layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(container)
         self._position_toc_widget()
@@ -3705,7 +3714,19 @@ class MainWindow(QMainWindow):
         self._save_status_label.hide()
         # Normal status widgets yield to transient messages and return when the
         # message timeout expires; permanent widgets remain visible on the right.
-        self.statusBar().addWidget(self._save_status_label, 1)
+        self._document_status = QWidget(self.statusBar())
+        document_status_layout = QHBoxLayout(self._document_status)
+        document_status_layout.setContentsMargins(0, 0, 0, 0)
+        document_status_layout.setSpacing(12)
+        self._document_path_label = QLabel(self._document_status)
+        self._document_path_label.setObjectName("documentPathLabel")
+        self._document_path_label.setTextFormat(Qt.PlainText)
+        self._document_path_label.setMinimumWidth(0)
+        self._document_path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._document_path_label.setAccessibleName("Current document path")
+        document_status_layout.addWidget(self._document_path_label, 1)
+        self.statusBar().addWidget(self._document_status, 1)
+        self._update_main_utility_identity()
 
         self._editor_word_count = 0
         self._editor_word_count_path: Optional[str] = None
@@ -3719,7 +3740,7 @@ class MainWindow(QMainWindow):
         self._cursor_status_label.setAccessibleName("Editor cursor position")
         self._cursor_status_label.setToolTip("Current editor line, column, and selection")
         self._cursor_status_label.hide()
-        self._reading_mode_button = QToolButton(self.statusBar())
+        self._reading_mode_button = QToolButton(self._editor_status)
         self._reading_mode_button.setObjectName("readingModeToggle")
         self._reading_mode_button.setAutoRaise(True)
         self._reading_mode_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -3729,8 +3750,10 @@ class MainWindow(QMainWindow):
         self._reading_mode_button.setDefaultAction(self._action_reading_view)
         self._reading_mode_button.setStyleSheet(self._mode_button_style())
         self._reading_mode_button.hide()
-        self.statusBar().addPermanentWidget(self._reading_mode_button, 0)
-        self.statusBar().addPermanentWidget(self._cursor_status_label, 0)
+        self._editor_status_layout.addWidget(self._reading_mode_button)
+        self._editor_status_layout.addWidget(self._cursor_status_label)
+        self._editor_status_layout.addStretch(1)
+        self._editor_status_layout.addWidget(self._save_status_label)
         self._update_main_cursor_status()
 
         map_icon = self._load_icon(
@@ -4221,18 +4244,7 @@ class MainWindow(QMainWindow):
             icon=self.windowIcon(),
             accent_color=getattr(self, "_vault_accent_color", None),
         )
-        self.main_toolbar_identity.breadcrumbActivated.connect(self._open_main_breadcrumb)
-        self.main_toolbar_breadcrumb = self.main_toolbar_identity.detach_breadcrumb(
-            self.toolbar
-        )
-        self.main_toolbar_breadcrumb.setMinimumWidth(240)
-        self.main_toolbar_breadcrumb.setMaximumWidth(640)
-        self.main_toolbar_breadcrumb.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.toolbar.addWidget(self.main_toolbar_breadcrumb)
-        self.toolbar.addWidget(self.main_toolbar_identity)
+        self.main_toolbar_identity.hide()
         self._update_main_utility_identity()
         
         # Preferences/settings cog icon
@@ -4257,11 +4269,12 @@ class MainWindow(QMainWindow):
         identity = getattr(self, "main_toolbar_identity", None)
         if identity is not None:
             identity.set_detail(name, path)
-            breadcrumb = self._main_breadcrumb_items()
-            if breadcrumb:
-                identity.set_breadcrumb(breadcrumb)
-            else:
-                identity.clear_breadcrumb()
+        path_label = getattr(self, "_document_path_label", None)
+        if path_label is not None:
+            page_path = path_to_colon(self.current_path) if self.current_path else ""
+            full_path = ":".join(part for part in (name, page_path) if part)
+            path_label.setText(full_path)
+            path_label.setToolTip(full_path)
         header = getattr(self, "tree_header_widget", None)
         if isinstance(header, UtilityPanelHeader):
             header.set_detail(name, path)
@@ -11778,6 +11791,7 @@ class MainWindow(QMainWindow):
         try:
             self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
             self._default_status_stylesheet = self.statusBar().styleSheet()
+            self._apply_editor_status_theme()
             self._update_main_cursor_status()
         except Exception:
             pass
@@ -13335,6 +13349,7 @@ class MainWindow(QMainWindow):
                 btn.setToolTip(tooltip)
             desired_buttons.append(btn)
 
+        self.history_bar.setVisible(bool(desired_buttons))
         membership_changed = bool(existing_by_path) or desired_buttons != self.history_buttons
         for btn in existing_by_path.values():
             self.history_layout.removeWidget(btn)
@@ -15127,8 +15142,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._refresh_reading_view()
-        # The breadcrumb now carries the persistent page location. Keep the
-        # status bar available for transient work, errors, and sync state.
+        # The document status widget carries the persistent page location.
         display_path = path_to_colon(path) or path
         if hasattr(self, "toc_widget"):
             root_base = ensure_root_colon_link(display_path) if display_path else ""
@@ -24651,11 +24665,30 @@ class MainWindow(QMainWindow):
         if getattr(self, "_main_soft_scroll_enabled", True):
             self._soft_autoscroll_main()
 
+    def _apply_editor_status_theme(self) -> None:
+        footer = getattr(self, "_editor_status", None)
+        if footer is None:
+            return
+        # Resolve the same effective application/vault colors as the status bar.
+        style = status_bar_stylesheet(footer)
+        style = style.replace("QStatusBar::item { border: 0; }", "")
+        style = style.replace("QStatusBar {", "QFrame#mainEditorStatus {")
+        colors = chrome_colors(footer, getattr(self, "_vault_accent_color", None))
+        foreground = theme_color(
+            "ui.status_bar.text", theme_value("markdown_editor.base.text", colors["text"])
+        )
+        text = foreground.name() if foreground.isValid() else colors["text"]
+        footer.setStyleSheet(
+            style + f"QFrame#mainEditorStatus QLabel {{ color: {text}; "
+            "border: none; background: transparent; }"
+        )
+
     def _update_main_cursor_status(self) -> None:
         label = getattr(self, "_cursor_status_label", None)
         if label is None:
             return
         if not self.current_path or not getattr(self, "editor", None):
+            self._editor_status.hide()
             label.clear()
             label.hide()
             button = getattr(self, "_reading_mode_button", None)
@@ -24663,6 +24696,7 @@ class MainWindow(QMainWindow):
                 button.hide()
             self._set_save_status("")
             return
+        self._editor_status.show()
         if getattr(self, "_editor_word_count_path", None) != self.current_path:
             self._editor_word_count = self._calculate_main_word_count()
             self._editor_word_count_path = self.current_path

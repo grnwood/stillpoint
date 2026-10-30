@@ -262,19 +262,30 @@ def _palette_hex(role: QPalette.ColorRole, source: Optional[QtWidgets.QWidget] =
 
 
 def _chat_surface_defaults(source: Optional[QtWidgets.QWidget] = None) -> dict[str, str]:
-    palette = _resolved_palette(source)
-    return {
-        "window": palette.color(QPalette.ColorRole.Window).name(),
-        "base": palette.color(QPalette.ColorRole.Base).name(),
-        "alt": palette.color(QPalette.ColorRole.AlternateBase).name(),
-        "text": palette.color(QPalette.ColorRole.Text).name(),
-        "window_text": palette.color(QPalette.ColorRole.WindowText).name(),
-        "mid": palette.color(QPalette.ColorRole.Mid).name(),
-        "highlight": palette.color(QPalette.ColorRole.Highlight).name(),
-        "highlighted_text": palette.color(QPalette.ColorRole.HighlightedText).name(),
-        "disabled_text": palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text).name(),
-        "link": palette.color(QPalette.ColorRole.Link).name(),
+    # Widget palettes may still contain colors explicitly applied by the previous
+    # theme. Resolve effective theme values before using application fallbacks.
+    palette = _resolved_palette()
+    background = theme_value("markdown_editor.base.bg", palette.color(QPalette.Window).name())
+    foreground = theme_value("markdown_editor.base.text", palette.color(QPalette.Text).name())
+    values = {
+        "window": ("bg", background),
+        "base": ("surface_bg", background),
+        "alt": ("alt_bg", palette.color(QPalette.AlternateBase).name()),
+        "text": ("text", foreground),
+        "window_text": ("text", foreground),
+        "mid": ("border", theme_value("ui.chrome.border", palette.color(QPalette.Mid).name())),
+        "highlight": ("selected_bg", palette.color(QPalette.Highlight).name()),
+        "highlighted_text": ("selected_text", palette.color(QPalette.HighlightedText).name()),
+        "disabled_text": ("muted_text", palette.color(QPalette.Disabled, QPalette.Text).name()),
+        "link": ("link", palette.color(QPalette.Link).name()),
+        "input_bg": ("input_bg", background),
+        "input_text": ("input_text", foreground),
     }
+    colors = {}
+    for key, (setting, fallback) in values.items():
+        color = QColor(theme_value(f"ai_chat_panel.panel.{setting}", fallback))
+        colors[key] = color.name() if color.isValid() else QColor(fallback).name()
+    return colors
 
 
 @dataclass
@@ -2191,8 +2202,8 @@ class AIChatPanel(QtWidgets.QWidget):
         surface_bg = colors["base"]
         alt_bg = colors["alt"]
         border = colors["mid"]
-        input_bg = colors["base"]
-        input_text = colors["text"]
+        input_bg = colors["input_bg"]
+        input_text = colors["input_text"]
         highlight = colors["highlight"]
         highlighted_text = colors["highlighted_text"]
         disabled_text = colors["disabled_text"]
@@ -2316,26 +2327,26 @@ class AIChatPanel(QtWidgets.QWidget):
             )
         if hasattr(self, "input_edit"):
             input_palette = self.input_edit.palette()
-            input_palette.setColor(QPalette.ColorRole.Base, QColor(colors["base"]))
-            input_palette.setColor(QPalette.ColorRole.Window, QColor(colors["base"]))
-            input_palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
+            input_palette.setColor(QPalette.ColorRole.Base, QColor(colors["input_bg"]))
+            input_palette.setColor(QPalette.ColorRole.Window, QColor(colors["input_bg"]))
+            input_palette.setColor(QPalette.ColorRole.Text, QColor(colors["input_text"]))
             self.input_edit.setPalette(input_palette)
             self.input_edit.viewport().setPalette(input_palette)
             self.input_edit.viewport().setAutoFillBackground(True)
             self.input_edit.setStyleSheet(
                 f"""
                 QPlainTextEdit {{
-                    background: {colors['base']};
-                    background-color: {colors['base']};
-                    color: {colors['text']};
+                    background: {colors['input_bg']};
+                    background-color: {colors['input_bg']};
+                    color: {colors['input_text']};
                     border: 1px solid {colors['mid']};
                     border-radius: 6px;
                     selection-background-color: {colors['highlight']};
                     selection-color: {colors['highlighted_text']};
                 }}
                 QPlainTextEdit QWidget {{
-                    background: {colors['base']};
-                    background-color: {colors['base']};
+                    background: {colors['input_bg']};
+                    background-color: {colors['input_bg']};
                 }}
                 """
             )

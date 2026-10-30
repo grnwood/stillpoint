@@ -450,10 +450,7 @@ def test_main_window_utility_identity_uses_existing_toolbar_and_rail(main_window
     main_window._update_main_utility_identity()
 
     assert main_window.toolbar.isAncestorOf(main_window.main_toolbar_identity)
-    assert main_window.toolbar.isAncestorOf(main_window.main_toolbar_breadcrumb)
-    assert not main_window.main_toolbar_identity.isAncestorOf(
-        main_window.main_toolbar_breadcrumb
-    )
+    assert main_window.main_toolbar_identity.isHidden()
     assert main_window.main_toolbar_identity.title_label.text() == "STILLPOINT"
     assert main_window.main_toolbar_identity.detail_label.text().endswith("test_vault")
     assert main_window.tree_header_widget.title_label.text() == "VAULT"
@@ -461,23 +458,81 @@ def test_main_window_utility_identity_uses_existing_toolbar_and_rail(main_window
     assert main_window.search_tab._utility_panel_header.title_label.text() == "SEARCH"
 
 
-def test_main_window_identity_breadcrumb_tracks_and_opens_page(main_window, monkeypatch) -> None:
-    opened: list[str] = []
-    monkeypatch.setattr(main_window, "_open_file", opened.append)
+def test_main_window_status_path_tracks_page(main_window) -> None:
     main_window.current_path = "/PageA/Child1/Child1.md"
     main_window._update_main_utility_identity()
 
-    buttons = main_window.main_toolbar_breadcrumb.findChildren(QToolButton)
-    assert [button.text() for button in buttons] == ["test_vault", "PageA", "Child1"]
-    assert buttons[-1].toolTip() == "/PageA/Child1"
+    assert main_window._document_path_label.text() == "test_vault:PageA:Child1"
+    assert main_window._document_path_label.toolTip() == "test_vault:PageA:Child1"
+    main_window._set_save_status("Saved")
+    assert main_window._editor_status.isAncestorOf(main_window._save_status_label)
+    assert not main_window.statusBar().isAncestorOf(main_window._save_status_label)
 
-    buttons[-1].click()
-    assert opened == ["/PageA/Child1/Child1.md"]
 
-
-def test_main_window_status_bar_keeps_location_in_breadcrumb(main_window) -> None:
+def test_main_window_status_bar_keeps_location_below_toolbar(main_window) -> None:
     main_window._open_file("/PageA/PageA.md")
 
     assert main_window.statusBar().currentMessage() == ""
     assert " words · Ln 1, Col 1" in main_window._cursor_status_label.text()
-    assert main_window._cursor_status_label.isVisibleTo(main_window.statusBar())
+    assert main_window._cursor_status_label.isVisibleTo(main_window._editor_status)
+    assert main_window._editor_status.isAncestorOf(main_window._reading_mode_button)
+    assert not main_window.statusBar().isAncestorOf(main_window._cursor_status_label)
+    main_window.statusBar().showMessage("Syncing", 1000)
+    assert main_window._reading_mode_button.isVisibleTo(main_window._editor_status)
+    assert main_window._cursor_status_label.isVisibleTo(main_window._editor_status)
+
+
+def test_main_window_hides_empty_history_row(main_window) -> None:
+    main_window.page_history = []
+    main_window._refresh_history_buttons()
+    assert main_window.history_bar.isHidden()
+    main_window.page_history = ["/PageA/PageA.md"]
+    main_window._refresh_history_buttons()
+    assert not main_window.history_bar.isHidden()
+
+
+def test_editor_footer_refreshes_effective_application_and_vault_theme(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    import json
+    from sp.app.ui import theme
+
+    themes = {
+        "application": {"markdown_editor": {"base": {"bg": "#202530", "text": "#edf1fa"}}, "ui": {"status_bar": {
+            "bg": "#202530", "text": "#edf1fa", "border": "#455060",
+        }}},
+        "vault": {"markdown_editor": {"base": {"bg": "#20122f", "text": "#efd9ff"}}, "ui": {"status_bar": {
+            "bg": "#20122f", "text": "#efd9ff", "border": "#663399",
+        }}},
+    }
+    for name, values in themes.items():
+        (tmp_path / f"{name}.json").write_text(json.dumps(values), encoding="utf-8")
+    main_window.right_panel._add_ai_chat_tab()
+    ai_panel = main_window.right_panel.ai_chat_panel
+    ai_panel.messages = [("assistant", "**Themed response**")]
+    selected = ["application"]
+    monkeypatch.delenv("SP_FOLDER_NAVIGATOR_THEME_OVERRIDE", raising=False)
+    monkeypatch.setattr(theme.config, "load_effective_theme_preference", lambda: selected[0])
+    monkeypatch.setattr(theme, "_resolve_theme_path", lambda name=None: tmp_path / f"{name}.json")
+    monkeypatch.setattr(theme, "_bundled_theme_path", lambda name: tmp_path / f"{name}.json")
+    try:
+        for name, values in themes.items():
+            selected[0] = name
+            theme.reload_theme()
+            main_window._apply_effective_theme_visuals()
+            style = main_window._editor_status.styleSheet()
+            for color in values["ui"]["status_bar"].values():
+                assert color in style
+            assert "palette(alternate-base)" not in style
+            assert "QFrame#mainEditorStatus QLabel" in style
+            from PySide6.QtGui import QPalette
+            background = values["markdown_editor"]["base"]["bg"]
+            foreground = values["markdown_editor"]["base"]["text"]
+            assert f"background: {background}" in ai_panel.styleSheet()
+            assert ai_panel.chat_view.palette().color(QPalette.Base).name() == background
+            assert ai_panel.input_edit.palette().color(QPalette.Base).name() == background
+            assert ai_panel.chat_view.palette().color(QPalette.Text).name() == foreground
+            assert background in ai_panel.chat_view.document().defaultStyleSheet()
+            assert "Themed response" in ai_panel.chat_view.toPlainText()
+    finally:
+        theme.reload_theme()

@@ -6026,11 +6026,9 @@ class Window(QMainWindow):
     def _update_chat_toggle_icons(self) -> None:
         if self.chat_panel is None:
             return
-        collapse_icon = self.style().standardIcon(QStyle.SP_ArrowRight)
-        expand_icon = self.style().standardIcon(QStyle.SP_ArrowLeft)
-        self.chat_toggle_button.setIcon(collapse_icon)
+        self._configure_header_button_icon(self.chat_toggle_button, "show-sidebar.svg")
         self.chat_toggle_button.setToolTip("Hide AI chat sidebar")
-        self.chat_minibar_toggle.setIcon(expand_icon)
+        self._configure_header_button_icon(self.chat_minibar_toggle, "hide-sidebar.svg")
         self.chat_minibar_toggle.setToolTip("Show AI chat sidebar")
 
     def all_tabs(self):
@@ -8480,6 +8478,7 @@ class Window(QMainWindow):
         if isinstance(hidden, QToolButton):
             self._update_hidden_files_control(hidden.isChecked())
         self._update_folder_rail_toggle_icons()
+        self._update_chat_toggle_icons()
 
     def _hidden_files_icon(self, visible: bool) -> QIcon:
         return self._header_asset_icon(

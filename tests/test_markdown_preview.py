@@ -595,9 +595,9 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     qapp.processEvents()
     assert main_window._reading_mode_button.isVisible()
     assert main_window._reading_mode_button.mapTo(
-        main_window.statusBar(), QPoint()
+        main_window._editor_status, QPoint()
     ).x() < main_window._cursor_status_label.mapTo(
-        main_window.statusBar(), QPoint()
+        main_window._editor_status, QPoint()
     ).x()
     assert main_window.reading_view.header.isHidden()
     assert main_window._reading_view_enabled
