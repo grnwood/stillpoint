@@ -12,7 +12,7 @@ from PySide6.QtTest import QTest
 from sp.app.ui.main_window import MainWindow, OPEN_ROLE, PATH_ROLE
 
 
-def test_editor_escape_reveals_and_focuses_current_page_in_vault(main_window):
+def test_editor_escape_keeps_hidden_vault_and_editor_focus(main_window):
     main_window.editor.set_vi_mode_enabled(False)
     main_window._open_file("/PageA/PageA.md")
     main_window.left_tab_widget.setCurrentWidget(main_window.search_tab)
@@ -25,14 +25,12 @@ def test_editor_escape_reveals_and_focuses_current_page_in_vault(main_window):
     QTest.keyClick(main_window.editor, Qt.Key_Escape)
     QApplication.processEvents()
 
-    assert main_window._is_left_panel_expanded()
-    assert main_window.left_tab_widget.currentWidget() is main_window._vault_tab
-    assert main_window.tree_view.hasFocus()
-    current = main_window.tree_view.currentIndex()
-    assert (current.data(OPEN_ROLE) or current.data(PATH_ROLE)) == main_window.current_path
+    assert not main_window._is_left_panel_expanded()
+    assert main_window.left_tab_widget.currentWidget() is main_window.search_tab
+    assert main_window.editor.hasFocus()
 
 
-def test_vi_insert_escape_exits_insert_before_returning_focus_to_vault(main_window):
+def test_vi_escape_exits_insert_without_revealing_vault(main_window):
     main_window._open_file("/PageA/PageA.md")
     main_window.editor.set_vi_mode_enabled(True)
     main_window.editor._enter_vi_insert_mode()
@@ -53,9 +51,9 @@ def test_vi_insert_escape_exits_insert_before_returning_focus_to_vault(main_wind
     QTest.keyClick(main_window.editor, Qt.Key_Escape)
     QApplication.processEvents()
 
-    assert main_window._is_left_panel_expanded()
-    assert main_window.left_tab_widget.currentWidget() is main_window._vault_tab
-    assert main_window.tree_view.hasFocus()
+    assert not main_window._is_left_panel_expanded()
+    assert main_window.left_tab_widget.currentWidget() is main_window.search_tab
+    assert main_window.editor.hasFocus()
 
 
 def test_copy_link_status_survives_editor_hover_refresh(main_window):

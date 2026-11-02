@@ -1,6 +1,6 @@
 import pytest
 from PySide6.QtCore import Qt, QEvent, QMimeData
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 from PySide6.QtGui import QKeyEvent, QTextCursor
 from PySide6.QtTest import QTest
 
@@ -349,5 +349,55 @@ def test_vi_m_without_selection_uses_move_page_callback(qapp: QApplication) -> N
 
     QTest.keyClick(editor, Qt.Key_M)
 
+    assert fired == [True]
+    editor.close()
+
+
+def test_move_page_is_a_direct_editor_context_action(qapp: QApplication) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor._current_path = "/PageA/PageA.md"
+    fired: list[bool] = []
+    editor.set_move_page_callback(lambda: fired.append(True))
+    menu = QMenu(editor)
+
+    action = editor._add_move_page_action(menu)
+
+    assert action is not None
+    assert action.text() == "Move Page…"
+    assert action in menu.actions()
+    assert action.menu() is None
+    action.trigger()
+    assert fired == [True]
+    editor.close()
+
+
+def test_move_text_is_direct_only_when_text_is_selected(
+    qapp: QApplication, monkeypatch
+) -> None:
+    editor = MarkdownEditor()
+    _force_initial_paint(editor, qapp)
+    editor.setPlainText("Move this text")
+    fired: list[bool] = []
+    monkeypatch.setattr(
+        editor,
+        "_move_text_via_jump_dialog",
+        lambda: fired.append(True),
+    )
+    menu_without_selection = QMenu(editor)
+
+    assert editor._add_move_text_action(menu_without_selection) is None
+
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+    menu_with_selection = QMenu(editor)
+    action = editor._add_move_text_action(menu_with_selection)
+
+    assert action is not None
+    assert action.text() == "Move Text…"
+    assert action in menu_with_selection.actions()
+    assert action.menu() is None
+    action.trigger()
     assert fired == [True]
     editor.close()

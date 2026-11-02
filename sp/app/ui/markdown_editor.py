@@ -5796,6 +5796,27 @@ class MarkdownEditor(QTextEdit):
             pass
         return menu
 
+    def _add_move_page_action(self, menu: QMenu) -> Optional[QAction]:
+        """Expose the host page-move workflow directly in editor context menus."""
+        if not self._move_page_callback or not self._current_path:
+            return None
+        action = menu.addAction("Move Page…")
+        action.triggered.connect(self._move_page_callback)
+        return action
+
+    def _add_move_text_action(self, menu: QMenu) -> Optional[QAction]:
+        """Expose Move Text directly when the editor has a selection."""
+        if not self.textCursor().hasSelection():
+            return None
+        action = menu.addAction("Move Text…")
+        action.triggered.connect(self._move_text_via_jump_dialog)
+        return action
+
+    def _add_direct_move_actions(self, menu: QMenu) -> bool:
+        move_text = self._add_move_text_action(menu)
+        move_page = self._add_move_page_action(menu)
+        return move_text is not None or move_page is not None
+
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()
         if self._context_menu_selection:
@@ -5846,6 +5867,8 @@ class MarkdownEditor(QTextEdit):
             # Then image-specific actions
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
+            if self._add_direct_move_actions(menu):
+                menu.addSeparator()
             for width in MARKDOWN_IMAGE_WIDTH_OPTIONS:
                 action = menu.addAction(f"{width}px")
                 action.triggered.connect(
@@ -5896,6 +5919,8 @@ class MarkdownEditor(QTextEdit):
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
+            if self._add_direct_move_actions(menu):
+                menu.addSeparator()
 
             base_menu = self.createStandardContextMenu()
             try:
@@ -5968,14 +5993,6 @@ class MarkdownEditor(QTextEdit):
                 terminal_action = nav_sub.addAction("Open Terminal Here")
                 terminal_action.triggered.connect(self._open_terminal_here)
 
-                move_sub = menu.addMenu("Move")
-                move_text_action = move_sub.addAction("Move Text…")
-                move_text_action.setEnabled(self.textCursor().hasSelection())
-                move_text_action.triggered.connect(self._move_text_via_jump_dialog)
-                move_page_action = move_sub.addAction("Move Page…")
-                move_page_action.setEnabled(bool(self._move_page_callback and self._current_path))
-                if self._move_page_callback:
-                    move_page_action.triggered.connect(self._move_page_callback)
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
             self._suppress_focus_lost_once = False
@@ -6003,6 +6020,8 @@ class MarkdownEditor(QTextEdit):
                 menu.addAction(heading_action)
             self._add_ai_actions_entry(menu, as_submenu=True)
             self._add_view_mode_actions(menu)
+            if self._add_direct_move_actions(menu):
+                menu.addSeparator()
 
             edit_sub = menu.addMenu("Edit")
             for act in base_menu.actions():
@@ -6053,15 +6072,6 @@ class MarkdownEditor(QTextEdit):
             backlinks_action.triggered.connect(lambda: self.backlinksRequested.emit(self._current_path or ""))
             terminal_action = nav_sub.addAction("Open Terminal Here")
             terminal_action.triggered.connect(self._open_terminal_here)
-
-            move_sub = menu.addMenu("Move")
-            move_text_action = move_sub.addAction("Move Text…")
-            move_text_action.setEnabled(self.textCursor().hasSelection())
-            move_text_action.triggered.connect(self._move_text_via_jump_dialog)
-            move_page_action = move_sub.addAction("Move Page…")
-            move_page_action.setEnabled(bool(self._move_page_callback and self._current_path))
-            if self._move_page_callback:
-                move_page_action.triggered.connect(self._move_page_callback)
 
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
