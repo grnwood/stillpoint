@@ -400,12 +400,14 @@ class JumpToPageDialog(QDialog):
             quick_item.setToolTip(quick_label)
             self.list_widget.addItem(quick_item)
             quick_target_count += 1
+        matching_page_paths: set[str] = set()
         for page in pages:
             if self._filter_prefix and not page["path"].startswith(self._filter_prefix):
                 continue
             item = QListWidgetItem(self._display_label(page))
             item.setData(Qt.UserRole, page["path"])
             self.list_widget.addItem(item)
+            matching_page_paths.add(page["path"])
         if self._launch_mode == "bookmarks":
             needle = term.casefold()
             folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
@@ -422,11 +424,27 @@ class JumpToPageDialog(QDialog):
                 item.setToolTip(folder_path)
                 self.list_widget.addItem(item)
         
-        # Track if we have matching pages and update title accordingly
-        self._has_matching_pages = self.list_widget.count() > 0
-        
-        # If no matches in insert_link/move_text mode, show create option
-        if not self._has_matching_pages and self._launch_mode in ("insert_link", "move_text") and term:
+        # Track actual page matches before adding any create action. Pinned quick
+        # targets and folder navigators are destinations, but are not search
+        # matches for purposes of the dialog title or new-page affordance.
+        self._has_matching_pages = bool(matching_page_paths)
+
+        # Moving text should always make the current page's child-page option
+        # explicit, even when similarly named pages exist elsewhere. If that
+        # exact child already exists, its normal search result is the valid
+        # destination and a create action would be misleading.
+        if self._launch_mode == "move_text" and term:
+            new_path = self._generate_new_page_path(term)
+            if new_path not in matching_page_paths:
+                parent_label = self._new_page_parent_label()
+                item = QListWidgetItem(
+                    f"<i>Create child page: <b>{html.escape(term)}</b> "
+                    f"— under {html.escape(parent_label)}</i>"
+                )
+                item.setData(Qt.UserRole, new_path)
+                item.setToolTip(f"Create {new_path}")
+                self.list_widget.addItem(item)
+        elif self._launch_mode == "insert_link" and not self._has_matching_pages and term:
             new_path = self._generate_new_page_path(term)
             item = QListWidgetItem(f"<i>Create new page: {html.escape(term)}</i>")
             item.setData(Qt.UserRole, new_path)
@@ -555,6 +573,12 @@ class JumpToPageDialog(QDialog):
             return "Vault Root"
         # Return parent folder (where current page lives)
         return parts[-2] if len(parts) >= 2 else "Vault Root"
+
+    def _new_page_parent_label(self) -> str:
+        """Return an unambiguous label for the page that will own a new child."""
+        if not self._current_page_path:
+            return "Vault Root"
+        return path_to_colon(self._current_page_path) or self._current_page_path
     
     def _generate_new_page_path(self, page_name: str) -> str:
         """Generate path for a new page at the current vault level."""

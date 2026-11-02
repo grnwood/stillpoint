@@ -81,3 +81,48 @@ def test_jump_dialog_bookmark_mode_with_only_folder_navigators(qapp, tmp_path, m
         assert dlg.selected_is_folder_navigator()
     finally:
         dlg.close()
+
+
+def test_move_text_always_offers_child_page_under_current_journal_page(qapp, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sp.app.ui.jump_dialog.config.search_pages",
+        lambda _term: [
+            {"path": "/Topics/Compliance calls/Compliance calls.md", "title": "Compliance calls"},
+        ],
+    )
+    dlg = JumpToPageDialog(
+        launch_mode="move_text",
+        current_page_path="/Journal/2026/11/02/02.md",
+    )
+    try:
+        dlg.search.setText("Compliance calls")
+
+        assert dlg.list_widget.count() == 2
+        create_item = dlg.list_widget.item(1)
+        assert "Create child page" in create_item.text()
+        assert "under Journal:2026:11:02" in create_item.text()
+        assert create_item.data(Qt.UserRole) == (
+            "/Journal/2026/11/02/Compliance calls/Compliance calls.md"
+        )
+    finally:
+        dlg.close()
+
+
+def test_move_text_does_not_offer_create_when_exact_child_exists(qapp, monkeypatch) -> None:
+    child_path = "/Journal/2026/11/02/Compliance calls/Compliance calls.md"
+    monkeypatch.setattr(
+        "sp.app.ui.jump_dialog.config.search_pages",
+        lambda _term: [{"path": child_path, "title": "Compliance calls"}],
+    )
+    dlg = JumpToPageDialog(
+        launch_mode="move_text",
+        current_page_path="/Journal/2026/11/02/02.md",
+    )
+    try:
+        dlg.search.setText("Compliance calls")
+
+        assert dlg.list_widget.count() == 1
+        assert dlg.list_widget.item(0).data(Qt.UserRole) == child_path
+        assert "Create child page" not in dlg.list_widget.item(0).text()
+    finally:
+        dlg.close()
