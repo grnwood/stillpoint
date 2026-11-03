@@ -142,7 +142,7 @@ from .screen_positioning import (
 )
 from .canvas_navigation import install_primary_wheel_zoom
 from .markdown_preview import MarkdownReadingView
-from .git_widgets import GitDiffEditor, GitHistoryDialog, VaultGitPanel
+from .git_widgets import CommitBeforePushDialog, GitDiffEditor, GitHistoryDialog, VaultGitPanel
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -2543,6 +2543,7 @@ class MainWindow(QMainWindow):
         # Remember cursor positions for history navigation
         # Track last-saved content to detect dirty buffers
         self._last_saved_content: Optional[str] = None
+        self._last_save_failure_message: Optional[str] = None
         self._pending_editor_sync_from_map: dict[str, dict[str, Any]] = {}
         self._undo_cache_path: Optional[Path] = None
         self._undo_cache_pages_limit: int = 20
@@ -2553,6 +2554,9 @@ class MainWindow(QMainWindow):
             "pages": {},
             "order": [],
         }
+        self._editor_recovery_path: Optional[Path] = None
+        self._editor_recovery: dict[str, Any] = {"schema_version": 1, "drafts": {}}
+        self._editor_recovery_limit: int = 20
         self._scroll_anim: Optional[QPropertyAnimation] = None
         self._vi_enabled: bool = False
         self._vi_insert_active: bool = False
@@ -2717,6 +2721,12 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setInterval(30_000)
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
+        self.editor_recovery_timer = QTimer(self)
+        self.editor_recovery_timer.setInterval(1500)
+        self.editor_recovery_timer.setSingleShot(True)
+        self.editor_recovery_timer.timeout.connect(
+            lambda: self._checkpoint_current_recovery_draft("edit checkpoint")
+        )
         self._last_editor_activity = 0.0
         self.git_auto_backup_timer = QTimer(self)
         self.git_auto_backup_timer.setSingleShot(True)
@@ -6332,11 +6342,29 @@ class MainWindow(QMainWindow):
         if not self.vault_root or not self._is_git_mode_enabled() or not self._flush_editor_before_git():
             return
         try:
+            entries = git_support.status(self.vault_root)
+            unstaged = git_support.unstaged_paths(entries)
+            committed_before_push = False
+            if 0 < len(unstaged) <= 10 and not any(entry.conflicted for entry in entries):
+                dialog = CommitBeforePushDialog(unstaged, self)
+                if dialog.exec() != QDialog.Accepted:
+                    return
+                if dialog.should_stage():
+                    committed_before_push = git_support.commit_paths(
+                        self.vault_root,
+                        dialog.commit_message(),
+                        unstaged,
+                    )
             git_support.push(self.vault_root, include_versions=True)
         except git_support.GitError as exc:
             self._git_error("Could Not Publish Changes", exc)
             return
-        self.statusBar().showMessage("Vault changes published.", 4500)
+        self.statusBar().showMessage(
+            "Changes committed and published."
+            if committed_before_push
+            else "Vault changes published.",
+            4500,
+        )
         self._refresh_git_mode_ui()
 
     def _close_git_diff_editor(self) -> None:
@@ -6804,9 +6832,9 @@ class MainWindow(QMainWindow):
     def _ensure_writable(self, action: str, *, interactive: bool = True) -> bool:
         """Guard write operations when the vault is opened read-only."""
         if self._read_only:
-            if not interactive:
+            if interactive:
                 if self._user_read_only and self._remote_mode:
-                    self._alert("You do not have permisison to write to this vault.")
+                    self._alert("You do not have permission to write to this vault.")
                 elif self._user_read_only and self._is_homebase_mode_enabled():
                     self._alert("You do not have permission to write to this vault.")
                 else:
@@ -12141,8 +12169,11 @@ class MainWindow(QMainWindow):
             if self._remote_mode:
                 self._undo_cache_path = None
                 self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+                self._editor_recovery_path = None
+                self._editor_recovery = {"schema_version": 1, "drafts": {}}
             else:
                 self._init_persisted_undo_cache_for_vault()
+                self._init_editor_recovery_for_vault()
             if self._remote_mode:
                 if not self._ensure_remote_auth_for_vault():
                     finish_setup_phase("root_index_state", result="auth_cancelled")
@@ -14990,7 +15021,8 @@ class MainWindow(QMainWindow):
             return
 
         payload = resp.json()
-        content = payload.get("content", "")
+        disk_content = payload.get("content", "")
+        content, recovered_draft, recovered_cursor_position = self._offer_editor_recovery(path, disk_content)
         rev = payload.get("rev")
         mtime_ns = payload.get("mtime_ns")
         if path:
@@ -15053,7 +15085,26 @@ class MainWindow(QMainWindow):
             loaded_editor_content = self.editor.to_markdown()
         except Exception:
             loaded_editor_content = content
-        self._last_saved_content = loaded_editor_content
+        if recovered_draft:
+            self._last_saved_content = disk_content
+            self._dirty_flag = True
+            try:
+                self.editor.document().setModified(True)
+            except Exception:
+                pass
+            if recovered_cursor_position is not None:
+                try:
+                    cursor = self.editor.textCursor()
+                    cursor.setPosition(max(0, min(recovered_cursor_position, len(self.editor.toPlainText()))))
+                    self.editor.setTextCursor(cursor)
+                except Exception:
+                    pass
+            self.statusBar().showMessage(
+                "Recovered unsaved edits. Save the page to commit them to the vault.",
+                12000,
+            )
+        else:
+            self._last_saved_content = loaded_editor_content
         self._update_dirty_indicator()
         self._capture_undo_snapshot(path, loaded_editor_content, source="load")
         move_cursor_to_end = cursor_at_end or self._should_focus_hr_tail(content)
@@ -15144,7 +15195,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "toc_widget"):
             root_base = ensure_root_colon_link(display_path) if display_path else ""
             self.toc_widget.set_base_path(root_base)
-        self.statusBar().clearMessage()
+        if recovered_draft:
+            self.statusBar().showMessage(
+                "Recovered unsaved edits. Save the page to commit them to the vault.",
+                12000,
+            )
+        else:
+            self.statusBar().clearMessage()
         self._update_main_cursor_status()
         self._update_window_title()
         self._mark_initial_page_loaded()
@@ -15298,6 +15355,8 @@ class MainWindow(QMainWindow):
 
     @measure_performance("save.finalize")
     def _finalize_save(self, path: str, content: str, resp_payload: dict, message: str) -> None:
+        self._last_save_failure_message = None
+        self._clear_editor_recovery_draft(path)
         metadata_started_at = performance_start()
         previous_saved_content = self._last_saved_content
         was_virtual = path in self.virtual_pages
@@ -15382,6 +15441,40 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{message} {display_path}", 2000 if "Auto" in message else 4000)
         self._schedule_homebase_sync("page save")
 
+    def _save_http_error_message(self, exc: httpx.HTTPError, fallback: str) -> str:
+        """Build a concise status-bar message from an API save failure."""
+        response = getattr(exc, "response", None)
+        detail = ""
+        if response is not None:
+            try:
+                payload = response.json()
+                raw = payload.get("detail") if isinstance(payload, dict) else payload
+                if isinstance(raw, dict):
+                    detail = str(raw.get("message") or raw.get("exception") or "").strip()
+                elif raw is not None:
+                    detail = str(raw).strip()
+            except Exception:
+                detail = ""
+            if not detail:
+                try:
+                    detail = str(response.text or "").strip()
+                except Exception:
+                    detail = ""
+            status = f"HTTP {response.status_code}"
+            return f"{fallback}: {status} — {detail}" if detail else f"{fallback}: {status}"
+        detail = str(exc).strip()
+        return f"{fallback}: {detail}" if detail else fallback
+
+    def _report_save_failure(self, message: str) -> None:
+        """Keep the dirty buffer and expose the reason a save did not complete."""
+        cleaned = str(message or "Save failed.").strip()
+        checkpointed = self._checkpoint_current_recovery_draft("save failure")
+        if checkpointed:
+            cleaned += " A device-local recovery checkpoint was saved."
+        self._last_save_failure_message = cleaned
+        self._set_save_status("Save failed")
+        self.statusBar().showMessage(cleaned, 15000)
+
     def _init_persisted_undo_cache_for_vault(self) -> None:
         if not self.vault_root:
             self._undo_cache_path = None
@@ -15403,6 +15496,169 @@ class MainWindow(QMainWindow):
                 self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
         except Exception:
             self._undo_cache = {"schema_version": 1, "pages": {}, "order": []}
+
+    def _init_editor_recovery_for_vault(self) -> None:
+        """Load device-local dirty-buffer checkpoints for the active vault."""
+        if not self.vault_root:
+            self._editor_recovery_path = None
+            self._editor_recovery = {"schema_version": 1, "drafts": {}}
+            return
+        self._editor_recovery_path = config.vault_state_dir(self.vault_root) / "editor-recovery.json"
+        try:
+            payload = json.loads(self._editor_recovery_path.read_text(encoding="utf-8"))
+            drafts = payload.get("drafts") if isinstance(payload, dict) else None
+            self._editor_recovery = {
+                "schema_version": 1,
+                "drafts": drafts if isinstance(drafts, dict) else {},
+            }
+        except FileNotFoundError:
+            self._editor_recovery = {"schema_version": 1, "drafts": {}}
+        except Exception as exc:
+            self._editor_recovery = {"schema_version": 1, "drafts": {}}
+            self.statusBar().showMessage(f"Could not read editor recovery data: {exc}", 12000)
+
+    def _persist_editor_recovery(self) -> bool:
+        """Atomically persist dirty-buffer checkpoints outside the synced vault."""
+        path = self._editor_recovery_path
+        if path is None:
+            return False
+        temporary = path.with_suffix(".json.tmp")
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            payload = json.dumps(self._editor_recovery, ensure_ascii=False, sort_keys=True)
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except (AttributeError, OSError):
+                pass
+            return True
+        except Exception as exc:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            self.statusBar().showMessage(f"Could not write editor recovery checkpoint: {exc}", 15000)
+            return False
+
+    def _checkpoint_current_recovery_draft(self, reason: str) -> bool:
+        """Durably snapshot the current dirty editor without touching the vault file."""
+        if self._editor_recovery_path is None or not self.current_path:
+            return False
+        if getattr(self, "_suspend_dirty_tracking", False) or not self._is_editor_dirty():
+            return False
+        editor_path = self.editor.current_relative_path()
+        page_path = str(editor_path or self.current_path).strip()
+        if not page_path:
+            return False
+        try:
+            content = self.editor.to_markdown()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not capture editor recovery checkpoint: {exc}", 15000)
+            return False
+        base_content = self._last_saved_content or ""
+        try:
+            cursor_position = int(self.editor.textCursor().position())
+        except Exception:
+            cursor_position = 0
+        drafts = self._editor_recovery.setdefault("drafts", {})
+        if not isinstance(drafts, dict):
+            drafts = {}
+            self._editor_recovery["drafts"] = drafts
+        drafts[page_path] = {
+            "content": content,
+            "base_content_sha256": hashlib.sha256(base_content.encode("utf-8")).hexdigest(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "cursor_position": cursor_position,
+            "reason": str(reason or "dirty buffer"),
+            "app_version": SP_VERSION,
+        }
+        if len(drafts) > self._editor_recovery_limit:
+            oldest = sorted(
+                drafts,
+                key=lambda key: str((drafts.get(key) or {}).get("saved_at") or ""),
+            )
+            for stale_path in oldest[: len(drafts) - self._editor_recovery_limit]:
+                drafts.pop(stale_path, None)
+        return self._persist_editor_recovery()
+
+    def _clear_editor_recovery_draft(self, path: str) -> None:
+        drafts = self._editor_recovery.get("drafts")
+        if not isinstance(drafts, dict) or path not in drafts:
+            return
+        removed = drafts.pop(path)
+        if not self._persist_editor_recovery():
+            drafts[path] = removed
+
+    def _offer_editor_recovery(self, path: str, disk_content: str) -> tuple[str, bool, int | None]:
+        """Offer a device-local draft without ever overwriting the disk copy automatically."""
+        drafts = self._editor_recovery.get("drafts")
+        entry = drafts.get(path) if isinstance(drafts, dict) else None
+        if not isinstance(entry, dict):
+            return disk_content, False, None
+        draft_content = str(entry.get("content") or "")
+        if not has_material_text_difference(draft_content, disk_content):
+            self._clear_editor_recovery_draft(path)
+            return disk_content, False, None
+
+        saved_at = str(entry.get("saved_at") or "unknown time")
+        box = QMessageBox(self)
+        box.setWindowTitle("Recover Unsaved Edits")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"StillPoint found unsaved edits for {path}.")
+        box.setInformativeText(
+            f"Recovery checkpoint: {saved_at}\n\n"
+            "The vault file has not been changed. Recover the draft, compare it with the vault file, "
+            "discard it, or keep it for later."
+        )
+        recover_button = box.addButton("Recover Draft", QMessageBox.AcceptRole)
+        compare_button = box.addButton("Compare…", QMessageBox.ActionRole)
+        discard_button = box.addButton("Discard Draft", QMessageBox.DestructiveRole)
+        later_button = box.addButton("Not Now", QMessageBox.RejectRole)
+        box.setDefaultButton(recover_button)
+        box.exec()
+        chosen = box.clickedButton()
+        if chosen == discard_button:
+            self._clear_editor_recovery_draft(path)
+            return disk_content, False, None
+        if chosen == later_button or chosen is None:
+            return disk_content, False, None
+        recovered_content = draft_content
+        if chosen == compare_button:
+            dialog = MergeConflictDialog(
+                draft_content,
+                disk_content,
+                path,
+                parent=self,
+                window_title="Compare Recovery Draft",
+                title=f"Compare the recovered draft with the vault copy of {path}.",
+                local_label="Recovery draft",
+                remote_label="Vault copy",
+                local_action_label="Keep Draft",
+                remote_action_label="Keep Vault Copy",
+            )
+            if dialog.exec() != QDialog.Accepted or dialog.merged_text() is None:
+                return disk_content, False, None
+            recovered_content = dialog.merged_text()
+            if not has_material_text_difference(recovered_content, disk_content):
+                self._clear_editor_recovery_draft(path)
+                return disk_content, False, None
+        try:
+            cursor_position = int(entry.get("cursor_position"))
+        except (TypeError, ValueError):
+            cursor_position = None
+        return recovered_content, True, cursor_position
 
     def _save_persisted_undo_cache(self) -> None:
         if not self._undo_cache_path:
@@ -15598,9 +15854,15 @@ class MainWindow(QMainWindow):
         self._merge_dialog_open = True
         try:
             if dialog.exec() != QDialog.Accepted:
+                self._report_save_failure(
+                    f"Save cancelled: the conflict for {path} was not resolved. Your edits remain unsaved."
+                )
                 return False
             merged = dialog.merged_text()
             if merged is None:
+                self._report_save_failure(
+                    f"Save cancelled: no merged content was selected for {path}. Your edits remain unsaved."
+                )
                 return False
         finally:
             self._merge_dialog_open = False
@@ -15630,11 +15892,16 @@ class MainWindow(QMainWindow):
                 conflict_payload = self._extract_conflict_payload(resp)
                 if conflict_payload and self._accept_noop_conflict(path, merged, conflict_payload, auto):
                     return True
+                message = f"Save failed for {path}: the file changed again while resolving the conflict."
+                self._report_save_failure(message)
                 if not auto:
-                    self._alert("Save failed: the server changed again. Please retry.")
+                    self._alert(message)
                 return False
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            self._report_save_failure(
+                self._save_http_error_message(exc, f"Failed to save {path}")
+            )
             if not auto:
                 self._alert_api_error(exc, f"Failed to save {path}")
             return False
@@ -15657,13 +15924,19 @@ class MainWindow(QMainWindow):
         force: bool = False,
         allow_when_suspended: bool = False,
     ) -> None:
+        self._last_save_failure_message = None
         if getattr(self, "_heading_picker_active", False):
             # Skip saves triggered while the heading picker popup is active (vi 't')
+            if not auto:
+                self._report_save_failure("Save paused while the heading picker is open.")
             return
         if self._merge_dialog_open:
+            self._report_save_failure("Save is waiting for the open conflict dialog to be resolved.")
             return
         if self._suspend_autosave and not allow_when_suspended:
             self._debug("Autosave suppressed (suspend flag set).")
+            if not auto:
+                self._report_save_failure("Save is temporarily suspended. Please try again.")
             return
         if self._suspend_autosave and allow_when_suspended:
             self._debug(f"Autosave suspend bypassed (reason={reason}, force={force}).")
@@ -15725,6 +15998,10 @@ class MainWindow(QMainWindow):
         
         # Autosave should silently skip when read-only; explicit Ctrl+S should warn.
         if not self._ensure_writable("save changes", interactive=not auto):
+            if not auto:
+                self._report_save_failure(
+                    self._read_only_status_message("Save failed because this vault is read-only.")
+                )
             return
         if not self.current_path:
             if not auto:
@@ -15732,9 +16009,12 @@ class MainWindow(QMainWindow):
             return
         editor_path = self.editor.current_relative_path()
         if editor_path and self.current_path and editor_path != self.current_path:
-            self._debug(
-                f"Autosave skipped due to path mismatch editor={editor_path} window={self.current_path}"
+            message = (
+                "Save blocked because the editor page does not match the active page "
+                f"(editor: {editor_path}; active: {self.current_path}). Your edits remain unsaved."
             )
+            self._debug(message)
+            self._report_save_failure(message)
             return
         
         # Check if this is a virtual page with unchanged content
@@ -15818,6 +16098,9 @@ class MainWindow(QMainWindow):
                     return
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            self._report_save_failure(
+                self._save_http_error_message(exc, f"Failed to save {self.current_path}")
+            )
             if not auto:
                 self._alert_api_error(exc, f"Failed to save {self.current_path}")
             return
@@ -16088,10 +16371,13 @@ class MainWindow(QMainWindow):
         )
         if not self._is_editor_dirty():
             return True
-        self.statusBar().showMessage(
-            "Could not save the current page; the action was cancelled to protect your changes.",
-            8000,
-        )
+        if self._last_save_failure_message:
+            self._set_save_status("Save failed")
+            self.statusBar().showMessage(self._last_save_failure_message, 15000)
+        else:
+            self._report_save_failure(
+                "Could not save the current page; the action was cancelled to protect your changes."
+            )
         return False
 
     def _open_journal_today(self) -> None:
@@ -26358,6 +26644,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         new_state = self._dirty_state_from_editor(default=True)
+        recovery_timer = getattr(self, "editor_recovery_timer", None)
+        if recovery_timer is not None:
+            if new_state and getattr(self, "_editor_recovery_path", None) is not None:
+                recovery_timer.start()
+            else:
+                recovery_timer.stop()
         if new_state != getattr(self, "_dirty_flag", False):
             self._dirty_flag = new_state
             self._update_dirty_indicator()
@@ -26473,6 +26765,7 @@ class MainWindow(QMainWindow):
         # macOS, Command-Q may otherwise deliver a final expose event while the
         # document layout or syntax highlighter is entering teardown.
         self.setProperty("_sp_closing", True)
+        self._checkpoint_current_recovery_draft("window close")
         try:
             if getattr(self, "editor", None):
                 self.editor.prepare_for_shutdown()
@@ -26490,6 +26783,7 @@ class MainWindow(QMainWindow):
                 pass
         # Stop any pending timers
         self.autosave_timer.stop()
+        self.editor_recovery_timer.stop()
         self.git_auto_backup_timer.stop()
         self._search_sync.stop()
         self._link_update_poll_timer.stop()

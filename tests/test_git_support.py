@@ -149,6 +149,24 @@ def test_save_changes_reports_clean_repository_without_empty_commit(tmp_path) ->
     assert git_support.save_changes(root, "Nothing") is False
 
 
+def test_commit_paths_commits_only_selected_files(tmp_path) -> None:
+    root = _repository(tmp_path)
+    first = root / "First.md"
+    second = root / "Second.md"
+    first.write_text("initial first\n", encoding="utf-8")
+    second.write_text("initial second\n", encoding="utf-8")
+    assert git_support.save_changes(root, "Initial") is True
+    first.write_text("changed first\n", encoding="utf-8")
+    second.write_text("changed second\n", encoding="utf-8")
+
+    assert git_support.commit_paths(root, "Update first", ["First.md"]) is True
+
+    committed_paths = _git(root, "show", "--format=", "--name-only", "HEAD").stdout.splitlines()
+    assert committed_paths == ["First.md"]
+    remaining = git_support.status(root)
+    assert [entry.path for entry in remaining] == ["Second.md"]
+
+
 def test_automatic_backup_is_marked_and_hidden_from_history_by_default(tmp_path) -> None:
     root = _repository(tmp_path)
     page = root / "Page.md"

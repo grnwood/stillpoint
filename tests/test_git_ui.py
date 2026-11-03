@@ -8,7 +8,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QTableWidget
 
 from sp.app import config, git_support
-from sp.app.ui.git_widgets import GitDiffEditor, GitPathLabel, VaultGitPanel
+from sp.app.ui.git_widgets import CommitBeforePushDialog, GitDiffEditor, GitPathLabel, VaultGitPanel
 from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
 
 
@@ -202,6 +202,121 @@ def test_git_panel_status_codes_are_fixed_three_letter_labels() -> None:
     assert VaultGitPanel._status_info("?")[:2] == ("NEW", "New")
     assert VaultGitPanel._status_info("U")[:2] == ("CNF", "Conflict")
     assert all(len(VaultGitPanel._status_info(code)[0]) == 3 for code in "MADRCTU?")
+
+
+def test_git_panel_disables_commit_and_push_when_nothing_is_actionable(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    state = {"ahead": 0}
+    entries: list[git_support.GitStatusEntry] = []
+    monkeypatch.setattr(
+        git_support,
+        "repository_state",
+        lambda _root: git_support.GitRepositoryState(
+            True,
+            True,
+            branch="main",
+            ahead=state["ahead"],
+            has_upstream=True,
+        ),
+    )
+    monkeypatch.setattr(git_support, "status", lambda _root: list(entries))
+    panel = VaultGitPanel(tmp_path)
+    qtbot.addWidget(panel)
+
+    assert not panel.save_button.isEnabled()
+    assert not panel.publish_button.isEnabled()
+    assert panel.save_button.toolTip() == "No changes to commit"
+    assert panel.publish_button.toolTip() == "No commits to push"
+
+    entries.append(git_support.GitStatusEntry("Page.md", " ", "M"))
+    panel.refresh()
+    assert panel.save_button.isEnabled()
+    assert panel.publish_button.isEnabled()
+    assert "Commit and push 1 unstaged file" in panel.publish_button.toolTip()
+
+    entries[:] = [
+        git_support.GitStatusEntry(f"Page-{index}.md", " ", "M")
+        for index in range(11)
+    ]
+    panel.refresh()
+    assert panel.save_button.isEnabled()
+    assert not panel.publish_button.isEnabled()
+
+    entries.clear()
+    state["ahead"] = 1
+    panel.refresh()
+    assert not panel.save_button.isEnabled()
+    assert panel.publish_button.isEnabled()
+
+
+def test_commit_before_push_dialog_requires_message_only_when_staging(qtbot) -> None:
+    dialog = CommitBeforePushDialog(["one.md", "two.md"])
+    qtbot.addWidget(dialog)
+    ok_button = dialog.buttons.button(dialog.buttons.StandardButton.Ok)
+
+    assert dialog.should_stage()
+    assert not ok_button.isEnabled()
+    dialog.message_edit.setText("Update notes")
+    assert ok_button.isEnabled()
+    assert dialog.commit_message() == "Update notes"
+
+    dialog.stage_checkbox.setChecked(False)
+    assert not dialog.message_edit.isEnabled()
+    assert ok_button.isEnabled()
+    assert ok_button.text() == "Push Existing Commits"
+
+
+def test_stillpoint_push_can_stage_selected_small_change_set(
+    main_window, monkeypatch, tmp_path
+) -> None:
+    import sp.app.ui.main_window as module
+
+    entries = [
+        git_support.GitStatusEntry("one.md", " ", "M"),
+        git_support.GitStatusEntry("two.md", "?", "?"),
+    ]
+    calls: list[object] = []
+
+    class _Dialog:
+        def __init__(self, paths, _parent):
+            calls.append(("dialog", paths))
+
+        def exec(self):
+            return QDialog.Accepted
+
+        @staticmethod
+        def should_stage():
+            return True
+
+        @staticmethod
+        def commit_message():
+            return "Update notes"
+
+    main_window.vault_root = str(tmp_path)
+    monkeypatch.setattr(main_window, "_is_git_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window, "_flush_editor_before_git", lambda: True)
+    monkeypatch.setattr(module, "CommitBeforePushDialog", _Dialog)
+    monkeypatch.setattr(git_support, "status", lambda _root: entries)
+    monkeypatch.setattr(
+        git_support,
+        "commit_paths",
+        lambda root, message, paths: calls.append(("commit", root, message, paths)) or True,
+    )
+    monkeypatch.setattr(
+        git_support,
+        "push",
+        lambda root, include_versions: calls.append(("push", root, include_versions)),
+    )
+    monkeypatch.setattr(main_window, "_refresh_git_mode_ui", lambda: None)
+
+    main_window._git_push()
+
+    assert calls == [
+        ("dialog", ["one.md", "two.md"]),
+        ("commit", str(tmp_path), "Update notes", ["one.md", "two.md"]),
+        ("push", str(tmp_path), True),
+    ]
 
 
 def test_git_path_label_elides_directories_and_restores_full_path(qtbot) -> None:

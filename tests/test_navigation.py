@@ -2,6 +2,9 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+import hashlib
+import json
 import pytest
 from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QMessageBox, QSizePolicy, QToolBar
 from PySide6.QtCore import Qt, QTimer, QEvent, QModelIndex
@@ -338,6 +341,124 @@ class TestHistoryNavigation:
         main_window._open_file("/PageB/PageB.md")
         assert main_window.current_path == "/PageA/PageA.md"
         assert "action was cancelled" in main_window.statusBar().currentMessage()
+
+    def test_page_switch_surfaces_cloud_write_failure_reason(self, main_window, monkeypatch):
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Unsaved change")
+        QApplication.processEvents()
+        original_post = main_window.http.post
+
+        def post(path, *args, **kwargs):
+            if path == "/api/file/write":
+                return httpx.Response(
+                    500,
+                    json={"detail": {"message": "Cloud provider denied the write"}},
+                    request=httpx.Request("POST", "http://stillpoint.test/api/file/write"),
+                )
+            return original_post(path, *args, **kwargs)
+
+        monkeypatch.setattr(main_window.http, "post", post)
+
+        main_window._open_file("/PageB/PageB.md")
+
+        assert main_window.current_path == "/PageA/PageA.md"
+        assert "Cloud provider denied the write" in main_window.statusBar().currentMessage()
+        assert main_window._save_status_label.text() == "Save failed"
+
+    def test_manual_save_reports_editor_path_mismatch(self, main_window):
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Unsaved change")
+        main_window.editor._current_path = "/PageB/PageB.md"
+
+        main_window._save_current_file(auto=False, reason="manual save")
+
+        assert "editor page does not match the active page" in main_window.statusBar().currentMessage()
+        assert main_window._save_status_label.text() == "Save failed"
+
+    def test_manual_save_reports_read_only_vault(self, main_window, monkeypatch):
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Unsaved change")
+        main_window._read_only = True
+        alerts: list[str] = []
+        monkeypatch.setattr(main_window, "_alert", alerts.append)
+
+        main_window._save_current_file(auto=False, reason="manual save")
+
+        assert alerts == ["Vault is read-only because another StillPoint window holds the lock.\nCannot save changes."]
+        assert "read-only" in main_window.statusBar().currentMessage()
+        assert main_window._save_status_label.text() == "Save failed"
+
+    def test_dirty_buffer_checkpoint_is_written_and_cleared_after_save(self, main_window):
+        main_window._init_editor_recovery_for_vault()
+        main_window._open_file("/PageA/PageA.md")
+        QApplication.processEvents()
+        main_window.editor.moveCursor(QTextCursor.End)
+        main_window.editor.insertPlainText("Recovered later")
+
+        assert main_window._checkpoint_current_recovery_draft("test failure") is True
+        recovery_path = main_window._editor_recovery_path
+        assert recovery_path is not None and recovery_path.is_file()
+        payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert "Recovered later" in payload["drafts"]["/PageA/PageA.md"]["content"]
+
+        original_post = main_window.http.post
+
+        def post(path, json=None, headers=None):
+            if path == "/api/file/write":
+                content = str((json or {}).get("content") or "")
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "rev": 2,
+                        "mtime_ns": 2,
+                        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    },
+                    request=httpx.Request("POST", "http://stillpoint.test/api/file/write"),
+                )
+            return original_post(path, json=json)
+
+        main_window.http.post = post
+        main_window._save_current_file(auto=False, reason="manual save")
+
+        payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert "/PageA/PageA.md" not in payload["drafts"]
+
+    def test_reopening_page_offers_and_restores_recovery_draft(self, main_window, monkeypatch):
+        main_window._init_editor_recovery_for_vault()
+        page_path = "/PageB/PageB.md"
+        draft_text = "# PageB\n\nRecovered unsaved text\n"
+        main_window._editor_recovery["drafts"] = {
+            page_path: {
+                "content": draft_text,
+                "base_content_sha256": "old",
+                "saved_at": "2026-11-02T20:00:00+00:00",
+                "cursor_position": len(draft_text),
+                "reason": "save failure",
+            }
+        }
+        assert main_window._persist_editor_recovery() is True
+        clicked: dict[int, object] = {}
+
+        def exec_recover(box):
+            clicked[id(box)] = next(button for button in box.buttons() if button.text() == "Recover Draft")
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", exec_recover)
+        monkeypatch.setattr(QMessageBox, "clickedButton", lambda box: clicked.get(id(box)))
+
+        main_window._open_file(page_path)
+
+        assert main_window.editor.to_markdown() == draft_text
+        assert main_window._is_editor_dirty()
+        assert page_path in main_window._editor_recovery["drafts"]
+        assert "Recovered unsaved edits" in main_window.statusBar().currentMessage()
 
     def test_edit_page_source_saves_before_opening_external_editor(self, main_window, monkeypatch):
         events = []

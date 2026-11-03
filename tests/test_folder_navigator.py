@@ -3791,6 +3791,8 @@ def test_git_repository_header_controls_run_expected_commands(
     assert window.rail.indexOf(window.git_page) == 2
     assert window.rail.tabText(2) == "Git"
 
+    window.git_commit_button.setEnabled(True)
+    window.git_push_button.setEnabled(True)
     window.git_pull_button.click()
     window.git_commit_button.click()
     window.git_push_button.click()
@@ -3799,6 +3801,106 @@ def test_git_repository_header_controls_run_expected_commands(
         (["pull"], "Git Pull"),
         (["commit", "-m", "Ship the reader"], "Git Commit"),
         (["push"], "Git Push"),
+    ]
+    window.close()
+
+
+def test_folder_navigator_git_buttons_follow_changes_and_unpushed_commits(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.window as module
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    output = {"value": b"## main...origin/main\0"}
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: module.subprocess.CompletedProcess(
+            args[0], 0, stdout=output["value"], stderr=b""
+        ),
+    )
+    window = Window(tmp_path)
+
+    window.refresh_git_status()
+    assert not window.git_commit_button.isEnabled()
+    assert not window.git_push_button.isEnabled()
+    assert window.git_commit_button.toolTip() == "No changes to commit"
+    assert window.git_push_button.toolTip() == "No commits to push"
+
+    output["value"] = b"## main...origin/main\0 M tracked.txt\0"
+    window.refresh_git_status()
+    assert window.git_commit_button.isEnabled()
+    assert window.git_push_button.isEnabled()
+
+    output["value"] = b"## main...origin/main\0" + b"".join(
+        f" M file-{index}.txt\0".encode() for index in range(11)
+    )
+    window.refresh_git_status()
+    assert window.git_commit_button.isEnabled()
+    assert not window.git_push_button.isEnabled()
+
+    output["value"] = b"## main...origin/main [ahead 1]\0"
+    window.refresh_git_status()
+    assert not window.git_commit_button.isEnabled()
+    assert window.git_push_button.isEnabled()
+    window.close()
+
+
+def test_folder_navigator_push_stages_only_listed_small_change_set(
+        tmp_path, monkeypatch, app):
+    import sp.app.folder_navigator.window as module
+    from PySide6.QtWidgets import QDialog
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".git").mkdir()
+    window = Window(tmp_path)
+    window._git_status_entries = [
+        {"path": "one.md", "original": None, "index": " ", "worktree": "M"},
+        {"path": "two.md", "original": None, "index": "?", "worktree": "?"},
+    ]
+    calls: list[object] = []
+
+    class _Dialog:
+        def __init__(self, paths, _parent):
+            calls.append(("dialog", paths))
+
+        @staticmethod
+        def exec():
+            return QDialog.Accepted
+
+        @staticmethod
+        def should_stage():
+            return True
+
+        @staticmethod
+        def commit_message():
+            return "Update notes"
+
+    monkeypatch.setattr(module, "CommitBeforePushDialog", _Dialog)
+    monkeypatch.setattr(
+        window,
+        "_run_git_quiet_command",
+        lambda arguments, message: calls.append(("quiet", arguments, message)) or True,
+    )
+    monkeypatch.setattr(
+        window,
+        "_run_git_command",
+        lambda arguments, title: calls.append(("run", arguments, title)),
+    )
+
+    window._git_push()
+
+    assert calls == [
+        ("dialog", ["one.md", "two.md"]),
+        ("quiet", ["add", "--", "one.md", "two.md"], "Staged 2 files"),
+        (
+            "quiet",
+            ["commit", "--only", "-m", "Update notes", "--", "one.md", "two.md"],
+            "Changes committed",
+        ),
+        ("run", ["push"], "Git Push"),
     ]
     window.close()
 

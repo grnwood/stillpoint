@@ -66,7 +66,7 @@ from sp.app.ui.keyboard_shortcuts import (
     is_vi_navigation_chord,
     vi_navigation_sequences,
 )
-from sp.app.ui.git_widgets import git_change_row, git_section_row
+from sp.app.ui.git_widgets import CommitBeforePushDialog, git_change_row, git_section_row
 from sp.app.ui.canvas_navigation import (
     install_primary_wheel_zoom,
     native_zoom_steps,
@@ -4406,6 +4406,8 @@ class Window(QMainWindow):
         self.git_panel_header = None
         self.git_status_list = None
         self.git_status_label = None
+        self._git_status_entries: list[dict] = []
+        self._git_ahead = 0
         if self.git_repository:
             self._ensure_folder_metadata_ignored()
         self.terminal_button = self._make_header_button(
@@ -4463,6 +4465,8 @@ class Window(QMainWindow):
             self.git_push_button = self._make_header_button(
                 "git-push.svg", "Git push", self._git_push, self.git_panel_header
             )
+            self.git_commit_button.setEnabled(False)
+            self.git_push_button.setEnabled(False)
             self.git_refresh_button = QToolButton(self.git_panel_header)
             self.git_refresh_button.setAutoRaise(True)
             refresh_icon_size = 20 if sys.platform == "win32" else 18
@@ -8538,6 +8542,26 @@ class Window(QMainWindow):
         self._run_git_command(["pull"], "Git Pull")
 
     def _git_push(self) -> None:
+        entries = list(self._git_status_entries)
+        unstaged = self._git_unstaged_paths(entries)
+        if (
+            0 < len(unstaged) <= 10
+            and not any(self._git_entry_conflicted(entry) for entry in entries)
+        ):
+            dialog = CommitBeforePushDialog(unstaged, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            if dialog.should_stage():
+                if not self._run_git_quiet_command(
+                    ["add", "--", *unstaged],
+                    f"Staged {len(unstaged)} file{'s' if len(unstaged) != 1 else ''}",
+                ):
+                    return
+                if not self._run_git_quiet_command(
+                    ["commit", "--only", "-m", dialog.commit_message(), "--", *unstaged],
+                    "Changes committed",
+                ):
+                    return
         self._run_git_command(["push"], "Git Push")
 
     def _git_commit(self) -> None:
@@ -8582,6 +8606,8 @@ class Window(QMainWindow):
         while index < len(records):
             record = records[index]
             index += 1
+            if record.startswith("## "):
+                continue
             if not record or len(record) < 4 or record[2] != " ":
                 continue
             code = record[:2]
@@ -8595,6 +8621,41 @@ class Window(QMainWindow):
                 {"path": path, "original": original, "index": code[0], "worktree": code[1]}
             )
         return parsed
+
+    @staticmethod
+    def _git_ahead_count(output: bytes | str) -> int:
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        header = next(
+            (record for record in output.split("\0") if record.startswith("## ")),
+            "",
+        )
+        match = re.search(r"(?:\[|, )ahead (\d+)(?:[,\]])", header)
+        return int(match.group(1)) if match else 0
+
+    def _update_git_action_state(self, *, entries: list[dict] | None, ahead: int) -> None:
+        current_entries = entries or []
+        unstaged = self._git_unstaged_paths(current_entries)
+        can_offer_commit = (
+            0 < len(unstaged) <= 10
+            and not any(self._git_entry_conflicted(entry) for entry in current_entries)
+        )
+        if self.git_commit_button is not None:
+            self.git_commit_button.setEnabled(bool(current_entries))
+            self.git_commit_button.setToolTip(
+                "Git commit" if current_entries else "No changes to commit"
+            )
+        if self.git_push_button is not None:
+            self.git_push_button.setEnabled(ahead > 0 or can_offer_commit)
+            self.git_push_button.setToolTip(
+                "Git push"
+                if ahead > 0
+                else (
+                    f"Commit and push {len(unstaged)} unstaged file{'s' if len(unstaged) != 1 else ''}"
+                    if can_offer_commit
+                    else "No commits to push"
+                )
+            )
 
     @staticmethod
     def _git_status_name(code: str) -> str:
@@ -8614,6 +8675,15 @@ class Window(QMainWindow):
         code = entry["index"] + entry["worktree"]
         return "U" in code or code in {"AA", "DD"}
 
+    @staticmethod
+    def _git_unstaged_paths(entries: list[dict]) -> list[str]:
+        return list(dict.fromkeys(
+            str(entry.get("path") or "")
+            for entry in entries
+            if entry.get("path")
+            and (entry.get("index") == "?" or entry.get("worktree") not in {" ", "?"})
+        ))
+
     def _rail_changed(self, index: int) -> None:
         if self.git_page is not None and self.rail.widget(index) is self.git_page:
             self.refresh_git_status()
@@ -8624,7 +8694,7 @@ class Window(QMainWindow):
         try:
             result = subprocess.run(
                 _git_command(
-                    "-C", str(self.root), "status", "--porcelain=v1", "-z",
+                    "-C", str(self.root), "status", "--porcelain=v1", "-z", "--branch",
                     "--untracked-files=all",
                 ),
                 stdout=subprocess.PIPE,
@@ -8634,16 +8704,28 @@ class Window(QMainWindow):
                 **_BACKGROUND_SUBPROCESS_OPTIONS,
             )
         except (OSError, subprocess.SubprocessError) as exc:
+            self._git_status_entries = []
+            self._git_ahead = 0
+            self._update_git_action_state(entries=None, ahead=0)
             self.git_status_list.clear()
             self.git_status_label.setText(f"Git status unavailable: {exc}")
             return
         if result.returncode:
+            self._git_status_entries = []
+            self._git_ahead = 0
+            self._update_git_action_state(entries=None, ahead=0)
             detail = result.stderr.decode("utf-8", errors="replace").strip()
             self.git_status_list.clear()
             self.git_status_label.setText(detail or "Git status unavailable")
             return
 
         entries = self._parse_git_status(result.stdout)
+        self._git_status_entries = entries
+        self._git_ahead = self._git_ahead_count(result.stdout)
+        self._update_git_action_state(
+            entries=entries,
+            ahead=self._git_ahead,
+        )
         conflicts = [entry for entry in entries if self._git_entry_conflicted(entry)]
         staged = [
             entry for entry in entries

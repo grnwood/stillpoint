@@ -39,6 +39,15 @@ class GitStatusEntry:
         return "U" in code or code in {"AA", "DD"}
 
 
+def unstaged_paths(entries: Iterable[GitStatusEntry]) -> list[str]:
+    """Return unique files with working-tree or untracked changes."""
+    return list(dict.fromkeys(
+        entry.path
+        for entry in entries
+        if entry.index == "?" or entry.worktree not in {" ", "?"}
+    ))
+
+
 @dataclass(frozen=True)
 class GitHistoryEntry:
     commit: str
@@ -331,6 +340,40 @@ def save_changes(root: str | Path, message: str) -> bool:
     if staged.returncode != 1:
         raise GitError("Could not inspect the changes waiting to be saved.")
     _run(vault_root, ["commit", "-m", cleaned], timeout=120)
+    return True
+
+
+def commit_paths(root: str | Path, message: str, paths: Iterable[str]) -> bool:
+    """Stage and commit only a small, explicitly selected set of changed paths."""
+    vault_root = require_exact_repository(root)
+    cleaned_message = str(message or "").strip()
+    if not cleaned_message:
+        raise GitError("Enter a name for these changes.")
+    selected = list(dict.fromkeys(str(path or "").strip() for path in paths if str(path or "").strip()))
+    if not selected or len(selected) > 10:
+        raise GitError("Select between 1 and 10 files to stage and commit.")
+    entries = {entry.path: entry for entry in status(vault_root)}
+    for path in selected:
+        candidate = Path(path)
+        entry = entries.get(path)
+        if candidate.is_absolute() or ".." in candidate.parts or entry is None:
+            raise GitError(f"The changed path is no longer available: {path}")
+        if entry.conflicted:
+            raise GitError(f"Resolve the conflict before committing: {path}")
+        if entry.index != "?" and entry.worktree in {" ", "?"}:
+            raise GitError(f"The path no longer has unstaged changes: {path}")
+    ensure_metadata_ignored(vault_root)
+    _run(vault_root, ["add", "--", *selected])
+    staged = _run(vault_root, ["diff", "--cached", "--quiet", "--", *selected], check=False)
+    if staged.returncode == 0:
+        return False
+    if staged.returncode != 1:
+        raise GitError("Could not inspect the selected files waiting to be saved.")
+    _run(
+        vault_root,
+        ["commit", "--only", "-m", cleaned_message, "--", *selected],
+        timeout=120,
+    )
     return True
 
 

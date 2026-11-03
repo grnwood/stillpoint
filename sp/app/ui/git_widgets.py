@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -37,6 +39,58 @@ from .utility_header import UtilityPanelHeader
 
 
 _WINDOWS = sys.platform == "win32"
+
+
+class CommitBeforePushDialog(QDialog):
+    """Offer a small, explicit stage-and-commit step before pushing."""
+
+    def __init__(self, unstaged_paths: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Commit Before Push")
+        layout = QVBoxLayout(self)
+        count = len(unstaged_paths)
+        explanation = QLabel(
+            f"{count} unstaged file{'s' if count != 1 else ''} will not be included in a push "
+            "unless they are staged and committed first."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        files = QLabel("\n".join(f"• {path}" for path in unstaged_paths))
+        files.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        files.setWordWrap(True)
+        files.setStyleSheet("padding: 6px; color: palette(mid); background: palette(base);")
+        layout.addWidget(files)
+        self.stage_checkbox = QCheckBox(
+            f"Automatically stage these {count} file{'s' if count != 1 else ''} and commit before pushing"
+        )
+        self.stage_checkbox.setChecked(True)
+        layout.addWidget(self.stage_checkbox)
+        self.message_edit = QLineEdit()
+        self.message_edit.setPlaceholderText("Commit message")
+        layout.addWidget(self.message_edit)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        push_button = self.buttons.button(QDialogButtonBox.Ok)
+        push_button.setText("Commit and Push")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.stage_checkbox.toggled.connect(self._sync_state)
+        self.message_edit.textChanged.connect(self._sync_state)
+        self._sync_state()
+        self.message_edit.setFocus()
+
+    def _sync_state(self) -> None:
+        staging = self.stage_checkbox.isChecked()
+        self.message_edit.setEnabled(staging)
+        push_button = self.buttons.button(QDialogButtonBox.Ok)
+        push_button.setText("Commit and Push" if staging else "Push Existing Commits")
+        push_button.setEnabled(not staging or bool(self.message_edit.text().strip()))
+
+    def should_stage(self) -> bool:
+        return self.stage_checkbox.isChecked()
+
+    def commit_message(self) -> str:
+        return self.message_edit.text().strip()
 
 
 def git_status_info(code: str) -> tuple[str, str, str]:
@@ -394,10 +448,12 @@ class VaultGitPanel(QWidget):
         self.save_button = QToolButton(self.header)
         self.save_button.setText("●")
         self.save_button.setToolTip("Save changes (Git commit)")
+        self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.saveChangesRequested)
         self.publish_button = QToolButton(self.header)
         self.publish_button.setText("↑")
         self.publish_button.setToolTip("Publish changes (Git push)")
+        self.publish_button.setEnabled(False)
         self.publish_button.clicked.connect(self.publishRequested)
         for button in (self.refresh_button, self.get_button, self.save_button, self.publish_button):
             button.setAutoRaise(True)
@@ -446,9 +502,11 @@ class VaultGitPanel(QWidget):
             state = git_support.repository_state(self.vault_root)
             entries = git_support.status(self.vault_root)
         except git_support.GitError as exc:
+            self._update_action_state(None, None)
             self.summary.setText(f"Repository needs attention: {exc}")
             self.statusChanged.emit(None, str(exc))
             return
+        self._update_action_state(state, entries)
         self.statusChanged.emit(state, entries)
         details = [state.branch or "No commits yet"]
         if state.ahead:
@@ -491,6 +549,33 @@ class VaultGitPanel(QWidget):
                     self.changes.setCurrentItem(
                         item, QItemSelectionModel.SelectionFlag.NoUpdate
                     )
+
+    def _update_action_state(
+        self,
+        state: git_support.GitRepositoryState | None,
+        entries: list[git_support.GitStatusEntry] | None,
+    ) -> None:
+        has_changes = bool(entries) if entries is not None else False
+        unstaged = git_support.unstaged_paths(entries or [])
+        can_offer_commit = (
+            0 < len(unstaged) <= 10
+            and not any(entry.conflicted for entry in (entries or []))
+        )
+        has_unpushed_commits = bool(state is not None and state.ahead > 0)
+        self.save_button.setEnabled(has_changes)
+        self.publish_button.setEnabled(has_unpushed_commits or can_offer_commit)
+        self.save_button.setToolTip(
+            "Save changes (Git commit)" if has_changes else "No changes to commit"
+        )
+        self.publish_button.setToolTip(
+            "Publish changes (Git push)"
+            if has_unpushed_commits
+            else (
+                f"Commit and push {len(unstaged)} unstaged file{'s' if len(unstaged) != 1 else ''}"
+                if can_offer_commit
+                else "No commits to push"
+            )
+        )
 
 class GitDiffEditor(QWidget):
     """A visual, side-by-side working-copy comparison for the editor pane."""
