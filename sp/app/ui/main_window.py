@@ -15971,9 +15971,28 @@ class MainWindow(QMainWindow):
         if not self._remote_mode:
             if not self.vault_root:
                 return False
+            # Page references can arrive with different casing than the actual
+            # vault entries (for example ``/journal/...`` for ``/Journal/...``).
+            # Reading directly from that logical path fails on case-sensitive
+            # filesystems.  Keep the canonical path for both the read and the
+            # later delete so the attachment move is internally consistent.
+            source_path = self._resolve_case_insensitive_rel_path(source_path)
             try:
                 src_abs = (Path(self.vault_root) / source_path.lstrip("/")).resolve()
                 data = src_abs.read_bytes()
+            except FileNotFoundError:
+                # A stale Markdown image/file reference should not prevent the
+                # surrounding text from being moved.  Preserve the reference in
+                # the moved Markdown and make the skipped attachment visible to
+                # the user without interrupting the workflow with a modal error.
+                try:
+                    self.statusBar().showMessage(
+                        f"Attachment not found; moved text without copying {filename}",
+                        7000,
+                    )
+                except Exception:
+                    pass
+                return True
             except Exception as exc:
                 self._alert(f"Failed to read attachment {source_path}: {exc}")
                 return False
