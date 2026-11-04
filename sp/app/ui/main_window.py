@@ -19898,6 +19898,7 @@ class MainWindow(QMainWindow):
                 self._get_editor_text_for_path(self.current_path),
             ) if self.current_path else p.clear_content()
         )
+        panel.set_window_mode_control(visible=True, windowed=False)
         if self.current_path:
             panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
         else:
@@ -19908,7 +19909,10 @@ class MainWindow(QMainWindow):
         window.setCentralWidget(panel)
         window.resize(820, 720)
         self._apply_geometry_persistence(window, "map_panel_window")
-        window.show()
+        panel.windowModeToggleRequested.connect(
+            lambda w=window, p=panel: self._toggle_map_window_mode(w, p)
+        )
+        window.showFullScreen()
         self._register_detached_panel(window)
         self._detached_map_panels.append(panel)
         window.destroyed.connect(lambda: self._detached_map_panels.remove(panel) if panel in self._detached_map_panels else None)
@@ -19920,6 +19924,16 @@ class MainWindow(QMainWindow):
             ) if self.current_path else p.clear_content(),
         )
         QTimer.singleShot(0, lambda p=panel: p.preview_label.setFocus(Qt.OtherFocusReason))
+
+    @staticmethod
+    def _toggle_map_window_mode(window: QMainWindow, panel) -> None:
+        """Toggle a detached mind-map between movable and full-screen modes."""
+        if window.isFullScreen():
+            window.showNormal()
+            panel.set_window_mode_control(visible=True, windowed=True)
+        else:
+            window.showFullScreen()
+            panel.set_window_mode_control(visible=True, windowed=False)
 
     def _open_ai_chat_window(self, *, detached_only: bool = False) -> None:
         if not config.load_enable_ai_chats():
@@ -20016,6 +20030,8 @@ class MainWindow(QMainWindow):
 
             def _save(self) -> None:
                 try:
+                    if self._target.isFullScreen():
+                        return
                     geom = (
                         self._target.saveGeometry().toBase64().data().decode("ascii")
                         if hasattr(self._target, "saveGeometry")

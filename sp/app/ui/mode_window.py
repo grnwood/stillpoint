@@ -1146,7 +1146,7 @@ class ModeWindow(QMainWindow):
         self._show_filterable_heading_picker(global_point, prefer_above)
 
     def _show_filterable_heading_picker(self, global_pos, prefer_above: bool = False) -> None:
-        """Show a filterable heading picker near the cursor (vi 't')."""
+        """Show the filterable heading picker."""
         headings = self._heading_provider() or []
         if not headings:
             return
@@ -1327,19 +1327,29 @@ class ModeWindow(QMainWindow):
         list_widget.installEventFilter(filt)
         populate("")
 
-        # Position near cursor, above or below based on preference and space
+        # Audience mode is presentation-oriented, so keep the picker in a
+        # predictable place instead of making it follow the editing cursor.
         popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
-        screen = popup_available_geometry(anchor=global_pos, parent=self.editor)
         size = popup.size()
-        x = max(screen.left(), min(global_pos.x(), screen.right() - size.width() + 1))
-        if prefer_above:
-            y = global_pos.y() - size.height() - 8
-            if y < screen.top():
-                y = global_pos.y() + 12
+        if self.mode == "audience":
+            viewport = self.editor.viewport()
+            viewport_rect = viewport.rect()
+            viewport_top_left = viewport.mapToGlobal(viewport_rect.topLeft())
+            viewport_center = viewport.mapToGlobal(viewport_rect.center())
+            screen = popup_available_geometry(anchor=viewport_center, parent=self.editor)
+            x = viewport_center.x() - (size.width() // 2)
+            y = viewport_top_left.y() + max(24, min(72, viewport_rect.height() // 12))
         else:
-            y = global_pos.y() + 12
-            if y + size.height() > screen.bottom() + 1:
+            screen = popup_available_geometry(anchor=global_pos, parent=self.editor)
+            x = max(screen.left(), min(global_pos.x(), screen.right() - size.width() + 1))
+            if prefer_above:
                 y = global_pos.y() - size.height() - 8
+                if y < screen.top():
+                    y = global_pos.y() + 12
+            else:
+                y = global_pos.y() + 12
+                if y + size.height() > screen.bottom() + 1:
+                    y = global_pos.y() - size.height() - 8
         popup.move(clamp_popup_top_left(QPoint(x, y), size, screen))
         popup.show()
         popup.raise_()

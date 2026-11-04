@@ -672,3 +672,40 @@ def test_transient_tooltip_click_pins_and_close_button_dismisses(qapp: QApplicat
 
     assert panel._content_tooltip.isVisible() is False
     assert panel._tooltip_pinned is False
+
+
+def test_detached_map_window_control_toggles_fullscreen_state(qtbot) -> None:
+    from sp.app.ui.main_window import MainWindow
+
+    panel = MapPanel()
+    qtbot.addWidget(panel)
+    requested = []
+    panel.windowModeToggleRequested.connect(lambda: requested.append(True))
+
+    panel.set_window_mode_control(visible=True, windowed=False)
+    assert panel.window_mode_btn.isHidden() is False
+    assert panel.window_mode_btn.toolTip() == "Switch to windowed mode"
+    panel.window_mode_btn.click()
+    assert requested == [True]
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.full_screen = True
+
+        def isFullScreen(self) -> bool:
+            return self.full_screen
+
+        def showNormal(self) -> None:
+            self.full_screen = False
+
+        def showFullScreen(self) -> None:
+            self.full_screen = True
+
+    window = FakeWindow()
+    MainWindow._toggle_map_window_mode(window, panel)
+    assert window.full_screen is False
+    assert panel.window_mode_btn.toolTip() == "Switch to full screen"
+
+    MainWindow._toggle_map_window_mode(window, panel)
+    assert window.full_screen is True
+    assert panel.window_mode_btn.toolTip() == "Switch to windowed mode"

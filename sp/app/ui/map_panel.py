@@ -503,6 +503,7 @@ class MapPanel(QWidget):
     headingReorderRequested = Signal(str, str, str, int)
     statusMessageRequested = Signal(str, int)
     focusSyncRequested = Signal()
+    windowModeToggleRequested = Signal()
 
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
     _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -703,6 +704,15 @@ class MapPanel(QWidget):
         self.zoom_in_btn.setToolTip("Zoom in")
         self.zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1, None))
         toolbar.addWidget(self.zoom_in_btn)
+
+        self.window_mode_btn = QToolButton()
+        self.window_mode_btn.setAutoRaise(True)
+        self.window_mode_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.window_mode_btn.setIconSize(QSize(18, 18))
+        self.window_mode_btn.setToolTip("Switch to windowed mode")
+        self.window_mode_btn.clicked.connect(self.windowModeToggleRequested.emit)
+        self.window_mode_btn.hide()
+        toolbar.addWidget(self.window_mode_btn)
         root.addLayout(toolbar)
 
         self.preview_label = ZoomablePreviewLabel()
@@ -825,6 +835,13 @@ class MapPanel(QWidget):
         self.accept_btn.setIcon(self._load_svg_icon("accept.svg", QSize(18, 18), tint=accept))
         self.cancel_btn.setIcon(self._load_svg_icon("cancel.svg", QSize(18, 18), tint=cancel))
         self.note_toggle_btn.setIcon(self._load_svg_icon("show-note.svg", QSize(18, 18), tint=mono))
+        self.window_mode_btn.setIcon(
+            self._load_svg_icon(
+                "maximize.svg" if self.window_mode_btn.property("windowed") else "minimize.svg",
+                QSize(18, 18),
+                tint=mono,
+            )
+        )
         button_color = self._toolbar_icon_color().name()
         self.zoom_out_btn.setStyleSheet(f"color: {button_color};")
         self.zoom_in_btn.setStyleSheet(f"color: {button_color};")
@@ -842,6 +859,21 @@ class MapPanel(QWidget):
             "}"
         )
         self._update_detached_mode_controls()
+
+    def set_window_mode_control(self, *, visible: bool, windowed: bool = False) -> None:
+        """Show and update the detached mind-map window mode control."""
+        self.window_mode_btn.setVisible(visible)
+        self.window_mode_btn.setProperty("windowed", windowed)
+        self.window_mode_btn.setToolTip(
+            "Switch to full screen" if windowed else "Switch to windowed mode"
+        )
+        self.window_mode_btn.setIcon(
+            self._load_svg_icon(
+                "maximize.svg" if windowed else "minimize.svg",
+                QSize(18, 18),
+                tint=self._toolbar_icon_color(),
+            )
+        )
 
     def _load_svg_icon(self, name: str, size: QSize, *, tint: Optional[QColor] = None) -> QIcon:
         path = self._asset_path(name)
