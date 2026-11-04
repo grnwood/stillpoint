@@ -12,8 +12,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from PySide6.QtCore import QByteArray, QRectF, Qt, QUrl, QThread, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
+from PySide6.QtCore import QByteArray, QRectF, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from sp.app.external_launch import open_path_in_system
 from sp.logging_flags import log_enabled
 from sp.server.adapters.files import PAGE_SUFFIX
 from sp.vault_boundary import NestedVaultError, validate_vault_root
@@ -1566,7 +1567,7 @@ class OpenVaultDialog(QDialog):
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("{}", encoding="utf-8")
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            open_path_in_system(path)
         except Exception:
             pass
 

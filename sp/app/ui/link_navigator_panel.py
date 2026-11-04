@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from sp.app.external_launch import open_path_in_system
 from sp.server.adapters.files import strip_page_suffix
 from .path_utils import path_to_colon
 from .canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
@@ -1171,7 +1172,7 @@ class LinkNavigatorPanel(QWidget):
             local_path = f"{vault_root}{attachment_path}"
         else:
             local_path = f"{vault_root}/{attachment_path}"
-        QDesktopServices.openUrl(QUrl.fromLocalFile(local_path))
+        open_path_in_system(local_path)
 
     def _open_graph_menu(self, pos) -> None:
         menu = QMenu(self)

@@ -4508,6 +4508,8 @@ def test_folder_terminal_uses_native_platform_launcher(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(module.sys, "platform", platform)
     monkeypatch.setenv("TERMINAL", "native-test-terminal --fresh")
+    clean_env = {"SP_TEST_CLEAN_ENV": "1"}
+    monkeypatch.setattr(module, "external_process_environment", lambda: clean_env)
     calls = []
     monkeypatch.setattr(
         module.subprocess,
@@ -4524,6 +4526,7 @@ def test_folder_terminal_uses_native_platform_launcher(
         assert command[-1] == str(tmp_path.resolve())
     else:
         assert options["cwd"] == str(tmp_path.resolve())
+    assert options["env"] is clean_env
     window.close()
 
 

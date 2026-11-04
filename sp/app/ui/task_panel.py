@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from markdown import markdown as render_markdown
 from sp.app import config
+from sp.app.external_launch import open_path_in_system
 from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
@@ -1122,7 +1123,7 @@ class TaskPanel(QWidget):
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
             with tmp:
                 tmp.write(html_doc.encode("utf-8"))
-            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+            open_path_in_system(tmp.name)
         except Exception:
             return
 

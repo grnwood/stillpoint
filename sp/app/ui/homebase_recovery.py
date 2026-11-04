@@ -5,14 +5,15 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
     QHeaderView, QLabel, QListWidget, QMessageBox, QPlainTextEdit, QPushButton,
     QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from sp.app.external_launch import open_path_in_system
 from .screen_positioning import fit_window_to_available_screen
 from .theme import chrome_colors
 
@@ -420,7 +421,7 @@ class HomebaseRecoveryDialog(QDialog):
     def _open_backup_folder(self) -> None:
         try:
             self.store.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.root)))
+            opened = open_path_in_system(self.store.root)
         except Exception as exc:
             QMessageBox.warning(self, "Homebase Local Recovery", f"Could not open backup folder: {exc}")
             return

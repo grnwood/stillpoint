@@ -49,6 +49,7 @@ from shiboken6 import Shiboken
 
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES
 from sp.app import config
+from sp.app.external_launch import open_path_in_system
 from sp.app import indexer
 from sp.logging_flags import log_enabled
 from .theme import apply_menu_theme, theme_color, theme_value
@@ -1914,7 +1915,7 @@ class CalendarPanel(QWidget):
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
             with tmp:
                 tmp.write(html_doc.encode("utf-8"))
-            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+            open_path_in_system(tmp.name)
         except Exception:
             return
 
@@ -3506,7 +3507,7 @@ class CalendarPanel(QWidget):
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
             with tmp:
                 tmp.write(html_doc.encode("utf-8"))
-            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp.name))
+            open_path_in_system(tmp.name)
         except Exception:
             return
 

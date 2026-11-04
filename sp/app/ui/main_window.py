@@ -121,6 +121,7 @@ from PySide6.QtWidgets import (
 
 from sp.app import config, eventloop_diag, indexer
 from sp.app import git_support
+from sp.app.external_launch import external_process_environment, open_path_in_system
 from sp import VERSION as SP_VERSION, GITHUB_OWNER, GITHUB_PROJECT, GITHUB_ISSUE_URL
 from sp.logging_flags import log_enabled
 from sp.vault_boundary import NestedVaultError, validate_vault_root
@@ -7725,15 +7726,17 @@ class MainWindow(QMainWindow):
             self._seed_agents_file_if_needed(folder)
             folder.mkdir(parents=True, exist_ok=True)
             system = platform.system()
+            launch_env = external_process_environment()
             if system == "Windows":
                 subprocess.Popen(
                     ["cmd.exe", "/K", "cd", "/D", str(folder)],
                     cwd=str(folder),
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    env=launch_env,
                 )
             elif system == "Darwin":
                 script = f'tell application "Terminal" to do script "cd {shlex.quote(str(folder))}"'
-                subprocess.Popen(["osascript", "-e", script])
+                subprocess.Popen(["osascript", "-e", script], env=launch_env)
             else:
                 terminals = [
                     ["gnome-terminal", "--working-directory", str(folder)],
@@ -7747,7 +7750,7 @@ class MainWindow(QMainWindow):
                 launched = False
                 for term_cmd in terminals:
                     try:
-                        subprocess.Popen(term_cmd)
+                        subprocess.Popen(term_cmd, env=launch_env)
                         launched = True
                         break
                     except FileNotFoundError:
@@ -7964,7 +7967,7 @@ class MainWindow(QMainWindow):
         try:
             folder = self._homebase_sync_engine.recovery.root
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            opened = self._open_in_file_manager(folder)
         except Exception as exc:
             QMessageBox.warning(self, "Homebase Local Recovery", f"Could not open backup folder: {exc}")
             return
@@ -13588,7 +13591,7 @@ class MainWindow(QMainWindow):
         reveal_action = menu.addAction("Reveal in File Manager")
         reveal_action.setEnabled(Path(folder_path).is_dir())
         reveal_action.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
+            lambda: self._open_in_file_manager(Path(folder_path))
         )
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
@@ -20976,7 +20979,7 @@ class MainWindow(QMainWindow):
         try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
-            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_path)))
+            ok = open_path_in_system(target_path)
             if not ok:
                 self.statusBar().showMessage(f"Failed to open file link: {cleaned}", 4000)
             return ok
@@ -21413,7 +21416,7 @@ class MainWindow(QMainWindow):
         try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
+            open_path_in_system(candidate)
             return True
         except Exception:
             return False
@@ -21473,7 +21476,7 @@ class MainWindow(QMainWindow):
         try:
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(cache_path)))
+            open_path_in_system(cache_path)
             return True
         except Exception:
             return False
@@ -22643,7 +22646,7 @@ class MainWindow(QMainWindow):
             return
         abs_path = str((Path(self.vault_root) / file_path.lstrip("/")).resolve())
         # Launch in default editor
-        QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
+        open_path_in_system(abs_path)
         # Block with modal until user confirms they're done
         dlg = QMessageBox(self)
         dlg.setWindowTitle("Edit Page Source")
@@ -23332,21 +23335,7 @@ class MainWindow(QMainWindow):
     def _open_in_file_manager(self, path: Path) -> bool:
         """Try to open a file or folder in the OS file manager."""
         try:
-            if not path.exists():
-                return False
-            url = QUrl.fromLocalFile(str(path))
-            if QDesktopServices.openUrl(url):
-                return True
-            # Fallback per-OS
-            if sys.platform.startswith("darwin"):
-                result = subprocess.run(["open", str(path)], check=False)
-                return result.returncode == 0
-            if sys.platform.startswith("win"):
-                result = subprocess.run(["explorer", str(path)], check=False)
-                return result.returncode == 0
-            # Assume Linux/Unix
-            result = subprocess.run(["xdg-open", str(path)], check=False)
-            return result.returncode == 0
+            return open_path_in_system(path)
         except Exception as exc:
             self._alert(f"Failed to open file manager: {exc}")
             return False

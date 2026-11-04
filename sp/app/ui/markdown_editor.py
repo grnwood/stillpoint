@@ -98,6 +98,7 @@ from .ai_actions_data import AI_ACTION_GROUPS
 from .jump_dialog import JumpToPageDialog
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.app import config
+from sp.app.external_launch import external_process_environment, open_path_in_system
 from sp.app import indexer
 from sp.app.ocr_utils import OCRImageResult, ocr_image_file
 from sp.logging_flags import log_enabled
@@ -2786,15 +2787,16 @@ class MarkdownEditor(QTextEdit):
                 terminal_dir = self._vault_root
             
             system = platform.system()
+            launch_env = external_process_environment()
             
             if system == "Windows":
                 # Open Windows Terminal or cmd.exe
                 subprocess.Popen(["cmd.exe", "/K", "cd", "/D", str(terminal_dir)], 
-                               creationflags=subprocess.CREATE_NEW_CONSOLE)
+                               creationflags=subprocess.CREATE_NEW_CONSOLE, env=launch_env)
             elif system == "Darwin":  # macOS
                 # Use AppleScript to open Terminal.app
                 script = f'tell application "Terminal" to do script "cd {shlex.quote(str(terminal_dir))}"'
-                subprocess.Popen(["osascript", "-e", script])
+                subprocess.Popen(["osascript", "-e", script], env=launch_env)
             else:  # Linux and others
                 # Try common Linux terminals in order of preference
                 terminals = [
@@ -2806,7 +2808,7 @@ class MarkdownEditor(QTextEdit):
                 
                 for term_cmd in terminals:
                     try:
-                        subprocess.Popen(term_cmd)
+                        subprocess.Popen(term_cmd, env=launch_env)
                         break
                     except FileNotFoundError:
                         continue
@@ -6836,7 +6838,7 @@ class MarkdownEditor(QTextEdit):
             original = fmt.property(IMAGE_PROP_ORIGINAL) or fmt.name()
             resolved = self._resolve_image_path(str(original))
             if resolved and resolved.exists():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+                open_path_in_system(resolved)
             return
         
         # Check if double-clicking on a checkbox and toggle it

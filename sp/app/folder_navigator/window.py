@@ -89,6 +89,7 @@ from sp.app.ui.screen_positioning import (
     popup_available_geometry,
 )
 from sp.app import config
+from sp.app.external_launch import external_process_environment, open_path_in_system
 
 
 def _folder_navigator_asset_icon(
@@ -5696,7 +5697,7 @@ class Window(QMainWindow):
         if local.is_file() and inside(self.root, local):
             self.open_file(local, pinned=True)
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(local)))
+        open_path_in_system(local)
 
     def _zoom_active_view(self, direction):
         """Route StillPoint's standard zoom keys to the active viewer."""
@@ -10374,7 +10375,7 @@ class Window(QMainWindow):
             answer = QMessageBox.question(self, "Outside selected folder", f"Open outside target in system application?\n{path}")
             if answer != QMessageBox.Yes:
                 return
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+        if not open_path_in_system(path):
             self.statusBar().showMessage(f"No default application could open {path}", 12000)
 
     def _open_navigator_selection_in_system(self):
@@ -10395,19 +10396,21 @@ class Window(QMainWindow):
 
     def reveal(self, path):
         target = path.parent if path.is_file() else path
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+        if not open_path_in_system(target):
             self.statusBar().showMessage(f"Could not open file manager at {target}", 12000)
 
     def terminal(self, folder):
         folder = Path(folder).expanduser().resolve()
         try:
+            launch_env = external_process_environment()
             if sys.platform == "darwin":
-                subprocess.Popen(["open", "-a", "Terminal", str(folder)])
+                subprocess.Popen(["open", "-a", "Terminal", str(folder)], env=launch_env)
             elif sys.platform == "win32":
                 subprocess.Popen(
                     ["cmd.exe", "/K", "cd", "/d", str(folder)],
                     cwd=str(folder),
                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                    env=launch_env,
                 )
             else:
                 commands = []
@@ -10428,7 +10431,7 @@ class Window(QMainWindow):
                 )
                 for command in commands:
                     try:
-                        subprocess.Popen(command, cwd=str(folder))
+                        subprocess.Popen(command, cwd=str(folder), env=launch_env)
                         break
                     except FileNotFoundError:
                         continue

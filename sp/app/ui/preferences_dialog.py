@@ -38,11 +38,11 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from pathlib import Path
-from PySide6.QtGui import QFontDatabase, QFont, QDesktopServices
+from PySide6.QtGui import QFontDatabase, QFont
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QUrl
 
 from sp.app import config
+from sp.app.external_launch import open_path_in_system
 from sp.logging_flags import log_enabled
 from . import theme as theme_module
 from .screen_positioning import fit_window_to_available_screen
@@ -1577,7 +1577,7 @@ class PreferencesDialog(QDialog):
         except Exception:
             pass
         try:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(theme_dir)))
+            open_path_in_system(theme_dir)
         except Exception:
             QMessageBox.information(
                 self,

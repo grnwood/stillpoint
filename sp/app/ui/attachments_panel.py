@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
 from .canvas_navigation import install_primary_wheel_zoom
+from sp.app.external_launch import open_path_in_system
 from sp.logging_flags import log_enabled
 
 _DETAILED_LOGGING = log_enabled("attachments_media")
@@ -645,7 +646,7 @@ class AttachmentsPanel(QWidget):
         page_folder = self.current_page_path.parent
         
         if page_folder.exists() and page_folder.is_dir():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(page_folder)))
+            open_path_in_system(page_folder)
     
     def _zoom_in(self) -> None:
         """Zoom in to show larger icons."""
@@ -713,7 +714,7 @@ class AttachmentsPanel(QWidget):
                     # Open with default system handler
                     if log_enabled("attachments_media"):
                         print(f"[Attachments] Double-click non-puml -> open default: {data}")
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+                    open_path_in_system(file_path)
     
     def refresh(self) -> None:
         """Refresh the attachments list."""
