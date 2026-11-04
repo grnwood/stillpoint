@@ -3629,11 +3629,14 @@ class AIChatPanel(QtWidgets.QWidget):
         if target:
             self._set_status("Current page is already attached.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
             return
-        self.ensure_context_page_ref(self.current_page_path, index=False)
-        if self._context_matches_page(self.current_page_path):
+        if self.ensure_context_page_ref(self.current_page_path, index=False):
             self._set_status("Current page attached.", theme_value("ai_chat_panel.status.success", "#2ecc71"))
         else:
-            self._set_status("Could not attach the current page.", theme_value("ai_chat_panel.status.warning", "#f6c343"))
+            detail = getattr(self, "_last_context_attach_error", "")
+            message = "Could not attach the current page."
+            if detail:
+                message = f"{message} {detail}"
+            self._set_status(message, theme_value("ai_chat_panel.status.warning", "#f6c343"))
 
     def _attachment_path(self, page_ref: str, attachment_name: str) -> Optional[Path]:
         if not self.vault_root:
@@ -5803,30 +5806,59 @@ class AIChatPanel(QtWidgets.QWidget):
         self._update_model_status()
         self._update_load_current_page_button()
 
-    def ensure_context_page_ref(self, page_ref: str, *, index: bool = True) -> None:
+    def ensure_context_page_ref(self, page_ref: str, *, index: bool = True) -> bool:
         """Ensure a context page is attached to the current conversation."""
+        self._last_context_attach_error = ""
         if not page_ref:
-            return
-        if not self.ai_manager:
+            self._last_context_attach_error = "No page is open."
+            return False
+        if not self.current_session_id and not self._ensure_active_chat():
+            self._last_context_attach_error = "No active chat is available."
+            return False
+
+        last_error: Exception | None = None
+        for attempt in range(2):
             try:
-                self.ai_manager = AIManager()
-            except Exception:
-                return
-        if not self.current_session_id:
-            return
-        if not self._current_ai_conversation_id:
-            self._bind_ai_conversation()
-        if not self._current_ai_conversation_id:
-            return
-        self._refresh_context_items()
-        if any(item.kind == "page" and item.page_ref == page_ref for item in self._context_items):
-            return
-        try:
-            self.ai_manager.add_context_page(self._current_ai_conversation_id, page_ref)
-            _ = index  # Compatibility with callers; context is read at send time.
-        except Exception:
-            return
-        self._refresh_context_items()
+                if not self.ai_manager:
+                    self.ai_manager = AIManager()
+
+                # Rebind on every explicit attach.  This validates the persisted
+                # session-to-conversation mapping and recreates a conversation
+                # if an older/stale id was left behind.
+                self._bind_ai_conversation()
+                conv_id = self._current_ai_conversation_id
+                if not conv_id:
+                    raise RuntimeError("chat conversation is unavailable")
+                if self._context_matches_page(page_ref):
+                    return True
+
+                self.ai_manager.add_context_page(conv_id, page_ref)
+                _ = index  # Compatibility with callers; context is read at send time.
+                self._refresh_context_items()
+                if not self._context_matches_page(page_ref):
+                    # The write succeeded, but a transient refresh failure can
+                    # leave the UI cache empty.  Retain the confirmed attachment
+                    # locally so it is included if the user sends immediately.
+                    self._context_items.append(
+                        ContextItem(0, conv_id, "page", page_ref, None, None)
+                    )
+                    self._update_context_summary()
+                return True
+            except Exception as exc:
+                last_error = exc
+                _log_context(
+                    f"Failed to attach page context (attempt {attempt + 1}/2): {exc}"
+                )
+                if attempt == 0:
+                    continue
+
+        if last_error:
+            text = str(last_error).strip()
+            if "locked" in text.casefold() or "busy" in text.casefold():
+                self._last_context_attach_error = "The context database is busy; try again."
+            else:
+                self._last_context_attach_error = "Chat context storage is unavailable."
+        return False
 
     def _load_current_page_chat(self) -> None:
         self._new_chat()

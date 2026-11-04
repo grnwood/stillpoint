@@ -179,3 +179,45 @@ def test_chat_context_uses_selected_page_content(monkeypatch) -> None:
     monkeypatch.setattr(panel, "_list_context_pages", lambda _path: [])
     monkeypatch.setattr(panel, "_read_context_attachment", lambda _path, _name: "")
     assert "Current page" in panel._build_context_prompt("Summarize")
+
+
+def test_attach_current_page_survives_transient_context_refresh_failure(monkeypatch) -> None:
+    panel = AIChatPanel.__new__(AIChatPanel)
+    panel.current_session_id = 7
+    panel._current_ai_conversation_id = 11
+    panel._context_items = []
+    panel._last_context_attach_error = ""
+    added: list[tuple[int, str]] = []
+    panel.ai_manager = SimpleNamespace(
+        add_context_page=lambda conversation_id, page_ref: added.append((conversation_id, page_ref))
+    )
+    monkeypatch.setattr(panel, "_bind_ai_conversation", lambda: None)
+    monkeypatch.setattr(panel, "_refresh_context_items", lambda: panel._context_items.clear())
+    monkeypatch.setattr(panel, "_update_context_summary", lambda: None)
+
+    attached = panel.ensure_context_page_ref("/Notes/Notes.md", index=False)
+
+    assert attached is True
+    assert added == [(11, "/Notes/Notes.md")]
+    assert panel._context_matches_page("/Notes/Notes.md") is True
+
+
+def test_attach_current_page_retries_transient_database_failure(monkeypatch) -> None:
+    panel = AIChatPanel.__new__(AIChatPanel)
+    panel.current_session_id = 7
+    panel._current_ai_conversation_id = 11
+    panel._context_items = []
+    attempts: list[str] = []
+
+    def add_context_page(_conversation_id: int, page_ref: str) -> None:
+        attempts.append(page_ref)
+        if len(attempts) == 1:
+            raise RuntimeError("database is locked")
+
+    panel.ai_manager = SimpleNamespace(add_context_page=add_context_page)
+    monkeypatch.setattr(panel, "_bind_ai_conversation", lambda: None)
+    monkeypatch.setattr(panel, "_refresh_context_items", lambda: panel._context_items.clear())
+    monkeypatch.setattr(panel, "_update_context_summary", lambda: None)
+
+    assert panel.ensure_context_page_ref("/Notes/Notes.md", index=False) is True
+    assert attempts == ["/Notes/Notes.md", "/Notes/Notes.md"]
