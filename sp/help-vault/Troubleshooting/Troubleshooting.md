@@ -73,6 +73,16 @@ Try these first:
 2. Optionally set a Java path.
 3. Click **Test PlantUML Setup**.
 
+## Image OCR Says Tesseract Is Missing
+- StillPoint includes the Python OCR integration, but the Tesseract program must be installed separately.
+- **macOS (Homebrew):** `brew install tesseract`
+- **Windows (WinGet):** `winget install UB-Mannheim.TesseractOCR`
+- **Ubuntu/Debian:** `sudo apt install tesseract-ocr`
+- **Fedora:** `sudo dnf install tesseract`
+- **Arch Linux:** `sudo pacman -S tesseract`
+- Restart StillPoint after installation. macOS Homebrew locations and the standard Windows installation folder are detected automatically.
+- For a custom installation, set `TESSERACT_CMD` to the full path of the executable before starting StillPoint.
+
 ## App Startup Feels Slow
 - **Possible cause**: Font scanning overhead on some systems.
 - **Fix**: Enable `Use Minimal Font Scan (For Fast Window Startup)` in Preferences and restart.

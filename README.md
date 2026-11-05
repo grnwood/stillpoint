@@ -142,7 +142,7 @@ AI features are opt-in and require configuration. Current capabilities include:
 - AI actions menu for common edits and transformations.
 - Embedded RAG capabilities.
 - PDF and .docx extraction with vector indexing (pdfminer, python-docx).
-- Image text extraction via Tesseract.
+- Image text extraction via Tesseract ([installation instructions](docs/ocr.md)).
 
 ### Sample Use Cases (AI / RAG)
 

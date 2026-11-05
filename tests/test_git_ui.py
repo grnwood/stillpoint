@@ -254,8 +254,11 @@ def test_commit_before_push_dialog_requires_message_only_when_staging(qtbot) -> 
     dialog = CommitBeforePushDialog(["one.md", "two.md"])
     qtbot.addWidget(dialog)
     ok_button = dialog.buttons.button(dialog.buttons.StandardButton.Ok)
+    file_list = dialog.findChild(QLabel, "commitBeforePushFileList")
 
     assert dialog.should_stage()
+    assert file_list is not None
+    assert "color: palette(text)" in file_list.styleSheet()
     assert not ok_button.isEnabled()
     dialog.message_edit.setText("Update notes")
     assert ok_button.isEnabled()

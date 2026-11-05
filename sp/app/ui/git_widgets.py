@@ -56,9 +56,10 @@ class CommitBeforePushDialog(QDialog):
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         files = QLabel("\n".join(f"• {path}" for path in unstaged_paths))
+        files.setObjectName("commitBeforePushFileList")
         files.setTextInteractionFlags(Qt.TextSelectableByMouse)
         files.setWordWrap(True)
-        files.setStyleSheet("padding: 6px; color: palette(mid); background: palette(base);")
+        files.setStyleSheet("padding: 6px; color: palette(text); background: palette(base);")
         layout.addWidget(files)
         self.stage_checkbox = QCheckBox(
             f"Automatically stage these {count} file{'s' if count != 1 else ''} and commit before pushing"
