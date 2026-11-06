@@ -2320,14 +2320,18 @@ def logNav(message: str) -> None:
 
 
 class _DetachedWindowCloseFilter(QObject):
-    """Close a detached window before an app-wide shortcut can claim Cmd/Ctrl+W."""
+    """Close detached windows before an app-wide close/quit shortcut wins."""
 
     def __init__(self, target: QMainWindow) -> None:
         super().__init__(target)
         self._target = target
 
     def eventFilter(self, watched, event):  # type: ignore[override]
-        if event.type() != QEvent.ShortcutOverride or event.key() != Qt.Key_W:
+        if event.type() != QEvent.ShortcutOverride:
+            return False
+        is_close = event.key() == Qt.Key_W
+        is_macos_quit = sys.platform == "darwin" and event.key() == Qt.Key_Q
+        if not (is_close or is_macos_quit):
             return False
         if not isinstance(watched, QWidget) or watched.window() is not self._target:
             return False
@@ -13992,16 +13996,17 @@ class MainWindow(QMainWindow):
 
             def eventFilter(self, obj, ev):  # type: ignore[override]
                 if ev.type() == QEvent.KeyPress:
+                    modifiers = ev.modifiers() & ~Qt.KeypadModifier
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() == Qt.Key_Down and not ev.modifiers():
+                    if ev.key() == Qt.Key_Down and modifiers == Qt.NoModifier:
                         list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
                         return True
-                    if ev.key() == Qt.Key_Up and not ev.modifiers():
+                    if ev.key() == Qt.Key_Up and modifiers == Qt.NoModifier:
                         list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), -1))
                         return True
-                    if is_vi_navigation_chord(ev.modifiers()):
+                    if is_vi_navigation_chord(modifiers):
                         if ev.key() == Qt.Key_J:
                             list_widget.setCurrentRow(self._next_selectable(list_widget.currentRow(), 1))
                             return True
@@ -14196,18 +14201,19 @@ class MainWindow(QMainWindow):
 
             def eventFilter(self, obj, ev):  # type: ignore[override]
                 if ev.type() == QEvent.KeyPress:
+                    modifiers = ev.modifiers() & ~Qt.KeypadModifier
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() == Qt.Key_Down and not ev.modifiers():
+                    if ev.key() == Qt.Key_Down and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), 1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() == Qt.Key_Up and not ev.modifiers():
+                    if ev.key() == Qt.Key_Up and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if is_vi_navigation_chord(ev.modifiers()):
+                    if is_vi_navigation_chord(modifiers):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)

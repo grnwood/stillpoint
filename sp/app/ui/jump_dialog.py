@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from sp.app import config
+from .keyboard_shortcuts import is_vi_navigation_chord
 from .path_utils import path_to_colon
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 import html
@@ -210,6 +211,7 @@ class JumpToPageDialog(QDialog):
         self.search.setPlaceholderText("Start typing to filter pages…")
         self.search.textChanged.connect(self._refresh)
         self.search.returnPressed.connect(self._activate_current)
+        self.search.installEventFilter(self)
         layout.addWidget(self.search)
 
         self.list_widget = QListWidget()
@@ -312,6 +314,17 @@ class JumpToPageDialog(QDialog):
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self.search and event.type() == QEvent.KeyPress:
+            key = event.key()
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            if key in (Qt.Key_Up, Qt.Key_Down) and mods == Qt.NoModifier:
+                self._move_list_selection(-1 if key == Qt.Key_Up else 1)
+                return True
+            if key in (Qt.Key_J, Qt.Key_K) and (
+                is_vi_navigation_chord(mods) or bool(mods & Qt.ShiftModifier)
+            ):
+                self._move_list_selection(1 if key == Qt.Key_J else -1)
+                return True
         if obj in (self.list_widget, self.list_widget.viewport()) and event.type() == QEvent.KeyPress:
             key = event.key()
             text = event.text()

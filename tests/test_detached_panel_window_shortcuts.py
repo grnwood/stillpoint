@@ -25,3 +25,22 @@ def test_detached_window_standard_close_shortcut_closes_only_that_window(qtbot, 
     )
 
     assert not window.isVisible()
+
+
+def test_detached_window_command_q_closes_only_that_window_on_macos(qtbot, monkeypatch) -> None:
+    monkeypatch.setattr("sp.app.ui.main_window.sys.platform", "darwin")
+    monkeypatch.setattr("sp.app.main.get_app_icon", lambda: QIcon())
+    window = QMainWindow()
+    child = QWidget()
+    window.setCentralWidget(child)
+    qtbot.addWidget(window)
+
+    MainWindow._prepare_top_level_window(None, window)  # type: ignore[arg-type]
+    window.show()
+
+    QApplication.sendEvent(
+        child,
+        QKeyEvent(QEvent.ShortcutOverride, Qt.Key_Q, Qt.ControlModifier),
+    )
+
+    assert not window.isVisible()

@@ -1158,7 +1158,9 @@ def test_mermaid_external_browser_html_includes_export_controls(monkeypatch, tmp
     assert 'id="copy-svg-btn"' in html
     assert 'id="copy-png-btn"' in html
     assert "const includeBrowserControls = true;" in html
-    assert "flowchart: { htmlLabels: false }" in html
+    assert "flowchart: { htmlLabels: true }" in html
+    assert "sequence: { wrap: true, wrapPadding: 12 }" in html
+    assert "fontFamily: 'Arial, Helvetica" in html
     assert "const windowsPlatform = /Win/.test(navigator.platform || '');" in html
     assert "const primaryModifier = event.ctrlKey || event.metaKey;" in html
     assert "Local Mermaid runtime:" in html
@@ -1210,6 +1212,78 @@ def test_mermaid_inline_html_omits_browser_controls_by_default(monkeypatch, tmp_
     window.close()
 
 
+def test_mermaid_inline_html_prefers_pre_rendered_cli_svg(monkeypatch, tmp_path: Path):
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False)
+    file_path = tmp_path / "sample.mmd"
+    file_path.write_text("flowchart TD\n  A --> B\n", encoding="utf-8")
+    window = MermaidEditorWindow(str(file_path))
+    svg = '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="#dbeafe"/></svg>'
+
+    html = window._build_mermaid_html("", pre_rendered_svg=svg)
+
+    assert "const initialPreRenderedSvg =" in html
+    assert "Rendered by Mermaid CLI" in html
+    assert "#dbeafe" in html
+    assert "host.innerHTML = initialPreRenderedSvg" in html
+    window.close()
+
+
+def test_mermaid_inline_html_displays_cli_png_and_keeps_svg_for_export(monkeypatch, tmp_path: Path):
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False)
+    file_path = tmp_path / "sample.mmd"
+    file_path.write_text("sequenceDiagram\n  A->>B: Hello\n", encoding="utf-8")
+    window = MermaidEditorWindow(str(file_path))
+    svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>Export me</text></svg>'
+    png_data_url = "data:image/png;base64,iVBORw0KGgo="
+
+    html = window._build_mermaid_html(
+        "",
+        pre_rendered_svg=svg,
+        pre_rendered_png_data_url=png_data_url,
+    )
+
+    assert "const initialPreRenderedPngDataUrl" in html
+    assert png_data_url in html
+    assert "await showPreRenderedPng(initialPreRenderedPngDataUrl)" in html
+    assert "let preRenderedSvgText = initialPreRenderedSvg" in html
+    assert "Export me" in html
+    window.close()
+
+
+def test_mermaid_fit_scales_cli_raster_to_visible_viewport(monkeypatch, tmp_path: Path, qapp):
+    from PySide6.QtGui import QPixmap
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setattr("sp.app.ui.mermaid_editor_window._should_use_web_preview", lambda: False)
+    file_path = tmp_path / "wide.mmd"
+    file_path.write_text("flowchart LR\n  A --> B\n", encoding="utf-8")
+    window = MermaidEditorWindow(str(file_path))
+    window.resize(1000, 600)
+    window.show()
+    qapp.processEvents()
+    window.preview_pixmap = QPixmap(2000, 1000)
+    window.preview_pixmap.fill()
+
+    window._reset_preview_view()
+    qapp.processEvents()
+
+    displayed = window.preview_label.pixmap()
+    viewport = window.preview_scroll_area.viewport().size()
+    assert window._preview_fit_mode is True
+    assert displayed.width() <= viewport.width()
+    assert displayed.height() <= viewport.height()
+    assert displayed.width() >= viewport.width() - 8 or displayed.height() >= viewport.height() - 8
+
+    window._zoom_in_preview()
+    assert window._preview_fit_mode is False
+    window.close()
+
+
 def test_mermaid_external_browser_html_can_embed_pre_rendered_png(monkeypatch, tmp_path: Path):
     _patch_common_editor_deps(monkeypatch)
     monkeypatch.setattr("sp.app.ui.mermaid_editor_window._inline_preview_preference_enabled", lambda: False)
@@ -1250,11 +1324,11 @@ def test_prepare_svg_for_export_replaces_foreignobject_labels_with_svg_text():
     assert "World" in exported
 
 
-def test_prepare_mermaid_text_strips_styling_directives_and_html_breaks():
+def test_prepare_mermaid_text_preserves_styling_and_fixes_duplicate_line_breaks():
     renderer = MermaidRenderer()
     source = (
         "flowchart TD\n"
-        "    A[Line 1<br/>Line 2] --> B[End]\n"
+        "    A[Line 1<br/>\\nLine 2] --> B[End]\n"
         "    classDef accent fill:#f00,stroke:#000\n"
         "    class A accent\n"
         "    style A fill:#fff,stroke:#333\n"
@@ -1263,11 +1337,11 @@ def test_prepare_mermaid_text_strips_styling_directives_and_html_breaks():
 
     prepared = renderer._prepare_mermaid_text(source)
 
-    assert "classDef" not in prepared
-    assert "class A accent" not in prepared
-    assert "style A" not in prepared
-    assert "linkStyle" not in prepared
-    assert "Line 1\\nLine 2" in prepared
+    assert "classDef accent" in prepared
+    assert "class A accent" in prepared
+    assert "style A" in prepared
+    assert "linkStyle" in prepared
+    assert "Line 1<br/>Line 2" in prepared
 
 
 def test_qtsvg_normalization_converts_mindmap_foreignobject_labels():

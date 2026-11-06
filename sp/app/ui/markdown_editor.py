@@ -4627,29 +4627,47 @@ class MarkdownEditor(QTextEdit):
         return cleaned
 
     def _transform_markdown_selection_text(self, text: str, prefix: str, suffix: str) -> str:
-        """Toggle markdown wrappers on plain storage text."""
+        """Toggle inline wrappers without changing Markdown block structure."""
         prefix_len = len(prefix)
         suffix_len = len(suffix)
         lines = text.split("\n")
-        if len(lines) > 1:
-            def line_wrapped(line: str) -> bool:
-                return len(line) >= prefix_len + suffix_len and line.startswith(prefix) and line.endswith(suffix)
 
-            non_empty_lines = [line for line in lines if line]
-            all_wrapped = bool(non_empty_lines) and all(line_wrapped(line) for line in non_empty_lines)
-            if all_wrapped:
-                return "\n".join(
-                    line[prefix_len : len(line) - suffix_len] if line and line_wrapped(line) else line
-                    for line in lines
-                )
-            return "\n".join(
-                f"{prefix}{line}{suffix}" if line else line
-                for line in lines
+        def split_block_prefix(line: str) -> tuple[str, str]:
+            # Inline emphasis must begin after indentation and structural
+            # markers.  Otherwise an indented italic line such as
+            # ``*    text*`` is validly interpreted as a Markdown bullet.
+            match = re.match(
+                r"^(?P<block>\s*(?:(?:>\s*)+)?"
+                r"(?:(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s*)?)?)"
+                r"(?P<body>.*)$",
+                line,
+            )
+            if not match:
+                return "", line
+            return match.group("block"), match.group("body")
+
+        parts = [split_block_prefix(line) for line in lines]
+
+        def body_wrapped(body: str) -> bool:
+            return (
+                len(body) >= prefix_len + suffix_len
+                and body.startswith(prefix)
+                and body.endswith(suffix)
             )
 
-        if len(text) >= prefix_len + suffix_len and text.startswith(prefix) and text.endswith(suffix):
-            return text[prefix_len : len(text) - suffix_len]
-        return f"{prefix}{text}{suffix}"
+        meaningful_bodies = [body for _block, body in parts if body.strip()]
+        all_wrapped = bool(meaningful_bodies) and all(
+            body_wrapped(body) for body in meaningful_bodies
+        )
+        transformed: list[str] = []
+        for block, body in parts:
+            if not body.strip():
+                transformed.append(block + body)
+            elif all_wrapped and body_wrapped(body):
+                transformed.append(block + body[prefix_len : len(body) - suffix_len])
+            else:
+                transformed.append(f"{block}{prefix}{body}{suffix}")
+        return "\n".join(transformed)
 
     def _toggle_markdown_format(self, prefix: str, suffix: str = None) -> None:
         """Toggle markdown formatting around selected text or word at cursor.

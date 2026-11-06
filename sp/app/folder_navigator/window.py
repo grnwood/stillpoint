@@ -7,6 +7,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 import difflib
+import fnmatch
 import json
 import math
 import mimetypes
@@ -724,6 +725,42 @@ class FolderModel(QFileSystemModel):
             return False
         return super().canFetchMore(parent)
 
+    def hasChildren(self, parent=QModelIndex()):  # type: ignore[override]
+        """Suppress disclosure arrows for directories with no visible entries."""
+        if not parent.isValid():
+            return super().hasChildren(parent)
+        parent = parent.siblingAtColumn(0)
+        path = Path(self.filePath(parent))
+        if not path.is_dir() or not inside(self.root, path):
+            return False
+        if path.is_symlink():
+            try:
+                if not inside(self.root, path.resolve(strict=True)):
+                    return False
+            except OSError:
+                return False
+
+        show_hidden = bool(self.filter() & QDir.Hidden)
+        masks = tuple(self.nameFilters())
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if not show_hidden and name.startswith("."):
+                        continue
+                    try:
+                        if entry.is_dir():
+                            # QFileSystemModel is configured with QDir.AllDirs,
+                            # so folders remain visible regardless of file masks.
+                            return True
+                    except OSError:
+                        continue
+                    if not masks or any(fnmatch.fnmatch(name, mask) for mask in masks):
+                        return True
+        except OSError:
+            return False
+        return False
+
     def data(self, index, role=Qt.DisplayRole):
         if role == Qt.ToolTipRole and index.isValid():
             path = Path(self.filePath(index))
@@ -1158,10 +1195,14 @@ class HeadingPicker(QDialog):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj in (self.query, self.results) and event.type() == QEvent.KeyPress:
+            modifiers = event.modifiers() & ~Qt.KeypadModifier
             if event.key() in (Qt.Key_Down, Qt.Key_Up):
                 self._move(1 if event.key() == Qt.Key_Down else -1)
                 return True
-            if is_vi_navigation_chord(event.modifiers()):
+            if (
+                is_vi_navigation_chord(modifiers)
+                or modifiers == (Qt.ControlModifier | Qt.ShiftModifier)
+            ):
                 if event.key() == Qt.Key_J:
                     self._move(1)
                     return True
@@ -2408,6 +2449,11 @@ class Tab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.notice = QLabel("")
         self.notice.setAccessibleName("File status")
+        self.notice.setWordWrap(True)
+        self.notice.setMinimumWidth(0)
+        self.notice.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.notice.hide()
         layout.addWidget(self.notice)
         if loaded:
@@ -2881,8 +2927,13 @@ class ImageView(QWidget):
     def __init__(self, path, pixels, *, open_label=None, open_callback=None,
                  canvas_color=None, svg_text=None, source_dimensions=None,
                  preview_limited=False, full_resolution_callback=None,
-                 fit_upscale=False, reveal_callback=None):
+                 fit_upscale=False, reveal_callback=None,
+                 diagram_preview=False):
         super().__init__()
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         self.original = QPixmap.fromImage(pixels)
         self.path = Path(path)
         self.canvas_color = canvas_color
@@ -2896,7 +2947,7 @@ class ImageView(QWidget):
         self._fit_scheduled = False
         self._fitting = False
         self._last_fit_size = None
-        self._diagram_preview = bool(svg_text)
+        self._diagram_preview = bool(svg_text) or bool(diagram_preview)
         if self._diagram_preview:
             self.setFocusPolicy(Qt.StrongFocus)
         layout = QVBoxLayout(self)
@@ -2918,6 +2969,10 @@ class ImageView(QWidget):
             controls.addSpacing(10)
         controls.addStretch()
         self.scroll = QScrollArea()
+        self.scroll.setMinimumWidth(0)
+        self.scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
         self.label = ImageCanvasLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.zoomRequested.connect(
@@ -2999,6 +3054,7 @@ class ImageView(QWidget):
             ))
         layout.addWidget(self.scroll)
         self._schedule_fit()
+
 
     def _diagram_menu(self):
         menu = QMenu(self)
@@ -3185,6 +3241,63 @@ class ImageView(QWidget):
             self.scale(1)
         finally:
             self._fitting = False
+
+
+class DiagramErrorView(QWidget):
+    """Bounded diagram failure details that cannot resize the navigator."""
+
+    MAX_DETAILS_CHARS = 24_000
+
+    def __init__(self, path: Path, error: object, open_callback, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        summary = QLabel(
+            "StillPoint could not render this diagram. The source file is unchanged."
+        )
+        summary.setWordWrap(True)
+        summary.setMinimumWidth(0)
+        summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(summary)
+
+        details = str(error or "Unknown diagram render error")
+        if len(details) > self.MAX_DETAILS_CHARS:
+            omitted = len(details) - self.MAX_DETAILS_CHARS
+            details = (
+                details[: self.MAX_DETAILS_CHARS]
+                + f"\n\n… {omitted:,} additional characters omitted. "
+                "Open the diagram editor for the complete source."
+            )
+        self.details = QPlainTextEdit(self)
+        self.details.setObjectName("folderDiagramErrorDetails")
+        self.details.setAccessibleName("Diagram render error details")
+        self.details.setReadOnly(True)
+        self.details.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.details.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        self.details.setMinimumSize(0, 0)
+        self.details.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self.details.setPlainText(details)
+        layout.addWidget(self.details, 1)
+
+        open_button = QPushButton(
+            {
+                ".puml": "Open in PlantUML Editor",
+                ".mmd": "Open in Mermaid Editor",
+                ".excalidraw": "Open in Excalidraw Editor",
+            }.get(Path(path).suffix.casefold(), "Open Diagram Editor")
+        )
+        open_button.clicked.connect(open_callback)
+        layout.addWidget(open_button, 0, Qt.AlignLeft)
 
 
 def pdf_view(path, *, vi_enabled=False):
@@ -4297,7 +4410,9 @@ class Window(QMainWindow):
         self.tab_switcher_index = -1
         self._tab_switcher_focus_editor_on_activate = False
         self._startup_folder_focus_pending = True
+        self._startup_left_align_pending = True
         self._startup_selected_path = None
+        self._startup_reveal_generation = 0
         self.bridge.result.connect(self._search_result)
         self.bridge.finished.connect(self._search_finished)
         self.setObjectName("folderNavigatorWindow")
@@ -4531,6 +4646,10 @@ class Window(QMainWindow):
             self.rail.currentChanged.connect(self._rail_changed)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("folderNavigatorEditors")
+        self.tabs.setMinimumWidth(0)
+        self.tabs.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         self.tabs.setTabsClosable(True)
         self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideMiddle)
         self.tabs.tabBar().setExpanding(False)
@@ -4547,6 +4666,10 @@ class Window(QMainWindow):
         )
         self.welcome.setAlignment(Qt.AlignCenter)
         self.content = QSplitter(Qt.Vertical)
+        self.content.setMinimumWidth(0)
+        self.content.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         self.content.addWidget(self.tabs)
         self.content.addWidget(self.welcome)
 
@@ -4811,6 +4934,7 @@ class Window(QMainWindow):
         self._refresh_header_icons()
         self.identity_bar.set_accent_color(accent.name())
         self.folder_panel_header.set_accent_color(accent.name())
+        self._update_folder_filter_chip()
         self.folder_rail_minibar_bar.setStyleSheet(
             self._folder_rail_minibar_stylesheet()
         )
@@ -5119,6 +5243,11 @@ class Window(QMainWindow):
                           rail_width=self._rail_last_width,
                           pinned=[str(t.path) for t in self.all_tabs() if t.pinned],
                           active=str(self.active_tab().path) if self.active_tab() and self.active_tab().pinned else None,
+                          last_active=str(self.active_tab().path) if self.active_tab() else None,
+                          folder_filter=(
+                              self.scope.relative_to(self.root).as_posix()
+                              if self.scope != self.root else None
+                          ),
                           selected=selected,
                           geometry=bytes(self.saveGeometry().toBase64()).decode("ascii"))
         self._persist_sqlite_layout()
@@ -5166,6 +5295,11 @@ class Window(QMainWindow):
         except (TypeError, ValueError):
             rail_index = 0
         self.rail.setCurrentIndex(max(0, min(self.rail.count() - 1, rail_index)))
+        saved_filter = self.state.get("folder_filter")
+        if isinstance(saved_filter, str) and saved_filter and saved_filter != ".":
+            filtered_path = self.root / saved_filter
+            if filtered_path.is_dir() and inside(self.root, filtered_path):
+                self.apply_filter(filtered_path, persist=False)
         selected = self.state.get("selected")
         if isinstance(selected, (str, os.PathLike)) and selected:
             selected_path = Path(selected)
@@ -5186,6 +5320,16 @@ class Window(QMainWindow):
         for index, tab in enumerate(self.all_tabs()):
             if str(tab.path) == active:
                 self.tabs.setCurrentIndex(index)
+        last_active = self.state.get("last_active") or active
+        if isinstance(last_active, (str, os.PathLike)) and last_active:
+            last_active_path = Path(last_active)
+            if last_active_path.is_file() and inside(self.root, last_active_path):
+                self.open_file(last_active_path, pinned=False, defer_enhancements=True)
+        active_tab = self.active_tab()
+        if active_tab is not None:
+            # The active file is a stronger startup target than the selection
+            # that happened to be in the tree when the window last closed.
+            self._startup_selected_path = active_tab.path
         expanded_names = self.state.get("expanded", [])
         if not isinstance(expanded_names, list):
             expanded_names = []
@@ -5204,6 +5348,25 @@ class Window(QMainWindow):
         super().showEvent(event)
         if self._startup_folder_focus_pending:
             QTimer.singleShot(0, self._focus_folder_tree_on_launch)
+        if self._startup_left_align_pending:
+            for attempt, delay in enumerate((0, 75, 250, 750)):
+                QTimer.singleShot(
+                    delay,
+                    lambda current=attempt: self._left_align_folder_tree_on_launch(current),
+                )
+
+    def _left_align_folder_tree_on_launch(self, attempt=0):
+        """Undo stale horizontal offsets introduced during startup layout."""
+        if not self._startup_left_align_pending:
+            return
+        try:
+            self.tree.horizontalScrollBar().setValue(0)
+        except RuntimeError:
+            return
+        # The last scheduled pass runs after restored columns, expansions, and
+        # the initial reveal have had time to settle.
+        if attempt >= 3:
+            self._startup_left_align_pending = False
 
     def event(self, event):  # type: ignore[override]
         result = super().event(event)
@@ -5257,6 +5420,11 @@ class Window(QMainWindow):
         root_index = self.tree.rootIndex()
         target = None
         if self._startup_selected_path is not None:
+            if not inside(self.scope, self._startup_selected_path):
+                # A restored active tab must remain visible even when the
+                # previously saved folder filter points somewhere else.
+                self.clear_filter(persist=False)
+                root_index = self.tree.rootIndex()
             restored = self.model.index(str(self._startup_selected_path))
             if restored.isValid():
                 target = restored
@@ -5269,10 +5437,45 @@ class Window(QMainWindow):
 
         self._startup_folder_focus_pending = False
         if target is not None and target.isValid():
-            self._suppress_tree_preview = True
-            self.tree.setCurrentIndex(target)
-            self.tree.scrollTo(target)
+            self._startup_reveal_generation += 1
+            self._reveal_startup_path(
+                Path(self.model.filePath(target)),
+                self._startup_reveal_generation,
+            )
+
+    def _reveal_startup_path(self, path: Path, generation: int, attempt: int = 0):
+        """Reveal a restored file after QFileSystemModel expands asynchronously."""
+        if generation != self._startup_reveal_generation or not self.isVisible():
+            return
+        index = self.model.index(str(path))
+        if not index.isValid():
+            if attempt < 20:
+                QTimer.singleShot(
+                    75,
+                    lambda: self._reveal_startup_path(path, generation, attempt + 1),
+                )
+            return
+        root_index = self.tree.rootIndex()
+        self._suppress_tree_preview = True
+        try:
+            ancestor = index.parent()
+            while ancestor.isValid() and ancestor != root_index:
+                self.tree.expand(ancestor)
+                ancestor = ancestor.parent()
+            self.tree.setCurrentIndex(index)
+            self.tree.scrollTo(index, QAbstractItemView.PositionAtCenter)
+            self.tree.horizontalScrollBar().setValue(0)
+        finally:
             self._suppress_tree_preview = False
+
+        visible = self.tree.visualRect(index)
+        if (attempt < 20 and (
+                not visible.isValid()
+                or not self.tree.viewport().rect().intersects(visible))):
+            QTimer.singleShot(
+                75,
+                lambda: self._reveal_startup_path(path, generation, attempt + 1),
+            )
 
     def _remember_expansion(self, index, expanded):
         name = self.model.filePath(index)
@@ -6798,7 +7001,16 @@ class Window(QMainWindow):
     def _diagram_preview_signature(path):
         path = Path(path)
         sidecar = path.with_name(f"{path.name}.png")
-        return fingerprint(path), fingerprint(sidecar) if path.suffix.casefold() == ".excalidraw" else None
+        theme = (
+            config.load_mermaid_render_theme(default="default")
+            if path.suffix.casefold() == ".mmd"
+            else None
+        )
+        return (
+            fingerprint(path),
+            fingerprint(sidecar) if path.suffix.casefold() == ".excalidraw" else None,
+            theme,
+        )
 
     @staticmethod
     def _diagram_cache_key(path, signature):
@@ -6929,13 +7141,42 @@ class Window(QMainWindow):
                     self._emit_bridge_result(("diagram", path, signature, None, image, None))
                     return
                 source = read_text(path).text
-                result = self._diagram_renderer(suffix).render_svg(source)
-                if not result.success or not result.svg_content:
-                    details = [result.error_message or "Diagram render failed"]
-                    if result.stderr and result.stderr not in details:
-                        details.extend(("Details:", result.stderr))
-                    raise ValueError("\n\n".join(details))
-                pixels = self._rasterize_diagram_svg(result.svg_content)
+                renderer = self._diagram_renderer(suffix)
+                if suffix == ".mmd":
+                    theme = config.load_mermaid_render_theme(default="default")
+                    result = renderer.render_svg(
+                        source,
+                        theme=theme,
+                        normalize_for_qtsvg=False,
+                    )
+                    png_result = renderer.render_png(
+                        source,
+                        theme=theme,
+                        background_color="white",
+                        scale=2.0,
+                    )
+                    pixels = QImage()
+                    if png_result.success and png_result.png_bytes:
+                        pixels.loadFromData(png_result.png_bytes, "PNG")
+                    if pixels.isNull() and result.success and result.svg_content:
+                        compatible_svg = renderer._normalize_svg_for_qtsvg(
+                            result.svg_content
+                        )
+                        pixels = self._rasterize_diagram_svg(compatible_svg)
+                    if pixels.isNull():
+                        failure = png_result if not png_result.success else result
+                        details = [failure.error_message or "Diagram render failed"]
+                        if failure.stderr and failure.stderr not in details:
+                            details.extend(("Details:", failure.stderr))
+                        raise ValueError("\n\n".join(details))
+                else:
+                    result = renderer.render_svg(source)
+                    if not result.success or not result.svg_content:
+                        details = [result.error_message or "Diagram render failed"]
+                        if result.stderr and result.stderr not in details:
+                            details.extend(("Details:", result.stderr))
+                        raise ValueError("\n\n".join(details))
+                    pixels = self._rasterize_diagram_svg(result.svg_content)
                 self._emit_bridge_result((
                     "diagram", path, signature, result.svg_content, pixels, None,
                 ))
@@ -6986,24 +7227,15 @@ class Window(QMainWindow):
             tab.layout().removeWidget(current)
             current.deleteLater()
         if error:
-            tab.show_notice(f"Diagram preview unavailable: {error}")
-            fallback = QWidget()
-            fallback_layout = QVBoxLayout(fallback)
-            error_label = QLabel(str(error))
-            error_label.setWordWrap(True)
-            error_label.setTextInteractionFlags(
-                Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+            tab.show_notice("Diagram preview unavailable. See the bounded details below.")
+            tab.viewer = DiagramErrorView(
+                path,
+                error,
+                lambda checked=False, selected=path: self._open_specialized_editor(selected),
+                tab,
             )
-            fallback_layout.addWidget(error_label)
-            open_button = QPushButton(self._diagram_editor_label(path))
-            open_button.clicked.connect(
-                lambda checked=False, selected=path: self._open_specialized_editor(selected)
-            )
-            fallback_layout.addWidget(open_button)
-            fallback_layout.addStretch()
-            tab.viewer = fallback
-            tab.layout().addWidget(fallback)
-            self._install_preview_context_menu(tab, fallback)
+            tab.layout().addWidget(tab.viewer, 1)
+            self._install_preview_context_menu(tab, tab.viewer)
             return
         placeholder_item = tab.layout().itemAt(1)
         if placeholder_item and placeholder_item.widget():
@@ -7017,6 +7249,7 @@ class Window(QMainWindow):
             svg_text=svg if path.suffix.casefold() in {".puml", ".mmd"} else None,
             fit_upscale=True,
             reveal_callback=lambda selected=path: self.reveal_tree(selected),
+            diagram_preview=path.suffix.casefold() in {".puml", ".mmd"},
         )
         tab.layout().addWidget(tab.viewer)
         self._install_preview_context_menu(tab, tab.viewer)
@@ -9290,7 +9523,26 @@ class Window(QMainWindow):
         else:
             self.tree.collapseAll()
 
-    def apply_filter(self, folder):
+    def _update_folder_filter_chip(self):
+        """Make the header scope chip visibly distinct while filtered."""
+        header = getattr(self, "folder_panel_header", None)
+        if header is None:
+            return
+        filtered = self.scope != self.root
+        if filtered:
+            header.set_detail(self.scope.name, f"Filtered to {self.scope}")
+            header.detail_label.setStyleSheet(
+                "QLabel#utilityPanelDetail {"
+                f"background-color: {theme_value('main_window.filter_badge.bg', '#c62828')};"
+                f"color: {theme_value('main_window.filter_badge.text', '#ffffff')};"
+                f"border: 1px solid {theme_value('main_window.filter_badge.bg', '#c62828')};"
+                "}"
+            )
+        else:
+            header.detail_label.setStyleSheet("")
+            header.set_detail(self.root.name, str(self.root))
+
+    def apply_filter(self, folder, *, persist=True):
         if folder.is_dir() and inside(self.root, folder):
             if folder == self.root:
                 self.clear_filter()
@@ -9301,7 +9553,10 @@ class Window(QMainWindow):
             self.filter_label.setToolTip(f"Filtered to {folder} (click to clear)")
             self.filter_label.show()
             self.clear_filter_action.setEnabled(True)
+            self._update_folder_filter_chip()
             self.statusBar().showMessage(f"Scope: {folder.name}", 2500)
+            if persist:
+                self._persist()
 
     def filter_from_here(self):
         """Filter to the selected folder, or the selected file's parent."""
@@ -9315,13 +9570,16 @@ class Window(QMainWindow):
         self.rail.setCurrentIndex(0)
         self.tree.setFocus(Qt.OtherFocusReason)
 
-    def clear_filter(self):
+    def clear_filter(self, *, persist=True):
         self._filtered_escape_at = 0.0
         self.scope = self.root
         self.tree.setRootIndex(self.model.index(str(self.root)))
         self.filter_label.hide()
         self.clear_filter_action.setEnabled(False)
+        self._update_folder_filter_chip()
         self.statusBar().clearMessage()
+        if persist:
+            self._persist()
 
     def _choose_file_mask(self):
         current = "; ".join(self.file_masks)

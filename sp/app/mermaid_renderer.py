@@ -55,7 +55,7 @@ class MermaidRenderer:
 
     _DEFAULT_FONT_STACK = "Arial,Helvetica,'DejaVu Sans','Noto Sans',sans-serif"
     _LINUX_FONT_FAMILY_REPLACEMENT = "'DejaVu Sans','Noto Sans',Arial,Helvetica,sans-serif"
-    _RENDER_PIPELINE_VERSION = "8"
+    _RENDER_PIPELINE_VERSION = "9"
     _QTSVG_TEXT_OVERRIDE = (
         "<style id=\"stillpoint-qtsvg-fixes\">"
         "#my-svg text,#my-svg tspan,text,tspan{"
@@ -410,13 +410,14 @@ class MermaidRenderer:
                 effective_theme = self._normalize_theme(theme, background_color)
                 config_payload = {
                     "theme": effective_theme,
+                    "fontFamily": self._DEFAULT_FONT_STACK,
                     "themeVariables": {
                         "fontFamily": self._DEFAULT_FONT_STACK,
                     },
                     "flowchart": {
-                        # Avoid foreignObject-based labels that QtSvg may not render.
-                        "htmlLabels": False,
+                        "htmlLabels": True,
                     },
+                    "sequence": {"wrap": True, "wrapPadding": 12},
                 }
                 config_path.write_text(
                     json.dumps(config_payload, ensure_ascii=True),
@@ -507,13 +508,17 @@ class MermaidRenderer:
                 effective_theme = self._normalize_theme(theme, background_color)
                 config_payload = {
                     "theme": effective_theme,
+                    "fontFamily": self._DEFAULT_FONT_STACK,
                     "themeVariables": {
                         "fontFamily": self._DEFAULT_FONT_STACK,
                     },
                     "flowchart": {
-                        # Avoid foreignObject-based labels that QtSvg may not render.
-                        "htmlLabels": False,
+                        # Browser-quality SVG keeps HTML labels. QtSvg fallback
+                        # requests plain SVG text because it cannot draw
+                        # foreignObject content.
+                        "htmlLabels": not normalize_for_qtsvg,
                     },
+                    "sequence": {"wrap": True, "wrapPadding": 12},
                 }
                 config_path.write_text(
                     json.dumps(config_payload, ensure_ascii=True),
@@ -632,38 +637,21 @@ class MermaidRenderer:
         return luminance < 140
 
     def _prepare_mermaid_text(self, mermaid_text: str) -> str:
-        """Normalize Mermaid source to improve Linux font fallback in headless Chromium."""
-        if not os.name == "posix":
-            return self._strip_mermaid_styling(mermaid_text)
+        """Preserve Mermaid styling while normalizing common generated syntax."""
         if not mermaid_text:
             return mermaid_text
-        return self._strip_mermaid_styling(mermaid_text).replace(
-            "ui-sans-serif,system-ui",
-            self._LINUX_FONT_FAMILY_REPLACEMENT,
+        prepared = re.sub(
+            r"(<br\s*/?>)\\n",
+            r"\1",
+            mermaid_text,
+            flags=re.IGNORECASE,
         )
-
-    def _strip_mermaid_styling(self, mermaid_text: str) -> str:
-        """Remove Mermaid styling directives and HTML label breaks from source text."""
-        if not mermaid_text:
-            return mermaid_text
-
-        trailing_newline = mermaid_text.endswith("\n")
-        cleaned_lines: list[str] = []
-        for line in mermaid_text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                cleaned_lines.append(line)
-                continue
-            if re.match(r"^%%\{.*\}%%$", stripped):
-                continue
-            if re.match(r"^(?:classDef|class|style|linkStyle|themeCSS|themeVariables|theme)\b", stripped):
-                continue
-            cleaned_lines.append(re.sub(r"<br\s*/?>", r"\\n", line, flags=re.IGNORECASE))
-
-        cleaned_text = "\n".join(cleaned_lines)
-        if trailing_newline:
-            cleaned_text += "\n"
-        return cleaned_text
+        if os.name == "posix":
+            prepared = prepared.replace(
+                "ui-sans-serif,system-ui",
+                self._LINUX_FONT_FAMILY_REPLACEMENT,
+            )
+        return prepared
 
     def _normalize_svg_for_qtsvg(self, svg_content: str) -> str:
         """Normalize Mermaid SVG for QtSvg compatibility in fallback preview mode."""

@@ -1295,18 +1295,19 @@ class ModeWindow(QMainWindow):
 
             def eventFilter(self, obj, ev):  # type: ignore[override]
                 if ev.type() == QEvent.KeyPress:
+                    modifiers = ev.modifiers() & ~Qt.KeypadModifier
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() == Qt.Key_Down and not ev.modifiers():
+                    if ev.key() == Qt.Key_Down and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), 1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() == Qt.Key_Up and not ev.modifiers():
+                    if ev.key() == Qt.Key_Up and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if is_vi_navigation_chord(ev.modifiers()):
+                    if is_vi_navigation_chord(modifiers):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)

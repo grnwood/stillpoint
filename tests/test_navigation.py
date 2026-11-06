@@ -690,6 +690,13 @@ class TestHistoryNavigation:
         qapp.processEvents()
         assert list_widget.currentRow() == 0
 
+        QTest.keyClick(filter_edit, Qt.Key_Down)
+        assert list_widget.currentRow() == 1
+        assert filter_edit.hasFocus()
+        QTest.keyClick(filter_edit, Qt.Key_Up)
+        assert list_widget.currentRow() == 0
+        assert filter_edit.hasFocus()
+
         QTest.keyClick(filter_edit, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
         assert list_widget.currentRow() == 1
 

@@ -3701,18 +3701,18 @@ def save_mermaid_auto_render(enabled: bool) -> None:
     conn.commit()
 
 
-def load_mermaid_render_theme(default: str = "neutral") -> str:
+def load_mermaid_render_theme(default: str = "default") -> str:
     """Load Mermaid render theme for web preview."""
     allowed = {"default", "neutral", "forest", "dark", "base"}
     conn = _get_conn()
     if not conn:
-        return default if default in allowed else "neutral"
+        return default if default in allowed else "default"
     cur = conn.execute("SELECT value FROM kv WHERE key = ?", ("mermaid_render_theme",))
     row = cur.fetchone()
     if not row or not row[0]:
-        return default if default in allowed else "neutral"
+        return default if default in allowed else "default"
     value = str(row[0]).strip().lower()
-    return value if value in allowed else (default if default in allowed else "neutral")
+    return value if value in allowed else (default if default in allowed else "default")
 
 
 def save_mermaid_render_theme(theme: str) -> None:
@@ -3720,7 +3720,7 @@ def save_mermaid_render_theme(theme: str) -> None:
     allowed = {"default", "neutral", "forest", "dark", "base"}
     value = (theme or "").strip().lower()
     if value not in allowed:
-        value = "neutral"
+        value = "default"
     conn = _get_conn()
     if not conn:
         return

@@ -2710,6 +2710,13 @@ def test_heading_picker_supports_platform_vi_navigation_chord(app):
     picker.query.setFocus()
     assert picker.results.currentRow() == 0
 
+    QTest.keyClick(picker.query, Qt.Key_Down)
+    assert picker.results.currentRow() == 1
+    assert picker.query.hasFocus()
+    QTest.keyClick(picker.query, Qt.Key_Up)
+    assert picker.results.currentRow() == 0
+    assert picker.query.hasFocus()
+
     QTest.keyClick(picker.query, Qt.Key_J, Qt.ControlModifier | Qt.ShiftModifier)
     assert picker.results.currentRow() == 1
     QTest.keyClick(picker.query, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier)
@@ -2859,9 +2866,15 @@ def test_filter_chicklet_and_remove_action_stay_in_sync(tmp_path, monkeypatch, a
     assert window.filter_label.text() == "Filtered"
     assert str(nested) in window.filter_label.toolTip()
     assert str(theme_value("main_window.filter_badge.bg", "#c62828")) in window.filter_label.styleSheet()
+    assert window.folder_panel_header.detail_label.text() == nested.name
+    assert str(theme_value("main_window.filter_badge.bg", "#c62828")) in (
+        window.folder_panel_header.detail_label.styleSheet()
+    )
     assert window.clear_filter_action.isEnabled()
     window.clear_filter_action.trigger()
     assert window.scope == window.root
+    assert window.folder_panel_header.detail_label.text() == window.root.name
+    assert window.folder_panel_header.detail_label.styleSheet() == ""
     assert window.filter_label.isHidden()
     assert not window.clear_filter_action.isEnabled()
     window.apply_filter(nested)
@@ -2870,6 +2883,100 @@ def test_filter_chicklet_and_remove_action_stay_in_sync(tmp_path, monkeypatch, a
     assert window.filter_label.isHidden()
     assert not window.clear_filter_action.isEnabled()
     window.close()
+
+
+def test_folder_filter_is_restored_for_vault(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    first = Window(tmp_path)
+    first.apply_filter(nested)
+    first.close()
+
+    restored = Window(tmp_path)
+    try:
+        assert restored.scope == nested
+        assert Path(restored.model.filePath(restored.tree.rootIndex())) == nested
+        assert not restored.filter_label.isHidden()
+    finally:
+        restored.close()
+
+
+def test_restored_active_tab_is_revealed_in_folder_tree(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    nested = tmp_path / "one" / "two"
+    nested.mkdir(parents=True)
+    target = nested / "active.md"
+    target.write_text("# Active\n", encoding="utf-8")
+    first = Window(tmp_path)
+    # Ordinary preview tabs (not only pinned tabs) are remembered.
+    first.open_file(target)
+    first.close()
+
+    restored = Window(tmp_path)
+    try:
+        restored.show()
+        for _ in range(20):
+            app.processEvents()
+            restored._focus_folder_tree_on_launch(str(nested))
+            if Path(restored.model.filePath(restored.tree.currentIndex())) == target:
+                break
+        assert restored.active_tab().path == target
+        assert Path(restored.model.filePath(restored.tree.currentIndex())) == target
+        assert restored.tree.isExpanded(restored.model.index(str(nested)))
+        app.processEvents()
+        assert restored.tree.viewport().rect().intersects(
+            restored.tree.visualRect(restored.tree.currentIndex())
+        )
+    finally:
+        restored.close()
+
+
+def test_folder_tree_is_horizontally_left_aligned_at_startup(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / "a-file-with-a-long-name.txt").write_text("x", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        window.resize(420, 500)
+        window.show()
+        window.tree.setColumnWidth(0, 900)
+        app.processEvents()
+        scrollbar = window.tree.horizontalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        assert scrollbar.value() > 0
+
+        window._left_align_folder_tree_on_launch(3)
+
+        assert scrollbar.value() == 0
+        assert window._startup_left_align_pending is False
+    finally:
+        window.close()
+
+
+def test_empty_folders_do_not_report_expandable_children(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    empty = tmp_path / "empty"
+    populated = tmp_path / "populated"
+    empty.mkdir()
+    populated.mkdir()
+    (populated / "child.txt").write_text("child", encoding="utf-8")
+    window = Window(tmp_path)
+    try:
+        empty_index = window.model.index(str(empty))
+        populated_index = window.model.index(str(populated))
+
+        assert window.model.hasChildren(empty_index) is False
+        assert window.model.hasChildren(populated_index) is True
+    finally:
+        window.close()
 
 
 def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
@@ -5053,6 +5160,15 @@ def test_diagram_selection_renders_preview_and_refreshes_after_disk_save(
         monkeypatch.setattr(
             "sp.app.mermaid_renderer.MermaidRenderer.render_svg", render
         )
+        monkeypatch.setattr(
+            "sp.app.mermaid_renderer.MermaidRenderer.render_png",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                success=False,
+                png_bytes=None,
+                error_message="PNG unavailable in test",
+                stderr="",
+            ),
+        )
         initial = "flowchart TD\nA --> B\n"
         updated = "flowchart TD\nA --> C\n"
     path = tmp_path / f"diagram{suffix}"
@@ -5153,6 +5269,15 @@ def test_uncached_diagram_preview_uses_animated_loading_state(
     monkeypatch.setattr(
         "sp.app.mermaid_renderer.MermaidRenderer.render_svg", render
     )
+    monkeypatch.setattr(
+        "sp.app.mermaid_renderer.MermaidRenderer.render_png",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            success=False,
+            png_bytes=None,
+            error_message="PNG unavailable in test",
+            stderr="",
+        ),
+    )
     path = tmp_path / "diagram.mmd"
     path.write_text("flowchart TD\nA --> B\n", encoding="utf-8")
     window = Window(tmp_path)
@@ -5180,6 +5305,44 @@ def test_uncached_diagram_preview_uses_animated_loading_state(
         app.processEvents()
         time.sleep(.01)
     assert not placeholder.timer.isActive()
+    window.close()
+
+
+def test_diagram_render_failure_is_bounded_and_keeps_folder_rail_usable(
+        tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QAbstractScrollArea, QPlainTextEdit, QSizePolicy
+    from sp.app.folder_navigator.window import DiagramErrorView, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "broken.mmd"
+    path.write_text("@startuml\n" + ("participant VeryLongName\n" * 1000), encoding="utf-8")
+    window = Window(tmp_path)
+    monkeypatch.setattr(window, "_load_diagram_preview", lambda *_args, **_kwargs: None)
+    window.resize(1100, 720)
+    window.show()
+    window.open_file(path)
+    window.splitter.setSizes([280, 820])
+    app.processEvents()
+    rail_width_before = window.splitter.sizes()[0]
+
+    error = "Mermaid render error: " + ("unrecognized source " * 5000)
+    signature = window._diagram_preview_signature(path)
+    window._show_diagram_preview(path, signature, None, None, error)
+    app.processEvents()
+
+    tab = window.active_tab()
+    assert isinstance(tab.viewer, DiagramErrorView)
+    assert error not in tab.notice.text()
+    assert len(tab.viewer.details.toPlainText()) < len(error)
+    assert "additional characters omitted" in tab.viewer.details.toPlainText()
+    assert tab.viewer.details.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth
+    assert (
+        tab.viewer.details.sizeAdjustPolicy()
+        == QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+    )
+    assert tab.viewer.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+    assert window.splitter.sizes()[0] >= min(200, rail_width_before)
+    assert window.folder_rail_container.width() >= 80
     window.close()
 
 

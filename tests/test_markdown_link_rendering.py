@@ -921,6 +921,58 @@ def test_copy_as_markdown_multi_paragraph_selection_with_links_preserves_full_se
     assert "\n\n" in copied
 
 
+@pytest.mark.parametrize("marker", ["*", "**", "~~", "==", "`"])
+def test_multiline_inline_format_preserves_indentation_and_block_markers(editor, marker):
+    source = (
+        "    Indented paragraph line\n"
+        "\tTabbed continuation\n"
+        "\n"
+        "- List item\n"
+        "- [ ] Task item\n"
+        "> Quoted line"
+    )
+
+    formatted = editor._transform_markdown_selection_text(source, marker, marker)
+
+    assert formatted == (
+        f"    {marker}Indented paragraph line{marker}\n"
+        f"\t{marker}Tabbed continuation{marker}\n"
+        "\n"
+        f"- {marker}List item{marker}\n"
+        f"- [ ] {marker}Task item{marker}\n"
+        f"> {marker}Quoted line{marker}"
+    )
+    assert editor._transform_markdown_selection_text(formatted, marker, marker) == source
+
+
+def test_multiline_italic_format_does_not_turn_indented_lines_into_bullets(editor):
+    source = "\tFirst line\n    Second line"
+
+    formatted = editor._transform_markdown_selection_text(source, "*", "*")
+    display = editor._to_display(formatted)
+
+    assert formatted == "\t*First line*\n    *Second line*"
+    assert "•" not in display
+
+
+def test_toggle_italic_on_selected_indented_paragraph_round_trips(editor):
+    source = "Intro\n\tFirst continuation\n\tSecond continuation\nClosing\n"
+    editor.set_markdown(source)
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_italic()
+
+    assert editor.to_markdown() == (
+        "*Intro*\n\t*First continuation*\n\t*Second continuation*\n*Closing*\n"
+    )
+    assert "•" not in editor.toPlainText()
+
+    editor._toggle_italic()
+    assert editor.to_markdown() == source
+
+
 def test_copy_link_target_keeps_external_urls_plain(editor):
     copied = editor._copy_link_to_location("https://example.com/path?q=1")
 

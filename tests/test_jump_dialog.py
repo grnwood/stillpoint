@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from sp.app.ui.jump_dialog import JumpToPageDialog
 
@@ -40,6 +41,31 @@ def test_jump_dialog_bookmark_mode_filters_by_search_term(qapp) -> None:
         dlg.search.setText("beta")
         assert dlg.list_widget.count() == 1
         assert dlg.list_widget.item(0).data(Qt.UserRole) == "/Projects/Beta/Beta.md"
+    finally:
+        dlg.close()
+
+
+def test_jump_dialog_arrow_keys_move_results_while_search_keeps_focus(qapp) -> None:
+    dlg = JumpToPageDialog(
+        launch_mode="bookmarks",
+        allowed_paths=[
+            "/Projects/Alpha/Alpha.md",
+            "/Projects/Beta/Beta.md",
+            "/Projects/Gamma/Gamma.md",
+        ],
+    )
+    try:
+        dlg.show()
+        dlg.search.setFocus()
+        dlg.list_widget.setCurrentRow(0)
+
+        QTest.keyClick(dlg.search, Qt.Key_Down)
+        assert dlg.list_widget.currentRow() == 1
+        assert dlg.focusWidget() is dlg.search
+
+        QTest.keyClick(dlg.search, Qt.Key_Up)
+        assert dlg.list_widget.currentRow() == 0
+        assert dlg.focusWidget() is dlg.search
     finally:
         dlg.close()
 

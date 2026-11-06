@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QByteArray, QEvent, Qt
+from PySide6.QtGui import QAction, QKeyEvent, QKeySequence
 from PySide6.QtTest import QTest
 
 from sp.app.ui.page_editor_window import PageEditorWindow
@@ -84,3 +84,12 @@ def test_page_editor_has_window_close_command(qtbot, qapp, monkeypatch) -> None:
     qapp.processEvents()
 
     assert not window.isVisible()
+
+
+def test_page_editor_treats_command_q_as_window_close_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr("sp.app.ui.page_editor_window.sys.platform", "darwin")
+    command_q = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_Q, Qt.ControlModifier)
+    command_w = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_W, Qt.ControlModifier)
+
+    assert PageEditorWindow._is_close_window_key(command_q) is True
+    assert PageEditorWindow._is_close_window_key(command_w) is True

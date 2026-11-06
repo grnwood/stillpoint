@@ -280,11 +280,24 @@ class PageEditorWindow(QMainWindow):
         if sys.platform == "darwin":
             file_menu = self.menuBar().addMenu("&File")
             file_menu.addAction(action)
+            # In a detached single-page editor, Cmd+Q means close this editor,
+            # not terminate the parent StillPoint application. NoRole prevents
+            # macOS from promoting this window-local action to the app Quit role.
+            close_editor_action = QAction("Close Editor Window", self)
+            close_editor_action.setShortcut(QKeySequence("Ctrl+Q"))
+            close_editor_action.setShortcutContext(Qt.WindowShortcut)
+            close_editor_action.setMenuRole(QAction.MenuRole.NoRole)
+            close_editor_action.triggered.connect(self.close)
+            self.addAction(close_editor_action)
+            file_menu.addAction(close_editor_action)
+            self._close_editor_quit_action = close_editor_action
         self._close_window_action = action
 
     @staticmethod
     def _is_close_window_key(event) -> bool:
-        if event.key() != Qt.Key_W:
+        is_window_close = event.key() == Qt.Key_W
+        is_detached_quit = sys.platform == "darwin" and event.key() == Qt.Key_Q
+        if not (is_window_close or is_detached_quit):
             return False
         modifiers = event.modifiers() & ~Qt.KeypadModifier
         if modifiers == Qt.ControlModifier:
@@ -1368,18 +1381,19 @@ class PageEditorWindow(QMainWindow):
 
             def eventFilter(self, obj, ev):  # type: ignore[override]
                 if ev.type() == QEvent.KeyPress:
+                    modifiers = ev.modifiers() & ~Qt.KeypadModifier
                     if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
                         activate_current()
                         return True
-                    if ev.key() == Qt.Key_Down and not ev.modifiers():
+                    if ev.key() == Qt.Key_Down and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), 1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if ev.key() == Qt.Key_Up and not ev.modifiers():
+                    if ev.key() == Qt.Key_Up and modifiers == Qt.NoModifier:
                         row = self._next_selectable(list_widget.currentRow(), -1)
                         list_widget.setCurrentRow(row)
                         return True
-                    if is_vi_navigation_chord(ev.modifiers()):
+                    if is_vi_navigation_chord(modifiers):
                         if ev.key() == Qt.Key_J:
                             row = self._next_selectable(list_widget.currentRow(), 1)
                             list_widget.setCurrentRow(row)
