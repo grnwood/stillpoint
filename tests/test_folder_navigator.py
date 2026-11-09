@@ -359,15 +359,17 @@ def test_tsv_preview_uses_extension_fallback_for_ambiguous_content(tmp_path):
     assert preview.rows == [["one", "two"]]
 
 
-def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monkeypatch):
+@pytest.mark.parametrize("empty", [False, True])
+def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monkeypatch, empty):
     import zipfile
 
     class Sheet:
-        end = (1, 1)
+        end = None if empty else (1, 1)
         total_height = 1
         total_width = 1
 
         def iter_rows(self):
+            assert not empty, "Empty sheets must not reach the native iterator"
             return iter((("label", "value"), ("answer", 42)))
 
     class Workbook:
@@ -398,8 +400,8 @@ def test_workbook_preview_lazily_uses_calamine_and_selects_sheet(tmp_path, monke
 
     assert preview.sheet_names == ("First", "Second")
     assert preview.sheet_name == "Second"
-    assert preview.rows == [["label", "value"], ["answer", "42"]]
-    assert (preview.total_rows, preview.total_columns) == (2, 2)
+    assert preview.rows == ([] if empty else [["label", "value"], ["answer", "42"]])
+    assert (preview.total_rows, preview.total_columns) == ((0, 0) if empty else (2, 2))
 
 
 def test_quick_open_ranking_and_content_matching():

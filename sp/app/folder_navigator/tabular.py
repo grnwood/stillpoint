@@ -229,6 +229,13 @@ def read_workbook_preview(path: Path, sheet_name: str | None = None) -> TablePre
             return TablePreview([], sheet_names=names)
         selected = sheet_name if sheet_name in names else names[0]
         sheet = workbook.get_sheet_by_name(selected)
+        # Calamine's native iter_rows implementation can panic on an empty
+        # worksheet. Preserve its name so the UI can still select other sheets.
+        if sheet.end is None:
+            return TablePreview(
+                [], sheet_names=names, sheet_name=selected,
+                total_rows=0, total_columns=0,
+            )
         rows, truncated = _bounded_rows(sheet.iter_rows())
         return TablePreview(
             rows,

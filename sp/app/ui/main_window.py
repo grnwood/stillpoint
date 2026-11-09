@@ -3446,6 +3446,7 @@ class MainWindow(QMainWindow):
             self._sync_reading_theme_action
         )
         view_mode_menu.addAction(self._action_reading_theme_colors)
+        self._sync_reading_theme_action(self.reading_view.theme_toggle.isChecked())
         view_menu.addSeparator()
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -3763,6 +3764,18 @@ class MainWindow(QMainWindow):
         self._reading_mode_button.setStyleSheet(self._mode_button_style())
         self._reading_mode_button.hide()
         self._editor_status_layout.addWidget(self._reading_mode_button)
+        self._reading_theme_button = QToolButton(self._editor_status)
+        self._reading_theme_button.setObjectName("readingThemeStatusToggle")
+        self._reading_theme_button.setAutoRaise(True)
+        self._reading_theme_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._reading_theme_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._reading_theme_button.setIconSize(QSize(16, 16))
+        self._reading_theme_button.setFixedSize(24, 22)
+        self._reading_theme_button.setAccessibleName("Use theme colors in Reading View")
+        self._reading_theme_button.setDefaultAction(self._action_reading_theme_colors)
+        self._reading_theme_button.setStyleSheet(self._mode_button_style())
+        self._reading_theme_button.setVisible(self._reading_view_enabled)
+        self._editor_status_layout.addWidget(self._reading_theme_button)
         self._editor_status_layout.addWidget(self._cursor_status_label)
         self._editor_status_layout.addStretch(1)
         self._editor_status_layout.addWidget(self._save_status_label)
@@ -11969,6 +11982,7 @@ class MainWindow(QMainWindow):
             if getattr(self, "_reading_view_enabled", False):
                 self._refresh_reading_view()
         self._update_reading_view_action()
+        self._sync_reading_theme_action(self.reading_view.theme_toggle.isChecked())
         icon_color = self._main_icon_color()
         for button, asset_name in (
             (getattr(self, "refresh_tree_button", None), "reload.svg"),
@@ -21908,6 +21922,9 @@ class MainWindow(QMainWindow):
         if action is None:
             return
         reading = bool(getattr(self, "_reading_view_enabled", False))
+        theme_button = getattr(self, "_reading_theme_button", None)
+        if theme_button is not None:
+            theme_button.setVisible(reading)
         if reading:
             action.setText("Edit View")
             action.setToolTip("Switch to edit mode (Ctrl/Cmd+Space)")
@@ -21926,11 +21943,20 @@ class MainWindow(QMainWindow):
 
     def _sync_reading_theme_action(self, enabled: bool) -> None:
         action = getattr(self, "_action_reading_theme_colors", None)
-        if action is None or action.isChecked() == bool(enabled):
+        if action is None:
             return
         blocked = action.blockSignals(True)
         action.setChecked(bool(enabled))
         action.blockSignals(blocked)
+        action.setToolTip(
+            "Use the white Reading View background"
+            if enabled else "Use theme colors in Reading View"
+        )
+        icon = self._load_icon(
+            self._find_asset("dark-light.svg"), self._main_icon_color(), size=16
+        )
+        if icon is not None:
+            action.setIcon(icon)
 
     def _focus_vault_tab(self) -> None:
         """Switch to Vault tab and focus the tree."""

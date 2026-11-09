@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from urllib.parse import quote
@@ -6386,6 +6387,14 @@ class Window(QMainWindow):
             self.disposable_preview_futures.discard(completed)
             if completed.cancelled() and cleanup is not None:
                 cleanup()
+            if not completed.cancelled():
+                error = completed.exception()
+                if error is not None:
+                    print(
+                        f"[Folder Navigator preview] {kind} worker failed",
+                        file=sys.stderr, flush=True,
+                    )
+                    traceback.print_exception(type(error), error, error.__traceback__)
 
         future.add_done_callback(finished)
         return future
@@ -6728,17 +6737,49 @@ class Window(QMainWindow):
 
     def _load_workbook_preview(self, path, sheet_name=None, *, disposable=False):
         signature = fingerprint(path)
+        print(
+            f"[Folder Navigator workbook] Queued: {path} (sheet={sheet_name!r})",
+            file=sys.stderr, flush=True,
+        )
         def job():
+            started = time.perf_counter()
+            print(
+                f"[Folder Navigator workbook] Reading: {path}",
+                file=sys.stderr, flush=True,
+            )
             try:
                 preview = read_workbook_preview(path, sheet_name)
+                print(
+                    f"[Folder Navigator workbook] Read {len(preview.rows)} rows "
+                    f"in {time.perf_counter() - started:.2f}s: {path}",
+                    file=sys.stderr, flush=True,
+                )
                 self._emit_bridge_result(
                     ("table", path, signature, preview, False, None)
                 )
             except Exception as exc:
+                print(
+                    f"[Folder Navigator workbook] Failed: {path}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                traceback.print_exc()
                 self._emit_bridge_result(
                     ("table", path, signature, None, False, str(exc))
                 )
-        self._submit_preview_job(job, kind="workbook", disposable=disposable)
+        future = self._submit_preview_job(job, kind="workbook", disposable=disposable)
+        if future is not None:
+            def report_worker_failure(completed):
+                if completed.cancelled():
+                    return
+                error = completed.exception()
+                if error is not None:
+                    # Native parser panics inherit BaseException and bypass
+                    # the ordinary Exception handler inside the worker.
+                    self._emit_bridge_result(
+                        ("table", path, signature, None, False,
+                         f"{type(error).__name__}: {error}")
+                    )
+            future.add_done_callback(report_worker_failure)
 
     def _load_document_preview(self, path, *, disposable=False):
         from .documents import build_docx_preview, build_pptx_preview, document_signature

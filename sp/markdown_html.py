@@ -336,7 +336,9 @@ def _rewrite_markdown_image_sizes(text: str) -> str:
         title = match.group("title")
         title_attr = f' title="{html.escape(title, quote=True)}"' if title else ""
         width = match.group("width")
-        return f'<img src="{path}" alt="{alt}" style="width: {width}px;"{title_attr} />'
+        # QTextDocument reads the HTML width attribute, but ignores CSS image
+        # widths. Keep both for the native reading view and browser renderers.
+        return f'<img src="{path}" alt="{alt}" width="{width}" style="width: {width}px;"{title_attr} />'
 
     return _IMAGE_MD_SIZE_RE.sub(replace, text)
 

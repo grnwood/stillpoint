@@ -340,8 +340,9 @@ def test_reading_view_handles_macos_vi_page_chord_with_image(
     assert view.browser.verticalScrollBar().value() > start
 
 
+@pytest.mark.parametrize("requested_width", [None, 180, 500])
 def test_reading_images_reflow_with_the_content_column(
-    qtbot, qapp, tmp_path: Path
+    qtbot, qapp, tmp_path: Path, requested_width
 ) -> None:
     image_path = tmp_path / "responsive.svg"
     image_path.write_text(
@@ -354,8 +355,9 @@ def test_reading_images_reflow_with_the_content_column(
     qtbot.addWidget(view)
     view.resize(420, 300)
     view.show()
+    sizing = f"{{width={requested_width}}}" if requested_width else ""
     view.set_markdown(
-        "Before\n\n![diagram](responsive.svg)\n\nAfter",
+        f"Before\n\n![diagram](responsive.svg){sizing}\n\nAfter",
         base_directory=tmp_path,
     )
     qapp.processEvents()
@@ -375,15 +377,19 @@ def test_reading_images_reflow_with_the_content_column(
         raise AssertionError("Rendered image was not found")
 
     narrow_width, narrow_height = image_dimensions()
-    assert narrow_width == pytest.approx(view.browser.viewport().width() - 80)
+    assert narrow_width == pytest.approx(
+        min(requested_width or 1200, view.browser.viewport().width() - 80)
+    )
     assert narrow_height == pytest.approx(narrow_width / 2)
 
     view.resize(700, 300)
     QTest.qWait(view.ZOOM_DEBOUNCE_MS + 30)
     qapp.processEvents()
     wide_width, wide_height = image_dimensions()
-    assert wide_width > narrow_width
-    assert wide_width == pytest.approx(view.browser.viewport().width() - 80)
+    assert wide_width >= narrow_width
+    assert wide_width == pytest.approx(
+        min(requested_width or 1200, view.browser.viewport().width() - 80)
+    )
     assert wide_height == pytest.approx(wide_width / 2)
 
 
