@@ -1,12 +1,15 @@
 # Navigation
 
+## Copy and Paste Pages
+With the vault tree focused, press `Ctrl+C` and `Ctrl+V` (`Cmd+C` and `Cmd+V` on macOS) to copy and paste a page within the same vault. Copies include child pages and attachments. Select another page to paste beneath it, or paste while the source remains selected to create a sibling copy. Existing names receive a `-Copy` suffix. Read-only vaults block paste.
+
 StillPoint is designed so you can move quickly once your vault grows. Start with the mouse while learning, then add shortcuts to stay in flow without breaking focus.
 
 For visual structure work, see [:/Mindmap:Mindmap|Mindmap Mode].
 
 ## Vault Tree
 The left sidebar shows your vault structure.
-- Click a page name to open it in the editor.
+- Click a page name to open it while keeping focus in the tree. Press `Enter` to move focus into the editor.
 - Expand/collapse folders with the arrow icons.
 - Right-click for more options like rename or delete.
 - You can right-click a folder/page and filter navigation from that point.

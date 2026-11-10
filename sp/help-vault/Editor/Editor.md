@@ -8,6 +8,14 @@ StillPoint’s editor is a Markdown editor designed for fast note-taking, linkin
 - Add links between related pages.
 - Add tasks directly inside notes.
 
+## Page Preview and Editing
+Use **Reading View** for a rendered page preview with formatted headings, links, images, and tables. Use **Edit View** to write and change the underlying Markdown.
+
+- Press `Ctrl+Space` (`Cmd+Space` on macOS) to switch views, or use the view button above the page. Its label shows the view you can switch to.
+- Both views show the same page. Switching views does not create a separate copy; edits appear in Reading View when you switch back.
+- Reading View supports following links and finding text. Switch to Edit View to change text or insert content.
+- Vault permissions still apply in Edit View. Read-only vaults, including the help vault, allow reading, navigation, selection, and copying, but block typing, pasting, and dropping links or attachments into the page.
+
 ## Markdown Basics
 StillPoint uses standard Markdown with a few workflow-friendly additions.
 

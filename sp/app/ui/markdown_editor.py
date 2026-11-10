@@ -3854,6 +3854,8 @@ class MarkdownEditor(QTextEdit):
             self._restore_cursor_position(initial_position)
 
     def insertFromMimeData(self, source: QMimeData) -> None:  # type: ignore[override]
+        if self._read_only_mode or self.isReadOnly():
+            return
         # 0) Internal markdown payload from StillPoint clipboard copy.
         if source.hasFormat("application/x-stillpoint-markdown"):
             try:
@@ -6665,6 +6667,9 @@ class MarkdownEditor(QTextEdit):
     
     def dragEnterEvent(self, event):  # type: ignore[override]
         """Accept drag events with file URLs."""
+        if self._read_only_mode or self.isReadOnly():
+            event.ignore()
+            return
         mime = event.mimeData()
         print(f"[DragEnter] hasUrls: {mime.hasUrls()}, hasText: {mime.hasText()}")
         # Check for custom stillpoint-path format first (from tree drag)
@@ -6683,6 +6688,9 @@ class MarkdownEditor(QTextEdit):
     
     def dragMoveEvent(self, event):  # type: ignore[override]
         """Accept drag move events with file URLs."""
+        if self._read_only_mode or self.isReadOnly():
+            event.ignore()
+            return
         mime = event.mimeData()
         if mime.hasFormat("application/x-stillpoint-path") or mime.hasUrls() or mime.hasText():
             event.acceptProposedAction()
@@ -6691,6 +6699,9 @@ class MarkdownEditor(QTextEdit):
     
     def dropEvent(self, event):  # type: ignore[override]
         """Handle dropped files - insert as image or file link."""
+        if self._read_only_mode or self.isReadOnly():
+            event.ignore()
+            return
         from pathlib import Path
         
         mime = event.mimeData()

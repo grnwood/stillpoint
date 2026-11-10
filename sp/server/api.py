@@ -5722,6 +5722,18 @@ def file_move(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(re
     return {"ok": True, **result}
 
 
+@app.post("/api/file/copy")
+def file_copy(payload: RenameMovePayload, user: AuthModels.UserInfo = Depends(require_write_user)) -> dict:
+    root = vault_state.get_root()
+    _require_no_reorganization_recovery(root)
+    with vault_reorg.structural_operation(root):
+        try:
+            result = file_ops.copy_folder(root, payload.from_path, payload.to_path)
+        except (FileAccessError, OSError) as exc:
+            _raise_file_http(400, f"Copy failed for {payload.from_path}", exc)
+    return {"ok": True, **result}
+
+
 @app.get("/api/vault/reorganize/candidates")
 def vault_reorganize_candidates(
     q: str = "",

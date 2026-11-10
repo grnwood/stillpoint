@@ -1,5 +1,7 @@
 # Folder Navigator
 
+With the folder tree focused, use `Ctrl+C` and `Ctrl+V` (`Cmd+C` and `Cmd+V` on macOS) to copy and paste selected files or folders. Paste uses the selected folder, or the containing folder of a selected file. Existing items are preserved and copies receive a `-Copy` suffix. The right-click menu also provides **Copy** and **Paste**.
+
 Folder Navigator is StillPoint's detached, keyboard-first browser and editor for an ordinary folder. It is **Ranger-inspired**, meaning it is designed for fast filesystem movement and a keyboard-driven flow; it is not a clone of Ranger's column layout.
 
 ## Where It Fits

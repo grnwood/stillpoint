@@ -853,6 +853,19 @@ class TestCursorPositionMemory:
 
 
 class TestTreeClickGuard:
+    def test_clicking_page_requests_tree_focus(self, qapp):
+        from sp.app.ui.main_window import OPEN_ROLE
+        item = QStandardItem("Page")
+        item.setData("/Page/Page.md", OPEN_ROLE)
+        requests = []
+        host = SimpleNamespace(
+            _cancel_tree_nav_open=lambda: None,
+            current_path=None,
+            _request_tree_open=lambda target, **kwargs: requests.append((target, kwargs)),
+        )
+        MainWindow._on_tree_row_clicked(host, item)
+        assert requests == [("/Page/Page.md", {"focus_target": "tree"})]
+
     def test_tree_clicks_queue_latest_target_until_editor_ready(self, main_window, monkeypatch):
         root = main_window.tree_model.invisibleRootItem()
         first_index = main_window.tree_model.indexFromItem(root.child(0))
@@ -874,11 +887,13 @@ class TestTreeClickGuard:
 
         assert opened == []
         assert main_window._pending_tree_open_path == "/PageB/PageB.md"
+        assert main_window._pending_tree_open_focus_target == "tree"
 
         main_window._drain_pending_tree_open()
 
         assert opened == ["/PageB/PageB.md"]
         assert main_window._pending_tree_open_path is None
+        assert main_window.tree_view.hasFocus()
 
     def test_tree_open_requests_are_dropped_during_vault_switch(self, main_window, monkeypatch):
         opened: list[str] = []
@@ -958,3 +973,63 @@ class TestTreeClickGuard:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("size", [16, 18])
+def test_tinted_icons_preserve_logical_size(qapp, monkeypatch, tmp_path, ratio, size):
+    import sp.app.ui.main_window as module
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QColor, QIcon, QPixmap
+
+    path = tmp_path / "icon.svg"
+    path.write_text("placeholder")
+    source = QPixmap(size * ratio, size * ratio)
+    source.setDevicePixelRatio(ratio)
+    source.fill(Qt.white)
+    captured = []
+
+    def icon_factory(value):
+        if isinstance(value, str):
+            return SimpleNamespace(pixmap=lambda *args: source)
+        captured.append(value)
+        return QIcon(value)
+
+    monkeypatch.setattr(module, "QIcon", icon_factory)
+    icon = MainWindow._load_icon(SimpleNamespace(), path, QColor("red"), size=size)
+    assert icon is not None
+    tinted = captured[0]
+    assert tinted.devicePixelRatio() == ratio
+    assert tinted.deviceIndependentSize().toSize() == QSize(size, size)
+    # Missing DPR metadata paints into only a quarter of the backing pixels.
+    image = tinted.toImage()
+    assert image.pixelColor(image.width() - 1, image.height() - 1) == QColor("red")
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+def test_badged_icons_preserve_retina_size_and_overlay_position(qapp, monkeypatch, ratio):
+    import sp.app.ui.main_window as module
+    from PySide6.QtGui import QColor, QIcon, QPixmap
+
+    def pixmap(size, color):
+        result = QPixmap(size * ratio, size * ratio)
+        result.setDevicePixelRatio(ratio)
+        result.fill(color)
+        return result
+
+    base = SimpleNamespace(isNull=lambda: False, pixmap=lambda *args: pixmap(24, Qt.blue))
+    badge = SimpleNamespace(pixmap=lambda *args: pixmap(12, Qt.red))
+    captured = []
+
+    def icon_factory(value):
+        captured.append(value)
+        return QIcon(value)
+
+    monkeypatch.setattr(module, "QIcon", icon_factory)
+    MainWindow._badge_icon(SimpleNamespace(_ai_badge_icon=badge), base)
+    result = captured[0]
+    assert result.devicePixelRatio() == ratio
+    image = result.toImage()
+    assert image.pixelColor(2 * ratio, 2 * ratio) == QColor(Qt.blue)
+    assert image.pixelColor(20 * ratio, 20 * ratio) == QColor(Qt.red)
+    assert image.pixelColor(23 * ratio, 23 * ratio) == QColor(Qt.blue)

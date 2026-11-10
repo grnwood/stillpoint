@@ -153,6 +153,34 @@ def move_folder(root: Path, from_path: str, to_path: str, rewrite_links: bool = 
     return _move_folder(root, from_path, to_path, set_new_parent_order=True, rewrite_links=rewrite_links)
 
 
+def copy_folder(root: Path, from_path: str, parent_path: str) -> dict:
+    """Duplicate a page subtree and its attachments without replacing anything."""
+    root = root.resolve()
+    source = _resolve_folder(root, _normalize_folder_path(from_path))
+    parent = _resolve_folder(root, _normalize_folder_path(parent_path))
+    if source == root or not source.is_dir() or not parent.is_dir():
+        raise FileAccessError("Choose an existing page and destination folder")
+    if parent == source or source in parent.parents:
+        raise FileAccessError("Cannot copy a page into its own subtree")
+    with _lock_paths([str(source), str(parent)]):
+        destination = parent / source.name
+        number = 1
+        while destination.exists() or destination.is_symlink():
+            suffix = "-Copy" if number == 1 else f"-Copy-{number}"
+            destination = parent / f"{source.name}{suffix}"
+            number += 1
+        shutil.copytree(source, destination, symlinks=True)
+        for suffix in PAGE_SUFFIXES:
+            old = destination / f"{source.name}{suffix}"
+            if old.is_file() and not old.is_symlink() and source.name != destination.name:
+                old.rename(destination / f"{destination.name}{suffix}")
+        for page in destination.rglob("*"):
+            if page.is_file() and not page.is_symlink() and page.suffix in PAGE_SUFFIXES:
+                config.ensure_page_entry("/" + page.relative_to(root).as_posix())
+        version = config.bump_tree_version()
+    return {"path": "/" + destination.relative_to(root).as_posix(), "version": version}
+
+
 def _move_folder(root: Path, from_path: str, to_path: str, *, set_new_parent_order: bool, rewrite_links: bool = True) -> dict:
     src_folder = _normalize_folder_path(from_path)
     dest_folder = _normalize_folder_path(to_path)

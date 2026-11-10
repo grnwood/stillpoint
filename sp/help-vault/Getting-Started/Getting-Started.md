@@ -9,7 +9,9 @@ When you first run StillPoint, you will see a welcome screen.
 - A vault is just a folder on your computer with Markdown pages inside it.
 
 Tip: many users create a `vaults/` folder (for example on Desktop or Documents) and keep each vault in its own subfolder.
-update: talk about setting default vault or not.
+
+## Choose a Default Vault
+In the vault chooser, use **Default vault** to choose which vault opens when StillPoint starts. Choose **No default** if you prefer to choose a vault each time. You can change this later in the vault chooser; it does not move or delete any vault files.
 
 ## Create or Open a Vault
 - Use Vault -> New Vault to create a new vault.
@@ -53,6 +55,8 @@ Templates help you create consistent pages quickly.
 ## Saving
 - StillPoint saves automatically as you type.
 - Use `Ctrl+S` to force a save at any time.
+- Switch between the rendered page preview (**Reading View**) and **Edit View** with `Ctrl+Space` (`Cmd+Space` on macOS) or the view button above the page. See [:Editor|Editor] for details.
+- Read-only vaults, including this help vault, can be browsed and copied from, but cannot be edited.
 
 ## Terminal and Coding Agent Workflow
 - Use `Vault -> Open Vault in Terminal` to open the actual vault folder in your system terminal.

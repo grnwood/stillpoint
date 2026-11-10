@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QEvent,
     QModelIndex,
     QPoint,
+    QPointF,
     QRect,
     QDate,
     Qt,
@@ -1249,6 +1250,9 @@ class InlineNameEdit(QLineEdit):
 
 
 class VaultTreeView(QTreeView):
+    copyRequested = Signal()
+    pasteRequested = Signal()
+    deleteRequested = Signal()
     enterActivated = Signal()
     shiftEnterActivated = Signal()
     arrowNavigated = Signal()
@@ -1282,6 +1286,19 @@ class VaultTreeView(QTreeView):
             pass
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if (event.key() == Qt.Key_Delete or (sys.platform == "darwin" and event.key() == Qt.Key_Backspace)) and event.modifiers() == Qt.NoModifier:
+            if not event.isAutoRepeat():
+                self.deleteRequested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.Copy):
+            self.copyRequested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.Paste):
+            self.pasteRequested.emit()
+            event.accept()
+            return
         mods = event.modifiers() & ~Qt.KeypadModifier
         vi_nav_enabled = False
         try:
@@ -2634,6 +2651,9 @@ class MainWindow(QMainWindow):
         self.tree_view.escapePressed.connect(self._clear_nav_filter)
         self.tree_view.rowClicked.connect(self._on_tree_row_clicked)
         self.tree_view.moveRequested.connect(self._on_tree_move_requested)
+        self.tree_view.copyRequested.connect(self._copy_selected_vault_page)
+        self.tree_view.pasteRequested.connect(self._paste_selected_vault_page)
+        self.tree_view.deleteRequested.connect(self._delete_selected_vault_page)
         self.tree_view.reorderRequested.connect(self._on_tree_reorder_requested)
         self.tree_view.dragStatusChanged.connect(self._on_drag_status_changed)
         self.tree_view.expanded.connect(self._on_tree_expanded)
@@ -16774,6 +16794,9 @@ class MainWindow(QMainWindow):
         if pm.isNull():
             return icon  # Fall back to untinted icon if SVG can't rasterize
         colored = QPixmap(pm.size())
+        # pixmap() can return Retina pixels even before this window is shown.
+        # Keep their logical size when painting and wrapping them in a QIcon.
+        colored.setDevicePixelRatio(pm.devicePixelRatio())
         colored.fill(Qt.transparent)
         painter = QPainter(colored)
         painter.drawPixmap(0, 0, pm)
@@ -16802,12 +16825,13 @@ class MainWindow(QMainWindow):
             return base
         badge_pm = self._ai_badge_icon.pixmap(12, 12)
         result = QPixmap(pm.size())
+        result.setDevicePixelRatio(pm.devicePixelRatio())
         result.fill(Qt.transparent)
         painter = QPainter(result)
         painter.drawPixmap(0, 0, pm)
-        x = pm.width() - badge_pm.width() - 1
-        y = pm.height() - badge_pm.height() - 1
-        painter.drawPixmap(x, y, badge_pm)
+        x = pm.deviceIndependentSize().width() - badge_pm.deviceIndependentSize().width() - 1
+        y = pm.deviceIndependentSize().height() - badge_pm.deviceIndependentSize().height() - 1
+        painter.drawPixmap(QPointF(x, y), badge_pm)
         painter.end()
         return QIcon(result)
 
@@ -21786,7 +21810,7 @@ class MainWindow(QMainWindow):
         self._activate_tree_selection(focus_editor=False)
 
     def _on_tree_row_clicked(self, index: QModelIndex) -> None:
-        """Open and focus editor when a tree row is clicked."""
+        """Open the clicked page while keeping navigation focus in the tree."""
         self._cancel_tree_nav_open()
         target = index.data(OPEN_ROLE) or index.data(PATH_ROLE)
         if target == FILTER_BANNER:
@@ -21795,7 +21819,7 @@ class MainWindow(QMainWindow):
         if target:
             if target != self.current_path:
                 self._skip_next_selection_open = True
-            self._request_tree_open(target, focus_target="editor")
+            self._request_tree_open(target, focus_target="tree")
 
     @measure_performance("navigation.focus_handoff")
     def _focus_editor(self) -> None:
@@ -22548,6 +22572,17 @@ class MainWindow(QMainWindow):
         def add_menu_section(title: str) -> None:
             menu.addSection(title)
 
+        def add_page_clipboard_actions(path: str) -> None:
+            if path != "/":
+                copy_action = menu.addAction("Copy Page")
+                copy_action.triggered.connect(lambda checked=False, p=path: self._copy_vault_page(p))
+            paste_action = menu.addAction("Paste Page")
+            mime = QApplication.clipboard().mimeData()
+            paste_action.setEnabled(bool(
+                not self._read_only and mime and mime.hasFormat("application/x-stillpoint-page-copy")
+            ))
+            paste_action.triggered.connect(lambda checked=False, p=path: self._paste_vault_page(p))
+
         def add_new_page_menu(parent_menu: QMenu, parent_path: str) -> None:
             new_page_menu = parent_menu.addMenu("New Page")
             new_page_menu.addAction(
@@ -22634,6 +22669,7 @@ class MainWindow(QMainWindow):
                         self._show_git_history(p)
                 )
             add_menu_section("Organize")
+            add_page_clipboard_actions(path)
             reorg_subtree_action = menu.addAction("Reorganize this subtree…")
             reorg_subtree_action.triggered.connect(
                 lambda checked=False, p=path: self._open_vault_reorganization(p)
@@ -22677,6 +22713,7 @@ class MainWindow(QMainWindow):
         else:
             add_menu_section("Create")
             add_new_page_menu(menu, self._context_menu_parent_path(index))
+            add_page_clipboard_actions("/")
         if menu.actions():
             menu.exec(global_pos)
 
@@ -22717,6 +22754,64 @@ class MainWindow(QMainWindow):
         opened = self._open_in_file_manager(folder_path)
         if not opened:
             self._alert(f"Could not open folder: {folder_path}")
+
+    def _vault_page_clipboard_identity(self):
+        return [str(self.api_base) if self._remote_mode else "local", str(self.vault_root or "")]
+
+    def _copy_selected_vault_page(self):
+        index = self.tree_view.currentIndex()
+        path = index.data(PATH_ROLE) if index.isValid() else None
+        self._copy_vault_page(path)
+
+    def _copy_vault_page(self, path):
+        if not path or path == "/":
+            self.statusBar().showMessage("Select a page or folder to copy", 5000)
+            return
+        if not self._read_only and not self._save_before_page_transition(reason="copy page"):
+            return
+        mime = QMimeData()
+        mime.setData("application/x-stillpoint-page-copy", json.dumps({
+            "vault": self._vault_page_clipboard_identity(), "path": path,
+        }).encode("utf-8"))
+        QApplication.clipboard().setMimeData(mime)
+        link = ensure_root_colon_link(path_to_colon(path))
+        self.statusBar().showMessage(f"Copied {link}", 5000)
+
+    def _paste_selected_vault_page(self):
+        index = self.tree_view.currentIndex()
+        parent = index.data(PATH_ROLE) if index.isValid() else "/"
+        self._paste_vault_page(parent or "/")
+
+    def _paste_vault_page(self, parent):
+        if not self._ensure_writable("paste pages"):
+            self.statusBar().showMessage("Cannot paste pages: vault is read-only", 5000)
+            return
+        mime = QApplication.clipboard().mimeData()
+        if not mime or not mime.hasFormat("application/x-stillpoint-page-copy"):
+            self.statusBar().showMessage("No page or folder to paste", 5000)
+            return
+        try:
+            payload = json.loads(bytes(mime.data("application/x-stillpoint-page-copy")))
+            if payload.get("vault") != self._vault_page_clipboard_identity():
+                self.statusBar().showMessage("Paste pages into the vault they were copied from", 5000)
+                return
+            if parent == payload["path"]:
+                parent = str(Path(parent).parent)
+            response = self.http.post("/api/file/copy", json={"from": payload["path"], "to": parent or "/"})
+            response.raise_for_status()
+        except (ValueError, KeyError, TypeError):
+            self.statusBar().showMessage("Cannot paste: invalid page clipboard data", 5000)
+            return
+        except httpx.HTTPError as exc:
+            self._alert_api_error(exc, "Failed to paste page")
+            self.statusBar().showMessage("Failed to paste page", 8000)
+            return
+        pasted_path = response.json()["path"]
+        self._pending_selection = pasted_path
+        self.tree_view.setFocus(Qt.OtherFocusReason)
+        self._refresh_tree()
+        link = ensure_root_colon_link(path_to_colon(pasted_path))
+        self.statusBar().showMessage(f"Pasted {link}", 5000)
 
     def _copy_tree_location_link(self, path: str, open_path: Optional[str]) -> None:
         """Copy a colon-style link for the selected tree item."""
@@ -24484,6 +24579,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             editor.deleteLater()
+
+    def _delete_selected_vault_page(self):
+        index = self.tree_view.currentIndex()
+        path = index.data(PATH_ROLE) if index.isValid() else None
+        if not path or path in {"/", FILTER_BANNER}:
+            return
+        open_path = index.data(OPEN_ROLE) or self._folder_to_file_path(path)
+        position = self.tree_view.viewport().mapToGlobal(self.tree_view.visualRect(index).center())
+        self._delete_path(path, open_path, position)
 
     def _delete_path(self, folder_path: str, open_path: Optional[str], global_pos: QPoint) -> None:
         try:

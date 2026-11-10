@@ -5882,7 +5882,7 @@ def test_file_context_menu_groups_actions_and_renames_open_file(
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
     assert labels == [
         "Open", "Open in New Tab", "Keep Open", "Open in Default Application",
-        "Rename…", "Make a Copy", "Delete File…", "New", "Add to AI Chat Context", "Remove Bookmark",
+        "Rename…", "Make a Copy", "Delete File…", "Copy", "Paste", "New", "Add to AI Chat Context", "Remove Bookmark",
         "Reveal in File Manager", "Copy Path", "Open Terminal Here",
     ]
     new_menu = next(action.menu() for action in menu.actions() if action.text() == "New")
@@ -6671,4 +6671,57 @@ def test_markdown_dirty_tab_tracks_transformed_buffer_and_saved_baseline(
     assert tab.dirty
     assert window.tabs.tabText(index).startswith("● ")
     tab.editor.document().setModified(False)
+    window.close()
+
+
+def test_rename_keeps_csv_text_editor(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / "data.csv"
+    source.write_text("name,value\none,1\n", encoding="utf-8")
+    window = Window(tmp_path)
+    window.show()
+    window.open_file(source, pinned=True, force_text=True)
+    window._rename_file(source)
+    edit = window.rename_file_edit
+    edit.setText("renamed.csv")
+    QTest.keyClick(edit, Qt.Key_Return)
+    app.processEvents()
+    tab = window.active_tab()
+    assert tab.path == tmp_path / "renamed.csv"
+    assert tab.editor is not None
+    assert tab.editor.toPlainText() == "name,value\none,1\n"
+    assert not tab.dirty
+    window.close()
+
+
+@pytest.mark.parametrize("folder", [False, True])
+def test_tree_clipboard_copies_files_and_folders(tmp_path, monkeypatch, app, folder):
+    from PySide6.QtWidgets import QApplication
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    source = tmp_path / ("source" if folder else "source.txt")
+    if folder:
+        source.mkdir()
+        (source / "nested.txt").write_text("hello")
+    else:
+        source.write_text("hello")
+    target = tmp_path / "destination"
+    target.mkdir()
+    window = Window(tmp_path)
+    monkeypatch.setattr(window.executor, "submit", lambda job: job())
+    window._copy_tree_path(source)
+    window._paste_tree_paths(target)
+    copied = target / source.name
+    content = copied / "nested.txt" if folder else copied
+    assert content.read_text() == "hello"
+    content.write_text("keep")
+    window._paste_tree_paths(target)
+    assert content.read_text() == "keep"
+    assert source.exists()
+    QApplication.clipboard().clear()
     window.close()

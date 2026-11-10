@@ -780,6 +780,9 @@ class NavigatorTree(QTreeView):
     folderPickerRequested = Signal()
     pathsDropped = Signal(object, object)
     pathsMoved = Signal(object, object)
+    copyRequested = Signal()
+    pasteRequested = Signal()
+    deleteRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -904,6 +907,19 @@ class NavigatorTree(QTreeView):
         self.pathsDropped.emit(sources, target)
 
     def keyPressEvent(self, event):
+        if (event.key() == Qt.Key_Delete or (sys.platform == "darwin" and event.key() == Qt.Key_Backspace)) and event.modifiers() == Qt.NoModifier:
+            if not event.isAutoRepeat():
+                self.deleteRequested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.Copy):
+            self.copyRequested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.Paste):
+            self.pasteRequested.emit()
+            event.accept()
+            return
         key = event.key()
         mods = event.modifiers()
         if key == Qt.Key_Escape:
@@ -968,6 +984,10 @@ class InlineFileNameEdit(QLineEdit):
     canceled = Signal()
 
     def keyPressEvent(self, event):  # type: ignore[override]
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            self.returnPressed.emit()
+            return
         if event.key() == Qt.Key_Escape:
             self.canceled.emit()
             return
@@ -4470,6 +4490,9 @@ class Window(QMainWindow):
         self.tree.folderPickerRequested.connect(self.folder_picker)
         self.tree.pathsDropped.connect(self._copy_dropped_paths)
         self.tree.pathsMoved.connect(self._move_dropped_paths)
+        self.tree.copyRequested.connect(self._copy_selected_tree_paths)
+        self.tree.pasteRequested.connect(self._paste_selected_tree_directory)
+        self.tree.deleteRequested.connect(self._delete_selected_tree_files)
         self.tree.doubleClicked.connect(self._tree_double_clicked)
         self.tree.escapePressed.connect(self._escape_tree)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -9764,6 +9787,7 @@ class Window(QMainWindow):
             target_directory = Path(root_path) if root_path else self.scope
             target_index = self.tree.rootIndex()
             self._add_new_context_menu(menu, target_directory, target_index)
+            self._add_paste_context_action(menu, target_directory)
             menu.addSeparator()
             menu.addAction("Open Terminal Here", lambda: self.terminal(target_directory))
             return menu
@@ -9800,6 +9824,8 @@ class Window(QMainWindow):
         target_directory = path if folder else path.parent
         target_index = index if folder else index.parent()
         menu.addSeparator()
+        menu.addAction("Copy", lambda: self._copy_tree_path(path))
+        self._add_paste_context_action(menu, target_directory)
         self._add_new_context_menu(menu, target_directory, target_index)
         menu.addSeparator()
         if self.chat_panel is not None:
@@ -9813,6 +9839,69 @@ class Window(QMainWindow):
         copy_menu.addAction("Relative Path", lambda: QApplication.clipboard().setText(str(path.relative_to(self.root))))
         menu.addAction("Open Terminal Here", lambda: self.terminal(path if folder else path.parent))
         return menu
+
+    def _copy_tree_path(self, path):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        QApplication.clipboard().setMimeData(mime)
+        self.statusBar().showMessage(f"Copied {path.name}", 4000)
+
+    def _copy_selected_tree_paths(self):
+        paths = [self.model.filePath(index) for index in self.tree.selectionModel().selectedRows(0)]
+        if not paths:
+            self.statusBar().showMessage("Select a file or folder to copy", 5000)
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(path) for path in paths])
+        QApplication.clipboard().setMimeData(mime)
+        self.statusBar().showMessage(f"Copied {len(paths)} item(s) to clipboard", 5000)
+
+    def _paste_selected_tree_directory(self):
+        index = self.tree.currentIndex()
+        path = Path(self.model.filePath(index)) if index.isValid() else self.scope
+        self._paste_tree_paths(path if path.is_dir() else path.parent)
+
+    def _add_paste_context_action(self, menu, directory):
+        action = menu.addAction("Paste", lambda: self._paste_tree_paths(directory))
+        mime = QApplication.clipboard().mimeData()
+        action.setEnabled(bool(mime and any(url.isLocalFile() for url in mime.urls())))
+
+    def _paste_tree_paths(self, directory):
+        mime = QApplication.clipboard().mimeData()
+        sources = [url.toLocalFile() for url in mime.urls() if url.isLocalFile()] if mime else []
+        if sources:
+            self._copy_dropped_paths(sources, directory, rename_collisions=True)
+        else:
+            self.statusBar().showMessage("No files or folders to paste", 5000)
+
+    def _select_pasted_paths(self, paths, attempts=20, settle=True):
+        if not paths:
+            return
+        self._startup_folder_focus_pending = False
+        self._startup_reveal_generation += 1
+        self._cancel_pending_tree_markdown()
+        indexes = [self.model.index(str(path)) for path in paths]
+        if any(not index.isValid() for index in indexes):
+            if attempts > 0:
+                QTimer.singleShot(50, self, lambda: self._select_pasted_paths(paths, attempts - 1))
+            return
+        if settle:
+            # QFileSystemModel may sort freshly materialized rows on its next
+            # update. Select after that update so the highlight stays put.
+            QTimer.singleShot(100, self, lambda: self._select_pasted_paths(paths, attempts, False))
+            return
+        self.reveal_tree(paths[-1])
+        was_suppressed = self._suppress_tree_preview
+        self._suppress_tree_preview = True
+        try:
+            selection = self.tree.selectionModel()
+            selection.clearSelection()
+            for path in paths:
+                index = self.model.index(str(path))
+                selection.select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+            selection.setCurrentIndex(self.model.index(str(paths[-1])), QItemSelectionModel.NoUpdate)
+        finally:
+            self._suppress_tree_preview = was_suppressed
 
     def _selected_files_for_context(self, clicked_index):
         """Return selected files only when the context-clicked file is selected."""
@@ -9917,6 +10006,8 @@ class Window(QMainWindow):
         if tab_index >= 0 and self.tabs.widget(tab_index).dirty:
             self.statusBar().showMessage("Save changes before renaming this file", 8000)
             return
+        self._cancel_pending_tree_markdown()
+        self._cancel_pending_preview_hydration()
         try:
             path.rename(target)
         except OSError as exc:
@@ -9926,11 +10017,12 @@ class Window(QMainWindow):
         self._cancel_rename_file()
         active_path = self.active_tab().path if self.active_tab() else None
         was_pinned = self.tabs.widget(tab_index).pinned if tab_index >= 0 else False
+        was_text = tab_index >= 0 and self.tabs.widget(tab_index).editor is not None
         if tab_index >= 0:
             self.close_tab(tab_index)
         self._reconcile_file_change(path, target)
         if tab_index >= 0:
-            self.open_file(target, pinned=was_pinned, replace_preview=False)
+            self.open_file(target, pinned=was_pinned, force_text=was_text, replace_preview=False)
             if active_path is not None and active_path != path:
                 previous_index = self._index_for(active_path)
                 if previous_index >= 0:
@@ -9948,7 +10040,7 @@ class Window(QMainWindow):
     def _copy_file_target(path: Path) -> Path:
         """Return the first available sibling name using a -Copy suffix."""
         path = Path(path)
-        suffix = path.suffix
+        suffix = "" if path.is_dir() else path.suffix
         basename = path.name[:-len(suffix)] if suffix else path.name
         candidate = path.with_name(f"{basename}-Copy{suffix}")
         number = 2
@@ -10051,6 +10143,15 @@ class Window(QMainWindow):
                     settle_sort=False,
                 ),
             )
+
+    def _delete_selected_tree_files(self):
+        index = self.tree.currentIndex()
+        if not index.isValid():
+            return
+        if self.model.isDir(index):
+            self.statusBar().showMessage("Select a file to delete", 5000)
+            return
+        self._delete_files(self._selected_files_for_context(index))
 
     def _delete_files(self, paths):
         unique_paths = []
@@ -11268,8 +11369,9 @@ class Window(QMainWindow):
             self.search_results.setCurrentItem(item)
 
     def _search_finished(self, payload):
-        if payload[0] == "drop-copy":
+        if payload[0] in {"drop-copy", "paste-copy"}:
             _, copied, errors = payload
+            verb = "Pasted" if payload[0] == "paste-copy" else "Copied"
             self._schedule_refresh()
             if self.catalog_db is not None:
                 try:
@@ -11278,17 +11380,19 @@ class Window(QMainWindow):
                     pass
             self._update_index_notice()
             self._refresh_quick_pickers()
+            if payload[0] == "paste-copy" and copied:
+                self._select_pasted_paths(copied)
             if errors:
                 detail = "; ".join(errors[:3])
                 if len(errors) > 3:
                     detail += f"; and {len(errors) - 3} more"
                 self.statusBar().showMessage(
-                    f"Copied {len(copied)} item(s); {len(errors)} skipped: {detail}",
+                    f"{verb} {len(copied)} item(s); {len(errors)} skipped: {detail}",
                     15000,
                 )
             else:
                 self.statusBar().showMessage(
-                    f"Copied {len(copied)} dropped item(s)", 5000
+                    f"{verb} {len(copied)} item(s)", 5000
                 )
         elif payload[0] == "catalog":
             _, state, indexed = payload
@@ -11344,7 +11448,7 @@ class Window(QMainWindow):
         path, line = target
         self.open_file(path, line=line)
 
-    def _copy_dropped_paths(self, sources, target):
+    def _copy_dropped_paths(self, sources, target, *, rename_collisions=False):
         """Copy local file-manager drops into an in-root directory."""
         try:
             target = Path(target).resolve(strict=True)
@@ -11355,7 +11459,8 @@ class Window(QMainWindow):
             self.statusBar().showMessage("Drop target is outside the folder root", 12000)
             return
 
-        self.statusBar().showMessage(f"Copying {len(sources)} dropped item(s)…")
+        verb = "Pasting" if rename_collisions else "Copying"
+        self.statusBar().showMessage(f"{verb} {len(sources)} item(s) into {target.name}…")
 
         def job():
             copied = []
@@ -11364,9 +11469,12 @@ class Window(QMainWindow):
                 try:
                     source = Path(candidate).resolve(strict=True)
                     destination = target / source.name
-                    if destination.exists():
-                        errors.append(f"{source.name}: already exists")
-                        continue
+                    if destination.exists() or destination.is_symlink():
+                        if rename_collisions:
+                            destination = self._copy_file_target(destination)
+                        else:
+                            errors.append(f"{source.name}: already exists")
+                            continue
                     if source.is_dir():
                         if inside(source, target):
                             errors.append(f"{source.name}: cannot copy a folder into itself")
@@ -11395,7 +11503,7 @@ class Window(QMainWindow):
                         batch = []
             if batch:
                 self._catalog_batch(batch, None)
-            self._emit_bridge_finished(("drop-copy", copied, errors))
+            self._emit_bridge_finished(("paste-copy" if rename_collisions else "drop-copy", copied, errors))
 
         try:
             self.executor.submit(job)
