@@ -2076,6 +2076,37 @@ def test_bookmark_picker_fuzzy_selects_bookmarked_folder(tmp_path, monkeypatch, 
     window.close()
 
 
+def test_bookmarks_can_be_reordered_and_persisted(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QPoint
+    from sp.app.folder_navigator.window import BookmarkButton, Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folders = [tmp_path / name for name in ("alpha", "beta", "gamma")]
+    for folder in folders:
+        folder.mkdir()
+    window = Window(tmp_path)
+    try:
+        for folder in folders:
+            window.toggle_bookmark(folder)
+
+        assert all(
+            isinstance(window.bookmark_buttons[str(folder)], BookmarkButton)
+            for folder in folders
+        )
+        monkeypatch.setattr(window, "_bookmark_drag_insert_pos", lambda _pos: 3)
+        first = str(folders[0])
+        window._on_bookmark_drag_start(first)
+        window._on_bookmark_drag_end(first, QPoint())
+
+        assert window._bookmarks() == [
+            str(folders[1]), str(folders[2]), str(folders[0])
+        ]
+        saved = json.loads(window.settings_path.read_text(encoding="utf-8"))
+        assert saved[str(tmp_path.resolve())]["bookmarks"] == window._bookmarks()
+    finally:
+        window.close()
+
+
 def test_bookmark_picker_includes_stillpoint_folder_navigator(
         tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt

@@ -28,7 +28,7 @@ from urllib.parse import quote
 from PySide6.QtCore import (QAbstractListModel, QAbstractTableModel, QDir, QEvent, QFile, QFileInfo, QFileSystemWatcher, QMimeData, QProcess,
                             QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QImageReader, QKeySequence, QPalette,
+from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontDatabase, QIcon, QImage, QImageReader, QKeySequence, QPalette,
     QNativeGestureEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTextFormat, QTextOption)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QAbstractItemView, QAbstractScrollArea, QFileIconProvider, QFileSystemModel, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -186,6 +186,68 @@ def _git_command(*arguments: str) -> list[str]:
 class Bridge(QObject):
     result = Signal(object)
     finished = Signal(object)
+
+
+class BookmarkButton(QPushButton):
+    """Bookmark chicklet with StillPoint-style press-and-hold reordering."""
+
+    dragStartRequested = Signal(str)
+    dragMoveRequested = Signal(str, QPoint)
+    dragEndRequested = Signal(str, QPoint)
+
+    def __init__(self, bookmark_path: str, label: str, parent=None):
+        super().__init__(label, parent)
+        self.bookmark_path = bookmark_path
+        self._press_pos = None
+        self._drag_active = False
+        self._drag_hold_timer = QTimer(self)
+        self._drag_hold_timer.setSingleShot(True)
+        self._drag_hold_timer.setInterval(220)
+        self._drag_hold_timer.timeout.connect(self._activate_drag)
+
+    def _activate_drag(self):
+        if self.isDown():
+            self._drag_active = True
+            self.dragStartRequested.emit(self.bookmark_path)
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.position().toPoint()
+            self._drag_active = False
+            self._drag_hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[override]
+        if self._drag_active and event.buttons() & Qt.LeftButton:
+            self.dragMoveRequested.emit(
+                self.bookmark_path, event.globalPosition().toPoint()
+            )
+            event.accept()
+            return
+        if (
+            self._press_pos is not None
+            and event.buttons() & Qt.LeftButton
+            and not self._drag_active
+            and (event.position().toPoint() - self._press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._drag_hold_timer.stop()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # type: ignore[override]
+        self._drag_hold_timer.stop()
+        if event.button() == Qt.LeftButton and self._drag_active:
+            self.setDown(False)
+            self.dragEndRequested.emit(
+                self.bookmark_path, event.globalPosition().toPoint()
+            )
+            self._drag_active = False
+            self._press_pos = None
+            event.accept()
+            return
+        self._drag_active = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
 
 
 class GitCommandDialog(QDialog):
@@ -4839,6 +4901,10 @@ class Window(QMainWindow):
         self.bookmarks_bar = QHBoxLayout()
         self.bookmarks_bar.setContentsMargins(7, 2, 7, 2)
         self.bookmarks_bar.setSpacing(3)
+        self.bookmark_buttons = {}
+        self._bookmark_drag_source_path = None
+        self._bookmark_drag_insert_index = None
+        self._bookmark_drag_divider = None
         layout.addLayout(self.bookmarks_bar)
         layout.addWidget(self.splitter)
         self.setCentralWidget(outer)
@@ -9701,13 +9767,17 @@ class Window(QMainWindow):
         self._persist()
 
     def _render_bookmarks(self):
+        self._clear_bookmark_drag_state()
         while self.bookmarks_bar.count():
             item = self.bookmarks_bar.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self.bookmark_buttons.clear()
         for name in self._bookmarks():
             path = Path(name)
-            button = QPushButton(("⚠ " if not path.exists() else "") + path.name)
+            button = BookmarkButton(
+                name, ("⚠ " if not path.exists() else "") + path.name
+            )
             button.setObjectName("folderNavigatorBookmarkButton")
             button.setFixedHeight(26)
             button.setStyleSheet(
@@ -9717,8 +9787,95 @@ class Window(QMainWindow):
             button.clicked.connect(lambda _, p=path: self._activate_bookmark(p))
             button.setContextMenuPolicy(Qt.CustomContextMenu)
             button.customContextMenuRequested.connect(lambda pos, p=path, b=button: self._bookmark_menu(p, b.mapToGlobal(pos)))
+            button.dragStartRequested.connect(self._on_bookmark_drag_start)
+            button.dragMoveRequested.connect(self._on_bookmark_drag_move)
+            button.dragEndRequested.connect(self._on_bookmark_drag_end)
+            self.bookmark_buttons[name] = button
             self.bookmarks_bar.addWidget(button)
         self.bookmarks_bar.addStretch()
+
+    def _ensure_bookmark_drag_divider(self):
+        if self._bookmark_drag_divider is None:
+            divider = QFrame(self.centralWidget())
+            divider.setFrameShape(QFrame.VLine)
+            divider.setLineWidth(2)
+            divider.setFixedWidth(3)
+            divider.setStyleSheet(
+                "QFrame { background: "
+                f"{theme_value('main_window.bookmark.drag_divider', '#4A90E2')}; "
+                "border: none; margin: 2px 0; }"
+            )
+            self._bookmark_drag_divider = divider
+        return self._bookmark_drag_divider
+
+    def _clear_bookmark_drag_state(self):
+        self._bookmark_drag_source_path = None
+        self._bookmark_drag_insert_index = None
+        divider = self._bookmark_drag_divider
+        if divider is not None:
+            self.bookmarks_bar.removeWidget(divider)
+            divider.hide()
+        central = self.centralWidget()
+        if central is not None:
+            central.unsetCursor()
+
+    def _bookmark_drag_insert_pos(self, global_pos):
+        bookmarks = self._bookmarks()
+        for index, name in enumerate(bookmarks):
+            button = self.bookmark_buttons.get(name)
+            if button is None or not button.isVisible():
+                continue
+            local_pos = button.mapFromGlobal(global_pos)
+            if local_pos.x() < button.width() // 2:
+                return index
+        return len(bookmarks)
+
+    def _update_bookmark_drag_divider(self, global_pos):
+        if not self._bookmark_drag_source_path:
+            return
+        insert_index = self._bookmark_drag_insert_pos(global_pos)
+        self._bookmark_drag_insert_index = insert_index
+        divider = self._ensure_bookmark_drag_divider()
+        self.bookmarks_bar.removeWidget(divider)
+        self.bookmarks_bar.insertWidget(insert_index, divider)
+        divider.show()
+
+    def _on_bookmark_drag_start(self, bookmark_path):
+        bookmarks = self._bookmarks()
+        if bookmark_path not in bookmarks:
+            return
+        self._bookmark_drag_source_path = bookmark_path
+        self._bookmark_drag_insert_index = bookmarks.index(bookmark_path)
+        self.centralWidget().setCursor(Qt.ClosedHandCursor)
+        self._update_bookmark_drag_divider(QCursor.pos())
+
+    def _on_bookmark_drag_move(self, bookmark_path, global_pos):
+        if bookmark_path == self._bookmark_drag_source_path:
+            self._update_bookmark_drag_divider(global_pos)
+
+    def _on_bookmark_drag_end(self, bookmark_path, global_pos):
+        if bookmark_path != self._bookmark_drag_source_path:
+            self._clear_bookmark_drag_state()
+            return
+        self._update_bookmark_drag_divider(global_pos)
+        insert_index = self._bookmark_drag_insert_index
+        self._clear_bookmark_drag_state()
+        bookmarks = self._bookmarks()
+        if insert_index is None or bookmark_path not in bookmarks:
+            return
+        source_index = bookmarks.index(bookmark_path)
+        final_index = max(0, min(insert_index, len(bookmarks)))
+        if final_index > source_index:
+            final_index -= 1
+        if final_index == source_index:
+            return
+        bookmarks.pop(source_index)
+        bookmarks.insert(final_index, bookmark_path)
+        self._render_bookmarks()
+        self._persist()
+        self.statusBar().showMessage(
+            f"Reordered bookmark: {Path(bookmark_path).name}", 2000
+        )
 
     def _activate_bookmark(self, path):
         if path.is_file():
