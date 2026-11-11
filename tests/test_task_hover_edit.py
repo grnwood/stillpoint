@@ -202,3 +202,59 @@ def test_main_window_routes_hovered_line_to_shared_task_editor(main_window, monk
     assert task["tags"] == ["phone"]
     assert kwargs["parent"] is main_window
     assert kwargs["anchor_pos"] == anchor
+
+
+def test_task_context_submenu_only_appears_on_editable_task_lines(qtbot) -> None:
+    from PySide6.QtWidgets import QMenu
+    editor = MarkdownEditor()
+    qtbot.addWidget(editor)
+    editor.set_markdown("Plain text\n- [ ] Task\n")
+    requested = []
+    def provider(block, anchor):
+        requested.append(block)
+        result = QMenu(editor)
+        result.addAction("Mark Complete")
+        return result
+    editor.task_context_menu_provider = provider
+    menu = QMenu(editor)
+    anchor = QPoint(10, 10)
+    editor._add_task_actions_menu(menu, QTextCursor(editor.document().firstBlock()), anchor)
+    assert menu.actions() == []
+    cursor = QTextCursor(editor.document().findBlockByNumber(1))
+    editor._add_task_actions_menu(menu, cursor, anchor)
+    assert menu.actions()[0].text() == "Task actions"
+    assert requested == [1]
+    editor.setReadOnly(True)
+    editor._add_task_actions_menu(menu, cursor, anchor)
+    assert requested == [1]
+
+
+def test_editor_task_context_action_saves_and_targets_clicked_task(qtbot, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from sp.app.ui.main_window import MainWindow
+    from sp.app.ui.task_panel import TaskPanel
+
+    editor = MarkdownEditor()
+    panel = TaskPanel()
+    qtbot.addWidget(editor)
+    qtbot.addWidget(panel)
+    editor.set_markdown("Plain text\n- [ ] Clicked task\n")
+    calls = []
+    dummy = SimpleNamespace(editor=editor, right_panel=SimpleNamespace(task_panel=panel),
+                            current_path="/Page/Page.md", _dirty_flag=True)
+    def save(**kwargs):
+        calls.append("save")
+        dummy._dirty_flag = False
+        editor.document().setModified(False)
+    dummy._save_current_file = save
+    monkeypatch.setattr(panel, "_apply_task_mutation", lambda tasks, **changes: calls.append((tasks, changes)))
+    menu = MainWindow._main_editor_task_context_menu(dummy, 1, QPoint(10, 10))
+    expected = panel._build_task_context_menu([{"task": {"status": "todo"}}])
+    assert [a.text() for a in menu.actions()] == [a.text() for a in expected.actions()]
+    assert calls == []
+    menu.actions()[0].trigger()
+    assert calls[0] == "save"
+    tasks, changes = calls[1]
+    assert tasks[0]["line"] == 2
+    assert tasks[0]["text"] == "Clicked task"
+    assert changes == {"status": "done", "restore_list_focus": False}

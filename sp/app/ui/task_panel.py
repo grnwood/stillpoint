@@ -236,6 +236,7 @@ class TaskPanel(QWidget):
     filterClearRequested = Signal()
     taskDatesWillApply = Signal(list)  # affected page paths
     taskDatesApplied = Signal(list)  # affected page paths
+    indexRebuildRequested = Signal()
     statusRequested = Signal(str, int)
     remoteRequestObserved = Signal(str, float, str)  # state, latency_ms, message
 
@@ -300,6 +301,9 @@ class TaskPanel(QWidget):
         self._mutation_focus_index = 0
         self._mutation_focus_task_id: Optional[str] = None
         self._mutation_scroll_value = 0
+        self._mutation_requires_refresh = False
+        self._index_recovery_offered = False
+        self._recovery_scroll = None
         self._last_undo_id: Optional[str] = None
         self._last_undo_receipt: Optional[dict] = None
 
@@ -2287,15 +2291,65 @@ class TaskPanel(QWidget):
         }
 
     def _show_mutation_error(self, exc: Exception) -> None:
-        message = str(exc)
+        payload = {}
         response = getattr(exc, "response", None)
         if response is not None:
             try:
                 payload = response.json()
-                message = str(payload.get("detail") or message)
             except Exception:
                 pass
-        QMessageBox.warning(self, "Task update blocked", message)
+        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or detail.get("detail") or exc)
+            error_type = str(detail.get("exception") or "")
+        else:
+            message = str(detail or exc)
+            error_type = ""
+        stale_source = (
+            isinstance(exc, FileNotFoundError)
+            or error_type == "FileNotFoundError"
+            or getattr(response, "status_code", None) == 404
+            or "Page files must share the same name" in message
+            or "task changed or can no longer be found" in message
+            or "selected source line is no longer a task" in message
+        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Task update blocked")
+        dialog.setTextFormat(Qt.PlainText)
+        dialog.setDetailedText(str(detail or exc))
+        rebuild = None
+        if stale_source and not self._index_recovery_offered:
+            dialog.setText("This task’s source has moved or changed.")
+            dialog.setInformativeText(
+                "Rebuild the vault index to update the task list, then try again. "
+                "If the problem persists, the source page may need repair."
+            )
+            rebuild = dialog.addButton("Rebuild index", QMessageBox.AcceptRole)
+            dialog.addButton(QMessageBox.Cancel)
+        elif stale_source:
+            dialog.setText("This task’s source page needs attention.")
+            dialog.setInformativeText(
+                "The task could not be updated. Check that its source page exists "
+                "and that its filename matches its parent folder."
+            )
+            dialog.addButton(QMessageBox.Ok)
+        else:
+            dialog.setText(message)
+            dialog.addButton(QMessageBox.Ok)
+        dialog.exec()
+        if rebuild is not None and dialog.clickedButton() is rebuild:
+            self._index_recovery_offered = True
+            self._recovery_scroll = (
+                self.task_tree.horizontalScrollBar().value(),
+                self.task_tree.verticalScrollBar().value(),
+            )
+            self.indexRebuildRequested.emit()
+
+    def refresh_after_index_rebuild(self) -> None:
+        self._invalidate_api_task_requests(preserve_cached=True)
+        self._last_refresh_signature = None
+        self._refresh_tasks()
 
     def _prepare_list_focus_restore(self) -> None:
         """Remember the keyboard position across a task-list rebuild."""
@@ -2314,7 +2368,7 @@ class TaskPanel(QWidget):
             self._mutation_focus_index = 0
         self._restore_list_focus_after_mutation = True
 
-    def _restore_list_focus(self, *, preserve_current: bool = False) -> None:
+    def _restore_list_focus(self, *, preserve_current: bool = False, restore_focus: bool = True) -> None:
         """Keep task commands chained even when the selected row disappeared."""
         if not self._restore_list_focus_after_mutation:
             return
@@ -2332,19 +2386,51 @@ class TaskPanel(QWidget):
         scroll_bar.setValue(
             max(scroll_bar.minimum(), min(self._mutation_scroll_value, scroll_bar.maximum()))
         )
-        self.task_tree.setFocus(Qt.OtherFocusReason)
+        if restore_focus:
+            self.task_tree.setFocus(Qt.OtherFocusReason)
         self._restore_list_focus_after_mutation = False
         self._mutation_focus_task_id = None
 
-    def _schedule_mutation_refresh(self) -> None:
-        """Keep changed rows pinned briefly, then reconcile and sort once."""
+    def _schedule_mutation_refresh(self, *, completion_only: bool = False) -> None:
+        """Keep changed rows pinned briefly before settling the list."""
+        self._mutation_requires_refresh |= not completion_only
         self._mutation_grace_active = True
         self.task_tree.setSortingEnabled(False)
         self._mutation_refresh_timer.start()
 
     def _finish_mutation_grace(self) -> None:
         self._mutation_grace_active = False
-        self._refresh_tasks()
+        requires_refresh = self._mutation_requires_refresh
+        self._mutation_requires_refresh = False
+        if requires_refresh:
+            self._refresh_tasks()
+            return
+
+        # Completion needs no rebuild or re-sort. Preserve the user's position
+        # at the end of the grace period, including navigation during the delay.
+        horizontal = self.task_tree.horizontalScrollBar().value()
+        restore_focus = self.task_tree.hasFocus()
+        self._prepare_list_focus_restore()
+        if not self.show_completed.isChecked():
+            for item in self._visible_items():
+                task = item.data(0, Qt.UserRole) or {}
+                if task.get("status") != "done":
+                    continue
+                parent = item.parent() or self.task_tree.invisibleRootItem()
+                index = parent.indexOfChild(item)
+                children = item.takeChildren()
+                parent.takeChild(index)
+                # Open subtasks remain visible when their completed parent leaves.
+                for offset, child in enumerate(children):
+                    parent.insertChild(index + offset, child)
+        self._visible_tasks = [
+            item.data(0, Qt.UserRole)
+            for item in self._visible_items()
+            if item.data(0, Qt.UserRole)
+        ]
+        self._restore_list_focus(restore_focus=restore_focus)
+        self.task_tree.horizontalScrollBar().setValue(horizontal)
+        self._update_summary_footer(self._visible_tasks)
 
     def _apply_optimistic_task_changes(self, tasks: list[dict], changes: dict) -> None:
         """Reflect a successful mutation in place without moving its rows yet."""
@@ -2439,6 +2525,7 @@ class TaskPanel(QWidget):
     ) -> bool:
         if not tasks:
             return False
+        self._recovery_scroll = None
         if restore_list_focus:
             self._prepare_list_focus_restore()
         if changes.get("destination") or changes.get("delete"):
@@ -2490,7 +2577,7 @@ class TaskPanel(QWidget):
                 self._last_undo_id = None
             self._invalidate_api_task_requests(preserve_cached=True)
             self._last_refresh_signature = None
-            self._schedule_mutation_refresh()
+            self._schedule_mutation_refresh(completion_only=optimistic_changes == {"status": "done"})
             try:
                 self._apply_optimistic_task_changes(tasks, optimistic_changes)
             except Exception as exc:
@@ -3303,6 +3390,9 @@ class TaskPanel(QWidget):
     def clear(self) -> None:
         self._search_refresh_timer.stop()
         self._mutation_refresh_timer.stop()
+        self._index_recovery_offered = False
+        self._recovery_scroll = None
+        self._mutation_requires_refresh = False
         self._mutation_grace_active = False
         self.active_tags.clear()
         self._invalidate_api_task_requests()
@@ -3469,6 +3559,11 @@ class TaskPanel(QWidget):
         """Refresh tasks, ignoring payloads from Qt signals such as toggled(bool)."""
         if self._mutation_grace_active:
             return
+        if self._recovery_scroll is not None:
+            self._recovery_scroll = (
+                self.task_tree.horizontalScrollBar().value(),
+                self.task_tree.verticalScrollBar().value(),
+            )
         data_started_at = performance_start()
         if self._triage_mode:
             self._refresh_triage()
@@ -3723,7 +3818,12 @@ class TaskPanel(QWidget):
         self._restore_list_focus()
         self._refresh_tags()
         self._update_summary_footer(visible_tasks)
-        self._single_shot_ui(0, self._reset_horizontal_scroll)
+        if self._recovery_scroll is not None:
+            horizontal, vertical = self._recovery_scroll
+            self._single_shot_ui(0, lambda: self.task_tree.horizontalScrollBar().setValue(horizontal))
+            self._single_shot_ui(0, lambda: self.task_tree.verticalScrollBar().setValue(vertical))
+        else:
+            self._single_shot_ui(0, self._reset_horizontal_scroll)
         emit_performance_span(
             "panel.tasks.tree_build",
             tree_started_at,
@@ -4249,39 +4349,33 @@ class TaskPanel(QWidget):
         if menu.actions():
             menu.exec(self.task_tree.viewport().mapToGlobal(pos))
 
-    def _build_task_context_menu(self, targets: list[dict]) -> QMenu:
-        """Build the context menu for one or more selected task rows."""
+    def _build_task_context_menu(self, targets: list[dict], *, dispatch=None) -> QMenu:
+        """Build shared task actions; editor callers dispatch against their source line."""
         any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
         any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
         menu = QMenu(self)
         apply_menu_theme(menu, self.task_tree)
+
+        def add(label, command, callback):
+            menu.addAction(label).triggered.connect(
+                lambda checked=False: dispatch(command) if dispatch else callback()
+            )
+
         if any_open:
-            menu.addAction("Mark Complete").triggered.connect(
-                lambda: self._set_tasks_completed(targets, True)
-            )
+            add("Mark Complete", "complete", lambda: self._set_tasks_completed(targets, True))
         if any_done:
-            menu.addAction("Reopen Task").triggered.connect(
-                lambda: self._set_tasks_completed(targets, False)
-            )
+            add("Reopen Task", "reopen", lambda: self._set_tasks_completed(targets, False))
         menu.addSeparator()
-        menu.addAction("Edit Task… (E)").triggered.connect(self._open_task_editor)
-        menu.addAction("Set Due Date… (D)").triggered.connect(
-            lambda: self._open_task_date_quick_menu("due", targets, self._task_date_anchor())
-        )
-        menu.addAction("Set Start Date… (S)").triggered.connect(
-            lambda: self._open_task_date_quick_menu("start", targets, self._task_date_anchor())
-        )
-        menu.addAction("Edit Tags… (T)").triggered.connect(self._edit_selected_tags)
-        menu.addAction("Move… (M)").triggered.connect(self._move_selected_tasks)
-        menu.addAction("Remove Task Indicators (R)").triggered.connect(
-            self._remove_selected_task_indicators
-        )
-        menu.addAction("Delete Task…").triggered.connect(self._delete_selected_tasks)
+        add("Edit Task… (E)", "edit", self._open_task_editor)
+        add("Set Due Date… (D)", "due", lambda: self._open_task_date_quick_menu("due", targets, self._task_date_anchor()))
+        add("Set Start Date… (S)", "start", lambda: self._open_task_date_quick_menu("start", targets, self._task_date_anchor()))
+        add("Edit Tags… (T)", "tags", self._edit_selected_tags)
+        add("Move… (M)", "move", self._move_selected_tasks)
+        add("Remove Task Indicators (R)", "remove_indicators", self._remove_selected_task_indicators)
+        add("Delete Task…", "delete", self._delete_selected_tasks)
         if self._last_undo_id or self._last_undo_receipt:
             menu.addSeparator()
-            menu.addAction("Undo Last Change (Ctrl+Z)").triggered.connect(
-                self._undo_last_mutation
-            )
+            add("Undo Last Change (Ctrl+Z)", "undo", self._undo_last_mutation)
         return menu
 
     def _mark_activation_source(self, source: str) -> None:
@@ -4410,6 +4504,9 @@ class TaskPanel(QWidget):
     
     def set_vault_root(self, vault_root: str) -> None:
         """Set vault root for task filtering preferences."""
+        if vault_root != self.vault_root:
+            self._index_recovery_offered = False
+            self._recovery_scroll = None
         self.vault_root = vault_root
         self._last_refresh_signature = None
         self._invalidate_api_task_requests()

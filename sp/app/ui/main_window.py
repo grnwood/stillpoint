@@ -2774,6 +2774,7 @@ class MainWindow(QMainWindow):
         self.editor.imageSaved.connect(self._on_image_saved)
         self.editor.set_task_hover_edit_enabled(True)
         self.editor.taskEditRequested.connect(self._edit_task_from_main_editor)
+        self.editor.task_context_menu_provider = self._main_editor_task_context_menu
         self.editor.textChanged.connect(self._on_editor_text_changed)
         self.editor.focusLost.connect(self._on_editor_focus_lost)
         app = QApplication.instance()
@@ -2974,6 +2975,12 @@ class MainWindow(QMainWindow):
         try:
             if self.right_panel.task_panel:
                 self.right_panel.task_panel.focusGained.connect(self._suspend_vi_for_tasks)
+                self.right_panel.task_panel.indexRebuildRequested.connect(
+                    lambda: self._rebuild_vault_index_from_disk(
+                        confirmed=True,
+                        on_complete=self.right_panel.task_panel.refresh_after_index_rebuild,
+                    )
+                )
         except Exception:
             pass
 
@@ -19803,6 +19810,11 @@ class MainWindow(QMainWindow):
             self._alert("Open a vault first.")
             return
         panel = TaskPanel(font_size_key="task_font_size_detached")
+        panel.indexRebuildRequested.connect(
+            lambda: self._rebuild_vault_index_from_disk(
+                confirmed=True, on_complete=panel.refresh_after_index_rebuild
+            )
+        )
         panel.set_http_client(self.http)
         panel.set_remote_mode(bool(self._remote_mode))
         panel.set_vault_root(self._local_vault_root() or "")
@@ -25178,6 +25190,49 @@ class MainWindow(QMainWindow):
         self._save_status_path = self.current_path if text else None
         label.setVisible(bool(text))
 
+    def _main_editor_task_context_menu(self, block_number: int, anchor_pos):
+        panel = getattr(self.right_panel, "task_panel", None)
+        if panel is None or not self.current_path or self.editor.isReadOnly():
+            return None
+        lines = self.editor.to_markdown().splitlines()
+        if not 0 <= block_number < len(lines):
+            return None
+        parsed = indexer.extract_tasks(self.current_path, lines[block_number])
+        if not parsed:
+            return None
+        task = dict(parsed[0])
+        task.update(path=self.current_path, line=block_number + 1,
+                    id=f"{self.current_path}:{block_number + 1}")
+        targets = [{"path": task["path"], "line": task["line"], "task": task}]
+
+        def dispatch(command):
+            if self._dirty_flag or self.editor.document().isModified():
+                self._save_current_file(auto=True, reason="task context action", force=True,
+                                        allow_when_suspended=True)
+                if self._dirty_flag or self.editor.document().isModified():
+                    QMessageBox.warning(self, "Task update blocked", "Save the page before changing this task.")
+                    return
+            if command in ("edit", "tags", "move"):
+                field = {"tags": "tags", "move": "destination"}.get(command)
+                panel.edit_task(task, focus_field=field, parent=self, anchor_pos=anchor_pos)
+            elif command in ("due", "start"):
+                panel._open_task_date_quick_menu(command, targets, anchor_pos)
+            elif command == "undo":
+                panel._undo_last_mutation()
+            else:
+                if command == "delete" and QMessageBox.question(
+                    self, "Delete task?", "Delete the selected task?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                ) != QMessageBox.Yes:
+                    return
+                changes = {
+                    "complete": {"status": "done"}, "reopen": {"status": "todo"},
+                    "delete": {"delete": True}, "remove_indicators": {"remove_indicators": True},
+                }[command]
+                panel._apply_task_mutation([task], restore_list_focus=False, **changes)
+
+        return panel._build_task_context_menu(targets, dispatch=dispatch)
+
     def _edit_task_from_main_editor(self, block_number: int, anchor_pos) -> None:
         """Open the shared Task Editor for a task hovered in the main editor."""
         if not self.current_path:
@@ -25938,28 +25993,29 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_tree_nav_open_target"):
             self._tree_nav_open_target = None
 
-    def _rebuild_vault_index_from_disk(self) -> None:
+    def _rebuild_vault_index_from_disk(self, *, confirmed: bool = False, on_complete=None) -> None:
         """Drop and rebuild vault index from source files, preserving bookmarks/kv/ai tables."""
         if not self.vault_root:
             self._alert("Select a vault before rebuilding the index.")
             return
         if not self._ensure_writable("rebuild the vault index"):
             return
-        confirm = QMessageBox.question(
-            self,
-            "Reindex",
-            "Reindex vault from files?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
+        if not confirmed:
+            confirm = QMessageBox.question(
+                self,
+                "Reindex",
+                "Reindex vault from files?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
 
         self._search_sync.suspend("manual rebuild index")
         try:
             if self._remote_mode:
                 # Remote reindex via API
-                self._reindex_remote_vault(rebuild_search=False)
+                self._reindex_remote_vault(rebuild_search=False, on_complete=on_complete)
             else:
                 # Local reindex
                 if not config.has_active_vault():
@@ -26011,6 +26067,8 @@ class MainWindow(QMainWindow):
                     pass
                 self.statusBar().showMessage("Reindex complete", 4000)
                 print("[UI] Reindex from files complete")
+                if on_complete:
+                    on_complete()
         finally:
             self._search_sync.resume("manual rebuild index")
 

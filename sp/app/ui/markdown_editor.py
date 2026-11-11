@@ -5839,6 +5839,15 @@ class MarkdownEditor(QTextEdit):
         move_page = self._add_move_page_action(menu)
         return move_text is not None or move_page is not None
 
+    def _add_task_actions_menu(self, menu: QMenu, cursor: QTextCursor, anchor) -> None:
+        provider = getattr(self, "task_context_menu_provider", None)
+        if self.isReadOnly() or not provider or not self._is_task_line(cursor.block().text())[0]:
+            return
+        task_menu = provider(cursor.blockNumber(), anchor)
+        if task_menu is not None:
+            task_menu.setTitle("Task actions")
+            menu.addMenu(task_menu)
+
     def contextMenuEvent(self, event):  # type: ignore[override]
         self._last_context_menu_global_pos = event.globalPos()
         if self._context_menu_selection:
@@ -5911,6 +5920,7 @@ class MarkdownEditor(QTextEdit):
             ocr_action.triggered.connect(
                 lambda checked=False, image_pos=image_hit[0].position(): self.request_inline_image_ocr_at_position(image_pos)
             )
+            self._add_task_actions_menu(menu, click_cursor, event.globalPos())
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
             self._suppress_focus_lost_once = False
@@ -6015,6 +6025,7 @@ class MarkdownEditor(QTextEdit):
                 terminal_action = nav_sub.addAction("Open Terminal Here")
                 terminal_action.triggered.connect(self._open_terminal_here)
 
+            self._add_task_actions_menu(menu, click_cursor, event.globalPos())
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
             self._suppress_focus_lost_once = False
@@ -6095,6 +6106,7 @@ class MarkdownEditor(QTextEdit):
             terminal_action = nav_sub.addAction("Open Terminal Here")
             terminal_action.triggered.connect(self._open_terminal_here)
 
+            self._add_task_actions_menu(menu, click_cursor, event.globalPos())
             self._suppress_focus_lost_once = True
             menu.exec(event.globalPos())
             self._suppress_focus_lost_once = False

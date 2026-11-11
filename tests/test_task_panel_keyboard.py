@@ -409,3 +409,127 @@ def test_editor_tag_candidates_include_vault_wide_tags(qtbot) -> None:
     panel._nav_filter_prefix = "/Inside"
 
     assert panel._known_tags_for_editor() == ["inside", "outside", "work"]
+
+
+def test_completion_settles_without_rebuilding_or_resetting_scroll(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    panel.show_completed.setChecked(False)
+    task = _add_task(panel)
+    completed = panel.task_tree.currentItem()
+    _add_task(panel, line=4, text="Next task")
+    survivor = panel.task_tree.currentItem()
+    refreshes = []
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda: refreshes.append(True))
+    panel.task_tree.horizontalScrollBar().setRange(0, 500)
+    panel.task_tree.horizontalScrollBar().setValue(50)
+    panel._schedule_mutation_refresh(completion_only=True)
+    panel._apply_optimistic_task_changes([task], {"status": "done"})
+    assert completed.font(1).strikeOut()
+    panel._finish_mutation_grace()
+    assert refreshes == []
+    assert panel.task_tree.topLevelItemCount() == 1
+    assert panel.task_tree.currentItem() is survivor
+    assert panel.task_tree.horizontalScrollBar().value() == 50
+    assert panel._visible_tasks == [survivor.data(0, Qt.UserRole)]
+
+
+def test_completion_keeps_done_rows_when_shown(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    panel.show_completed.setChecked(True)
+    task = _add_task(panel)
+    item = panel.task_tree.currentItem()
+    refreshes = []
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda: refreshes.append(True))
+    panel._schedule_mutation_refresh(completion_only=True)
+    panel._apply_optimistic_task_changes([task], {"status": "done"})
+    panel._finish_mutation_grace()
+    assert refreshes == []
+    assert panel.task_tree.topLevelItem(0) is item
+    assert item.font(1).strikeOut()
+
+
+def test_completion_preserves_open_children(qtbot, monkeypatch) -> None:
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    panel.show_completed.setChecked(False)
+    task = _add_task(panel)
+    parent = panel.task_tree.currentItem()
+    child_task = _add_task(panel, line=4, text="Open child")
+    child = panel.task_tree.takeTopLevelItem(panel.task_tree.indexOfTopLevelItem(panel.task_tree.currentItem()))
+    parent.addChild(child)
+    monkeypatch.setattr(panel, "_refresh_tasks", lambda: None)
+    panel._schedule_mutation_refresh(completion_only=True)
+    panel._apply_optimistic_task_changes([task], {"status": "done"})
+    panel._finish_mutation_grace()
+    assert panel.task_tree.topLevelItem(0) is child
+    assert panel._visible_tasks == [child_task]
+
+
+def test_stale_task_error_offers_rebuild_once_with_readable_message(qtbot, monkeypatch) -> None:
+    import httpx
+    from PySide6.QtWidgets import QMessageBox
+
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    dialogs = []
+    requests = []
+    clicked = []
+
+    def accept_rebuild(dialog):
+        dialogs.append((dialog.text(), dialog.informativeText(), dialog.detailedText()))
+        button = next((b for b in dialog.buttons() if b.text() == "Rebuild index"), None)
+        clicked.append(button)
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", accept_rebuild)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: clicked[-1])
+    panel.indexRebuildRequested.connect(lambda: requests.append(True))
+    response = httpx.Response(400, request=httpx.Request("POST", "http://test/api/tasks/mutate"), json={
+        "detail": {
+            "message": "Task mutation blocked: Page files must share the same name as their parent folder.",
+            "exception": "FileAccessError",
+            "traceback": "Technical traceback",
+        }
+    })
+    error = httpx.HTTPStatusError("Bad request", request=response.request, response=response)
+    panel._show_mutation_error(error)
+    assert requests == [True]
+    assert "source has moved or changed" in dialogs[0][0]
+    assert "Technical traceback" not in dialogs[0][0]
+    assert "Technical traceback" in dialogs[0][2]
+    panel._show_mutation_error(error)
+    assert requests == [True]
+    assert "needs attention" in dialogs[1][0]
+
+
+def test_unrelated_task_error_does_not_offer_rebuild(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    dialogs = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda dialog: dialogs.append(dialog.text()) or 0)
+    panel._show_mutation_error(ValueError("Task text cannot be empty."))
+    assert dialogs == ["Task text cannot be empty."]
+    assert panel._index_recovery_offered is False
+
+
+def test_missing_task_source_can_cancel_recovery(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    offered = []
+    requests = []
+    def cancel(dialog):
+        offered.extend(button.text() for button in dialog.buttons())
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", cancel)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: None)
+    panel.indexRebuildRequested.connect(lambda: requests.append(True))
+    panel._show_mutation_error(FileNotFoundError("/missing/page.md"))
+    assert "Rebuild index" in offered
+    assert requests == []
+    assert panel._index_recovery_offered is False
