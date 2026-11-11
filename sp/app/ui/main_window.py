@@ -149,7 +149,7 @@ from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
 from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
-from sp.app import zim_import
+from sp.app import obsidian_import, zim_import
 from sp import VERSION as APP_VERSION
 
 _ONE_SHOT_PROMPT_CACHE: Optional[str] = None
@@ -3423,6 +3423,10 @@ class MainWindow(QMainWindow):
         zim_import_action.setToolTip("Import pages from a Zim wiki folder or .txt file")
         zim_import_action.triggered.connect(self._import_zim_wiki)
         import_menu.addAction(zim_import_action)
+        obsidian_import_action = QAction("Obsidian Vault…", self)
+        obsidian_import_action.setToolTip("Import notes and attachments from an Obsidian vault folder")
+        obsidian_import_action.triggered.connect(self._import_obsidian_vault)
+        import_menu.addAction(obsidian_import_action)
         new_page_action = QAction("New Page...", self)
         new_page_action.setToolTip("Create a new page in the current folder")
         new_page_action.triggered.connect(
@@ -3531,6 +3535,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self._action_process_quick_captures)
         self._action_view_vault_disk = view_vault_disk_action
         self._action_zim_import = zim_import_action
+        self._action_obsidian_import = obsidian_import_action
         self._action_rebuild_index = rebuild_index_action
         self._action_rebuild_search_index = rebuild_search_index_action
         self._action_webserver = webserver_action
@@ -3539,6 +3544,7 @@ class MainWindow(QMainWindow):
             self._action_view_vault_disk: self._action_view_vault_disk.toolTip(),
             self._action_open_vault_terminal: self._action_open_vault_terminal.toolTip(),
             self._action_zim_import: self._action_zim_import.toolTip(),
+            self._action_obsidian_import: self._action_obsidian_import.toolTip(),
             self._action_rebuild_index: self._action_rebuild_index.toolTip(),
             self._action_rebuild_search_index: self._action_rebuild_search_index.toolTip(),
             self._action_webserver: self._action_webserver.toolTip(),
@@ -6932,6 +6938,7 @@ class MainWindow(QMainWindow):
             (self._action_new_vault, "Create a new vault"),
             (self._action_view_vault_disk, "View vault on disk"),
             (self._action_zim_import, "Import from Zim"),
+            (self._action_obsidian_import, "Import from Obsidian"),
             (self._action_webserver, "Start web server"),
         ]
         for action, label in guarded:
@@ -24229,6 +24236,119 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message)
         else:
             self.statusBar().clearMessage()
+
+    # --- Obsidian import ---------------------------------------------
+
+    def _import_obsidian_vault(self) -> None:
+        if not self._require_local_mode("Import an Obsidian vault"):
+            return
+        if not self.vault_root or not config.has_active_vault():
+            self._alert("Select a vault before importing.")
+            return
+        if not self._ensure_writable("import pages"):
+            return
+        selected = QFileDialog.getExistingDirectory(self, "Select Obsidian vault folder")
+        if not selected:
+            return
+        target_folder = self._prompt_import_target_folder()
+        if target_folder is None:
+            return
+        root = Path(self.vault_root).resolve()
+        try:
+            plan = obsidian_import.plan_import(Path(selected), target_folder, root)
+        except Exception as exc:
+            self._alert(f"Cannot plan Obsidian import: {exc}")
+            return
+
+        details = plan.skipped + plan.warnings
+        preview = QMessageBox(self)
+        preview.setWindowTitle("Import Obsidian vault")
+        preview.setText(
+            f"Ready to import {len(plan.pages)} page(s) and {plan.attachment_count} attachment copy/copies.\n"
+            f"Skipped pages: {len(plan.skipped)}. Warnings: {len(plan.warnings)}."
+        )
+        if details:
+            preview.setDetailedText("\n".join(details))
+        if not plan.pages:
+            preview.setInformativeText("No importable Markdown notes found.")
+            preview.exec()
+            return
+        preview.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        preview.setDefaultButton(QMessageBox.Cancel)
+        if preview.exec() != QMessageBox.Ok:
+            return
+
+        total = len(plan.pages) + plan.attachment_count
+        progress = QProgressDialog("Importing Obsidian vault…", None, 0, total, self)
+        progress.setWindowTitle("Importing")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        imported = copied = steps = 0
+        failures: list[str] = []
+        try:
+            for page in plan.pages:
+                progress.setLabelText(
+                    f"Pages {imported}/{len(plan.pages)}, attachments {copied}/{plan.attachment_count} — "
+                    f"{page.rel_stem}"
+                )
+                QApplication.processEvents()
+                # Recheck after the preview so newly created files are not overwritten.
+                destination = root / page.dest_path.lstrip("/")
+                if not destination.resolve().is_relative_to(root):
+                    raise ValueError(f"Unsafe destination: {page.dest_path}")
+                if any(destination.with_suffix(ext).exists() for ext in PAGE_SUFFIXES):
+                    raise FileExistsError(f"Destination appeared after planning: {page.dest_path}")
+                for attachment in page.attachments:
+                    if (destination.parent / attachment.name).exists():
+                        raise FileExistsError(f"Attachment appeared after planning: {attachment.name}")
+                self._log_write("import page", page.dest_path, page.content, auto=None)
+                response = self.http.post("/api/file/write", json={"path": page.dest_path, "content": page.content})
+                response.raise_for_status()
+                imported += 1
+                steps += 1
+                progress.setValue(steps)
+                # Upload separately so completed-copy totals remain accurate on failure.
+                for attachment in page.attachments:
+                    progress.setLabelText(f"Copying {attachment.name} for {page.rel_stem}")
+                    QApplication.processEvents()
+                    with attachment.source.open("rb") as handle:
+                        response = self.http.post(
+                            "/files/attach", data={"page_path": page.dest_path},
+                            files=[("files", (attachment.name, handle, "application/octet-stream"))],
+                        )
+                        response.raise_for_status()
+                    copied += 1
+                    steps += 1
+                    progress.setValue(steps)
+        except Exception as exc:
+            failures.append(f"{page.rel_stem}: {exc}")
+        finally:
+            progress.close()
+            if imported:
+                self._populate_vault_tree()
+
+        summary = QMessageBox(self)
+        summary.setWindowTitle("Obsidian import stopped" if failures else "Obsidian import complete")
+        summary.setText(
+            f"Imported {imported}/{len(plan.pages)} page(s) and {copied}/{plan.attachment_count} attachment copies.\n"
+            f"Skipped pages: {len(plan.skipped)}. Failed operations: {len(failures)}. "
+            f"Warnings: {len(plan.warnings)}."
+        )
+        if details or failures:
+            summary.setDetailedText("\n".join(details + failures))
+        if imported:
+            summary.setInformativeText(
+                ("Imported pages were retained; some attachments may be missing.\n" if failures else "")
+                + "Would you like to reindex the vault?"
+            )
+            summary.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            summary.setDefaultButton(QMessageBox.No)
+        result = summary.exec()
+        self.statusBar().showMessage(f"Imported {imported} page(s) from Obsidian", 5000)
+        if imported and result == QMessageBox.Yes:
+            self._reindex_vault(show_progress=True)
 
     # --- Zim import --------------------------------------------------
 
