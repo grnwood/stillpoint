@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Optional
 
+from sp.server.adapters.files import PAGE_SUFFIX
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -189,7 +191,7 @@ class FolderTemplateDialog(QDialog):
         # Show preview of files
         txt_files = sorted(template_path.glob("*.txt"))
         for txt_file in txt_files:
-            self.preview_list.addItem(f"📄 {txt_file.stem}.txt")
+            self.preview_list.addItem(f"📄 {txt_file.stem}{PAGE_SUFFIX}")
         
         # Auto-suggest folder name from template name if input is empty
         if not self.folder_name_input.text():

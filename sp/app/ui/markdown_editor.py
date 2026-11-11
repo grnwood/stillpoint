@@ -3853,6 +3853,33 @@ class MarkdownEditor(QTextEdit):
         if self._toggle_task_marker(block):
             self._restore_cursor_position(initial_position)
 
+    def apply_task_status(self, block_number: int, status: str) -> bool:
+        """Reflect a persisted task change without replacing the document."""
+        from sp.app.task_mutations import rewrite_task_line
+
+        block = self.document().findBlockByNumber(block_number)
+        if not block.isValid() or not self._is_task_line(block.text())[0]:
+            return False
+        updated = self._to_display(rewrite_task_line(block.text(), status=status))
+        if updated == block.text():
+            return True
+        original = block.text()
+        start = 0
+        while start < min(len(original), len(updated)) and original[start] == updated[start]:
+            start += 1
+        end = 0
+        while end < min(len(original), len(updated)) - start and original[-end - 1] == updated[-end - 1]:
+            end += 1
+        selected = QTextCursor(self.textCursor())
+        scroll = self.verticalScrollBar().value()
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + start)
+        cursor.setPosition(block.position() + len(original) - end, QTextCursor.KeepAnchor)
+        cursor.insertText(updated[start:len(updated) - end])
+        self.setTextCursor(selected)
+        self.verticalScrollBar().setValue(scroll)
+        return True
+
     def insertFromMimeData(self, source: QMimeData) -> None:  # type: ignore[override]
         if self._read_only_mode or self.isReadOnly():
             return

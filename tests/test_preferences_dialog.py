@@ -5,6 +5,33 @@ from pathlib import Path
 from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QLabel, QMessageBox, QScrollArea
 
 
+def test_page_editor_toc_defaults_on_and_persists(monkeypatch, tmp_path):
+    from sp.app import config
+
+    monkeypatch.setattr(config, "GLOBAL_CONFIG", tmp_path / "preferences.json")
+    assert config.load_page_editor_toc_widget_enabled() is True
+    config.save_page_editor_toc_widget_enabled(False)
+    assert config.load_page_editor_toc_widget_enabled() is False
+    config.save_page_editor_toc_widget_enabled(True)
+    assert config.load_page_editor_toc_widget_enabled() is True
+
+
+def test_page_editor_toc_preference_follows_parent_checkbox(qtbot, monkeypatch, tmp_path):
+    from sp.app import config
+    from sp.app.ui.preferences_dialog import PreferencesDialog
+
+    monkeypatch.setattr(config, "GLOBAL_CONFIG", tmp_path / "preferences.json")
+    dialog = PreferencesDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.page_editor_toc_widget_checkbox.isChecked()
+    assert dialog.page_editor_toc_widget_checkbox.isEnabled()
+    dialog.toc_widget_checkbox.setChecked(False)
+    assert not dialog.page_editor_toc_widget_checkbox.isEnabled()
+    assert dialog.page_editor_toc_widget_checkbox.isChecked()
+    dialog.toc_widget_checkbox.setChecked(True)
+    assert dialog.page_editor_toc_widget_checkbox.isEnabled()
+
+
 def test_markdown_image_max_width_defaults_to_900_and_persists(monkeypatch, tmp_path) -> None:
     from sp.app import config
 

@@ -2898,6 +2898,15 @@ def save_toc_collapsed(collapsed: bool) -> None:
     _update_global_config({"toc_collapsed": bool(collapsed)})
 
 
+def load_page_editor_toc_collapsed() -> bool:
+    """Return the detached page editors' saved TOC folded state."""
+    return bool(_read_global_config().get("page_editor_toc_collapsed", False))
+
+
+def save_page_editor_toc_collapsed(collapsed: bool) -> None:
+    _update_global_config({"page_editor_toc_collapsed": bool(collapsed)})
+
+
 def load_toc_widget_enabled() -> bool:
     """Return whether the TOC widget should be enabled."""
     if not GLOBAL_CONFIG.exists():
@@ -2912,6 +2921,15 @@ def load_toc_widget_enabled() -> bool:
 def save_toc_widget_enabled(enabled: bool) -> None:
     """Persist the TOC widget enabled state."""
     _update_global_config({"toc_widget_enabled": bool(enabled)})
+
+
+def load_page_editor_toc_widget_enabled() -> bool:
+    """Return whether detached page editors show the floating TOC."""
+    return bool(_read_global_config().get("page_editor_toc_widget_enabled", True))
+
+
+def save_page_editor_toc_widget_enabled(enabled: bool) -> None:
+    _update_global_config({"page_editor_toc_widget_enabled": bool(enabled)})
 
 
 def get_page_hash(path: str) -> Optional[str]:

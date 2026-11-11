@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 import re
+import hashlib
 import traceback
 import httpx
 import sys
 
-from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint, QSize
+from PySide6.QtCore import QTimer, Qt, QByteArray, QObject, QEvent, QPoint, QSize, QPropertyAnimation
 from PySide6.QtGui import (
     QAction,
     QKeySequence,
@@ -39,11 +40,13 @@ from PySide6.QtCore import QSize
 
 from .find_replace_bar import FindReplaceBar
 from .markdown_editor import MarkdownEditor, MARKDOWN_IMAGE_WIDTH_OPTIONS
-from .keyboard_shortcuts import is_vi_navigation_chord
+from .keyboard_shortcuts import is_vi_navigation_chord, primary_modifier_label
+from .canvas_navigation import install_primary_wheel_zoom
 from .insert_link_dialog import InsertLinkDialog
 from .date_insert_dialog import DateInsertDialog
 from .page_load_logger import PageLoadLogger, PAGE_LOGGING_ENABLED
-from .path_utils import colon_to_path, path_to_colon, should_use_full_target_label, trace_link_decision
+from .path_utils import colon_to_path, path_to_colon, ensure_root_colon_link, should_use_full_target_label, trace_link_decision
+from .toc_widget import TableOfContentsWidget
 from .task_quick_editor import TaskQuickEditor
 from sp.app import config, indexer
 from sp.logging_flags import log_enabled
@@ -130,9 +133,11 @@ class PageEditorWindow(QMainWindow):
         self._font_size = config.load_popup_font_size(14)
 
         self.editor = MarkdownEditor()
+        install_primary_wheel_zoom(self.editor, self._adjust_font_size)
         # Custom context menu with Edit operations only
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self._show_editor_context_menu)
+        self.editor.task_context_menu_provider = self._task_context_menu
         self.editor.set_context(self.vault_root, self._source_path)
         self.editor.set_font_point_size(self._font_size)
         self.editor.set_vi_cursor_style(config.load_vi_cursor_style())
@@ -150,6 +155,9 @@ class PageEditorWindow(QMainWindow):
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
         self.editor.taskEditRequested.connect(self._edit_task_from_page_editor)
         self._task_editor: Optional[TaskQuickEditor] = None
+        self._task_undo_id: Optional[str] = None
+        self._task_status_undo = None
+        self._task_status_undo_content = None
         self._find_bar = FindReplaceBar(self)
         self._find_bar.findNextRequested.connect(self._on_find_next_requested)
         self._find_bar.replaceRequested.connect(self._on_replace_requested)
@@ -170,13 +178,16 @@ class PageEditorWindow(QMainWindow):
         self._vi_insert_active = False
 
         self._last_saved_content: Optional[str] = None
+        self._saved_disk_content: Optional[str] = None
+        self._saved_content_sha256: Optional[str] = None
+        self._refreshing_saved_state = False
         self._app_state_changed_slot = None
         self._inline_ai_worker = None
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.timeout.connect(lambda: self._save_current_file(auto=True, reason="autosave timer"))
-        self.editor.textChanged.connect(lambda: self._autosave_timer.start())
+        self.editor.textChanged.connect(self._on_buffer_changed)
         self.editor.document().modificationChanged.connect(lambda _: self._update_dirty_indicator())
         app = QApplication.instance()
         if app is not None:
@@ -188,6 +199,19 @@ class PageEditorWindow(QMainWindow):
         
         # Heading picker state
         self._toc_headings: list[dict] = []
+        self._toc_scroll_anim = None
+        self.toc_widget = TableOfContentsWidget(self)
+        self.toc_widget.set_headings([])
+        self.toc_widget.set_base_path(ensure_root_colon_link(path_to_colon(self._source_path)))
+        self.toc_widget.headingActivated.connect(self._toc_jump_to_position)
+        self.toc_widget.set_collapsed(config.load_page_editor_toc_collapsed())
+        self.toc_widget.collapsedChanged.connect(self._on_toc_collapsed_changed)
+        self.toc_widget.linkCopied.connect(lambda link: self.statusBar().showMessage(f"Copied link: {link}", 3000))
+        self.toc_widget.hide()
+        self.editor.viewportResized.connect(self._position_toc_widget)
+        self.editor.verticalScrollBar().valueChanged.connect(self._position_toc_widget)
+        self.editor.verticalScrollBar().rangeChanged.connect(self._position_toc_widget)
+        self._refresh_toc_preferences()
         self._popup_items: list = []
         self._popup_index: int = -1
         self._popup_mode: Optional[str] = None
@@ -245,12 +269,6 @@ class PageEditorWindow(QMainWindow):
         heading_action.triggered.connect(self._request_heading_picker_popup)
         self.addAction(heading_action)
 
-        link_action = QAction("Insert Link…", self)
-        link_action.triggered.connect(self._insert_link)
-        self._insert_link_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.editor)
-        self._insert_link_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        self._insert_link_shortcut.activated.connect(self._insert_link)
-
         date_action = QAction("Insert Date…", self)
         date_action.setShortcut(QKeySequence("Ctrl+D"))
         date_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
@@ -279,6 +297,9 @@ class PageEditorWindow(QMainWindow):
         self.addAction(action)
         if sys.platform == "darwin":
             file_menu = self.menuBar().addMenu("&File")
+            file_menu.addAction(self._save_action)
+            file_menu.addAction(self._reload_action)
+            file_menu.addSeparator()
             file_menu.addAction(action)
             # In a detached single-page editor, Cmd+Q means close this editor,
             # not terminate the parent StillPoint application. NoRole prevents
@@ -291,6 +312,8 @@ class PageEditorWindow(QMainWindow):
             self.addAction(close_editor_action)
             file_menu.addAction(close_editor_action)
             self._close_editor_quit_action = close_editor_action
+            edit_menu = self.menuBar().addMenu("&Edit")
+            edit_menu.addAction(self._insert_link_action)
         self._close_window_action = action
 
     @staticmethod
@@ -304,12 +327,13 @@ class PageEditorWindow(QMainWindow):
             return True
         return sys.platform == "darwin" and modifiers == Qt.MetaModifier
 
-    def _api_post(self, path: str, payload: dict) -> httpx.Response:
+    def _api_post(self, path: str, payload: dict, *, headers=None) -> httpx.Response:
         """POST with one remote re-auth retry on 401."""
-        resp = self.http.post(path, json=payload)
+        options = {"headers": headers} if headers else {}
+        resp = self.http.post(path, json=payload, **options)
         if resp.status_code == 401 and self._remote_mode and self._auth_prompt:
             if self._auth_prompt():
-                resp = self.http.post(path, json=payload)
+                resp = self.http.post(path, json=payload, **options)
         return resp
 
     def _api_get(self, path: str, *, params: Optional[dict] = None) -> httpx.Response:
@@ -374,14 +398,160 @@ class PageEditorWindow(QMainWindow):
                 pass
         return message
 
-    def _edit_task_from_page_editor(self, block_number: int, anchor_pos) -> None:
+    def _prepare_task_action(self) -> bool:
+        if self._read_only or self.editor.isReadOnly():
+            return False
+        if self._is_dirty():
+            self._save_current_file(auto=True, reason="task context action", notify_main=False)
+        if self._is_dirty():
+            QMessageBox.warning(self, "Task update blocked", "Save the page before changing this task.")
+            return False
+        return True
+
+    def _task_context_menu(self, block_number: int, anchor_pos):
+        from .task_context_menu import build_task_context_menu
+
+        if self._read_only or self.editor.isReadOnly():
+            return None
+        lines = self.editor.to_markdown().splitlines()
+        if not 0 <= block_number < len(lines):
+            return None
+        parsed = indexer.extract_tasks(self._source_path, lines[block_number])
+        if not parsed:
+            return None
+        task = dict(parsed[0], path=self._source_path, line=block_number + 1,
+                    id=f"{self._source_path}:{block_number + 1}")
+
+        def dispatch(command):
+            if not self._prepare_task_action():
+                return
+            if command in ("edit", "tags", "move"):
+                self._edit_task_from_page_editor(
+                    block_number, anchor_pos,
+                    focus_field={"tags": "tags", "move": "destination"}.get(command),
+                )
+            elif command in ("due", "start"):
+                self._show_task_date_menu(task, command, anchor_pos)
+            elif command == "undo":
+                self._undo_task_action()
+            else:
+                if command == "delete" and QMessageBox.question(
+                    self, "Delete task?", "Delete the selected task?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                ) != QMessageBox.Yes:
+                    return
+                changes = {
+                    "complete": {"status": "done"}, "reopen": {"status": "todo"},
+                    "delete": {"delete": True}, "remove_indicators": {"remove_indicators": True},
+                }[command]
+                self._mutate_task_from_page_editor(task, changes)
+
+        return build_task_context_menu(
+            self, [{"task": task}], dispatch, undo_available=bool(self._task_undo_id),
+            theme_anchor=self.editor,
+        )
+
+    def _show_task_date_menu(self, task: dict, role: str, anchor_pos) -> None:
+        from .task_panel import TaskDateQuickMenu, TaskPanel
+
+        menu = TaskDateQuickMenu(self, use_vi_keys=bool(self._vi_enabled))
+        apply_menu_theme(menu, self.editor)
+        for label in ("Today", "Tomorrow", "Yesterday", "This Week", "Next Week",
+                      "End of Week", "This Weekend", "Next Weekend"):
+            if label == "This Week":
+                menu.addSeparator()
+            menu.addAction(label).triggered.connect(
+                lambda checked=False, value=label: self._mutate_task_from_page_editor(
+                    task, {role: TaskPanel._resolve_quick_date(value, role)},
+                )
+            )
+        menu.addSeparator()
+
+        def pick_date():
+            dialog = DateInsertDialog(self, anchor_pos=anchor_pos)
+            dialog.setWindowModality(Qt.WindowModal)
+            if dialog.exec() == QDialog.Accepted:
+                self._mutate_task_from_page_editor(task, {role: dialog.selected_date_text()})
+
+        menu.addAction("Date...").triggered.connect(pick_date)
+        if task.get("starts" if role == "start" else "due") or task.get(role):
+            menu.addSeparator()
+            menu.addAction("Clear Date").triggered.connect(
+                lambda: self._mutate_task_from_page_editor(task, {role: ""})
+            )
+        menu.exec(anchor_pos)
+
+    def _finish_task_action(self, *, inline_status=None, persisted_content=None) -> None:
+        if inline_status is not None and self.editor.apply_task_status(*inline_status):
+            from sp.app.task_mutations import rewrite_task_line
+
+            lines = (self._saved_disk_content or self._last_saved_content or "").splitlines(keepends=True)
+            if persisted_content is not None:
+                self._remember_saved_state(persisted_content)
+            elif 0 <= inline_status[0] < len(lines):
+                lines[inline_status[0]] = rewrite_task_line(lines[inline_status[0]], status=inline_status[1])
+                self._remember_saved_state("".join(lines))
+            else:
+                self._remember_saved_state(self.editor.to_markdown())
+        else:
+            self._load_content()
+            try:
+                self._open_in_main(self._source_path, force=True, refresh_only=True)
+            except Exception:
+                pass
+        self._update_dirty_indicator()
+        self.statusBar().showMessage("Task updated", 3000)
+
+    def _mutate_task_from_page_editor(self, task: dict, changes: dict) -> bool:
+        if not self._prepare_task_action():
+            return False
+        payload = {"targets": [{
+            "path": self._source_path, "line": task["line"],
+            "expected_text": str(task.get("text") or ""),
+            "expected_status": str(task.get("status") or "todo"),
+        }], **changes}
+        try:
+            response = self._api_post("/api/tasks/mutate", payload)
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            QMessageBox.warning(self, "Task update blocked", self._task_mutation_error(exc))
+            return False
+        self._task_undo_id = result.get("undo_id")
+        status_only = set(changes) == {"status"}
+        self._task_status_undo = (task["line"] - 1, task["status"]) if status_only else None
+        self._task_status_undo_content = (
+            self._saved_disk_content if self._saved_disk_content is not None else self._last_saved_content
+        ) if status_only else None
+        self._finish_task_action(
+            inline_status=(task["line"] - 1, changes["status"]) if status_only else None,
+        )
+        return True
+
+    def _undo_task_action(self) -> None:
+        if not self._task_undo_id or not self._prepare_task_action():
+            return
+        try:
+            response = self._api_post(f"/api/tasks/undo/{self._task_undo_id}", {})
+            response.raise_for_status()
+        except Exception as exc:
+            QMessageBox.warning(self, "Task update blocked", self._task_mutation_error(exc))
+            return
+        previous_status = self._task_status_undo
+        previous_content = self._task_status_undo_content
+        self._task_undo_id = None
+        self._task_status_undo = None
+        self._task_status_undo_content = None
+        self._finish_task_action(inline_status=previous_status, persisted_content=previous_content)
+
+    def _edit_task_from_page_editor(self, block_number: int, anchor_pos, *, focus_field=None) -> None:
         """Edit one task using state and network ownership local to this window."""
         if self._read_only:
             QMessageBox.information(self, "Edit Task", "Cannot edit tasks while this window is read-only.")
             return
 
         if self._is_dirty():
-            self._save_current_file(auto=True, reason="edit inline task")
+            self._save_current_file(auto=True, reason="edit inline task", notify_main=False)
             if self._is_dirty():
                 QMessageBox.warning(self, "Edit Task", "Save the page before editing this task.")
                 return
@@ -405,6 +575,7 @@ class PageEditorWindow(QMainWindow):
         dialog = TaskQuickEditor(
             task,
             self,
+            focus_field=focus_field,
             known_tags=self._task_editor_known_tags(),
             page_search=self._task_destination_pages,
             anchor_pos=anchor_pos if isinstance(anchor_pos, QPoint) else None,
@@ -427,15 +598,7 @@ class PageEditorWindow(QMainWindow):
             self.editor.pop_focus_lost_suppression()
             self._task_editor = None
 
-        payload = {
-            "targets": [
-                {
-                    "path": self._source_path,
-                    "line": line_index + 1,
-                    "expected_text": str(task.get("text") or ""),
-                    "expected_status": str(task.get("status") or "todo"),
-                }
-            ],
+        changes = {
             "text": values["text"],
             "status": values["status"],
             "priority": values["priority"],
@@ -444,23 +607,13 @@ class PageEditorWindow(QMainWindow):
             "due": values["due"],
             "destination": self._normalize_task_destination(values.get("destination")),
         }
-        try:
-            response = self._api_post("/api/tasks/mutate", payload)
-            response.raise_for_status()
-            response.json()
-        except Exception as exc:
-            QMessageBox.warning(self, "Task update blocked", self._task_mutation_error(exc))
+        if not self._mutate_task_from_page_editor(task, changes):
             return
 
-        self._load_content()
         block = self.editor.document().findBlockByNumber(line_index)
         if block.isValid():
             self.editor.setTextCursor(QTextCursor(block))
             self.editor.ensureCursorVisible()
-        try:
-            self._open_in_main(self._source_path, force=True, refresh_only=True)
-        except Exception:
-            pass
         self.statusBar().showMessage("Task updated", 3000)
         QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
@@ -636,10 +789,12 @@ class PageEditorWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         toolbar.setIconSize(QSize(16, 16))
         assets_root = Path(__file__).resolve().parents[2] / "assets"
+        modifier = primary_modifier_label()
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence.Save)
-        save_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        save_action.setToolTip("Save (Ctrl+S)")
+        save_action.setShortcutContext(Qt.WindowShortcut)
+        save_action.setToolTip(f"Save ({modifier}+S)")
+        self._save_action = save_action
         save_icon_path = assets_root / "save.svg"
         if save_icon_path.exists():
             icon = self._load_tinted_icon(save_icon_path, size=16)
@@ -651,8 +806,9 @@ class PageEditorWindow(QMainWindow):
 
         reload_action = QAction("Reload", self)
         reload_action.setShortcut(QKeySequence("Ctrl+R"))
-        reload_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        reload_action.setToolTip("Reload current page (Ctrl+R)")
+        reload_action.setShortcutContext(Qt.WindowShortcut)
+        reload_action.setToolTip(f"Reload current page ({modifier}+R)")
+        self._reload_action = reload_action
         reload_icon_path = assets_root / "reload.svg"
         if reload_icon_path.exists():
             icon = self._load_tinted_icon(reload_icon_path, size=16)
@@ -663,7 +819,10 @@ class PageEditorWindow(QMainWindow):
         self.addAction(reload_action)
 
         insert_link_action = QAction("Insert Link…", self)
-        insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
+        insert_link_action.setShortcut(QKeySequence("Ctrl+L"))
+        insert_link_action.setShortcutContext(Qt.WindowShortcut)
+        self._insert_link_action = insert_link_action
+        insert_link_action.setToolTip(f"Insert a link to another page ({modifier}+L)")
         link_icon_path = assets_root / "link.svg"
         if link_icon_path.exists():
             icon = self._load_tinted_icon(link_icon_path, size=16)
@@ -671,6 +830,7 @@ class PageEditorWindow(QMainWindow):
                 insert_link_action.setIcon(icon)
         insert_link_action.triggered.connect(self._insert_link)
         toolbar.addAction(insert_link_action)
+        self.addAction(insert_link_action)
         toolbar.addSeparator()
         ai_action = QAction("AI Assist...", self)
         ai_action.setToolTip("AI assist (one-shot)")
@@ -682,10 +842,10 @@ class PageEditorWindow(QMainWindow):
         ai_action.triggered.connect(self._open_ai_assist)
         toolbar.addAction(ai_action)
         font_up = QAction("A+", self)
-        font_up.setToolTip("Increase font size")
+        font_up.setToolTip(f"Increase font size ({modifier}++ or {modifier}+mouse wheel)")
         font_up.triggered.connect(lambda: self._adjust_font_size(1))
         font_down = QAction("A-", self)
-        font_down.setToolTip("Decrease font size")
+        font_down.setToolTip(f"Decrease font size ({modifier}+- or {modifier}+mouse wheel)")
         font_down.triggered.connect(lambda: self._adjust_font_size(-1))
         toolbar.addAction(font_down)
         toolbar.addAction(font_up)
@@ -737,8 +897,7 @@ class PageEditorWindow(QMainWindow):
             self.editor.set_markdown(content)
             if tracer:
                 tracer.mark("editor content applied")
-            self.editor.document().setModified(False)
-            self._last_saved_content = content
+            self._remember_saved_state(content)
             self.statusBar().showMessage("Ready")
             if tracer:
                 tracer.end("ready for edit (popup)")
@@ -763,6 +922,58 @@ class PageEditorWindow(QMainWindow):
         current = self.editor.to_markdown()
         return current != (self._last_saved_content or "")
 
+    def _on_buffer_changed(self) -> None:
+        self._update_dirty_indicator()
+        self._autosave_timer.start()
+
+    def _remember_saved_state(self, content: str) -> None:
+        self._saved_disk_content = content
+        self._saved_content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        self._last_saved_content = self.editor.to_markdown()
+        self.editor.document().setModified(False)
+        self._autosave_timer.stop()
+        self._update_dirty_indicator()
+
+    def _refresh_saved_state(self) -> None:
+        """Refresh a clean buffer on activation; preserve unsaved local edits."""
+        if self._refreshing_saved_state or self._saved_content_sha256 is None or self.property("_sp_closing"):
+            return
+        self._refreshing_saved_state = True
+        try:
+            response = self._api_post("/api/file/read", {"path": self._source_path})
+            response.raise_for_status()
+            content = response.json()["content"]
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if digest == self._saved_content_sha256:
+                self._update_dirty_indicator()
+                return
+            if self._is_dirty() and content != self.editor.to_markdown():
+                self.statusBar().showMessage("This page changed in another window. Your unsaved edits are preserved; save to compare changes.")
+                return
+            cursor = self.editor.textCursor()
+            position, anchor = cursor.position(), cursor.anchor()
+            scroll = self.editor.verticalScrollBar().value()
+            if content != self.editor.to_markdown():
+                self.editor.set_markdown(content)
+                cursor = self.editor.textCursor()
+                limit = self.editor.document().characterCount() - 1
+                cursor.setPosition(min(anchor, limit))
+                cursor.setPosition(min(position, limit), QTextCursor.KeepAnchor)
+                self.editor.setTextCursor(cursor)
+                self.editor.verticalScrollBar().setValue(scroll)
+            self._remember_saved_state(content)
+            self.statusBar().showMessage("Up to date · All changes saved", 3000)
+        except httpx.HTTPError as exc:
+            self.statusBar().showMessage(f"Could not check the saved page: {exc}", 5000)
+        finally:
+            self._refreshing_saved_state = False
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() == QEvent.WindowActivate and getattr(self, "_saved_content_sha256", None) is not None:
+            QTimer.singleShot(0, self._refresh_saved_state)
+        return result
+
     def _ensure_writable(self, auto: bool) -> bool:
         if not self._read_only:
             return True
@@ -775,7 +986,7 @@ class PageEditorWindow(QMainWindow):
         )
         return False
 
-    def _save_current_file(self, auto: bool = False, reason: str = "save") -> None:
+    def _save_current_file(self, auto: bool = False, reason: str = "save", *, notify_main: bool = True) -> None:
         if not self._is_dirty():
             return
         if not self._ensure_writable(auto):
@@ -801,7 +1012,27 @@ class PageEditorWindow(QMainWindow):
             f"bytes={payload_bytes}"
         )
         try:
-            resp = self._api_post("/api/file/write", payload)
+            headers = {"If-Match": f"sha256:{self._saved_content_sha256}"} if self._saved_content_sha256 else None
+            resp = self._api_post("/api/file/write", payload, headers=headers) if headers else self._api_post("/api/file/write", payload)
+            if resp.status_code == 409:
+                detail = resp.json().get("detail", {})
+                remote_content = detail.get("current_content") if isinstance(detail, dict) else None
+                if remote_content == payload["content"]:
+                    self._remember_saved_state(remote_content)
+                    self.statusBar().showMessage("All changes saved", 3000)
+                    return
+                if auto or remote_content is None:
+                    self.statusBar().showMessage("Save paused: the page changed in another window. Your edits are preserved; save to compare changes.")
+                    return
+                from .merge_conflict_dialog import MergeConflictDialog
+
+                dialog = MergeConflictDialog(payload["content"], remote_content, self._source_path, parent=self)
+                dialog.setWindowModality(Qt.WindowModal)
+                if dialog.exec() != QDialog.Accepted or dialog.merged_text() is None:
+                    return
+                payload["content"] = dialog.merged_text()
+                digest = hashlib.sha256(remote_content.encode("utf-8")).hexdigest()
+                resp = self._api_post("/api/file/write", payload, headers={"If-Match": f"sha256:{digest}"})
             resp.raise_for_status()
             _page_editor_log(f"[StillPoint Popup] Write OK {self._source_path} status={resp.status_code}")
         except httpx.HTTPError as exc:
@@ -814,15 +1045,13 @@ class PageEditorWindow(QMainWindow):
             if not auto:
                 QMessageBox.critical(self, "Save Failed", f"Failed to save: {exc}")
             return
-        self._last_saved_content = payload["content"]
-        try:
-            self.editor.document().setModified(False)
-        except Exception:
-            pass
+        if payload["content"] != self.editor.to_markdown():
+            self.editor.set_markdown(payload["content"])
+        self._remember_saved_state(payload["content"])
         self.statusBar().showMessage("Saved", 2000)
         # Notify parent/main window to refresh if editing the same page
         try:
-            if hasattr(self._open_in_main, "__call__"):
+            if notify_main and hasattr(self._open_in_main, "__call__"):
                 self._open_in_main(self._source_path, force=True, refresh_only=True)
         except Exception:
             pass
@@ -847,6 +1076,8 @@ class PageEditorWindow(QMainWindow):
         _page_editor_log(f"[StillPoint Popup] Reload request path={self._source_path}")
         if self._is_dirty():
             self._save_current_file(auto=True, reason="reload")
+            if self._is_dirty():
+                return
         self._load_content()
         self.statusBar().showMessage("Reloaded current page", 2000)
 
@@ -1142,6 +1373,9 @@ class PageEditorWindow(QMainWindow):
             pass
 
         click_cursor = self.editor.cursorForPosition(pos)
+        self.editor._add_task_actions_menu(
+            base_menu, click_cursor, self.editor.viewport().mapToGlobal(pos),
+        )
         heading_text = None
         try:
             heading_text = self.editor._heading_text_for_cursor(click_cursor)
@@ -1175,6 +1409,7 @@ class PageEditorWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._position_toc_widget()
         if hasattr(self, "_geometry_timer"):
             self._geometry_timer.start()
 
@@ -1188,6 +1423,74 @@ class PageEditorWindow(QMainWindow):
         self._toc_headings = list(headings or [])
         _page_editor_log(f"[PageEditor] Headings changed: {len(self._toc_headings)} headings")
         self._update_title()
+        self._update_toc_visibility(force=True)
+        self._position_toc_widget()
+
+    def _refresh_toc_preferences(self) -> None:
+        self.toc_widget.set_vault_accent_color(config.load_vault_accent_color())
+        self._update_toc_visibility(force=True)
+        self._position_toc_widget()
+
+    def _on_toc_collapsed_changed(self, collapsed: bool) -> None:
+        config.save_page_editor_toc_collapsed(collapsed)
+        self._position_toc_widget()
+
+    def _update_toc_visibility(self, force: bool = False) -> None:
+        widget = getattr(self, "toc_widget", None)
+        if widget is None:
+            return
+        enabled = config.load_toc_widget_enabled() and config.load_page_editor_toc_widget_enabled()
+        scrollable = self.editor.verticalScrollBar().maximum() > 0
+        if not enabled or not scrollable or len(self._toc_headings) <= 1:
+            widget.hide()
+            return
+        if force or not widget.isVisible():
+            widget.set_headings(self._toc_headings)
+            widget.show()
+
+    def _position_toc_widget(self, *args) -> None:
+        widget = getattr(self, "toc_widget", None)
+        if widget is None:
+            return
+        self._update_toc_visibility()
+        viewport = self.editor.viewport()
+        top_left = self.mapFromGlobal(viewport.mapToGlobal(viewport.rect().topLeft()))
+        widget.move(max(12, top_left.x() + viewport.width() - widget.width() - 12), max(12, top_left.y() + 12))
+        widget.raise_()
+
+    def _toc_jump_to_position(self, position: int) -> None:
+        if self._toc_scroll_anim is not None:
+            self._toc_scroll_anim.stop()
+            self._toc_scroll_anim.deleteLater()
+            self._toc_scroll_anim = None
+        cursor = QTextCursor(self.editor.document())
+        cursor.setPosition(max(0, min(position, self.editor.document().characterCount() - 1)))
+        self.editor.setTextCursor(cursor)
+        scrollbar = self.editor.verticalScrollBar()
+        target = scrollbar.value() + self.editor.cursorRect(cursor).top() - int(self.editor.viewport().height() * 0.25)
+        target = max(0, min(target, scrollbar.maximum()))
+        load_token = self.editor.current_load_token()
+
+        def finish():
+            if self.editor.current_load_token() != load_token:
+                return
+            self.editor.setTextCursor(cursor)
+            self.editor.ensureCursorVisible()
+            self._flash_heading(cursor)
+            self.editor.setFocus(Qt.OtherFocusReason)
+
+        delta = abs(target - scrollbar.value())
+        if delta <= 2:
+            scrollbar.setValue(target)
+            finish()
+            return
+        animation = QPropertyAnimation(scrollbar, b"value", self)
+        animation.setDuration(min(150, max(60, delta)))
+        animation.setStartValue(scrollbar.value())
+        animation.setEndValue(target)
+        animation.finished.connect(finish)
+        self._toc_scroll_anim = animation
+        animation.start()
 
     def _first_h1_title(self) -> Optional[str]:
         for heading in self._toc_headings:
@@ -1579,7 +1882,8 @@ class PageEditorWindow(QMainWindow):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = cursor
             sel.cursor.clearSelection()
-            sel.format.setBackground(theme_color("page_editor_window.highlight.selection_bg", "#ffd54f"))
+            highlight = config.load_vault_accent_color() or theme_value("main_window.highlight.selection_bg", "#ffd54f")
+            sel.format.setBackground(QColor(highlight))
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.format.setProperty(QTextFormat.UserProperty, 9991)
             current = self.editor.extraSelections()
@@ -1803,6 +2107,12 @@ class PageEditorWindow(QMainWindow):
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Handle Ctrl key release to activate heading popup selection."""
         if event.type() == QEvent.ShortcutOverride:
+            if event.key() == Qt.Key_L and (event.modifiers() & ~Qt.KeypadModifier) == Qt.ControlModifier:
+                event.accept()
+                return True
+            if event.matches(QKeySequence.Save):
+                event.accept()
+                return True
             if self._is_close_window_key(event):
                 event.accept()
                 return True
@@ -1810,6 +2120,14 @@ class PageEditorWindow(QMainWindow):
                 event.accept()
                 return True
         if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_L and (event.modifiers() & ~Qt.KeypadModifier) == Qt.ControlModifier:
+                self._insert_link_action.trigger()
+                event.accept()
+                return True
+            if event.matches(QKeySequence.Save):
+                self._save_action.trigger()
+                event.accept()
+                return True
             if self._is_close_window_key(event):
                 self.close()
                 event.accept()
@@ -1825,16 +2143,21 @@ class PageEditorWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if not self._read_only:
+            self._save_current_file(auto=False, reason="window close")
+        if not self._read_only and self._is_dirty():
+            event.ignore()
+            return
         # Mark as closing before save/network work so child editor paintEvent can
         # bail out during shutdown transitions.
         self.setProperty("_sp_closing", True)
+        if self._toc_scroll_anim is not None:
+            self._toc_scroll_anim.stop()
         try:
             if getattr(self, "editor", None):
                 self.editor.prepare_for_shutdown()
         except Exception:
             pass
-        # Autosave on close if dirty and writable
-        self._save_current_file(auto=False, reason="window close")
         self._save_geometry()
         try:
             app = QApplication.instance()

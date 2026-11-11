@@ -7,6 +7,11 @@ import platform
 from PySide6.QtCore import Qt
 
 
+def primary_modifier_label() -> str:
+    """Name the primary shortcut modifier without Qt's macOS Ctrl/Cmd swap."""
+    return "Cmd" if platform.system() == "Darwin" else "Ctrl"
+
+
 def vi_navigation_sequences() -> tuple[str, str]:
     """Return the forward and backward vi navigation shortcut sequences."""
     if platform.system() == "Darwin":

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QSizePolicy,
     QTextEdit,
     QToolButton,
@@ -162,8 +163,14 @@ class ModeWindow(QMainWindow):
         initial_cursor: Optional[int] = None,
         parent=None,
     ) -> None:
-        super().__init__(parent)
-        
+        # Keep the owner for callbacks without making it a native/transient
+        # parent. On macOS, activating an owned mode window can also bring the
+        # main window forward on another display.
+        super().__init__(None)
+        self._owner = parent
+        if parent is not None:
+            self.setScreen(parent.screen())
+
         # Set window icon explicitly (especially important on Windows)
         from sp.app.main import get_app_icon
         self.setWindowIcon(get_app_icon())
@@ -246,7 +253,9 @@ class ModeWindow(QMainWindow):
             pass
         QTimer.singleShot(0, lambda: self._flash_cursor_line(self.editor))
 
-        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        # Fullscreen hides the native frame itself. Changing decoration flags
+        # during a macOS fullscreen transition can leave the title bar clipped.
+        self.setWindowFlag(Qt.FramelessWindowHint, False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
         self.setWindowModality(Qt.NonModal)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -261,7 +270,6 @@ class ModeWindow(QMainWindow):
         self.installEventFilter(self)
         
         QTimer.singleShot(0, self.showFullScreen)
-        QTimer.singleShot(0, lambda: self._set_window_button_icon("minimize.svg"))
         QTimer.singleShot(0, self._mark_ready)
 
     # ------------------------------------------------------------------ UI
@@ -303,7 +311,7 @@ class ModeWindow(QMainWindow):
             f"{theme_value('mode_window.vi_badge.active_bg', '#ffd54d')}; color: "
             f"{theme_value('mode_window.vi_badge.active_text', '#000000')};"
         )
-        self._window_button = self._build_window_button("maximize.svg", "Toggle windowed/fullscreen")
+        self._window_button = self._build_window_button("minimize.svg", "Exit full screen")
         if self._window_button:
             self._window_button.clicked.connect(self._toggle_window_mode)
             header.addWidget(self._window_button, 0, Qt.AlignRight | Qt.AlignVCenter)
@@ -374,6 +382,7 @@ class ModeWindow(QMainWindow):
         # Custom context menu with Edit operations only
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self._show_editor_context_menu)
+        self.editor.task_context_menu_provider = self._task_context_menu
         self.editor.viewport().installEventFilter(self)
         self.editor.cursorPositionChanged.connect(self._on_cursor_moved)
         self.editor.textChanged.connect(self._on_editor_text_changed)
@@ -561,7 +570,7 @@ class ModeWindow(QMainWindow):
     def _wire_shortcuts(self) -> None:
         def _add_shortcut(seq: QKeySequence | Qt.Key, handler) -> QShortcut:
             sc = QShortcut(QKeySequence(seq), self)
-            sc.setContext(Qt.ApplicationShortcut)
+            sc.setContext(Qt.WindowShortcut)
             sc.setEnabled(False)  # Enabled once overlay reports ready
             sc.activated.connect(handler)
             self._shortcuts.append(sc)
@@ -794,21 +803,22 @@ class ModeWindow(QMainWindow):
             pass
 
     def _toggle_window_mode(self) -> None:
-        try:
-            if self._windowed:
-                self._windowed = False
-                self.setWindowFlag(Qt.FramelessWindowHint, True)
-                self.show()  # Apply flag change before fullscreen
-                self.showFullScreen()
-                self._set_window_button_icon("minimize.svg")
-            else:
-                self._windowed = True
-                self.setWindowFlag(Qt.FramelessWindowHint, False)
-                self.show()  # Apply flag change before windowed
-                self.showNormal()
-                self._set_window_button_icon("maximize.svg")
-        except Exception:
-            pass
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() != QEvent.WindowStateChange or not hasattr(self, "_window_button"):
+            return
+        # Also follow native macOS green-button / Escape transitions. Minimize
+        # preserves the state to return to when the window is restored.
+        if not self.isMinimized():
+            self._windowed = not self.isFullScreen()
+            if self._window_button is not None:
+                self._window_button.setToolTip("Enter full screen" if self._windowed else "Exit full screen")
+                self._set_window_button_icon("maximize.svg" if self._windowed else "minimize.svg")
 
     def _set_window_button_icon(self, icon_name: str) -> None:
         if not hasattr(self, "_window_button") or not self._window_button:
@@ -1079,13 +1089,83 @@ class ModeWindow(QMainWindow):
         except Exception:
             pass
 
+        anchor = self.editor.viewport().mapToGlobal(pos)
+        self.editor._add_task_actions_menu(
+            base_menu, self.editor.cursorForPosition(pos), anchor,
+        )
+
         ai_action = QAction("AI assist...", self)
         ai_action.triggered.connect(self._open_ai_assist)
         base_menu.addSeparator()
         base_menu.addAction(ai_action)
         
         # Show the menu
-        base_menu.exec(self.editor.mapToGlobal(pos))
+        base_menu.exec(anchor)
+
+    def _task_context_menu(self, block_number: int, anchor_pos):
+        owner = self._owner
+        if owner is None or not hasattr(owner, "_main_editor_task_context_menu"):
+            return None
+        return owner._main_editor_task_context_menu(
+            block_number, anchor_pos, editor=self.editor, page_path=self._page_path,
+            parent=self, prepare=self._save_task_buffer,
+        )
+
+    def _save_task_buffer(self) -> bool:
+        """Persist the visible buffer before the shared task service changes it."""
+        owner = self._owner
+        if self._read_only or owner is None or owner.current_path != self._page_path:
+            return False
+        markdown = self.editor.to_markdown()
+        if self._base_editor.to_markdown() != markdown:
+            self._base_editor.set_markdown(markdown)
+            self._base_editor.document().setModified(True)
+        if owner._dirty_flag or self._base_editor.document().isModified():
+            owner._save_current_file(
+                auto=True, reason="mode task context action", force=True,
+                allow_when_suspended=True,
+            )
+        if owner._dirty_flag or self._base_editor.document().isModified():
+            QMessageBox.warning(self, "Task update blocked", "Save the page before changing this task.")
+            return False
+        return True
+
+    def _reload_after_task_mutation(self) -> None:
+        """Refresh both buffers without closing or activating another window."""
+        owner = self._owner
+        if owner is None or owner.current_path != self._page_path:
+            return
+        try:
+            response = owner.http.post("/api/file/read", json={"path": self._page_path})
+            response.raise_for_status()
+            payload = response.json()
+            content = payload["content"]
+        except Exception as exc:
+            QMessageBox.warning(self, "Task refresh failed", str(exc))
+            return
+        suspended = owner._suspend_autosave
+        owner._suspend_autosave = True
+        try:
+            for editor in (self._base_editor, self.editor):
+                cursor = editor.textCursor()
+                position, anchor = cursor.position(), cursor.anchor()
+                scroll = editor.verticalScrollBar().value()
+                editor.set_markdown(content)
+                cursor = editor.textCursor()
+                limit = editor.document().characterCount() - 1
+                cursor.setPosition(min(anchor, limit))
+                cursor.setPosition(min(position, limit), QTextCursor.KeepAnchor)
+                editor.setTextCursor(cursor)
+                editor.verticalScrollBar().setValue(scroll)
+                editor.document().setModified(False)
+            owner._update_page_revision(self._page_path, payload)
+            owner._last_saved_content = self._base_editor.to_markdown()
+            owner._dirty_flag = False
+            self._overlay_initial_markdown = self.editor.to_markdown()
+            self._base_markdown_on_open = self._overlay_initial_markdown
+            self._base_doc_was_modified = False
+        finally:
+            owner._suspend_autosave = suspended
 
     # ------------------------------------------------------------------ Events
     def resizeEvent(self, event):  # type: ignore[override]
@@ -1837,7 +1917,7 @@ class ModeWindow(QMainWindow):
                 self._status_message(f"Inserted date: {text}", 3000)
 
     def _status_message(self, msg: str, duration: int = 2000) -> None:
-        parent = self.parent()
+        parent = self._owner
         try:
             if parent and hasattr(parent, "statusBar"):
                 parent.statusBar().showMessage(msg, duration)
@@ -1845,7 +1925,7 @@ class ModeWindow(QMainWindow):
             pass
 
     def _alert_parent(self, msg: str) -> None:
-        parent = self.parent()
+        parent = self._owner
         try:
             if parent and hasattr(parent, "_alert"):
                 parent._alert(msg)

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+from datetime import date
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QDialog
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import QDialog, QMenu, QMessageBox
 
 from sp.app.ui import page_editor_window as page_editor_module
 from sp.app.ui.page_editor_window import PageEditorWindow
@@ -119,3 +124,158 @@ def test_page_editor_owns_inline_task_editor_and_mutation(qtbot, monkeypatch) ->
     assert refreshed_main == [
         ("/Page/Page.md", {"force": True, "refresh_only": True})
     ]
+
+
+def test_page_editor_context_status_and_undo_do_not_reload(qtbot, monkeypatch):
+    window = _new_window(monkeypatch, callback=lambda *args, **kwargs: pytest.fail("main refreshed"))
+    qtbot.addWidget(window)
+    window.editor.set_markdown("Introduction\n- [ ] Clicked task @phone\n" + "Other text\n" * 150)
+    window._last_saved_content = window.editor.to_markdown()
+    window.editor.document().setModified(False)
+    cursor = QTextCursor(window.editor.document().findBlockByNumber(100))
+    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 5)
+    window.editor.setTextCursor(cursor)
+    window.editor.verticalScrollBar().setValue(300)
+    selection = (cursor.position(), cursor.anchor(), cursor.selectedText())
+    scroll = window.editor.verticalScrollBar().value()
+    document = window.editor.document()
+    posts = []
+
+    def post(path, payload):
+        posts.append((path, payload))
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"undo_id": "undo-local"})
+
+    monkeypatch.setattr(window, "_api_post", post)
+    monkeypatch.setattr(window, "_load_content", lambda: pytest.fail("page reloaded"))
+    monkeypatch.setattr(window.editor, "set_markdown", lambda *args: pytest.fail("buffer reset"))
+    for label, marker in (("Mark Complete", "- [x]"), ("Reopen Task", "- [ ]"),
+                          ("Mark Complete", "- [x]"), ("Undo Last Change", "- [ ]")):
+        menu = window._task_context_menu(1, QPoint(100, 100))
+        next(action for action in menu.actions() if action.text().startswith(label)).trigger()
+        assert marker + " Clicked task @phone" in window.editor.to_markdown()
+        assert window.editor.document() is document
+        current = window.editor.textCursor()
+        assert (current.position(), current.anchor(), current.selectedText()) == selection
+        assert window.editor.verticalScrollBar().value() == scroll
+        assert not window._is_dirty()
+    assert posts[0][1]["targets"] == [{
+        "path": "/Page/Page.md", "line": 2,
+        "expected_text": "Clicked task", "expected_status": "todo",
+    }]
+    assert posts[-1][0] == "/api/tasks/undo/undo-local"
+
+
+def test_page_editor_context_menu_matches_shared_task_menu(qtbot, monkeypatch):
+    from sp.app.ui.task_context_menu import build_task_context_menu
+
+    window = _new_window(monkeypatch)
+    qtbot.addWidget(window)
+    window.editor.set_markdown("Introduction\n- [ ] Task\n")
+    window._last_saved_content = window.editor.to_markdown()
+    task_menu = window._task_context_menu(1, QPoint(10, 10))
+    expected = build_task_context_menu(window, [{"task": {"status": "todo"}}], lambda command: None)
+    assert [action.text() for action in task_menu.actions()] == [action.text() for action in expected.actions()]
+    base_menu = QMenu(window)
+    shown = []
+    base_menu.exec = lambda *args: shown.append(base_menu)
+    monkeypatch.setattr(window.editor, "createStandardContextMenu", lambda: base_menu)
+    cursor = QTextCursor(window.editor.document().findBlockByNumber(1))
+    window._show_editor_context_menu(window.editor.cursorRect(cursor).center())
+    assert any(action.text() == "Task actions" for action in shown[0].actions())
+    assert window._task_context_menu(0, QPoint(10, 10)) is None
+    window.editor.setReadOnly(True)
+    assert window._task_context_menu(1, QPoint(10, 10)) is None
+
+
+@pytest.mark.parametrize("label,field", [("Edit Task", None), ("Edit Tags", "tags"), ("Move…", "destination")])
+def test_page_editor_context_edit_uses_local_task_dialog(qtbot, monkeypatch, label, field):
+    window = _new_window(monkeypatch)
+    qtbot.addWidget(window)
+    window.editor.set_markdown("Introduction\n- [ ] Task\n")
+    window._last_saved_content = window.editor.to_markdown()
+    edits = []
+    monkeypatch.setattr(window, "_edit_task_from_page_editor", lambda *args, **kwargs: edits.append((args, kwargs)))
+    anchor = QPoint(50, 50)
+    menu = window._task_context_menu(1, anchor)
+    next(action for action in menu.actions() if action.text().startswith(label)).trigger()
+    assert edits == [((1, anchor), {"focus_field": field})]
+
+
+def test_page_editor_failed_save_or_mutation_keeps_task_open(qtbot, monkeypatch):
+    window = _new_window(monkeypatch)
+    qtbot.addWidget(window)
+    window.editor.set_markdown("- [ ] Unsaved task\n")
+    monkeypatch.setattr(window, "_save_current_file", lambda **kwargs: None)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args))
+    monkeypatch.setattr(window, "_api_post", lambda *args: pytest.fail("unsaved task mutated"))
+    window._task_context_menu(0, QPoint(10, 10)).actions()[0].trigger()
+    assert warnings
+    assert window.editor.to_markdown() == "- [ ] Unsaved task\n"
+    window._last_saved_content = window.editor.to_markdown()
+
+    def fail(*args):
+        raise ValueError("Task changed on disk")
+
+    monkeypatch.setattr(window, "_api_post", fail)
+    window._task_context_menu(0, QPoint(10, 10)).actions()[0].trigger()
+    assert len(warnings) == 2
+    assert window.editor.to_markdown() == "- [ ] Unsaved task\n"
+
+
+@pytest.mark.parametrize("role,label", [("due", "Set Due Date"), ("start", "Set Start Date")])
+def test_page_editor_task_dates_target_clicked_task_in_own_window(qtbot, monkeypatch, role, label):
+    from sp.app.ui import task_panel
+
+    window = _new_window(monkeypatch)
+    qtbot.addWidget(window)
+    window.editor.set_markdown("Introduction\n- [ ] Clicked task\n")
+    window._last_saved_content = window.editor.to_markdown()
+    updates = []
+    monkeypatch.setattr(window, "_mutate_task_from_page_editor", lambda *args: updates.append(args))
+    quick_menu = QMenu(window)
+    quick_menu.exec = lambda *args: next(action for action in quick_menu.actions() if action.text() == "Today").trigger()
+    monkeypatch.setattr(task_panel, "TaskDateQuickMenu", lambda parent, **kwargs: quick_menu)
+    menu = window._task_context_menu(1, QPoint(10, 10))
+    next(action for action in menu.actions() if action.text().startswith(label)).trigger()
+    task, changes = updates[0]
+    assert task["path"] == "/Page/Page.md"
+    assert task["line"] == 2
+    assert task["text"] == "Clicked task"
+    assert changes == {role: date.today().isoformat()}
+
+
+def test_page_editor_task_delete_requires_confirmation(qtbot, monkeypatch):
+    window = _new_window(monkeypatch)
+    qtbot.addWidget(window)
+    window.editor.set_markdown("- [ ] Task\n")
+    window._last_saved_content = window.editor.to_markdown()
+    updates = []
+    monkeypatch.setattr(window, "_mutate_task_from_page_editor", lambda *args: updates.append(args))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.No)
+    menu = window._task_context_menu(0, QPoint(10, 10))
+    action = next(action for action in menu.actions() if action.text() == "Delete Task…")
+    action.trigger()
+    assert updates == []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    action.trigger()
+    assert updates[0][1] == {"delete": True}
+
+
+def test_page_editor_saves_unsaved_text_before_completion_without_main_reload(qtbot, monkeypatch):
+    window = _new_window(monkeypatch, callback=lambda *args, **kwargs: pytest.fail("main reloaded"))
+    qtbot.addWidget(window)
+    window.editor.set_markdown("Unsaved introduction\n- [ ] Task\n")
+    posts = []
+
+    def post(path, payload):
+        posts.append((path, payload))
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: {"undo_id": "undo-1"})
+
+    monkeypatch.setattr(window, "_api_post", post)
+    monkeypatch.setattr(window, "_load_content", lambda: pytest.fail("page reloaded"))
+    window._task_context_menu(1, QPoint(10, 10)).actions()[0].trigger()
+    assert [path for path, payload in posts] == ["/api/file/write", "/api/tasks/mutate"]
+    assert posts[0][1]["content"] == "Unsaved introduction\n- [ ] Task\n"
+    assert window.editor.to_markdown() == "Unsaved introduction\n- [x] Task\n"
+    assert not window._is_dirty()

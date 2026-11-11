@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Iterable, Optional
+from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, Signal, QPropertyAnimation
-from PySide6.QtGui import QAction, QColor, QPalette
+from PySide6.QtCore import QPoint, Qt, Signal, QPropertyAnimation, QSize
+from PySide6.QtGui import QAction, QColor, QPalette, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -61,6 +62,7 @@ class TableOfContentsWidget(QFrame):
         bg = theme_value("main_window.toc_widget.bg", bg_default)
         border = theme_value("main_window.toc_widget.border", border_default)
         text = theme_value("main_window.toc_widget.text", text_default)
+        self._toggle_icon_color = QColor(text)
         hover_bg = theme_value("main_window.toc_widget.hover_bg", hover_default)
         selected_bg = theme_value("main_window.toc_widget.selected_bg", selected_default)
         accent = (self._vault_accent_color or "").strip()
@@ -101,16 +103,43 @@ class TableOfContentsWidget(QFrame):
             QTreeWidget#tocTree::branch:selected:has-children {{
                 background: transparent;
             }}
+            QToolButton#tocToggle {{
+                color: {text};
+                background: transparent;
+                border: none;
+                padding: 2px;
+            }}
+            QToolButton#tocToggle:hover {{
+                background: {hover_bg};
+                border-radius: 4px;
+            }}
             """
         )
+        if getattr(self, "toggle_button", None) is not None:
+            self._update_toggle_icon()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        # Hide the header toggle to keep the widget unobtrusive
-        self.toggle_button = None
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setObjectName("tocToggle")
+        self.toggle_button.setText("Contents")
+        self.toggle_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle_button.setAutoRaise(True)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(True)
+        self.toggle_button.setIconSize(QSize(16, 16))
+        self.toggle_button.setToolTip("Collapse TOC")
+        self.toggle_button.setAccessibleName("Collapse table of contents")
+        self._update_toggle_icon()
+        self.toggle_button.clicked.connect(self._handle_toggle_clicked)
+        header.addWidget(self.toggle_button, 0, Qt.AlignLeft)
+        header.addStretch(1)
+        layout.addLayout(header)
 
         self.tree = QTreeWidget()
         self.tree.setObjectName("tocTree")
@@ -176,17 +205,37 @@ class TableOfContentsWidget(QFrame):
         self._apply_theme_styles()
 
     def set_collapsed(self, collapsed: bool) -> None:
-        # Collapse toggle removed; always stay expanded but keep API compatibility.
-        if self._collapsed != collapsed:
-            self._collapsed = False
-            self.tree.setVisible(True)
-            # self.setFixedWidth(self._expanded_width)  # No longer force fixed width
-            self.collapsedChanged.emit(False)
+        collapsed = bool(collapsed)
+        changed = self._collapsed != collapsed
+        self._collapsed = collapsed
+        self.tree.setVisible(not collapsed)
+        self.toggle_button.setChecked(not collapsed)
+        self.toggle_button.setToolTip("Expand TOC" if collapsed else "Collapse TOC")
+        self.toggle_button.setAccessibleName("Expand table of contents" if collapsed else "Collapse table of contents")
+        self._update_geometry()
+        if changed:
+            self.collapsedChanged.emit(collapsed)
 
     def collapsed(self) -> bool:
         return self._collapsed
 
     # --- Internal helpers -----------------------------------------------
+    def _update_toggle_icon(self) -> None:
+        path = Path(__file__).resolve().parents[2] / "assets" / "toc.svg"
+        icon = QIcon(str(path))
+        pixmap = icon.pixmap(16, 16)
+        if not pixmap.isNull():
+            tinted = QPixmap(pixmap.size())
+            tinted.setDevicePixelRatio(pixmap.devicePixelRatio())
+            tinted.fill(Qt.transparent)
+            painter = QPainter(tinted)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), self._toggle_icon_color)
+            painter.end()
+            icon = QIcon(tinted)
+        self.toggle_button.setIcon(icon)
+
     def _handle_toggle_clicked(self, checked: bool) -> None:
         # Checked means expanded
         self.set_collapsed(not checked)
@@ -235,6 +284,12 @@ class TableOfContentsWidget(QFrame):
         self.tree.addTopLevelItem(item)
 
     def _update_geometry(self) -> None:
+        self.layout().invalidate()
+        if self._collapsed:
+            self.setFixedHeight(self.layout().sizeHint().height() + self.frameWidth() * 2)
+        else:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
         self.adjustSize()
         self.updateGeometry()
         self.raise_()

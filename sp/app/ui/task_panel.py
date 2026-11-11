@@ -2521,6 +2521,7 @@ class TaskPanel(QWidget):
         tasks: list[dict],
         *,
         restore_list_focus: bool = True,
+        notify_editors: bool = True,
         **changes,
     ) -> bool:
         if not tasks:
@@ -2582,7 +2583,7 @@ class TaskPanel(QWidget):
                 self._apply_optimistic_task_changes(tasks, optimistic_changes)
             except Exception as exc:
                 print(f"[TASK_PANEL] Failed to apply mutation grace state: {exc}")
-            if changed_paths:
+            if changed_paths and notify_editors:
                 self.taskDatesApplied.emit(list(dict.fromkeys(changed_paths)))
             self.statusRequested.emit(
                 f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo.",
@@ -3973,8 +3974,8 @@ class TaskPanel(QWidget):
         tasks = [target.get("task") for target in targets if target.get("task")]
         self._apply_task_mutation(tasks, status="done" if done else "todo")
 
-    def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint) -> None:
-        menu = TaskDateQuickMenu(self, use_vi_keys=self._is_vi_mode())
+    def _open_task_date_quick_menu(self, role: str, targets: list[dict], anchor: QPoint, *, parent=None) -> None:
+        menu = TaskDateQuickMenu(parent or self, use_vi_keys=self._is_vi_mode())
         apply_menu_theme(menu, self.task_tree)
         for label in ("Today", "Tomorrow", "Yesterday"):
             act = menu.addAction(label)
@@ -3985,7 +3986,7 @@ class TaskPanel(QWidget):
             act.triggered.connect(lambda _, l=label: self._apply_task_date_choice(role, l, targets))
         menu.addSeparator()
         menu.addAction("Date...").triggered.connect(
-            lambda: self._open_task_date_picker(role, targets, anchor)
+            lambda: self._open_task_date_picker(role, targets, anchor, parent=parent)
         )
         if self._targets_have_date(role, targets):
             menu.addSeparator()
@@ -4023,10 +4024,10 @@ class TaskPanel(QWidget):
         tasks = [target.get("task") for target in targets if target.get("task")]
         self._apply_task_mutation(tasks, **({"start": ""} if role == "start" else {"due": ""}))
 
-    def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None) -> None:
+    def _open_task_date_picker(self, role: str, targets: list[dict], anchor: Optional[QPoint] = None, *, parent=None) -> None:
         anchor_pos = anchor or self._task_date_anchor()
         dlg = DateInsertDialog(
-            self,
+            parent or self,
             anchor_pos=anchor_pos,
             accept_on_double_click=True,
             accept_on_enter=True,
@@ -4049,7 +4050,8 @@ class TaskPanel(QWidget):
             return self.task_tree.viewport().mapToGlobal(rect.topRight() + QPoint(0, 4))
         return QCursor.pos()
 
-    def _resolve_quick_date(self, label: str, role: str) -> Optional[str]:
+    @staticmethod
+    def _resolve_quick_date(label: str, role: str) -> Optional[str]:
         today = date.today()
         weekday = today.weekday()
         week_start = today - timedelta(days=weekday)
@@ -4351,32 +4353,24 @@ class TaskPanel(QWidget):
 
     def _build_task_context_menu(self, targets: list[dict], *, dispatch=None) -> QMenu:
         """Build shared task actions; editor callers dispatch against their source line."""
-        any_done = any((t.get("task") or {}).get("status") == "done" for t in targets)
-        any_open = any((t.get("task") or {}).get("status") != "done" for t in targets)
-        menu = QMenu(self)
-        apply_menu_theme(menu, self.task_tree)
+        from .task_context_menu import build_task_context_menu
 
-        def add(label, command, callback):
-            menu.addAction(label).triggered.connect(
-                lambda checked=False: dispatch(command) if dispatch else callback()
-            )
-
-        if any_open:
-            add("Mark Complete", "complete", lambda: self._set_tasks_completed(targets, True))
-        if any_done:
-            add("Reopen Task", "reopen", lambda: self._set_tasks_completed(targets, False))
-        menu.addSeparator()
-        add("Edit Task… (E)", "edit", self._open_task_editor)
-        add("Set Due Date… (D)", "due", lambda: self._open_task_date_quick_menu("due", targets, self._task_date_anchor()))
-        add("Set Start Date… (S)", "start", lambda: self._open_task_date_quick_menu("start", targets, self._task_date_anchor()))
-        add("Edit Tags… (T)", "tags", self._edit_selected_tags)
-        add("Move… (M)", "move", self._move_selected_tasks)
-        add("Remove Task Indicators (R)", "remove_indicators", self._remove_selected_task_indicators)
-        add("Delete Task…", "delete", self._delete_selected_tasks)
-        if self._last_undo_id or self._last_undo_receipt:
-            menu.addSeparator()
-            add("Undo Last Change (Ctrl+Z)", "undo", self._undo_last_mutation)
-        return menu
+        callbacks = {
+            "complete": lambda: self._set_tasks_completed(targets, True),
+            "reopen": lambda: self._set_tasks_completed(targets, False),
+            "edit": self._open_task_editor,
+            "due": lambda: self._open_task_date_quick_menu("due", targets, self._task_date_anchor()),
+            "start": lambda: self._open_task_date_quick_menu("start", targets, self._task_date_anchor()),
+            "tags": self._edit_selected_tags,
+            "move": self._move_selected_tasks,
+            "remove_indicators": self._remove_selected_task_indicators,
+            "delete": self._delete_selected_tasks,
+            "undo": self._undo_last_mutation,
+        }
+        return build_task_context_menu(
+            self, targets, dispatch if dispatch is not None else lambda command: callbacks[command](),
+            undo_available=bool(self._last_undo_id or self._last_undo_receipt), theme_anchor=self.task_tree,
+        )
 
     def _mark_activation_source(self, source: str) -> None:
         self._last_activation_source = source

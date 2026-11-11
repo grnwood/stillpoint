@@ -257,4 +257,4 @@ def test_editor_task_context_action_saves_and_targets_clicked_task(qtbot, monkey
     tasks, changes = calls[1]
     assert tasks[0]["line"] == 2
     assert tasks[0]["text"] == "Clicked task"
-    assert changes == {"status": "done", "restore_list_focus": False}
+    assert changes == {"status": "done", "restore_list_focus": False, "notify_editors": False}

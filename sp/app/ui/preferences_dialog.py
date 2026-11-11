@@ -135,6 +135,15 @@ class PreferencesDialog(QDialog):
         self.toc_widget_checkbox.setChecked(config.load_toc_widget_enabled())
         self.toc_widget_checkbox.setToolTip("Show floating transparent Heading navigator in editor")
         general_layout.addWidget(self.toc_widget_checkbox)
+        self.page_editor_toc_widget_checkbox = QCheckBox("Enable TOC Widget in Page Editor")
+        self.page_editor_toc_widget_checkbox.setChecked(config.load_page_editor_toc_widget_enabled())
+        self.page_editor_toc_widget_checkbox.setToolTip("Show the same floating heading navigator in detached Page Editor windows")
+        self.page_editor_toc_widget_checkbox.setEnabled(self.toc_widget_checkbox.isChecked())
+        self.toc_widget_checkbox.toggled.connect(self.page_editor_toc_widget_checkbox.setEnabled)
+        page_editor_toc_row = QHBoxLayout()
+        page_editor_toc_row.addSpacing(24)
+        page_editor_toc_row.addWidget(self.page_editor_toc_widget_checkbox)
+        general_layout.addLayout(page_editor_toc_row)
         row_image_max_width = QHBoxLayout()
         row_image_max_width.addWidget(QLabel("Attachment image max width:"))
         self.markdown_image_max_width_combo = QComboBox()
@@ -1239,6 +1248,7 @@ class PreferencesDialog(QDialog):
     def accept(self):
         """Save preferences when OK is clicked."""
         config.save_toc_widget_enabled(self.toc_widget_checkbox.isChecked())
+        config.save_page_editor_toc_widget_enabled(self.page_editor_toc_widget_checkbox.isChecked())
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())
         config.save_vi_cursor_style("block" if self.vi_cursor_block_radio.isChecked() else "line")
         app_font = self._font_value(self.application_font_combo)
