@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+HEADING_SIZE_MULTIPLIERS = (1.9, 1.6, 1.35, 1.2, 1.08)
+
 _NON_WORD = re.compile(r"[^\w\s-]")
 _SPACES = re.compile(r"[\s_]+")
 

@@ -4380,7 +4380,7 @@ def test_git_status_multiselect_context_actions(tmp_path, monkeypatch, app):
 
     menu = window._create_git_context_menu()
     labels = [action.text() for action in menu.actions()]
-    assert labels == ["Stage", "Unstage", "Add to .gitignore"]
+    assert labels == ["Git Log History", "Stage", "Unstage", "Add to .gitignore"]
 
     quiet_calls = []
     monkeypatch.setattr(

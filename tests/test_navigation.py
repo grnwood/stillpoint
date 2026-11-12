@@ -147,7 +147,7 @@ class TestHistoryNavigation:
         for sequence in ("Alt+Left", "Alt+Right"):
             matches = [shortcut for shortcut in shortcuts if shortcut.key() == QKeySequence(sequence)]
             assert matches
-            assert all(shortcut.context() == Qt.ApplicationShortcut for shortcut in matches)
+            assert all(shortcut.context() == Qt.WindowShortcut for shortcut in matches)
     
     def test_history_back_navigation(self, main_window):
         """Test navigating backward through page history."""

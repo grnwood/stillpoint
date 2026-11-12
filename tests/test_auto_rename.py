@@ -58,11 +58,13 @@ def test_manual_rename_prompts_for_hidden_active_journal_page(main_window, monke
     calls: list[tuple[str, str, str]] = []
     main_window._show_journal_in_nav = False
     main_window.current_path = "/Journal/2026/08/01/Pickles/Pickles.md"
-    monkeypatch.setattr(
-        main_window_module.QInputDialog,
-        "getText",
-        lambda *args, **kwargs: ("Hamburger Notes", True),
-    )
+    def rename_dialog(dialog):
+        assert dialog.minimumWidth() >= 760
+        assert dialog.textValue() == "Pickles"
+        dialog.setTextValue("Hamburger Notes")
+        return main_window_module.QDialog.Accepted
+
+    monkeypatch.setattr(main_window_module.QInputDialog, "exec", rename_dialog)
     monkeypatch.setattr(
         main_window,
         "_handle_inline_rename",

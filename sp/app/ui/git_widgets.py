@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QKeySequence, QPalette, QShortcut, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -23,7 +23,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
+    QStyle,
+    QStyledItemDelegate,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -48,6 +52,7 @@ class CommitBeforePushDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Commit Before Push")
         layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignTop)
         count = len(unstaged_paths)
         explanation = QLabel(
             f"{count} unstaged file{'s' if count != 1 else ''} will not be included in a push "
@@ -58,9 +63,19 @@ class CommitBeforePushDialog(QDialog):
         files = QLabel("\n".join(f"• {path}" for path in unstaged_paths))
         files.setObjectName("commitBeforePushFileList")
         files.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        files.setWordWrap(True)
+        files.setWordWrap(False)
+        files.setTextFormat(Qt.PlainText)
+        files.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         files.setStyleSheet("padding: 6px; color: palette(text); background: palette(base);")
-        layout.addWidget(files)
+        file_scroll = QScrollArea()
+        file_scroll.setWidget(files)
+        file_scroll.setWidgetResizable(True)
+        file_scroll.setFixedHeight(min(
+            220,
+            files.sizeHint().height() + 2 * file_scroll.frameWidth()
+            + file_scroll.horizontalScrollBar().sizeHint().height(),
+        ))
+        layout.addWidget(file_scroll)
         self.stage_checkbox = QCheckBox(
             f"Automatically stage these {count} file{'s' if count != 1 else ''} and commit before pushing"
         )
@@ -79,6 +94,7 @@ class CommitBeforePushDialog(QDialog):
         self.message_edit.textChanged.connect(self._sync_state)
         self._sync_state()
         self.message_edit.setFocus()
+        self.resize(920, self.sizeHint().height())
 
     def _sync_state(self) -> None:
         staging = self.stage_checkbox.isChecked()
@@ -418,6 +434,217 @@ class VaultGitStatusList(QListWidget):
         super().clear()
 
 
+class GitLogDelegate(QStyledItemDelegate):
+    """Compact commit rows with a graph rail and terminal-style metadata."""
+
+    def sizeHint(self, option, index):
+        return QSize(0, QFontMetrics(option.font).height() * 2 + 20)
+
+    def paint(self, painter, option, index):
+        entry = index.data(Qt.UserRole)
+        if entry is None:
+            return
+        painter.save()
+        painter.setClipRect(option.rect)
+        rect = option.rect
+        palette = option.palette
+        dark = palette.color(QPalette.Base).lightness() < 128
+        accent = QColor("#63d8c4" if dark else "#087f72")
+        foreground = palette.color(QPalette.Text)
+        muted = QColor(foreground)
+        muted.setAlpha(165)
+        divider = QColor(foreground)
+        divider.setAlpha(48)
+        if option.state & (QStyle.State_Selected | QStyle.State_MouseOver):
+            background = QColor(accent)
+            background.setAlpha(38 if option.state & QStyle.State_Selected else 18)
+            painter.fillRect(rect, background)
+        rail_x = rect.left() + 13
+        painter.setPen(divider)
+        painter.drawLine(rail_x, rect.top(), rail_x, rect.bottom())
+        painter.drawLine(rect.left() + 28, rect.bottom(), rect.right() - 8, rect.bottom())
+        painter.setRenderHint(painter.RenderHint.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(accent)
+        painter.drawEllipse(rail_x - 3, rect.top() + 15, 6, 6)
+
+        subject_font = QFont(option.font)
+        subject_font.setWeight(QFont.Medium)
+        painter.setFont(subject_font)
+        metrics = QFontMetrics(subject_font)
+        left, width = rect.left() + 28, max(0, rect.width() - 40)
+        line_height = metrics.height()
+        painter.setPen(foreground)
+        painter.drawText(QRect(left, rect.top() + 8, width, line_height), Qt.AlignVCenter,
+                         metrics.elidedText(entry.subject, Qt.ElideRight, width))
+        mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        mono.setPointSizeF(max(8, option.font.pointSizeF() - 1))
+        painter.setFont(mono)
+        metadata_metrics = QFontMetrics(mono)
+        hash_width = metadata_metrics.horizontalAdvance(entry.commit[:8] + "  ")
+        metadata_top = rect.top() + 10 + line_height
+        painter.setPen(accent)
+        painter.drawText(QRect(left, metadata_top, hash_width, line_height), Qt.AlignVCenter, entry.commit[:8])
+        painter.setPen(muted)
+        metadata = f"{entry.committed_at[:10]} · {entry.author}"
+        painter.drawText(QRect(left + hash_width, metadata_top, max(0, width - hash_width), line_height),
+                         Qt.AlignVCenter, metadata_metrics.elidedText(metadata, Qt.ElideRight, max(0, width - hash_width)))
+        painter.restore()
+
+
+class GitLogPanel(QWidget):
+    commitActivated = Signal(object, str)
+
+    def __init__(self, root, parent=None):
+        super().__init__(parent)
+        self.root = Path(root)
+        self.relative_path = ""
+        self._scoped_path = ""
+        self._loaded = False
+        self._activation_commit = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QHBoxLayout()
+        header.setContentsMargins(10, 7, 8, 7)
+        self.scope_label = QLabel("History · Entire vault")
+        self.scope_label.setTextFormat(Qt.PlainText)
+        self.scope_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        header.addWidget(self.scope_label, 1)
+        self.all_button = QToolButton()
+        self.all_button.setText("All")
+        self.all_button.setCheckable(True)
+        self.all_button.setToolTip("Show history for the entire vault")
+        self.all_button.clicked.connect(self._toggle_all)
+        header.addWidget(self.all_button)
+        refresh = QToolButton()
+        refresh.setText("↻")
+        refresh.setToolTip("Refresh history")
+        refresh.clicked.connect(self.refresh)
+        header.addWidget(refresh)
+        layout.addLayout(header)
+        self.entries = QListWidget()
+        self.entries.setWordWrap(False)
+        self.entries.setMinimumHeight(120)
+        self.entries.setTextElideMode(Qt.ElideRight)
+        self.entries.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.entries.setMouseTracking(True)
+        self.entries.setUniformItemSizes(True)
+        self.entries.setItemDelegate(GitLogDelegate(self.entries))
+        self.entries.setStyleSheet("QListWidget { border: none; outline: 0; }")
+        self.entries.currentItemChanged.connect(self._activate)
+        self.entries.itemClicked.connect(lambda item: self._activate(item, None))
+        layout.addWidget(self.entries)
+        self.message = QLabel("Right-click and choose history to load commits.")
+        self.message.setWordWrap(True)
+        self.message.setContentsMargins(10, 7, 10, 7)
+        layout.addWidget(self.message)
+
+    def show_history(self, relative_path=""):
+        self.relative_path = str(relative_path).strip("/")
+        self._scoped_path = self.relative_path
+        self._loaded = True
+        self.refresh()
+
+    def _toggle_all(self, checked):
+        self.relative_path = "" if checked else self._scoped_path
+        self._loaded = True
+        self.refresh()
+
+    def refresh(self):
+        if not self._loaded:
+            return
+        self.all_button.setChecked(not self.relative_path)
+        self.all_button.setEnabled(bool(self._scoped_path))
+        self.all_button.setToolTip(
+            f"Return to history for {self._scoped_path}"
+            if not self.relative_path and self._scoped_path else "Show history for the entire vault"
+        )
+        self.scope_label.setText("History · " + (Path(self.relative_path).name if self.relative_path else "Entire vault"))
+        self.scope_label.setToolTip(self.relative_path or str(self.root))
+        selected = self.entries.currentItem()
+        selected_commit = selected.data(Qt.UserRole).commit if selected is not None else None
+        self.entries.blockSignals(True)
+        self.entries.clear()
+        try:
+            commits = git_support.recent_commits(self.root, self.relative_path)
+            for entry in commits:
+                item = QListWidgetItem(f"{entry.subject}\n{entry.commit[:8]} · {entry.committed_at[:16].replace('T', ' ')} · {entry.author}")
+                item.setData(Qt.UserRole, entry)
+                item.setToolTip(f"{entry.subject}\n{entry.author} · {entry.committed_at}\n{entry.commit}")
+                self.entries.addItem(item)
+                if entry.commit == selected_commit:
+                    self.entries.setCurrentItem(item)
+            self.message.setText(f"{len(commits)} recent commits · Select a commit to inspect its files." if commits else "No commits for this location yet.")
+        except git_support.GitError as exc:
+            self.message.setText(str(exc))
+        finally:
+            self.entries.blockSignals(False)
+
+    def _activate(self, item, _previous):
+        if item is not None:
+            entry = item.data(Qt.UserRole)
+            # Selection and click fire together for a newly selected row.
+            # A later click on that same row should still reopen its preview.
+            if self._activation_commit == entry.commit:
+                return
+            self._activation_commit = entry.commit
+            QTimer.singleShot(0, self, lambda: setattr(self, "_activation_commit", None))
+            self.commitActivated.emit(entry, self.relative_path)
+
+
+class GitCommitViewer(QWidget):
+    """Commit files and a visual patch hosted in the normal editor area."""
+
+    def __init__(self, root, entry, relative_path="", parent=None):
+        super().__init__(parent)
+        self.root, self.entry = root, entry
+        layout = QVBoxLayout(self)
+        title = QLabel(f"{entry.subject}\n{entry.author} · {entry.committed_at} · {entry.commit[:10]}")
+        title.setTextFormat(Qt.PlainText)
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        self.files = QComboBox()
+        self.files.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        layout.addWidget(self.files)
+        self.diff_layout = QVBoxLayout()
+        layout.addLayout(self.diff_layout, 1)
+        self.viewer = None
+        self._changes = []
+        try:
+            self._changes = git_support.commit_files(root, entry.commit)
+            for file in self._changes:
+                path = f"{file.original_path} → {file.path}" if file.original_path else file.path
+                counts = "binary" if file.additions is None else f"+{file.additions} / −{file.deletions}"
+                self.files.addItem(f"{git_status_info(file.status)[1]} · {path} · {counts}")
+                self.files.setItemData(self.files.count() - 1, path, Qt.ToolTipRole)
+            preferred = next((i for i, file in enumerate(self._changes)
+                              if file.path == relative_path or file.path.startswith(relative_path + "/")), 0)
+            self.files.setCurrentIndex(preferred)
+            self.files.currentIndexChanged.connect(self._show_file)
+            if self._changes:
+                self._show_file(preferred)
+            else:
+                self.diff_layout.addWidget(QLabel("This commit has no file changes."))
+        except git_support.GitError as exc:
+            self.diff_layout.addWidget(QLabel(str(exc)))
+
+    def _show_file(self, index):
+        file = self._changes[index]
+        try:
+            paths = [file.original_path, file.path] if file.original_path else [file.path]
+            patch = git_support.commit_diff(self.root, self.entry.commit, paths)
+        except git_support.GitError as exc:
+            patch = str(exc)
+        if self.viewer is not None:
+            self.diff_layout.removeWidget(self.viewer)
+            self.viewer.deleteLater()
+        self.viewer = GitDiffEditor(Path(file.path).name, patch, binary=file.additions is None,
+                                    comparison_text="Changes made in this commit")
+        self.diff_layout.addWidget(self.viewer)
+
+
 class VaultGitPanel(QWidget):
     """A compact, vault-focused Git rail using non-developer language."""
 
@@ -470,12 +697,25 @@ class VaultGitPanel(QWidget):
         self.changes.setWordWrap(False)
         self.changes.resetRequested.connect(self.resetRequested)
         self.changes.previewRequested.connect(self.changePreviewRequested)
-        layout.addWidget(self.changes, 1)
+        self.log_panel = GitLogPanel(self.vault_root)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.changes)
+        splitter.addWidget(self.log_panel)
+        splitter.setSizes([300, 300])
+        layout.addWidget(splitter, 1)
+        self.changes.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.changes.customContextMenuRequested.connect(self._history_menu)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(10000)
         self.refresh_timer.timeout.connect(self.refresh)
         self.refresh_timer.start()
         self.refresh()
+
+    def _history_menu(self, point):
+        menu = QMenu(self)
+        path = self.changes._item_path(self.changes.itemAt(point)) or ""
+        menu.addAction("Show History", lambda: self.log_panel.show_history(path))
+        menu.exec(self.changes.viewport().mapToGlobal(point))
 
     @staticmethod
     def _status_info(code: str) -> tuple[str, str, str]:
@@ -494,6 +734,7 @@ class VaultGitPanel(QWidget):
         return git_section_row(title, count)
 
     def refresh(self) -> None:
+        self.log_panel.refresh()
         current_path = self.changes._item_path(self.changes.currentItem())
         selected_paths = {
             self.changes._item_path(item) for item in self.changes.selected_file_items()
@@ -590,6 +831,7 @@ class GitDiffEditor(QWidget):
         parent=None,
         *,
         binary: bool = False,
+        comparison_text: str = "Working file compared with the latest saved version",
     ) -> None:
         super().__init__(parent)
         self.diff_text = diff_text or ""
@@ -629,7 +871,7 @@ class GitDiffEditor(QWidget):
 
         additions, deletions = self._change_counts(self.diff_text)
         summary = QHBoxLayout()
-        comparison = QLabel("Working file compared with the latest saved version")
+        comparison = QLabel(comparison_text)
         comparison.setStyleSheet("color: palette(text);")
         summary.addWidget(comparison)
         summary.addStretch(1)
@@ -966,7 +1208,9 @@ class GitHistoryDialog(QDialog):
         self.relative_path = str(relative_path).replace("\\", "/").strip("/")
         self._entries: list[git_support.GitHistoryEntry] = []
         self.setWindowTitle(f"Versions · {self.relative_path or self.vault_root.name}")
-        self.resize(980, 650)
+        self.resize(1280, 800)
+        self.setMinimumSize(880, 560)
+        self._files: list[git_support.GitCommitFile] = []
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.versions_only = QCheckBox("Named versions only")
@@ -985,15 +1229,56 @@ class GitHistoryDialog(QDialog):
         layout.addLayout(top)
         splitter = QSplitter()
         self.history_list = QListWidget()
+        self.history_list.setWordWrap(False)
+        self.history_list.setMinimumWidth(250)
         self.history_list.currentRowChanged.connect(self._show_selected)
         splitter.addWidget(self.history_list)
+        details = QWidget()
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        self.commit_details = QLabel()
+        self.commit_details.setTextFormat(Qt.PlainText)
+        self.commit_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.commit_details.setWordWrap(True)
+        details_layout.addWidget(self.commit_details)
+        self.file_summary = QLabel()
+        details_layout.addWidget(self.file_summary)
+        self.file_table = QTableWidget(0, 4)
+        self.file_table.setHorizontalHeaderLabels(["Change", "File (from vault root)", "+ Lines", "− Lines"])
+        self.file_table.setWordWrap(False)
+        self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.file_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.file_table.verticalHeader().hide()
+        self.file_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.file_table.horizontalHeader().setStretchLastSection(False)
+        self.file_table.currentCellChanged.connect(lambda *_: self._show_file_diff())
+        self.comparison = QComboBox()
+        self.comparison.addItems([
+            "Changes in this commit",
+            "Compare selected file with current working copy",
+            "Compare original page/folder with current working copy",
+        ])
+        self.comparison.setItemText(2, f"Compare {self.relative_path or 'entire vault'} with current working copy")
+        self.comparison.currentIndexChanged.connect(lambda *_: self._show_file_diff())
+        details_layout.addWidget(self.comparison)
         self.diff_view = QTextEdit()
         self.diff_view.setReadOnly(True)
         self.diff_view.setLineWrapMode(QTextEdit.NoWrap)
-        splitter.addWidget(self.diff_view)
-        splitter.setStretchFactor(1, 2)
+        self.diff_view.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        file_splitter = QSplitter(Qt.Vertical)
+        file_splitter.addWidget(self.file_table)
+        file_splitter.addWidget(self.diff_view)
+        file_splitter.setSizes([220, 400])
+        details_layout.addWidget(file_splitter, 1)
+        splitter.addWidget(details)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([320, 940])
         layout.addWidget(splitter, 1)
 
+        layout.addWidget(GitPathLabel(
+            f"Restore applies to: {self.relative_path or self.vault_root.name}", self
+        ))
         action_row = QHBoxLayout()
         self.restore_button = QPushButton("Restore This Version")
         self.restore_button.clicked.connect(self._restore_selected)
@@ -1011,6 +1296,11 @@ class GitHistoryDialog(QDialog):
     def refresh(self) -> None:
         self.history_list.clear()
         self.diff_view.clear()
+        self.file_table.setRowCount(0)
+        self._files = []
+        self.commit_details.clear()
+        self.file_summary.clear()
+        self.restore_button.setEnabled(False)
         try:
             self._entries = git_support.history(
                 self.vault_root,
@@ -1024,9 +1314,9 @@ class GitHistoryDialog(QDialog):
             return
         for entry in self._entries:
             title = entry.version_name or entry.subject or "Saved change"
-            date = entry.committed_at[:10] if entry.committed_at else ""
-            item = QListWidgetItem(f"{title}\n{date} · {entry.author}")
-            item.setToolTip(entry.commit)
+            date = entry.committed_at[:16].replace("T", " ") if entry.committed_at else ""
+            item = QListWidgetItem(f"{title}\n{date} · {entry.author}\n{entry.commit[:10]}")
+            item.setToolTip(f"{entry.subject}\n{entry.committed_at}\n{entry.commit}")
             self.history_list.addItem(item)
         if self._entries:
             self.history_list.setCurrentRow(0)
@@ -1043,13 +1333,89 @@ class GitHistoryDialog(QDialog):
         entry = self._selected_entry()
         if entry is None:
             return
+        self.restore_button.setEnabled(True)
+        self.commit_details.setText(
+            f"{entry.subject}\n{entry.author} · {entry.committed_at}\n{entry.commit}"
+        )
+        self.file_table.blockSignals(True)
+        self.file_table.setRowCount(0)
+        self._files = []
         try:
-            diff = git_support.diff_from_revision(
-                self.vault_root, entry.commit, self.relative_path
-            )
+            self._files = git_support.commit_files(self.vault_root, entry.commit)
+        except git_support.GitError as exc:
+            self.file_summary.setText("Could not load changed files.")
+            self.diff_view.setPlainText(str(exc))
+            self.file_table.blockSignals(False)
+            return
+        additions = sum(file.additions or 0 for file in self._files)
+        deletions = sum(file.deletions or 0 for file in self._files)
+        binary_count = sum(file.additions is None for file in self._files)
+        count = len(self._files)
+        summary = f"{count} changed file{'s' if count != 1 else ''} in this commit · +{additions} / −{deletions} lines"
+        if binary_count:
+            summary += f" · {binary_count} binary file{'s' if binary_count != 1 else ''}"
+        self.file_summary.setText(summary)
+        self.file_table.setRowCount(len(self._files))
+        preferred_row = next((row for row, file in enumerate(self._files)
+                              if file.path == self.relative_path
+                              or file.path.startswith(self.relative_path + "/")), 0)
+        for row, file in enumerate(self._files):
+            path = f"{file.original_path} → {file.path}" if file.original_path else file.path
+            values = [git_status_info(file.status)[1], path,
+                      "Binary" if file.additions is None else str(file.additions),
+                      "—" if file.deletions is None else str(file.deletions)]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(path)
+                self.file_table.setItem(row, column, item)
+        self.file_table.blockSignals(False)
+        if self._files:
+            self.file_table.setCurrentCell(preferred_row, 1)
+        else:
+            self.diff_view.setPlainText("This commit has no file changes.")
+            if self.comparison.currentIndex() == 2:
+                self._show_file_diff()
+
+    def _show_file_diff(self) -> None:
+        entry = self._selected_entry()
+        row = self.file_table.currentRow()
+        if entry is None:
+            return
+        if self.comparison.currentIndex() != 2 and not 0 <= row < len(self._files):
+            return
+        try:
+            if self.comparison.currentIndex() == 2:
+                diff = git_support.diff_from_revision(self.vault_root, entry.commit, self.relative_path)
+                empty_message = "This page/folder matches the current working copy."
+            elif self.comparison.currentIndex() == 0:
+                file = self._files[row]
+                paths = [file.original_path, file.path] if file.original_path else [file.path]
+                diff = git_support.commit_diff(self.vault_root, entry.commit, paths)
+                empty_message = "This file has no content changes in this commit."
+            else:
+                file = self._files[row]
+                diff = git_support.diff_from_revision(self.vault_root, entry.commit, file.path)
+                empty_message = "This file matches the current working copy."
         except git_support.GitError as exc:
             diff = str(exc)
-        self.diff_view.setPlainText(diff or "This item matches the current working copy.")
+            empty_message = ""
+        self.diff_view.setPlainText(diff or empty_message)
+        selections = []
+        for number, line in enumerate((diff or "").splitlines()[:20_000]):
+            color = None
+            if line.startswith("+") and not line.startswith("+++"):
+                color = QColor(46, 125, 50, 55)
+            elif line.startswith("-") and not line.startswith("---"):
+                color = QColor(198, 40, 40, 55)
+            elif line.startswith("@@"):
+                color = QColor(25, 118, 210, 55)
+            if color is not None:
+                selection = QTextEdit.ExtraSelection()
+                selection.cursor = QTextCursor(self.diff_view.document().findBlockByNumber(number))
+                selection.format.setBackground(color)
+                selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+                selections.append(selection)
+        self.diff_view.setExtraSelections(selections)
 
     def _restore_selected(self) -> None:
         entry = self._selected_entry()

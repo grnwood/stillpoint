@@ -133,6 +133,7 @@ class PageEditorWindow(QMainWindow):
         self._font_size = config.load_popup_font_size(14)
 
         self.editor = MarkdownEditor()
+        self.editor.set_page_navigation_enabled(False)
         install_primary_wheel_zoom(self.editor, self._adjust_font_size)
         # Custom context menu with Edit operations only
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -145,7 +146,6 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_task_hover_edit_enabled(True)
         self.editor.set_read_only_mode(self._read_only)
         self.editor.set_ai_shortcuts_enabled(False)
-        self.editor.linkActivated.connect(self._forward_link_to_main)
         self.editor.linkCopied.connect(
             lambda link: self.statusBar().showMessage(f"Copied link: {link}", 3000)
         )
@@ -1165,10 +1165,6 @@ class PageEditorWindow(QMainWindow):
                     surround_with_spaces=selection_range is None,
                 )
 
-    def _forward_link_to_main(self, link: str) -> None:
-        if link:
-            self._open_in_main(link)
-
     def _update_dirty_indicator(self) -> None:
         if not hasattr(self, "_dirty_status_label"):
             return
@@ -1326,7 +1322,7 @@ class PageEditorWindow(QMainWindow):
 
 
     def _show_editor_context_menu(self, pos) -> None:
-        """Show context menu with Edit operations matching main window."""
+        """Expose editing tools for this page, without page or mode navigation."""
         from PySide6.QtWidgets import QMenu
 
         image_hit = None
@@ -1373,6 +1369,18 @@ class PageEditorWindow(QMainWindow):
             pass
 
         click_cursor = self.editor.cursorForPosition(pos)
+        editable = not self.editor.isReadOnly()
+        markdown_link = self.editor._markdown_link_at_cursor(click_cursor)
+        link_target = markdown_link[3] if markdown_link else self.editor._link_under_cursor(click_cursor)
+        if link_target:
+            edit_link = base_menu.addAction("Edit Link…")
+            edit_link.setEnabled(editable)
+            edit_link.triggered.connect(lambda: self.editor._edit_link_at_cursor(click_cursor))
+            remove_link = base_menu.addAction("Remove Link")
+            remove_link.setEnabled(editable)
+            remove_link.triggered.connect(lambda: self.editor._remove_link_at_cursor(click_cursor))
+            copy_target = base_menu.addAction("Copy Link Target")
+            copy_target.triggered.connect(lambda: self.editor._copy_link_to_location(link_target))
         self.editor._add_task_actions_menu(
             base_menu, click_cursor, self.editor.viewport().mapToGlobal(pos),
         )
@@ -1396,11 +1404,16 @@ class PageEditorWindow(QMainWindow):
                 base_menu.addAction(copy_action)
 
         insert_link_action = QAction("Insert link…", self)
+        insert_link_action.setEnabled(editable)
         insert_link_action.triggered.connect(self._insert_link)
         base_menu.addSeparator()
         base_menu.addAction(insert_link_action)
+        insert_date_action = base_menu.addAction("Insert Date…")
+        insert_date_action.setEnabled(editable)
+        insert_date_action.triggered.connect(self._insert_date)
 
         ai_action = QAction("AI assist...", self)
+        ai_action.setEnabled(editable and config.load_enable_ai_chats())
         ai_action.triggered.connect(self._open_ai_assist)
         base_menu.addAction(ai_action)
         

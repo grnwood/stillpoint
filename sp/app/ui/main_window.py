@@ -144,7 +144,7 @@ from .screen_positioning import (
 )
 from .canvas_navigation import install_primary_wheel_zoom
 from .markdown_preview import MarkdownReadingView
-from .git_widgets import CommitBeforePushDialog, GitDiffEditor, GitHistoryDialog, VaultGitPanel
+from .git_widgets import CommitBeforePushDialog, GitCommitViewer, GitDiffEditor, GitHistoryDialog, VaultGitPanel
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
@@ -4437,7 +4437,7 @@ class MainWindow(QMainWindow):
         heading_popup.setContext(Qt.WindowShortcut)
         heading_popup.activated.connect(self._request_heading_picker_popup)
         vault_popup = QShortcut(QKeySequence("Ctrl+Alt+V"), self)
-        vault_popup.setContext(Qt.ApplicationShortcut)
+        vault_popup.setContext(Qt.WindowShortcut)
         vault_popup.activated.connect(self._show_quick_vault_picker)
         new_page_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         new_page_shortcut.activated.connect(lambda: self._show_new_page_dialog(insert_link_in_editor=False))
@@ -4462,8 +4462,8 @@ class MainWindow(QMainWindow):
         is_macos = platform.system() == "Darwin"
         nav_back = QShortcut(QKeySequence("Alt+Left"), self)
         nav_forward = QShortcut(QKeySequence("Alt+Right"), self)
-        nav_back.setContext(Qt.ApplicationShortcut)
-        nav_forward.setContext(Qt.ApplicationShortcut)
+        nav_back.setContext(Qt.WindowShortcut)
+        nav_forward.setContext(Qt.WindowShortcut)
         nav_back_mac = QShortcut(QKeySequence("Meta+["), self) if is_macos else None
         nav_forward_mac = QShortcut(QKeySequence("Meta+]"), self) if is_macos else None
         nav_up = QShortcut(QKeySequence("Alt+Up"), self)
@@ -4506,22 +4506,22 @@ class MainWindow(QMainWindow):
             command_bar_mac_physical_ctrl.activated.connect(self._show_command_bar)
         history_forward_seq, history_backward_seq = history_cycle_sequences()
         history_cycle_forward = QShortcut(QKeySequence(history_forward_seq), self)
-        history_cycle_forward.setContext(Qt.ApplicationShortcut)
+        history_cycle_forward.setContext(Qt.WindowShortcut)
         history_cycle_forward.activated.connect(
             lambda: self._cycle_recent_pages_or_leave_git(reverse=False)
         )
         history_cycle_backward = QShortcut(QKeySequence(history_backward_seq), self)
-        history_cycle_backward.setContext(Qt.ApplicationShortcut)
+        history_cycle_backward.setContext(Qt.WindowShortcut)
         history_cycle_backward.activated.connect(
             lambda: self._cycle_recent_pages_or_leave_git(reverse=True)
         )
         nav_back.activated.connect(self._navigate_history_back)
         nav_forward.activated.connect(self._navigate_history_forward)
         if nav_back_mac is not None:
-            nav_back_mac.setContext(Qt.ApplicationShortcut)
+            nav_back_mac.setContext(Qt.WindowShortcut)
             nav_back_mac.activated.connect(self._navigate_history_back)
         if nav_forward_mac is not None:
-            nav_forward_mac.setContext(Qt.ApplicationShortcut)
+            nav_forward_mac.setContext(Qt.WindowShortcut)
             nav_forward_mac.activated.connect(self._navigate_history_forward)
         nav_up.activated.connect(self._on_nav_up_shortcut)
         nav_down.activated.connect(self._on_nav_down_shortcut)
@@ -6018,6 +6018,7 @@ class MainWindow(QMainWindow):
             panel.saveChangesRequested.connect(self._git_save_changes)
             panel.publishRequested.connect(self._git_push)
             panel.changePreviewRequested.connect(self._show_git_working_diff)
+            panel.log_panel.commitActivated.connect(self._show_git_commit)
             panel.resetRequested.connect(self._git_reset_files)
             panel.statusChanged.connect(self._update_git_status_badge)
             self.git_panel = panel
@@ -6118,7 +6119,7 @@ class MainWindow(QMainWindow):
                 if active_diff is not None
                 else ""
             )
-            if active_diff_path and active_diff_path not in {
+            if active_diff_path and not active_diff_path.startswith("commit:") and active_diff_path not in {
                 str(getattr(entry, "path", "")) for entry in entries
             }:
                 self._close_git_diff_editor()
@@ -6480,6 +6481,21 @@ class MainWindow(QMainWindow):
         dialog = GitHistoryDialog(self.vault_root, relative_path, self)
         dialog.restored.connect(self._on_git_paths_restored)
         dialog.exec()
+
+    def _show_git_log(self, relative_path: str = "") -> None:
+        self._go_to_git()
+        if self.git_panel is not None:
+            self.git_panel.log_panel.show_history(relative_path)
+
+    def _show_git_commit(self, entry, relative_path="") -> None:
+        self._close_git_diff_editor()
+        viewer = GitCommitViewer(self.vault_root, entry, relative_path, self.editor_view_container)
+        viewer.setProperty("gitDiffPath", f"commit:{entry.commit}")
+        self._git_diff_editor = viewer
+        self._editor_view_stack.addWidget(viewer)
+        self._editor_view_stack.setCurrentWidget(viewer)
+        self._update_toc_visibility()
+        self.find_bar.hide()
 
     def _on_git_paths_restored(self, restored_paths: list[str]) -> None:
         self._refresh_tree()
@@ -21828,14 +21844,11 @@ class MainWindow(QMainWindow):
         self.editor.set_font_point_size(new_size)
         self.right_panel.set_calendar_font_size(new_size)
         config.save_global_editor_font_size(new_size)
+        if getattr(self, "_reading_view_enabled", False):
+            self.reading_view.refresh_editor_layout(self.editor)
 
     def _adjust_reading_view_zoom(self, delta: int) -> None:
-        if not hasattr(self, "reading_view"):
-            return
-        if int(delta) > 0:
-            self.reading_view.zoom_in(int(delta))
-        elif int(delta) < 0:
-            self.reading_view.zoom_out(-int(delta))
+        self._adjust_markdown_font_size(delta)
 
     def _apply_vault_tree_font_size(self) -> None:
         font = QFont(self.tree_view.font())
@@ -21969,12 +21982,14 @@ class MainWindow(QMainWindow):
             return
         if self._reading_saved_path != self.current_path:
             self._remember_reading_editor_position()
-        cursor = self.editor.textCursor()
+        source_line, screen_y = self.reading_view.editor_view_position(self.editor)
+        self.reading_view.match_editor_layout(self.editor)
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
         self.reading_view.set_markdown(
             self.editor.to_markdown(),
             base_directory=self._reading_view_base_directory(),
-            source_line=cursor.blockNumber() + 1,
+            source_line=source_line,
+            anchor_global_y=screen_y,
         )
 
     def _schedule_reading_view_refresh(self) -> None:
@@ -21995,18 +22010,20 @@ class MainWindow(QMainWindow):
         self.find_bar.hide()
         if enabled:
             self._remember_reading_editor_position()
+            entry_line, _screen_y = self.reading_view.editor_view_position(self.editor)
             self._refresh_reading_view()
             self._reading_entry_source_line = self.reading_view.source_block_line(
-                self.editor.textCursor().blockNumber() + 1
+                entry_line
             )
             self._editor_view_stack.setCurrentWidget(self.reading_view)
             self.reading_view.focus_reader()
             self.statusBar().showMessage("Reading View — press Ctrl/Cmd+Space to edit", 3000)
             return
+        reading_line, screen_y = self.reading_view.reading_view_position()
+        moved = self.reading_view.handoff_position_changed()
         self._editor_view_stack.setCurrentWidget(self.editor)
         if self._reading_saved_path == self.current_path and self._reading_saved_cursor:
-            reading_line = self.reading_view.current_source_line()
-            if reading_line != self._reading_entry_source_line:
+            if moved or reading_line != self._reading_entry_source_line:
                 block_number = max(
                     0, min(reading_line - 1, self.editor.document().blockCount() - 1)
                 )
@@ -22017,8 +22034,8 @@ class MainWindow(QMainWindow):
                 scrollbar = self.editor.verticalScrollBar()
                 scrollbar.setValue(
                     scrollbar.value()
-                    + cursor_rect.center().y()
-                    - self.editor.viewport().height() // 2
+                    + cursor_rect.top()
+                    - self.editor.viewport().mapFromGlobal(QPoint(0, screen_y)).y()
                 )
             else:
                 anchor, position = self._reading_saved_cursor
@@ -22759,6 +22776,8 @@ class MainWindow(QMainWindow):
                     lambda checked=False, p=str(version_path or "").lstrip("/"):
                         self._show_git_history(p)
                 )
+                menu.addAction("Show History", lambda checked=False, p=str(version_path or "").lstrip("/"):
+                               self._show_git_log(p))
             add_menu_section("Organize")
             add_page_clipboard_actions(path)
             reorg_subtree_action = menu.addAction("Reorganize this subtree…")
@@ -22805,6 +22824,8 @@ class MainWindow(QMainWindow):
             add_menu_section("Create")
             add_new_page_menu(menu, self._context_menu_parent_path(index))
             add_page_clipboard_actions("/")
+        if not index.isValid() and self._is_git_mode_enabled():
+            menu.addAction("Show History", self._show_git_log)
         if menu.actions():
             menu.exec(global_pos)
 
@@ -23690,15 +23711,14 @@ class MainWindow(QMainWindow):
     def _prompt_rename_path(self, source_path: str) -> None:
         """Collect and apply a new leaf name for a page or folder."""
         current_name = Path(source_path.rstrip("/")).name
-        new_name, accepted = QInputDialog.getText(
-            self,
-            "Rename",
-            "New name:",
-            QLineEdit.Normal,
-            current_name,
-        )
-        if not accepted:
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Rename")
+        dialog.setLabelText("New name:")
+        dialog.setTextValue(current_name)
+        dialog.setMinimumWidth(760)
+        if dialog.exec() != QDialog.Accepted:
             return
+        new_name = dialog.textValue()
         parent_path = str(Path(source_path.rstrip("/")).parent).replace("\\", "/")
         if parent_path in {"", "."}:
             parent_path = "/"

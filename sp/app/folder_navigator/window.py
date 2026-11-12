@@ -68,7 +68,7 @@ from sp.app.ui.keyboard_shortcuts import (
     is_vi_navigation_chord,
     vi_navigation_sequences,
 )
-from sp.app.ui.git_widgets import CommitBeforePushDialog, git_change_row, git_section_row
+from sp.app.ui.git_widgets import CommitBeforePushDialog, GitCommitViewer, GitLogPanel, git_change_row, git_section_row
 from sp.app.ui.canvas_navigation import (
     install_primary_wheel_zoom,
     native_zoom_steps,
@@ -258,8 +258,12 @@ class GitCommandDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumSize(720, 420)
+        self.resize(1120, 650)
         self.setWindowFlag(Qt.WindowCloseButtonHint, False)
         self._completed = False
+        self._command_arguments = list(arguments)
+        self._details_process = None
+        self._git_output = ""
 
         layout = QVBoxLayout(self)
         self.output = QPlainTextEdit(self)
@@ -303,6 +307,7 @@ class GitCommandDialog(QDialog):
         )
         if not data:
             return
+        self._git_output += data
         cursor = self.output.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(data)
@@ -326,6 +331,47 @@ class GitCommandDialog(QDialog):
         self._read_stdout()
         self._read_stderr()
         self._append(f"\n[git exited with code {exit_code}]\n")
+        if exit_code == 0 and self._command_arguments[:1] == ["commit"]:
+            # A normal commit prints only totals for modified files. Include
+            # the saved commit's paths and per-file line counts as well.
+            arguments = ["show", "--no-color", "--no-ext-diff", "--format=fuller",
+                         "--stat", "--stat-width=160", "--stat-name-width=120", "--summary", "HEAD"]
+            self._start_details(arguments, "Saved commit details")
+            return
+        if exit_code == 0 and self._command_arguments[:1] == ["push"]:
+            ranges = re.findall(r"^\s*\+?\s*([0-9a-f]+)\.{2,3}([0-9a-f]+)\s+\S+\s+->\s+\S+", self._git_output, re.MULTILINE)
+            revisions = [f"{old}..{new}" for old, new in ranges]
+            if not revisions:
+                branches = re.findall(r"\[new branch\]\s+(\S+)\s+->\s+\S+", self._git_output)
+                revisions = [f"refs/heads/{branch}" for branch in branches]
+            if revisions:
+                self._start_details([
+                    "log", "--no-color", "--no-ext-diff", "--format=short", "--reverse",
+                    "--max-count=100", "--stat", "--stat-width=160", "--stat-name-width=120",
+                    *revisions, "--",
+                ], "Published commits and files (up to 100 commits)")
+                return
+        self._complete()
+
+    def _start_details(self, arguments, label):
+        self._append(f"\n{label}\n$ git " + " ".join(arguments) + "\n\n")
+        details = QProcess(self)
+        self._details_process = details
+        details.setWorkingDirectory(self.process.workingDirectory())
+        command = _git_command(*arguments)
+        details.setProgram(command[0])
+        details.setArguments(command[1:])
+        details.setProcessChannelMode(QProcess.MergedChannels)
+        details.readyReadStandardOutput.connect(lambda: self._append(details.readAllStandardOutput()))
+        details.finished.connect(lambda *_: self._complete_commit_details())
+        details.errorOccurred.connect(
+            lambda error: self._complete_commit_details() if error == QProcess.FailedToStart else None
+        )
+        details.start()
+
+    def _complete_commit_details(self) -> None:
+        if self._details_process is not None:
+            self._append(self._details_process.readAllStandardOutput())
         self._complete()
 
     def _complete(self) -> None:
@@ -2709,10 +2755,13 @@ class Tab(QWidget):
     def _refresh_reading_view(self) -> None:
         if not self.markdown or self.editor is None or self.reading_view is None:
             return
+        source_line, screen_y = self.reading_view.editor_view_position(self.editor)
+        self.reading_view.match_editor_layout(self.editor)
         self.reading_view.set_markdown(
             self.editor.to_markdown(),
             base_directory=self.path.parent,
-            source_line=self.editor.textCursor().blockNumber() + 1,
+            source_line=source_line,
+            anchor_global_y=screen_y,
         )
 
     def set_reading_view(self, enabled: bool) -> None:
@@ -2736,16 +2785,18 @@ class Tab(QWidget):
             cursor = self.editor.textCursor()
             self._reading_saved_cursor = (cursor.anchor(), cursor.position())
             self._reading_saved_scroll = self.editor.verticalScrollBar().value()
+            entry_line, _screen_y = self.reading_view.editor_view_position(self.editor)
             self._refresh_reading_view()
             self._reading_entry_source_line = self.reading_view.source_block_line(
-                cursor.blockNumber() + 1
+                entry_line
             )
             self.editor_view_stack.setCurrentWidget(self.reading_view)
             self.reading_view.focus_reader()
         else:
+            reading_line, screen_y = self.reading_view.reading_view_position()
+            moved = self.reading_view.handoff_position_changed()
             self.editor_view_stack.setCurrentWidget(self.editor)
-            reading_line = self.reading_view.current_source_line()
-            if reading_line != self._reading_entry_source_line:
+            if moved or reading_line != self._reading_entry_source_line:
                 block_number = max(
                     0, min(reading_line - 1, self.editor.document().blockCount() - 1)
                 )
@@ -2756,8 +2807,8 @@ class Tab(QWidget):
                 scrollbar = self.editor.verticalScrollBar()
                 scrollbar.setValue(
                     scrollbar.value()
-                    + cursor_rect.center().y()
-                    - self.editor.viewport().height() // 2
+                    + cursor_rect.top()
+                    - self.editor.viewport().mapFromGlobal(QPoint(0, screen_y)).y()
                 )
             elif self._reading_saved_cursor:
                 anchor, position = self._reading_saved_cursor
@@ -4514,11 +4565,9 @@ class Window(QMainWindow):
         )
         try:
             self.editor_zoom_steps = max(-8, min(20, int(self.state.get("editor_zoom_steps", 0))))
-            self.reading_zoom_steps = max(-8, min(20, int(self.state.get("reading_zoom_steps", 0))))
             self.folder_zoom_steps = max(-8, min(20, int(self.state.get("folder_zoom_steps", 0))))
         except (TypeError, ValueError):
             self.editor_zoom_steps = 0
-            self.reading_zoom_steps = 0
             self.folder_zoom_steps = 0
         self._last_focus_pane = "folder"
         self.model = FolderModel(self.root, self)
@@ -4727,7 +4776,13 @@ class Window(QMainWindow):
             self.git_status_list.itemClicked.connect(self._open_git_status_item)
             self.git_status_list.itemActivated.connect(self._open_git_status_file)
             self.git_status_list.actionRequested.connect(self._git_hover_action)
-            git_layout.addWidget(self.git_status_list)
+            self.git_log_panel = GitLogPanel(self.root)
+            self.git_log_panel.commitActivated.connect(self._show_git_commit)
+            git_splitter = QSplitter(Qt.Vertical)
+            git_splitter.addWidget(self.git_status_list)
+            git_splitter.addWidget(self.git_log_panel)
+            git_splitter.setSizes([300, 300])
+            git_layout.addWidget(git_splitter, 1)
             self.rail.addTab(self.git_page, "Git")
             self.rail.currentChanged.connect(self._rail_changed)
         self.tabs = QTabWidget()
@@ -6007,21 +6062,6 @@ class Window(QMainWindow):
         if tab is None:
             return
         if tab.editor is not None:
-            if tab.reading_view_enabled and tab.reading_view is not None:
-                new_steps = max(-8, min(20, self.reading_zoom_steps + direction))
-                applied = new_steps - self.reading_zoom_steps
-                if not applied:
-                    return
-                self.reading_zoom_steps = new_steps
-                self.state["reading_zoom_steps"] = new_steps
-                for candidate in self.all_tabs():
-                    if candidate.reading_view is not None:
-                        if applied > 0:
-                            candidate.reading_view.zoom_in(applied)
-                        else:
-                            candidate.reading_view.zoom_out(-applied)
-                self._persist()
-                return
             new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
             applied = new_steps - self.editor_zoom_steps
             if not applied:
@@ -6030,7 +6070,13 @@ class Window(QMainWindow):
             self.state["editor_zoom_steps"] = new_steps
             for candidate in self.all_tabs():
                 if candidate.editor is not None:
-                    if applied > 0:
+                    if candidate.markdown:
+                        candidate.editor.set_font_point_size(
+                            candidate.editor.font().pointSize() + applied
+                        )
+                        if candidate.reading_view is not None:
+                            candidate.reading_view.refresh_editor_layout(candidate.editor)
+                    elif applied > 0:
                         candidate.editor.zoomIn(applied)
                     else:
                         candidate.editor.zoomOut(-applied)
@@ -6660,15 +6706,15 @@ class Window(QMainWindow):
                 install_primary_wheel_zoom(
                     tab.reading_view.browser, self._zoom_active_view
                 )
-            if self.editor_zoom_steps > 0:
+            if tab.markdown:
+                tab.editor.set_font_point_size(
+                    max(6, tab.editor.font().pointSize() + self.editor_zoom_steps)
+                )
+                tab.reading_view.match_editor_layout(tab.editor)
+            elif self.editor_zoom_steps > 0:
                 tab.editor.zoomIn(self.editor_zoom_steps)
             elif self.editor_zoom_steps < 0:
                 tab.editor.zoomOut(-self.editor_zoom_steps)
-            if tab.reading_view is not None:
-                if self.reading_zoom_steps > 0:
-                    tab.reading_view.zoom_in(self.reading_zoom_steps)
-                elif self.reading_zoom_steps < 0:
-                    tab.reading_view.zoom_out(-self.reading_zoom_steps)
             # Folder Navigator owns a deliberately small editor context menu.
             # In particular, Markdown tabs must not expose StillPoint page,
             # link-graph, AI, or vault-navigation actions here.
@@ -9055,6 +9101,8 @@ class Window(QMainWindow):
     def refresh_git_status(self) -> None:
         if not self.git_enabled or self.git_status_list is None:
             return
+        if hasattr(self, "git_log_panel"):
+            self.git_log_panel.refresh()
         try:
             result = subprocess.run(
                 _git_command(
@@ -9446,6 +9494,8 @@ class Window(QMainWindow):
     def _create_git_context_menu(self) -> QMenu:
         menu = QMenu(self)
         entries = self._selected_git_entries()
+        history_path = self.root / entries[0]["path"] if len(entries) == 1 else None
+        menu.addAction("Git Log History", lambda: self._show_git_log(history_path))
         if not entries:
             return menu
         if any(entry["worktree"] != " " or entry["index"] == "?" for entry in entries):
@@ -9460,6 +9510,32 @@ class Window(QMainWindow):
                 lambda: self._git_remove_untracked_entries(untracked),
             )
         return menu
+
+    def _show_git_log(self, path=None):
+        if not self.git_enabled:
+            return
+        relative = str(Path(path).relative_to(self.root)) if path is not None else ""
+        self.git_log_panel.show_history("" if relative == "." else relative)
+        self.rail.setCurrentWidget(self.git_page)
+
+    def _show_git_commit(self, entry, relative_path=""):
+        # History is a read-only preview tab; it never replaces dirty editors.
+        for index in range(self.tabs.count() - 1, -1, -1):
+            old = self.tabs.widget(index)
+            if old.property("gitCommitHistory"):
+                self.tabs.removeTab(index)
+                old.deleteLater()
+        tab = Tab(self.root, details="", root=self.root)
+        tab.setProperty("folderGitDiff", True)
+        tab.setProperty("gitCommitHistory", True)
+        viewer = GitCommitViewer(self.root, entry, relative_path, tab)
+        placeholder = tab.placeholder
+        tab.layout().replaceWidget(placeholder, viewer)
+        placeholder.deleteLater()
+        tab.viewer = viewer
+        index = self.tabs.addTab(tab, f"Commit {entry.commit[:8]}")
+        self.tabs.setCurrentIndex(index)
+        self._update_welcome()
 
     @staticmethod
     def _git_paths(entries: list[dict]) -> list[str]:
@@ -9947,8 +10023,12 @@ class Window(QMainWindow):
             self._add_paste_context_action(menu, target_directory)
             menu.addSeparator()
             menu.addAction("Open Terminal Here", lambda: self.terminal(target_directory))
+            if self.git_enabled:
+                menu.addAction("Git Log History", lambda: self._show_git_log(target_directory))
             return menu
         path = Path(self.model.filePath(index))
+        if self.git_enabled:
+            menu.addAction("Git Log History", lambda: self._show_git_log(path))
         folder = self.model.isDir(index)
         if folder:
             menu.addAction("Expand / Collapse", lambda: self.tree.setExpanded(index, not self.tree.isExpanded(index)))

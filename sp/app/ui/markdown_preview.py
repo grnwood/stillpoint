@@ -1,6 +1,7 @@
 """Token-free, in-process reading view for Markdown editors."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -30,6 +31,8 @@ from PySide6.QtGui import (
     QResizeEvent,
     QShortcut,
     QTextCursor,
+    QTextBlockFormat,
+    QTextFormat,
     QTextDocument,
 )
 from PySide6.QtWidgets import (
@@ -47,6 +50,7 @@ from PySide6.QtWidgets import (
 from sp.app import config
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_value
+from sp.app.ui.heading_utils import HEADING_SIZE_MULTIPLIERS
 from sp.markdown_html import nearest_source_anchor, render_markdown_html
 
 
@@ -349,6 +353,12 @@ class MarkdownReadingView(QWidget):
         self.base_directory: Path | None = None
         self._use_theme_colors = config.load_reading_view_use_theme_colors()
         self._base_font_point_size = 12.0
+        self._editor_font_family = "sans-serif"
+        self._editor_document_margin = 18.0
+        self._editor_line_spacing: float | None = None
+        self._heading_weight = 700
+        self._handoff_scroll_value = None
+        self._handoff_source_line = None
         self._zoom_steps = 0
         self._zoom_css_dirty = False
         self._zoom_render_timer = QTimer(self)
@@ -521,6 +531,10 @@ class MarkdownReadingView(QWidget):
             return f"{value * scale:.2f}pt"
 
         body_size = points(self._base_font_point_size)
+        heading_sizes = [
+            points(self._base_font_point_size * multiplier)
+            for multiplier in HEADING_SIZE_MULTIPLIERS
+        ]
         if self._use_theme_colors:
             configured_paper = str(
                 theme_value("markdown_preview.paper_bg", "#ffffff")
@@ -562,16 +576,16 @@ class MarkdownReadingView(QWidget):
             highlight = "#1a5fb4"
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
-            body {{ font-family: sans-serif; font-size: {body_size}; line-height: 1.35;
-                    margin: 12px 36px 20px 36px; }}
+            body {{ font-family: {self._editor_font_family}; font-size: {body_size}; line-height: 1.35;
+                    margin: {self._editor_document_margin}px; }}
             h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 6px;
-                   margin-bottom: 3px; font-weight: 700; }}
-            h1 {{ font-size: {points(self._base_font_point_size * 2.0)}; }}
-            h2 {{ font-size: {points(self._base_font_point_size * 1.55)}; }}
-            h3 {{ font-size: {points(self._base_font_point_size * 1.3)}; }}
-            h4 {{ font-size: {points(self._base_font_point_size * 1.15)}; }}
-            h5 {{ font-size: {points(self._base_font_point_size)}; }}
-            h6 {{ font-size: {points(self._base_font_point_size)}; color: {muted}; }}
+                   margin-bottom: 3px; font-weight: {self._heading_weight}; }}
+            h1 {{ font-size: {heading_sizes[0]}; }}
+            h2 {{ font-size: {heading_sizes[1]}; }}
+            h3 {{ font-size: {heading_sizes[2]}; }}
+            h4 {{ font-size: {heading_sizes[3]}; }}
+            h5 {{ font-size: {heading_sizes[4]}; }}
+            h6 {{ font-size: {heading_sizes[4]}; color: {muted}; }}
             p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
             p {{ margin-top: 0.25em; margin-bottom: 0.25em; }}
             table {{ border-collapse: collapse; width: 100%; margin-top: 0.55em;
@@ -619,13 +633,84 @@ class MarkdownReadingView(QWidget):
 
     def set_base_font_point_size(self, size: float) -> None:
         try:
-            value = max(6.0, min(24.0, float(size)))
+            value = max(6.0, float(size))
         except (TypeError, ValueError):
             value = 12.0
         if abs(value - self._base_font_point_size) < 0.01:
             return
         self._base_font_point_size = value
         self._apply_palette()
+
+    def match_editor_layout(self, editor) -> None:
+        """Keep text widths and typography familiar when switching from edit mode."""
+        self._zoom_render_timer.stop()
+        self._zoom_steps = 0
+        self._zoom_css_dirty = False
+        self._editor_font_family = json.dumps(editor.font().family())
+        self._editor_document_margin = editor.document().documentMargin()
+        self._editor_line_spacing = editor.fontMetrics().height()
+        self.browser.setFont(editor.font())
+        self.browser.document().setDefaultFont(editor.document().defaultFont())
+        highlighter = getattr(editor, "highlighter", None)
+        if highlighter is not None:
+            self._heading_weight = highlighter.heading_format.fontWeight()
+        self.browser.setViewportMargins(editor.viewportMargins())
+        self.set_base_font_point_size(editor.font().pointSizeF())
+        self._apply_palette()
+
+    def refresh_editor_layout(self, editor) -> None:
+        source_line, screen_y = self.reading_view_position() if self.last_markdown else (1, None)
+        self.match_editor_layout(editor)
+        if self.last_markdown:
+            self.set_markdown(
+                self.last_markdown, base_directory=self.base_directory,
+                source_line=source_line, anchor_global_y=screen_y,
+            )
+
+    def _match_source_spacing(self) -> None:
+        """Represent source blank lines instead of HTML's compact block margins."""
+        if self._editor_line_spacing is None:
+            return
+        lines = self.last_markdown.splitlines()
+        for position, source_line in self._source_positions:
+            cursor = QTextCursor(self.browser.document())
+            cursor.setPosition(position)
+            # Tables own multiple rendered blocks; preserve their internal
+            # layout rather than treating them as paragraphs.
+            if cursor.currentTable() is not None:
+                continue
+            blank_lines = 0
+            index = source_line - 2
+            while index >= 0 and not lines[index].strip():
+                blank_lines += 1
+                index -= 1
+            fmt = cursor.blockFormat()
+            fmt.setTopMargin(blank_lines * self._editor_line_spacing)
+            fmt.setBottomMargin(0)
+            fmt.setLineHeight(100, QTextBlockFormat.ProportionalHeight.value)
+            cursor.setBlockFormat(fmt)
+
+    @staticmethod
+    def editor_view_position(editor) -> tuple[int, int]:
+        cursor = editor.textCursor()
+        if not editor.viewport().rect().intersects(editor.cursorRect(cursor)):
+            cursor = editor.cursorForPosition(QPoint(12, 4))
+        block_cursor = QTextCursor(cursor.block())
+        screen_y = editor.viewport().mapToGlobal(editor.cursorRect(block_cursor).topLeft()).y()
+        return cursor.blockNumber() + 1, screen_y
+
+    def reading_view_position(self) -> tuple[int, int]:
+        cursor = self.browser._reading_cursor
+        if cursor.isNull():
+            cursor = self.browser.cursorForPosition(QPoint(12, 4))
+        screen_y = self.browser.viewport().mapToGlobal(self.browser.cursorRect(cursor).topLeft()).y()
+        return self.current_source_line(), screen_y
+
+    def handoff_position_changed(self) -> bool:
+        return self._handoff_scroll_value is not None and (
+            self.browser.verticalScrollBar().value() != self._handoff_scroll_value
+            or self.current_source_line() != self._handoff_source_line
+        )
 
     def page_scroll(self, direction: int) -> None:
         self.browser.page_scroll(direction)
@@ -716,6 +801,7 @@ class MarkdownReadingView(QWidget):
         *,
         base_directory: str | Path | None = None,
         source_line: int = 1,
+        anchor_global_y: int | None = None,
     ) -> None:
         if self._zoom_css_dirty:
             self._zoom_render_timer.stop()
@@ -763,13 +849,42 @@ class MarkdownReadingView(QWidget):
         self.last_html = f"<html><head><style>{self._css}</style></head><body>{body}</body></html>"
         self.browser._reading_cursor = QTextCursor()
         self.browser.setHtml(self.last_html)
+        # Qt's HTML importer retains h1..h6 relative size adjustments alongside
+        # our explicit point sizes. Those adjustments win during font resolution,
+        # so inspecting fontPointSize alone misleadingly reports the right size.
+        heading_formats = []
+        block = self.browser.document().begin()
+        while block.isValid():
+            fragment_iterator = block.begin()
+            while not fragment_iterator.atEnd():
+                fragment = fragment_iterator.fragment()
+                fmt = fragment.charFormat()
+                if (
+                    block.blockFormat().headingLevel() > 0
+                    and fmt.hasProperty(QTextFormat.FontSizeAdjustment)
+                ):
+                    fmt.clearProperty(QTextFormat.FontSizeAdjustment)
+                    heading_formats.append((fragment.position(), fragment.length(), fmt))
+                fragment_iterator += 1
+            block = block.next()
+        for position, length, fmt in heading_formats:
+            cursor = QTextCursor(self.browser.document())
+            cursor.setPosition(position)
+            cursor.setPosition(position + length, QTextCursor.KeepAnchor)
+            cursor.setCharFormat(fmt)
+        self.browser.document().setDocumentMargin(self._editor_document_margin)
         self._fit_images_to_viewport(reset=True)
         # A newly visible vertical scrollbar narrows the viewport after the
         # first layout pass; refit once more against that settled width.
         self._image_resize_timer.start()
         self._index_source_positions()
+        self._match_source_spacing()
         self._requested_source_line = max(1, int(source_line))
-        self.scroll_to_source_line(source_line)
+        self._handoff_scroll_value = None
+        self._handoff_source_line = None
+        self.scroll_to_source_line(
+            source_line, anchor_global_y=anchor_global_y, remember_handoff=True
+        )
 
     def _index_source_positions(self) -> None:
         positions: list[tuple[int, int]] = []
@@ -830,7 +945,10 @@ class MarkdownReadingView(QWidget):
                 return self.browser._nearest_content_cursor(cursor)
         return None
 
-    def scroll_to_source_line(self, source_line: int) -> None:
+    def scroll_to_source_line(
+        self, source_line: int, *, anchor_global_y: int | None = None,
+        remember_handoff: bool = False,
+    ) -> None:
         anchor = nearest_source_anchor(self.last_markdown, source_line)
         if anchor:
             def scroll_and_mark(value=anchor):
@@ -859,13 +977,17 @@ class MarkdownReadingView(QWidget):
                         )
                     cursor_rect = self.browser.cursorRect(cursor)
                     scrollbar = self.browser.verticalScrollBar()
-                    scrollbar.setValue(
-                        scrollbar.value()
-                        + cursor_rect.center().y()
-                        - self.browser.viewport().height() // 2
-                    )
+                    if anchor_global_y is None:
+                        offset = cursor_rect.center().y() - self.browser.viewport().height() // 2
+                    else:
+                        target_y = self.browser.viewport().mapFromGlobal(QPoint(0, anchor_global_y)).y()
+                        offset = cursor_rect.top() - target_y
+                    scrollbar.setValue(scrollbar.value() + offset)
                     self.browser._reading_cursor = QTextCursor(cursor)
                     self.browser.refresh_reading_cursor()
+                    if remember_handoff:
+                        self._handoff_scroll_value = scrollbar.value()
+                        self._handoff_source_line = self.current_source_line()
 
                 QTimer.singleShot(0, self.browser, place_source_cursor)
 

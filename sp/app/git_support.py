@@ -59,6 +59,73 @@ class GitHistoryEntry:
 
 
 @dataclass(frozen=True)
+class GitCommitFile:
+    path: str
+    status: str
+    additions: Optional[int]
+    deletions: Optional[int]
+    original_path: Optional[str] = None
+
+
+def recent_commits(root: str | Path, relative_path: str = "", *, limit: int = 100) -> list[GitHistoryEntry]:
+    vault_root = require_exact_repository(root)
+    arguments = ["log", f"--max-count={max(1, int(limit))}",
+                 "--format=%H%x00%aI%x00%an%x00%s%x00", "HEAD", "--"]
+    if relative_path:
+        arguments.append(relative_path)
+    result = _run(vault_root, arguments, check=False)
+    if result.returncode:
+        if _run(vault_root, ["rev-parse", "--verify", "HEAD"], check=False).returncode:
+            return []
+        raise GitError(_text(result) or result.stderr.decode("utf-8", errors="replace").strip())
+    fields = result.stdout.decode("utf-8", errors="replace").split("\0")
+    return [GitHistoryEntry(*(value.strip() for value in fields[index:index + 4]))
+            for index in range(0, len(fields) - 3, 4) if fields[index].strip()]
+
+
+def commit_files(root: str | Path, revision: str) -> list[GitCommitFile]:
+    """List changes made by a commit, comparing merges with their first parent."""
+    vault_root = require_exact_repository(root)
+    arguments = ["show", "--format=", "--no-ext-diff", "--no-color",
+                 "--diff-merges=first-parent", "--find-renames"]
+    names = _run(vault_root, [*arguments, "--name-status", "-z", revision, "--"])
+    counts = _run(vault_root, [*arguments, "--numstat", "-z", revision, "--"])
+    stats: dict[str, tuple[Optional[int], Optional[int]]] = {}
+    fields = iter(_text(counts).split("\0"))
+    for field in fields:
+        if not field:
+            continue
+        added, deleted, path = field.split("\t", 2)
+        if not path:  # With -z, renames use separate old/new path fields.
+            next(fields)
+            path = next(fields)
+        stats[path] = (None if added == "-" else int(added),
+                       None if deleted == "-" else int(deleted))
+    files = []
+    fields = iter(_text(names).split("\0"))
+    for code in fields:
+        if not code:
+            continue
+        path = next(fields)
+        original = None
+        if code.startswith(("R", "C")):
+            original, path = path, next(fields)
+        added, deleted = stats.get(path, (None, None))
+        files.append(GitCommitFile(path, code[0], added, deleted, original))
+    return files
+
+
+def commit_diff(root: str | Path, revision: str, paths: Iterable[str]) -> str:
+    """Show the patch introduced by a commit, including initial and merge commits."""
+    vault_root = require_exact_repository(root)
+    result = _run(vault_root, [
+        "show", "--format=", "--no-ext-diff", "--no-color",
+        "--diff-merges=first-parent", "--find-renames", revision, "--", *paths,
+    ])
+    return _text(result)
+
+
+@dataclass(frozen=True)
 class GitRepositoryState:
     initialized: bool
     exact_root: bool
@@ -628,7 +695,7 @@ def diff_from_revision(root: str | Path, revision: str, relative_path: str) -> s
     vault_root = require_exact_repository(root)
     result = _run(
         vault_root,
-        ["diff", "--no-ext-diff", "--no-color", revision, "--", relative_path],
+        ["diff", "--no-ext-diff", "--no-color", revision, "--", *([relative_path] if relative_path else [])],
         check=False,
     )
     if result.returncode not in {0, 1}:

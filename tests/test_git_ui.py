@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import subprocess
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QPalette, QShortcut
@@ -8,8 +9,91 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QTableWidget
 
 from sp.app import config, git_support
-from sp.app.ui.git_widgets import CommitBeforePushDialog, GitDiffEditor, GitPathLabel, VaultGitPanel
+from sp.app.ui.git_widgets import CommitBeforePushDialog, GitDiffEditor, GitHistoryDialog, GitPathLabel, VaultGitPanel
 from sp.app.ui.keyboard_shortcuts import history_cycle_sequences
+
+
+def test_history_shows_commit_files_and_keeps_comparisons_explicit(qtbot, tmp_path, monkeypatch):
+    entry = git_support.GitHistoryEntry("a" * 40, "2026-11-12T10:30:00-06:00", "Test Author", "Update pages")
+    monkeypatch.setattr(git_support, "history", lambda *args, **kwargs: [entry])
+    monkeypatch.setattr(git_support, "commit_files", lambda *args: [
+        git_support.GitCommitFile("Notes/Page.md", "M", 4, 2),
+        git_support.GitCommitFile("New/image.png", "R", None, None, "Old/image.png"),
+    ])
+    calls = []
+    monkeypatch.setattr(git_support, "commit_diff", lambda root, revision, paths: calls.append(paths) or "commit patch")
+    monkeypatch.setattr(git_support, "diff_from_revision", lambda root, revision, path: f"working comparison: {path}")
+    dialog = GitHistoryDialog(tmp_path, "Notes")
+    qtbot.addWidget(dialog)
+
+    assert dialog.width() >= 1200
+    assert "Test Author" in dialog.commit_details.text()
+    assert entry.commit in dialog.commit_details.text()
+    assert dialog.file_table.rowCount() == 2
+    assert not dialog.file_table.wordWrap()
+    assert "2 changed files" in dialog.file_summary.text()
+    assert "+4 / −2" in dialog.file_summary.text()
+    assert "1 binary" in dialog.file_summary.text()
+    assert dialog.diff_view.toPlainText() == "commit patch"
+    assert calls[-1] == ["Notes/Page.md"]
+    dialog.file_table.setCurrentCell(1, 1)
+    assert calls[-1] == ["Old/image.png", "New/image.png"]
+    assert "Old/image.png → New/image.png" == dialog.file_table.item(1, 1).text()
+    dialog.comparison.setCurrentIndex(1)
+    assert dialog.diff_view.toPlainText() == "working comparison: New/image.png"
+    dialog.comparison.setCurrentIndex(2)
+    assert dialog.diff_view.toPlainText() == "working comparison: Notes"
+    assert dialog.relative_path == "Notes"  # Selecting another file doesn't change the restore target.
+
+
+def test_history_handles_empty_and_failed_commit_file_details(qtbot, tmp_path, monkeypatch):
+    entry = git_support.GitHistoryEntry("b" * 40, "", "Test", "Empty checkpoint")
+    monkeypatch.setattr(git_support, "history", lambda *args, **kwargs: [entry])
+    monkeypatch.setattr(git_support, "commit_files", lambda *args: [])
+    dialog = GitHistoryDialog(tmp_path, "Page.md")
+    qtbot.addWidget(dialog)
+    assert "no file changes" in dialog.diff_view.toPlainText()
+    monkeypatch.setattr(git_support, "diff_from_revision", lambda *args: "+working edit")
+    dialog.comparison.setCurrentIndex(2)
+    assert dialog.diff_view.toPlainText() == "+working edit"
+
+    def fail(*args):
+        raise git_support.GitError("Could not read commit")
+
+    monkeypatch.setattr(git_support, "commit_files", fail)
+    dialog.refresh()
+    assert dialog.file_table.rowCount() == 0
+    assert dialog.diff_view.toPlainText() == "Could not read commit"
+    monkeypatch.setattr(git_support, "history", lambda *args, **kwargs: [])
+    dialog.refresh()
+    assert not dialog.restore_button.isEnabled()
+    assert not dialog.commit_details.text()
+
+
+def test_commit_terminal_includes_modified_file_details(qtbot, tmp_path):
+    from sp.app.folder_navigator.window import GitCommandDialog
+
+    git_support.initialize_repository(tmp_path)
+    for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+        subprocess.run(["git", "-C", str(tmp_path), "config", key, value], check=True)
+    page = tmp_path / "Existing page.md"
+    page.write_text("before\n", encoding="utf-8")
+    git_support.save_changes(tmp_path, "Initial")
+    page.write_text("after\nmore details\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "--", page.name], check=True)
+    dialog = GitCommandDialog(tmp_path, ["commit", "-m", "Update page"], "Git Commit")
+    qtbot.addWidget(dialog)
+    for _ in range(100):
+        if dialog.ok_button.isEnabled():
+            break
+        QTest.qWait(30)
+    assert dialog.ok_button.isEnabled()
+    assert dialog.width() >= 1100
+    details = dialog.output.toPlainText().split("Saved commit details", 1)[1]
+    assert "Existing page.md" in details
+    assert "Update page" in details
+    assert "Author:" in details
+    assert git_support.status(tmp_path) == []
 
 
 def test_git_mode_adds_vault_rail_and_command_palette_actions(main_window, monkeypatch) -> None:

@@ -149,6 +149,62 @@ def test_save_changes_reports_clean_repository_without_empty_commit(tmp_path) ->
     assert git_support.save_changes(root, "Nothing") is False
 
 
+def test_commit_details_report_files_counts_renames_and_binary(tmp_path) -> None:
+    root = _repository(tmp_path)
+    page = root / "Page.md"
+    page.write_text("first\nsecond\nthird\n", encoding="utf-8")
+    (root / "Remove.md").write_text("remove me\n", encoding="utf-8")
+    (root / "Modified.md").write_text("before\n", encoding="utf-8")
+    git_support.save_changes(root, "Initial")
+    initial = _git(root, "rev-parse", "HEAD").stdout.strip()
+    first_files = {file.path: file for file in git_support.commit_files(root, initial)}
+    assert first_files["Page.md"].status == "A"
+    assert first_files["Page.md"].additions == 3
+    assert "+first" in git_support.commit_diff(root, initial, ["Page.md"])
+
+    renamed = root / "Renamed ü\tpage.md"
+    page.rename(renamed)
+    (root / "Remove.md").unlink()
+    (root / "Modified.md").write_text("after\n", encoding="utf-8")
+    (root / "image.bin").write_bytes(b"\0\x01\x02")
+    (root / "New.md").write_text("new\n", encoding="utf-8")
+    git_support.save_changes(root, "Rename and add files")
+    files = {file.path: file for file in git_support.commit_files(root, "HEAD")}
+    assert files[renamed.name].original_path == "Page.md"
+    assert files[renamed.name].status == "R"
+    assert files[renamed.name].additions == 0
+    assert files["image.bin"].additions is None
+    assert files["New.md"].additions == 1
+    assert files["Remove.md"].status == "D"
+    assert files["Remove.md"].deletions == 1
+    assert files["Modified.md"].status == "M"
+    assert (files["Modified.md"].additions, files["Modified.md"].deletions) == (1, 1)
+    patch = git_support.commit_diff(root, "HEAD", ["Page.md", renamed.name])
+    assert "rename from" in patch
+    # The commit patch is stable even after more working-copy edits.
+    (root / "New.md").write_text("working edit\n", encoding="utf-8")
+    assert "+new" in git_support.commit_diff(root, "HEAD", ["New.md"])
+    assert "working edit" not in git_support.commit_diff(root, "HEAD", ["New.md"])
+    assert "working edit" in git_support.diff_from_revision(root, "HEAD", "")
+
+
+def test_commit_details_compare_merge_with_first_parent(tmp_path) -> None:
+    root = _repository(tmp_path)
+    (root / "Base.md").write_text("base\n", encoding="utf-8")
+    git_support.save_changes(root, "Initial")
+    branch = _git(root, "branch", "--show-current").stdout.strip()
+    _git(root, "checkout", "-b", "topic")
+    (root / "Topic.md").write_text("topic\n", encoding="utf-8")
+    git_support.save_changes(root, "Topic")
+    _git(root, "checkout", branch)
+    (root / "Main.md").write_text("main\n", encoding="utf-8")
+    git_support.save_changes(root, "Main")
+    _git(root, "merge", "--no-ff", "topic", "-m", "Merge topic")
+    files = git_support.commit_files(root, "HEAD")
+    assert [file.path for file in files] == ["Topic.md"]
+    assert "+topic" in git_support.commit_diff(root, "HEAD", ["Topic.md"])
+
+
 def test_commit_paths_commits_only_selected_files(tmp_path) -> None:
     root = _repository(tmp_path)
     first = root / "First.md"

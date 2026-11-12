@@ -161,6 +161,128 @@ def test_folder_markdown_tab_hands_cursor_position_both_directions(
     assert tab.editor.textCursor().blockNumber() + 1 == reading_line
 
 
+def test_reading_heading_sizes_match_editor(qtbot, qapp) -> None:
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    editor = MarkdownEditor()
+    view = MarkdownReadingView()
+    qtbot.addWidget(editor)
+    qtbot.addWidget(view)
+    editor.set_font_point_size(16)
+    markdown = "\n\n".join("#" * level + f" Heading {level}" for level in range(1, 6))
+    editor.set_markdown(markdown)
+    view.match_editor_layout(editor)
+    view.set_markdown(markdown)
+    qapp.processEvents()
+
+    for level in range(1, 6):
+        block = editor.document().findBlockByNumber((level - 1) * 2)
+        editor_size = max(span.format.fontPointSize() for span in block.layout().formats())
+        reader_cursor = view.browser.document().find(f"Heading {level}")
+        assert reader_cursor.charFormat().fontPointSize() == pytest.approx(editor_size)
+    assert view.browser.viewportMargins() == editor.viewportMargins()
+    assert view.browser.document().documentMargin() == editor.document().documentMargin()
+
+
+@pytest.mark.parametrize("level", range(1, 6))
+def test_reading_heading_geometry_matches_editor_after_zoom(qtbot, qapp, level):
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    editor = MarkdownEditor()
+    view = MarkdownReadingView()
+    qtbot.addWidget(editor)
+    qtbot.addWidget(view)
+    editor.resize(800, 500)
+    view.resize(800, 500)
+    view.header.hide()
+    editor.show()
+    view.show()
+    markdown = f"Before\n\n{'#' * level} Matching heading\n\nAfter"
+    editor.set_markdown(markdown)
+    QTest.qWait(30)
+    for size in (12, 17, 14, 28):
+        editor.set_font_point_size(size)
+        view.match_editor_layout(editor)
+        view.set_markdown(editor.to_markdown())
+        qapp.processEvents()
+        editor_rects = [editor.cursorRect(QTextCursor(editor.document().findBlockByNumber(n)))
+                        for n in (0, 2, 4)]
+        reader_rects = [view.browser.cursorRect(view.browser.document().find(text))
+                        for text in ("Before", "Matching heading", "After")]
+        assert abs(reader_rects[1].height() - editor_rects[1].height()) <= 2
+        for index in (1, 2):
+            edit_gap = editor_rects[index].top() - editor_rects[index - 1].top()
+            read_gap = reader_rects[index].top() - reader_rects[index - 1].top()
+            assert abs(edit_gap - read_gap) <= 2
+
+
+def test_reading_toggle_preserves_passage_height_and_selection(qtbot, qapp, tmp_path) -> None:
+    markdown = "\n\n".join(f"## Heading {index}\n\nParagraph {index}" for index in range(60))
+    page = tmp_path / "position.md"
+    page.write_text(markdown, encoding="utf-8")
+    tab = Tab(page, read_text(page), markdown=True, root=tmp_path)
+    qtbot.addWidget(tab)
+    tab.resize(700, 500)
+    tab.show()
+    QTest.qWait(50)
+    cursor = QTextCursor(tab.editor.document().findBlockByNumber(82))
+    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 4)
+    tab.editor.setTextCursor(cursor)
+    tab.editor.ensureCursorVisible()
+    tab.editor.verticalScrollBar().setValue(tab.editor.verticalScrollBar().value() + 130)
+    saved_cursor = (tab.editor.textCursor().anchor(), tab.editor.textCursor().position())
+    saved_scroll = tab.editor.verticalScrollBar().value()
+    source_line, screen_y = tab.reading_view.editor_view_position(tab.editor)
+
+    tab.set_reading_view(True)
+    assert tab._reading_saved_cursor == saved_cursor
+    QTest.qWait(50)
+    reading_line, reading_y = tab.reading_view.reading_view_position()
+    assert reading_line == source_line
+    assert abs(reading_y - screen_y) <= 2
+    tab.set_reading_view(False)
+    assert tab.editor.verticalScrollBar().value() == saved_scroll
+    assert (tab.editor.textCursor().anchor(), tab.editor.textCursor().position()) == saved_cursor
+
+    tab.set_reading_view(True)
+    QTest.qWait(50)
+    scrollbar = tab.reading_view.browser.verticalScrollBar()
+    scrollbar.setValue(scrollbar.value() + 250)
+    reading_line, reading_y = tab.reading_view.reading_view_position()
+    tab.set_reading_view(False)
+    assert tab.editor.textCursor().blockNumber() + 1 == reading_line
+    edit_y = tab.editor.viewport().mapToGlobal(tab.editor.cursorRect().topLeft()).y()
+    assert abs(edit_y - reading_y) <= 2
+
+
+def test_main_reading_toggle_keeps_visible_passage_with_caret_offscreen(main_window) -> None:
+    window = main_window
+    window.current_path = "/position.md"
+    window.editor.set_markdown("\n\n".join(f"Paragraph {index}" for index in range(100)))
+    window.resize(900, 600)
+    window.show()
+    QTest.qWait(50)
+    cursor = window.editor.textCursor()
+    cursor.movePosition(QTextCursor.Start)
+    window.editor.setTextCursor(cursor)
+    window.editor.verticalScrollBar().setValue(900)
+    saved_scroll = window.editor.verticalScrollBar().value()
+    source_line, screen_y = window.reading_view.editor_view_position(window.editor)
+    assert source_line > 1
+
+    window._set_reading_view_enabled(True)
+    QTest.qWait(50)
+    reading_line, reading_y = window.reading_view.reading_view_position()
+    assert reading_line == source_line
+    assert abs(reading_y - screen_y) <= 2
+    window._set_reading_view_enabled(False)
+    assert window.editor.verticalScrollBar().value() == saved_scroll
+    assert window.editor.textCursor().position() == 0
+    window.editor.document().setModified(False)
+    window._dirty_flag = False
+    window.current_path = None
+
+
 def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     view = MarkdownReadingView()
     qtbot.addWidget(view)
@@ -431,7 +553,7 @@ def test_reading_view_defaults_white_and_can_persist_theme_colors(
     assert state["enabled"] is True
     assert view.theme_toggle.isChecked()
     assert "background: #fdfaf2" in view._css
-    assert "font-size: 24.00pt" in view._css
+    assert "font-size: 22.80pt" in view._css
     assert "border: 2px solid" in view._css
     assert "background: #ddd2bf" in view._css
     assert "margin-top: 0.2em" in view._css
@@ -615,8 +737,9 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     assert "<table>" in main_window.reading_view.last_html
     editor_size_in_reading_view = main_window.font_size
     main_window._adjust_reading_view_zoom(1)
-    assert main_window.font_size == editor_size_in_reading_view
-    assert main_window.reading_view._zoom_steps == initial_reading_zoom + 1
+    assert main_window.font_size == editor_size_in_reading_view + 1
+    assert main_window.reading_view._base_font_point_size == main_window.font_size
+    assert main_window.reading_view._zoom_steps == 0
     main_window._adjust_reading_view_zoom(-1)
 
     main_window._action_reading_view.trigger()
@@ -668,11 +791,9 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
             shortcut.key() for shortcut in window.active_tab().reading_view_shortcuts
         }
         initial_editor_zoom = window.editor_zoom_steps
-        initial_reading_zoom = window.reading_zoom_steps
         window._zoom_active_view(1)
         assert window.editor_zoom_steps == initial_editor_zoom + 1
-        assert window.reading_zoom_steps == initial_reading_zoom
-        assert window.active_tab().reading_view._zoom_steps == initial_reading_zoom
+        assert window.active_tab().reading_view._zoom_steps == 0
         window.reading_view_action.trigger()
 
         assert window.active_tab().reading_view_enabled
@@ -680,9 +801,10 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         assert "Alpha" in window.active_tab().reading_view.browser.toPlainText()
         editor_zoom_in_reading_view = window.editor_zoom_steps
         window._zoom_active_view(1)
-        assert window.editor_zoom_steps == editor_zoom_in_reading_view
-        assert window.reading_zoom_steps == initial_reading_zoom + 1
-        assert window.active_tab().reading_view._zoom_steps == initial_reading_zoom + 1
+        assert window.editor_zoom_steps == editor_zoom_in_reading_view + 1
+        tab = window.active_tab()
+        assert tab.reading_view._zoom_steps == 0
+        assert tab.reading_view._base_font_point_size == tab.editor.font().pointSizeF()
         window.active_tab().reading_view.edit_button.click()
         assert not window.reading_view_action.isChecked()
     finally:

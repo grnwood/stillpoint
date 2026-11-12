@@ -86,7 +86,7 @@ from .path_utils import (
     is_http_link_target, path_to_colon, should_use_full_target_label,
     trace_link_decision,
 )
-from .heading_utils import heading_slug
+from .heading_utils import heading_slug, HEADING_SIZE_MULTIPLIERS
 from .page_load_logger import (
     PageLoadLogger,
     PERFORMANCE_LOGGING_ENABLED,
@@ -891,7 +891,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.hidden_format.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
         self.hidden_format.setFontLetterSpacing(1)
 
-        self._heading_multipliers = (1.9, 1.6, 1.35, 1.2, 1.08)
+        self._heading_multipliers = HEADING_SIZE_MULTIPLIERS
         self.heading_styles: list[QTextCharFormat] = []
         try:
             base_font = parent.defaultFont()
@@ -1848,6 +1848,7 @@ class MarkdownEditor(QTextEdit):
         self._ai_chat_active: bool = False
         self._page_load_logger: Optional[PageLoadLogger] = None
         self._open_in_window_callback: Optional[Callable[[str], None]] = None
+        self._page_navigation_enabled = True
         self._filter_nav_callback: Optional[Callable[[str], None]] = None
         self._move_text_callback: Optional[Callable[[str, str], bool]] = None
         self._move_page_callback: Optional[Callable[[], None]] = None
@@ -3612,10 +3613,10 @@ class MarkdownEditor(QTextEdit):
             # When Enter is pressed after +CamelCase, activate the link immediately
             # The chosen match has 'link' and 'label' groups from WIKI_LINK_DISPLAY_PATTERN
             link_target = chosen.group('link')
-            if link_target:
+            if link_target and self._page_navigation_enabled:
                 print(f"[CamelCase] Activating link after Enter: {link_target}")
                 # Schedule link activation after the cursor is positioned
-                QTimer.singleShot(0, lambda target=link_target: self.linkActivated.emit(target))
+                QTimer.singleShot(0, lambda target=link_target: self._activate_link(target))
 
         cursor.setPosition(min(target_pos, len(display_text)))
         self.setTextCursor(cursor)
@@ -3644,8 +3645,22 @@ class MarkdownEditor(QTextEdit):
         except Exception:
             pass
 
+    def set_page_navigation_enabled(self, enabled: bool) -> None:
+        """Allow hosts that edit one fixed page to keep links as editable text."""
+        self._page_navigation_enabled = bool(enabled)
+        if not enabled:
+            self.viewport().setCursor(Qt.IBeamCursor)
+
+    def _activate_link(self, target: str) -> bool:
+        if not self._page_navigation_enabled:
+            return False
+        self.linkActivated.emit(target)
+        return True
+
     def begin_dialog_block(self) -> None:
         """Completely freeze editor input and interaction while a modal dialog is open."""
+        if not self._dialog_block_input:
+            self._dialog_context_menu_policy = self.contextMenuPolicy()
         self._dialog_block_input = True
         self.setReadOnly(True)
         self.setEnabled(False)
@@ -3661,7 +3676,7 @@ class MarkdownEditor(QTextEdit):
         self._dialog_block_input = False
         self.setReadOnly(self._read_only_mode)
         self.setEnabled(True)
-        self.setContextMenuPolicy(Qt.DefaultContextMenu)
+        self.setContextMenuPolicy(getattr(self, "_dialog_context_menu_policy", Qt.DefaultContextMenu))
         self.viewport().unsetCursor()
 
     def insert_link(self, colon_path: str, link_name: str | None = None, *, surround_with_spaces: bool = False) -> None:
@@ -5216,8 +5231,8 @@ class MarkdownEditor(QTextEdit):
             cursor = self.textCursor()
             if self._is_cursor_at_link_activation_point(cursor):
                 link = self._link_under_cursor(cursor)
-                if link:
-                    self.linkActivated.emit(link)
+                if link and self._page_navigation_enabled:
+                    self._activate_link(link)
             return True
         # Allow other modifier combos (e.g., Ctrl+something) to propagate for non-editing shortcuts
         if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
@@ -5364,6 +5379,9 @@ class MarkdownEditor(QTextEdit):
             event.accept()
             return
         if event.modifiers() == (Qt.ControlModifier | Qt.AltModifier) and event.key() == Qt.Key_V:
+            if not self._page_navigation_enabled:
+                event.accept()
+                return
             cursor_rect = self.cursorRect()
             viewport = self.viewport()
             prefer_above = False
@@ -5441,10 +5459,10 @@ class MarkdownEditor(QTextEdit):
         meaningful_modifiers = event.modifiers() & ~Qt.KeypadModifier
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and meaningful_modifiers == Qt.ControlModifier:
             vi_insert = self._vi_feature_enabled and self._vi_insert_mode
-            if vi_insert:
+            if vi_insert and self._page_navigation_enabled:
                 link = self._link_under_cursor(self.textCursor())
-                if link:
-                    self.linkActivated.emit(link)
+                if link and self._page_navigation_enabled:
+                    self._activate_link(link)
                     event.accept()
                     return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not meaningful_modifiers:
@@ -5453,12 +5471,12 @@ class MarkdownEditor(QTextEdit):
             # Non-vi: Enter on a link should activate it immediately.
             if not vi_insert:
                 link = self._link_under_cursor(cursor)
-                if link:
-                    self.linkActivated.emit(link)
+                if link and self._page_navigation_enabled:
+                    self._activate_link(link)
                     event.accept()
                     return
             # Vi insert: keep link intact by moving past sentinels before newline handling.
-            if vi_insert:
+            if vi_insert or not self._page_navigation_enabled:
                 self._move_cursor_to_link_end_on_enter(cursor)
 
         # Bullet/task mode key handling
@@ -5534,8 +5552,8 @@ class MarkdownEditor(QTextEdit):
             # In non-vi or vi navigation mode, Enter on a link should activate it.
             if not vi_insert:
                 link = self._link_under_cursor(cursor)
-                if link:
-                    self.linkActivated.emit(link)
+                if link and self._page_navigation_enabled:
+                    self._activate_link(link)
                     event.accept()
                     return
             if self._handle_task_enter(task_indent, task_content):
@@ -5596,8 +5614,8 @@ class MarkdownEditor(QTextEdit):
             # In non-vi or vi navigation mode, Enter on a link should activate it.
             if not vi_insert:
                 link = self._link_under_cursor(cursor)
-                if link:
-                    self.linkActivated.emit(link)
+                if link and self._page_navigation_enabled:
+                    self._activate_link(link)
                     return
             # In vi insert mode, Enter should insert a newline without activating links.
             # Handle bullet list continuation (non-bullet lines)
@@ -6850,7 +6868,7 @@ class MarkdownEditor(QTextEdit):
         cursor = self.cursorForPosition(event.pos())
         self._update_task_hover_edit_button(event.pos(), cursor)
         link = self._link_under_cursor(cursor)
-        if link:
+        if link and self._page_navigation_enabled:
             self.viewport().setCursor(Qt.PointingHandCursor)
             self.linkHovered.emit(link)
         else:
@@ -6882,8 +6900,8 @@ class MarkdownEditor(QTextEdit):
             cursor = self.cursorForPosition(event.pos())
             md_info = self._markdown_link_at_cursor(cursor)
             link = md_info[3] if md_info else self._link_under_cursor(cursor)
-            if link:
-                self.linkActivated.emit(link)
+            if link and self._page_navigation_enabled:
+                self._activate_link(link)
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -6918,8 +6936,8 @@ class MarkdownEditor(QTextEdit):
         # Double-click on links also activates them
         md_info = self._markdown_link_at_cursor(cursor)
         link = md_info[3] if md_info else self._link_under_cursor(cursor)
-        if link:
-            self.linkActivated.emit(link)
+        if link and self._page_navigation_enabled:
+            self._activate_link(link)
             return
         super().mouseDoubleClickEvent(event)
 
@@ -7140,9 +7158,9 @@ class MarkdownEditor(QTextEdit):
         return None
 
     def _trigger_history_navigation(self, qt_key: int) -> None:
-        """Forward Alt-based navigation keys to the main window helpers."""
+        """Forward Alt-based navigation keys to the host window when enabled."""
         # Guard: Don't navigate if no file is loaded (prevents crash on empty editor)
-        if not self._current_path:
+        if not self._current_path or not self._page_navigation_enabled:
             return
         
         window = self.window()
@@ -8038,6 +8056,8 @@ class MarkdownEditor(QTextEdit):
             self.headingPickerRequested.emit(global_point, prefer_above)
             return True
         if key == Qt.Key_V and not shift:
+            if not self._page_navigation_enabled:
+                return True
             cursor_rect = self.cursorRect()
             viewport = self.viewport()
             prefer_above = False
@@ -8220,8 +8240,8 @@ class MarkdownEditor(QTextEdit):
                 cursor = self.textCursor()
                 if self._is_cursor_at_link_activation_point(cursor):
                     link = self._link_under_cursor(cursor)
-                    if link:
-                        self.linkActivated.emit(link)
+                    if link and self._page_navigation_enabled:
+                        self._activate_link(link)
             if read_only and key in (Qt.Key_Backspace, Qt.Key_Delete):
                 return _block_vi_edit()
             return True
