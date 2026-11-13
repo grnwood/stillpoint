@@ -21848,7 +21848,9 @@ class MainWindow(QMainWindow):
             self.reading_view.refresh_editor_layout(self.editor)
 
     def _adjust_reading_view_zoom(self, delta: int) -> None:
-        self._adjust_markdown_font_size(delta)
+        self.reading_view.defer_editor_zoom(
+            delta, self._adjust_markdown_font_size, current=self.font_size, minimum=6, maximum=24
+        )
 
     def _apply_vault_tree_font_size(self) -> None:
         font = QFont(self.tree_view.font())
@@ -21976,6 +21978,7 @@ class MainWindow(QMainWindow):
         self._reading_saved_path = self.current_path
         self._reading_saved_cursor = (cursor.anchor(), cursor.position())
         self._reading_saved_scroll = self.editor.verticalScrollBar().value()
+        self._reading_saved_font_size = self.editor.font().pointSizeF()
 
     def _refresh_reading_view(self) -> None:
         if not getattr(self, "_reading_view_enabled", False):
@@ -22001,6 +22004,8 @@ class MainWindow(QMainWindow):
         if enabled == getattr(self, "_reading_view_enabled", False):
             return
         self._reading_view_enabled = enabled
+        if not enabled:
+            self.reading_view.flush_editor_zoom()
         action = getattr(self, "_action_reading_view", None)
         if action is not None and action.isChecked() != enabled:
             action.blockSignals(True)
@@ -22020,7 +22025,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Reading View — press Ctrl/Cmd+Space to edit", 3000)
             return
         reading_line, screen_y = self.reading_view.reading_view_position()
-        moved = self.reading_view.handoff_position_changed()
+        moved = (
+            self.reading_view.handoff_position_changed()
+            or self.editor.font().pointSizeF() != getattr(self, "_reading_saved_font_size", self.editor.font().pointSizeF())
+        )
         self._editor_view_stack.setCurrentWidget(self.editor)
         if self._reading_saved_path == self.current_path and self._reading_saved_cursor:
             if moved or reading_line != self._reading_entry_source_line:

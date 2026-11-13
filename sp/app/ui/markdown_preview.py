@@ -365,6 +365,12 @@ class MarkdownReadingView(QWidget):
         self._zoom_render_timer.setSingleShot(True)
         self._zoom_render_timer.setInterval(self.ZOOM_DEBOUNCE_MS)
         self._zoom_render_timer.timeout.connect(self._apply_pending_zoom)
+        self._editor_zoom_delta = 0
+        self._editor_zoom_callback = None
+        self._editor_zoom_timer = QTimer(self)
+        self._editor_zoom_timer.setSingleShot(True)
+        self._editor_zoom_timer.setInterval(60)
+        self._editor_zoom_timer.timeout.connect(self.flush_editor_zoom)
         self._image_layout: dict[int, tuple[int, float, float, float]] = {}
         self._image_resize_timer = QTimer(self)
         self._image_resize_timer.setSingleShot(True)
@@ -667,6 +673,23 @@ class MarkdownReadingView(QWidget):
                 source_line=source_line, anchor_global_y=screen_y,
             )
 
+    def defer_editor_zoom(self, delta, callback, *, current=None, minimum=None, maximum=None) -> None:
+        """Coalesce a wheel gesture before touching either text document."""
+        self._editor_zoom_delta += int(delta)
+        if current is not None:
+            target = max(minimum, min(maximum, current + self._editor_zoom_delta))
+            self._editor_zoom_delta = target - current
+        self._editor_zoom_callback = callback
+        self._editor_zoom_timer.start()
+
+    def flush_editor_zoom(self) -> None:
+        self._editor_zoom_timer.stop()
+        delta, callback = self._editor_zoom_delta, self._editor_zoom_callback
+        self._editor_zoom_delta = 0
+        self._editor_zoom_callback = None
+        if delta and callback is not None:
+            callback(delta)
+
     def _match_source_spacing(self) -> None:
         """Represent source blank lines instead of HTML's compact block margins."""
         if self._editor_line_spacing is None:
@@ -848,6 +871,25 @@ class MarkdownReadingView(QWidget):
         )
         self.last_html = f"<html><head><style>{self._css}</style></head><body>{body}</body></html>"
         self.browser._reading_cursor = QTextCursor()
+        document = self.browser.document()
+        layout_enabled = document.isLayoutEnabled()
+        document.setLayoutEnabled(False)
+        try:
+            self._load_reader_document()
+        finally:
+            document.setLayoutEnabled(layout_enabled)
+        self._fit_images_to_viewport(reset=True)
+        # Refit once more after the scrollbar settles against the new layout.
+        self._image_resize_timer.start()
+        self._requested_source_line = max(1, int(source_line))
+        self._handoff_scroll_value = None
+        self._handoff_source_line = None
+        self.scroll_to_source_line(
+            source_line, anchor_global_y=anchor_global_y, remember_handoff=True
+        )
+
+    def _load_reader_document(self) -> None:
+        """Apply HTML and formatting with layout suspended by the caller."""
         self.browser.setHtml(self.last_html)
         # Qt's HTML importer retains h1..h6 relative size adjustments alongside
         # our explicit point sizes. Those adjustments win during font resolution,
@@ -873,18 +915,8 @@ class MarkdownReadingView(QWidget):
             cursor.setPosition(position + length, QTextCursor.KeepAnchor)
             cursor.setCharFormat(fmt)
         self.browser.document().setDocumentMargin(self._editor_document_margin)
-        self._fit_images_to_viewport(reset=True)
-        # A newly visible vertical scrollbar narrows the viewport after the
-        # first layout pass; refit once more against that settled width.
-        self._image_resize_timer.start()
         self._index_source_positions()
         self._match_source_spacing()
-        self._requested_source_line = max(1, int(source_line))
-        self._handoff_scroll_value = None
-        self._handoff_source_line = None
-        self.scroll_to_source_line(
-            source_line, anchor_global_y=anchor_global_y, remember_handoff=True
-        )
 
     def _index_source_positions(self) -> None:
         positions: list[tuple[int, int]] = []

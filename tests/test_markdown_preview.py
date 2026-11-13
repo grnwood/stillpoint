@@ -669,6 +669,64 @@ def test_reading_view_zoom_debounces_expensive_renders(
     assert renders == [3]
 
 
+def test_shared_zoom_batches_editor_and_reader_work_and_preserves_position(qtbot, qapp, monkeypatch):
+    from sp.app.ui.markdown_editor import MarkdownEditor
+
+    editor = MarkdownEditor()
+    view = MarkdownReadingView()
+    qtbot.addWidget(editor)
+    qtbot.addWidget(view)
+    editor.set_font_point_size(12)
+    editor.set_markdown("\n\n".join(f"Paragraph {index}" for index in range(80)))
+    view.resize(640, 400)
+    view.show()
+    view.match_editor_layout(editor)
+    view.set_markdown(editor.to_markdown(), source_line=41, anchor_global_y=120)
+    QTest.qWait(30)
+    initial_line, initial_y = view.reading_view_position()
+    applied, layouts = [], []
+    load = view._load_reader_document
+
+    def record_load():
+        layouts.append(view.browser.document().isLayoutEnabled())
+        load()
+
+    def apply_zoom(delta):
+        applied.append(delta)
+        editor.set_font_point_size(editor.font().pointSize() + delta)
+        view.refresh_editor_layout(editor)
+
+    monkeypatch.setattr(view, "_load_reader_document", record_load)
+    for delta in (1, 1, 1, -1, 1, 1):
+        view.defer_editor_zoom(delta, apply_zoom)
+    assert applied == []
+    assert layouts == []
+    QTest.qWait(90)
+    assert applied == [4]
+    assert layouts == [False]
+    assert view.browser.document().isLayoutEnabled()
+    assert view._base_font_point_size == editor.font().pointSizeF() == 16
+    qapp.processEvents()
+    qapp.processEvents()
+    line, screen_y = view.reading_view_position()
+    assert line == initial_line
+    assert abs(screen_y - initial_y) <= 2
+    view.defer_editor_zoom(1, apply_zoom)
+    view.flush_editor_zoom()
+    QTest.qWait(90)
+    assert applied == [4, 1]
+
+
+def test_shared_zoom_reversal_at_limit_retains_each_wheel_step(qtbot):
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    applied = []
+    for delta in (1, 1, -1):
+        view.defer_editor_zoom(delta, applied.append, current=24, minimum=6, maximum=24)
+    view.flush_editor_zoom()
+    assert applied == [-1]
+
+
 def test_folder_markdown_ctrl_space_toggles_reading_view(
     qtbot, qapp, tmp_path: Path
 ) -> None:
@@ -737,6 +795,8 @@ def test_stillpoint_reading_view_action_renders_unsaved_buffer_and_restores_curs
     assert "<table>" in main_window.reading_view.last_html
     editor_size_in_reading_view = main_window.font_size
     main_window._adjust_reading_view_zoom(1)
+    assert main_window.font_size == editor_size_in_reading_view
+    QTest.qWait(90)
     assert main_window.font_size == editor_size_in_reading_view + 1
     assert main_window.reading_view._base_font_point_size == main_window.font_size
     assert main_window.reading_view._zoom_steps == 0
@@ -801,11 +861,15 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         assert "Alpha" in window.active_tab().reading_view.browser.toPlainText()
         editor_zoom_in_reading_view = window.editor_zoom_steps
         window._zoom_active_view(1)
+        assert window.editor_zoom_steps == editor_zoom_in_reading_view
+        QTest.qWait(90)
         assert window.editor_zoom_steps == editor_zoom_in_reading_view + 1
         tab = window.active_tab()
         assert tab.reading_view._zoom_steps == 0
         assert tab.reading_view._base_font_point_size == tab.editor.font().pointSizeF()
+        window._zoom_active_view(1)
         window.active_tab().reading_view.edit_button.click()
         assert not window.reading_view_action.isChecked()
+        assert window.editor_zoom_steps == editor_zoom_in_reading_view + 2
     finally:
         window.close()

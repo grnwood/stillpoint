@@ -153,6 +153,8 @@ def test_push_dialog_lists_files_from_confirmed_remote_range(qtbot, tmp_path):
         QTest.qWait(20)
     assert dialog.ok_button.isEnabled()
     output = dialog.output.toPlainText()
+    assert "\x1b" not in output
+    assert "\x1b" not in dialog._git_output
     assert "Published commits and files" in output
     assert "Published page.md" in output
     assert "Publish page update" in output

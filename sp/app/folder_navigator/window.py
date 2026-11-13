@@ -69,6 +69,7 @@ from sp.app.ui.keyboard_shortcuts import (
     vi_navigation_sequences,
 )
 from sp.app.ui.git_widgets import CommitBeforePushDialog, GitCommitViewer, GitLogPanel, git_change_row, git_section_row
+from sp.app.ui.git_terminal import GitTerminalWriter
 from sp.app.ui.canvas_navigation import (
     install_primary_wheel_zoom,
     uninstall_primary_wheel_zoom,
@@ -273,11 +274,12 @@ class GitCommandDialog(QDialog):
         self.output.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.output.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         self.output.setStyleSheet(
-            "QPlainTextEdit { background: #07110a; color: #62ff86; "
-            "border: 1px solid #247a38; padding: 10px; "
-            "selection-background-color: #17652b; }"
+            "QPlainTextEdit { background: #07110a; color: #dbe4ed; "
+            "border: 1px solid #31545b; padding: 10px; "
+            "selection-background-color: #245563; }"
         )
-        self.output.setPlainText(f"$ git {' '.join(arguments)}\n\n")
+        self._terminal_writer = GitTerminalWriter(self.output)
+        self._append(f"\x1b[36m$ git {' '.join(arguments)}\x1b[0m\n\n")
         layout.addWidget(self.output)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=self)
@@ -290,7 +292,7 @@ class GitCommandDialog(QDialog):
 
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(root))
-        command = _git_command(*arguments)
+        command = _git_command("-c", "color.ui=always", *arguments)
         self.process.setProgram(command[0])
         self.process.setArguments(command[1:])
         self.process.setProcessChannelMode(QProcess.SeparateChannels)
@@ -308,12 +310,7 @@ class GitCommandDialog(QDialog):
         )
         if not data:
             return
-        self._git_output += data
-        cursor = self.output.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(data)
-        self.output.setTextCursor(cursor)
-        self.output.ensureCursorVisible()
+        self._git_output += self._terminal_writer.append(data)
 
     def _read_stdout(self) -> None:
         self._append(self.process.readAllStandardOutput())
@@ -331,11 +328,12 @@ class GitCommandDialog(QDialog):
     def _process_finished(self, exit_code: int, _exit_status) -> None:
         self._read_stdout()
         self._read_stderr()
-        self._append(f"\n[git exited with code {exit_code}]\n")
+        color = 32 if exit_code == 0 else 31
+        self._append(f"\n\x1b[{color}m[git exited with code {exit_code}]\x1b[0m\n")
         if exit_code == 0 and self._command_arguments[:1] == ["commit"]:
             # A normal commit prints only totals for modified files. Include
             # the saved commit's paths and per-file line counts as well.
-            arguments = ["show", "--no-color", "--no-ext-diff", "--format=fuller",
+            arguments = ["show", "--color=always", "--no-ext-diff", "--format=fuller",
                          "--stat", "--stat-width=160", "--stat-name-width=120", "--summary", "HEAD"]
             self._start_details(arguments, "Saved commit details")
             return
@@ -347,7 +345,7 @@ class GitCommandDialog(QDialog):
                 revisions = [f"refs/heads/{branch}" for branch in branches]
             if revisions:
                 self._start_details([
-                    "log", "--no-color", "--no-ext-diff", "--format=short", "--reverse",
+                    "log", "--color=always", "--no-ext-diff", "--format=short", "--reverse",
                     "--max-count=100", "--stat", "--stat-width=160", "--stat-name-width=120",
                     *revisions, "--",
                 ], "Published commits and files (up to 100 commits)")
@@ -355,11 +353,11 @@ class GitCommandDialog(QDialog):
         self._complete()
 
     def _start_details(self, arguments, label):
-        self._append(f"\n{label}\n$ git " + " ".join(arguments) + "\n\n")
+        self._append(f"\n\x1b[35;1m{label}\x1b[0m\n\x1b[36m$ git " + " ".join(arguments) + "\x1b[0m\n\n")
         details = QProcess(self)
         self._details_process = details
         details.setWorkingDirectory(self.process.workingDirectory())
-        command = _git_command(*arguments)
+        command = _git_command("-c", "color.ui=always", *arguments)
         details.setProgram(command[0])
         details.setArguments(command[1:])
         details.setProcessChannelMode(QProcess.MergedChannels)
@@ -2799,6 +2797,8 @@ class Tab(QWidget):
         ):
             return
         self.reading_view_enabled = enabled
+        if not enabled:
+            self.reading_view.flush_editor_zoom()
         toggle = getattr(self, "reading_toggle", None)
         if toggle is not None:
             toggle.blockSignals(True)
@@ -2809,6 +2809,7 @@ class Tab(QWidget):
             cursor = self.editor.textCursor()
             self._reading_saved_cursor = (cursor.anchor(), cursor.position())
             self._reading_saved_scroll = self.editor.verticalScrollBar().value()
+            self._reading_saved_font_size = self.editor.font().pointSizeF()
             entry_line, _screen_y = self.reading_view.editor_view_position(self.editor)
             self._refresh_reading_view()
             self._reading_entry_source_line = self.reading_view.source_block_line(
@@ -2818,7 +2819,10 @@ class Tab(QWidget):
             self.reading_view.focus_reader()
         else:
             reading_line, screen_y = self.reading_view.reading_view_position()
-            moved = self.reading_view.handoff_position_changed()
+            moved = (
+                self.reading_view.handoff_position_changed()
+                or self.editor.font().pointSizeF() != self._reading_saved_font_size
+            )
             self.editor_view_stack.setCurrentWidget(self.editor)
             if moved or reading_line != self._reading_entry_source_line:
                 block_number = max(
@@ -6088,50 +6092,48 @@ class Window(QMainWindow):
         if tab is None:
             return
         if tab.editor is not None:
-            new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
-            applied = new_steps - self.editor_zoom_steps
-            if not applied:
-                return
-            self.editor_zoom_steps = new_steps
-            self.state["editor_zoom_steps"] = new_steps
-            for candidate in self.all_tabs():
-                if candidate.editor is not None:
-                    if candidate.markdown:
-                        candidate.editor.set_font_point_size(
-                            candidate.editor.font().pointSize() + applied
-                        )
-                        if candidate.reading_view is not None:
-                            candidate.reading_view.refresh_editor_layout(candidate.editor)
-                    elif applied > 0:
-                        candidate.editor.zoomIn(applied)
-                    else:
-                        candidate.editor.zoomOut(-applied)
-            self._persist()
+            if tab.reading_view_enabled and tab.reading_view is not None:
+                tab.reading_view.defer_editor_zoom(
+                    direction, self._apply_editor_zoom,
+                    current=self.editor_zoom_steps, minimum=-8, maximum=20,
+                )
+            else:
+                self._apply_editor_zoom(direction)
             return
         viewer = getattr(tab, "viewer", None)
         if isinstance(viewer, SpreadsheetView):
-            new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
-            applied = new_steps - self.editor_zoom_steps
-            if not applied:
-                return
-            self.editor_zoom_steps = new_steps
-            self.state["editor_zoom_steps"] = new_steps
+            self._apply_editor_zoom(direction)
             for candidate in self.all_tabs():
-                if candidate.editor is not None:
-                    if applied > 0:
-                        candidate.editor.zoomIn(applied)
-                    else:
-                        candidate.editor.zoomOut(-applied)
                 candidate_viewer = getattr(candidate, "viewer", None)
                 if isinstance(candidate_viewer, SpreadsheetView):
-                    candidate_viewer.set_zoom_steps(new_steps)
-            self._persist()
+                    candidate_viewer.set_zoom_steps(self.editor_zoom_steps)
             return
         callback = getattr(viewer, "zoom_in" if direction > 0 else "zoom_out", None)
         if callable(callback):
             callback()
         else:
             self.statusBar().showMessage("Zoom is not available for this preview", 2500)
+
+    def _apply_editor_zoom(self, direction):
+        new_steps = max(-8, min(20, self.editor_zoom_steps + direction))
+        applied = new_steps - self.editor_zoom_steps
+        if not applied:
+            return
+        self.editor_zoom_steps = new_steps
+        self.state["editor_zoom_steps"] = new_steps
+        for candidate in self.all_tabs():
+            if candidate.editor is not None:
+                if candidate.markdown:
+                    candidate.editor.set_font_point_size(
+                        candidate.editor.font().pointSize() + applied
+                    )
+                    if candidate.reading_view is not None and candidate.reading_view_enabled:
+                        candidate.reading_view.refresh_editor_layout(candidate.editor)
+                elif applied > 0:
+                    candidate.editor.zoomIn(applied)
+                else:
+                    candidate.editor.zoomOut(-applied)
+        self._persist()
 
     @staticmethod
     def _visible_scroll_area(root, focused=None):
