@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from sp.app.ui.main_window import MainWindow
 from sp.app.ui.markdown_editor import MarkdownEditor

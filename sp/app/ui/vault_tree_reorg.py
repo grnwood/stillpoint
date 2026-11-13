@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -16,7 +16,14 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
     QGraphicsView,
     QLineEdit,
+    QMenu,
 )
+from .path_utils import path_to_colon, ensure_root_colon_link
+
+
+def page_location(path: str) -> str:
+    """Present page locations without exposing filesystem paths."""
+    return ensure_root_colon_link(path_to_colon(path)) if path and path != "/" else "Vault root"
 
 
 _JOURNAL_CONTAINER_RE = re.compile(
@@ -56,6 +63,26 @@ class _InlineRenameEdit(QLineEdit):
         super().focusOutEvent(event)
         if not self._resolved:
             self.commitRequested.emit()
+
+
+class _BranchToggleItem(QGraphicsSimpleTextItem):
+    def __init__(self, canvas, path, parent):
+        super().__init__("+" if path in canvas._collapsed_paths else "−", parent)
+        self.canvas = canvas
+        self.path = path
+        self.setPos(parent.WIDTH - 22, 4)
+        self.setBrush(canvas.palette().text())
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Expand branch" if path in canvas._collapsed_paths else "Collapse branch")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            canvas, path = self.canvas, self.path
+            event.accept()
+            # Rebuilding deletes this item; finish its event before doing so.
+            QTimer.singleShot(0, canvas, lambda: canvas.toggle_branch(path))
+            return
+        super().mousePressEvent(event)
 
 
 class _TreeNodeItem(QGraphicsRectItem):
@@ -108,7 +135,7 @@ class _TreeNodeItem(QGraphicsRectItem):
         self.text_item = QGraphicsSimpleTextItem(display, self)
         self.text_item.setBrush(QBrush(foreground))
         self.text_item.setPos(10, 7)
-        path_text = QGraphicsSimpleTextItem(path, self)
+        path_text = QGraphicsSimpleTextItem(page_location(path), self)
         path_color = QColor(foreground)
         path_color.setAlpha(165)
         path_text.setBrush(QBrush(path_color))
@@ -116,6 +143,19 @@ class _TreeNodeItem(QGraphicsRectItem):
         font.setPointSize(max(7, font.pointSize() - 2))
         path_text.setFont(font)
         path_text.setPos(10, 27)
+        path_text.setToolTip(page_location(path))
+
+    def contextMenuEvent(self, event):
+        canvas, path = self.canvas, self.path
+        menu = QMenu()
+        expand = menu.addAction("Expand All Below")
+        collapse = menu.addAction("Collapse All Below")
+        chosen = menu.exec(event.screenPos())
+        if chosen == expand:
+            QTimer.singleShot(0, canvas, lambda: canvas.expand_branch(path))
+        elif chosen == collapse:
+            QTimer.singleShot(0, canvas, lambda: canvas.collapse_branch(path))
+        event.accept()
 
     def remember_home(self) -> None:
         self._home_pos = QPointF(self.pos())
@@ -206,7 +246,6 @@ class VaultTreeCanvas(QGraphicsView):
     statusChanged = Signal(str)
 
     MAX_RENDERED_NODES = 700
-    MAX_INITIAL_DEPTH = 8
     X_GAP = 245.0
     Y_GAP = 72.0
 
@@ -220,6 +259,7 @@ class VaultTreeCanvas(QGraphicsView):
         self.setBackgroundBrush(self.palette().window())
         self._payload: list[dict[str, Any]] = []
         self._scope_root = "/"
+        self._collapsed_paths: set[str] = set()
         self._plan: list[dict[str, Any]] = []
         self._nodes: dict[str, _TreeNodeItem] = {}
         self._ghosts: dict[str, _StagedGhostItem] = {}
@@ -254,6 +294,45 @@ class VaultTreeCanvas(QGraphicsView):
         bounds = self.scene().itemsBoundingRect()
         if bounds.isValid() and not bounds.isEmpty():
             self.fitInView(bounds.adjusted(-30, -30, 30, 30), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def toggle_branch(self, path: str) -> None:
+        if path in self._collapsed_paths:
+            self._collapsed_paths.remove(path)
+        else:
+            self._collapsed_paths.add(path)
+        self.rebuild()
+
+    def expand_all(self) -> None:
+        self._collapsed_paths.clear()
+        self.rebuild()
+
+    def expand_branch(self, path: str) -> None:
+        self._collapsed_paths = {
+            candidate for candidate in self._collapsed_paths
+            if not (candidate == path or candidate.startswith(path.rstrip("/") + "/"))
+        }
+        self.rebuild()
+
+    def collapse_branch(self, path: str) -> None:
+        node = self._find_payload_node(path)
+        stack = [node] if node else (list(self._payload) if path == "/" else [])
+        self._collapsed_paths.add(path)
+        while stack:
+            descendant = stack.pop()
+            if descendant.get("children"):
+                self._collapsed_paths.add(str(descendant.get("path") or "/"))
+                stack.extend(descendant["children"])
+        self.rebuild()
+
+    def collapse_all(self) -> None:
+        stack = list(self._payload)
+        self._collapsed_paths.add(self._scope_root)
+        while stack:
+            node = stack.pop()
+            if node.get("children"):
+                self._collapsed_paths.add(str(node.get("path") or "/"))
+                stack.extend(node["children"])
+        self.rebuild()
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -308,7 +387,7 @@ class VaultTreeCanvas(QGraphicsView):
         while stack and len(visible_nodes) < self.MAX_RENDERED_NODES:
             node, depth = stack.pop()
             visible_nodes.append((node, depth))
-            if depth >= self.MAX_INITIAL_DEPTH:
+            if str(node.get("path") or "/") in self._collapsed_paths:
                 continue
             children = list(node.get("children") or [])
             stack.extend((child, depth + 1) for child in reversed(children))
@@ -360,6 +439,8 @@ class VaultTreeCanvas(QGraphicsView):
             item.remember_home()
             scene.addItem(item)
             self._nodes[path] = item
+            if node.get("children"):
+                _BranchToggleItem(self, path, item)
 
         ghost_offsets: dict[str, int] = {}
         for op in self._plan:
@@ -386,7 +467,7 @@ class VaultTreeCanvas(QGraphicsView):
                 scene.addItem(ghost)
                 self._ghosts[source] = ghost
             elif source_item is not None:
-                portal = QGraphicsSimpleTextItem(f"↗ moves outside scope → {destination}")
+                portal = QGraphicsSimpleTextItem(f"↗ moves outside view → {page_location(destination)}")
                 portal.setBrush(QBrush(QColor("#b97819")))
                 portal.setPos(
                     source_item.pos().x() + self.X_GAP,
@@ -535,7 +616,7 @@ class VaultTreeCanvas(QGraphicsView):
         self.statusChanged.emit(
             "Cannot move a page into its own subtree."
             if invalid
-            else f"Move {source.path} relative to {target.path}"
+            else f"Move {page_location(source.path)} relative to {page_location(target.path)}"
         )
 
     def _complete_drop(self, source: _TreeNodeItem, scene_pos: QPointF) -> None:

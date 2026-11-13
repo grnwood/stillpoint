@@ -121,7 +121,7 @@ class PrimaryWheelZoomFilter(QObject):
         self._accumulator = 0.0
 
     def eventFilter(self, watched, event):  # type: ignore[override]
-        if (event.type() != QEvent.Wheel
+        if (self._callback is None or event.type() != QEvent.Wheel
                 or not event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
             return False
         action = wheel_action(event)
@@ -136,9 +136,32 @@ class PrimaryWheelZoomFilter(QObject):
         return True
 
 
+def uninstall_primary_wheel_zoom(root) -> None:
+    """Detach Python event filters before Qt tears down a widget subtree."""
+    for owner in (root, *root.findChildren(QWidget)):
+        handlers = getattr(owner, "_primary_wheel_zoom_filters", ())
+        if not handlers:
+            continue
+        owner._primary_wheel_zoom_filters = []
+        for handler in handlers:
+            try:
+                target = handler._root
+                if target is not None:
+                    target.removeEventFilter(handler)
+                # Break the filter -> widget/callback cycles while every native
+                # widget is still valid. Qt must never dispatch into a collected
+                # Python filter during scrollbar/layout destruction.
+                handler._callback = None
+                handler._root = None
+                handler.deleteLater()
+            except RuntimeError:
+                pass
+
+
 def install_primary_wheel_zoom(root, callback) -> PrimaryWheelZoomFilter:
     """Install suite-standard Ctrl/Cmd wheel zoom for a widget subtree."""
 
+    uninstall_primary_wheel_zoom(root)
     handlers: list[PrimaryWheelZoomFilter] = []
     descendants = (
         child for child in root.findChildren(QObject) if isinstance(child, QWidget)

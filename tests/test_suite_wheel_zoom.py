@@ -8,7 +8,7 @@ from sp.app.ui import ai_chat_panel, calendar_panel, task_panel
 from sp.app.ui.ai_chat_panel import AIChatPanel
 from sp.app.ui.attachments_panel import AttachmentsPanel
 from sp.app.ui.calendar_panel import CalendarPanel
-from sp.app.ui.canvas_navigation import install_primary_wheel_zoom
+from sp.app.ui.canvas_navigation import install_primary_wheel_zoom, uninstall_primary_wheel_zoom
 from sp.app.ui.task_panel import TaskPanel
 
 
@@ -35,6 +35,26 @@ def test_primary_wheel_zoom_filter_handles_children_and_cmd(qapp, qtbot) -> None
     qapp.sendEvent(child, _primary_wheel(modifier=Qt.MetaModifier))
 
     assert directions == [1]
+
+
+def test_wheel_zoom_filters_detach_before_subtree_destruction(qapp, qtbot) -> None:
+    root = QWidget()
+    child = QLabel(root)
+    qtbot.addWidget(root)
+    directions = []
+    install_primary_wheel_zoom(root, directions.append)
+    handlers = list(root._primary_wheel_zoom_filters)
+    uninstall_primary_wheel_zoom(root)
+    assert root._primary_wheel_zoom_filters == []
+    assert all(handler._root is None and handler._callback is None for handler in handlers)
+    qapp.sendEvent(child, _primary_wheel())
+    assert directions == []
+    # Reinstallation must not leave old callbacks installed alongside the new one.
+    install_primary_wheel_zoom(root, directions.append)
+    install_primary_wheel_zoom(root, directions.append)
+    qapp.sendEvent(child, _primary_wheel())
+    assert directions == [1]
+    uninstall_primary_wheel_zoom(root)
 
 
 def test_requested_utility_panels_support_primary_wheel_zoom(qapp, qtbot, monkeypatch) -> None:

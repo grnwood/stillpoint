@@ -71,6 +71,7 @@ from sp.app.ui.keyboard_shortcuts import (
 from sp.app.ui.git_widgets import CommitBeforePushDialog, GitCommitViewer, GitLogPanel, git_change_row, git_section_row
 from sp.app.ui.canvas_navigation import (
     install_primary_wheel_zoom,
+    uninstall_primary_wheel_zoom,
     native_zoom_steps,
     wheel_action,
     zoom_factor,
@@ -2563,6 +2564,7 @@ class Tab(QWidget):
                  details="", root: Path | None = None, defer_enhancements=False):
         super().__init__()
         self.path = path
+        self._retired = False
         self.loaded = loaded
         self.clean_text = loaded.text if loaded else ""
         self.markdown = markdown
@@ -2736,9 +2738,31 @@ class Tab(QWidget):
             return self.editor.to_markdown()
         return self.editor.toPlainText() if self.editor else ""
 
+    def prepare_for_shutdown(self):
+        """Quiesce editor callbacks before a preview/tab leaves the UI."""
+        if self._retired:
+            return
+        self._retired = True
+        self.setUpdatesEnabled(False)
+        uninstall_primary_wheel_zoom(self)
+        if isinstance(self.editor, MarkdownEditor):
+            self.editor.prepare_for_shutdown()
+
+    def deleteLater(self):  # type: ignore[override]
+        # Removing a tab does not close its child editor. QWidget deletion alone
+        # skips MarkdownEditor's closeEvent, leaving its timers/highlighter live
+        # until Qt destroys the document and viewport in native code.
+        self.prepare_for_shutdown()
+        super().deleteLater()
+
+    def event(self, event):  # type: ignore[override]
+        if event.type() == QEvent.DeferredDelete:
+            self.prepare_for_shutdown()
+        return super().event(event)
+
     def load_text(self, text):
         """Replace a clean editor buffer after an external filesystem change."""
-        if self.editor is None:
+        if self._retired or self.editor is None:
             return
         if isinstance(self.editor, MarkdownEditor):
             self.editor.set_markdown(text)
@@ -2753,7 +2777,7 @@ class Tab(QWidget):
             self._refresh_reading_view()
 
     def _refresh_reading_view(self) -> None:
-        if not self.markdown or self.editor is None or self.reading_view is None:
+        if self._retired or not self.markdown or self.editor is None or self.reading_view is None:
             return
         source_line, screen_y = self.reading_view.editor_view_position(self.editor)
         self.reading_view.match_editor_layout(self.editor)
@@ -5521,6 +5545,8 @@ class Window(QMainWindow):
 
     def _repair_focus_after_activation(self):
         """Restore keyboard focus if an OS window switch left no pane active."""
+        if self._closing_event.is_set():
+            return
         if QApplication.activeWindow() is not self:
             return
         if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
@@ -7681,7 +7707,7 @@ class Window(QMainWindow):
     def _schedule_markdown_preview(self, tab, *, immediate=False):
         self.markdown_preview_timer.stop()
         self.pending_markdown_preview = None
-        if not tab or not tab.editor:
+        if self._closing_event.is_set() or not tab or tab._retired or not tab.editor:
             return
         if tab.property("folderLargeMarkdownSource"):
             return
@@ -7698,7 +7724,8 @@ class Window(QMainWindow):
     def _refresh_pending_markdown_preview(self):
         tab = self.pending_markdown_preview
         self.pending_markdown_preview = None
-        if (not tab or self.tabs.indexOf(tab) < 0 or tab is not self.active_tab()
+        if (self._closing_event.is_set() or not tab or tab._retired
+                or self.tabs.indexOf(tab) < 0 or tab is not self.active_tab()
                 or not tab.editor or not tab.loaded):
             return
         if tab.dirty:
@@ -8487,6 +8514,14 @@ class Window(QMainWindow):
         if not self._review_dirty(self.all_tabs()):
             event.ignore()
             return
+        self.setProperty("_sp_closing", True)
+        self._cancel_pending_tree_markdown()
+        self.markdown_preview_timer.stop()
+        self.pending_markdown_preview = None
+        self.refresh_timer.stop()
+        for tab in self.all_tabs():
+            tab.prepare_for_shutdown()
+        uninstall_primary_wheel_zoom(self)
         self._closing_event.set()
         self.search_cancel.set()
         self.catalog_cancel.set()
@@ -11873,6 +11908,8 @@ class Window(QMainWindow):
         self.refresh_timer.start(350)
 
     def _refresh_disk(self):
+        if self._closing_event.is_set():
+            return
         if not self.root.is_dir():
             self.statusBar().showMessage("Root folder is missing, unmounted, or inaccessible", 15000)
         for tab in self.all_tabs():

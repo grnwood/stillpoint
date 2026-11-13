@@ -616,7 +616,7 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot, monkeyp
     assert topics_item is not None
     window.destination_tree._show_drag_target(topics_item)
     assert topics_item.isSelected() is True
-    assert window.destination_hint_label.text() == "Drop target: /Topics"
+    assert window.destination_hint_label.text() == "Drop target: :Topics"
     window.destination_tree._finish_drag_target(restore_previous=False)
     assert window.destination_hint_label.text().startswith("Drag search results")
 
@@ -659,8 +659,8 @@ def test_workspace_stages_hidden_journal_page_and_optional_rename(qtbot, monkeyp
         "Status",
     ]
     assert window.plan_table.textElideMode() == Qt.TextElideMode.ElideMiddle
-    assert "/Journal/2026/08/01/TopicA" in window.plan_table.item(0, 1).toolTip()
-    assert "/Topics" in window.plan_table.item(0, 2).toolTip()
+    assert ":Journal:2026:08:01:TopicA" in window.plan_table.item(0, 1).toolTip()
+    assert ":Topics" in window.plan_table.item(0, 2).toolTip()
     assert "<b>Action</b>" in window.plan_table.item(0, 0).toolTip()
     assert "Topic A" in window.plan_table.item(0, 3).toolTip()
     assert "Not validated" in window.plan_table.item(0, 5).toolTip()
@@ -1314,3 +1314,123 @@ def test_contextual_tree_open_uses_bounded_scope_before_full_search(qtbot) -> No
 
     assert http.calls[-1] == {"include_journal": "true", "path": "/"}
     assert window._tree_payload_complete is True
+
+
+def test_review_clear_button_is_undoable_and_clears_validation(qtbot, monkeypatch):
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+
+    class Http:
+        def get(self, path, params=None):
+            return _Response({"version": 1, "tree": [
+                {"path": "/Source", "name": "Source", "children": []},
+                {"path": "/Target", "name": "Target", "children": []},
+            ]})
+
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_refresh_workspace_data", lambda: None)
+    assert not window.review_clear_btn.isEnabled()
+    window._stage_tree_operation("/Source", "/Target", "last", "")
+    original = [dict(op) for op in window._plan]
+    window._preflight = {"ok": True}
+    window._refresh_plan_view()
+    window.mode_tabs.setCurrentIndex(2)
+    assert window.review_clear_btn.isEnabled()
+    window.review_clear_btn.click()
+    assert window._plan == []
+    assert window._preflight is None
+    assert window.review_table.rowCount() == 0
+    assert not window.review_clear_btn.isEnabled()
+    assert not window.apply_btn.isEnabled()
+    assert window._undo_plan()
+    assert window._plan == original
+    window._plan_history.reset()
+
+
+def test_tree_canvas_branches_collapse_without_changing_plan(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from sp.app.ui.vault_tree_reorg import VaultTreeCanvas, _BranchToggleItem
+
+    canvas = VaultTreeCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(800, 500)
+    payload = [{"path": "/Parent", "name": "Parent", "children": [
+        {"path": "/Parent/Child", "name": "Child", "children": []}
+    ]}]
+    plan = [{"source_path": "/Parent/Child", "destination_parent": "/", "new_name": "Child"}]
+    canvas.set_model(payload, "/", plan, read_only=True)
+    canvas.show()
+    canvas.fit_tree()
+    QApplication.processEvents()
+    toggle = next(item for item in canvas._nodes["/Parent"].childItems() if isinstance(item, _BranchToggleItem))
+    QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(toggle.sceneBoundingRect().center()))
+    QApplication.processEvents()
+    assert "/Parent" in canvas._nodes
+    assert "/Parent/Child" not in canvas._nodes
+    assert canvas._plan == plan
+    # Refreshing staged changes must retain the user's collapsed branches.
+    canvas.set_model(payload, "/", plan, read_only=True)
+    assert "/Parent/Child" not in canvas._nodes
+    canvas.expand_all()
+    assert "/Parent/Child" in canvas._nodes
+    canvas.collapse_all()
+    assert set(canvas._nodes) == {"/"}
+    canvas.toggle_branch("/")
+    assert set(canvas._nodes) == {"/", "/Parent"}
+
+
+def test_reorg_displays_colon_locations_and_branch_controls(qtbot):
+    from sp.app.ui.vault_reorg_window import VaultReorgWindow
+    from sp.app.ui.vault_tree_reorg import page_location
+
+    class Http:
+        def get(self, path, params=None):
+            return _Response({"version": 1, "tree": [
+                {"path": "/Projects", "name": "Projects", "children": [
+                    {"path": "/Projects/Notes", "name": "Notes", "children": [
+                        {"path": "/Projects/Notes/Child", "name": "Child", "children": []}
+                    ]}
+                ]},
+                {"path": "/Other", "name": "Other", "children": []},
+            ]})
+
+    window = VaultReorgWindow(http_client=Http(), vault_name="Test", read_only=False)
+    qtbot.addWidget(window)
+    window.open_tree_scope("/Projects")
+    assert window.tree_scope_label.text() == ":Projects"
+    window.tree_canvas._select_path("/Projects")
+    window.tree_collapse_branch_btn.click()
+    assert set(window.tree_canvas._nodes) == {"/Projects"}
+    window.tree_expand_branch_btn.click()
+    assert "/Projects/Notes/Child" in window.tree_canvas._nodes
+    window.tree_collapse_all_btn.click()
+    assert set(window.tree_canvas._nodes) == {"/Projects"}
+    window.tree_expand_all_btn.click()
+    assert "/Projects/Notes/Child" in window.tree_canvas._nodes
+    window._stage_tree_operation("/Projects/Notes", "/Projects", "last", "")
+    assert window.plan_table.item(0, 1).text() == ":Projects:Notes"
+    assert window.plan_table.item(0, 2).text() == ":Projects"
+    assert window.review_table.item(0, 1).text() == ":Projects:Notes"
+    assert window.review_table.item(0, 2).text() == ":Projects"
+    assert window._plan[0]["source_path"] == "/Projects/Notes"
+    assert page_location("/Projects/Notes/Notes.md") == ":Projects:Notes"
+    assert page_location("/") == "Vault root"
+    window._plan_history.reset()
+
+
+def test_branch_expansion_does_not_expand_other_branches(qtbot):
+    from sp.app.ui.vault_tree_reorg import VaultTreeCanvas
+    canvas = VaultTreeCanvas()
+    qtbot.addWidget(canvas)
+    payload = [{"path": f"/{parent}", "children": [
+        {"path": f"/{parent}/Child", "children": [{"path": f"/{parent}/Child/Leaf"}]}
+    ]} for parent in ("A", "B")]
+    canvas.set_model(payload, "/", [], read_only=True)
+    canvas.collapse_branch("/A")
+    canvas.collapse_branch("/B")
+    canvas.expand_branch("/A")
+    assert "/A/Child/Leaf" in canvas._nodes
+    assert "/B" in canvas._nodes
+    assert "/B/Child" not in canvas._nodes

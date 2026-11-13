@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .vault_reorg_plan import StagingPlanHistory
-from .vault_tree_reorg import VaultTreeCanvas, is_protected_tree_path
+from .vault_tree_reorg import VaultTreeCanvas, is_protected_tree_path, page_location
 
 _REORG_MIME = "application/x-stillpoint-reorg-paths"
 _PATH_ROLE = Qt.ItemDataRole.UserRole
@@ -430,7 +430,7 @@ class VaultReorgWindow(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(6, 6, 6, 6)
         scope_row = QHBoxLayout()
-        scope_row.addWidget(QLabel("<b>Scope</b>"))
+        scope_row.addWidget(QLabel("<b>Viewing subtree</b>"))
         self.tree_scope_label = QLabel("/")
         self.tree_scope_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         scope_row.addWidget(self.tree_scope_label, 1)
@@ -443,6 +443,9 @@ class VaultReorgWindow(QDialog):
         self.tree_fit_btn = QPushButton("Fit")
         scope_row.addWidget(self.tree_fit_btn)
         layout.addLayout(scope_row)
+        scope_help = QLabel("This map shows the selected subtree. Use Expand All / Collapse All above, or right-click a page to expand or collapse everything below it. Changing the view keeps staged changes.")
+        scope_help.setWordWrap(True)
+        layout.addWidget(scope_help)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self.tree_canvas = VaultTreeCanvas()
@@ -451,6 +454,12 @@ class VaultReorgWindow(QDialog):
         self.tree_canvas.renameRequested.connect(self._tree_inline_rename_requested)
         self.tree_canvas.statusChanged.connect(self._tree_status_changed)
         self.tree_fit_btn.clicked.connect(self.tree_canvas.fit_tree)
+        self.tree_expand_all_btn = QPushButton("Expand All")
+        self.tree_expand_all_btn.clicked.connect(self.tree_canvas.expand_all)
+        scope_row.addWidget(self.tree_expand_all_btn)
+        self.tree_collapse_all_btn = QPushButton("Collapse All")
+        self.tree_collapse_all_btn.clicked.connect(self.tree_canvas.collapse_all)
+        scope_row.addWidget(self.tree_collapse_all_btn)
         split.addWidget(self.tree_canvas)
 
         inspector = QFrame()
@@ -461,6 +470,18 @@ class VaultReorgWindow(QDialog):
         self.tree_selected_label.setWordWrap(True)
         self.tree_selected_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         inspector_layout.addWidget(self.tree_selected_label)
+        branch_actions = QHBoxLayout()
+        self.tree_expand_branch_btn = QPushButton("Expand All Below")
+        self.tree_expand_branch_btn.clicked.connect(
+            lambda: self.tree_canvas.expand_branch(self._tree_selected_source) if self._tree_selected_source else None
+        )
+        branch_actions.addWidget(self.tree_expand_branch_btn)
+        self.tree_collapse_branch_btn = QPushButton("Collapse All Below")
+        self.tree_collapse_branch_btn.clicked.connect(
+            lambda: self.tree_canvas.collapse_branch(self._tree_selected_source) if self._tree_selected_source else None
+        )
+        branch_actions.addWidget(self.tree_collapse_branch_btn)
+        inspector_layout.addLayout(branch_actions)
         self.tree_rename_btn = QPushButton("Rename staged page…")
         self.tree_rename_btn.setEnabled(False)
         self.tree_rename_btn.clicked.connect(self._tree_rename_selected)
@@ -503,7 +524,7 @@ class VaultReorgWindow(QDialog):
         self.tree_after_btn.clicked.connect(lambda: self._tree_move_relative_to_picker("after"))
         relative_row.addWidget(self.tree_after_btn)
         inspector_layout.addLayout(relative_row)
-        self.tree_use_scope_btn = QPushButton("Use destination as scope")
+        self.tree_use_scope_btn = QPushButton("View destination subtree")
         self.tree_use_scope_btn.clicked.connect(self._tree_use_destination_as_scope)
         inspector_layout.addWidget(self.tree_use_scope_btn)
         split.addWidget(inspector)
@@ -525,7 +546,7 @@ class VaultReorgWindow(QDialog):
         layout.addWidget(self.review_status_label)
         self.review_table = QTableWidget(0, 8)
         self.review_table.setHorizontalHeaderLabels(
-            ["Action", "Source", "Final parent", "Name", "Placement", "Scope", "Journal", "Status"]
+            ["Action", "Source", "Final parent", "Name", "Placement", "Original view", "Journal", "Status"]
         )
         review_header = self.review_table.horizontalHeader()
         review_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -536,6 +557,10 @@ class VaultReorgWindow(QDialog):
         self.review_table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         layout.addWidget(self.review_table, 1)
         review_actions = QHBoxLayout()
+        self.review_clear_btn = QPushButton("Clear Staged Changes")
+        self.review_clear_btn.setToolTip("Clear the complete staging plan. Undo restores it; files on disk are unchanged.")
+        self.review_clear_btn.clicked.connect(self._clear_plan)
+        review_actions.addWidget(self.review_clear_btn)
         review_actions.addStretch(1)
         self.review_validate_btn = QPushButton("Validate complete plan")
         self.review_validate_btn.clicked.connect(self._validate_plan)
@@ -569,7 +594,7 @@ class VaultReorgWindow(QDialog):
     def _refresh_tree_mode(self) -> None:
         if not hasattr(self, "tree_canvas"):
             return
-        self.tree_scope_label.setText(self._tree_scope_root)
+        self.tree_scope_label.setText(page_location(self._tree_scope_root))
         self.tree_scope_up_btn.setEnabled(self._tree_scope_root != "/")
         self.tree_canvas.set_model(
             self._tree_payload,
@@ -615,7 +640,7 @@ class VaultReorgWindow(QDialog):
                 if not path:
                     continue
                 title = str(result.get("title") or Path(path.rstrip("/")).name)
-                item = QTreeWidgetItem([f"{title} — {path}"])
+                item = QTreeWidgetItem([f"{title} — {page_location(path)}"])
                 item.setData(0, _PATH_ROLE, path)
                 if is_protected_tree_path(path):
                     item.setText(0, f"🔒 {item.text(0)}")
@@ -663,6 +688,8 @@ class VaultReorgWindow(QDialog):
         self._tree_selected_source = path or None
         if not hasattr(self, "tree_selected_label"):
             return
+        self.tree_expand_branch_btn.setEnabled(bool(path))
+        self.tree_collapse_branch_btn.setEnabled(bool(path))
         if not path:
             self.tree_selected_label.setText("Select a page on the map.")
             self.tree_rename_btn.setEnabled(False)
@@ -674,10 +701,10 @@ class VaultReorgWindow(QDialog):
         existing = next((op for op in self._plan if op.get("source_path") == path), None)
         proposed = ""
         if existing:
-            proposed = f"\nStaged under: {existing.get('destination_parent')}\nName: {existing.get('new_name')}"
+            proposed = f"\nStaged under: {page_location(existing.get('destination_parent'))}\nName: {existing.get('new_name')}"
         protected = is_protected_tree_path(path)
         suffix = "\nProtected Journal anchor" if protected else ""
-        self.tree_selected_label.setText(f"{path}{proposed}{suffix}")
+        self.tree_selected_label.setText(f"{page_location(path)}{proposed}{suffix}")
         self.tree_rename_btn.setEnabled(not protected and not self.read_only)
         self.tree_revert_btn.setEnabled(existing is not None and not self.read_only)
         self._tree_destination_selected()
@@ -695,7 +722,7 @@ class VaultReorgWindow(QDialog):
             and not destination.startswith(self._tree_scope_root.rstrip("/") + "/")
         )
         self.tree_outside_label.setText(
-            f"⚠ This moves the selected subtree outside {self._tree_scope_root}."
+            f"⚠ This moves the selected subtree outside {page_location(self._tree_scope_root)}."
             if outside
             else ""
         )
@@ -796,7 +823,7 @@ class VaultReorgWindow(QDialog):
             answer = QMessageBox.question(
                 self,
                 "Stage Outside-Scope Move?",
-                f"This moves {source} outside {self._tree_scope_root}.\n\nNew parent: {destination_parent}",
+                f"This moves {page_location(source)} outside {page_location(self._tree_scope_root)}.\n\nNew parent: {page_location(destination_parent)}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -830,9 +857,9 @@ class VaultReorgWindow(QDialog):
             else:
                 existing.update(values)
 
-        label = f"Move {source} under {destination_parent}"
+        label = f"Move {page_location(source)} under {page_location(destination_parent)}"
         if placement_mode in {"before", "after"}:
-            label = f"Order {source} {placement_mode} {placement_sibling_path}"
+            label = f"Order {page_location(source)} {placement_mode} {page_location(placement_sibling_path)}"
         if self._plan_history.perform(label, mutate):
             self._invalidate_preflight()
             self._refresh_plan_view()
@@ -866,7 +893,7 @@ class VaultReorgWindow(QDialog):
         if not source:
             return
         if self._plan_history.perform(
-            f"Revert staged change for {source}",
+            f"Revert staged change for {page_location(source)}",
             lambda plan: plan.__setitem__(slice(None), [op for op in plan if op.get("source_path") != source]),
         ):
             self._invalidate_preflight()
@@ -890,17 +917,19 @@ class VaultReorgWindow(QDialog):
             )
             values = [
                 "Add reference" if op.get("operation_type") == "add_reference" else "Move",
-                op.get("source_path", ""),
-                final_parent,
+                page_location(op.get("source_path", "")),
+                page_location(final_parent),
                 op.get("new_name", ""),
                 server_op.get("placement_mode", op.get("placement_mode", "last")),
-                "Outside scope" if outside else "Within scope",
+                "Leaves viewed subtree" if outside else "Within viewed subtree",
                 op.get("journal_reference_action", ""),
                 op.get("status", "Not validated"),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(html.escape(str(value)))
+                if column == 5:
+                    item.setToolTip(f"Subtree shown when this change was staged: {page_location(scope_root)}. This is a navigation context, not a restriction on destinations.")
                 self.review_table.setItem(row, column, item)
         summary = self.summary_label.text() if hasattr(self, "summary_label") else ""
         if self._preflight and self._preflight.get("ok"):
@@ -913,6 +942,7 @@ class VaultReorgWindow(QDialog):
             )
         self.review_status_label.setText(summary)
         self.review_validate_btn.setEnabled(bool(self._plan) and not self.read_only)
+        self.review_clear_btn.setEnabled(bool(self._plan))
 
     def _setup_focus_panes(self) -> None:
         for pane in self._focus_panes:
@@ -955,7 +985,7 @@ class VaultReorgWindow(QDialog):
 
     def _update_drag_target_hint(self, path: str) -> None:
         if path:
-            self.destination_hint_label.setText(f"Drop target: {path}")
+            self.destination_hint_label.setText(f"Drop target: {page_location(path)}")
             self.destination_hint_label.setStyleSheet(
                 f"color: {self._focus_accent_color}; font-weight: 700;"
             )
@@ -978,6 +1008,12 @@ class VaultReorgWindow(QDialog):
             "drop near its top or bottom edge (or use Stage before/after) to order siblings, and use "
             "the destination browser for moves outside the visible scope. Review shows the combined "
             "plan. Undo and Redo affect staged operations only, never editor text or committed files.\n\n"
+            "Viewing subtree (scope) means the part of the vault currently shown on the map. "
+            "It is not a permission boundary. Use Up one level or Vault root to broaden the view, "
+            "or View destination subtree to focus it. Review flags moves that leave the subtree "
+            "shown when they were staged. Use +/− on a branch or Expand All / Collapse All to navigate. "
+            "Right-click any page for Expand All Below / Collapse All Below; the same controls appear "
+            "under Selected subtree. Page locations use StillPoint colon links throughout.\n\n"
             "Journal history is durable:\n"
             "• A Journal day page stays in the Journal. Reorganizing it adds a reference from the "
             "selected topic page back to that day.\n"
@@ -1292,11 +1328,11 @@ class VaultReorgWindow(QDialog):
             if operation_type == "add_reference" and matched_heading:
                 self._candidate_reference_notes[path] = matched_heading
                 prefix += f"Matched heading: {matched_heading}\n"
-            item = QListWidgetItem(f"{prefix}{title}\n{path}{suffix}")
+            item = QListWidgetItem(f"{prefix}{title}\n{page_location(path)}{suffix}")
             item.setData(_PATH_ROLE, path)
             tooltip_parts = [
                 f"<b>{html.escape(title)}</b>",
-                f"<code>{html.escape(path)}</code>",
+                f"<code>{html.escape(page_location(path))}</code>",
             ]
             if matched_heading:
                 tooltip_parts.append(f"<b>Matched heading:</b> {html.escape(matched_heading)}")
@@ -1422,9 +1458,9 @@ class VaultReorgWindow(QDialog):
 
         count = len(eligible)
         label = (
-            f"Stage {eligible[0][0]} under {destination_parent}"
+            f"Stage {page_location(eligible[0][0])} under {page_location(destination_parent)}"
             if count == 1
-            else f"Stage {count} pages under {destination_parent}"
+            else f"Stage {count} pages under {page_location(destination_parent)}"
         )
         if self._plan_history.perform(label, mutate):
             self._invalidate_preflight()
@@ -1477,8 +1513,8 @@ class VaultReorgWindow(QDialog):
             for row, op in enumerate(self._plan):
                 values = [
                     "Add reference" if op.get("operation_type", "move") == "add_reference" else "Move",
-                    op["source_path"],
-                    op["destination_parent"],
+                    page_location(op["source_path"]),
+                    page_location(op["destination_parent"]),
                     op["new_name"],
                     {
                         "append": "Will add to # Moved Pages",
@@ -1612,7 +1648,7 @@ class VaultReorgWindow(QDialog):
         old_name = str(self._plan[row].get("new_name") or "")
         source = str(self._plan[row].get("source_path") or "page")
         if self._plan_history.perform(
-            f"Rename {source} to {new_name or '(empty)'}",
+            f"Rename {page_location(source)} to {new_name or '(empty)'}",
             lambda plan: plan[row].__setitem__("new_name", new_name),
         ):
             self._invalidate_preflight()
@@ -1700,11 +1736,11 @@ class VaultReorgWindow(QDialog):
         for op in self._preflight.get("operations") or []:
             if op.get("operation_type") == "add_reference":
                 mappings.append(
-                    f"{op['source_path']}  →  add Journal reference in {op['destination_parent']}"
+                    f"{page_location(op['source_path'])}  →  add Journal reference in {page_location(op['destination_parent'])}"
                 )
             else:
                 mappings.append(
-                    f"{op['source_path']}  →  {op.get('destination_path') or op.get('raw_destination_path')}"
+                    f"{page_location(op['source_path'])}  →  {page_location(op.get('destination_path') or op.get('raw_destination_path'))}"
                 )
         detail = "Apply these staged changes?\n\n" + "\n".join(mappings)
         if self._preflight.get("journal_append_count"):
@@ -1782,7 +1818,7 @@ class VaultReorgWindow(QDialog):
         self._preflight = None
         self._refresh_plan_view()
         self._refresh_workspace_data()
-        QMessageBox.information(self, "Reorganization Complete", "The staged page moves were applied.")
+        QMessageBox.information(self, "Reorganization Complete", "Reorganization complete. Indexes updated.")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._plan:
