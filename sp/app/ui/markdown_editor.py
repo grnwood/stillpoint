@@ -4670,7 +4670,9 @@ class MarkdownEditor(QTextEdit):
         cleaned = self._strip_inline_markdown_wrappers(cleaned)
         return cleaned
 
-    def _transform_markdown_selection_text(self, text: str, prefix: str, suffix: str) -> str:
+    def _transform_markdown_selection_text(
+        self, text: str, prefix: str, suffix: str, *, protected_lines: set[int] | None = None
+    ) -> str:
         """Toggle inline wrappers without changing Markdown block structure."""
         prefix_len = len(prefix)
         suffix_len = len(suffix)
@@ -4690,6 +4692,28 @@ class MarkdownEditor(QTextEdit):
                 return "", line
             return match.group("block"), match.group("body")
 
+        # Structural rows and rendered links have their own display treatment.
+        # Keep them intact without vetoing formatting elsewhere in a selection.
+        protected: list[bool] = []
+        in_fence = False
+        fence_marker = ""
+        for index, line in enumerate(lines):
+            stripped = line.lstrip()
+            fence = re.match(r"(`{3,}|~{3,})", stripped)
+            is_protected = in_fence or bool(fence) or index in (protected_lines or ())
+            if fence:
+                marker = fence.group(1)
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif marker[0] == fence_marker[0] and len(marker) >= len(fence_marker):
+                    in_fence = False
+            is_protected = is_protected or bool(
+                re.match(r"#{1,6}(?:\s|$)", stripped)
+                or re.fullmatch(r"(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})", stripped)
+                or WIKI_LINK_STORAGE_PATTERN.search(line)
+            )
+            protected.append(is_protected)
         parts = [split_block_prefix(line) for line in lines]
 
         def body_wrapped(body: str) -> bool:
@@ -4699,13 +4723,16 @@ class MarkdownEditor(QTextEdit):
                 and body.endswith(suffix)
             )
 
-        meaningful_bodies = [body for _block, body in parts if body.strip()]
+        meaningful_bodies = [
+            body for (_block, body), keep in zip(parts, protected)
+            if body.strip() and not keep
+        ]
         all_wrapped = bool(meaningful_bodies) and all(
             body_wrapped(body) for body in meaningful_bodies
         )
         transformed: list[str] = []
-        for block, body in parts:
-            if not body.strip():
+        for (block, body), keep in zip(parts, protected):
+            if keep or not body.strip():
                 transformed.append(block + body)
             elif all_wrapped and body_wrapped(body):
                 transformed.append(block + body[prefix_len : len(body) - suffix_len])
@@ -4734,9 +4761,9 @@ class MarkdownEditor(QTextEdit):
             return
         adjusted_cursor = self._expanded_selection_for_overlapping_links(cursor)
         blocks = self._blocks_for_cursor(adjusted_cursor)
-        if self._selection_contains_heading(adjusted_cursor):
+        if len(blocks) == 1 and self._selection_contains_heading(adjusted_cursor):
             return
-        if self._selection_contains_rendered_link(adjusted_cursor):
+        if len(blocks) == 1 and self._selection_contains_rendered_link(adjusted_cursor):
             return
         full_block_selection = self._selection_covers_full_blocks(adjusted_cursor, blocks)
         if full_block_selection:
@@ -4752,7 +4779,14 @@ class MarkdownEditor(QTextEdit):
             selected_storage = self._from_display(selected_display)
         if not selected_storage:
             return
-        new_storage = self._transform_markdown_selection_text(selected_storage, prefix, suffix)
+        protected_lines = {
+            index for index, block in enumerate(blocks)
+            if self._block_is_heading_text(block.text())
+            or WIKI_LINK_DISPLAY_PATTERN.search(block.text())
+        }
+        new_storage = self._transform_markdown_selection_text(
+            selected_storage, prefix, suffix, protected_lines=protected_lines
+        )
         new_display = self._to_display(new_storage)
         if full_block_selection:
             replace_start = blocks[0].position()

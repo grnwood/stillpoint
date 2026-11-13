@@ -196,6 +196,7 @@ class AgentToolOverlay(QDialog):
             server_config=self._server_config,
             model=self._model,
             system_prompt=DEFAULT_AGENT_SYSTEM_PROMPT,
+            mode="create",
         )
         self._worker = AgentToolLoopWorker(
             config=config_obj,

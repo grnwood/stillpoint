@@ -3,8 +3,20 @@ from __future__ import annotations
 
 import html
 import re
+from urllib.parse import quote, unquote
 
 import markdown as md
+
+
+def vault_link_href(target: str) -> str:
+    """Carry colon page references through Qt's URL parser without losing them."""
+    return "stillpoint-page:" + quote(target, safe="")
+
+
+def decode_vault_link_href(href: str) -> str:
+    if href.startswith("stillpoint-page:"):
+        return unquote(href[len("stillpoint-page:"):])
+    return href
 
 
 _IMAGE_MD_SIZE_RE = re.compile(
@@ -147,6 +159,7 @@ def _rewrite_task_and_dash_markers(text: str) -> str:
     normalized: list[str] = []
     in_fence = False
     fence_marker = ""
+    task_indent: int | None = None
     checkbox_re = re.compile(
         r"^(?P<indent>[ \t]*)(?:(?:[-+*]|\d+\.)[ \t]+)?"
         r"\[(?P<state>[ xX])\][ \t]+(?P<rest>.*)$"
@@ -169,6 +182,7 @@ def _rewrite_task_and_dash_markers(text: str) -> str:
             continue
         checkbox_match = checkbox_re.match(line)
         if checkbox_match:
+            task_indent = len(checkbox_match.group("indent").expandtabs(4))
             checked = (checkbox_match.group("state") or " ").lower() == "x"
             cls = "md-checkbox md-checkbox--checked" if checked else "md-checkbox md-checkbox--unchecked"
             normalized.append(
@@ -176,6 +190,15 @@ def _rewrite_task_and_dash_markers(text: str) -> str:
                 f'aria-hidden="true"></span>{checkbox_match.group("rest") or ""}'
             )
             continue
+        if task_indent is not None and stripped:
+            indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+            # Task notes use indentation for visual nesting in the editor.
+            # The checkbox is rendered as a span rather than a Markdown list,
+            # so literal four-space indentation would turn its notes into code.
+            if indent >= task_indent + 4:
+                line = "&#160;" * indent + line.lstrip(" \t")
+            elif not stripped.startswith('<span id="sp-source-'):
+                task_indent = None
         dash_match = dash_re.match(line)
         if dash_match:
             normalized.append(
@@ -347,8 +370,32 @@ def _rewrite_zim_links(text: str) -> str:
     def replace(match: re.Match) -> str:
         target = (match.group("target") or "").strip()
         label = (match.group("label") or "").strip()
+        if target.startswith((":", "/")):
+            return (
+                f'<a href="{vault_link_href(target)}">'
+                f'{html.escape(label or target.lstrip(":"))}</a>'
+            )
         if target.startswith(("http://", "https://")):
             return f"[{label or target}]({target})"
         return label or target.lstrip(":")
 
-    return _ZIM_LINK_RE.sub(replace, text)
+    output: list[str] = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"\s*(`{3,}|~{3,})", line)
+        if marker:
+            value = marker.group(1)
+            if not fence:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = ""
+            output.append(line)
+        elif fence:
+            output.append(line)
+        else:
+            parts = re.split(r"(`+[^`]*`+)", line)
+            output.append("".join(
+                part if part.startswith("`") else _ZIM_LINK_RE.sub(replace, part)
+                for part in parts
+            ))
+    return "".join(output)

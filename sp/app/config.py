@@ -33,6 +33,7 @@ _TASK_FETCH_CACHE_SIZE = 32
 _TASKS_FTS_ENABLED = False
 _TASKS_FTS_THRESHOLD = 500
 _TASK_INDEX_VERSION = 0
+_TASK_INDEX_DB_STATE: tuple | None = None
 _TASK_VERSION_LOCK = RLock()
 
 _PAGE_CACHE_ROWS: list[dict] = []
@@ -4168,6 +4169,74 @@ def update_page_index(
     bump_task_index_version()
 
 
+_TASK_SOURCE_CHECK: tuple | None = None
+
+
+def prune_task_sources(root: Path, *, force: bool = False) -> int:
+    """Remove derived task rows for missing or unsupported page sources only.
+
+    Never modifies source files or page metadata. Unavailable vaults and paths
+    that cannot be checked are retained rather than treated as deletions.
+    """
+    global _TASK_SOURCE_CHECK
+    from sp.server.adapters import files
+    from stat import S_ISREG
+
+    root = Path(root).resolve()
+    if _current_active_root() is None or Path(_current_active_root()).resolve() != root or not root.is_dir():
+        return 0
+    key = (str(root), get_task_index_version())
+    now = time.monotonic()
+    if not force and _TASK_SOURCE_CHECK and _TASK_SOURCE_CHECK[:2] == key and now - _TASK_SOURCE_CHECK[2] < 5:
+        return 0
+    conn = _get_conn()
+    if conn is None:
+        return 0
+    stale = []
+    preferred_pages = {}
+    for (path,) in conn.execute("SELECT DISTINCT path FROM tasks").fetchall():
+        try:
+            target = (root / path.lstrip("/")).resolve()
+            if not files.is_indexable_page(root, target):
+                stale.append(path)
+                continue
+            # A legacy index entry must not compete with the preferred Markdown page.
+            if target.suffix.lower() == files.LEGACY_SUFFIX and target.with_suffix(files.PAGE_SUFFIX).is_file():
+                preferred = target.with_suffix(files.PAGE_SUFFIX)
+                preferred_pages[f"/{preferred.relative_to(root).as_posix()}"] = preferred.read_text(encoding="utf-8")
+                stale.append(path)
+                continue
+            actual = files._resolve_page_for_read(target)
+            if not S_ISREG(actual.stat().st_mode):
+                stale.append(path)
+        except FileNotFoundError:
+            stale.append(path)
+        except (OSError, ValueError):
+            continue
+    removed = 0
+    if stale:
+        with conn:
+            for path in stale:
+                ids = [row[0] for row in conn.execute("SELECT task_id FROM tasks WHERE path = ?", (path,))]
+                removed += len(ids)
+                conn.executemany("DELETE FROM task_tags WHERE task_id = ?", ((task_id,) for task_id in ids))
+                if _tasks_fts_exists(conn):
+                    conn.executemany("DELETE FROM tasks_fts WHERE task_id = ?", ((task_id,) for task_id in ids))
+                conn.execute("DELETE FROM tasks WHERE path = ?", (path,))
+                conn.execute("DELETE FROM kv WHERE key = ?", (f"hash:{path}",))
+        _invalidate_task_cache()
+        bump_task_index_version()
+        # Legacy page writes migrate to .md. Replace those task IDs with the
+        # preferred page's current content, instead of dropping legitimate tasks.
+        if preferred_pages:
+            from sp.app.indexer import index_page
+            for path, content in preferred_pages.items():
+                set_page_hash(path, "")
+                index_page(path, content)
+    _TASK_SOURCE_CHECK = (str(root), get_task_index_version(), now)
+    return removed
+
+
 def delete_page_index(path: str) -> None:
     """Delete a single page from the index."""
     conn = _get_conn()
@@ -4520,6 +4589,8 @@ def rebuild_index_from_disk(root: Path, keep_tables: Optional[set[str]] = None) 
     finally:
         conn.close()
         _invalidate_page_cache()
+        _invalidate_task_cache()
+        bump_task_index_version()
 
 
 def ensure_page_entry(page_path: str, title: Optional[str] = None) -> None:
@@ -4997,16 +5068,41 @@ def delete_task_ai_summary() -> None:
 
 
 def bump_task_index_version() -> int:
-    """Increment the in-memory task index version used for cache invalidation."""
+    """Publish task-index changes to other desktop/API processes as well."""
     global _TASK_INDEX_VERSION
     with _TASK_VERSION_LOCK:
         _TASK_INDEX_VERSION += 1
+        _invalidate_task_cache()
+        conn = _get_conn()
+        if conn is not None:
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO kv(key, value) VALUES('task_index_revision', '1') "
+                        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+                    )
+                return int(conn.execute("SELECT value FROM kv WHERE key = 'task_index_revision'").fetchone()[0])
+            except sqlite3.Error:
+                pass
         return _TASK_INDEX_VERSION
 
 
 def get_task_index_version() -> int:
-    """Return the current in-memory task index version."""
+    """Observe task-index changes made by another process using this vault."""
+    global _TASK_INDEX_DB_STATE
     with _TASK_VERSION_LOCK:
+        conn = _get_conn()
+        if conn is not None:
+            try:
+                row = conn.execute("SELECT value FROM kv WHERE key = 'task_index_revision'").fetchone()
+                version = int(row[0]) if row else 0
+                state = (str(_current_active_root()), version)
+                if state != _TASK_INDEX_DB_STATE:
+                    _invalidate_task_cache()
+                    _TASK_INDEX_DB_STATE = state
+                return version
+            except (sqlite3.Error, ValueError):
+                pass
         return _TASK_INDEX_VERSION
 
 
@@ -5020,6 +5116,7 @@ def fetch_tasks(
     conn = _get_conn()
     if not conn:
         return []
+    get_task_index_version()
     non_actionable_tags_list = load_non_actionable_task_tags_list()
     non_actionable_tags = set(non_actionable_tags_list)
     cache_key = _task_cache_key(

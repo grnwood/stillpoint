@@ -37,6 +37,7 @@ from PySide6.QtWidgets import QFrame, QLineEdit, QListWidget, QStyle, QLabel, QS
 from PySide6.QtSvg import QSvgRenderer
 from sp.rag.attachment_text import MAX_OFFICE_CONTEXT_CHARS, extract_attachment_text
 from markdown import markdown
+from sp.markdown_html import vault_link_href, decode_vault_link_href
 import html
 
 # Use stillpoint_config for global config storage
@@ -44,6 +45,7 @@ from sp.app import config, config as stillpoint_config
 from .theme import apply_menu_theme, theme_color, theme_value
 from .canvas_navigation import install_primary_wheel_zoom
 from sp.ai.manager import AIManager, ContextItem
+from sp.ai.agent_modes import normalize_mode
 from sp.ai.context import (
     MAX_VISION_IMAGES_PER_REQUEST, MAX_VISION_PAYLOAD_CHARS,
     VISION_IMAGE_SUFFIXES, build_context_prompt, image_data_url,
@@ -53,7 +55,6 @@ from .agent_tool_loop import (
     AgentToolChatWorker,
     DEFAULT_AGENT_SYSTEM_PROMPT,
     build_vault_key,
-    parse_agent_message,
 )
 from .ai_api import (
     build_api_request, build_auth_headers, build_httpx_timeout, compose_url, format_api_error,
@@ -86,8 +87,8 @@ def _log_context(message: str) -> None:
         print(_color_text(f"[Context] {message}", CONTEXT_COLOR))
 
 
-def _load_tinted_icon(path: Path, size: QSize | None = None) -> QIcon:
-    tint = _icon_tint_color()
+def _load_tinted_icon(path: Path, size: QSize | None = None, tint: QColor | None = None) -> QIcon:
+    tint = tint if tint is not None else _icon_tint_color()
     if not path.exists():
         return QIcon()
     target_size = size or QSize(24, 24)
@@ -878,7 +879,8 @@ class AIChatStore:
                 last_model TEXT,
                 last_server TEXT,
                 system_prompt TEXT,
-                ai_conversation_id INTEGER
+                ai_conversation_id INTEGER,
+                agent_mode TEXT NOT NULL DEFAULT 'chat'
             )
             """
         )
@@ -920,6 +922,9 @@ class AIChatStore:
                 schema_updated = True
             if "ai_conversation_id" not in cols:
                 cur.execute("ALTER TABLE sessions ADD COLUMN ai_conversation_id INTEGER")
+                schema_updated = True
+            if "agent_mode" not in cols:
+                cur.execute("ALTER TABLE sessions ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'chat'")
                 schema_updated = True
             if schema_updated:
                 conn.commit()
@@ -963,7 +968,7 @@ class AIChatStore:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, name, parent_id, path, type, auto_title, sort_order, last_model, last_server, system_prompt, ai_conversation_id FROM sessions WHERE id = ?",
+            "SELECT * FROM sessions WHERE id = ?",
             (session_id,),
         )
         row = cur.fetchone()
@@ -1110,6 +1115,10 @@ class AIChatStore:
         cur.execute("UPDATE sessions SET last_model = ? WHERE id = ?", (model, session_id))
         conn.commit()
         conn.close()
+
+    def update_session_agent_mode(self, session_id: int, mode: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE sessions SET agent_mode = ? WHERE id = ?", (normalize_mode(mode), session_id))
 
     def update_session_last_server(self, session_id: int, server_name: str) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -1882,7 +1891,6 @@ class AIChatPanel(QtWidgets.QWidget):
             self._agent_tools_enabled = True
         self._last_agent_read_path: Optional[str] = None
         self._last_user_prompt: Optional[str] = None
-        self._agent_fallback_in_progress = False
         self._agent_progress_lines: list[str] = []
         self._current_editor_path: Optional[str] = None
         self._debug_entries: list[dict] = []
@@ -2128,7 +2136,25 @@ class AIChatPanel(QtWidgets.QWidget):
         # Compact input row: two-line textbox with controls on the right
         input_container = QtWidgets.QWidget()
         input_container.setObjectName("aiChatInputContainer")
-        input_layout = QtWidgets.QHBoxLayout(input_container)
+        composer_layout = QtWidgets.QVBoxLayout(input_container)
+        composer_layout.setContentsMargins(0, 0, 0, 0)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Mode:"))
+        self.agent_mode_combo = QtWidgets.QComboBox()
+        self.agent_mode_combo.setObjectName("aiChatAgentMode")
+        self.agent_mode_combo.setAccessibleName("Chat mode")
+        self.agent_mode_combo.addItem("Chat", "chat")
+        self.agent_mode_combo.addItem("Research", "research")
+        self.agent_mode_combo.addItem("Create / Edit", "create")
+        self.agent_mode_combo.setMinimumContentsLength(12)
+        self.agent_mode_combo.currentIndexChanged.connect(self._on_agent_mode_changed)
+        mode_row.addWidget(self.agent_mode_combo)
+        self.agent_mode_hint = QtWidgets.QLabel()
+        self.agent_mode_hint.setWordWrap(True)
+        mode_row.addWidget(self.agent_mode_hint, 1)
+        composer_layout.addLayout(mode_row)
+        input_layout = QtWidgets.QHBoxLayout()
+        composer_layout.addLayout(input_layout)
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(6)
         self.input_edit = QtWidgets.QPlainTextEdit()
@@ -2397,6 +2423,12 @@ class AIChatPanel(QtWidgets.QWidget):
             self.stop_btn.setIcon(_load_icon("cancel.svg", QSize(10, 10)))
         if hasattr(self, "send_btn"):
             self.send_btn.setIcon(_load_icon("send-message.svg", QSize(10, 10)))
+        if hasattr(self, "agent_mode_combo"):
+            for index, asset in enumerate(("chat-bubble.svg", "research-agent.svg", "agent-create.svg")):
+                self.agent_mode_combo.setItemIcon(index, _load_tinted_icon(
+                    _get_asset_directory() / asset, QSize(18, 18), QColor(_chat_surface_defaults(self)["text"])
+                ))
+            self._update_agent_mode_hint()
 
     def apply_theme(self) -> None:
         """Rebuild theme-sensitive styles after the effective theme changes."""
@@ -2596,6 +2628,8 @@ class AIChatPanel(QtWidgets.QWidget):
             self.stop_btn.setVisible(active)
         if hasattr(self, "send_btn"):
             self.send_btn.setEnabled(not active)
+        if hasattr(self, "agent_mode_combo"):
+            self.agent_mode_combo.setEnabled(not active)
         if hasattr(self, "chat_tree"):
             self.chat_tree.setEnabled(not active)
         if hasattr(self, "new_chat_btn"):
@@ -2912,17 +2946,46 @@ class AIChatPanel(QtWidgets.QWidget):
     def _linkify_vault_paths(self, text: str) -> str:
         if not text:
             return text
-        fenced = re.split(r"(```.*?```)", text, flags=re.DOTALL)
-        for idx, chunk in enumerate(fenced):
-            if chunk.startswith("```"):
-                continue
-            fenced[idx] = self._linkify_inline_paths(chunk)
-        return "".join(fenced)
+        output: list[str] = []
+        fence = ""
+        for line in text.splitlines(keepends=True):
+            marker = re.match(r"\s*(`{3,}|~{3,})", line)
+            if marker:
+                value = marker.group(1)
+                if not fence:
+                    fence = value
+                elif value[0] == fence[0] and len(value) >= len(fence):
+                    fence = ""
+                output.append(line)
+            else:
+                output.append(line if fence else self._linkify_inline_paths(line))
+        return "".join(output)
 
     def _linkify_inline_paths(self, text: str) -> str:
-        segments = re.split(r"(`[^`]*`)", text)
+        # Consume complete links before looking for bare paths. Otherwise a
+        # path inside [target|label] can become a nested, malformed hyperlink.
+        segments = re.split(
+            r"(`+[^`]*`+|!?\[[^\]\n]*\]\([^\)\n]*\)|\[[^\]|\n]+\|[^\]\n]*\])",
+            text,
+        )
         for idx, seg in enumerate(segments):
             if seg.startswith("`"):
+                continue
+            wiki = re.fullmatch(r"\[([^\]|]+)\|([^\]]*)\]", seg)
+            md_link = re.fullmatch(r"\[([^\]]*)\]\(([^)]+)\)", seg)
+            if wiki or md_link:
+                target, label = wiki.groups() if wiki else (md_link.group(2), md_link.group(1))
+                target = target.strip()
+                if target.startswith("/"):
+                    target = ensure_root_colon_link(path_to_colon(target))
+                if target.startswith((":", "http://", "https://", "#")):
+                    href = vault_link_href(target) if target.startswith((":", "/")) else target
+                    safe_target = html.escape(href, quote=True)
+                    safe_title = html.escape(target, quote=True)
+                    safe_label = html.escape(label.strip() or target.lstrip(":"), quote=False)
+                    segments[idx] = f'<a href="{safe_target}" title="{safe_title}">{safe_label}</a>'
+                continue
+            if seg.startswith("!["):
                 continue
             transformed = self._replace_path_tokens(seg)
             segments[idx] = self._replace_title_lines_with_links(transformed)
@@ -2983,9 +3046,10 @@ class AIChatPanel(QtWidgets.QWidget):
             if not colon:
                 out.append(line)
                 continue
-            href = html.escape(f":{colon}", quote=True)
+            href = html.escape(vault_link_href(f":{colon}"), quote=True)
+            title = html.escape(f":{colon}", quote=True)
             label = html.escape(stripped, quote=False)
-            out.append(f"{prefix}<a href=\"{href}\" title=\"{href}\">{label}</a>{sep}{rest}{newline}")
+            out.append(f"{prefix}<a href=\"{href}\" title=\"{title}\">{label}</a>{sep}{rest}{newline}")
         return "".join(out)
 
     def _replace_path_tokens(self, text: str) -> str:
@@ -3007,8 +3071,9 @@ class AIChatPanel(QtWidgets.QWidget):
             colon = f":{colon}"
             label = Path(trimmed).stem or colon.split(":")[-1]
             safe_label = html.escape(label, quote=False)
-            safe_colon = html.escape(colon, quote=True)
-            return f"{prefix}<a href=\"{safe_colon}\" title=\"{safe_colon}\">{safe_label}</a>{trailing}"
+            safe_colon = html.escape(vault_link_href(colon), quote=True)
+            title = html.escape(colon, quote=True)
+            return f"{prefix}<a href=\"{safe_colon}\" title=\"{title}\">{safe_label}</a>{trailing}"
 
         return pattern.sub(_replace, text)
 
@@ -3981,6 +4046,11 @@ class AIChatPanel(QtWidgets.QWidget):
 
     def _apply_session_defaults(self, session: Dict) -> None:
         """Apply stored server/model defaults to UI for a chat session."""
+        if hasattr(self, "agent_mode_combo"):
+            self.agent_mode_combo.blockSignals(True)
+            self.agent_mode_combo.setCurrentIndex(self.agent_mode_combo.findData(normalize_mode(session.get("agent_mode"))))
+            self.agent_mode_combo.blockSignals(False)
+            self._update_agent_mode_hint()
         # Server
         last_server = session.get("last_server")
         if not last_server:
@@ -4375,6 +4445,9 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self._ensure_active_chat():
             QtWidgets.QMessageBox.critical(self, "Chat", "Could not find or create a chat.")
             return
+        if self._selected_agent_mode() != "chat" and not self._should_use_agent_tools():
+            self._set_status("Agent mode unavailable. Enable agents in Preferences → Agents and open a vault or folder.", "#f6c343")
+            return
         try:
             context_prompt, vision_images, ocr_context_prompt = self._build_context_payload(content)
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
@@ -4452,11 +4525,37 @@ class AIChatPanel(QtWidgets.QWidget):
             self._agent_tools_enabled = config.load_global_enable_ai_agents()
         except Exception:
             pass
-        if not self._agent_tools_enabled:
+        if not self._agent_tools_enabled or self._selected_agent_mode() == "chat":
             return False
         if not self._api_client:
             return False
         return True
+
+    def _selected_agent_mode(self) -> str:
+        combo = getattr(self, "agent_mode_combo", None)
+        return normalize_mode(combo.currentData() if combo is not None else "chat")
+
+    def _on_agent_mode_changed(self, _index) -> None:
+        mode = self._selected_agent_mode()
+        if self._ensure_active_chat():
+            self.agent_mode_combo.blockSignals(True)
+            self.agent_mode_combo.setCurrentIndex(self.agent_mode_combo.findData(mode))
+            self.agent_mode_combo.blockSignals(False)
+            self.store.update_session_agent_mode(self.current_session_id, mode)
+        self._update_agent_mode_hint()
+
+    def _update_agent_mode_hint(self) -> None:
+        mode = self._selected_agent_mode()
+        descriptions = {
+            "chat": "Attached context only · No tools",
+            "research": "Search and read · No changes",
+            "create": "Search, create and edit · Can change files",
+        }
+        text = descriptions[mode]
+        if mode != "chat" and not config.load_global_enable_ai_agents():
+            text = "Enable agents in Preferences → Agents to use this mode"
+        self.agent_mode_hint.setText(text)
+        self.agent_mode_combo.setToolTip(text)
 
     def _append_assistant_message(self, text: str) -> None:
         self.messages.append(("assistant", text))
@@ -4519,6 +4618,9 @@ class AIChatPanel(QtWidgets.QWidget):
         vision_images: Optional[list[str]] = None,
         ocr_context_prompt: Optional[str] = None,
     ) -> None:
+        if not self._should_use_agent_tools():
+            self._set_status("Select Research or Create / Edit to use agent tools.", "#f6c343")
+            return
         content = (content or "").strip()
         if not content:
             return
@@ -4531,6 +4633,13 @@ class AIChatPanel(QtWidgets.QWidget):
         if not self.vault_root:
             QtWidgets.QMessageBox.critical(self, "Agent Tools", "Open a vault before running Agent tools.")
             return
+
+        history = list(self.messages)
+        if not record_user:
+            for index in range(len(history) - 1, -1, -1):
+                if history[index] == ("user", content):
+                    history = history[:index]
+                    break
 
         api_base = str(self._api_client.base_url) if getattr(self._api_client, "base_url", None) else ""
         vault_key = build_vault_key(api_base, self.vault_root)
@@ -4582,6 +4691,7 @@ class AIChatPanel(QtWidgets.QWidget):
             server_config=self.current_server,
             model=self.model_combo.currentText(),
             system_prompt=system_prompt,
+            mode=self._selected_agent_mode(),
         )
         self._agent_tool_worker = AgentToolChatWorker(
             config=config_obj,
@@ -4589,6 +4699,7 @@ class AIChatPanel(QtWidgets.QWidget):
             user_prompt=content,
             vision_images=vision_images,
             ocr_fallback_system_prompt=ocr_system_prompt,
+            history=history,
             context={
                 "current_path": self.current_page_path or "",
                 "chat_page_path": self._current_chat_path or "",
@@ -4778,22 +4889,6 @@ class AIChatPanel(QtWidgets.QWidget):
         if getattr(self, "debug_checkbox", None) and self.debug_checkbox.isChecked():
             anchor_index = idx - 1
             self._append_debug_message(f"LLM response:\n{clean_full}", anchor_index=anchor_index)
-        parsed = parse_agent_message(clean_full)
-        if (
-            parsed
-            and parsed.get("type") == "tool_request"
-            and self._should_use_agent_tools()
-            and not self._agent_fallback_in_progress
-            and self._last_user_prompt
-        ):
-            self._agent_fallback_in_progress = True
-            self.messages[idx] = ("assistant", "Tool request received; running tools...")
-            if self.current_session_id:
-                self.store.save_message(self.current_session_id, "assistant", "Tool request received; running tools...")
-            self._render_messages()
-            self._start_agent_send(self._last_user_prompt, extra_system=None, record_user=False)
-            self._agent_fallback_in_progress = False
-            return
         think_text = ""
         if state:
             think_text = str(state.get("think", ""))
@@ -5352,6 +5447,9 @@ class AIChatPanel(QtWidgets.QWidget):
         self._clear_debug_entries()
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
+        if url.scheme() == "stillpoint-page":
+            self.chatNavigateRequested.emit(decode_vault_link_href(url.toString(QUrl.FullyEncoded)))
+            return
         href = url.toString(QUrl.FullyDecoded).strip()
         try:
             href = html.unescape(href)

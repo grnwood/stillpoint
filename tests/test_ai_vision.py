@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import httpx
 
+from sp.ai.agent_modes import mode_prompt
 from sp.app.ui.ai_api import is_unsupported_vision_response, with_vision_images
 from sp.app.ui.ai_chat_panel import ApiWorker
 from sp.app.ui.agent_tool_loop import AgentLoopConfig, AgentToolChatWorker
@@ -129,7 +130,7 @@ def test_agent_chat_retries_with_ocr_and_keeps_text_for_next_step(monkeypatch) -
     assert len(payloads) == 3
     assert isinstance(payloads[0]["messages"][1]["content"], list)
     assert payloads[1]["messages"] == [
-        {"role": "system", "content": "OCR prompt"},
+        {"role": "system", "content": "OCR prompt\n\n" + mode_prompt("research")},
         {"role": "user", "content": "describe"},
     ]
     assert payloads[2]["messages"] == payloads[1]["messages"]

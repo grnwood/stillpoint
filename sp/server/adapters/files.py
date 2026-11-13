@@ -94,6 +94,22 @@ def _ensure_valid_page_name(path: Path, *, allow_legacy: bool = True) -> None:
         raise FileAccessError("Page files must share the same name as their parent folder.")
 
 
+def is_indexable_page(root: Path, path: Path) -> bool:
+    """Whether a file belongs to the actionable StillPoint page namespace."""
+    root, path = root.resolve(), path.resolve()
+    if not path.is_relative_to(root) or path.parent == root:
+        return False
+    if any(part in {".stillpoint", ".sp_folder", ".git", ".codex"} for part in path.relative_to(root).parts[:-1]):
+        return False
+    if path_crosses_nested_vault(root, path):
+        return False
+    try:
+        _ensure_valid_page_name(path)
+    except FileAccessError:
+        return False
+    return True
+
+
 def _ensure_page_scaffold(directory: Path) -> Path:
     page_file = _page_file_for(directory)
     if not page_file.exists():
@@ -141,10 +157,12 @@ def _resolve(root: Path, relative_path: str) -> Path:
     return target
 
 
-def read_file(root: Path, path: str) -> str:
+def read_file(root: Path, path: str, *, create_missing: bool = True) -> str:
     target = _resolve(root, path)
     target = _resolve_page_for_read(target)
     if not target.exists():
+        if not create_missing:
+            raise FileNotFoundError(target)
         parent = target.parent
         if not parent.exists():
             raise FileNotFoundError(target)

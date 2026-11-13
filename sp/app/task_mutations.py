@@ -23,6 +23,10 @@ class TaskConflictError(ValueError):
     pass
 
 
+class TaskNotFoundError(TaskConflictError):
+    pass
+
+
 @dataclass(frozen=True)
 class TaskMutationTarget:
     path: str
@@ -67,7 +71,7 @@ def _locate_task_line(lines: list[str], target: TaskMutationTarget) -> int:
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        raise TaskConflictError("The task changed or can no longer be found. Reload Tasks and try again.")
+        raise TaskNotFoundError("The task changed or can no longer be found. Reload Tasks and try again.")
     raise TaskConflictError("More than one matching task was found. Open the source page to edit it safely.")
 
 
@@ -211,9 +215,26 @@ def mutate_task(
     remove_indicators: bool = False,
 ) -> dict:
     source_path = _normalized_path(target.path)
-    content = files.read_file(vault_root, source_path)
+    resolved_source = files._resolve(vault_root, source_path)
+    if not files.is_indexable_page(vault_root, resolved_source):
+        config.prune_task_sources(vault_root, force=True)
+        return {"ok": True, "paths": [], "before": {}, "after": {}, "removed_stale": 1}
+    try:
+        content = files.read_file(vault_root, source_path, create_missing=False)
+    except (FileNotFoundError, files.FileAccessError) as exc:
+        if isinstance(exc, files.FileAccessError) and "Page files must share the same name" not in str(exc):
+            raise
+        config.prune_task_sources(vault_root, force=True)
+        return {"ok": True, "paths": [], "before": {}, "after": {}, "removed_stale": 1}
     lines = content.splitlines(keepends=True)
-    line_index = _locate_task_line(lines, target)
+    try:
+        line_index = _locate_task_line(lines, target)
+    except TaskNotFoundError:
+        # Old task rows can outlive their source line (including blank pages
+        # created by older read behavior). Reconcile the index, never the file.
+        config.set_page_hash(source_path, "")
+        indexer.index_page(source_path, content)
+        return {"ok": True, "paths": [], "before": {}, "after": {}, "removed_stale": 1}
     before_line = lines[line_index]
     block_end = _task_block_end(lines, line_index)
     original_tail = lines[line_index + 1 : block_end]
@@ -239,7 +260,7 @@ def mutate_task(
         lines[line_index] = updated_line
         after_files = {source_path: "".join(lines)}
     else:
-        destination_content = files.read_file(vault_root, destination_path)
+        destination_content = files.read_file(vault_root, destination_path, create_missing=False)
         before_files[destination_path] = destination_content
         del lines[line_index:block_end]
         moved_block = updated_line + "".join(original_tail)
@@ -276,7 +297,10 @@ def undo_file_mutation(vault_root: Path, receipt: dict) -> dict:
     if not before or set(before) != set(after):
         raise ValueError("This change has no valid undo information.")
     for path, expected_content in after.items():
-        current = files.read_file(vault_root, path)
+        try:
+            current = files.read_file(vault_root, path, create_missing=False)
+        except FileNotFoundError as exc:
+            raise TaskConflictError(f"{path} is missing, so undo was not applied.") from exc
         if current != expected_content:
             raise TaskConflictError(
                 f"{path} changed after the action, so undo was not applied."

@@ -467,6 +467,35 @@ def test_completion_preserves_open_children(qtbot, monkeypatch) -> None:
     assert panel._visible_tasks == [child_task]
 
 
+def test_stale_task_cleanup_removes_row_without_fake_undo_or_editor_reload(qtbot, monkeypatch):
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    task = _add_task(panel)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True, "updated": 0, "removed_stale": 1, "paths": [], "undo_id": None}
+
+    class Client:
+        def post(self, *args, **kwargs):
+            return Response()
+
+    panel._http_client = Client()
+    monkeypatch.setattr(panel, "_schedule_mutation_refresh", lambda **kwargs: None)
+    messages, reloads = [], []
+    panel.statusRequested.connect(lambda text, duration: messages.append(text))
+    panel.taskDatesApplied.connect(reloads.append)
+    assert panel._apply_task_mutation([task], delete=True)
+    assert panel.task_tree.topLevelItemCount() == 0
+    assert panel._last_undo_id is None
+    assert reloads == []
+    assert "stale task entry" in messages[-1]
+    assert "Ctrl+Z" not in messages[-1]
+
+
 def test_stale_task_error_offers_rebuild_once_with_readable_message(qtbot, monkeypatch) -> None:
     import httpx
     from PySide6.QtWidgets import QMessageBox

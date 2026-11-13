@@ -171,7 +171,7 @@ _TASKS_STALE_CACHE: dict[
     tuple[str, tuple[str, ...], bool, bool, bool, Optional[str]],
     tuple[float, list[dict]],
 ] = {}
-_TASK_CACHE_VERSION: int = -1
+_TASK_CACHE_VERSION: tuple | int = -1
 _TASKS_QUERY_TIMEOUT_S = max(0.1, float(os.getenv("SP_TASKS_QUERY_TIMEOUT_S", "12.0")))
 _TASKS_QUERY_WORKERS = max(1, int(os.getenv("SP_TASKS_QUERY_WORKERS", "4")))
 _TASKS_STALE_MAX_AGE_S = max(1.0, float(os.getenv("SP_TASKS_STALE_MAX_AGE_S", "300.0")))
@@ -947,7 +947,8 @@ def _fetch_tasks(
     status: Optional[str],
 ) -> list[dict]:
     global _TASK_CACHE_VERSION
-    current_version = config.get_task_index_version()
+    config.prune_task_sources(_get_vault_root())
+    current_version = (str(_get_vault_root()), config.get_task_index_version())
     if _TASK_CACHE_VERSION != current_version:
         _clear_task_cache()
         _TASK_CACHE_VERSION = current_version
@@ -2824,7 +2825,11 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
     if log_enabled("search_index"):
         print(f"[Reindex] Job {job_id} started: rebuild_search={rebuild_search}")
     
+    config_token = None
     try:
+        if not root.is_dir():
+            raise FileNotFoundError(f"Vault is unavailable: {root}")
+        config_token = config.push_active_vault_context(str(root))
         with _REINDEX_LOCK:
             if job_id not in _REINDEX_JOBS:
                 return
@@ -2835,9 +2840,9 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
-                if path_crosses_nested_vault(root, page_file):
-                    continue
                 if page_file.name == "AGENTS.md":
+                    continue
+                if not files.is_indexable_page(root, page_file):
                     continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                     continue
@@ -2852,6 +2857,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
             _REINDEX_JOBS[job_id]["message"] = f"Indexing {total} pages..."
         
         # Index pages
+        removed_stale = config.prune_task_sources(root, force=True)
+        config.clear_page_hashes()
         for idx, txt_file in enumerate(txt_files, start=1):
             rel_path = txt_file.relative_to(root)
             path_str = f"/{rel_path.as_posix()}"
@@ -2932,6 +2939,8 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                 with _REINDEX_LOCK:
                     _REINDEX_JOBS[job_id]["message"] = f"Main index complete, search index error: {search_exc}"
         
+        config.bump_task_index_version()
+        _clear_task_cache()
         if log_enabled("search_index"):
             print(f"[Reindex] Job {job_id}: marking as completed")
         with _REINDEX_LOCK:
@@ -2941,7 +2950,10 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
                 # Keep the error message from search indexing
                 pass
             else:
-                _REINDEX_JOBS[job_id]["message"] = f"Complete: indexed {total} pages"
+                _REINDEX_JOBS[job_id]["message"] = (
+                    f"Complete: indexed {total} pages"
+                    + (f"; removed {removed_stale} stale task entries" if removed_stale else "")
+                )
         if log_enabled("search_index"):
             print(f"[Reindex] Job {job_id}: finished successfully")
     
@@ -2950,6 +2962,9 @@ def _do_reindex_vault(job_id: str, root: Path, rebuild_search: bool) -> None:
         with _REINDEX_LOCK:
             _REINDEX_JOBS[job_id]["status"] = "error"
             _REINDEX_JOBS[job_id]["message"] = str(exc)
+    finally:
+        if config_token is not None:
+            config.reset_active_vault_context(config_token)
 
 
 class ReindexRequest(BaseModel):
@@ -5033,6 +5048,8 @@ def api_mutate_tasks(
         return {"ok": True, "updated": 0, "paths": []}
     paths: list[str] = []
     undo_receipt: dict[str, dict] = {"before": {}, "after": {}}
+    removed_stale = 0
+    removed_ids = []
     for raw_target in payload.targets:
         target = TaskMutationTarget(
             path=raw_target.path,
@@ -5060,19 +5077,28 @@ def api_mutate_tasks(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileAccessError as exc:
             _raise_file_http(400, "Task mutation blocked", exc)
+        except FileNotFoundError as exc:
+            _raise_file_http(404, "Task page not found", exc)
+        removed_stale += int(result.get("removed_stale") or 0)
+        if result.get("removed_stale"):
+            removed_ids.append(f"{raw_target.path}:{raw_target.line}")
         paths.extend(result.get("paths") or [])
         for path, content in (result.get("before") or {}).items():
             undo_receipt["before"].setdefault(path, content)
         undo_receipt["after"].update(result.get("after") or {})
     _clear_task_cache()
-    undo_id = uuid.uuid4().hex
-    with _TASK_MUTATION_UNDO_LOCK:
-        _TASK_MUTATION_UNDO[undo_id] = undo_receipt
-        while len(_TASK_MUTATION_UNDO) > 100:
-            _TASK_MUTATION_UNDO.pop(next(iter(_TASK_MUTATION_UNDO)))
+    undo_id = None
+    if undo_receipt["before"]:
+        undo_id = uuid.uuid4().hex
+        with _TASK_MUTATION_UNDO_LOCK:
+            _TASK_MUTATION_UNDO[undo_id] = undo_receipt
+            while len(_TASK_MUTATION_UNDO) > 100:
+                _TASK_MUTATION_UNDO.pop(next(iter(_TASK_MUTATION_UNDO)))
     return {
         "ok": True,
-        "updated": len(payload.targets),
+        "updated": len(payload.targets) - removed_stale,
+        "removed_stale": removed_stale,
+        "removed_ids": removed_ids,
         "paths": list(dict.fromkeys(paths)),
         "undo_id": undo_id,
     }
@@ -5217,7 +5243,7 @@ def api_update_task_dates(
     updated_count = 0
     for rel_path, items in targets_by_path.items():
         try:
-            content = files.read_file(root, rel_path)
+            content = files.read_file(root, rel_path, create_missing=False)
         except FileAccessError as exc:
             _raise_file_http(400, f"Update tasks read blocked for {rel_path}", exc)
         except FileNotFoundError as exc:

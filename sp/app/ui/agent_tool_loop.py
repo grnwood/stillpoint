@@ -16,6 +16,7 @@ from PySide6 import QtCore
 from .ai_api import build_api_request, format_api_error, is_unsupported_vision_response, with_vision_images
 from .path_utils import colon_to_path, ensure_root_colon_link, normalize_link_target, path_to_colon
 from sp.app import config
+from sp.ai.agent_modes import conversation_history, mode_prompt, tool_allowed
 
 try:
     from bs4 import BeautifulSoup
@@ -150,6 +151,8 @@ the journal page filename yourself.
 
 StillPoint internal link rules:
 - Use root-relative colon links: [:Parent:Child|Visible Label].
+- When vault tools return a link field, copy that target exactly; do not append
+  the page name again or infer the path from its display title.
 - A tool path such as /2-Projects/Acushnet/LineItemXml/LineItemXml.md becomes
   [:2-Projects:Acushnet:LineItemXml|LineItemXml].
 - Never combine the current page's colon path with a slash path.
@@ -681,7 +684,7 @@ def _normalize_agent_link_line(line: str) -> str:
     def _markdown(match: re.Match[str]) -> str:
         target = match.group("target")
         normalized = _agent_page_target_to_colon(target)
-        if normalized == target:
+        if not normalized.startswith(":"):
             return match.group(0)
         return f"[{normalized}|{match.group('label')}]"
 
@@ -720,79 +723,6 @@ def _normalize_agent_page_links(content: str) -> str:
     return "".join(output)
 
 
-def _detect_guard_state(prompt: str) -> dict:
-    lowered = (prompt or "").lower()
-    settings = _load_agent_settings()
-    triggers = settings.get("triggers", {})
-    def _any_trigger(keys: list[str], default: tuple[str, ...]) -> bool:
-        terms = keys if keys else list(default)
-        return any(term in lowered for term in terms)
-    return {
-        "wants_tasks": _any_trigger(triggers.get("tasks.list", []), (" task", " tasks", "todo", "to-do", "overdue")),
-        "wants_write": _any_trigger(triggers.get("vault.write", []), ("write", "create a page", "new page", "make a page", "add a page")),
-        "wants_append": _any_trigger(triggers.get("vault.write.append", []), ("add to", "append", "insert into", "update", "edit")),
-        "wants_daily": _any_trigger(triggers.get("daily.open", []), ("daily", "journal", "today")),
-        "wants_search": _any_trigger(triggers.get("vault.search", []), ("search", "find references", "look for")),
-        "wants_web": _any_trigger(triggers.get("web.search", []), ("search the web", "web search", "internet search")),
-        "wants_summary": _any_trigger(triggers.get("summary", []), ("summarize", "summary", "tl;dr", "overview")),
-        "tag": _extract_tag_from_prompt(prompt),
-        "prompt": prompt or "",
-    }
-
-
-def _apply_guard_to_tool_call(
-    name: str,
-    args: dict,
-    guard: dict,
-    *,
-    tasks_done: bool,
-) -> tuple[str, dict, Optional[dict]]:
-    if name == "daily.open" and not guard.get("wants_daily"):
-        return name, args, _tool_error("permission_denied", "daily.open blocked unless user asked about daily/journal.")
-    if name == "tasks.list" and not guard.get("wants_tasks"):
-        if guard.get("wants_search"):
-            query = (args or {}).get("query") or _extract_search_query_from_prompt(guard.get("prompt") or "")
-            return "vault.search", {"query": query or "tasks"}, None
-        return name, args, _tool_error("permission_denied", "tasks.list blocked unless user asked about tasks/todo.")
-    if guard.get("wants_web") and name != "web.search":
-        prompt = guard.get("prompt") or ""
-        query = (args or {}).get("query") or _extract_search_query_from_prompt(prompt) or guard.get("tag") or ""
-        new_args = {"query": query}
-        if (args or {}).get("limit"):
-            new_args["limit"] = (args or {}).get("limit")
-        return "web.search", new_args, None
-    if guard.get("wants_tasks") and not tasks_done and name not in ("tasks.list", "vault.search"):
-        tag = guard.get("tag") or ""
-        new_args: dict = {"status": "todo" if "todo" in (guard or {}) else "all"}
-        if tag:
-            new_args["tags"] = [tag]
-            new_args["status"] = "todo"
-        else:
-            new_args["query"] = "tasks"
-            new_args["status"] = "todo"
-        return "tasks.list", new_args, None
-    return name, args, None
-
-
-def _parse_trigger_settings(settings: dict) -> dict:
-    tools = settings.get("tools") if isinstance(settings, dict) else None
-    if not isinstance(tools, list):
-        return {}
-    trigger_map: dict[str, list[str]] = {}
-    for tool in tools:
-        name = (tool or {}).get("name")
-        tweaks = (tool or {}).get("settings") or ""
-        if not isinstance(name, str) or not name:
-            continue
-        if "triggers=" in tweaks:
-            raw = tweaks.split("triggers=", 1)[1]
-            raw = raw.split(";", 1)[0]
-            terms = [t.strip().lower() for t in raw.split(",") if t.strip()]
-            if terms:
-                trigger_map[name] = terms
-    return trigger_map
-
-
 def _parse_engine_setting(settings: dict) -> str:
     tools = settings.get("tools") if isinstance(settings, dict) else None
     if not isinstance(tools, list):
@@ -809,7 +739,6 @@ def _parse_engine_setting(settings: dict) -> str:
 def _load_agent_settings() -> dict:
     settings = config.load_agent_tool_settings()
     return {
-        "triggers": _parse_trigger_settings(settings),
         "web_engine": _parse_engine_setting(settings),
     }
 
@@ -864,6 +793,7 @@ def _tool_vault_read(client: httpx.Client, args: dict, context: dict) -> dict:
             "ok": True,
             "output": {
                 "path": path,
+                "link": ensure_root_colon_link(path_to_colon(path)),
                 "content": payload.get("content", ""),
                 "rev": payload.get("rev"),
                 "mtime_ns": payload.get("mtime_ns"),
@@ -901,6 +831,7 @@ def _tool_vault_search(client: httpx.Client, args: dict, context: dict) -> dict:
             matches.append(
                 {
                     "path": item.get("path"),
+                    "link": ensure_root_colon_link(path_to_colon(item.get("path") or "")),
                     "snippet": item.get("snippet"),
                     "score": item.get("rank"),
                 }
@@ -927,12 +858,7 @@ def _tool_vault_write(client: httpx.Client, args: dict, context: dict) -> dict:
     if content is None:
         return {"ok": False, "error": _tool_error("invalid_args", "content is required")}
     if not isinstance(content, str) or not content.strip():
-        source = str(context.get("last_read_content") or "")
-        if source:
-            content = _synthesize_key_dates_content(source, title="Key Dates")
-            _log_tool("vault.write received empty content; synthesized summary from last vault.read result")
-        else:
-            return {"ok": False, "error": _tool_error("invalid_args", "content must be non-empty")}
+        return {"ok": False, "error": _tool_error("invalid_args", "content must be non-empty")}
     content = _normalize_agent_page_links(content)
     if mode == "append" and _is_implicit_page_reference(path):
         current_path = context.get("current_editor_path") or context.get("current_path") or ""
@@ -1472,6 +1398,7 @@ class AgentLoopConfig:
     model: str
     system_prompt: str
     max_steps: int = 6
+    mode: str = "research"
 
 
 class AgentToolLoopWorker(QtCore.QThread):
@@ -1524,14 +1451,12 @@ class AgentToolLoopWorker(QtCore.QThread):
         client = _clone_http_client(self._client)
         try:
             agent_settings = _load_agent_settings()
-            guard = _detect_guard_state(self._user_prompt)
             requested = _extract_colon_link(self._user_prompt)
             if requested:
                 self._context["requested_path"] = requested
-            self._context["guard_state"] = guard
             self._context["web_engine"] = agent_settings.get("web_engine")
             messages: list[dict] = [
-                {"role": "system", "content": self._config.system_prompt},
+                {"role": "system", "content": self._config.system_prompt + "\n\n" + mode_prompt(self._config.mode)},
                 {
                     "role": "user",
                     "content": (
@@ -1569,27 +1494,6 @@ class AgentToolLoopWorker(QtCore.QThread):
                     self.finished.emit(reply)
                     return
                 if parsed.get("type") == "final":
-                    guard_state = self._context.get("guard_state") or {}
-                    if guard_state.get("wants_write") and not self._context.get("vault_write_done"):
-                        retries = int(self._context.get("write_guard_retries") or 0)
-                        if retries >= 1:
-                            self.failed.emit(
-                                "Agent did not issue a required vault write call. "
-                                "Try again and specify a concrete destination page path."
-                            )
-                            return
-                        self._context["write_guard_retries"] = retries + 1
-                        hint_path = _extract_quoted_page_name(self._user_prompt)
-                        path_hint = f' path="{hint_path}"' if hint_path else ""
-                        reminder = (
-                            "You must return type='tool_request' with vault.write or vault.create_child "
-                            f"before any final answer. Use mode='replace' for vault.write.{path_hint}"
-                        )
-                        if self._context.get("debug"):
-                            self.toolLog.emit(f"Guard: {reminder}")
-                        _log_tool(f"Guard: {reminder}")
-                        messages.append({"role": "user", "content": reminder})
-                        continue
                     final_text = parsed.get("content") if isinstance(parsed, dict) else reply
                     self.finished.emit(final_text or reply)
                     return
@@ -1600,8 +1504,6 @@ class AgentToolLoopWorker(QtCore.QThread):
                 if not isinstance(calls, list) or not calls:
                     self.failed.emit("Tool request missing calls.")
                     return
-                tasks_done = bool(self._context.get("tasks_list_done"))
-                guard_state = self._context.get("guard_state") or {}
                 for call in calls:
                     if self._cancel_requested:
                         self.failed.emit("Cancelled")
@@ -1642,8 +1544,8 @@ class AgentToolLoopWorker(QtCore.QThread):
                         if not isinstance(query, str) or not query.strip():
                             args = dict(args or {})
                             args["query"] = _fallback_search_query(self._user_prompt)
-                    normalized_name, args, guard_error = _apply_guard_to_tool_call(
-                        normalized_name, args, guard_state, tasks_done=tasks_done
+                    permission_error = None if tool_allowed(self._config.mode, normalized_name) else _tool_error(
+                        "permission_denied", f"{normalized_name} is not available in {self._config.mode} mode."
                     )
                     if not name:
                         msg = f"Tool call: <missing name> {args}"
@@ -1658,11 +1560,11 @@ class AgentToolLoopWorker(QtCore.QThread):
                         self.toolLog.emit(msg)
                     _log_tool(msg)
                     handler = tools.get(normalized_name)
-                    if guard_error:
+                    if permission_error:
                         result = _tool_result(
                             call_id,
                             normalized_name or name,
-                            error=guard_error,
+                            error=permission_error,
                         )
                     elif not handler:
                         result = _tool_result(
@@ -1748,6 +1650,7 @@ class AgentToolChatWorker(QtCore.QThread):
         context: dict,
         vision_images: Optional[list[str]] = None,
         ocr_fallback_system_prompt: Optional[str] = None,
+        history: Optional[list[tuple[str, str]]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1757,6 +1660,7 @@ class AgentToolChatWorker(QtCore.QThread):
         self._context = context or {}
         self._vision_images = vision_images or []
         self._ocr_fallback_system_prompt = ocr_fallback_system_prompt
+        self._history = list(history or [])
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -1771,7 +1675,7 @@ class AgentToolChatWorker(QtCore.QThread):
             self._vision_images and self._ocr_fallback_system_prompt
             and is_unsupported_vision_response(resp)
         ):
-            messages[0] = {"role": "system", "content": self._ocr_fallback_system_prompt}
+            messages[0] = {"role": "system", "content": self._ocr_fallback_system_prompt + "\n\n" + mode_prompt(self._config.mode)}
             for message in messages:
                 if message.get("role") == "user" and isinstance(message.get("content"), list):
                     message["content"] = next(
@@ -1805,14 +1709,13 @@ class AgentToolChatWorker(QtCore.QThread):
         client = _clone_http_client(self._client)
         try:
             agent_settings = _load_agent_settings()
-            guard = _detect_guard_state(self._user_prompt)
             requested = _extract_colon_link(self._user_prompt)
             if requested:
                 self._context["requested_path"] = requested
-            self._context["guard_state"] = guard
             self._context["web_engine"] = agent_settings.get("web_engine")
             messages: list[dict] = [
-                {"role": "system", "content": self._config.system_prompt},
+                {"role": "system", "content": self._config.system_prompt + "\n\n" + mode_prompt(self._config.mode)},
+                *conversation_history(self._history),
                 {
                     "role": "user",
                     "content": (
@@ -1850,27 +1753,6 @@ class AgentToolChatWorker(QtCore.QThread):
                     self.finalMessage.emit(reply)
                     return
                 if parsed.get("type") == "final":
-                    guard_state = self._context.get("guard_state") or {}
-                    if guard_state.get("wants_write") and not self._context.get("vault_write_done"):
-                        retries = int(self._context.get("write_guard_retries") or 0)
-                        if retries >= 1:
-                            self.failed.emit(
-                                "Agent did not issue a required vault write call. "
-                                "Try again and specify a concrete destination page path."
-                            )
-                            return
-                        self._context["write_guard_retries"] = retries + 1
-                        hint_path = _extract_quoted_page_name(self._user_prompt)
-                        path_hint = f' path="{hint_path}"' if hint_path else ""
-                        reminder = (
-                            "You must return type='tool_request' with vault.write or vault.create_child "
-                            f"before any final answer. Use mode='replace' for vault.write.{path_hint}"
-                        )
-                        if self._context.get("debug"):
-                            self.toolMessage.emit(f"Guard: {reminder}")
-                        _log_tool(f"Guard: {reminder}")
-                        messages.append({"role": "user", "content": reminder})
-                        continue
                     final_text = parsed.get("content") if isinstance(parsed, dict) else reply
                     self.finalMessage.emit(final_text or reply)
                     return
@@ -1881,8 +1763,6 @@ class AgentToolChatWorker(QtCore.QThread):
                 if not isinstance(calls, list) or not calls:
                     self.failed.emit("Tool request missing calls.")
                     return
-                tasks_done = bool(self._context.get("tasks_list_done"))
-                guard_state = self._context.get("guard_state") or {}
                 for call in calls:
                     if self._cancel_requested:
                         self.failed.emit("Cancelled")
@@ -1923,8 +1803,8 @@ class AgentToolChatWorker(QtCore.QThread):
                         if not isinstance(query, str) or not query.strip():
                             args = dict(args or {})
                             args["query"] = _fallback_search_query(self._user_prompt)
-                    normalized_name, args, guard_error = _apply_guard_to_tool_call(
-                        normalized_name, args, guard_state, tasks_done=tasks_done
+                    permission_error = None if tool_allowed(self._config.mode, normalized_name) else _tool_error(
+                        "permission_denied", f"{normalized_name} is not available in {self._config.mode} mode."
                     )
                     if not name:
                         msg = f"Tool call: <missing name> {args}"
@@ -1939,11 +1819,11 @@ class AgentToolChatWorker(QtCore.QThread):
                         self.toolMessage.emit(msg)
                     _log_tool(msg)
                     handler = tools.get(normalized_name)
-                    if guard_error:
+                    if permission_error:
                         result = _tool_result(
                             call_id,
                             normalized_name or name,
-                            error=guard_error,
+                            error=permission_error,
                         )
                     elif not handler:
                         result = _tool_result(

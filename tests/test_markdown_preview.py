@@ -23,6 +23,24 @@ TABLE_MARKDOWN = """# Report
 """
 
 
+@pytest.mark.parametrize("anchors", [False, True])
+def test_indented_task_notes_render_formatting_instead_of_code(anchors):
+    rendered = render_markdown_html(
+        "## daily team sync up\n"
+        "- [ ] look into this @todo\n    \n"
+        "    **Everyone: received a message**\n"
+        "    *Hi there*\n\n"
+        "    [https://example.com|Demo]\n\n---\n\n"
+        "    unrelated code",
+        source_anchors=anchors,
+    )
+    assert "<strong>Everyone: received a message</strong>" in rendered
+    assert "<em>Hi there</em>" in rendered
+    assert 'href="https://example.com"' in rendered
+    assert "unrelated code\n</code></pre>" in rendered
+    assert rendered.count("<pre>") == 1
+
+
 def test_shared_markdown_renderer_keeps_print_quality_and_source_anchors() -> None:
     rendered = render_markdown_html(TABLE_MARKDOWN, source_anchors=True)
 

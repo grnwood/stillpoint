@@ -114,6 +114,7 @@ def test_folder_worker_uses_tool_results_before_final(tmp_path, monkeypatch, qap
         server_config={}, model="test", system_prompt="test", user_prompt="Create a file",
         root=root, current_path="", dirty_paths=set(),
         history=[("user", "Earlier request"), ("assistant", "Earlier result")],
+        mode="create",
     )
     seen = []
     monkeypatch.setattr(worker, "_send_llm", lambda messages: (seen.append(messages.copy()), next(replies))[1])
@@ -148,6 +149,7 @@ def test_folder_chat_prompt_runs_local_create_tool(tmp_path, monkeypatch, qapp):
         root, lambda _q, _s: [], lambda _q, _s: [], lambda _p: None,
     )
     panel.current_server = {"name": "test"}
+    panel.agent_mode_combo.setCurrentIndex(panel.agent_mode_combo.findData("create"))
     panel._start_send("Create notes/answer.txt")
 
     assert (root / "notes" / "answer.txt").read_text(encoding="utf-8") == "done\n"

@@ -51,7 +51,7 @@ from sp.app import config
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_value
 from sp.app.ui.heading_utils import HEADING_SIZE_MULTIPLIERS
-from sp.markdown_html import nearest_source_anchor, render_markdown_html
+from sp.markdown_html import decode_vault_link_href, nearest_source_anchor, render_markdown_html
 
 
 class _ReadingBrowser(QTextBrowser):
@@ -442,7 +442,10 @@ class MarkdownReadingView(QWidget):
             | Qt.LinksAccessibleByKeyboard
         )
         self.browser.anchorClicked.connect(
-            lambda url: self.linkActivated.emit(url.toString())
+            lambda url: self.linkActivated.emit(
+                decode_vault_link_href(url.toString(QUrl.FullyEncoded))
+                if url.scheme() == "stillpoint-page" else url.toString()
+            )
         )
         self.browser.searchRequested.connect(self.show_find)
         layout.addWidget(self.browser, 1)

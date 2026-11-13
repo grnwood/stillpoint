@@ -1,7 +1,6 @@
 import httpx
 
 from sp.app.ui.agent_tool_loop import (
-    _apply_guard_to_tool_call,
     _child_page_path,
     _daily_page_repeated_as_child,
     _extract_key_date_lines,
@@ -13,7 +12,6 @@ from sp.app.ui.agent_tool_loop import (
     _normalize_tool_name,
     _normalize_write_path,
     _paths_refer_same_page,
-    _parse_trigger_settings,
     parse_agent_message,
     _tool_vault_write,
     _tool_vault_create_child,
@@ -256,19 +254,6 @@ def test_normalize_read_path_canonicalizes_non_matching_md_filename() -> None:
     assert _normalize_read_path("/Playpage/Key Dates.md") == "/Playpage/Key Dates/Key Dates.md"
 
 
-def test_guard_blocks_tasks_list_without_task_intent() -> None:
-    name, args, err = _apply_guard_to_tool_call(
-        "tasks.list",
-        {"query": "key date"},
-        {"wants_tasks": False, "wants_search": False, "prompt": ""},
-        tasks_done=False,
-    )
-    assert name == "tasks.list"
-    assert args == {"query": "key date"}
-    assert err is not None
-    assert err.get("code") == "permission_denied"
-
-
 def test_infer_tool_name_prefers_vault_search_for_plain_query() -> None:
     assert _infer_tool_name_from_args({"query": "key dates"}) == "vault.search"
 
@@ -299,7 +284,7 @@ def test_vault_write_rejects_empty_content() -> None:
     assert (result.get("error") or {}).get("code") == "invalid_args"
 
 
-def test_vault_write_empty_content_synthesizes_when_last_read_exists() -> None:
+def test_vault_write_empty_content_does_not_invent_a_summary() -> None:
     client = _DummyClient()
     source = "Created Monday 16 February 2026\nMeeting on 2026-02-02\n"
     result = _tool_vault_write(
@@ -313,27 +298,12 @@ def test_vault_write_empty_content_synthesizes_when_last_read_exists() -> None:
             "vault_root_name": "",
         },
     )
-    assert result.get("ok") is True
-    assert client.last_write_payload is not None
-    written = client.last_write_payload.get("content") or ""
-    assert "Monday 16 February 2026" in written
-    assert "2026-02-02" in written
+    assert result.get("ok") is False
+    assert client.last_write_payload is None
 
 
 def test_paths_refer_same_page_for_folder_and_page_file() -> None:
     assert _paths_refer_same_page("/Playpage", "/Playpage/Playpage.md") is True
-
-
-def test_parse_trigger_settings_ignores_non_string_tool_names() -> None:
-    settings = {
-        "tools": [
-            {"name": {"bad": "value"}, "settings": "triggers=foo,bar"},
-            {"name": "vault.search", "settings": "triggers=search,find"},
-        ]
-    }
-    out = _parse_trigger_settings(settings)
-    assert "vault.search" in out
-    assert out["vault.search"] == ["search", "find"]
 
 
 def test_extract_key_date_lines_finds_multiple_date_formats() -> None:

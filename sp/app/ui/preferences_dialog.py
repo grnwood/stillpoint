@@ -8,6 +8,7 @@ import shutil
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractScrollArea,
     QDialog,
     QVBoxLayout,
@@ -559,8 +560,8 @@ class PreferencesDialog(QDialog):
         task_layout.addWidget(self.show_task_page_checkbox)
         task_layout.addStretch(1)
 
-        # AI & Code
-        ai_layout = add_section("AI Chats and Agents")
+        # AI Chat
+        ai_layout = add_section("AI Chat")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
         self.enable_ai_chats_checkbox.setChecked(config.load_global_enable_ai_chats())
         self.enable_ai_chats_checkbox.stateChanged.connect(self._warn_restart_required)
@@ -653,60 +654,78 @@ class PreferencesDialog(QDialog):
         row4.addWidget(self.ai_read_timeout_spin, 1)
         ai_layout.addLayout(row4)
         self._load_default_server_model()
-        add_divider(ai_layout)
-        ai_layout.addWidget(QLabel("<b>Agents</b>"))
-        self.enable_ai_agents_checkbox = QCheckBox("Enable AI Agents in chat")
+        ai_layout.addStretch(1)
+
+        # Agents have their own page, immediately below AI Chat.
+        agent_layout = add_section("Agents")
+        agent_layout.addWidget(QLabel("<b>Chat Agents</b>"))
+        self.enable_ai_agents_checkbox = QCheckBox("Enable Research and Create / Edit modes in chat")
+        self.enable_ai_agents_checkbox.setToolTip(
+            "Makes agent modes available after approval for the vault or folder. "
+            "Choose a mode beside the message box. Chat mode never runs agent tools."
+        )
         self.enable_ai_agents_checkbox.setChecked(config.load_global_enable_ai_agents())
-        self.enable_ai_agents_checkbox.stateChanged.connect(self._warn_restart_required)
-        ai_layout.addWidget(self.enable_ai_agents_checkbox)
+        agent_layout.addWidget(self.enable_ai_agents_checkbox)
         self.seed_agents_workspace_checkbox = QCheckBox("Add AGENTS.md to vault workspace when opening a terminal")
         self.seed_agents_workspace_checkbox.setChecked(config.load_seed_agents_workspace())
-        ai_layout.addWidget(self.seed_agents_workspace_checkbox)
+        agent_layout.addWidget(self.seed_agents_workspace_checkbox)
         quiet_row = QHBoxLayout()
         quiet_row.addWidget(QLabel("Local filesystem quiet time (s):"))
         self.local_filesystem_quiet_spin = QSpinBox()
         self.local_filesystem_quiet_spin.setRange(1, 120)
         self.local_filesystem_quiet_spin.setValue(config.load_local_filesystem_quiet_seconds())
         quiet_row.addWidget(self.local_filesystem_quiet_spin, 1)
-        ai_layout.addLayout(quiet_row)
+        agent_layout.addLayout(quiet_row)
         self._agents_box = QWidget()
         agents_layout = QVBoxLayout(self._agents_box)
         agents_layout.setContentsMargins(8, 4, 8, 4)
         agents_layout.setSpacing(6)
         agents_layout.addWidget(
             QLabel(
-                "<b>Vault Assistant</b><br>"
-                "Understands vault tools (search/read/write, tasks, daily).<br>"
-                "<i>Example:</i> \"Search my vault for SVS and write a summary page.\""
+                "<b>Chat</b><br>"
+                "Answers using the conversation and attached context. No tool calls."
             )
         )
         agents_layout.addWidget(
             QLabel(
-                "<b>Task Assistant</b><br>"
-                "Finds and organizes tasks based on tags or due dates.<br>"
-                "<i>Example:</i> \"Find tasks tagged @todo and write a new page.\""
+                "<b>Research</b><br>"
+                "Searches and reads vault pages, files, tasks, or web sources. Cannot change files.<br>"
+                "<i>Example:</i> \"Find our API decisions and explain the tradeoffs with sources.\""
             )
         )
         agents_layout.addWidget(
             QLabel(
-                "<b>Web Research Assistant</b><br>"
-                "Fetches/scrapes URLs or runs a quick web search.<br>"
-                "<i>Example:</i> \"Search the web for todays news on oil prices.\""
+                "<b>Create / Edit</b><br>"
+                "Can research, create pages, and edit files when requested.<br>"
+                "<i>Example:</i> \"Create an API decision summary under Project Notes.\""
             )
         )
         self._agents_box.setVisible(self.enable_ai_agents_checkbox.isChecked())
+        for label in self._agents_box.findChildren(QLabel):
+            label.setWordWrap(True)
         self.enable_ai_agents_checkbox.toggled.connect(self._agents_box.setVisible)
-        ai_layout.addWidget(self._agents_box)
-        add_divider(ai_layout)
-        ai_layout.addWidget(QLabel("<b>Agent Tools</b>"))
+        agent_layout.addWidget(self._agents_box)
+        add_divider(agent_layout)
+        web_row = QHBoxLayout()
+        web_row.addWidget(QLabel("Web search engine:"))
+        self.agent_web_engine_combo = QComboBox()
+        for name, value in (("DuckDuckGo", "duckduckgo"), ("Google", "google"), ("Brave", "brave")):
+            self.agent_web_engine_combo.addItem(name, value)
+        from .agent_tool_loop import _parse_engine_setting
+        engine = _parse_engine_setting(config.load_agent_tool_settings()) or "duckduckgo"
+        self.agent_web_engine_combo.setCurrentIndex(max(0, self.agent_web_engine_combo.findData(engine)))
+        web_row.addWidget(self.agent_web_engine_combo, 1)
+        agent_layout.addLayout(web_row)
+        agent_layout.addWidget(QLabel("<b>Agent Tools</b>"))
         self.agent_tools_table = QTableWidget()
         self.agent_tools_table.setColumnCount(3)
-        self.agent_tools_table.setHorizontalHeaderLabels(["Tool", "Sample Query", "Tweaks / Dials"])
+        self.agent_tools_table.setHorizontalHeaderLabels(["Tool", "Modes", "Example"])
+        self.agent_tools_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.agent_tools_table.horizontalHeader().setStretchLastSection(True)
         self.agent_tools_table.verticalHeader().setVisible(False)
         self._load_agent_tools_table()
-        ai_layout.addWidget(self.agent_tools_table)
-        ai_layout.addStretch(1)
+        agent_layout.addWidget(self.agent_tools_table)
+        agent_layout.addStretch(1)
 
         # PlantUML
         puml_layout = add_section("PlantUML")
@@ -1185,60 +1204,51 @@ class PreferencesDialog(QDialog):
                 {
                     "name": "web.search",
                     "sample": "search the web for 'current oil prices'",
-                    "settings": "engine=duckduckgo",
                 },
                 {
                     "name": "tasks.list",
                     "sample": "find tasks with @todo",
-                    "settings": "triggers=task,tasks,todo,to-do,overdue",
                 },
                 {
                     "name": "vault.search",
                     "sample": "search my vault for 'TODO' references",
-                    "settings": "triggers=search,find references,look for",
                 },
                 {
                     "name": "vault.write",
                     "sample": "write a new page titled \"Daily Summary\"",
-                    "settings": "triggers=write,create a page,new page,make a page,add a page",
                 },
                 {
                     "name": "vault.create_child",
                     "sample": "create a page under today's journal called \"Daily Summary\"",
-                    "settings": "triggers=under,beneath,inside,child page,subpage",
                 },
                 {
                     "name": "vault.write.append",
                     "sample": "add to my favorite poems page a haiku",
-                    "settings": "triggers=add to,append,insert into,update,edit",
                 },
                 {
                     "name": "daily.open",
                     "sample": "add to my journal for today",
-                    "settings": "triggers=daily,journal,today",
                 },
             ]
         }
 
     def _load_agent_tools_table(self) -> None:
-        settings = config.load_agent_tool_settings()
-        if not settings:
-            settings = self._default_agent_tools_config()
-        tools = settings.get("tools") if isinstance(settings, dict) else None
-        if not isinstance(tools, list):
-            tools = []
+        from sp.ai.agent_modes import READ_TOOLS, WRITE_TOOLS
+        examples = {tool["name"]: tool["sample"] for tool in self._default_agent_tools_config()["tools"]}
+        examples.update({
+            "vault.read": "read the API decision page", "web.fetch": "read this URL",
+            "web.scrape": "extract text from this URL", "folder.read": "read notes/decisions.md",
+            "folder.search": "find references to API", "folder.create": "create notes/summary.md",
+            "folder.write": "update notes/summary.md",
+        })
+        tools = sorted(READ_TOOLS | WRITE_TOOLS)
         self.agent_tools_table.setRowCount(len(tools))
-        for row, tool in enumerate(tools):
-            name = (tool or {}).get("name", "")
-            sample = (tool or {}).get("sample", "")
-            tweaks = (tool or {}).get("settings", "")
-            item_name = QTableWidgetItem(str(name))
-            item_name.setFlags(item_name.flags() & ~Qt.ItemIsEditable)
-            self.agent_tools_table.setItem(row, 0, item_name)
-            self.agent_tools_table.setItem(row, 1, QTableWidgetItem(str(sample)))
-            self.agent_tools_table.setItem(row, 2, QTableWidgetItem(str(tweaks)))
+        for row, name in enumerate(tools):
+            modes = "Research, Create / Edit" if name in READ_TOOLS else "Create / Edit"
+            for column, text in enumerate((name, modes, examples.get(name, ""))):
+                self.agent_tools_table.setItem(row, column, QTableWidgetItem(text))
         self.agent_tools_table.resizeColumnsToContents()
-    
+
     def _on_rebuild_clicked(self):
         """Handle rebuild index button click."""
         self.rebuildIndexRequested.emit()
@@ -1346,22 +1356,11 @@ class PreferencesDialog(QDialog):
         config.save_default_ai_operations_model(self.default_operations_model_combo.currentText() or None)
         config.save_ai_chat_connect_timeout(self.ai_connect_timeout_spin.value())
         config.save_ai_chat_read_timeout(self.ai_read_timeout_spin.value())
-        try:
-            tools = []
-            for row in range(self.agent_tools_table.rowCount()):
-                name_item = self.agent_tools_table.item(row, 0)
-                sample_item = self.agent_tools_table.item(row, 1)
-                tweak_item = self.agent_tools_table.item(row, 2)
-                tools.append(
-                    {
-                        "name": name_item.text() if name_item else "",
-                        "sample": sample_item.text() if sample_item else "",
-                        "settings": tweak_item.text() if tweak_item else "",
-                    }
-                )
-            config.save_agent_tool_settings({"tools": tools})
-        except Exception:
-            pass
+        settings = config.load_agent_tool_settings() or {}
+        tools = list(settings.get("tools") or [])
+        tools = [dict(tool) for tool in tools if isinstance(tool, dict) and tool.get("name") != "web.search"]
+        tools.append({"name": "web.search", "settings": f"engine={self.agent_web_engine_combo.currentData()}"})
+        config.save_agent_tool_settings({**settings, "tools": tools})
         config.save_non_actionable_task_tags(self.non_actionable_tags_edit.text())
         config.save_show_task_start_date(self.show_task_start_checkbox.isChecked())
         config.save_show_task_page(self.show_task_page_checkbox.isChecked())

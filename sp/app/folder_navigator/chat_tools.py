@@ -13,6 +13,7 @@ from PySide6 import QtCore
 from sp.app.ui.ai_api import build_api_request, format_api_error, is_unsupported_vision_response, with_vision_images
 from sp.app.ui.agent_tool_loop import AGENT_MESSAGE_SCHEMA, parse_agent_message
 from sp.rag.attachment_text import extract_attachment_text
+from sp.ai.agent_modes import conversation_history, mode_prompt, tool_allowed
 from .core import DEFAULT_PRUNED_DIRECTORY_NAMES, ConflictError, atomic_save, read_text
 
 
@@ -209,7 +210,7 @@ class FolderAgentChatWorker(QtCore.QThread):
                  user_prompt: str, root: Path, current_path: str,
                  dirty_paths: set[Path], vision_images: list[str] | None = None,
                  ocr_system_prompt: str | None = None,
-                 history: list[tuple[str, str]] | None = None, parent=None) -> None:
+                 history: list[tuple[str, str]] | None = None, mode="research", parent=None) -> None:
         super().__init__(parent)
         self.server_config = server_config
         self.model = model
@@ -221,6 +222,7 @@ class FolderAgentChatWorker(QtCore.QThread):
         self.vision_images = vision_images or []
         self.ocr_system_prompt = ocr_system_prompt
         self.history = history or []
+        self.mode = mode
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -232,7 +234,7 @@ class FolderAgentChatWorker(QtCore.QThread):
         )
         response = httpx.post(url, json=payload, headers=headers, timeout=timeout, verify=verify)
         if self.vision_images and self.ocr_system_prompt and is_unsupported_vision_response(response):
-            messages[0] = {"role": "system", "content": self.ocr_system_prompt}
+            messages[0] = {"role": "system", "content": self.ocr_system_prompt + "\n\n" + mode_prompt(self.mode)}
             for message in messages:
                 if message.get("role") == "user" and isinstance(message.get("content"), list):
                     message["content"] = next(
@@ -252,13 +254,9 @@ class FolderAgentChatWorker(QtCore.QThread):
     def run(self) -> None:
         tools = FolderChatTools(self.root, dirty_paths=self.dirty_paths)
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self.system_prompt + "\n\n" + mode_prompt(self.mode)},
         ]
-        messages.extend(
-            {"role": role, "content": content[:15_000]}
-            for role, content in self.history[-12:]
-            if role in {"user", "assistant"} and content.strip()
-        )
+        messages.extend(conversation_history(self.history))
         messages.append({
             "role": "user",
             "content": f"Current file: {self.current_path}\n\nUser request:\n{self.user_prompt}",
@@ -286,7 +284,9 @@ class FolderAgentChatWorker(QtCore.QThread):
                     name = call["name"]
                     args = call["args"]
                     self.toolMessage.emit(f"Agent activity: [Agent: {name} {args.get('path') or args.get('query') or ''}…]")
-                    output = tools.call(name, args)
+                    output = tools.call(name, args) if tool_allowed(self.mode, name) else {
+                        "error": f"{name} is not available in {self.mode} mode. Select Create / Edit to change files."
+                    }
                     success = "error" not in output
                     wrote |= success and name in {"folder.create", "folder.write"}
                     if success and name in {"folder.create", "folder.write"}:

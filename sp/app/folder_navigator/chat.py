@@ -238,7 +238,7 @@ class FolderChatPanel(AIChatPanel):
         )
 
     def _should_use_agent_tools(self) -> bool:
-        return config.load_global_enable_ai_agents()
+        return config.load_global_enable_ai_agents() and self._selected_agent_mode() != "chat"
 
     def _folder_agent_key(self) -> str:
         return f"folder::{self.folder_root}"
@@ -249,6 +249,9 @@ class FolderChatPanel(AIChatPanel):
         vision_images: list[str] | None = None,
         ocr_context_prompt: str | None = None,
     ) -> None:
+        if not self._should_use_agent_tools():
+            self._set_status("Select Research or Create / Edit to use agent tools.", "#f6c343")
+            return
         if self._agent_tool_worker:
             self._set_status("Agent tools already running…", "#f6c343")
             return
@@ -304,6 +307,7 @@ class FolderChatPanel(AIChatPanel):
             vision_images=vision_images,
             ocr_system_prompt=ocr_system_prompt,
             history=history,
+            mode=self._selected_agent_mode(),
         )
         self._agent_tool_worker.toolMessage.connect(self._handle_agent_tool_message)
         self._agent_tool_worker.visionFallback.connect(self._show_vision_fallback_notice)

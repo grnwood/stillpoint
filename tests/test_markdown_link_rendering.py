@@ -922,6 +922,51 @@ def test_copy_as_markdown_multi_paragraph_selection_with_links_preserves_full_se
 
 
 @pytest.mark.parametrize("marker", ["*", "**", "~~", "==", "`"])
+def test_format_task_description_with_heading_and_link(editor, qapp, marker):
+    source = (
+        "## daily team sync up\n"
+        "- [ ] look into this from pankaj @dk @todo\n"
+        "    \n"
+        "    Everyone: received the following from msg from Salesforce. Seems like a new tool:\n"
+        "    Hi there -\n"
+        "    I'm not sure if I shared this with you, but I think our OMS Operations Console could be useful for DigiKey.\n"
+        "    \n"
+        "    [https://salesforce.vidyard.com/watch/7A1nBJLfuXhSe9f6B35s73|]\n"
+        "\n---"
+    )
+    editor.set_markdown(source)
+    original = editor.to_markdown()
+    cursor = editor.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    editor.setTextCursor(cursor)
+
+    editor._toggle_markdown_format(marker)
+    qapp.processEvents()
+
+    formatted = editor.to_markdown()
+    assert formatted.startswith("## daily team sync up\n- [ ] " + marker)
+    assert f"    {marker}Hi there -{marker}" in formatted
+    assert "    [https://salesforce.vidyard.com/watch/7A1nBJLfuXhSe9f6B35s73|]" in formatted
+    assert formatted.rstrip().endswith("\n---")
+    block = editor.document().findBlockByNumber(4)
+    ranges = block.layout().formats()
+    if marker == "**":
+        assert any(item.format.fontWeight() >= 700 for item in ranges)
+    elif marker == "*":
+        assert any(item.format.fontItalic() for item in ranges)
+
+    editor._toggle_markdown_format(marker)
+    assert editor.to_markdown() == original
+
+
+def test_multiline_format_preserves_fenced_code(editor):
+    source = "Intro\n```python\nvalue = 1\n```\nClosing"
+    assert editor._transform_markdown_selection_text(source, "**", "**") == (
+        "**Intro**\n```python\nvalue = 1\n```\n**Closing**"
+    )
+
+
+@pytest.mark.parametrize("marker", ["*", "**", "~~", "==", "`"])
 def test_multiline_inline_format_preserves_indentation_and_block_markers(editor, marker):
     source = (
         "    Indented paragraph line\n"

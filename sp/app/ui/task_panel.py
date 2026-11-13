@@ -2541,6 +2541,8 @@ class TaskPanel(QWidget):
             self.taskDatesWillApply.emit(paths)
         destination = self._normalize_destination(changes.pop("destination", None))
         optimistic_changes = dict(changes)
+        removed_stale = 0
+        removed_ids = set()
         if destination:
             optimistic_changes["destination"] = destination
         try:
@@ -2553,7 +2555,11 @@ class TaskPanel(QWidget):
                 response = self._http_client.post("/api/tasks/mutate", json=payload)
                 response.raise_for_status()
                 result = response.json()
-                changed_paths = list(result.get("paths") or paths)
+                removed_stale = int(result.get("removed_stale") or 0)
+                removed_ids.update(result.get("removed_ids") or [])
+                if removed_stale == len(tasks):
+                    removed_ids.update(str(task.get("id") or "") for task in tasks)
+                changed_paths = list(result.get("paths") or ([] if removed_stale else paths))
                 self._last_undo_id = str(result.get("undo_id") or "") or None
                 self._last_undo_receipt = None
             else:
@@ -2571,24 +2577,34 @@ class TaskPanel(QWidget):
                         **changes,
                     )
                     changed_paths.extend(result.get("paths") or [])
+                    removed_stale += int(result.get("removed_stale") or 0)
+                    if result.get("removed_stale"):
+                        removed_ids.add(str(task.get("id") or ""))
                     for path, content in (result.get("before") or {}).items():
                         receipt["before"].setdefault(path, content)
                     receipt["after"].update(result.get("after") or {})
-                self._last_undo_receipt = receipt
+                self._last_undo_receipt = receipt if receipt["before"] else None
                 self._last_undo_id = None
             self._invalidate_api_task_requests(preserve_cached=True)
             self._last_refresh_signature = None
-            self._schedule_mutation_refresh(completion_only=optimistic_changes == {"status": "done"})
+            self._schedule_mutation_refresh(completion_only=not removed_stale and optimistic_changes == {"status": "done"})
             try:
-                self._apply_optimistic_task_changes(tasks, optimistic_changes)
+                if removed_ids:
+                    self._discard_stale_task_rows(removed_ids)
+                self._apply_optimistic_task_changes(
+                    [task for task in tasks if str(task.get("id") or "") not in removed_ids], optimistic_changes
+                )
             except Exception as exc:
                 print(f"[TASK_PANEL] Failed to apply mutation grace state: {exc}")
             if changed_paths and notify_editors:
                 self.taskDatesApplied.emit(list(dict.fromkeys(changed_paths)))
-            self.statusRequested.emit(
-                f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo.",
-                5000,
-            )
+            if removed_stale:
+                message = f"Removed {removed_stale} stale task entr{'ies' if removed_stale != 1 else 'y'}; source files were not changed."
+                if len(tasks) > removed_stale:
+                    message += f" Updated {len(tasks) - removed_stale} other tasks."
+            else:
+                message = f"Updated {len(tasks)} task{'s' if len(tasks) != 1 else ''}. Ctrl+Z to undo."
+            self.statusRequested.emit(message, 6000)
             return True
         except Exception as exc:
             if restore_list_focus:
@@ -2596,6 +2612,21 @@ class TaskPanel(QWidget):
                 self._mutation_focus_task_id = None
             self._show_mutation_error(exc)
             return False
+
+    def _discard_stale_task_rows(self, removed_ids: set[str]) -> None:
+        for key, (timestamp, rows) in list(self._api_task_cache.items()):
+            self._api_task_cache[key] = (timestamp, [row for row in rows if str(row.get("id") or "") not in removed_ids])
+        for item in self._visible_items():
+            if str((item.data(0, Qt.UserRole) or {}).get("id") or "") not in removed_ids:
+                continue
+            parent = item.parent() or self.task_tree.invisibleRootItem()
+            index = parent.indexOfChild(item)
+            children = item.takeChildren()
+            parent.takeChild(index)
+            for offset, child in enumerate(children):
+                parent.insertChild(index + offset, child)
+        self._visible_tasks = [item.data(0, Qt.UserRole) for item in self._visible_items() if item.data(0, Qt.UserRole)]
+        self._update_summary_footer(self._visible_tasks)
 
     def _open_task_editor(self, *, focus_field: Optional[str] = None) -> None:
         task = self._current_row_data()
@@ -3360,6 +3391,10 @@ class TaskPanel(QWidget):
             self._last_refresh_signature = None
             self._refresh_tasks()
             return
+        if not self._remote_mode:
+            vault = self.vault_root or config.get_active_vault()
+            if vault:
+                config.prune_task_sources(Path(vault))
         signature = self._refresh_signature()
         if signature == self._last_refresh_signature:
             if log_enabled("tasks_calendar"):
@@ -4475,6 +4510,9 @@ class TaskPanel(QWidget):
                 return cached[1] if cached else []
             self._queue_remote_task_fetch(cache_key, params)
             return cached[1] if cached else []
+        vault = self.vault_root or config.get_active_vault()
+        if vault:
+            config.prune_task_sources(Path(vault))
         return config.fetch_tasks(
             query,
             tags,

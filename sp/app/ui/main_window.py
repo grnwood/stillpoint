@@ -148,7 +148,7 @@ from .git_widgets import CommitBeforePushDialog, GitCommitViewer, GitDiffEditor,
 from . import theme as theme_module
 from sp.app.ui.ai_actions_data import AI_ACTION_GROUPS
 from sp.server import search_index
-from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix
+from sp.server.adapters.files import LEGACY_SUFFIX, PAGE_SUFFIX, PAGE_SUFFIXES, strip_page_suffix, is_indexable_page
 from sp.app import obsidian_import, zim_import
 from sp import VERSION as APP_VERSION
 
@@ -21675,6 +21675,13 @@ class MainWindow(QMainWindow):
 
         target_name, anchor = self._split_link_anchor(name)
         anchor_slug = self._anchor_slug(anchor)
+
+        # Following a relative link to this page should not manufacture a
+        # child with the same name. Explicit colon paths can still name one.
+        if ":" not in target_name and target_name.casefold() == Path(self.current_path).stem.casefold():
+            self._scroll_to_anchor_slug(anchor_slug)
+            self._apply_navigation_focus(focus_target)
+            return
         
         # Check if this is a colon notation link (PageA:PageB:PageC or :VaultRoot)
         if ":" in target_name:
@@ -23542,6 +23549,14 @@ class MainWindow(QMainWindow):
         # Accept both folder paths and full page refs (may include anchors)
         base, anchor = self._split_link_anchor(chat_folder)
         file_path = self._normalize_editor_path(base or "/")
+        file_path = self._resolve_case_insensitive_rel_path(file_path)
+        if not self._page_exists(file_path) and Path(file_path).suffix.lower() == PAGE_SUFFIX:
+            legacy_path = self._resolve_case_insensitive_rel_path(str(Path(file_path).with_suffix(LEGACY_SUFFIX)))
+            if self._page_exists(legacy_path):
+                file_path = legacy_path
+        if not self._page_exists(file_path):
+            self.statusBar().showMessage(f"Linked page not found: {chat_folder}", 5000)
+            return
         # Stay on the current page if it already matches this chat's folder/file
         if self.current_path:
             try:
@@ -26742,10 +26757,17 @@ class MainWindow(QMainWindow):
         print("[UI] Reindex start")
         
         root = Path(self.vault_root)
+        if not root.is_dir():
+            self._alert("The vault is unavailable. Reconnect it before rebuilding the index.")
+            return
+        config.prune_task_sources(root, force=True)
+        config.clear_page_hashes()
         txt_files = []
         for suffix in PAGE_SUFFIXES:
             for page_file in sorted(root.rglob(f"*{suffix}")):
                 if page_file.name == "AGENTS.md":
+                    continue
+                if not is_indexable_page(root, page_file):
                     continue
                 if suffix == LEGACY_SUFFIX and page_file.with_suffix(PAGE_SUFFIX).exists():
                     continue
@@ -26773,6 +26795,7 @@ class MainWindow(QMainWindow):
                 progress.setValue(idx)
                 QApplication.processEvents()
         
+        config.bump_task_index_version()
         self.right_panel.refresh_tasks()
         self.right_panel.refresh_links(self.current_path)
         
