@@ -10093,6 +10093,15 @@ class MarkdownEditor(QTextEdit):
 
     def _handle_task_enter(self, indent: str, content: str) -> bool:
         cursor = self.textCursor()
+        if not cursor.hasSelection() and cursor.positionInBlock() <= len(indent):
+            # Before the marker, Enter adds space above the existing task.
+            # Continuing the task list is reserved for positions after it.
+            cursor.beginEditBlock()
+            cursor.movePosition(QTextCursor.StartOfBlock)
+            cursor.insertBlock()
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            return True
         cursor.beginEditBlock()
         if not content.strip():
             cursor.select(QTextCursor.LineUnderCursor)

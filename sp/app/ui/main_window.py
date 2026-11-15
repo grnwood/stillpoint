@@ -2765,6 +2765,8 @@ class MainWindow(QMainWindow):
         self.tree_view.setHeaderHidden(True)
 
         self.editor = MarkdownEditor()
+        from .table_hover_preview import TableHoverPreview
+        self._table_hover_preview = TableHoverPreview(self.editor)
         try:
             temp_widget = QWidget()
             self._default_editor_max_width = temp_widget.maximumWidth()
@@ -23200,7 +23202,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("AI worker unavailable.", 4000)
             return
         try:
-            from .one_shot_overlay import OneShotPromptOverlay
+            from .one_shot_overlay import OneShotPromptOverlay, selection_replacement_handler
         except Exception:
             self.statusBar().showMessage("One-Shot overlay unavailable.", 4000)
             return
@@ -23237,18 +23239,10 @@ class MainWindow(QMainWindow):
         start_pos = cursor.selectionStart()
         end_pos = cursor.selectionEnd()
 
-        def _accept_insert(assistant_text: str) -> None:
-            try:
-                replace_cursor = QTextCursor(doc)
-                replace_cursor.setPosition(start_pos)
-                replace_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
-                replace_cursor.beginEditBlock()
-                replace_cursor.removeSelectedText()
-                replace_cursor.insertText(assistant_text)
-                replace_cursor.endEditBlock()
-                self.editor.setFocus()
-            except Exception:
-                pass
+        captured_cursor = QTextCursor(doc)
+        captured_cursor.setPosition(start_pos)
+        captured_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        _accept_insert = selection_replacement_handler(self.editor, captured_cursor)
 
         system_prompt = _load_one_shot_prompt()
         overlay = OneShotPromptOverlay(
@@ -23297,7 +23291,7 @@ class MainWindow(QMainWindow):
             overlay.move(geo.center() - overlay.rect().center())
         except Exception:
             pass
-        overlay.open_with_selection(text)
+        overlay.open_with_selection(captured_cursor.selectedText().replace("\u2029", "\n"))
 
     def _open_inline_ai_prompt(self, anchor: QPoint, insert_pos: int) -> None:
         if not config.load_enable_ai_chats():

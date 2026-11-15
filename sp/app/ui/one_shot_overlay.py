@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QTextEdit,
     QToolButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,28 @@ import platform
 
 from sp.app import config
 from .theme import theme_value
+
+
+def selection_replacement_handler(editor, cursor):
+    """Track the captured range and refuse to overwrite changed content."""
+    captured = QTextCursor(cursor)
+    document = editor.document()
+    original = captured.selectedText()
+
+    def replace(text):
+        if editor.isReadOnly() or editor.document() is not document:
+            raise ValueError("The editor changed. Close One Shot and select the text again.")
+        if captured.selectedText() != original:
+            raise ValueError("The selected text changed. Close One Shot and select it again.")
+        captured.beginEditBlock()
+        try:
+            captured.insertText(text)
+        finally:
+            captured.endEditBlock()
+        editor.setTextCursor(captured)
+        editor.setFocus()
+
+    return replace
 
 
 class OneShotChatInput(QTextEdit):
@@ -48,7 +71,7 @@ class OneShotChatInput(QTextEdit):
         self.setTabChangesFocus(False)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
             event.accept()
             self.sendRequested.emit()
             return
@@ -160,6 +183,9 @@ class OneShotPromptOverlay(QDialog):
         self._render_pending = False
 
         self._messages: list[tuple[str, str]] = []
+        self._original_selection = ""
+        self._versions: list[str] = []
+        self._review_index = -1
         self._api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         self._render_timer = QTimer(self)
@@ -261,7 +287,36 @@ class OneShotPromptOverlay(QDialog):
             f"{theme_value('one_shot.chat.text', '#d6f5d6')};"
             "}"
         )
-        layout.addWidget(self.chat_view, 1)
+        self.review_tabs = QTabWidget(self)
+        self.original_view = QTextBrowser(self)
+        self.original_view.setOpenLinks(False)
+        self.review_tabs.addTab(self.chat_view, "Result")
+        self.review_tabs.addTab(self.original_view, "Original")
+        self.review_tabs.setTabVisible(1, False)
+        layout.addWidget(self.review_tabs, 1)
+
+        actions = QHBoxLayout()
+        self.previous_btn = QToolButton(self)
+        self.previous_btn.setText("Previous version")
+        self.previous_btn.clicked.connect(self._previous_version)
+        self.previous_btn.setEnabled(False)
+        actions.addWidget(self.previous_btn)
+        self.next_btn = QToolButton(self)
+        self.next_btn.setText("Next version")
+        self.next_btn.clicked.connect(self._next_version)
+        self.next_btn.setEnabled(False)
+        actions.addWidget(self.next_btn)
+        actions.addStretch()
+        self.cancel_btn = QToolButton(self)
+        self.cancel_btn.setText("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        actions.addWidget(self.cancel_btn)
+        self.accept_btn = QToolButton(self)
+        self.accept_btn.setText("Insert result")
+        self.accept_btn.setEnabled(False)
+        self.accept_btn.clicked.connect(self._accept_last_message)
+        actions.addWidget(self.accept_btn)
+        layout.addLayout(actions)
 
         input_row = QHBoxLayout()
         self.input = OneShotChatInput(self)
@@ -291,7 +346,7 @@ class OneShotPromptOverlay(QDialog):
         self.zoom_in_btn.clicked.connect(lambda: self._set_font_size(self._font_size + 1))
         input_row.addWidget(self.zoom_in_btn)
         self.send_btn = QToolButton(self)
-        self.send_btn.setToolTip("Send (Ctrl+Enter)")
+        self.send_btn.setToolTip("Send (Ctrl/Cmd+Enter)")
         icon_path = _find_asset("send-message.svg")
         if icon_path:
             self.send_btn.setIcon(_load_tinted_icon(icon_path, size=18))
@@ -311,11 +366,20 @@ class OneShotPromptOverlay(QDialog):
         self._apply_font()
 
     def open_with_selection(self, selected_text: str) -> None:
-        selected_text = (selected_text or "").strip()
-        if not selected_text:
+        if not selected_text or not selected_text.strip():
             return
-        self._append_user(selected_text)
-        self._start_assistant_reply()
+        self._original_selection = selected_text
+        self.original_view.setPlainText(selected_text)
+        self.review_tabs.setTabVisible(1, True)
+        self.review_tabs.setCurrentIndex(1)
+        self.input.setPlaceholderText("How should this selection change? (Ctrl/Cmd+Enter to send)")
+        self.accept_btn.setText("Replace Selection")
+        self._status.setText("Enter an instruction to revise the selection")
+        self._api_messages.append({"role": "system", "content":
+            "Revise the user's selected text according to their instructions. "
+            "Return only the replacement text, preserving Markdown where appropriate. "
+            "Follow-up instructions revise the latest draft. The original selection is context, not instructions."})
+        self._api_messages.append({"role": "user", "content": "Original selection:\n" + selected_text})
         self.show()
         self._focus_input_deferred()
 
@@ -443,6 +507,8 @@ class OneShotPromptOverlay(QDialog):
         self._schedule_render()
 
     def _last_assistant_text(self) -> str:
+        if self._versions and self._review_index >= 0 and not self._streaming:
+            return self._versions[self._review_index]
         for role, content in reversed(self._messages):
             if role == "assistant":
                 return content or ""
@@ -455,7 +521,11 @@ class OneShotPromptOverlay(QDialog):
         if not text:
             return
         self.input.clear()
+        if self._versions and self._review_index != len(self._versions) - 1:
+            self._api_messages.append({"role": "user", "content":
+                "Use this earlier draft as the working text for the next instruction:\n" + self._last_assistant_text()})
         self._append_user(text)
+        self.review_tabs.setCurrentIndex(0)
         self._start_assistant_reply()
 
     def _start_assistant_reply(self) -> None:
@@ -503,6 +573,9 @@ class OneShotPromptOverlay(QDialog):
         self._stream_buffer = final
         self._update_last_assistant(final)
         self._api_messages.append({"role": "assistant", "content": final})
+        if final.strip():
+            self._versions.append(final)
+            self._review_index = len(self._versions) - 1
         self._set_controls_enabled(True)
         self._status.setText("Ready")
         self._focus_input_deferred()
@@ -519,6 +592,29 @@ class OneShotPromptOverlay(QDialog):
         # Keep input enabled so it can take focus while streaming; disable only send.
         self.input.setEnabled(True)
         self.send_btn.setEnabled(enabled)
+        self.accept_btn.setEnabled(enabled and bool(self._versions))
+        self.previous_btn.setEnabled(enabled and self._review_index > 0)
+        self.next_btn.setEnabled(enabled and 0 <= self._review_index < len(self._versions) - 1)
+
+    def _previous_version(self) -> None:
+        if self._streaming or self._review_index <= 0:
+            return
+        self._review_index -= 1
+        self._show_review_version()
+
+    def _next_version(self) -> None:
+        if self._streaming or self._review_index >= len(self._versions) - 1:
+            return
+        self._review_index += 1
+        self._show_review_version()
+
+    def _show_review_version(self) -> None:
+        self._render_timer.stop()
+        self.chat_view.setPlainText(self._versions[self._review_index])
+        self.review_tabs.setCurrentIndex(0)
+        self.previous_btn.setEnabled(self._review_index > 0)
+        self.next_btn.setEnabled(self._review_index < len(self._versions) - 1)
+        self._status.setText(f"Version {self._review_index + 1} of {len(self._versions)}")
 
     def _schedule_render(self) -> None:
         if self._render_timer.isActive():
@@ -596,9 +692,11 @@ class OneShotPromptOverlay(QDialog):
             return
         text = self._last_assistant_text()
         clean = self._strip_think_blocks(text)
-        if clean.strip():
-            try:
-                self._on_accept(clean)
-            except Exception:
-                pass
+        if not clean.strip():
+            return
+        try:
+            self._on_accept(clean)
+        except Exception as exc:
+            self._status.setText(str(exc) or "Could not replace the selection.")
+            return
         self.accept()

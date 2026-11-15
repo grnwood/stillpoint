@@ -443,6 +443,9 @@ class SourceEditor(QPlainTextEdit):
 
 def configure_markdown_editor(editor: MarkdownEditor, path: Path) -> None:
     """Apply settings shared with StillPoint's primary Markdown editor."""
+    if getattr(editor, "_table_hover_preview", None) is None:
+        from sp.app.ui.table_hover_preview import TableHoverPreview
+        editor._table_hover_preview = TableHoverPreview(editor)
     editor.set_context(str(path), str(path.parent))
     editor.set_pygments_style(config.load_pygments_style())
     editor.set_vi_cursor_style(config.load_vi_cursor_style())

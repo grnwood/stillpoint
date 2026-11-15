@@ -137,6 +137,7 @@ def test_copy_control_contrasts_with_paper_and_stays_visible_mid_block(
     qtbot, qapp, monkeypatch, kind, dark
 ):
     monkeypatch.setattr(config, "load_reading_view_use_theme_colors", lambda: dark)
+    monkeypatch.setattr(config, "load_reading_view_background", lambda: "theme" if dark else "white")
     view = MarkdownReadingView()
     qtbot.addWidget(view)
     palette = QPalette(view.palette())

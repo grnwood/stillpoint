@@ -44,6 +44,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QApplication,
     QHBoxLayout,
     QLabel,
@@ -97,6 +98,9 @@ def _reading_table_border(paper: str, header: str, border: str) -> str:
         ):
             return candidate.name()
     return candidate.name()
+
+
+READING_CURSOR_GUTTER = 24
 
 
 class _ReadingBrowser(QTextBrowser):
@@ -170,9 +174,9 @@ class _ReadingBrowser(QTextBrowser):
         ):
             return QRect()
         cursor_rect = self.cursorRect(self._reading_cursor)
-        line_height = max(8, self.fontMetrics().height() + 4)
-        width = max(18, min(32, self.fontMetrics().horizontalAdvance("MMM")))
-        return QRect(5, cursor_rect.top(), width, min(line_height, cursor_rect.height()))
+        line_height = min(cursor_rect.height(), self.fontMetrics().height() + 4)
+        height = max(8, min(20, round(line_height * 0.7)))
+        return QRect(8, cursor_rect.top() + (line_height - height) // 2, 4, height)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
@@ -190,9 +194,16 @@ class _ReadingBrowser(QTextBrowser):
             )
         )
         painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
+        glow = QColor(color)
+        glow.setAlpha(35)
+        painter.setBrush(glow)
+        painter.drawRoundedRect(QRect(marker).adjusted(-3, -3, 3, 3), 5, 5)
+        color.setAlpha(220)
         painter.setBrush(color)
-        painter.drawRoundedRect(marker, 3, 3)
+        painter.drawRoundedRect(marker, 2, 2)
+        painter.end()
 
     @staticmethod
     def _nearest_content_cursor(
@@ -983,7 +994,8 @@ class MarkdownReadingView(QWidget):
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
             body {{ font-family: {self._editor_font_family}; font-size: {body_size}; line-height: 1.35;
-                    margin: {self._editor_document_margin}px; }}
+                    margin: {self._editor_document_margin}px;
+                    margin-left: {self._editor_document_margin + READING_CURSOR_GUTTER}px; }}
             h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 6px;
                    margin-bottom: 3px; font-weight: {self._heading_weight}; }}
             h1 {{ font-size: {heading_sizes[0]}; }}
@@ -1205,7 +1217,7 @@ class MarkdownReadingView(QWidget):
 
     def _fit_images_to_viewport(self, *, reset: bool = False) -> None:
         """Give Qt explicit responsive image boxes so visual and layout sizes agree."""
-        available_width = max(64.0, float(self.browser.viewport().width() - 80))
+        available_width = max(64.0, float(self.browser.viewport().width() - 80 - READING_CURSOR_GUTTER))
         document = self.browser.document()
         if reset:
             layouts: dict[int, tuple[int, float, float, float]] = {}
@@ -1511,6 +1523,21 @@ class MarkdownReadingView(QWidget):
         button.setToolTip("Copied Markdown")
         button.setAccessibleName("Copied Markdown")
         self._position_reader_tools()
+        effect = button.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(button)
+            button.setGraphicsEffect(effect)
+        animation = getattr(button, "_copy_feedback_animation", None)
+        if animation is not None:
+            animation.stop()
+            animation.deleteLater()
+        animation = QPropertyAnimation(effect, b"opacity", button)
+        animation.setDuration(220)
+        animation.setStartValue(0.4)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        button._copy_feedback_animation = animation
+        animation.start()
 
         def restore():
             self._style_copy_button(button)

@@ -39,7 +39,8 @@ def source_block_lines(text: str) -> list[int]:
     previous_blank = True
     in_fence = False
     fence_marker = ""
-    for index, line in enumerate(text.splitlines(), start=1):
+    lines = text.splitlines()
+    for index, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
             previous_blank = True
@@ -50,10 +51,16 @@ def source_block_lines(text: str) -> list[int]:
                 fence_marker = ""
             previous_blank = False
             continue
+        fence_start = bool(re.match(r"^ {0,3}(`{3,}|~{3,})", line))
+        table_start = (
+            index < len(lines) and "|" in line
+            and all(re.fullmatch(r":?-{3,}:?", cell.strip())
+                    for cell in lines[index].strip().strip("|").split("|"))
+        )
         if stripped.startswith(("```", "~~~")):
             in_fence = True
             fence_marker = re.match(r"`+|~+", stripped).group()
-        if previous_blank:
+        if previous_blank or fence_start or table_start:
             starts.append(index)
         previous_blank = False
     return starts or ([1] if text else [])
@@ -91,6 +98,8 @@ def _add_source_anchors(text: str) -> str:
                 continue
             # A zero-width character keeps the anchor alive in QTextDocument.
             # Qt can discard a truly empty span, notably before image blocks.
+            if output and output[-1].strip():
+                output.append("")
             output.extend((f'<span id="sp-source-{index}">&#8203;</span>', ""))
         output.append(line)
     return "\n".join(output)

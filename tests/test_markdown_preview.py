@@ -9,7 +9,7 @@ from PySide6.QtTest import QTest
 
 from sp.app.folder_navigator.core import read_text
 from sp.app.folder_navigator.window import Tab
-from sp.app.ui.markdown_preview import MarkdownReadingView
+from sp.app.ui.markdown_preview import MarkdownReadingView, READING_CURSOR_GUTTER
 from sp.markdown_html import nearest_source_anchor, render_markdown_html
 
 
@@ -21,6 +21,30 @@ TABLE_MARKDOWN = """# Report
 
 ![diagram](diagram.png){width=300}
 """
+
+
+@pytest.mark.parametrize("gap", ["\n\n", "\n"])
+def test_main_reading_copy_controls_for_table_and_code(main_window, gap):
+    from PySide6.QtWidgets import QApplication
+
+    window = main_window
+    code = '```python\nprint("hello")\n```\n'
+    table = '| Name | Value |\n| --- | --- |\n| A | 1 |\n'
+    window.editor.set_markdown('Example' + gap + code + 'Table follows' + gap + table)
+    window.resize(1000, 800)
+    window.show()
+    window._set_reading_view_enabled(True)
+    QTest.qWait(80)
+    view = window.reading_view
+    assert [kind for _, _, kind in view._copy_buttons] == ['code', 'table']
+    for (button, _, _), expected in zip(view._copy_buttons, (code, table)):
+        assert button.isVisible()
+        button.click()
+        assert QApplication.clipboard().text().rstrip() == expected.rstrip()
+        assert button.text() == 'Copied'
+        assert button._copy_feedback_animation.duration() == 220
+    QTest.qWait(1550)
+    assert all(button.text() == '' for button, _, _ in view._copy_buttons)
 
 
 def test_main_reading_t_picker_navigates_reader(main_window, monkeypatch):
@@ -401,9 +425,11 @@ def test_reading_view_supports_vi_document_navigation(qtbot, qapp) -> None:
     assert scrollbar.maximum() > 0
     assert not view.browser.extraSelections()
     marker = view.browser.vi_rail_rect()
-    assert 18 <= marker.width() <= view.browser.fontMetrics().horizontalAdvance("MMMM")
+    assert marker.width() == 4
     assert marker.height() <= view.browser.fontMetrics().height() + 4
     assert marker.right() < 40
+    text_cursor = QTextCursor(view.browser._reading_cursor.block())
+    assert view.browser.cursorRect(text_cursor).left() - marker.right() >= 12
 
     initial_position = view.browser._reading_cursor.position()
     initial_marker_top = marker.top()
@@ -605,7 +631,7 @@ def test_reading_images_reflow_with_the_content_column(
 
     narrow_width, narrow_height = image_dimensions()
     assert narrow_width == pytest.approx(
-        min(requested_width or 1200, view.browser.viewport().width() - 80)
+        min(requested_width or 1200, view.browser.viewport().width() - 80 - READING_CURSOR_GUTTER)
     )
     assert narrow_height == pytest.approx(narrow_width / 2)
 
@@ -615,7 +641,7 @@ def test_reading_images_reflow_with_the_content_column(
     wide_width, wide_height = image_dimensions()
     assert wide_width >= narrow_width
     assert wide_width == pytest.approx(
-        min(requested_width or 1200, view.browser.viewport().width() - 80)
+        min(requested_width or 1200, view.browser.viewport().width() - 80 - READING_CURSOR_GUTTER)
     )
     assert wide_height == pytest.approx(wide_width / 2)
 
