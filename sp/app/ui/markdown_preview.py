@@ -408,10 +408,22 @@ class MarkdownReadingView(QWidget):
         self.reading_options = config.load_reading_options()
         self._source_blocks = []
         self._copy_buttons = []
+        self._positioning_reader_tools = False
+        self._rendering_markdown = False
+        self._pending_render_request = None
+        self._render_request_timer = QTimer(self)
+        self._render_request_timer.setSingleShot(True)
+        self._render_request_timer.setInterval(0)
+        self._render_request_timer.timeout.connect(self._render_pending_request)
+        self._reader_tools_timer = QTimer(self)
+        self._reader_tools_timer.setSingleShot(True)
+        self._reader_tools_timer.setInterval(0)
+        self._reader_tools_timer.timeout.connect(self._position_reader_tools)
         self._focus_targets = None
         self._focus_restore = []
         self._focus_splitters = []
         self._source_line_positions = {}
+        self._source_positions = []
         self._appearance_changed = False
         self._scroll_request_id = 0
         self._pending_source_position = None
@@ -537,7 +549,7 @@ class MarkdownReadingView(QWidget):
         self.options_popup.optionsChanged.connect(self.set_reading_options)
         self.browser.verticalScrollBar().valueChanged.connect(self._position_reader_tools)
         self.browser.horizontalScrollBar().valueChanged.connect(self._position_reader_tools)
-        self.browser.document().documentLayout().documentSizeChanged.connect(self._position_reader_tools)
+        self.browser.document().documentLayout().documentSizeChanged.connect(self._schedule_reader_tools)
         self.browser.viewport().installEventFilter(self)
         QApplication.instance().installEventFilter(self)
         self.setFocusProxy(self.browser)
@@ -641,6 +653,8 @@ class MarkdownReadingView(QWidget):
             view._apply_reading_options(options)
 
     def _apply_reading_options(self, options):
+        if self.reading_options == options:
+            return
         source_line, screen_y = self.reading_view_position() if self.last_markdown else (1, None)
         self.reading_options = dict(options)
         self.options_popup.set_options(options)
@@ -658,10 +672,14 @@ class MarkdownReadingView(QWidget):
             font = QFont(self.browser.font())
             font.setPointSizeF(self._base_font_point_size * self.reading_options["size"] / 100 * 1.1 ** self._zoom_steps)
             maximum = round(QFontMetricsF(font).averageCharWidth() * characters + 2 * self._editor_document_margin + 24)
-        self.browser.setMaximumWidth(maximum)
-        self.browser.setMinimumWidth(0)
+        if self.browser.maximumWidth() != maximum:
+            self.browser.setMaximumWidth(maximum)
+        if self.browser.minimumWidth() != 0:
+            self.browser.setMinimumWidth(0)
         margin = max(0, (self.reading_body.width() - maximum) // 2)
-        self._column_layout.setContentsMargins(margin, 0, margin, 0)
+        current = self._column_layout.contentsMargins()
+        if (current.left(), current.top(), current.right(), current.bottom()) != (margin, 0, margin, 0):
+            self._column_layout.setContentsMargins(margin, 0, margin, 0)
 
     def configure_focus_mode(self, targets):
         """targets returns chrome widgets to hide; the reader stays in place."""
@@ -698,7 +716,7 @@ class MarkdownReadingView(QWidget):
     def eventFilter(self, obj, event):
         if obj is getattr(self, "browser", None) or obj is getattr(getattr(self, "browser", None), "viewport", lambda: None)():
             if event.type() == QEvent.Resize:
-                QTimer.singleShot(0, self, self._position_reader_tools)
+                self._schedule_reader_tools()
         if self._focus_restore and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
             if self.window().isActiveWindow() and QApplication.activePopupWidget() is None and not self.find_bar.isVisible():
                 self.set_focus_mode(False)
@@ -714,7 +732,21 @@ class MarkdownReadingView(QWidget):
         self.scroll_to_source_line(source_line)
         self.focus_reader()
 
+    def _schedule_reader_tools(self, *_args):
+        if not self._reader_tools_timer.isActive():
+            self._reader_tools_timer.start()
+
     def _position_reader_tools(self, *_args):
+        self._reader_tools_timer.stop()
+        if self._positioning_reader_tools or self._rendering_markdown:
+            return
+        self._positioning_reader_tools = True
+        try:
+            self._layout_reader_tools()
+        finally:
+            self._positioning_reader_tools = False
+
+    def _layout_reader_tools(self):
         if not hasattr(self, "toc_widget"):
             return
         self._apply_column_width()
@@ -1064,7 +1096,11 @@ class MarkdownReadingView(QWidget):
         screen_y = editor.viewport().mapToGlobal(editor.cursorRect(block_cursor).topLeft()).y()
         return cursor.blockNumber() + 1, screen_y
 
-    def reading_view_position(self) -> tuple[int, int]:
+    def reading_view_position(self) -> tuple[int, int | None]:
+        if self._rendering_markdown:
+            # Theme/options may arrive from a layout signal while the document
+            # is being replaced. Do not query cursors in that partial layout.
+            return getattr(self, "_requested_source_line", 1), None
         if self._pending_source_position is not None:
             line, screen_y = self._pending_source_position
             if screen_y is None:
@@ -1092,7 +1128,7 @@ class MarkdownReadingView(QWidget):
         super().resizeEvent(event)
         if self.last_html:
             self._image_resize_timer.start()
-            QTimer.singleShot(0, self, self._position_reader_tools)
+            self._schedule_reader_tools()
 
     def _image_source_size(self, source: str) -> tuple[float, float] | None:
         source_url = QUrl(source)
@@ -1170,6 +1206,45 @@ class MarkdownReadingView(QWidget):
         self.browser.refresh_reading_cursor()
 
     def set_markdown(
+        self,
+        markdown_text: str,
+        *,
+        base_directory: str | Path | None = None,
+        source_line: int = 1,
+        anchor_global_y: int | None = None,
+    ) -> None:
+        request = (markdown_text, base_directory, source_line, anchor_global_y)
+        if self._rendering_markdown:
+            # Theme, width, spacing, font and navigation all enter here. Keep
+            # only the latest request; never replace a document mid-layout.
+            self._pending_render_request = request
+            return
+        self._render_request_timer.stop()
+        self._pending_render_request = None
+        self._rendering_markdown = True
+        updates_enabled = self.browser.updatesEnabled()
+        self.browser.setUpdatesEnabled(False)
+        try:
+            self._render_markdown_document(
+                markdown_text, base_directory=base_directory,
+                source_line=source_line, anchor_global_y=anchor_global_y,
+            )
+        finally:
+            self._rendering_markdown = False
+            self.browser.setUpdatesEnabled(updates_enabled)
+            if self._pending_render_request is not None:
+                self._render_request_timer.start()
+            self._schedule_reader_tools()
+
+    def _render_pending_request(self):
+        request = self._pending_render_request
+        self._pending_render_request = None
+        if request is not None:
+            source, directory, line, screen_y = request
+            self.set_markdown(source, base_directory=directory,
+                              source_line=line, anchor_global_y=screen_y)
+
+    def _render_markdown_document(
         self,
         markdown_text: str,
         *,
@@ -1363,7 +1438,7 @@ class MarkdownReadingView(QWidget):
         if palette is not None:
             self.toc_widget.set_host_palette(palette)
             self.toc_widget.set_vault_accent_color(palette.color(QPalette.Highlight).name())
-        QTimer.singleShot(0, self, self._position_reader_tools)
+        self._schedule_reader_tools()
 
     def _copy_source_block(self, source, button):
         QApplication.clipboard().setText(source.markdown)

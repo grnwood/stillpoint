@@ -2324,12 +2324,12 @@ class MarkdownEditor(QTextEdit):
     def _is_alive(self, obj) -> bool:
         return bool(obj) and Shiboken.isValid(obj)
 
-    def _mutations_blocked(self) -> bool:
+    def _mutations_blocked(self, *, ignore_hidden_paint: bool = False) -> bool:
         return (
             self._display_guard
             or self._cursor_events_blocked
             or self._vi_paint_in_progress
-            or self._suppress_paint
+            or (self._suppress_paint and (not ignore_hidden_paint or self.isVisible()))
             or self._suppress_paint_depth > 0
             or type(self)._LOAD_GUARD_DEPTH > 0
             or self._in_mode_window_transition()
@@ -2340,7 +2340,9 @@ class MarkdownEditor(QTextEdit):
             return False
         if self._load_in_flight_token != 0:
             return False
-        if self._mutations_blocked():
+        # Reading View hides this editor, which suppresses painting but must
+        # not prevent loading the next page into its backing document.
+        if self._mutations_blocked(ignore_hidden_paint=True):
             return False
         until = self._post_load_paint_guard_until
         if until > 0.0 and time.perf_counter() < until:
@@ -2609,6 +2611,10 @@ class MarkdownEditor(QTextEdit):
             # after show(), but vi activation still needs a visible, settled widget.
             self._vi_has_painted = True
             self._schedule_vi_activation()
+        # Hidden editors leave visibility-dependent layout work dormant. Run
+        # it once when Edit View is actually exposed, rather than polling it.
+        QTimer.singleShot(0, self, self._apply_scroll_past_end_margin)
+        QTimer.singleShot(0, self, self._refresh_hr_selections)
 
     def hideEvent(self, event):  # type: ignore[override]
         self._suppress_paint = True
@@ -3627,23 +3633,37 @@ class MarkdownEditor(QTextEdit):
             pass
 
     def set_font_point_size(self, size: int) -> None:
+        if not self._editor_alive:
+            return
         # Clamp to a sensible, positive point size to avoid Qt warnings
         try:
             safe_size = max(6, int(size))
         except Exception:
             safe_size = 13
-        font = self.font()
-        font.setPointSize(safe_size)
-        self.setFont(font)
+        # Reading View can flush a queued zoom just before revealing this
+        # editor. Font changes and rehighlighting invalidate QTextDocument's
+        # layout just like a page load; do not let an expose paint consume the
+        # intermediate layout. Keep the load token so queued images stay valid.
+        self._push_paint_block()
+        was_cursor_blocked = self._cursor_events_blocked
+        self._cursor_events_blocked = True
         try:
-            self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
-        except Exception:
-            pass
-        try:
+            font = self.font()
+            font.setPointSize(safe_size)
+            self.setFont(font)
+            try:
+                self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
+            except Exception:
+                pass
             if hasattr(self, "highlighter"):
                 self.highlighter.set_base_font_size(float(safe_size))
-        except Exception:
-            pass
+        finally:
+            self._cursor_events_blocked = was_cursor_blocked
+            token = self.current_load_token()
+            self._post_load_repaint_token = -1
+            self._arm_post_load_paint_guard(token)
+            self._pop_paint_block()
+            self._queue_post_load_repaint(token)
 
     def set_page_navigation_enabled(self, enabled: bool) -> None:
         """Allow hosts that edit one fixed page to keep links as editable text."""
@@ -9275,6 +9295,12 @@ class MarkdownEditor(QTextEdit):
         *,
         block_numbers: Optional[set[int]] = None,
     ) -> None:
+        if not self._editor_alive:
+            return
+        if self._suppress_paint and not self.isVisible() and not self._suppress_paint_depth:
+            self._hr_retry_timer.stop()
+            self._hr_refresh_retry_pending = False
+            return
         if not self._is_current_load_token(load_token):
             self._hr_refresh_retry_pending = False
             self._hr_refresh_retry_token = None
@@ -10499,13 +10525,19 @@ class MarkdownEditor(QTextEdit):
 
     def _apply_scroll_past_end_margin(self, load_token: Optional[int] = None) -> None:
         """Add bottom margin to the document so the view can scroll past the last line."""
+        if not self._editor_alive:
+            self._scroll_margin_retry_pending = False
+            return
         if not self._is_current_load_token(load_token):
             self._scroll_margin_retry_pending = False
             return
         if self._mutations_blocked() or self._suppress_vi_cursor:
+            if self._suppress_paint and not self.isVisible() and not self._suppress_paint_depth:
+                self._scroll_margin_retry_pending = False
+                return
             if not self._scroll_margin_retry_pending:
                 self._scroll_margin_retry_pending = True
-                QTimer.singleShot(0, lambda tok=load_token: self._retry_scroll_margin(tok))
+                QTimer.singleShot(50, self, lambda tok=load_token: self._retry_scroll_margin(tok))
             return
         self._scroll_margin_retry_pending = False
         try:

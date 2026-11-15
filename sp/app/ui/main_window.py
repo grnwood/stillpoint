@@ -3053,6 +3053,11 @@ class MainWindow(QMainWindow):
         self._reading_saved_cursor = None
         self._reading_saved_scroll = 0
         self._reading_entry_source_line = 1
+        self._reading_view_refresh_timer = QTimer(self)
+        self._reading_view_refresh_timer.setSingleShot(True)
+        self._reading_view_refresh_timer.setInterval(0)
+        self._reading_view_refresh_timer.timeout.connect(lambda: self._refresh_reading_view())
+        self._reading_view_render_key = None
         self.editor.textChanged.connect(self._schedule_reading_view_refresh)
 
         self.editor_view_container = QWidget()
@@ -21999,6 +22004,7 @@ class MainWindow(QMainWindow):
         self._reading_saved_font_size = self.editor.font().pointSizeF()
 
     def _refresh_reading_view(self) -> None:
+        self._reading_view_refresh_timer.stop()
         if not getattr(self, "_reading_view_enabled", False):
             return
         changed_page = self._reading_saved_path != self.current_path
@@ -22011,16 +22017,26 @@ class MainWindow(QMainWindow):
         self.reading_view.match_editor_layout(self.editor)
         self.reading_view.toc_widget.set_base_path(path_to_colon(self.current_path or ""))
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
+        source = self.editor.to_markdown()
+        render_key = (self.current_path, self.editor.current_load_token(), source, self.reading_view._css)
+        if render_key == self._reading_view_render_key:
+            if self._editor_view_stack.currentWidget() is not self.reading_view:
+                self.reading_view.scroll_to_source_line(
+                    source_line, anchor_global_y=screen_y, remember_handoff=True
+                )
+            return
         self.reading_view.set_markdown(
-            self.editor.to_markdown(),
+            source,
             base_directory=self._reading_view_base_directory(),
             source_line=source_line,
             anchor_global_y=screen_y,
         )
+        self._reading_view_render_key = render_key
 
     def _schedule_reading_view_refresh(self) -> None:
         if getattr(self, "_reading_view_enabled", False):
-            QTimer.singleShot(0, self, self._refresh_reading_view)
+            if not self._reading_view_refresh_timer.isActive():
+                self._reading_view_refresh_timer.start()
 
     def _set_reading_view_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)

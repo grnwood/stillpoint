@@ -2564,6 +2564,11 @@ class Tab(QWidget):
         super().__init__()
         self.path = path
         self._retired = False
+        self._reading_view_render_key = None
+        self._reading_view_refresh_timer = QTimer(self)
+        self._reading_view_refresh_timer.setSingleShot(True)
+        self._reading_view_refresh_timer.setInterval(0)
+        self._reading_view_refresh_timer.timeout.connect(self._refresh_reading_view)
         self.loaded = loaded
         self.clean_text = loaded.text if loaded else ""
         self.markdown = markdown
@@ -2655,15 +2660,7 @@ class Tab(QWidget):
                 self.reading_view.linkActivated.connect(
                     lambda target: self.readingLinkActivated.emit(target)
                 )
-                self.editor.textChanged.connect(
-                    lambda: QTimer.singleShot(
-                        0,
-                        self,
-                        lambda: self._refresh_reading_view()
-                        if self.reading_view_enabled
-                        else None,
-                    )
-                )
+                self.editor.textChanged.connect(self._schedule_reading_view_refresh)
                 editor_views = QWidget(self)
                 self.editor_view_stack = QStackedWidget(editor_views)
                 editor_views_layout = QVBoxLayout(editor_views)
@@ -2779,6 +2776,7 @@ class Tab(QWidget):
         if self._retired:
             return
         self._retired = True
+        self._reading_view_refresh_timer.stop()
         self.setUpdatesEnabled(False)
         uninstall_primary_wheel_zoom(self)
         if isinstance(self.editor, MarkdownEditor):
@@ -2812,7 +2810,12 @@ class Tab(QWidget):
         if self.reading_view_enabled:
             self._refresh_reading_view()
 
+    def _schedule_reading_view_refresh(self) -> None:
+        if not self._retired and self.reading_view_enabled and not self._reading_view_refresh_timer.isActive():
+            self._reading_view_refresh_timer.start()
+
     def _refresh_reading_view(self) -> None:
+        self._reading_view_refresh_timer.stop()
         if self._retired or not self.markdown or self.editor is None or self.reading_view is None:
             return
         if self.editor_view_stack.currentWidget() is self.reading_view and self.reading_view.last_markdown:
@@ -2820,12 +2823,21 @@ class Tab(QWidget):
         else:
             source_line, screen_y = self.reading_view.editor_view_position(self.editor)
         self.reading_view.match_editor_layout(self.editor)
+        source = self.editor.to_markdown()
+        render_key = (self.editor.current_load_token(), source, self.reading_view._css)
+        if render_key == self._reading_view_render_key:
+            if self.editor_view_stack.currentWidget() is not self.reading_view:
+                self.reading_view.scroll_to_source_line(
+                    source_line, anchor_global_y=screen_y, remember_handoff=True
+                )
+            return
         self.reading_view.set_markdown(
-            self.editor.to_markdown(),
+            source,
             base_directory=self.path.parent,
             source_line=source_line,
             anchor_global_y=screen_y,
         )
+        self._reading_view_render_key = render_key
 
     def set_reading_view(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -4901,6 +4913,7 @@ class Window(QMainWindow):
             git_layout.addWidget(git_splitter, 1)
             self.rail.addTab(self.git_page, "Git")
             self.rail.currentChanged.connect(self._rail_changed)
+        self._reading_view_preferred = False
         self.tabs = QTabWidget()
         self.tabs.setObjectName("folderNavigatorEditors")
         self.tabs.setMinimumWidth(0)
@@ -6160,6 +6173,7 @@ class Window(QMainWindow):
     def _on_tab_reading_view_changed(self, tab: Tab, enabled: bool) -> None:
         if tab is not self.active_tab() or not hasattr(self, "reading_view_action"):
             return
+        self._reading_view_preferred = bool(enabled)
         self.reading_view_action.blockSignals(True)
         self.reading_view_action.setChecked(bool(enabled))
         self.reading_view_action.blockSignals(False)
@@ -8265,6 +8279,11 @@ class Window(QMainWindow):
 
     def _tab_changed(self, index):
         tab = self.active_tab()
+        if tab and tab.markdown and tab.reading_view_enabled != self._reading_view_preferred:
+            keep_tree_focus = self.tree.hasFocus()
+            tab.set_reading_view(self._reading_view_preferred)
+            if keep_tree_focus:
+                self.tree.setFocus(Qt.OtherFocusReason)
         for other in self.all_tabs():
             if other is not tab and getattr(other, "reading_view", None) is not None:
                 other.reading_view.set_focus_mode(False)
