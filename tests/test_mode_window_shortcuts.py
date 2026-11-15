@@ -8,6 +8,40 @@ from sp.app.ui.main_window import MainWindow
 from sp.app.ui.mode_window import ModeWindow
 
 
+def test_shutdown_discards_mode_reload_and_queued_navigation(qapp, monkeypatch):
+    from PySide6.QtCore import QObject, QTimer
+
+    class ClosingWindow(QObject):
+        _process_mode_pending = MainWindow._process_mode_pending
+        _reload_page_preserve_cursor = MainWindow._reload_page_preserve_cursor
+        _open_file = MainWindow._open_file
+        _on_mode_overlay_closed = MainWindow._on_mode_overlay_closed
+
+        def _normalize_root_page_path(self, path):
+            raise AssertionError("Navigation reached the closed window")
+
+    main = ClosingWindow()
+    main.current_path = "/Page.md"
+    calls = []
+    monkeypatch.setattr(main, "_normalize_root_page_path", lambda path: calls.append(path))
+    main._pending_reload_path = "/Page.md"
+    main._pending_mode_navigation = None
+    main._mode_window_pending = False
+    # Queue the reload while the window is still open, then enter shutdown
+    # before the event loop gets a chance to dispatch it.
+    main._process_mode_pending()
+    QTimer.singleShot(0, lambda: main._open_file("/Other.md", force=True))
+    main.setProperty("_sp_closing", True)
+    main._pending_mode_target = "focus"
+    main._on_mode_overlay_closed("audience", 0)
+    main._process_mode_pending("focus")
+    QTest.qWait(20)
+    assert calls == []
+    assert main._pending_reload_path is None
+    assert main._pending_mode_navigation is None
+    assert main._pending_mode_target is None
+
+
 @pytest.mark.parametrize("mode", ["focus", "audience"])
 def test_main_shortcuts_with_mode_window_open(qtbot, monkeypatch, mode):
     calls = []

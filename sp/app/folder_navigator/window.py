@@ -914,6 +914,52 @@ class NavigatorTree(QTreeView):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setSortingEnabled(True)
         self.sortByColumn(0, Qt.AscendingOrder)
+        self._drag_position = None
+        self._drag_target = None
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(40)
+        self._drag_scroll_timer.timeout.connect(self._scroll_during_drag)
+
+    def _clear_drag_feedback(self):
+        self._drag_scroll_timer.stop()
+        self._drag_position = None
+        self._drag_target = None
+        self.viewport().update()
+
+    def _scroll_during_drag(self):
+        point = self._drag_position
+        if point is None:
+            return
+        margin = 36
+        height = self.viewport().height()
+        direction = -1 if point.y() < margin else 1 if point.y() >= height - margin else 0
+        if direction:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + direction * max(1, bar.singleStep()))
+            self._drag_target = self._drop_directory(point)
+            self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._drag_target is None:
+            return
+        index = self.model().index(str(self._drag_target))
+        rect = self.visualRect(index)
+        if not rect.isValid():
+            return
+        rect.setLeft(1)
+        rect.setRight(self.viewport().width() - 2)
+        painter = QPainter(self.viewport())
+        painter.fillRect(rect, QColor(0, 120, 255, 75))
+        painter.setPen(QPen(QColor("#ffffff"), 4))
+        painter.drawRect(rect.adjusted(2, 2, -2, -2))
+        painter.setPen(QPen(QColor("#005fcc"), 2))
+        painter.drawRect(rect.adjusted(2, 2, -2, -2))
+        painter.end()
+
+    def dragLeaveEvent(self, event):
+        self._clear_drag_feedback()
+        event.accept()
 
     def _drop_directory(self, position):
         index = self.indexAt(position)
@@ -959,10 +1005,26 @@ class NavigatorTree(QTreeView):
             return
         drag = QDrag(self)
         drag.setMimeData(self._drag_mime_data(paths))
+        badge = QLabel()
+        names = "\n".join(path.name for path in paths[:3])
+        if len(paths) > 3:
+            names += f"\n… and {len(paths) - 3} more"
+        badge.setText(f"{len(paths)} item(s)\n{names}")
+        badge.setStyleSheet(
+            "QLabel { background: #005fcc; color: #ffffff; border: 2px solid white;"
+            " border-radius: 5px; padding: 8px; font-weight: bold; }"
+        )
+        badge.setTextFormat(Qt.PlainText)
+        badge.adjustSize()
+        drag.setPixmap(badge.grab())
+        drag.setHotSpot(QPoint(-12, -12))
         # External drops should copy by default so dragging out cannot silently
         # remove a file from the navigator. Internal targets explicitly select
         # MoveAction in dragEnterEvent/dropEvent, preserving move-to-folder.
-        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+        try:
+            drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+        finally:
+            self._clear_drag_feedback()
 
     def _internal_drop_paths(self, event):
         if event.source() is not self or not event.mimeData().hasFormat(self.INTERNAL_PATHS_MIME):
@@ -986,7 +1048,11 @@ class NavigatorTree(QTreeView):
         event.ignore()
 
     def dragMoveEvent(self, event):  # type: ignore[override]
+        self._drag_position = event.position().toPoint()
+        self._drag_scroll_timer.start()
         target = self._drop_directory(event.position().toPoint())
+        self._drag_target = target
+        self.viewport().update()
         if (self._internal_drop_paths(event) and target is not None
                 and target.is_dir() and inside(self.model().root, target)):
             event.setDropAction(Qt.MoveAction)
@@ -999,6 +1065,7 @@ class NavigatorTree(QTreeView):
         event.ignore()
 
     def dropEvent(self, event):  # type: ignore[override]
+        self._clear_drag_feedback()
         target = self._drop_directory(event.position().toPoint())
         internal = self._internal_drop_paths(event)
         if internal and target is not None and target.is_dir():
@@ -2721,7 +2788,7 @@ class Tab(QWidget):
                 self.reading_theme_toggle.setParent(self.editor_status)
                 self.reading_theme_toggle.setAutoRaise(True)
                 self.reading_theme_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                self.reading_theme_toggle.setFixedSize(24, 22)
+                self.reading_theme_toggle.setFixedSize(40, 24)
                 self.reading_theme_toggle.setIconSize(QSize(16, 16))
                 self.reading_theme_toggle.hide()
                 status_layout.addWidget(self.reading_theme_toggle)
@@ -6988,8 +7055,15 @@ class Window(QMainWindow):
             )
         elif kind == "pdf":
             try:
+                signature = fingerprint(tab.path)
                 view = pdf_view(tab.path, vi_enabled=self.tree.vi_enabled)
+                previous = getattr(tab, "viewer", None)
+                if previous is not None:
+                    tab.layout().removeWidget(previous)
+                    previous.hide()
+                    previous.deleteLater()
                 tab.viewer = view
+                tab.preview_signature = signature
                 tab.layout().addWidget(view)
                 if placeholder is not None:
                     if isinstance(placeholder, PreviewLoadingView):
@@ -12099,6 +12173,11 @@ class Window(QMainWindow):
                     quality=getattr(tab, "requested_image_quality", "full"),
                     disposable=not tab.pinned,
                 )
+            elif (getattr(tab, "preview_kind", None) == "pdf"
+                    and tab.property("folderPreviewHydrated")
+                    and actual != getattr(tab, "preview_signature", None)):
+                tab.setProperty("folderPreviewHydrated", False)
+                self._schedule_preview_hydration(tab, immediate=True)
             elif tab.path.suffix.casefold() in DOCUMENT_SUFFIXES:
                 try:
                     from .documents import document_signature

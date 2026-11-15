@@ -23,6 +23,75 @@ TABLE_MARKDOWN = """# Report
 """
 
 
+def test_main_reading_t_picker_navigates_reader(main_window, monkeypatch):
+    from PySide6.QtWidgets import QLineEdit
+
+    window = main_window
+    window.editor.set_markdown("# First\n\nText\n\n## Last")
+    window._toc_headings = [
+        {"title": "First", "line": 1, "position": 0, "level": 1},
+        {"title": "Last", "line": 5,
+         "position": window.editor.document().findBlockByNumber(4).position(), "level": 2},
+    ]
+    window.show()
+    window._set_reading_view_enabled(True)
+    window.activateWindow()
+    window.reading_view.browser.setFocus()
+    QTest.keyClick(window.reading_view.browser, Qt.Key_T)
+    QTest.qWait(30)
+    picker = window._heading_picker
+    assert picker.isVisible()
+    query = picker.findChild(QLineEdit)
+    query.setText("Last")
+    navigated = []
+    monkeypatch.setattr(window.reading_view, "scroll_to_source_line", lambda line: navigated.append(line))
+    QTest.keyClick(query, Qt.Key_Return)
+    QTest.qWait(30)
+    assert navigated == [5]
+    assert window._reading_view_enabled
+    assert window.reading_view.browser.hasFocus()
+
+
+def test_main_reading_background_control_uses_shared_picker(main_window, monkeypatch):
+    from sp.app import config
+
+    state = {}
+    monkeypatch.setattr(config, "_update_global_config", state.update)
+    button = main_window._reading_theme_button
+    assert button is main_window.reading_view.theme_toggle
+    assert button.width() >= 40
+    main_window.reading_view._apply_background("white")
+    button.click()
+    assert state["reading_view_background"] == "theme"
+    main_window.reading_view._background_actions["paper"].trigger()
+    assert state["reading_view_background"] == "paper"
+    assert main_window.reading_view._paper_color.name() == "#f5f0e6"
+
+
+def test_reading_background_picker_cycles_and_syncs(qtbot, monkeypatch):
+    from sp.app import config
+
+    state = {"reading_view_background": "white"}
+    monkeypatch.setattr(config, "_read_global_config", lambda: state)
+    monkeypatch.setattr(config, "_update_global_config", state.update)
+    first, second = MarkdownReadingView(), MarkdownReadingView()
+    qtbot.addWidget(first)
+    qtbot.addWidget(second)
+    for name, color in (("theme", None), ("paper", "#f5f0e6"),
+                        ("mist", "#e5e7eb"), ("dusk", "#252a30"),
+                        ("white", "#ffffff")):
+        first.theme_toggle.click()
+        assert state["reading_view_background"] == name
+        assert second._reading_background == name
+        assert second._background_actions[name].isChecked()
+        if color:
+            assert second._paper_color.name() == color
+    first._background_actions["paper"].trigger()
+    second.set_theme_palette(QPalette())
+    assert second._reading_background == "paper"
+    assert second._paper_color.name() == "#f5f0e6"
+
+
 @pytest.mark.parametrize("anchors", [False, True])
 def test_indented_task_notes_render_formatting_instead_of_code(anchors):
     rendered = render_markdown_html(
@@ -80,6 +149,24 @@ def test_reading_view_renders_live_markdown_without_a_print_url(
     view.find_query.setText("Alpha")
     view.find_next()
     assert view.browser.textCursor().selectedText() == "Alpha"
+
+
+def test_reading_view_preserves_loose_ordered_list_numbering(qtbot) -> None:
+    text = "# Elders\n\n1. First elder\n\n2. Second elder\n\n3. Third elder"
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown(text)
+
+    assert view.last_html.count("<ol>") == 1
+    document = view.browser.document()
+    items = []
+    block = document.begin()
+    while block.isValid():
+        if "elder" in block.text():
+            items.append(block.textList().itemText(block))
+        block = block.next()
+    assert items == ["1.", "2.", "3."]
+    assert [line for _position, line in view._source_positions] == [1, 3, 5, 7]
 
 
 def test_reading_view_keeps_source_positions_for_image_only_blocks(qtbot) -> None:
@@ -539,6 +626,9 @@ def test_reading_view_defaults_white_and_can_persist_theme_colors(
     import sp.app.ui.markdown_preview as preview_module
 
     state = {"enabled": False}
+    monkeypatch.setattr(preview_module.config, "load_reading_view_background",
+                        lambda: "theme" if state["enabled"] else "white")
+    monkeypatch.setattr(preview_module.config, "save_reading_view_background", lambda value: None)
     values = {
         "markdown_preview.paper_bg": "#fdfaf2",
         "markdown_preview.text": "#201a16",
@@ -587,6 +677,8 @@ def test_reading_view_theme_mode_uses_live_palette_when_preview_is_stock(
     qtbot, monkeypatch
 ) -> None:
     import sp.app.ui.markdown_preview as preview_module
+    monkeypatch.setattr(preview_module.config, "load_reading_view_background", lambda: "white")
+    monkeypatch.setattr(preview_module.config, "save_reading_view_background", lambda value: None)
 
     monkeypatch.setattr(
         preview_module.config,

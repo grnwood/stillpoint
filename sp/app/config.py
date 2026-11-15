@@ -512,6 +512,40 @@ def save_reading_view_use_theme_colors(enabled: bool) -> None:
     _update_global_config({"reading_view_use_theme_colors": bool(enabled)})
 
 
+def load_reading_view_background() -> str:
+    value = _read_global_config().get("reading_view_background")
+    if value in {"theme", "white", "paper", "mist", "dusk"}:
+        return value
+    return "theme" if load_reading_view_use_theme_colors() else "white"
+
+
+def save_reading_view_background(background: str) -> None:
+    if background not in {"theme", "white", "paper", "mist", "dusk"}:
+        raise ValueError("Unknown reading background")
+    _update_global_config({"reading_view_background": background})
+
+
+def load_mode_reading_preferences(mode: str) -> dict:
+    payload = _read_global_config().get(f"{mode}_reading", {})
+    payload = payload if isinstance(payload, dict) else {}
+    background = payload.get("background", "theme")
+    return {
+        "background": background if background in {"theme", "white", "paper", "mist", "dusk"} else "theme",
+        "options": normalize_reading_options(payload.get("options", {})),
+    }
+
+
+def save_mode_reading_preferences(mode: str, *, background=None, options=None) -> None:
+    if mode not in {"focus", "audience"}:
+        raise ValueError("Unknown reading mode")
+    preferences = load_mode_reading_preferences(mode)
+    if background is not None:
+        preferences["background"] = background
+    if options is not None:
+        preferences["options"] = normalize_reading_options(options)
+    _update_global_config({f"{mode}_reading": preferences})
+
+
 def normalize_reading_options(value) -> dict:
     value = value if isinstance(value, dict) else {}
     width = value.get("width", "comfortable")
@@ -1569,6 +1603,7 @@ def load_focus_mode_settings() -> dict:
         "center_column": True,
         "max_column_width_chars": 80,
         "typewriter_scrolling": False,
+        "reading_view": False,
         "paragraph_focus": False,
         "font_size": load_default_markdown_font_size(),
         "font_scale": 1.0,
@@ -1604,6 +1639,7 @@ def load_audience_mode_settings() -> dict:
         "font_scale": 1.15,
         "line_height_scale": 1.15,
         "cursor_spotlight": True,
+        "reading_view": False,
         "paragraph_highlight": True,
         "soft_autoscroll": True,
         "show_floating_tools": True,

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -80,6 +81,7 @@ def _load_one_shot_prompt() -> str:
     _ONE_SHOT_PROMPT_CACHE = default_prompt
     return default_prompt
 from .markdown_editor import MarkdownEditor
+from .markdown_preview import MarkdownReadingView
 from .keyboard_shortcuts import is_vi_navigation_chord
 from .date_insert_dialog import DateInsertDialog
 from .find_replace_bar import FindReplaceBar
@@ -264,6 +266,7 @@ class ModeWindow(QMainWindow):
         self._build_ui(read_only)
         self._wire_shortcuts()
         self._apply_mode_styling()
+        self._set_reading_view(bool(self._settings.get("reading_view", False)), persist=False)
         self._position_overlays()
         
         # Install event filter to catch Control key release for popup navigation
@@ -294,6 +297,17 @@ class ModeWindow(QMainWindow):
             header.addWidget(self._ai_button, 0, Qt.AlignVCenter)
         header.addWidget(title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
+        self._reading_toggle = QToolButton()
+        self._reading_toggle.setIcon(self._tinted_icon(Path(__file__).resolve().parents[2] / "assets" / "read-mode.svg"))
+        self._reading_toggle.setFixedSize(36, 28)
+        self._reading_toggle.setText("Read")
+        self._reading_toggle.setToolTip("Toggle Reading View")
+        self._reading_toggle.setAccessibleName("Toggle Reading View")
+        self._reading_toggle.setCheckable(True)
+        self._reading_toggle.setFocusPolicy(Qt.NoFocus)
+        self._reading_toggle.setStyleSheet(self._mode_button_style())
+        self._reading_toggle.toggled.connect(self._set_reading_view)
+        header.addWidget(self._reading_toggle)
         if self.mode != "audience" and self._ai_button:
             header.addWidget(self._ai_button, 0, Qt.AlignRight | Qt.AlignVCenter)
 
@@ -403,6 +417,27 @@ class ModeWindow(QMainWindow):
         self.editor.setFocusPolicy(Qt.StrongFocus)
         self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         host_layout.addWidget(self.editor, 1)
+        self.reading_view = MarkdownReadingView(preference_scope=self.mode)
+        self.reading_view.set_header_visible(False)
+        self.reading_view.browser.installEventFilter(self)
+        self.reading_view.hide()
+        host_layout.addWidget(self.reading_view, 1)
+        self._reading_background = self.reading_view.theme_toggle
+        self._reading_background.setParent(container)
+        self._reading_background.setFixedSize(40, 28)
+        background_size_policy = self._reading_background.sizePolicy()
+        background_size_policy.setRetainSizeWhenHidden(True)
+        self._reading_background.setSizePolicy(background_size_policy)
+        self._reading_background.setStyleSheet(self._mode_button_style())
+        header.insertWidget(header.indexOf(self._reading_toggle) + 1, self._reading_background)
+        self._reading_options = self.reading_view.options_button
+        self._reading_options.setParent(container)
+        self._reading_options.setFixedSize(36, 28)
+        self._reading_options.setStyleSheet(self._mode_button_style())
+        self._reading_options_opacity = QGraphicsOpacityEffect(self._reading_options)
+        self._reading_options.setGraphicsEffect(self._reading_options_opacity)
+        self._reading_options.setIcon(self._tinted_icon(Path(__file__).resolve().parents[2] / "assets" / "reading-options.svg"))
+        header.insertWidget(header.indexOf(self._reading_background) + 1, self._reading_options)
 
         root.addWidget(editor_host, 1)
 
@@ -439,6 +474,46 @@ class ModeWindow(QMainWindow):
         lighter = max(l1, l2)
         darker = min(l1, l2)
         return (lighter + 0.05) / (darker + 0.05)
+
+    def _set_reading_view(self, enabled: bool, *, persist: bool = True) -> None:
+        if enabled:
+            self.reading_view.set_vi_enabled(config.load_vi_mode_enabled())
+            self.reading_view.match_editor_layout(self.editor)
+            line, screen_y = self.reading_view.editor_view_position(self.editor)
+            self.reading_view.set_markdown(
+                self.editor.to_markdown(),
+                base_directory=(Path(self._vault_root) / self._page_path.lstrip("/")).parent
+                if self._vault_root and self._page_path else None,
+                source_line=line, anchor_global_y=screen_y,
+            )
+        elif not self.reading_view.isHidden():
+            line, _ = self.reading_view.reading_view_position()
+            block = self.editor.document().findBlockByNumber(max(0, line - 1))
+            if block.isValid():
+                self.editor.setTextCursor(QTextCursor(block))
+                self.editor.ensureCursorVisible()
+        self.editor.setVisible(not enabled)
+        self.reading_view.setVisible(enabled)
+        self._reading_background.setVisible(enabled)
+        self._reading_options.setEnabled(enabled)
+        self._reading_options_opacity.setOpacity(1.0 if enabled else 0.35)
+        self._reading_toggle.blockSignals(True)
+        self._reading_toggle.setChecked(enabled)
+        self._reading_toggle.blockSignals(False)
+        if persist:
+            self._settings["reading_view"] = enabled
+            save = config.save_focus_mode_settings if self.mode == "focus" else config.save_audience_mode_settings
+            save(self._settings)
+        self._focus_active_surface()
+        # Let shortcut dispatch and deferred layout finish before restoring
+        # focus, so scrolling keys reach the newly visible surface.
+        QTimer.singleShot(0, self._focus_active_surface)
+
+    def _focus_active_surface(self) -> None:
+        if self._reading_toggle.isChecked():
+            self.reading_view.browser.setFocus(Qt.ShortcutFocusReason)
+        else:
+            self.editor.setFocus(Qt.ShortcutFocusReason)
 
     def _build_audience_tools_in_header(self, header: QHBoxLayout) -> None:
         """Add audience mode tools directly to the header bar."""
@@ -579,6 +654,8 @@ class ModeWindow(QMainWindow):
         # Treat both mode hotkeys as toggles while overlay is open.
         _add_shortcut("Ctrl+Alt+F", self._request_close)
         _add_shortcut("Ctrl+Alt+A", self._request_close)
+        _add_shortcut("Ctrl+Space", self._reading_toggle.toggle)
+        _add_shortcut("Meta+Space", self._reading_toggle.toggle)
 
         if self.mode == "audience":
             _add_shortcut("Ctrl+Alt+=", lambda: self._adjust_font_scale(0.05))
@@ -727,10 +804,19 @@ class ModeWindow(QMainWindow):
             selection_bg = palette.color(QPalette.Highlight)
         padding = "28px 40px" if self.mode == "focus" else "38px 72px"
         scaled_size = int(self._base_font_size * self._font_scale)
+        # A hidden editor has not necessarily had its stylesheet polished yet.
+        # Reading startup must see the mode font immediately, before first show.
+        mode_font = QFont(self.editor.font())
+        mode_font.setFamily(self._base_font_family)
+        mode_font.setPointSize(scaled_size)
+        self.editor.setFont(mode_font)
+        self.editor.set_font_point_size(scaled_size)
         pal = self.editor.palette()
         pal.setColor(QPalette.Base, palette_bg)
         pal.setColor(QPalette.Text, text_color)
         pal.setColor(QPalette.Highlight, selection_bg)
+        # Reading theme colors follow this mode's editor palette.
+        self.reading_view.set_theme_palette(pal)
         self.editor.setPalette(pal)
         try:
             viewport = self.editor.viewport()
@@ -960,6 +1046,9 @@ class ModeWindow(QMainWindow):
         return False
 
     def _show_find_bar(self, *, replace: bool, backwards: bool, seed: Optional[str] = None) -> None:
+        if self._reading_toggle.isChecked():
+            self.reading_view.show_find()
+            return
         query = (seed or "").strip()
         if not query:
             query = self.editor.last_search_query()
@@ -1039,6 +1128,12 @@ class ModeWindow(QMainWindow):
     def _adjust_font_scale(self, delta: float) -> None:
         self._font_scale = max(1.0, min(2.5, self._font_scale + delta))
         self._apply_mode_styling()
+        if self._reading_toggle.isChecked():
+            line, y = self.reading_view.reading_view_position()
+            self.reading_view.match_editor_layout(self.editor)
+            self.reading_view.set_markdown(self.editor.to_markdown(),
+                                          base_directory=self.reading_view.base_directory,
+                                          source_line=line, anchor_global_y=y)
         if self.mode == "audience":
             settings = config.load_audience_mode_settings()
             settings["font_scale"] = self._font_scale
@@ -1350,14 +1445,17 @@ class ModeWindow(QMainWindow):
             self.editor.setTextCursor(cursor)
             self.editor.ensureCursorVisible()
             self._flash_heading_selection(cursor)
+            if self._reading_toggle.isChecked():
+                self.reading_view.scroll_to_source_line(cursor.blockNumber() + 1)
             popup.close()
-            QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+            QTimer.singleShot(0, self._focus_active_surface)
 
         filter_edit.textChanged.connect(populate)
         list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
         list_widget.itemActivated.connect(lambda *_: activate_current())
 
         editor_ref = self.editor
+        focus_active_surface = self._focus_active_surface
 
         from PySide6.QtCore import QObject
         class _PickerFilter(QObject):
@@ -1399,7 +1497,7 @@ class ModeWindow(QMainWindow):
                     if ev.key() == Qt.Key_Escape:
                         popup.close()
                         if editor_ref:
-                            QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
+                            QTimer.singleShot(0, focus_active_surface)
                         return True
                 return False
 
@@ -1408,29 +1506,17 @@ class ModeWindow(QMainWindow):
         list_widget.installEventFilter(filt)
         populate("")
 
-        # Audience mode is presentation-oriented, so keep the picker in a
-        # predictable place instead of making it follow the editing cursor.
-        popup.resize(360, min(320, max(160, list_widget.sizeHintForRow(0) * min(8, list_widget.count()) + 64)))
+        surface = self.reading_view if self._reading_toggle.isChecked() else self.editor
+        page_rect = surface.rect()
+        popup_width = min(max(420, int(page_rect.width() * 0.65)), max(420, page_rect.width() - 40))
+        popup_height = max(260, int(page_rect.height() * 0.65))
+        popup.resize(popup_width, popup_height)
         size = popup.size()
-        if self.mode == "audience":
-            viewport = self.editor.viewport()
-            viewport_rect = viewport.rect()
-            viewport_top_left = viewport.mapToGlobal(viewport_rect.topLeft())
-            viewport_center = viewport.mapToGlobal(viewport_rect.center())
-            screen = popup_available_geometry(anchor=viewport_center, parent=self.editor)
-            x = viewport_center.x() - (size.width() // 2)
-            y = viewport_top_left.y() + max(24, min(72, viewport_rect.height() // 12))
-        else:
-            screen = popup_available_geometry(anchor=global_pos, parent=self.editor)
-            x = max(screen.left(), min(global_pos.x(), screen.right() - size.width() + 1))
-            if prefer_above:
-                y = global_pos.y() - size.height() - 8
-                if y < screen.top():
-                    y = global_pos.y() + 12
-            else:
-                y = global_pos.y() + 12
-                if y + size.height() > screen.bottom() + 1:
-                    y = global_pos.y() - size.height() - 8
+        center = surface.mapToGlobal(page_rect.center())
+        top = surface.mapToGlobal(page_rect.topLeft())
+        screen = popup_available_geometry(anchor=center, parent=surface)
+        x = center.x() - size.width() // 2
+        y = top.y() + page_rect.height() // 4
         popup.move(clamp_popup_top_left(QPoint(x, y), size, screen))
         popup.show()
         popup.raise_()
@@ -1594,6 +1680,10 @@ class ModeWindow(QMainWindow):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         """Handle Ctrl key release to activate heading popup selection."""
+        if (obj is getattr(getattr(self, "reading_view", None), "browser", None) and event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_T and event.modifiers() == Qt.NoModifier):
+            self._request_heading_picker_popup()
+            return True
         if event.type() == QEvent.KeyRelease:
             if event.key() == Qt.Key_Control and self._popup_items:
                 self._activate_heading_popup_selection()
@@ -1619,6 +1709,11 @@ class ModeWindow(QMainWindow):
             self._pending_close = True
             event.ignore()
             return
+        if self._reading_toggle.isChecked():
+            line, _ = self.reading_view.reading_view_position()
+            block = self.editor.document().findBlockByNumber(max(0, line - 1))
+            if block.isValid():
+                self.editor.setTextCursor(QTextCursor(block))
         self._sync_vi_insert_to_base()
         try:
             if not self._read_only:
@@ -1776,7 +1871,7 @@ class ModeWindow(QMainWindow):
             )
         except Exception:
             pass
-        QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.ShortcutFocusReason))
+        QTimer.singleShot(0, self._focus_active_surface)
 
     def _update_vi_badge(self, insert_active: bool) -> None:
         if not hasattr(self, "_vi_badge"):

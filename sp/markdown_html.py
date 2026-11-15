@@ -80,6 +80,15 @@ def _add_source_anchors(text: str) -> str:
     output: list[str] = []
     for index, line in enumerate(text.splitlines(), start=1):
         if index in starts:
+            ordered_item = re.match(r"^(\s*\d+\.\s+)(.*)$", line)
+            if ordered_item:
+                # A standalone anchor paragraph between loose list items
+                # splits the list, restarting its numbering at one.
+                output.append(
+                    f'{ordered_item.group(1)}<span id="sp-source-{index}">&#8203;</span>'
+                    f'{ordered_item.group(2)}'
+                )
+                continue
             # A zero-width character keeps the anchor alive in QTextDocument.
             # Qt can discard a truly empty span, notably before image blocks.
             output.extend((f'<span id="sp-source-{index}">&#8203;</span>', ""))

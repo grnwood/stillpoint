@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QMouseEvent,
     QPainter,
+    QPixmap,
     QPalette,
     QResizeEvent,
     QShortcut,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QLineEdit,
     QPushButton,
     QTextBrowser,
@@ -101,6 +103,7 @@ class _ReadingBrowser(QTextBrowser):
     """Selectable HTML reader with optional vi-style scrolling."""
 
     searchRequested = Signal()
+    headingPickerRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -330,6 +333,10 @@ class _ReadingBrowser(QTextBrowser):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         modifiers = event.modifiers() & ~Qt.KeypadModifier
+        if modifiers == Qt.NoModifier and event.key() == Qt.Key_T:
+            self.headingPickerRequested.emit()
+            event.accept()
+            return
         if (
             self.vi_enabled
             and is_vi_navigation_chord(modifiers)
@@ -397,15 +404,23 @@ class MarkdownReadingView(QWidget):
 
     editRequested = Signal()
     linkActivated = Signal(str)
+    backgroundChanged = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, preference_scope=None):
         super().__init__(parent)
+        self.preference_scope = preference_scope
         self.last_markdown = ""
         self.last_html = ""
         self.base_directory: Path | None = None
-        self._use_theme_colors = config.load_reading_view_use_theme_colors()
+        self._reading_background = config.load_reading_view_background()
+        self._use_theme_colors = self._reading_background == "theme"
         self._host_theme_palette: QPalette | None = None
         self.reading_options = config.load_reading_options()
+        if preference_scope in {"focus", "audience"}:
+            preferences = config.load_mode_reading_preferences(preference_scope)
+            self._reading_background = preferences["background"]
+            self._use_theme_colors = self._reading_background == "theme"
+            self.reading_options = preferences["options"]
         self._source_blocks = []
         self._copy_buttons = []
         self._positioning_reader_tools = False
@@ -468,8 +483,23 @@ class MarkdownReadingView(QWidget):
         self.theme_toggle.setObjectName("readingThemeToggle")
         self.theme_toggle.setCheckable(True)
         self.theme_toggle.setChecked(self._use_theme_colors)
+        background_menu = QMenu(self.theme_toggle)
+        self._background_actions = {}
+        for name, color in (("theme", "#303840"), ("white", "#ffffff"),
+                            ("paper", "#f5f0e6"), ("mist", "#e5e7eb"),
+                            ("dusk", "#252a30")):
+            swatch = QPixmap(18, 18)
+            swatch.fill(QColor(color))
+            action = background_menu.addAction(QIcon(swatch), name.title())
+            action.setCheckable(True)
+            action.setChecked(name == self._reading_background)
+            action.triggered.connect(lambda checked=False, value=name: self._background_selected(value))
+            self._background_actions[name] = action
+        self.theme_toggle.setMenu(background_menu)
+        self.theme_toggle.setPopupMode(QToolButton.MenuButtonPopup)
+        self.theme_toggle.setMinimumSize(40, 24)
         self.theme_toggle.setIconSize(QSize(18, 18))
-        self.theme_toggle.setAccessibleName("Use theme colors in Reading View")
+        self.theme_toggle.setAccessibleName("Reading background")
         self._update_theme_toggle_tooltip()
         header_layout.addWidget(self.theme_toggle)
         self.options_button = self._reader_button(header, "reading-options.svg", "Reading options")
@@ -553,7 +583,7 @@ class MarkdownReadingView(QWidget):
         self.browser.viewport().installEventFilter(self)
         QApplication.instance().installEventFilter(self)
         self.setFocusProxy(self.browser)
-        self.theme_toggle.toggled.connect(self._theme_mode_toggled)
+        self.theme_toggle.clicked.connect(self._cycle_background)
         self._instances.add(self)
 
         find_shortcut = QShortcut(QKeySequence.Find, self)
@@ -644,11 +674,15 @@ class MarkdownReadingView(QWidget):
 
     def set_reading_options(self, options):
         options = config.normalize_reading_options(options)
-        config.save_reading_options(options)
+        if self.preference_scope:
+            config.save_mode_reading_preferences(self.preference_scope, options=options)
+        else:
+            config.save_reading_options(options)
         for view in list(self._instances):
             # WeakSet can retain Python wrappers briefly after Qt deletes them.
             import shiboken6
-            if not shiboken6.isValid(view) or not shiboken6.isValid(view.browser):
+            if (not shiboken6.isValid(view) or not shiboken6.isValid(view.browser)
+                    or view.preference_scope != self.preference_scope):
                 continue
             view._apply_reading_options(options)
 
@@ -819,21 +853,38 @@ class MarkdownReadingView(QWidget):
 
     def _update_theme_toggle_tooltip(self) -> None:
         self.theme_toggle.setToolTip(
-            "Use the white Reading View background"
-            if self._use_theme_colors
-            else "Use theme colors in Reading View"
+            f"Reading background: {self._reading_background.title()}. Click to cycle; open the menu to choose."
         )
 
-    def _theme_mode_toggled(self, enabled: bool) -> None:
-        config.save_reading_view_use_theme_colors(enabled)
+    def _cycle_background(self) -> None:
+        names = ("white", "theme", "paper", "mist", "dusk")
+        self._background_selected(names[(names.index(self._reading_background) + 1) % len(names)])
+
+    def _background_selected(self, background: str) -> None:
+        if self.preference_scope:
+            config.save_mode_reading_preferences(self.preference_scope, background=background)
+        else:
+            config.save_reading_view_background(background)
+            config.save_reading_view_use_theme_colors(background == "theme")
         for view in list(self._instances):
             import shiboken6
-            if shiboken6.isValid(view) and shiboken6.isValid(view.theme_toggle):
-                view._apply_theme_mode(enabled)
+            if (shiboken6.isValid(view) and shiboken6.isValid(view.theme_toggle)
+                    and view.preference_scope == self.preference_scope):
+                view._apply_background(background)
+                view.backgroundChanged.emit(background)
+
+    def _theme_mode_toggled(self, enabled: bool) -> None:
+        self._background_selected("theme" if enabled else "white")
 
     def _apply_theme_mode(self, enabled: bool) -> None:
+        self._apply_background("theme" if enabled else "white")
+
+    def _apply_background(self, background: str) -> None:
         source_line, screen_y = self.reading_view_position() if self.last_markdown else (1, None)
-        self._use_theme_colors = bool(enabled)
+        self._reading_background = background
+        self._use_theme_colors = background == "theme"
+        for name, action in self._background_actions.items():
+            action.setChecked(name == background)
         blocked = self.theme_toggle.blockSignals(True)
         self.theme_toggle.setChecked(self._use_theme_colors)
         self.theme_toggle.blockSignals(blocked)
@@ -901,6 +952,17 @@ class MarkdownReadingView(QWidget):
             table_header = "#e9edf2"
             code_bg = "#f6f8fa"
             highlight = "#1a5fb4"
+            if self._reading_background in {"paper", "mist", "dusk"}:
+                paper, text = {
+                    "paper": ("#f5f0e6", "#302c25"),
+                    "mist": ("#e5e7eb", "#25282d"),
+                    "dusk": ("#252a30", "#dee2e7"),
+                }[self._reading_background]
+                dark = self._reading_background == "dusk"
+                muted = "#aeb7c2" if dark else "#62605a"
+                border = "#59636f" if dark else "#b8b6b0"
+                table_header = code_bg = "#333b45" if dark else QColor(paper).darker(105).name()
+                highlight = "#8fc5ff" if dark else "#1a5fb4"
         table_border = _reading_table_border(paper, table_header, border)
         self._paper_color = QColor(paper)
         self._text_color = QColor(text)
@@ -988,7 +1050,7 @@ class MarkdownReadingView(QWidget):
         """Use the host's local colors and refresh any rendered theme content."""
         self._host_theme_palette = QPalette(palette)
         self.setPalette(palette)
-        self._apply_theme_mode(self._use_theme_colors)
+        self._apply_background(self._reading_background)
 
     def set_vi_cursor_style(self, style: str) -> None:
         self.browser.set_vi_state(self.browser.vi_enabled, style)

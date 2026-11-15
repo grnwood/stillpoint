@@ -1275,6 +1275,35 @@ class VaultTreeView(QTreeView):
         self.setDropIndicatorShown(True)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+        # Keep scrolling even when the pointer is stationary during a drag.
+        self.setAutoScroll(False)
+        self._edge_drag_position: QPoint | None = None
+        self._edge_drag_timer = QTimer(self)
+        self._edge_drag_timer.setInterval(40)
+        self._edge_drag_timer.timeout.connect(self._scroll_drag_edge)
+
+    def _stop_drag_edge_scroll(self) -> None:
+        self._edge_drag_timer.stop()
+        self._edge_drag_position = None
+
+    def _scroll_drag_edge(self) -> None:
+        point = self._edge_drag_position
+        if point is None:
+            return
+        margin = 36
+        height = self.viewport().height()
+        direction = -1 if point.y() < margin else 1 if point.y() >= height - margin else 0
+        if direction:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + direction * max(1, bar.singleStep()))
+
+    def viewportEvent(self, event):  # type: ignore[override]
+        if event.type() == QEvent.DragMove:
+            self._edge_drag_position = event.position().toPoint()
+            self._edge_drag_timer.start()
+        elif event.type() in (QEvent.DragLeave, QEvent.Drop, QEvent.Hide):
+            self._stop_drag_edge_scroll()
+        return super().viewportEvent(event)
 
     def focusInEvent(self, event):  # type: ignore[override]
         super().focusInEvent(event)
@@ -3042,6 +3071,7 @@ class MainWindow(QMainWindow):
             lambda: self._set_reading_view_enabled(False)
         )
         self.reading_view.linkActivated.connect(self._open_reading_view_link)
+        self.reading_view.browser.headingPickerRequested.connect(self._request_heading_picker_popup)
         self.reading_view.set_base_font_point_size(self.font_size)
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
         self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
@@ -3467,22 +3497,8 @@ class MainWindow(QMainWindow):
         self._update_reading_view_action()
         self._action_reading_view.triggered.connect(self._set_reading_view_enabled)
         view_mode_menu.addAction(self._action_reading_view)
-        self._action_reading_theme_colors = QAction(
-            "Use Theme Colors in Reading View",
-            self,
-        )
-        self._action_reading_theme_colors.setCheckable(True)
-        self._action_reading_theme_colors.setChecked(
-            self.reading_view.theme_toggle.isChecked()
-        )
-        self._action_reading_theme_colors.toggled.connect(
-            self.reading_view.theme_toggle.setChecked
-        )
-        self.reading_view.theme_toggle.toggled.connect(
-            self._sync_reading_theme_action
-        )
-        view_mode_menu.addAction(self._action_reading_theme_colors)
-        self._sync_reading_theme_action(self.reading_view.theme_toggle.isChecked())
+        background_menu = view_mode_menu.addMenu("Reading Background")
+        background_menu.addActions(list(self.reading_view._background_actions.values()))
         view_menu.addSeparator()
         reset_view_action = QAction("Reset View/Layout", self)
         reset_view_action.setToolTip("Reset window size and splitter positions to defaults")
@@ -3802,15 +3818,15 @@ class MainWindow(QMainWindow):
         self._reading_mode_button.setStyleSheet(self._mode_button_style())
         self._reading_mode_button.hide()
         self._editor_status_layout.addWidget(self._reading_mode_button)
-        self._reading_theme_button = QToolButton(self._editor_status)
+        self._reading_theme_button = self.reading_view.theme_toggle
+        self._reading_theme_button.setParent(self._editor_status)
         self._reading_theme_button.setObjectName("readingThemeStatusToggle")
         self._reading_theme_button.setAutoRaise(True)
         self._reading_theme_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._reading_theme_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._reading_theme_button.setIconSize(QSize(16, 16))
-        self._reading_theme_button.setFixedSize(24, 22)
-        self._reading_theme_button.setAccessibleName("Use theme colors in Reading View")
-        self._reading_theme_button.setDefaultAction(self._action_reading_theme_colors)
+        self._reading_theme_button.setFixedSize(40, 24)
+        self._reading_theme_button.setAccessibleName("Reading background")
         self._reading_theme_button.setStyleSheet(self._mode_button_style())
         self._reading_theme_button.setVisible(self._reading_view_enabled)
         self._editor_status_layout.addWidget(self._reading_theme_button)
@@ -14239,6 +14255,10 @@ class MainWindow(QMainWindow):
                     pass
             self._heading_picker_autosave_active = False
 
+        def focus_picker_surface() -> None:
+            surface = self.reading_view.browser if self._reading_view_enabled else self.editor
+            surface.setFocus(Qt.OtherFocusReason)
+
         def activate_current() -> None:
             item = list_widget.currentItem()
             if not item:
@@ -14251,10 +14271,13 @@ class MainWindow(QMainWindow):
             except Exception:
                 pos = 0
             cursor = self._cursor_at_position(max(0, pos))
-            self._animate_or_flash_to_cursor(cursor)
+            if self._reading_view_enabled:
+                self.reading_view.scroll_to_source_line(cursor.blockNumber() + 1)
+            else:
+                self._animate_or_flash_to_cursor(cursor)
             finish_picker()
             popup.close()
-            QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+            QTimer.singleShot(0, focus_picker_surface)
 
         filter_edit.textChanged.connect(populate)
         list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
@@ -14303,7 +14326,7 @@ class MainWindow(QMainWindow):
                         finish_picker()
                         popup.close()
                         if editor_ref:
-                            QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
+                            QTimer.singleShot(0, focus_picker_surface)
                         return True
                 return False
 
@@ -14312,10 +14335,11 @@ class MainWindow(QMainWindow):
         list_widget.installEventFilter(filt)
         populate("")
 
-        editor_rect = self.editor.rect()
+        surface = self.reading_view if self._reading_view_enabled else self.editor
+        editor_rect = surface.rect()
         popup_width = min(max(420, int(editor_rect.width() * 0.65)), max(420, editor_rect.width() - 40))
         popup_height = max(260, int(editor_rect.height() * 0.65))
-        center = self.editor.mapToGlobal(editor_rect.center())
+        center = surface.mapToGlobal(editor_rect.center())
         screen_geo = popup_available_geometry(anchor=global_pos, parent=self.editor)
         desired = QPoint(center.x() - popup_width // 2, center.y() - popup_height // 2)
         top_left = clamp_popup_top_left(desired, QSize(popup_width, popup_height), screen_geo)
@@ -15041,6 +15065,8 @@ class MainWindow(QMainWindow):
         restore_history_cursor: bool = False,
         sync_calendar: bool = True,
     ) -> bool:
+        if self.property("_sp_closing"):
+            return False
         if path:
             path = self._normalize_root_page_path(path)
         self._close_git_diff_editor()
@@ -20644,6 +20670,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_mode_overlay(self, mode: str) -> None:
         """Toggle Focus/Audience mode full-screen overlay."""
+        if self.property("_sp_closing"):
+            return
         normalized = (mode or "").lower()
         if normalized not in {"focus", "audience"}:
             return
@@ -20723,6 +20751,11 @@ class MainWindow(QMainWindow):
         """Reset state after an overlay window closes."""
         self._mode_window_pending = False
         self._mode_window = None
+        if self.property("_sp_closing"):
+            self._pending_mode_target = None
+            self._pending_reload_path = None
+            self._pending_mode_navigation = None
+            return
         pending_target = getattr(self, "_pending_mode_target", None)
         self._pending_mode_target = None
         if self.current_path:
@@ -20752,6 +20785,11 @@ class MainWindow(QMainWindow):
 
     def _process_mode_pending(self, pending_target: str | None = None) -> None:
         """Handle deferred reloads or mode switches once overlays are settled."""
+        if self.property("_sp_closing"):
+            self._pending_reload_path = None
+            self._pending_mode_navigation = None
+            self._pending_mode_target = None
+            return
         if self._mode_window_pending:
             return
         reload_path = getattr(self, "_pending_reload_path", None)
@@ -25331,6 +25369,8 @@ class MainWindow(QMainWindow):
     
     def _reload_page_preserve_cursor(self, path: str) -> None:
         """Reload a page while keeping its last known cursor position."""
+        if self.property("_sp_closing"):
+            return
         if not self._feature_remember_cursor_position_enabled:
             self._open_file(path, add_to_history=False, force=True, restore_history_cursor=False)
             return

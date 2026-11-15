@@ -26,3 +26,14 @@ def test_reading_view_theme_colors_loads_and_saves(monkeypatch) -> None:
     config.save_reading_view_use_theme_colors(False)
 
     assert updates == [{"reading_view_use_theme_colors": False}]
+
+
+def test_reading_background_migrates_and_persists(monkeypatch):
+    state = {"reading_view_use_theme_colors": True}
+    monkeypatch.setattr(config, "_read_global_config", lambda: state)
+    monkeypatch.setattr(config, "_update_global_config", state.update)
+    assert config.load_reading_view_background() == "theme"
+    config.save_reading_view_background("paper")
+    assert config.load_reading_view_background() == "paper"
+    state["reading_view_background"] = "unknown"
+    assert config.load_reading_view_background() == "theme"

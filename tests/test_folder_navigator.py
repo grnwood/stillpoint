@@ -2311,6 +2311,36 @@ def test_tree_drag_out_publishes_native_file_urls(tmp_path):
     ]
 
 
+def test_tree_drag_edge_scrolling_and_cleanup(tmp_path, monkeypatch, app):
+    from PySide6.QtCore import QPoint
+    from sp.app.folder_navigator.window import NavigatorTree
+
+    tree = NavigatorTree()
+    tree.resize(300, 240)
+    tree.show()
+    app.processEvents()
+    monkeypatch.setattr(tree, "_drop_directory", lambda point: tmp_path)
+    bar = tree.verticalScrollBar()
+    bar.setRange(0, 100)
+    bar.setSingleStep(2)
+    bar.setValue(50)
+    tree._drag_position = QPoint(20, 1)
+    tree._scroll_during_drag()
+    assert bar.value() == 48
+    tree._drag_position = QPoint(20, tree.viewport().height() - 1)
+    tree._scroll_during_drag()
+    assert bar.value() == 50
+    tree._drag_position = QPoint(20, tree.viewport().height() // 2)
+    tree._scroll_during_drag()
+    assert bar.value() == 50
+    tree._drag_scroll_timer.start()
+    tree._clear_drag_feedback()
+    assert not tree._drag_scroll_timer.isActive()
+    assert tree._drag_target is None
+    assert tree._drag_position is None
+    tree.close()
+
+
 def test_tree_drag_out_defaults_to_copy_but_keeps_internal_move(
         tmp_path, monkeypatch, app):
     from PySide6.QtCore import Qt
@@ -2329,6 +2359,12 @@ def test_tree_drag_out_defaults_to_copy_but_keeps_internal_move(
         def setMimeData(self, mime):
             captured["mime"] = mime
 
+        def setPixmap(self, pixmap):
+            captured["pixmap"] = pixmap
+
+        def setHotSpot(self, point):
+            captured["hotspot"] = point
+
         def exec(self, actions, default_action):
             captured["actions"] = actions
             captured["default"] = default_action
@@ -2338,6 +2374,7 @@ def test_tree_drag_out_defaults_to_copy_but_keeps_internal_move(
     tree.startDrag(Qt.CopyAction | Qt.MoveAction)
 
     assert captured["parent"] is tree
+    assert not captured["pixmap"].isNull()
     assert captured["mime"].urls()[0].toLocalFile() == str(source.absolute())
     assert captured["actions"] & Qt.CopyAction
     assert captured["actions"] & Qt.MoveAction
@@ -3044,6 +3081,41 @@ def test_image_preview_honors_orientation_and_fits(tmp_path, monkeypatch, app):
     assert view.zoom > initial_zoom
     window._zoom_active_view(-1)
     assert view.zoom == pytest.approx(initial_zoom)
+    window.close()
+
+
+def test_pdf_preview_refreshes_after_disk_change(tmp_path, monkeypatch, app):
+    from PySide6.QtWidgets import QWidget
+    from sp.app.folder_navigator import window as module
+    from sp.app.folder_navigator.core import fingerprint
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / "sample.pdf"
+    path.write_bytes(b"original PDF")
+    previews = []
+
+    def preview(source, **kwargs):
+        previews.append(Path(source).read_bytes())
+        return QWidget()
+
+    monkeypatch.setattr(module, "pdf_view", preview)
+    window = module.Window(tmp_path)
+    window.open_file(path, pinned=True)
+    tab = window.active_tab()
+    original_view = tab.viewer
+    window._refresh_disk()
+    assert previews == [b"original PDF"]
+    assert tab.viewer is original_view
+
+    replacement = tmp_path / "replacement.pdf"
+    replacement.write_bytes(b"updated PDF content")
+    replacement.replace(path)
+    window._refresh_disk()
+    assert previews == [b"original PDF", b"updated PDF content"]
+    assert tab.viewer is not original_view
+    assert tab.preview_signature == fingerprint(path)
+    window._refresh_disk()
+    assert len(previews) == 2
     window.close()
 
 

@@ -11,6 +11,40 @@ from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtTest import QTest
 
 
+def test_vault_tree_scrolls_at_drag_edges(qtbot):
+    from PySide6.QtCore import QPoint, QEvent
+    from PySide6.QtGui import QStandardItem, QStandardItemModel
+    from sp.app.ui.main_window import VaultTreeView
+
+    tree = VaultTreeView()
+    qtbot.addWidget(tree)
+    model = QStandardItemModel(tree)
+    for number in range(100):
+        model.appendRow(QStandardItem(f"Page {number}"))
+    tree.setModel(model)
+    tree.resize(300, 240)
+    tree.show()
+    QTest.qWait(50)
+    assert tree.verticalScrollBar().maximum() > 20
+    bar = tree.verticalScrollBar()
+    bar.setValue(20)
+    tree._edge_drag_position = QPoint(20, 1)
+    tree._edge_drag_timer.start()
+    QTest.qWait(100)
+    assert bar.value() < 20
+    tree._edge_drag_position = QPoint(20, tree.viewport().height() - 1)
+    before = bar.value()
+    QTest.qWait(100)
+    assert bar.value() > before
+    tree._edge_drag_position = QPoint(20, tree.viewport().height() // 2)
+    before = bar.value()
+    tree._scroll_drag_edge()
+    assert bar.value() == before
+    tree.viewportEvent(QEvent(QEvent.DragLeave))
+    assert not tree._edge_drag_timer.isActive()
+    assert tree._edge_drag_position is None
+
+
 class TestTreeExpansionNavigation:
     """Test tree expansion behavior during navigation."""
     
