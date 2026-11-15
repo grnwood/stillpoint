@@ -69,6 +69,15 @@ Folder Navigator reuses StillPoint's Markdown editor for Markdown files and a sy
 - Closing dirty tabs or the window offers Save, Discard, and Cancel choices.
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle tabs using StillPoint's familiar switcher.
 - In a Markdown editor, `t` in vi navigation mode or `Ctrl+Alt+T` opens the heading picker, fixed in the editor viewport.
+- The floating table of contents appears at the upper-right of both Markdown editing and reading views when the document scrolls and has multiple headings. It follows **Enable TOC Widget** in preferences, supports folding and copying heading links, and preserves its fold state when switching views.
+
+### Reading View
+
+For Markdown files, `Ctrl+Space` (`Cmd+Space` on macOS) or the bottom view button switches between editing and reading while preserving your source position. Reading uses this folder's local colors when theme colors are enabled.
+
+The book icon opens the same **Reading options** as StillPoint: centered reading widths, independent text sizing, line spacing, and subtle alternating table rows. These settings persist across sessions. The floating collapsible table of contents supports heading navigation and copying heading links.
+
+The focus icon temporarily hides the folder rail, bookmarks, tabs, and chat. Press `Escape` or click it again to restore your layout. Use the copy icon on code blocks or tables to copy their source Markdown; the button briefly shows a checkmark and **Copied**.
 
 Folder Navigator follows the global StillPoint vi-mode and vi-cursor preferences. The source editor supports navigation keys, selection, find, copy/cut/paste operations, opening a line, and `d` to delete a selection or the current line.
 

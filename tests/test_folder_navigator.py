@@ -3868,6 +3868,40 @@ def test_folder_navigator_persists_root_specific_folder_color(
         restored.close()
 
 
+def test_folder_reading_view_follows_root_color_changes(tmp_path, monkeypatch, app):
+    from sp.app.folder_navigator.window import Window
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    document = tmp_path / "notes.md"
+    document.write_text("# Notes\n\n- Readable list item\n", encoding="utf-8")
+    previous_stylesheet = app.styleSheet()
+    app.setStyleSheet("QWidget { background: #00251f; color: #caffef; }")
+    window = Window(tmp_path)
+    try:
+        window._set_folder_identity_accent("#b51b42")
+        window.open_file(document, pinned=True)
+        tab = window.active_tab()
+        tab.reading_view._apply_theme_mode(True)
+        tab.set_reading_view(True)
+        assert (
+            f"background: {window.palette().color(QPalette.Base).name()}"
+            in tab.reading_view.last_html
+        )
+        for accent in ("#b51b42", "#8b6fcb"):
+            window._set_folder_identity_accent(accent)
+            paper = window.palette().color(QPalette.Base).name()
+            text = window.palette().color(QPalette.Text).name()
+            assert f"background: {paper}" in tab.reading_view.last_html
+            assert f"color: {text}" in tab.reading_view.last_html
+            tab.reading_view.match_editor_layout(tab.editor)
+            tab._refresh_reading_view()
+            assert f"background: {paper}" in tab.reading_view.last_html
+            assert f"color: {text}" in tab.reading_view.last_html
+    finally:
+        window.close()
+        app.setStyleSheet(previous_stylesheet)
+
+
 def test_hidden_files_toggle_persists_and_syncs_with_view_action(
         tmp_path, monkeypatch, app):
     from PySide6.QtCore import QDir

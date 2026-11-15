@@ -88,6 +88,7 @@ from sp.app.ui.theme import (
 )
 from sp.app.ui.utility_header import CompactToolbarIdentity, UtilityPanelHeader
 from sp.app.ui.markdown_preview import MarkdownReadingView
+from sp.app.ui.toc_widget import TableOfContentsWidget
 from sp.app.ui.screen_positioning import (
     clamp_popup_top_left,
     popup_available_geometry,
@@ -2635,6 +2636,8 @@ class Tab(QWidget):
                 self.show_notice("Read-only file: editing and saving are disabled")
             if markdown:
                 self.reading_view = MarkdownReadingView(self)
+                self.reading_view.set_theme_palette(self.palette())
+                self.reading_view.set_header_visible(False)
                 self.reading_view.set_base_font_point_size(
                     self.editor.font().pointSizeF()
                 )
@@ -2669,6 +2672,19 @@ class Tab(QWidget):
                 self.editor_view_stack.addWidget(self.editor)
                 self.editor_view_stack.addWidget(self.reading_view)
                 self.editor_view_stack.setCurrentWidget(self.editor)
+                self._toc_headings = []
+                self.toc_widget = TableOfContentsWidget(self.editor.viewport())
+                self.toc_widget.set_base_path(self.path.resolve().as_uri())
+                self.toc_widget.set_host_palette(self.palette())
+                self.toc_widget.set_collapsed(config.load_toc_collapsed())
+                self.toc_widget.headingActivated.connect(self._toc_jump_to_position)
+                self.toc_widget.collapsedChanged.connect(self._toc_collapsed_changed)
+                self.toc_widget.hide()
+                self.editor.headingsChanged.connect(self._on_toc_headings_changed)
+                self.editor.viewportResized.connect(self._position_editor_toc)
+                self.editor.verticalScrollBar().valueChanged.connect(self._position_editor_toc)
+                self.editor.verticalScrollBar().rangeChanged.connect(self._position_editor_toc)
+                self.editor.refresh_heading_outline()
                 toggle_sequences = ["Ctrl+Space"]
                 if sys.platform == "darwin":
                     toggle_sequences.append("Meta+Space")
@@ -2702,6 +2718,28 @@ class Tab(QWidget):
                 self._update_reading_toggle()
                 self.reading_toggle.toggled.connect(self.set_reading_view)
                 status_layout.addWidget(self.reading_toggle)
+                # Reuse the reader's toggle so its saved preference and
+                # synchronization across open readers stay in one place.
+                self.reading_theme_toggle = self.reading_view.theme_toggle
+                self.reading_theme_toggle.setParent(self.editor_status)
+                self.reading_theme_toggle.setAutoRaise(True)
+                self.reading_theme_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                self.reading_theme_toggle.setFixedSize(24, 22)
+                self.reading_theme_toggle.setIconSize(QSize(16, 16))
+                self.reading_theme_toggle.hide()
+                status_layout.addWidget(self.reading_theme_toggle)
+                for button in (self.reading_view.options_button, self.reading_view.focus_button):
+                    button.setParent(self.editor_status)
+                    button.hide()
+                    status_layout.addWidget(button)
+                for button in (self.reading_toggle, self.reading_theme_toggle):
+                    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                    button.setStyleSheet(
+                        "QToolButton { border: none; padding: 2px 4px; "
+                        "background: transparent; }"
+                        "QToolButton:hover { background: palette(alternate-base); "
+                        "border-radius: 3px; }"
+                    )
             status_layout.addWidget(self.cursor_status)
             status_layout.addStretch()
             status_layout.addWidget(self.file_status)
@@ -2777,7 +2815,10 @@ class Tab(QWidget):
     def _refresh_reading_view(self) -> None:
         if self._retired or not self.markdown or self.editor is None or self.reading_view is None:
             return
-        source_line, screen_y = self.reading_view.editor_view_position(self.editor)
+        if self.editor_view_stack.currentWidget() is self.reading_view and self.reading_view.last_markdown:
+            source_line, screen_y = self.reading_view.reading_view_position()
+        else:
+            source_line, screen_y = self.reading_view.editor_view_position(self.editor)
         self.reading_view.match_editor_layout(self.editor)
         self.reading_view.set_markdown(
             self.editor.to_markdown(),
@@ -2797,7 +2838,15 @@ class Tab(QWidget):
         ):
             return
         self.reading_view_enabled = enabled
+        if enabled:
+            self.reading_view.toc_widget.set_collapsed(self.toc_widget.collapsed())
+        else:
+            self.toc_widget.set_collapsed(self.reading_view.toc_widget.collapsed())
+        self.reading_theme_toggle.setVisible(enabled)
+        self.reading_view.options_button.setVisible(enabled)
+        self.reading_view.focus_button.setVisible(enabled and self.reading_view._focus_targets is not None)
         if not enabled:
+            self.reading_view.set_focus_mode(False)
             self.reading_view.flush_editor_zoom()
         toggle = getattr(self, "reading_toggle", None)
         if toggle is not None:
@@ -2806,6 +2855,7 @@ class Tab(QWidget):
             self._update_reading_toggle()
             toggle.blockSignals(False)
         if enabled:
+            self.reading_view._appearance_changed = False
             cursor = self.editor.textCursor()
             self._reading_saved_cursor = (cursor.anchor(), cursor.position())
             self._reading_saved_scroll = self.editor.verticalScrollBar().value()
@@ -2850,7 +2900,45 @@ class Tab(QWidget):
                 self.editor.verticalScrollBar().setValue(self._reading_saved_scroll)
             self.editor.setFocus(Qt.ShortcutFocusReason)
         self._update_editor_status()
+        self._position_editor_toc()
         self.readingViewChanged.emit(enabled)
+
+    def _on_toc_headings_changed(self, headings):
+        if self._retired:
+            return
+        self._toc_headings = [entry for entry in headings if entry.get("type") != "hr"]
+        self.toc_widget.set_headings(self._toc_headings)
+        self._position_editor_toc()
+
+    def _toc_collapsed_changed(self, collapsed):
+        config.save_toc_collapsed(collapsed)
+        self._position_editor_toc()
+
+    def _position_editor_toc(self, *_args):
+        widget = getattr(self, "toc_widget", None)
+        if widget is None or self._retired:
+            return
+        visible = (
+            not self.reading_view_enabled
+            and config.load_toc_widget_enabled()
+            and len(self._toc_headings) > 1
+            and self.editor.verticalScrollBar().maximum() > 0
+        )
+        widget.setVisible(visible)
+        viewport = self.editor.viewport()
+        widget.move(max(0, viewport.width() - widget.width() - 12), 12)
+        widget.raise_()
+
+    def _toc_jump_to_position(self, position):
+        if self._retired:
+            return
+        cursor = QTextCursor(self.editor.document())
+        cursor.setPosition(max(0, min(int(position), self.editor.document().characterCount() - 1)))
+        self.editor.setTextCursor(cursor)
+        self.editor.ensureCursorVisible()
+        bar = self.editor.verticalScrollBar()
+        bar.setValue(bar.value() + self.editor.cursorRect(cursor).top() - self.editor.viewport().height() // 4)
+        self.editor.setFocus(Qt.OtherFocusReason)
 
     def _update_reading_toggle(self) -> None:
         toggle = getattr(self, "reading_toggle", None)
@@ -4988,8 +5076,11 @@ class Window(QMainWindow):
         self._bookmark_drag_source_path = None
         self._bookmark_drag_insert_index = None
         self._bookmark_drag_divider = None
-        layout.addLayout(self.bookmarks_bar)
-        layout.addWidget(self.splitter)
+        self.bookmarks_container = QWidget()
+        self.bookmarks_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.bookmarks_container.setLayout(self.bookmarks_bar)
+        layout.addWidget(self.bookmarks_container)
+        layout.addWidget(self.splitter, 1)
         self.setCentralWidget(outer)
         self.statusBar().setStyleSheet(status_bar_stylesheet(self.statusBar()))
         if self.catalog_db_error:
@@ -5197,10 +5288,15 @@ class Window(QMainWindow):
                     set_cursor_color(accent.name() if isinstance(saved_accent, str) else None)
             reading_view = getattr(tab, "reading_view", None)
             if reading_view is not None:
-                reading_view.setPalette(palette)
+                reading_view.set_theme_palette(palette)
                 reading_view.set_folder_navigator_vi_cursor_color(
                     accent.name() if isinstance(saved_accent, str) else None
                 )
+            toc_widget = getattr(tab, "toc_widget", None)
+            if toc_widget is not None:
+                toc_widget.set_host_palette(palette)
+                toc_widget.set_vault_accent_color(accent.name())
+                tab._position_editor_toc()
             status = getattr(tab, "editor_status", None)
             if status is not None:
                 status.setStyleSheet(
@@ -5325,6 +5421,8 @@ class Window(QMainWindow):
     def _persist_sqlite_layout(self):
         if self.catalog_db is None:
             return
+        if any(getattr(getattr(tab, "reading_view", None), "_focus_restore", []) for tab in self.all_tabs()):
+            return
         try:
             order = self.tree.header().sortIndicatorOrder()
             self.catalog_db.set_ui_states({
@@ -5409,6 +5507,10 @@ class Window(QMainWindow):
             if not self.rail.isHidden()
             else self.state.get("splitter", [self._rail_last_width, 800])
         )
+        for tab in self.all_tabs():
+            for splitter, sizes in getattr(getattr(tab, "reading_view", None), "_focus_splitters", []):
+                if splitter is self.splitter:
+                    splitter_sizes = sizes
         self.state.update(splitter=splitter_sizes, rail=self.rail.currentIndex(),
                           chat_visible=self.chat_visible,
                           chat_width=getattr(self, "_chat_last_width", 420),
@@ -6731,6 +6833,14 @@ class Window(QMainWindow):
         if tab.editor:
             install_primary_wheel_zoom(tab.editor, self._zoom_active_view)
             if tab.reading_view is not None:
+                tab.reading_view.toc_widget.set_base_path(path.as_uri())
+                tab.reading_view.configure_focus_mode(lambda: [
+                    self.folder_rail_container, self.bookmarks_container,
+                    self.tabs.tabBar(), self.tabs.cornerWidget(),
+                    self.tabs.cornerWidget(Qt.TopLeftCorner),
+                    self.chat_container,
+                ])
+                tab.reading_view.focus_button.setVisible(tab.reading_view_enabled)
                 install_primary_wheel_zoom(
                     tab.reading_view.browser, self._zoom_active_view
                 )
@@ -8155,6 +8265,9 @@ class Window(QMainWindow):
 
     def _tab_changed(self, index):
         tab = self.active_tab()
+        for other in self.all_tabs():
+            if other is not tab and getattr(other, "reading_view", None) is not None:
+                other.reading_view.set_focus_mode(False)
         if self.chat_panel is not None:
             ref = "/" + tab.path.relative_to(self.root).as_posix() if tab else None
             self.chat_panel.set_current_page(ref)
@@ -8516,6 +8629,9 @@ class Window(QMainWindow):
         if not self._review_dirty(self.all_tabs()):
             event.ignore()
             return
+        for tab in self.all_tabs():
+            if getattr(tab, "reading_view", None) is not None:
+                tab.reading_view.set_focus_mode(False)
         self.setProperty("_sp_closing", True)
         self._cancel_pending_tree_markdown()
         self.markdown_preview_timer.stop()

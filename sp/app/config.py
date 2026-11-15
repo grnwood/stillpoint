@@ -512,6 +512,30 @@ def save_reading_view_use_theme_colors(enabled: bool) -> None:
     _update_global_config({"reading_view_use_theme_colors": bool(enabled)})
 
 
+def normalize_reading_options(value) -> dict:
+    value = value if isinstance(value, dict) else {}
+    width = value.get("width", "comfortable")
+    spacing = value.get("spacing", "normal")
+    try:
+        size = max(60, min(200, int(value.get("size", 100))))
+    except (ValueError, TypeError, OverflowError):
+        size = 100
+    return {
+        "width": width if width in ("narrow", "comfortable", "wide", "full") else "comfortable",
+        "size": size,
+        "spacing": spacing if spacing in ("compact", "normal", "relaxed") else "normal",
+        "stripe_tables": bool(value.get("stripe_tables", True)),
+    }
+
+
+def load_reading_options() -> dict:
+    return normalize_reading_options(_read_global_config().get("reading_options"))
+
+
+def save_reading_options(options: dict) -> None:
+    _update_global_config({"reading_options": normalize_reading_options(options)})
+
+
 def load_vault_theme_override() -> Optional[str]:
     """Return per-vault theme override, or None when unset."""
     value = (_load_vault_kv("vault_theme_override") or "").strip()

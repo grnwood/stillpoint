@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDialog
 
 from sp.app.ui.jump_dialog import JumpToPageDialog
 
@@ -66,6 +68,54 @@ def test_jump_dialog_arrow_keys_move_results_while_search_keeps_focus(qapp) -> N
         QTest.keyClick(dlg.search, Qt.Key_Up)
         assert dlg.list_widget.currentRow() == 0
         assert dlg.focusWidget() is dlg.search
+    finally:
+        dlg.close()
+
+
+def test_bookmark_type_ahead_accepts_capital_j_and_k(qapp) -> None:
+    dlg = JumpToPageDialog(
+        launch_mode="bookmarks",
+        allowed_paths=["/Journal/Journal.md", "/Knowledge/Knowledge.md"],
+        geometry_key=None,
+    )
+    try:
+        dlg.show()
+        qapp.processEvents()
+        for key, term, path in (
+            (Qt.Key_J, "J", "/Journal/Journal.md"),
+            (Qt.Key_K, "K", "/Knowledge/Knowledge.md"),
+        ):
+            dlg.search.clear()
+            qapp.sendEvent(
+                dlg.search, QKeyEvent(QEvent.KeyPress, key, Qt.ShiftModifier, term)
+            )
+            assert dlg.search.text() == term
+            assert dlg.list_widget.count() == 1
+            assert dlg.selected_path() == path
+    finally:
+        dlg.close()
+
+
+def test_bookmark_type_ahead_from_results_supports_backspace_and_enter(qapp) -> None:
+    dlg = JumpToPageDialog(
+        launch_mode="bookmarks",
+        allowed_paths=["/Journal/Journal.md", "/Knowledge/Knowledge.md"],
+        geometry_key=None,
+    )
+    try:
+        dlg.show()
+        qapp.processEvents()
+        dlg.list_widget.setFocus()
+        QTest.keyClicks(dlg.list_widget, "JournaX")
+        assert dlg.search.text() == "JournaX"
+        dlg.list_widget.setFocus()
+        QTest.keyClick(dlg.list_widget, Qt.Key_Backspace)
+        assert dlg.search.text() == "Journa"
+        assert dlg.selected_path() == "/Journal/Journal.md"
+        dlg.list_widget.setFocus()
+        QTest.keyClick(dlg.list_widget, Qt.Key_Return)
+        assert dlg.result() == QDialog.DialogCode.Accepted
+        assert dlg.search.text() == "Journa"
     finally:
         dlg.close()
 

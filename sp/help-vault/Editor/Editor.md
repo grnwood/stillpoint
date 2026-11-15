@@ -11,10 +11,22 @@ StillPoint’s editor is a Markdown editor designed for fast note-taking, linkin
 ## Page Preview and Editing
 Use **Reading View** for a rendered page preview with formatted headings, links, images, and tables. Use **Edit View** to write and change the underlying Markdown.
 
-- Press `Ctrl+Space` (`Cmd+Space` on macOS) to switch views, or use the view button above the page. Its label shows the view you can switch to.
+- Press `Ctrl+Space` (`Cmd+Space` on macOS) to switch views, or use the view button in the bottom editor bar.
 - Both views show the same page. Switching views does not create a separate copy; edits appear in Reading View when you switch back.
 - Reading View supports following links and finding text. Switch to Edit View to change text or insert content.
 - Vault permissions still apply in Edit View. Read-only vaults, including the help vault, allow reading, navigation, selection, and copying, but block typing, pasting, and dropping links or attachments into the page.
+
+### Reading Options
+
+The book icon in the bottom bar opens **Reading options**. Choose Narrow, Comfortable, Wide, or Full width; adjust text size independently of the editor; and select Compact, Normal, or Relaxed line spacing. Subtle alternating table rows can be turned off here. These preferences are remembered across sessions and shared with Folder Navigator.
+
+Wide code and tables use the reader's horizontal scrollbar when needed.
+
+Switching between reading and editing preserves your source position, including individual table rows and code lines, even when the two views use different sizes or widths.
+
+Use the focus icon to hide navigation and top controls temporarily. Press `Escape` or click the icon again to restore the previous layout. If Find or the options popup is open, the first `Escape` closes that control.
+
+The floating collapsible table of contents navigates headings and offers **Copy Link Location** on a heading's context menu. Code blocks and tables have a **Copy Markdown** button at their upper-right edge: code includes its fences and language label, while tables include their Markdown header and alignment row. A checkmark and **Copied** confirm the action.
 
 ## Markdown Basics
 StillPoint uses standard Markdown with a few workflow-friendly additions.

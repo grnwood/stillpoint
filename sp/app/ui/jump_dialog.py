@@ -279,7 +279,7 @@ class JumpToPageDialog(QDialog):
         if previous_focus is self.list_widget:
             key = event.key()
             text = event.text()
-            if text and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            if text and text.isprintable() and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
                 self.search.setFocus()
                 self.search.insert(text)
                 event.accept()
@@ -299,13 +299,10 @@ class JumpToPageDialog(QDialog):
                     pass
             event.accept()
             return
-        # Handle Shift+J (down) and Shift+K (up) as arrow key equivalents
-        elif event.key() == Qt.Key_J and (event.modifiers() & Qt.ShiftModifier):
-            self._move_list_selection(1)
-            event.accept()
-            return
-        elif event.key() == Qt.Key_K and (event.modifiers() & Qt.ShiftModifier):
-            self._move_list_selection(-1)
+        elif event.key() in (Qt.Key_J, Qt.Key_K) and is_vi_navigation_chord(
+            event.modifiers() & ~Qt.KeypadModifier
+        ):
+            self._move_list_selection(1 if event.key() == Qt.Key_J else -1)
             event.accept()
             return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -320,15 +317,15 @@ class JumpToPageDialog(QDialog):
             if key in (Qt.Key_Up, Qt.Key_Down) and mods == Qt.NoModifier:
                 self._move_list_selection(-1 if key == Qt.Key_Up else 1)
                 return True
-            if key in (Qt.Key_J, Qt.Key_K) and (
-                is_vi_navigation_chord(mods) or bool(mods & Qt.ShiftModifier)
-            ):
+            if key in (Qt.Key_J, Qt.Key_K) and is_vi_navigation_chord(mods):
                 self._move_list_selection(1 if key == Qt.Key_J else -1)
                 return True
         if obj in (self.list_widget, self.list_widget.viewport()) and event.type() == QEvent.KeyPress:
             key = event.key()
             text = event.text()
-            if text and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                return self._activate_current()
+            if text and text.isprintable() and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
                 self.search.setFocus()
                 self.search.insert(text)
                 return True

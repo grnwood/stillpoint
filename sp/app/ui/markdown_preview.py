@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QPoint,
     QRect,
     QSize,
@@ -22,6 +23,9 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QIcon,
+    QFont,
+    QFontMetricsF,
+    QFontDatabase,
     QImageReader,
     QKeyEvent,
     QKeySequence,
@@ -34,9 +38,12 @@ from PySide6.QtGui import (
     QTextBlockFormat,
     QTextFormat,
     QTextDocument,
+    QTextTable,
+    QTextCharFormat,
 )
 from PySide6.QtWidgets import (
     QFrame,
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -51,7 +58,43 @@ from sp.app import config
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_value
 from sp.app.ui.heading_utils import HEADING_SIZE_MULTIPLIERS
+from sp.app.ui.reading_options import ReadingOptionsPopup, reading_source_blocks
+from sp.app.ui.toc_widget import TableOfContentsWidget
+from sp.app.ui.screen_positioning import popup_available_geometry, clamp_popup_top_left
 from sp.markdown_html import decode_vault_link_href, nearest_source_anchor, render_markdown_html
+
+
+def _reading_table_border(paper: str, header: str, border: str) -> str:
+    """Keep dark table grids distinct from both body and header backgrounds."""
+    backgrounds = [QColor(paper), QColor(header)]
+    original = QColor(border)
+    if not all(color.isValid() for color in [*backgrounds, original]):
+        return border
+    if backgrounds[0].lightnessF() >= 0.5:
+        return border
+
+    def luminance(color: QColor) -> float:
+        channels = (color.redF(), color.greenF(), color.blueF())
+        linear = [
+            value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+            for value in channels
+        ]
+        return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+    for step in range(21):
+        amount = step / 20
+        candidate = QColor.fromRgbF(*(
+            value + (1 - value) * amount
+            for value in (original.redF(), original.greenF(), original.blueF())
+        ))
+        foreground = luminance(candidate)
+        if all(
+            (max(foreground, luminance(bg)) + 0.05)
+            / (min(foreground, luminance(bg)) + 0.05) >= 3
+            for bg in backgrounds
+        ):
+            return candidate.name()
+    return candidate.name()
 
 
 class _ReadingBrowser(QTextBrowser):
@@ -110,9 +153,7 @@ class _ReadingBrowser(QTextBrowser):
             return
         cursor = QTextCursor(self._reading_cursor)
         if cursor.isNull():
-            cursor = self.cursorForPosition(
-                QPoint(max(0, self.viewport().width() // 3), self.viewport().height() // 2)
-            )
+            cursor = self.content_cursor_at_y(self.viewport().height() // 2)
         cursor = self._nearest_content_cursor(cursor)
         cursor.clearSelection()
         self._reading_cursor = QTextCursor(cursor)
@@ -127,7 +168,7 @@ class _ReadingBrowser(QTextBrowser):
             return QRect()
         cursor_rect = self.cursorRect(self._reading_cursor)
         line_height = max(8, self.fontMetrics().height() + 4)
-        width = max(18, self.fontMetrics().horizontalAdvance("MMM"))
+        width = max(18, min(32, self.fontMetrics().horizontalAdvance("MMM")))
         return QRect(5, cursor_rect.top(), width, min(line_height, cursor_rect.height()))
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -172,11 +213,22 @@ class _ReadingBrowser(QTextBrowser):
                 block = advance(block)
         return cursor
 
+    def content_cursor_at_y(self, y: int) -> QTextCursor:
+        """Hit an actual table cell rather than the empty space beside it."""
+        document = self.document()
+        x = round(document.documentMargin()) + 8
+        document_y = y + self.verticalScrollBar().value()
+        for frame in document.rootFrame().childFrames():
+            if isinstance(frame, QTextTable):
+                rect = document.documentLayout().frameBoundingRect(frame)
+                if rect.top() <= document_y <= rect.bottom():
+                    x = round(rect.left() + frame.format().cellPadding() + 4) - self.horizontalScrollBar().value()
+                    break
+        x = max(1, min(self.viewport().width() - 1, x))
+        return self.cursorForPosition(QPoint(x, y))
+
     def _sync_cursor_to_viewport(self) -> None:
-        if (
-            not (self.vi_enabled or self._navigation_cursor_visible)
-            or self.document().isEmpty()
-        ):
+        if self.document().isEmpty():
             self.refresh_reading_cursor()
             return
         if self._preserve_cursor_during_animation:
@@ -199,7 +251,7 @@ class _ReadingBrowser(QTextBrowser):
         else:
             y = 4
         self._reading_cursor = self._nearest_content_cursor(
-            self.cursorForPosition(QPoint(max(0, self.viewport().width() // 3), y))
+            self.content_cursor_at_y(y)
         )
         self.refresh_reading_cursor()
 
@@ -352,6 +404,17 @@ class MarkdownReadingView(QWidget):
         self.last_html = ""
         self.base_directory: Path | None = None
         self._use_theme_colors = config.load_reading_view_use_theme_colors()
+        self._host_theme_palette: QPalette | None = None
+        self.reading_options = config.load_reading_options()
+        self._source_blocks = []
+        self._copy_buttons = []
+        self._focus_targets = None
+        self._focus_restore = []
+        self._focus_splitters = []
+        self._source_line_positions = {}
+        self._appearance_changed = False
+        self._scroll_request_id = 0
+        self._pending_source_position = None
         self._base_font_point_size = 12.0
         self._editor_font_family = "sans-serif"
         self._editor_document_margin = 18.0
@@ -397,6 +460,14 @@ class MarkdownReadingView(QWidget):
         self.theme_toggle.setAccessibleName("Use theme colors in Reading View")
         self._update_theme_toggle_tooltip()
         header_layout.addWidget(self.theme_toggle)
+        self.options_button = self._reader_button(header, "reading-options.svg", "Reading options")
+        self.options_button.clicked.connect(self.show_reading_options)
+        header_layout.addWidget(self.options_button)
+        self.focus_button = self._reader_button(header, "focus-mode.svg", "Enter reading focus mode")
+        self.focus_button.setCheckable(True)
+        self.focus_button.toggled.connect(self.set_focus_mode)
+        self.focus_button.hide()
+        header_layout.addWidget(self.focus_button)
         header_layout.addStretch()
         self.find_button = QToolButton(header)
         self.find_button.setText("Find")
@@ -448,8 +519,27 @@ class MarkdownReadingView(QWidget):
             )
         )
         self.browser.searchRequested.connect(self.show_find)
-        layout.addWidget(self.browser, 1)
+        self.reading_body = QWidget(self)
+        self.reading_body.setObjectName("markdownReadingBody")
+        self._column_layout = QHBoxLayout(self.reading_body)
+        self._column_layout.setContentsMargins(0, 0, 0, 0)
+        self._column_layout.setSpacing(0)
+        self._column_layout.addWidget(self.browser, 1)
+        layout.addWidget(self.reading_body, 1)
         layout.addWidget(self.find_bar)
+        self.toc_widget = TableOfContentsWidget(self.reading_body)
+        self.toc_widget.set_collapsed(config.load_toc_collapsed())
+        self.toc_widget.collapsedChanged.connect(self._toc_collapsed)
+        self.toc_widget.headingActivated.connect(self._toc_activated)
+        self.toc_widget.hide()
+        self.options_popup = ReadingOptionsPopup(self)
+        self.options_popup.set_options(self.reading_options)
+        self.options_popup.optionsChanged.connect(self.set_reading_options)
+        self.browser.verticalScrollBar().valueChanged.connect(self._position_reader_tools)
+        self.browser.horizontalScrollBar().valueChanged.connect(self._position_reader_tools)
+        self.browser.document().documentLayout().documentSizeChanged.connect(self._position_reader_tools)
+        self.browser.viewport().installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
         self.setFocusProxy(self.browser)
         self.theme_toggle.toggled.connect(self._theme_mode_toggled)
         self._instances.add(self)
@@ -477,6 +567,196 @@ class MarkdownReadingView(QWidget):
             )
             self._page_shortcuts.append(shortcut)
         self._apply_palette()
+
+    def _asset_icon(self, name: str, color: QColor | None = None) -> QIcon:
+        path = Path(__file__).resolve().parents[2] / "assets" / name
+        if not path.exists() and getattr(sys, "_MEIPASS", None):
+            root = Path(sys._MEIPASS)
+            path = next((p for p in (root / "sp" / "assets" / name, root / "assets" / name) if p.exists()), path)
+        pixmap = QIcon(str(path)).pixmap(QSize(16, 16))
+        if not pixmap.isNull():
+            painter = QPainter(pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            palette = self._host_theme_palette if self._host_theme_palette is not None else self.palette()
+            painter.fillRect(pixmap.rect(), color if color is not None else palette.color(QPalette.Text))
+            painter.end()
+        return QIcon(pixmap)
+
+    def _update_focus_button_icon(self):
+        background = self._focus_checked_background
+        checked_text = QColor("#111111" if background.lightnessF() >= 0.5 else "#ffffff")
+        icon = QIcon()
+        for state, tinted in (
+            (QIcon.Off, self._asset_icon("focus-mode.svg")),
+            (QIcon.On, self._asset_icon("focus-mode.svg", checked_text)),
+        ):
+            pixmap = tinted.pixmap(QSize(16, 16))
+            for mode in (QIcon.Normal, QIcon.Active, QIcon.Selected):
+                icon.addPixmap(pixmap, mode, state)
+        self.focus_button.setIcon(icon)
+
+    def _style_copy_button(self, button, *, copied=False):
+        button.setIcon(self._asset_icon("accept.svg" if copied else "copy.svg", self._text_color))
+        button.setStyleSheet(
+            "QToolButton { padding: 2px 4px; border-radius: 4px; "
+            f"color: {self._text_color.name()}; background: {self._paper_color.name()}; "
+            f"border: 1px solid {self._copy_button_border.name()}; }}"
+            "QToolButton:hover, QToolButton:focus {"
+            f"background: {self._copy_button_hover.name()}; border-color: {self._text_color.name()}; }}"
+        )
+
+    def _reader_button(self, parent, asset, label):
+        button = QToolButton(parent)
+        button.setAutoRaise(True)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setFixedSize(24, 22)
+        button.setIconSize(QSize(16, 16))
+        button.setIcon(self._asset_icon(asset))
+        button.setAccessibleName(label)
+        button.setToolTip(label)
+        button.setStyleSheet(
+            "QToolButton { border: none; padding: 2px 4px; background: transparent; }"
+            "QToolButton:hover, QToolButton:checked { background: palette(alternate-base); border-radius: 3px; }"
+        )
+        return button
+
+    def show_reading_options(self):
+        self.options_popup.set_options(self.reading_options)
+        self.options_popup.adjustSize()
+        anchor = self.options_button.mapToGlobal(QPoint(0, 0))
+        desired = anchor - QPoint(0, self.options_popup.height() + 6)
+        available = popup_available_geometry(anchor=anchor, parent=self)
+        self.options_popup.move(clamp_popup_top_left(desired, self.options_popup.size(), available))
+        self.options_popup.show()
+        self.options_popup.width_choice.setFocus()
+
+    def set_reading_options(self, options):
+        options = config.normalize_reading_options(options)
+        config.save_reading_options(options)
+        for view in list(self._instances):
+            # WeakSet can retain Python wrappers briefly after Qt deletes them.
+            import shiboken6
+            if not shiboken6.isValid(view) or not shiboken6.isValid(view.browser):
+                continue
+            view._apply_reading_options(options)
+
+    def _apply_reading_options(self, options):
+        source_line, screen_y = self.reading_view_position() if self.last_markdown else (1, None)
+        self.reading_options = dict(options)
+        self.options_popup.set_options(options)
+        self._appearance_changed = True
+        self._apply_palette()
+        if self.last_markdown:
+            self.set_markdown(self.last_markdown, base_directory=self.base_directory,
+                              source_line=source_line, anchor_global_y=screen_y)
+
+    def _apply_column_width(self):
+        characters = {"narrow": 60, "comfortable": 80, "wide": 100}.get(self.reading_options["width"])
+        if characters is None:
+            maximum = 16777215
+        else:
+            font = QFont(self.browser.font())
+            font.setPointSizeF(self._base_font_point_size * self.reading_options["size"] / 100 * 1.1 ** self._zoom_steps)
+            maximum = round(QFontMetricsF(font).averageCharWidth() * characters + 2 * self._editor_document_margin + 24)
+        self.browser.setMaximumWidth(maximum)
+        self.browser.setMinimumWidth(0)
+        margin = max(0, (self.reading_body.width() - maximum) // 2)
+        self._column_layout.setContentsMargins(margin, 0, margin, 0)
+
+    def configure_focus_mode(self, targets):
+        """targets returns chrome widgets to hide; the reader stays in place."""
+        self._focus_targets = targets
+        self.focus_button.show()
+
+    def set_focus_mode(self, enabled):
+        enabled = bool(enabled)
+        if enabled == bool(self._focus_restore):
+            return
+        source_line, screen_y = self.reading_view_position()
+        if enabled and self._focus_targets is not None:
+            from PySide6.QtWidgets import QSplitter
+            window = self.window()
+            self._focus_splitters = [(splitter, splitter.sizes()) for splitter in window.findChildren(QSplitter)]
+            for widget in self._focus_targets():
+                if widget is not None:
+                    self._focus_restore.append((widget, not widget.isHidden()))
+                    widget.hide()
+        else:
+            for widget, visible in self._focus_restore:
+                widget.setVisible(visible)
+            self._focus_restore = []
+            for splitter, sizes in self._focus_splitters:
+                splitter.setSizes(sizes)
+            self._focus_splitters = []
+        blocked = self.focus_button.blockSignals(True)
+        self.focus_button.setChecked(bool(self._focus_restore))
+        self.focus_button.blockSignals(blocked)
+        self.focus_button.setToolTip("Exit reading focus mode (Esc)" if self._focus_restore else "Enter reading focus mode")
+        if self.last_markdown:
+            self.scroll_to_source_line(source_line, anchor_global_y=screen_y)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "browser", None) or obj is getattr(getattr(self, "browser", None), "viewport", lambda: None)():
+            if event.type() == QEvent.Resize:
+                QTimer.singleShot(0, self, self._position_reader_tools)
+        if self._focus_restore and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            if self.window().isActiveWindow() and QApplication.activePopupWidget() is None and not self.find_bar.isVisible():
+                self.set_focus_mode(False)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _toc_collapsed(self, collapsed):
+        config.save_toc_collapsed(collapsed)
+        self._position_reader_tools()
+
+    def _toc_activated(self, source_line):
+        self.scroll_to_source_line(source_line)
+        self.focus_reader()
+
+    def _position_reader_tools(self, *_args):
+        if not hasattr(self, "toc_widget"):
+            return
+        self._apply_column_width()
+        enough = len(self.toc_widget._headings) > 1
+        self.toc_widget.setVisible(config.load_toc_widget_enabled() and enough and self.browser.verticalScrollBar().maximum() > 0)
+        self.toc_widget.move(max(0, self.reading_body.width() - self.toc_widget.width() - 12), 12)
+        self.toc_widget.raise_()
+        viewport = self.browser.viewport()
+        for button, position, kind in self._copy_buttons:
+            cursor = QTextCursor(self.browser.document())
+            cursor.setPosition(min(position, self.browser.document().characterCount() - 1))
+            rect = self.browser.cursorRect(cursor)
+            y = rect.top() - 26
+            end_cursor = QTextCursor(self.browser.document())
+            end_cursor.setPosition(min(button._reading_block_end, self.browser.document().characterCount() - 1))
+            bottom = self.browser.cursorRect(end_cursor).bottom()
+            x = viewport.width() - button.width() - 8
+            if kind == "table" and cursor.currentTable():
+                table = cursor.currentTable()
+                layout = self.browser.document().documentLayout()
+                first = table.cellAt(0, 0)
+                last_column = table.cellAt(0, table.columns() - 1)
+                first_format = first.format().toTableCellFormat()
+                last_format = last_column.format().toTableCellFormat()
+                # Qt's frame bounds include table margins. Cell bounds locate
+                # the visible grid, keeping the control beside its actual edge.
+                top = layout.blockBoundingRect(first.firstCursorPosition().block()).top() - first_format.topPadding()
+                right = layout.blockBoundingRect(last_column.firstCursorPosition().block()).right() + last_format.rightPadding()
+                last_row = [table.cellAt(table.rows() - 1, column) for column in range(table.columns())]
+                table_bottom = max(layout.blockBoundingRect(cell.lastCursorPosition().block()).bottom()
+                                   + cell.format().toTableCellFormat().bottomPadding() for cell in last_row)
+                y = round(top) - self.browser.verticalScrollBar().value() - 26
+                bottom = round(table_bottom) - self.browser.verticalScrollBar().value()
+                x = min(x, round(right) - self.browser.horizontalScrollBar().value() - button.width())
+            visible = bottom >= button.height() + 4 and y < viewport.height()
+            y = min(max(4, y), bottom - button.height(), viewport.height() - button.height() - 4)
+            candidate = QRect(viewport.mapTo(self.reading_body, QPoint(max(0, x), y)), button.size())
+            if self.toc_widget.isVisible() and candidate.intersects(self.toc_widget.geometry()):
+                x = min(x, viewport.mapFrom(self.reading_body, self.toc_widget.pos()).x() - button.width() - 8)
+            button.move(max(0, x), y)
+            button.setVisible(visible)
+            button.raise_()
 
     def set_header_visible(self, visible: bool) -> None:
         """Show shared reader controls when the host does not provide its own."""
@@ -515,10 +795,12 @@ class MarkdownReadingView(QWidget):
     def _theme_mode_toggled(self, enabled: bool) -> None:
         config.save_reading_view_use_theme_colors(enabled)
         for view in list(self._instances):
-            view._apply_theme_mode(enabled)
+            import shiboken6
+            if shiboken6.isValid(view) and shiboken6.isValid(view.theme_toggle):
+                view._apply_theme_mode(enabled)
 
     def _apply_theme_mode(self, enabled: bool) -> None:
-        source_line = self.current_source_line() if self.last_markdown else 1
+        source_line, screen_y = self.reading_view_position() if self.last_markdown else (1, None)
         self._use_theme_colors = bool(enabled)
         blocked = self.theme_toggle.blockSignals(True)
         self.theme_toggle.setChecked(self._use_theme_colors)
@@ -530,11 +812,15 @@ class MarkdownReadingView(QWidget):
                 self.last_markdown,
                 base_directory=self.base_directory,
                 source_line=source_line,
+                anchor_global_y=screen_y,
             )
 
     def _apply_palette(self) -> None:
-        palette = self.palette()
-        scale = 1.1 ** self._zoom_steps
+        # Application-wide QWidget styles can replace the effective widget
+        # palette after polishing. Keep the host's explicit content colors
+        # independent of that stylesheet so later layout/zoom refreshes agree.
+        palette = self._host_theme_palette if self._host_theme_palette is not None else self.palette()
+        scale = 1.1 ** self._zoom_steps * self.reading_options["size"] / 100
 
         def points(value: float) -> str:
             return f"{value * scale:.2f}pt"
@@ -553,7 +839,7 @@ class MarkdownReadingView(QWidget):
                 configured_paper.casefold() != "#ffffff"
                 or configured_text.casefold() != "#111111"
             )
-            if custom_preview_palette:
+            if custom_preview_palette and self._host_theme_palette is None:
                 paper = configured_paper
                 text = configured_text
                 muted = str(theme_value("markdown_preview.muted", "#666666"))
@@ -583,6 +869,23 @@ class MarkdownReadingView(QWidget):
             table_header = "#e9edf2"
             code_bg = "#f6f8fa"
             highlight = "#1a5fb4"
+        table_border = _reading_table_border(paper, table_header, border)
+        self._paper_color = QColor(paper)
+        self._text_color = QColor(text)
+        self._code_background = QColor(code_bg)
+        self._focus_checked_background = QColor(table_header)
+
+        def tint(amount):
+            return QColor.fromRgbF(*(
+                base * (1 - amount) + foreground * amount
+                for base, foreground in zip(
+                    (self._paper_color.redF(), self._paper_color.greenF(), self._paper_color.blueF()),
+                    (self._text_color.redF(), self._text_color.greenF(), self._text_color.blueF()),
+                )
+            ))
+
+        self._copy_button_border = tint(0.30)
+        self._copy_button_hover = tint(0.12)
         self._css = f"""
             html, body {{ color: {text}; background: {paper}; }}
             body {{ font-family: {self._editor_font_family}; font-size: {body_size}; line-height: 1.35;
@@ -596,10 +899,11 @@ class MarkdownReadingView(QWidget):
             h5 {{ font-size: {heading_sizes[4]}; }}
             h6 {{ font-size: {heading_sizes[4]}; color: {muted}; }}
             p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
+            p, ul, ol, li, th, td {{ color: {text}; }}
             p {{ margin-top: 0.25em; margin-bottom: 0.25em; }}
             table {{ border-collapse: collapse; width: 100%; margin-top: 0.55em;
-                     margin-bottom: 0.55em; border: 2px solid {border}; }}
-            th, td {{ border: 1px solid {border}; padding: 5px 8px; text-align: left; }}
+                     margin-bottom: 0.55em; border: 2px solid {table_border}; }}
+            th, td {{ border: 1px solid {table_border}; padding: 5px 8px; text-align: left; }}
             th {{ background: {table_header}; color: {text}; font-weight: 700; }}
             table.reading-rule {{ width: 100%; border: none;
                                   margin-top: 2px; margin-bottom: 3px; }}
@@ -622,13 +926,37 @@ class MarkdownReadingView(QWidget):
             f"border-bottom: 1px solid {palette.color(QPalette.Mid).name()};"
             "} QTextBrowser#markdownReadingBrowser {"
             f"background: {paper}; color: {text}; border: none;"
+            "} QWidget#markdownReadingBody {"
+            f"background: {paper};"
             "}"
         )
         self._update_theme_toggle_icon()
+        self.options_button.setIcon(self._asset_icon("reading-options.svg"))
+        self._update_focus_button_icon()
+        for button, _position, _kind in self._copy_buttons:
+            self._style_copy_button(button, copied=bool(button.text()))
+        button_style = (
+            f"QToolButton {{ border: none; padding: 2px 4px; background: transparent; color: {text}; }}"
+            f"QToolButton:hover, QToolButton:checked {{ background: {table_header}; border-radius: 3px; }}"
+        )
+        self.options_button.setStyleSheet(button_style)
+        self.focus_button.setStyleSheet(button_style)
+        self.options_popup.setStyleSheet(
+            f"QFrame#readingOptionsPopup {{ background: {paper}; color: {text}; border: 1px solid {table_border}; border-radius: 6px; }}"
+            f"QFrame#readingOptionsPopup QWidget {{ background: {paper}; color: {text}; }}"
+            f"QFrame#readingOptionsPopup QComboBox, QFrame#readingOptionsPopup QPushButton, QFrame#readingOptionsPopup QToolButton {{ background: {table_header}; color: {text}; padding: 4px; border: 1px solid {table_border}; border-radius: 3px; }}"
+        )
+        self._apply_column_width()
         self.browser.refresh_reading_cursor()
 
     def set_vi_enabled(self, enabled: bool) -> None:
         self.browser.set_vi_state(enabled, self.browser.vi_cursor_style)
+
+    def set_theme_palette(self, palette: QPalette) -> None:
+        """Use the host's local colors and refresh any rendered theme content."""
+        self._host_theme_palette = QPalette(palette)
+        self.setPalette(palette)
+        self._apply_theme_mode(self._use_theme_colors)
 
     def set_vi_cursor_style(self, style: str) -> None:
         self.browser.set_vi_state(self.browser.vi_enabled, style)
@@ -653,7 +981,6 @@ class MarkdownReadingView(QWidget):
     def match_editor_layout(self, editor) -> None:
         """Keep text widths and typography familiar when switching from edit mode."""
         self._zoom_render_timer.stop()
-        self._zoom_steps = 0
         self._zoom_css_dirty = False
         self._editor_font_family = json.dumps(editor.font().family())
         self._editor_document_margin = editor.document().documentMargin()
@@ -695,15 +1022,13 @@ class MarkdownReadingView(QWidget):
 
     def _match_source_spacing(self) -> None:
         """Represent source blank lines instead of HTML's compact block margins."""
-        if self._editor_line_spacing is None:
-            return
         lines = self.last_markdown.splitlines()
         for position, source_line in self._source_positions:
             cursor = QTextCursor(self.browser.document())
             cursor.setPosition(position)
             # Tables own multiple rendered blocks; preserve their internal
             # layout rather than treating them as paragraphs.
-            if cursor.currentTable() is not None:
+            if cursor.currentTable() is not None or cursor.blockFormat().nonBreakableLines():
                 continue
             blank_lines = 0
             index = source_line - 2
@@ -711,10 +1036,24 @@ class MarkdownReadingView(QWidget):
                 blank_lines += 1
                 index -= 1
             fmt = cursor.blockFormat()
-            fmt.setTopMargin(blank_lines * self._editor_line_spacing)
+            fmt.setTopMargin(blank_lines * (self._editor_line_spacing or self.browser.fontMetrics().height()))
             fmt.setBottomMargin(0)
-            fmt.setLineHeight(100, QTextBlockFormat.ProportionalHeight.value)
+            spacing = {"compact": 90, "normal": 100, "relaxed": 135}[self.reading_options["spacing"]]
+            fmt.setLineHeight(spacing, QTextBlockFormat.ProportionalHeight.value)
             cursor.setBlockFormat(fmt)
+        # Wrapped paragraphs and list continuations also need the reader's
+        # spacing; tables and code retain their compact internal layout.
+        block = self.browser.document().begin()
+        while block.isValid():
+            cursor = QTextCursor(block)
+            if cursor.currentTable() is None and not block.blockFormat().nonBreakableLines():
+                fmt = block.blockFormat()
+                fmt.setLineHeight(
+                    {"compact": 90, "normal": 100, "relaxed": 135}[self.reading_options["spacing"]],
+                    QTextBlockFormat.ProportionalHeight.value,
+                )
+                cursor.setBlockFormat(fmt)
+            block = block.next()
 
     @staticmethod
     def editor_view_position(editor) -> tuple[int, int]:
@@ -726,14 +1065,22 @@ class MarkdownReadingView(QWidget):
         return cursor.blockNumber() + 1, screen_y
 
     def reading_view_position(self) -> tuple[int, int]:
+        if self._pending_source_position is not None:
+            line, screen_y = self._pending_source_position
+            if screen_y is None:
+                screen_y = self.browser.viewport().mapToGlobal(QPoint(0, self.browser.viewport().height() // 2)).y()
+            return self.source_block_line(line), screen_y
         cursor = self.browser._reading_cursor
         if cursor.isNull():
-            cursor = self.browser.cursorForPosition(QPoint(12, 4))
+            cursor = self.browser.content_cursor_at_y(4)
+            self.browser._reading_cursor = QTextCursor(cursor)
         screen_y = self.browser.viewport().mapToGlobal(self.browser.cursorRect(cursor).topLeft()).y()
         return self.current_source_line(), screen_y
 
     def handoff_position_changed(self) -> bool:
         return self._handoff_scroll_value is not None and (
+            self._appearance_changed
+            or
             self.browser.verticalScrollBar().value() != self._handoff_scroll_value
             or self.current_source_line() != self._handoff_source_line
         )
@@ -745,6 +1092,7 @@ class MarkdownReadingView(QWidget):
         super().resizeEvent(event)
         if self.last_html:
             self._image_resize_timer.start()
+            QTimer.singleShot(0, self, self._position_reader_tools)
 
     def _image_source_size(self, source: str) -> tuple[float, float] | None:
         source_url = QUrl(source)
@@ -834,6 +1182,8 @@ class MarkdownReadingView(QWidget):
             self._apply_palette()
             self._zoom_css_dirty = False
         self.last_markdown = markdown_text or ""
+        self._source_line_positions = {}
+        self._source_blocks = reading_source_blocks(self.last_markdown)
         self.base_directory = Path(base_directory).resolve() if base_directory else None
         if self.base_directory is not None:
             base_url = QUrl.fromLocalFile(str(self.base_directory) + os.sep)
@@ -920,6 +1270,130 @@ class MarkdownReadingView(QWidget):
         self.browser.document().setDocumentMargin(self._editor_document_margin)
         self._index_source_positions()
         self._match_source_spacing()
+        self._decorate_reader_document()
+
+    def _decorate_reader_document(self):
+        for button, _position, _kind in self._copy_buttons:
+            button.hide()
+            button.deleteLater()
+        self._copy_buttons = []
+        document = self.browser.document()
+        original_positions = dict((line, position) for position, line in self._source_positions)
+        self._source_line_positions = dict(original_positions)
+        for source in self._source_blocks:
+            anchor = nearest_source_anchor(self.last_markdown, source.line)
+            line = int(anchor.rsplit("-", 1)[-1]) if anchor else source.line
+            position = original_positions.get(line)
+            if position is None:
+                continue
+            cursor = QTextCursor(document)
+            cursor.setPosition(position)
+            if source.kind == "table":
+                table = cursor.currentTable()
+                if table is None:
+                    continue
+                fmt = table.format()
+                fmt.setTopMargin(max(28, fmt.topMargin()))
+                table.setFormat(fmt)
+                for row in range(table.rows()):
+                    source_line = source.line if row == 0 else source.line + row + 1
+                    self._source_line_positions[source_line] = table.cellAt(row, 0).firstCursorPosition().position()
+                    for column in range(table.columns()):
+                        cell = table.cellAt(row, column)
+                        cell_position = cell.firstCursorPosition().position()
+                        self._source_positions.append((cell_position, source_line))
+                        if row and row % 2 == 0 and self.reading_options["stripe_tables"]:
+                            color = QColor.fromRgbF(*(
+                                base * 0.94 + text * 0.06
+                                for base, text in zip(
+                                    (self._paper_color.redF(), self._paper_color.greenF(), self._paper_color.blueF()),
+                                    (self._text_color.redF(), self._text_color.greenF(), self._text_color.blueF()),
+                                )
+                            ))
+                            cell_format = cell.format().toTableCellFormat()
+                            cell_format.setBackground(color)
+                            cell.setFormat(cell_format)
+            else:
+                block = cursor.block()
+                if not block.blockFormat().nonBreakableLines():
+                    continue
+                fmt = block.blockFormat()
+                fmt.setTopMargin(max(28, fmt.topMargin()))
+                cursor.setBlockFormat(fmt)
+                fenced = bool(re.match(r"^ {0,3}(`{3,}|~{3,})", source.markdown))
+                source_line = source.line + int(fenced)
+                first_block = True
+                last_source_line = source.end_line - int(fenced)
+                while block.isValid() and block.blockFormat().nonBreakableLines() and source_line <= last_source_line:
+                    code_cursor = QTextCursor(block)
+                    code_format = block.blockFormat()
+                    code_format.setTopMargin(28 if first_block else 0)
+                    code_format.setBottomMargin(0)
+                    code_format.setLeftMargin(8)
+                    code_format.setRightMargin(8)
+                    code_format.setLineHeight(100, QTextBlockFormat.ProportionalHeight.value)
+                    code_format.setBackground(self._code_background)
+                    code_cursor.setBlockFormat(code_format)
+                    code_cursor.select(QTextCursor.BlockUnderCursor)
+                    char_format = QTextCharFormat()
+                    char_format.setFontFamilies([QFontDatabase.systemFont(QFontDatabase.FixedFont).family()])
+                    char_format.setForeground(self._text_color)
+                    code_cursor.mergeCharFormat(char_format)
+                    self._source_line_positions[source_line] = block.position()
+                    self._source_positions.append((block.position(), source_line))
+                    block = block.next()
+                    source_line += 1
+                    first_block = False
+            button = self._reader_button(self.browser.viewport(), "copy.svg", "Copy Markdown")
+            end_line = max((line for line in self._source_line_positions if source.line <= line <= source.end_line), default=source.line)
+            button._reading_block_end = self._source_line_positions.get(end_line, position)
+            self._style_copy_button(button)
+            button.setFocusPolicy(Qt.StrongFocus)
+            button.clicked.connect(lambda _checked=False, source=source, button=button: self._copy_source_block(source, button))
+            self._copy_buttons.append((button, position, source.kind))
+        self._source_positions = sorted(set(self._source_positions))
+        headings = []
+        for position, line in self._source_positions:
+            block = document.findBlock(position)
+            level = block.blockFormat().headingLevel()
+            if level:
+                headings.append({"title": block.text().replace("\u200b", ""), "level": level, "position": line, "line": line})
+        self.toc_widget.set_headings(headings)
+        palette = self._host_theme_palette
+        if palette is not None:
+            self.toc_widget.set_host_palette(palette)
+            self.toc_widget.set_vault_accent_color(palette.color(QPalette.Highlight).name())
+        QTimer.singleShot(0, self, self._position_reader_tools)
+
+    def _copy_source_block(self, source, button):
+        QApplication.clipboard().setText(source.markdown)
+        self._style_copy_button(button, copied=True)
+        button.setText("Copied")
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setFixedWidth(86)
+        button.setToolTip("Copied Markdown")
+        button.setAccessibleName("Copied Markdown")
+        self._position_reader_tools()
+
+        def restore():
+            self._style_copy_button(button)
+            button.setText("")
+            button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            button.setFixedWidth(24)
+            button.setToolTip("Copy Markdown")
+            button.setAccessibleName("Copy Markdown")
+            self._position_reader_tools()
+
+        previous = getattr(button, "_copy_feedback_timer", None)
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+        timer = QTimer(button)
+        timer.setSingleShot(True)
+        timer.setTimerType(Qt.PreciseTimer)
+        timer.timeout.connect(restore)
+        button._copy_feedback_timer = timer
+        timer.start(1500)
 
     def _index_source_positions(self) -> None:
         positions: list[tuple[int, int]] = []
@@ -941,12 +1415,18 @@ class MarkdownReadingView(QWidget):
         self._source_positions = positions
 
     def source_block_line(self, source_line: int) -> int:
+        if self._source_line_positions:
+            line = max((line for line in self._source_line_positions if line <= source_line), default=1)
+            position = self._source_line_positions.get(line)
+            return max((candidate for candidate, value in self._source_line_positions.items() if value == position), default=line)
         anchor = nearest_source_anchor(self.last_markdown, source_line)
         match = re.fullmatch(r"sp-source-(\d+)", anchor)
         return int(match.group(1)) if match else 1
 
     def current_source_line(self) -> int:
         """Return the Markdown block line nearest the reading rail marker."""
+        if self._pending_source_position is not None:
+            return self.source_block_line(self._pending_source_position[0])
         if not self._source_positions:
             return 1
         if self.browser._reading_cursor.isNull():
@@ -973,6 +1453,10 @@ class MarkdownReadingView(QWidget):
         if not match:
             return None
         line = int(match.group(1))
+        if line in self._source_line_positions:
+            cursor = QTextCursor(self.browser.document())
+            cursor.setPosition(self._source_line_positions[line])
+            return self.browser._nearest_content_cursor(cursor)
         for position, source_line in self._source_positions:
             if source_line == line:
                 cursor = QTextCursor(self.browser.document())
@@ -984,14 +1468,22 @@ class MarkdownReadingView(QWidget):
         self, source_line: int, *, anchor_global_y: int | None = None,
         remember_handoff: bool = False,
     ) -> None:
-        anchor = nearest_source_anchor(self.last_markdown, source_line)
+        self._scroll_request_id += 1
+        request_id = self._scroll_request_id
+        self._pending_source_position = (source_line, anchor_global_y)
+        anchor = f"sp-source-{self.source_block_line(source_line)}" if self._source_line_positions else nearest_source_anchor(self.last_markdown, source_line)
         if anchor:
             def scroll_and_mark(value=anchor):
+                if request_id != self._scroll_request_id:
+                    return
                 self.browser.scrollToAnchor(value)
 
                 def place_source_cursor():
+                    if request_id != self._scroll_request_id:
+                        return
                     cursor = self._cursor_for_source_anchor(value)
                     if cursor is None:
+                        self._pending_source_position = None
                         self.browser._sync_cursor_to_viewport()
                         return
                     block_line = self.source_block_line(source_line)
@@ -1019,14 +1511,17 @@ class MarkdownReadingView(QWidget):
                         offset = cursor_rect.top() - target_y
                     scrollbar.setValue(scrollbar.value() + offset)
                     self.browser._reading_cursor = QTextCursor(cursor)
+                    self._pending_source_position = None
                     self.browser.refresh_reading_cursor()
                     if remember_handoff:
                         self._handoff_scroll_value = scrollbar.value()
                         self._handoff_source_line = self.current_source_line()
 
-                QTimer.singleShot(0, self.browser, place_source_cursor)
+                place_source_cursor()
 
             QTimer.singleShot(0, self.browser, scroll_and_mark)
+        else:
+            self._pending_source_position = None
 
     def show_find(self) -> None:
         self.find_bar.show()

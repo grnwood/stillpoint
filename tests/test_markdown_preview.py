@@ -615,6 +615,82 @@ def test_reading_view_theme_mode_uses_live_palette_when_preview_is_stock(
     assert "background: #172235" in view._css
 
 
+@pytest.mark.parametrize("custom_preview", [False, True])
+def test_dark_reading_table_grid_is_visible_in_rendered_cells(
+    qtbot, monkeypatch, custom_preview
+) -> None:
+    import sp.app.ui.markdown_preview as preview_module
+
+    values = {
+        "markdown_preview.paper_bg": "#081c19",
+        "markdown_preview.text": "#d4f5ef",
+        "markdown_preview.border": "#102821",
+        "markdown_preview.table_header_bg": "#102c26",
+    } if custom_preview else {}
+    monkeypatch.setattr(
+        preview_module, "theme_value", lambda path, default=None: values.get(path, default)
+    )
+    monkeypatch.setattr(
+        preview_module.config, "load_reading_view_use_theme_colors", lambda: True
+    )
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    palette = QPalette(view.palette())
+    for role, color in (
+        (QPalette.Base, "#081c19"),
+        (QPalette.Text, "#d4f5ef"),
+        (QPalette.Mid, "#102821"),
+        (QPalette.AlternateBase, "#102c26"),
+    ):
+        palette.setColor(role, QColor(color))
+    view.setPalette(palette)
+    view._apply_palette()
+    view.set_markdown("| Name | Status |\n| --- | --- |\n| Alpha | Ready |")
+    table = next(iter(view.browser.document().rootFrame().childFrames()))
+    for row in range(2):
+        cell = table.cellAt(row, 0).format().toTableCellFormat()
+        assert cell.topBorder() == 1
+        assert cell.topBorderBrush().color().lightness() > 100
+    assert table.format().border() == 2
+
+
+def test_host_reading_palette_overrides_global_preview_and_refreshes_lists(qtbot, monkeypatch):
+    import sp.app.ui.markdown_preview as preview_module
+
+    values = {
+        "markdown_preview.paper_bg": "#00251f",
+        "markdown_preview.text": "#caffef",
+    }
+    monkeypatch.setattr(
+        preview_module, "theme_value", lambda path, default=None: values.get(path, default)
+    )
+    monkeypatch.setattr(
+        preview_module.config, "load_reading_view_use_theme_colors", lambda: True
+    )
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown("Paragraph\n\n- **canStart()** is the gatekeeper\n- start() is the worker")
+    palette = QPalette(view.palette())
+    palette.setColor(QPalette.Base, QColor("#320a18"))
+    palette.setColor(QPalette.Text, QColor("#f4f7fb"))
+    view.set_theme_palette(palette)
+    assert "background: #320a18" in view.last_html
+    assert "background: #00251f" not in view.last_html
+    block = view.browser.document().begin()
+    while block.isValid():
+        if block.textList():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.text().strip("\u200b "):
+                    assert fragment.charFormat().foreground().color() == QColor("#f4f7fb")
+                iterator += 1
+        block = block.next()
+    # White-paper mode still works with a folder-specific palette.
+    view._apply_theme_mode(False)
+    assert "background: #ffffff" in view.last_html
+
+
 def test_reading_view_materializes_checkbox_glyphs(qtbot) -> None:
     view = MarkdownReadingView()
     qtbot.addWidget(view)

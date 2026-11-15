@@ -3809,6 +3809,14 @@ class MainWindow(QMainWindow):
         self._reading_theme_button.setStyleSheet(self._mode_button_style())
         self._reading_theme_button.setVisible(self._reading_view_enabled)
         self._editor_status_layout.addWidget(self._reading_theme_button)
+        self.reading_view.configure_focus_mode(lambda: [
+            self.left_panel_container, self.right_panel_container,
+            self.history_bar, self.toolbar,
+        ])
+        for button in (self.reading_view.options_button, self.reading_view.focus_button):
+            button.setParent(self._editor_status)
+            button.setVisible(self._reading_view_enabled)
+            self._editor_status_layout.addWidget(button)
         self._editor_status_layout.addWidget(self._cursor_status_label)
         self._editor_status_layout.addStretch(1)
         self._editor_status_layout.addWidget(self._save_status_label)
@@ -20634,6 +20642,9 @@ class MainWindow(QMainWindow):
         normalized = (mode or "").lower()
         if normalized not in {"focus", "audience"}:
             return
+        if normalized == "focus" and getattr(self, "_reading_view_enabled", False):
+            self.reading_view.set_focus_mode(not bool(self.reading_view._focus_restore))
+            return
         if not hasattr(self, "_pending_mode_target"):
             self._pending_mode_target: str | None = None
         if getattr(self, "_mode_window_pending", False):
@@ -21990,10 +22001,15 @@ class MainWindow(QMainWindow):
     def _refresh_reading_view(self) -> None:
         if not getattr(self, "_reading_view_enabled", False):
             return
-        if self._reading_saved_path != self.current_path:
+        changed_page = self._reading_saved_path != self.current_path
+        if changed_page:
             self._remember_reading_editor_position()
-        source_line, screen_y = self.reading_view.editor_view_position(self.editor)
+        if not changed_page and self._editor_view_stack.currentWidget() is self.reading_view and self.reading_view.last_markdown:
+            source_line, screen_y = self.reading_view.reading_view_position()
+        else:
+            source_line, screen_y = self.reading_view.editor_view_position(self.editor)
         self.reading_view.match_editor_layout(self.editor)
+        self.reading_view.toc_widget.set_base_path(path_to_colon(self.current_path or ""))
         self.reading_view.set_vi_enabled(bool(getattr(self, "_vi_enabled", False)))
         self.reading_view.set_markdown(
             self.editor.to_markdown(),
@@ -22012,6 +22028,7 @@ class MainWindow(QMainWindow):
             return
         self._reading_view_enabled = enabled
         if not enabled:
+            self.reading_view.set_focus_mode(False)
             self.reading_view.flush_editor_zoom()
         action = getattr(self, "_action_reading_view", None)
         if action is not None and action.isChecked() != enabled:
@@ -22021,6 +22038,9 @@ class MainWindow(QMainWindow):
         self._update_reading_view_action()
         self.find_bar.hide()
         if enabled:
+            self.reading_view._appearance_changed = False
+            self.toc_widget.hide()
+            self.reading_view.toc_widget.set_collapsed(config.load_toc_collapsed())
             self._remember_reading_editor_position()
             entry_line, _screen_y = self.reading_view.editor_view_position(self.editor)
             self._refresh_reading_view()
@@ -22063,6 +22083,8 @@ class MainWindow(QMainWindow):
                 self.editor.setTextCursor(cursor)
                 self.editor.verticalScrollBar().setValue(int(self._reading_saved_scroll))
         self.editor.setFocus(Qt.ShortcutFocusReason)
+        self.toc_widget.set_collapsed(config.load_toc_collapsed())
+        self._position_toc_widget()
 
     def _update_reading_view_action(self) -> None:
         action = getattr(self, "_action_reading_view", None)
@@ -22072,6 +22094,11 @@ class MainWindow(QMainWindow):
         theme_button = getattr(self, "_reading_theme_button", None)
         if theme_button is not None:
             theme_button.setVisible(reading)
+        self.reading_view.options_button.setVisible(reading)
+        self.reading_view.focus_button.setVisible(reading)
+        focus_button = getattr(self, "_focus_mode_button", None)
+        if focus_button is not None:
+            focus_button.setVisible(not reading)
         if reading:
             action.setText("Edit View")
             action.setToolTip("Switch to edit mode (Ctrl/Cmd+Space)")
@@ -25904,6 +25931,9 @@ class MainWindow(QMainWindow):
         """Show/hide/refresh the ToC based on headings and scrollability."""
         if not self.toc_widget:
             return
+        if getattr(self, "_reading_view_enabled", False):
+            self.toc_widget.hide()
+            return
         git_diff = getattr(self, "_git_diff_editor", None)
         if (
             git_diff is not None
@@ -27257,6 +27287,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         reorg_window = getattr(self, "_vault_reorg_window", None)
+        if hasattr(self, "reading_view"):
+            self.reading_view.set_focus_mode(False)
         if reorg_window is not None:
             try:
                 reorg_window.close()

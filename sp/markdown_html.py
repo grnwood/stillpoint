@@ -44,14 +44,15 @@ def source_block_lines(text: str) -> list[int]:
         if not stripped:
             previous_blank = True
             continue
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-            elif marker == fence_marker:
+        if in_fence:
+            if re.fullmatch(re.escape(fence_marker[0]) + "{" + str(len(fence_marker)) + ",}", stripped):
                 in_fence = False
                 fence_marker = ""
+            previous_blank = False
+            continue
+        if stripped.startswith(("```", "~~~")):
+            in_fence = True
+            fence_marker = re.match(r"`+|~+", stripped).group()
         if previous_blank:
             starts.append(index)
         previous_blank = False

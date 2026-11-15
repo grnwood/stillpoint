@@ -32,6 +32,7 @@ class TableOfContentsWidget(QFrame):
         self.setObjectName("tocWidget")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._vault_accent_color: Optional[str] = None
+        self._host_palette = None
         self._apply_theme_styles()
         self._collapsed = False
         self._expanded_width = 220
@@ -65,6 +66,12 @@ class TableOfContentsWidget(QFrame):
         self._toggle_icon_color = QColor(text)
         hover_bg = theme_value("main_window.toc_widget.hover_bg", hover_default)
         selected_bg = theme_value("main_window.toc_widget.selected_bg", selected_default)
+        if self._host_palette is not None:
+            bg = self._host_palette.color(QPalette.AlternateBase).name()
+            border = self._host_palette.color(QPalette.Mid).name()
+            text = self._host_palette.color(QPalette.Text).name()
+            hover_bg = self._host_palette.color(QPalette.Base).name()
+            self._toggle_icon_color = QColor(text)
         accent = (self._vault_accent_color or "").strip()
         if accent.startswith("#"):
             color = QColor(accent)
@@ -202,6 +209,11 @@ class TableOfContentsWidget(QFrame):
     def set_vault_accent_color(self, color_hex: Optional[str]) -> None:
         candidate = (color_hex or "").strip()
         self._vault_accent_color = candidate if candidate.startswith("#") else None
+        self._apply_theme_styles()
+
+    def set_host_palette(self, palette: QPalette) -> None:
+        """Follow an embedding window's local content palette."""
+        self._host_palette = QPalette(palette)
         self._apply_theme_styles()
 
     def set_collapsed(self, collapsed: bool) -> None:
