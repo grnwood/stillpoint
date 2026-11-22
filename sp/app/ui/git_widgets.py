@@ -190,7 +190,6 @@ def git_change_row(
 
     status = QLabel(abbreviation)
     status.setObjectName("vaultGitStatusCode")
-    status.setFixedWidth(42 if _WINDOWS else 38)
     status.setAlignment(Qt.AlignCenter)
     status.setToolTip(f"{name} — {explanation}")
     status.setAccessibleName(f"Git status: {name}")
@@ -202,9 +201,11 @@ def git_change_row(
         "MOD": "#ad6800",
     }.get(abbreviation, "#546e7a")
     status.setStyleSheet(
-        "font-family: monospace; font-weight: 700; padding: 2px 3px; "
+        "font-family: monospace; font-size: 9pt; font-weight: 700; padding: 2px 3px; "
         f"border-radius: 3px; color: {color}; background: transparent;"
     )
+    status.ensurePolished()
+    status.setFixedWidth(max(42 if _WINDOWS else 38, status.sizeHint().width()))
     row_layout.addWidget(status, 0)
 
     display_path = str(path)
@@ -213,10 +214,9 @@ def git_change_row(
     path_label = GitPathLabel(display_path)
     path_label.setObjectName("vaultGitFilePath")
     path_label.setAccessibleName(f"Changed file: {path}")
-    if _WINDOWS:
-        path_font = path_label.font()
-        path_font.setPointSize(max(10, path_font.pointSize()))
-        path_label.setFont(path_font)
+    path_font = path_label.font()
+    path_font.setPointSize(10)
+    path_label.setFont(path_font)
     row_layout.addWidget(path_label, 1)
     return row
 

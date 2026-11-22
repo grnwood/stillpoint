@@ -73,6 +73,10 @@ Folder Navigator reuses StillPoint's Markdown editor for Markdown files and a sy
 
 ### Reading View
 
+If a large Markdown file opens in lightweight mode, use **Render Full Markdown** above the source to render the full document and enable the normal edit/reading controls. It uses your current buffer, including unsaved edits. If rendering fails, the source remains available and you can retry.
+
+Normal **Copy** provides formatted HTML and a readable plain-text fallback in both Markdown views, matching StillPoint. Context menus also offer **Copy as Plain Text** and **Copy as Markdown**. Pasting back into a StillPoint Markdown editor preserves the underlying formatting and link targets.
+
 For Markdown files, `Ctrl+Space` (`Cmd+Space` on macOS) or the bottom view button switches between editing and reading while preserving your source position. Reading uses this folder's local colors when theme colors are enabled.
 
 The book icon opens the same **Reading options** as StillPoint: centered reading widths, independent text sizing, line spacing, and subtle alternating table rows. These settings persist across sessions. The floating collapsible table of contents supports heading navigation and copying heading links.

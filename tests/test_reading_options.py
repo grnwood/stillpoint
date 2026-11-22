@@ -115,6 +115,7 @@ def _icon_ink(icon, state=QIcon.Off):
 
 def test_focus_checked_icon_is_dark_on_light_checked_background(qtbot, monkeypatch):
     monkeypatch.setattr(config, "load_reading_view_use_theme_colors", lambda: False)
+    monkeypatch.setattr(config, "load_reading_view_background", lambda: "white")
     view = MarkdownReadingView()
     qtbot.addWidget(view)
     palette = QPalette(view.palette())

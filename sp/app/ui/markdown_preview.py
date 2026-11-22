@@ -61,6 +61,7 @@ from sp.app import config
 from sp.app.ui.keyboard_shortcuts import is_vi_navigation_chord
 from sp.app.ui.theme import theme_value
 from sp.app.ui.heading_utils import HEADING_SIZE_MULTIPLIERS
+from sp.app.ui.markdown_clipboard import clipboard_from_html, clipboard_from_markdown
 from sp.app.ui.reading_options import ReadingOptionsPopup, reading_source_blocks
 from sp.app.ui.toc_widget import TableOfContentsWidget
 from sp.app.ui.screen_positioning import popup_available_geometry, clamp_popup_top_left
@@ -111,6 +112,7 @@ class _ReadingBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._clipboard_view = parent
         self.vi_enabled = False
         self.vi_cursor_style = "line"
         self._pending_g = False
@@ -127,6 +129,42 @@ class _ReadingBrowser(QTextBrowser):
         self._scroll_animation.setEasingCurve(QEasingCurve.OutCubic)
         self._scroll_animation.finished.connect(self._finish_scroll_animation)
         self.verticalScrollBar().valueChanged.connect(self._schedule_cursor_sync)
+
+    def _selection_mime(self, mode="formatted"):
+        cursor = self.textCursor()
+        owner = self._clipboard_view
+        source = owner.clipboard_source_selection(cursor) if owner is not None else None
+        if source is not None:
+            return clipboard_from_markdown(source, mode=mode)
+        html = cursor.selection().toHtml()
+        if self.document().findBlock(cursor.selectionStart()).blockFormat().nonBreakableLines():
+            # Qt exports the first partial preformatted line as a paragraph.
+            # Restore its code context before stripping presentation styles.
+            html = re.sub(r"<p(\s[^>]*)?>(.*?)</p>", r"<pre\1>\2</pre>", html, count=1, flags=re.DOTALL)
+        return clipboard_from_html(html, mode=mode)
+
+    def createMimeDataFromSelection(self):  # type: ignore[override]
+        return self._selection_mime()
+
+    def copy(self):
+        if self.textCursor().hasSelection():
+            QApplication.clipboard().setMimeData(self._selection_mime())
+
+    def _copy_with_mode(self, mode):
+        if self.textCursor().hasSelection():
+            QApplication.clipboard().setMimeData(self._selection_mime(mode))
+
+    def createStandardContextMenu(self, *args, **kwargs):  # type: ignore[override]
+        menu = super().createStandardContextMenu(*args, **kwargs)
+        for label, mode in (("Copy as Plain Text", "plain"), ("Copy as Markdown", "markdown")):
+            action = menu.addAction(label, lambda checked=False, mode=mode: self._copy_with_mode(mode))
+            action.setEnabled(self.textCursor().hasSelection())
+        return menu
+
+    def contextMenuEvent(self, event):  # type: ignore[override]
+        menu = self.createStandardContextMenu(event.pos())
+        menu.exec(event.globalPos())
+        menu.deleteLater()
 
     def _finish_scroll_animation(self) -> None:
         self._preserve_cursor_during_animation = False
@@ -415,9 +453,50 @@ class MarkdownReadingView(QWidget):
 
     editRequested = Signal()
     linkActivated = Signal(str)
+
+    def clipboard_source_selection(self, cursor):
+        """Use exact source for complete blocks; retain partial selections as-is."""
+        document = self.browser.document()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        if start == 0 and end == document.characterCount() - 1:
+            return self.last_markdown
+        if not cursor.hasSelection() or not self._source_positions:
+            return None
+        first = document.findBlock(start)
+        last = document.findBlock(max(start, end - 1))
+        # Cursor positions are UTF-16 offsets, so use QTextCursor to inspect
+        # the prefix rather than indexing Python text by Qt positions.
+        prefix = QTextCursor(first)
+        prefix.setPosition(start, QTextCursor.KeepAnchor)
+        if prefix.selectedText().replace("\u200b", "").strip():
+            return None
+        if end < last.position() + last.length() - 1:
+            return None
+        first_cursor, last_cursor = QTextCursor(first), QTextCursor(last)
+        for candidate in (first_cursor, last_cursor):
+            table = candidate.currentTable()
+            if table is not None and (start > table.firstCursorPosition().position() + 1
+                                      or end < table.lastCursorPosition().position()):
+                return None
+        preceding = [(position, line) for position, line in self._source_positions if position <= start]
+        if not preceding:
+            return None
+        position = max(position for position, _line in preceding)
+        source_start = min(line for candidate, line in preceding if candidate == position)
+        following = [(position, line) for position, line in self._source_positions if position >= end]
+        source_end = min(following)[1] - 1 if following else len(self.last_markdown.splitlines())
+        for source in self._source_blocks:
+            if source.kind == "code" and source.line <= source_start <= source.end_line:
+                block_position = self._source_line_positions.get(source.line)
+                if block_position != first.position() or source_end < source.end_line:
+                    return None
+                source_start = source.line
+            if source.kind == "code" and source.line <= source_end < source.end_line:
+                return None
+        return "\n".join(self.last_markdown.splitlines()[source_start - 1:source_end])
     backgroundChanged = Signal(str)
 
-    def __init__(self, parent=None, *, preference_scope=None):
+    def __init__(self, parent=None, *, preference_scope=None, enable_table_preview=True):
         super().__init__(parent)
         self.preference_scope = preference_scope
         self.last_markdown = ""
@@ -455,9 +534,11 @@ class MarkdownReadingView(QWidget):
         self._pending_source_position = None
         self._base_font_point_size = 12.0
         self._editor_font_family = "sans-serif"
+        self._code_font_family = self._fixed_width_font_family()
         self._editor_document_margin = 18.0
         self._editor_line_spacing: float | None = None
         self._heading_weight = 700
+        self._editor_syntax_colors = {}
         self._handoff_scroll_value = None
         self._handoff_source_line = None
         self._zoom_steps = 0
@@ -621,6 +702,31 @@ class MarkdownReadingView(QWidget):
             self._page_shortcuts.append(shortcut)
         self._apply_palette()
 
+        if enable_table_preview:
+            from .table_hover_preview import TableHoverPreview
+            self._table_hover_preview = TableHoverPreview(
+                self.browser, source_at_point=self._table_source_at_point
+            )
+
+    def _table_source_at_point(self, point):
+        table = self.browser.cursorForPosition(point).currentTable()
+        if table is None:
+            return None
+        rect = self.browser.document().documentLayout().frameBoundingRect(table)
+        document_point = QPoint(
+            point.x() + self.browser.horizontalScrollBar().value(),
+            point.y() + self.browser.verticalScrollBar().value(),
+        )
+        if not rect.contains(document_point):
+            return None
+        for source in self._source_blocks:
+            if source.kind != "table":
+                continue
+            position = self._source_line_positions.get(source.line)
+            if position is not None and table.firstPosition() <= position <= table.lastPosition():
+                return source.markdown, source.line - 1
+        return None
+
     def _asset_icon(self, name: str, color: QColor | None = None) -> QIcon:
         path = Path(__file__).resolve().parents[2] / "assets" / name
         if not path.exists() and getattr(sys, "_MEIPASS", None):
@@ -634,6 +740,20 @@ class MarkdownReadingView(QWidget):
             painter.fillRect(pixmap.rect(), color if color is not None else palette.color(QPalette.Text))
             painter.end()
         return QIcon(pixmap)
+
+    @staticmethod
+    def _fixed_width_font_family():
+        """Resolve a real installed font; Qt's generic alias can be proportional."""
+        system_family = QFontDatabase.systemFont(QFontDatabase.FixedFont).family()
+        available = QFontDatabase.families()
+        names = {family.casefold(): family for family in available}
+        candidates = [system_family, "Menlo", "Consolas", "DejaVu Sans Mono",
+                      "Liberation Mono", "Monaco", "Courier New", *available]
+        for candidate in candidates:
+            family = names.get(candidate.casefold())
+            if family and QFontDatabase.isFixedPitch(family):
+                return family
+        return system_family or "monospace"
 
     def _update_focus_button_icon(self):
         background = self._focus_checked_background
@@ -989,6 +1109,29 @@ class MarkdownReadingView(QWidget):
                 )
             ))
 
+        # Prefer the attached editor's actual highlighter colors. Standalone
+        # readers use the same theme keys and light/dark defaults as the editor.
+        light = self._paper_color.lightness() >= 128
+        def syntax(name, light_default, dark_default):
+            return self._editor_syntax_colors.get(name) or str(theme_value(
+                f"markdown_editor.syntax.{name}", light_default if light else dark_default
+            ))
+
+        heading = syntax("heading", "#8b5cf6", "#6cb4ff")
+        bold = syntax("bold", "#92400e", "#ffd479")
+        italic = syntax("italic", "#9d174d", "#ffa7c4")
+        bold_italic = syntax("bold_italic", "#7c2d12", "#ffb8d1")
+        code_text = syntax("code_text", "#166534", "#a3ffab")
+        inline_code_bg = syntax("code_bg", "#ecfdf5", "#2a2a2a")
+        code_bg = syntax("code_block_bg", "#f3f4f6", "#2a2a2a")
+        code_block_text = syntax("code_block_text", "#166534", "#a3ffab")
+        self._code_background = QColor(code_bg)
+        self._code_text_color = QColor(code_block_text)
+        heading_inline_css = "\n".join(
+            f"h{level}, h{level} strong, h{level} em, h{level} b, h{level} i {{ color: {self._editor_syntax_colors.get(f'heading{level}', heading)}; }}"
+            for level in range(1, 7)
+        )
+
         self._copy_button_border = tint(0.30)
         self._copy_button_hover = tint(0.12)
         self._css = f"""
@@ -996,14 +1139,14 @@ class MarkdownReadingView(QWidget):
             body {{ font-family: {self._editor_font_family}; font-size: {body_size}; line-height: 1.35;
                     margin: {self._editor_document_margin}px;
                     margin-left: {self._editor_document_margin + READING_CURSOR_GUTTER}px; }}
-            h1, h2, h3, h4, h5, h6 {{ color: {text}; margin-top: 6px;
+            h1, h2, h3, h4, h5, h6 {{ color: {heading}; margin-top: 6px;
                    margin-bottom: 3px; font-weight: {self._heading_weight}; }}
             h1 {{ font-size: {heading_sizes[0]}; }}
             h2 {{ font-size: {heading_sizes[1]}; }}
             h3 {{ font-size: {heading_sizes[2]}; }}
             h4 {{ font-size: {heading_sizes[3]}; }}
             h5 {{ font-size: {heading_sizes[4]}; }}
-            h6 {{ font-size: {heading_sizes[4]}; color: {muted}; }}
+            h6 {{ font-size: {heading_sizes[4]}; }}
             p, li, th, td, blockquote, pre, code {{ font-size: {body_size}; }}
             p, ul, ol, li, th, td {{ color: {text}; }}
             p {{ margin-top: 0.25em; margin-bottom: 0.25em; }}
@@ -1017,8 +1160,14 @@ class MarkdownReadingView(QWidget):
                                      padding: 0; height: 1px; font-size: 1px; }}
             blockquote {{ color: {muted}; border-left: 4px solid {border};
                           margin-left: 0; padding-left: 1em; }}
-            code {{ background: {code_bg}; font-family: monospace; }}
-            pre {{ background: {code_bg}; border: 1px solid {border}; padding: 7px; }}
+            strong, b {{ color: {bold}; }}
+            em, i {{ color: {italic}; }}
+            strong em, em strong, b i, i b {{ color: {bold_italic}; }}
+            {heading_inline_css}
+            pre, code {{ font-family: {json.dumps(self._code_font_family)}; }}
+            code {{ color: {code_text}; background: {inline_code_bg}; white-space: pre-wrap; }}
+            pre, pre code {{ color: {code_block_text}; background: {code_bg}; }}
+            pre {{ border: 1px solid {border}; padding: 7px; }}
             a {{ color: {highlight}; text-decoration: none; }}
             img {{ max-width: 100%; margin-top: 0.2em; margin-bottom: 0.2em; }}
             mark {{ color: {text}; background: transparent; text-decoration: underline; }}
@@ -1096,6 +1245,21 @@ class MarkdownReadingView(QWidget):
         highlighter = getattr(editor, "highlighter", None)
         if highlighter is not None:
             self._heading_weight = highlighter.heading_format.fontWeight()
+            colors = {}
+            for name, fmt in (
+                ("heading", highlighter.heading_format),
+                ("bold", highlighter.bold_format),
+                ("italic", highlighter.italic_format),
+                ("bold_italic", highlighter.bold_italic_format),
+                ("code_text", highlighter.code_format),
+                ("code_block_text", highlighter.code_block),
+            ):
+                colors[name] = fmt.foreground().color().name()
+            colors["code_bg"] = highlighter.code_format.background().color().name()
+            colors["code_block_bg"] = highlighter.code_block.background().color().name()
+            for level, fmt in enumerate(highlighter.heading_styles, 1):
+                colors[f"heading{level}"] = fmt.foreground().color().name()
+            self._editor_syntax_colors = colors
         self.browser.setViewportMargins(editor.viewportMargins())
         self.set_base_font_point_size(editor.font().pointSizeF())
         self._apply_palette()
@@ -1485,8 +1649,10 @@ class MarkdownReadingView(QWidget):
                     code_cursor.setBlockFormat(code_format)
                     code_cursor.select(QTextCursor.BlockUnderCursor)
                     char_format = QTextCharFormat()
-                    char_format.setFontFamilies([QFontDatabase.systemFont(QFontDatabase.FixedFont).family()])
-                    char_format.setForeground(self._text_color)
+                    char_format.setFontFamilies([self._code_font_family])
+                    char_format.setFontFixedPitch(True)
+                    char_format.setFontStyleHint(QFont.Monospace)
+                    char_format.setForeground(self._code_text_color)
                     code_cursor.mergeCharFormat(char_format)
                     self._source_line_positions[source_line] = block.position()
                     self._source_positions.append((block.position(), source_line))

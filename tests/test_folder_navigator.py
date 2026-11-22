@@ -308,7 +308,7 @@ def test_folder_navigator_format_table_action_is_one_dirty_edit(
     window.close()
 
 
-def test_large_markdown_opens_lightweight_without_rich_override(
+def test_large_markdown_opens_lightweight_with_explicit_render_button(
         tmp_path, monkeypatch, app):
     import sp.app.folder_navigator.core as core
     from sp.app.folder_navigator.editors import SourceEditor
@@ -326,7 +326,8 @@ def test_large_markdown_opens_lightweight_without_rich_override(
     assert tab.property("folderLargeMarkdownSource")
     assert tab.editor.syntax_highlighter is None
     assert "lightweight mode" in tab.notice.text()
-    assert not hasattr(tab, "rich_markdown_button")
+    assert tab.rich_markdown_button.text() == "Render Full Markdown"
+    assert tab.rich_markdown_button.isEnabled()
     window.close()
 
 
@@ -1110,9 +1111,11 @@ def test_editor_context_menu_is_shared_and_reveals_file(
 
     assert [
         action for action in markdown_actions
-        if action not in {"Copy as Markdown", "Format Markdown Table"}
+        if action not in {"Copy as Markdown", "Copy as Plain Text", "Format Markdown Table"}
     ] == source_actions
     assert "Copy as Markdown" in markdown_actions
+    assert "Copy as Plain Text" in markdown_actions
+    assert "Copy as Plain Text" not in source_actions
     assert "Copy as Markdown" not in source_actions
     assert "Format Markdown Table" in markdown_actions
     assert "Format Markdown Table" not in source_actions
@@ -1122,7 +1125,7 @@ def test_editor_context_menu_is_shared_and_reveals_file(
     markdown_tab.editor.insertPlainText("unsaved ")
     next(action for action in markdown_menu.actions()
          if action.text() == "Copy as Markdown").trigger()
-    assert app.clipboard().text() == markdown_tab.editor.to_markdown()
+    assert app.clipboard().text() == markdown_tab.editor.to_markdown().strip()
     assert app.clipboard().text() != markdown_path.read_text()
 
     markdown_menu.actions()[-1].trigger()

@@ -106,3 +106,84 @@ def test_transient_print_preview_rewrites_only_local_relative_images(
         in rendered
     )
     assert 'src="https://example.com/a.png"' in rendered
+
+
+def test_nested_bullets_keep_hierarchy_in_both_print_renderers(tmp_path: Path) -> None:
+    from xml.etree import ElementTree as ET
+    from sp.server import api
+    from sp.webserver.server import WebServer
+
+    text = (
+        "Big things from yesterday:\n"
+        "* **Review context**\n"
+        "  * Each review gets its own data\n"
+        "    * Add `fetchData()`\n"
+        "      SOQL the required fields.\n"
+        "* **Queueable work**\n"
+        "  * Otherwise `localWork()`\n"
+    )
+    for rendered in (api._render_markdown_html(text),
+                     WebServer(str(tmp_path))._render_markdown(text, "")):
+        root = ET.fromstring(f"<div>{rendered}</div>")
+        assert len(root.findall("./ul/li")) == 2
+        assert len(root.findall("./ul/li/ul/li")) == 2
+        assert len(root.findall("./ul/li/ul/li/ul/li")) == 1
+        assert root.find("./ul/li/strong").text == "Review context"
+        assert root.find("./ul/li/ul/li/ul/li/code").text == "fetchData()"
+        assert "SOQL the required fields." in "".join(root.itertext())
+        assert not root.findall(".//pre")
+
+
+def test_print_bold_matches_editor_with_spaces_inside_markers(tmp_path: Path) -> None:
+    from sp.server import api
+    from sp.webserver.server import WebServer
+
+    text = (
+        "* **No dependencies causing loops... **\n"
+        "  * Mitigated with runLast\n\n"
+        "** leading space** and **ordinary** and ***both***\n\n"
+        "`**literal **`\n\n"
+        "```text\n**literal **\n```\n\n"
+        r"\*\*escaped **"
+    )
+    for rendered in (api._render_markdown_html(text),
+                     WebServer(str(tmp_path))._render_markdown(text, "")):
+        assert "<strong>No dependencies causing loops... </strong>" in rendered
+        assert "<strong> leading space</strong>" in rendered
+        assert "<strong>ordinary</strong>" in rendered
+        assert "<strong><em>both</em></strong>" in rendered
+        assert "<code>**literal **</code>" in rendered
+        assert '<code class="language-text">**literal **' in rendered
+        assert "<p>**escaped **</p>" in rendered
+
+
+def test_html_renderers_preserve_tabbed_prose_and_inline_formatting(tmp_path: Path) -> None:
+    from xml.etree import ElementTree as ET
+    from sp.markdown_html import render_markdown_html
+    from sp.webserver.server import WebServer
+
+    text = (
+        "Runs on create.\n"
+        "\tif `initial`:\n"
+        "\t\t**Evaluate decisions**\n"
+        "\telse:\n"
+        "\t\tLoad records\n\n"
+        "Next paragraph\n"
+        "  Loop:\n"
+        "    `evaluate()`\n\n"
+        "```text\n\tcode stays tabbed\n```\n\n"
+        "    standalone code"
+    )
+    renderers = [render_markdown_html(text),
+                 render_markdown_html(text, source_anchors=True),
+                 WebServer(str(tmp_path))._render_markdown(text, "")]
+    for rendered in renderers:
+        root = ET.fromstring(f"<div>{rendered}</div>")
+        assert "\u00a0" * 4 + "if " in "".join(root.itertext())
+        assert "\u00a0" * 8 + "Evaluate decisions" in "".join(root.itertext())
+        assert "\u00a0" * 2 + "Loop:" in "".join(root.itertext())
+        assert "\u00a0" * 4 + "evaluate()" in "".join(root.itertext())
+        assert root.find("./p/strong").text == "Evaluate decisions"
+        assert len(root.findall("./pre")) == 2
+        assert "    code stays tabbed" in rendered
+        assert "standalone code" in "".join(root.findall("./pre/code")[1].itertext())

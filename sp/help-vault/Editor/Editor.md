@@ -11,16 +11,28 @@ StillPoint’s editor is a Markdown editor designed for fast note-taking, linkin
 ## Page Preview and Editing
 Use **Reading View** for a rendered page preview with formatted headings, links, images, and tables. Use **Edit View** to write and change the underlying Markdown.
 
+Reading View keeps the editor's theme colors for headings, bold and italic text, and fixed-width text, including when using Folder Navigator.
+
 - Press `Ctrl+Space` (`Cmd+Space` on macOS) to switch views, or use the view button in the bottom editor bar.
 - Both views show the same page. Switching views does not create a separate copy; edits appear in Reading View when you switch back.
 - Reading View supports following links and finding text. Switch to Edit View to change text or insert content.
 - Vault permissions still apply in Edit View. Read-only vaults, including the help vault, allow reading, navigation, selection, and copying, but block typing, pasting, and dropping links or attachments into the page.
+
+With vi navigation enabled, the **Line Outline Cursor** frames the active visual line in the vault or folder accent color. Text colors and the line background remain readable inside the outline. The same cursor is used by Folder Navigator's Markdown editor and the Focus and Audience editors.
+
+### Copying Content
+
+**Copy** (`Ctrl+C`, or `Cmd+C` on macOS) works the same in StillPoint and Folder Navigator, in both editing and reading views. It copies clean formatted HTML for email and rich-text applications, with readable plain text as a fallback. Headings, emphasis, links, lists, tables, and code are preserved without the reader's theme colors, font sizes, or page layout. Pasting between StillPoint editors also preserves the underlying Markdown.
+
+Use **Copy as Plain Text** from the context menu for unformatted readable text, or **Copy as Markdown** for source syntax. The copy buttons on reading-view tables and code blocks remain explicit **Copy Markdown** actions.
 
 ### Reading Options
 
 The book icon in the bottom bar opens **Reading options**. Choose Narrow, Comfortable, Wide, or Full width; adjust text size independently of the editor; and select Compact, Normal, or Relaxed line spacing. Subtle alternating table rows can be turned off here. These preferences are remembered across sessions and shared with Folder Navigator.
 
 Wide code and tables use the reader's horizontal scrollbar when needed.
+
+Hold the pointer over a table for three-quarters of a second to open a larger read-only table preview. Move the mouse or press `Escape` to dismiss it. This works in both Markdown editing and reading views, including Folder Navigator.
 
 Switching between reading and editing preserves your source position, including individual table rows and code lines, even when the two views use different sizes or widths.
 

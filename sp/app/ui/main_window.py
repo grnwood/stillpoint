@@ -14259,6 +14259,7 @@ class MainWindow(QMainWindow):
 
         def focus_picker_surface() -> None:
             surface = self.reading_view.browser if self._reading_view_enabled else self.editor
+            self.activateWindow()
             surface.setFocus(Qt.OtherFocusReason)
 
         def activate_current() -> None:
@@ -14356,8 +14357,9 @@ class MainWindow(QMainWindow):
     def _request_heading_picker_popup(self) -> None:
         if not getattr(self, "editor", None):
             return
-        cursor_rect = self.editor.cursorRect()
-        viewport = self.editor.viewport()
+        surface = self.reading_view.browser if self._reading_view_enabled else self.editor
+        cursor_rect = surface.cursorRect()
+        viewport = surface.viewport()
         prefer_above = False
         try:
             prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
@@ -16865,6 +16867,7 @@ class MainWindow(QMainWindow):
         if focused is not None and focused.window() is self:
             panel_roots = (
                 getattr(self, "editor", None),
+                getattr(self, "reading_view", None),
                 getattr(self, "find_bar", None),
                 getattr(self, "left_panel_container", None),
                 getattr(self, "right_panel_container", None),
@@ -16872,7 +16875,9 @@ class MainWindow(QMainWindow):
             if any(root is not None and (focused is root or root.isAncestorOf(focused))
                    for root in panel_roots):
                 return
-        if getattr(self, "current_path", None):
+        if getattr(self, "_reading_view_enabled", False):
+            self.reading_view.browser.setFocus(Qt.ActiveWindowFocusReason)
+        elif getattr(self, "current_path", None):
             self.editor.setFocus(Qt.ActiveWindowFocusReason)
         else:
             if self._is_right_panel_expanded():

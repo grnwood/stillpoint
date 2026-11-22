@@ -409,7 +409,7 @@ class PreferencesDialog(QDialog):
         modes_layout.addWidget(self.vi_enable_checkbox)
         modes_layout.addWidget(QLabel("Vi navigation cursor style:"))
         self.vi_cursor_block_radio = QRadioButton("Use Vi Mode Block Cursor")
-        self.vi_cursor_line_radio = QRadioButton("Use Vi Mode Line Highlight Cursor")
+        self.vi_cursor_line_radio = QRadioButton("Use Vi Mode Line Outline Cursor")
         cursor_style = config.load_vi_cursor_style()
         self.vi_cursor_block_radio.setChecked(cursor_style == "block")
         self.vi_cursor_line_radio.setChecked(cursor_style != "block")
@@ -417,7 +417,7 @@ class PreferencesDialog(QDialog):
             "Show an accent-colored block cursor while vi navigation mode is active."
         )
         self.vi_cursor_line_radio.setToolTip(
-            "Highlight the current line with the vault accent color while vi navigation mode is active."
+            "Outline the current Markdown line with the accent color while vi navigation mode is active."
         )
         modes_layout.addWidget(self.vi_cursor_block_radio)
         modes_layout.addWidget(self.vi_cursor_line_radio)

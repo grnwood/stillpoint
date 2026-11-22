@@ -3,9 +3,30 @@ from __future__ import annotations
 
 import html
 import re
+from xml.etree import ElementTree
 from urllib.parse import quote, unquote
 
 import markdown as md
+
+
+class _EditorBoldProcessor(md.inlinepatterns.InlineProcessor):
+    def handleMatch(self, match, data):
+        content = match.group(1)
+        if not content.strip():
+            return None, None, None
+        element = ElementTree.Element("strong")
+        element.text = content
+        return element, match.start(0), match.end(0)
+
+
+class EditorEmphasisExtension(md.extensions.Extension):
+    """Accept whitespace inside bold markers, as the editor does."""
+
+    def extendMarkdown(self, renderer):
+        renderer.inlinePatterns.register(
+            _EditorBoldProcessor(r"(?<!\*)\*\*(?!\*)([^*\n]+)\*\*(?!\*)", renderer),
+            "stillpoint_bold", 175,
+        )
 
 
 def vault_link_href(target: str) -> str:
@@ -87,13 +108,13 @@ def _add_source_anchors(text: str) -> str:
     output: list[str] = []
     for index, line in enumerate(text.splitlines(), start=1):
         if index in starts:
-            ordered_item = re.match(r"^(\s*\d+\.\s+)(.*)$", line)
-            if ordered_item:
-                # A standalone anchor paragraph between loose list items
-                # splits the list, restarting its numbering at one.
+            list_item = re.match(r"^([ \t]*(?:[*+]|\d+\.)[ \t]+)(.*)$", line)
+            if list_item:
+                # Keep anchors inside list items so loose and nested lists
+                # remain a single list (including their numbering).
                 output.append(
-                    f'{ordered_item.group(1)}<span id="sp-source-{index}">&#8203;</span>'
-                    f'{ordered_item.group(2)}'
+                    f'{list_item.group(1)}<span id="sp-source-{index}">&#8203;</span>'
+                    f'{list_item.group(2)}'
                 )
                 continue
             # A zero-width character keeps the anchor alive in QTextDocument.
@@ -113,9 +134,10 @@ def render_markdown_html(text: str, *, source_anchors: bool = False) -> str:
     normalized = _rewrite_markdown_image_sizes(normalized)
     normalized = _rewrite_task_and_dash_markers(normalized)
     normalized = _normalize_markdown_lists(normalized)
+    normalized = _preserve_prose_indentation(normalized)
     normalized = _rewrite_highlight(normalized)
     normalized = _rewrite_strikethrough(normalized)
-    renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+    renderer = md.Markdown(extensions=["fenced_code", "tables", "nl2br", EditorEmphasisExtension()])
     rendered = renderer.convert(normalized)
     if source_anchors:
         rendered = _inline_source_anchors(rendered)
@@ -265,76 +287,95 @@ def _normalize_markdown_image_blocks(text: str) -> str:
 
 
 def _normalize_markdown_lists(text: str) -> str:
-    def is_list_line(value: str) -> bool:
-        trimmed = value.lstrip()
-        if trimmed.startswith(("* ", "- ", "+ ")):
-            return True
-        # Stillpoint's editor permits italicized list rows such as
-        # ``    *- item text*``.  Treat their dash as the list marker when
-        # removing accidental code-block indentation for HTML rendering.
-        if trimmed.startswith(("*- ", "_- ")):
-            return True
-        digits = ""
-        for character in trimmed:
-            if not character.isdigit():
-                break
-            digits += character
-        return bool(digits) and trimmed[len(digits):].startswith(". ")
+    """Translate the editor's list indentation to Python-Markdown's four spaces.
 
-    def indent_columns(value: str) -> int:
-        columns = 0
-        for character in value:
-            if character == " ":
-                columns += 1
-            elif character == "\t":
-                columns += 4
-            else:
-                break
-        return columns
-
-    def strip_indent(value: str, columns: int) -> str:
-        remaining = columns
-        index = 0
-        while index < len(value) and remaining > 0:
-            if value[index] == " ":
-                remaining -= 1
-            elif value[index] == "\t":
-                remaining -= 4
-            else:
-                break
-            index += 1
-        return value[index:]
-
-    lines = text.splitlines()
+    Track source indentation levels instead of deindenting every indented row:
+    both two-space editor lists and existing four-space lists must keep children.
+    """
+    list_re = re.compile(r"^([ \t]*)(?:[*+] |\d+\. )")
     normalized: list[str] = []
-    in_fence = False
-    fence_marker = ""
-    deindent_active = False
-    for line in lines:
+    levels: list[int] = []
+    fence = ""
+    for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-            elif marker == fence_marker:
-                in_fence = False
-                fence_marker = ""
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            value = marker.group(1)
+            if not fence:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = ""
             normalized.append(line)
             continue
-        if in_fence or not stripped:
+        if fence or not stripped:
             normalized.append(line)
             continue
-        if not deindent_active and is_list_line(line) and indent_columns(line) >= 4:
-            deindent_active = True
-        if is_list_line(line):
-            if normalized and normalized[-1].strip() and not is_list_line(normalized[-1].strip()):
-                normalized.append("")
-            normalized.append(strip_indent(line, 4) if deindent_active else line)
+        indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+        if list_re.match(line):
+            if not levels:
+                if normalized and normalized[-1].strip():
+                    normalized.append("")
+                levels.append(indent)
+            else:
+                while len(levels) > 1 and indent < levels[-1]:
+                    levels.pop()
+                if indent > levels[-1]:
+                    levels.append(indent)
+                elif indent < levels[0]:
+                    levels = [indent]
+            normalized.append(" " * (4 * (len(levels) - 1)) + line.lstrip(" \t"))
             continue
-        deindent_active = False
+        if levels and indent > levels[-1]:
+            # A wrapped line or paragraph belongs to the preceding list item.
+            continuation_indent = max(
+                4 * len(levels), 4 * (len(levels) - 1) + indent - levels[-1]
+            )
+            normalized.append(" " * continuation_indent + line.lstrip(" \t"))
+            continue
+        levels = []
+        # Legacy italicized dash rows are prose, even when indented in the editor.
+        if stripped.startswith(("*- ", "_- ")):
+            line = line[4:] if line.startswith("    ") else line.lstrip("\t")
         normalized.append(line)
     return "\n".join(normalized)
+
+
+def _preserve_prose_indentation(text: str) -> str:
+    """Keep editor indentation on prose lines instead of HTML collapsing it.
+
+    Lists retain their structural indentation; fenced and standalone four-space
+    code blocks continue to use Markdown's code rendering.
+    """
+    output: list[str] = []
+    fence = ""
+    prose: bool | None = None
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            value = marker.group(1)
+            if not fence:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence):
+                fence = ""
+            prose = None
+            output.append(line)
+            continue
+        if fence:
+            output.append(line)
+            continue
+        if not line.strip():
+            prose = None
+            output.append(line)
+            continue
+        if prose is None:
+            stripped = line.lstrip(" \t")
+            structural = re.match(r"(?:[*+-]\s|\d+\.\s|#{1,6}\s|[>|<]|[-*_]{3,}\s*$)", stripped)
+            prose = not structural and not line.startswith("    ")
+        if prose:
+            leading = re.match(r"[ \t]*", line).group()
+            line = "&#160;" * len(leading.expandtabs(4)) + line[len(leading):]
+        output.append(line)
+    return "\n".join(output)
 
 
 def _rewrite_outside_code(text: str, pattern: str, replacement: str) -> str:

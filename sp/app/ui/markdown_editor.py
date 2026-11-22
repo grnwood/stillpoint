@@ -87,6 +87,8 @@ from .path_utils import (
     trace_link_decision,
 )
 from .heading_utils import heading_slug, HEADING_SIZE_MULTIPLIERS
+from .markdown_clipboard import clipboard_from_html, clipboard_from_markdown
+from sp.markdown_html import vault_link_href
 from .page_load_logger import (
     PageLoadLogger,
     PERFORMANCE_LOGGING_ENABLED,
@@ -1410,10 +1412,29 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 set_format_cp_span(indent + hashes + 1, len(text), fmt)
                 heading_applied = True
 
-        # If we styled a heading, stop here so later rules (links, tags, etc.) don't override
-        # the heading font size/color and leave trailing characters unstyled.
+        # Headings keep their own typography. Process inline emphasis using
+        # copies of that format rather than the body rules, which would reset
+        # the heading size/color or leave Markdown delimiters visible on paste.
         if heading_applied:
             self._apply_inline_code_formatting(text)
+            heading_format = QTextCharFormat(fmt)
+            delimiters = {"bold": 2, "italic": 1, "bold_italic": 3, "strike": 2, "highlight": 2}
+            for start, length, kind in self._scan_inline_patterns(text):
+                width = delimiters.get(kind)
+                if width is None:
+                    continue
+                inline_format = QTextCharFormat(heading_format)
+                if kind in {"bold", "bold_italic"}:
+                    inline_format.setFontWeight(QFont.Weight.Bold)
+                if kind in {"italic", "bold_italic"}:
+                    inline_format.setFontItalic(True)
+                if kind == "strike":
+                    inline_format.setFontStrikeOut(True)
+                if kind == "highlight":
+                    inline_format.setBackground(self.highlight_format.background())
+                set_format_cp_span(start, start + width, self.hidden_format)
+                set_format_cp_span(start + width, start + length - width, inline_format)
+                set_format_cp_span(start + length - width, start + length, self.hidden_format)
             if self._timing_enabled:
                 self._timing_blocks += 1
                 self._timing_total += time.perf_counter() - t0
@@ -2587,6 +2608,13 @@ class MarkdownEditor(QTextEdit):
         self._vi_paint_in_progress = True
         try:
             super().paintEvent(event)
+            outline = self._vi_line_outline_rect()
+            if not outline.isEmpty():
+                painter = QPainter(viewport)
+                painter.setPen(QPen(self._vi_cursor_colors()[0], 1.0))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(QRectF(outline).adjusted(0.5, 0.5, -0.5, -0.5))
+                painter.end()
             if not self._vi_has_painted:
                 self._vi_has_painted = True
         finally:
@@ -4811,7 +4839,7 @@ class MarkdownEditor(QTextEdit):
         if full_block_selection:
             replace_start = blocks[0].position()
             last_block = blocks[-1]
-            replace_end = last_block.position() + len(last_block.text())
+            replace_end = last_block.position() + last_block.length() - 1
             replace_cursor = QTextCursor(self.document())
             replace_cursor.setPosition(replace_start)
             replace_cursor.setPosition(replace_end, QTextCursor.KeepAnchor)
@@ -4819,14 +4847,43 @@ class MarkdownEditor(QTextEdit):
         else:
             replace_cursor = adjusted_cursor
             start = adjusted_cursor.selectionStart()
-        replace_cursor.beginEditBlock()
-        replace_cursor.insertText(new_display)
-        replace_cursor.endEditBlock()
-        new_cursor = self.textCursor()
-        new_cursor.setPosition(start)
-        new_cursor.setPosition(start + len(new_display), QTextCursor.KeepAnchor)
-        self.setTextCursor(new_cursor)
-    
+        removed_length = replace_cursor.selectionEnd() - replace_cursor.selectionStart()
+        # Replacing several blocks invalidates their QTextLayouts. Keep native
+        # painting, cursor geometry callbacks, and display normalization out of
+        # the edit until both the replacement and its selection are complete.
+        self._push_paint_block()
+        cursor_blocked = self._cursor_events_blocked
+        enforcing = self._enforce_display_guard
+        self._cursor_events_blocked = True
+        self._enforce_display_guard = True
+        try:
+            replace_cursor.beginEditBlock()
+            try:
+                replace_cursor.insertText(new_display)
+                # QTextCursor positions are UTF-16 offsets, not Python lengths.
+                end = replace_cursor.position()
+                new_cursor = QTextCursor(self.document())
+                new_cursor.setPosition(start)
+                new_cursor.setPosition(end, QTextCursor.KeepAnchor)
+                for block in self._blocks_for_cursor(new_cursor):
+                    self._refresh_hanging_indent(block, block.text())
+            finally:
+                replace_cursor.endEditBlock()
+            self.setTextCursor(new_cursor)
+        finally:
+            self._cursor_events_blocked = cursor_blocked
+            self._enforce_display_guard = enforcing
+            token = self.current_load_token()
+            self._post_load_repaint_token = -1
+            self._arm_post_load_paint_guard(token)
+            self._pop_paint_block()
+            self._queue_post_load_repaint(token)
+        # Document-derived scans were suppressed during the transaction.
+        self._last_block_count = self.document().blockCount()
+        self._on_document_contents_change(start, removed_length, end - start)
+        self._emit_cursor()
+        self._maybe_update_vi_cursor()
+
     def _toggle_bold(self) -> None:
         """Toggle bold formatting (**text**)."""
         self._toggle_markdown_format('**')
@@ -5911,6 +5968,7 @@ class MarkdownEditor(QTextEdit):
 
     def createStandardContextMenu(self, *args, **kwargs):  # type: ignore[override]
         menu = super().createStandardContextMenu(*args, **kwargs)
+        self._add_copy_plain_action(menu)
         try:
             apply_menu_theme(menu, self)
         except Exception:
@@ -6224,6 +6282,7 @@ class MarkdownEditor(QTextEdit):
         copy_action, md_action = self._build_copy_actions(menu)
         menu.addAction(copy_action)
         menu.addAction(md_action)
+        self._add_copy_plain_action(menu)
         menu.addSeparator()
 
     def _add_cut_action(self, menu: QMenu) -> None:
@@ -6524,6 +6583,27 @@ class MarkdownEditor(QTextEdit):
     def _selection_as_markdown_for_clipboard(self) -> str:
         cursor = self.textCursor()
         text = self._selection_storage_markdown(cursor)
+        # Syntax highlighting is not stored in QTextDocument's character
+        # formats. Preserve emphasis when only the visible word is selected.
+        if text and cursor.hasSelection() and "\n" not in text:
+            block = self.document().findBlock(cursor.selectionStart())
+            start = cursor.selectionStart() - block.position()
+            end = cursor.selectionEnd() - block.position()
+            if not re.fullmatch(r"\[[^\]]*\|[^\]]*\]", text):
+                for item in block.layout().formats():
+                    if item.start <= start and item.start + item.length >= end:
+                        fmt = item.format
+                        if fmt.fontFixedPitch():
+                            fence = "`" * (max((len(value) for value in re.findall(r"`+", text)), default=0) + 1)
+                            text = fence + text + fence
+                        else:
+                            if fmt.fontWeight() >= 600:
+                                text = "**" + text + "**"
+                            if fmt.fontItalic():
+                                text = "*" + text + "*"
+                            if fmt.fontStrikeOut():
+                                text = "~~" + text + "~~"
+                        break
         return text or ""
 
     def _storage_links_to_markdown_links(self, text: str) -> str:
@@ -6632,44 +6712,89 @@ class MarkdownEditor(QTextEdit):
         return adjusted_cursor
 
     def _copy_selection_to_clipboard(self) -> None:
-        markdown_text = self._selection_as_markdown_for_clipboard()
-        if not markdown_text:
-            return
-        self._set_clipboard_markdown(markdown_text, include_internal_payload=True)
+        if self.textCursor().hasSelection():
+            QApplication.clipboard().setMimeData(self.createMimeDataFromSelection())
+
+    def _partial_selection_html(self):
+        """Project a partial paragraph's visible syntax formats into rich text.
+
+        QTextDocumentFragment omits QSyntaxHighlighter formats. Copy those
+        formats into a temporary document, removing hidden Markdown markers
+        only there, so a selection crossing emphasis boundaries stays valid.
+        """
+        cursor = self.textCursor()
+        block = self.document().findBlock(cursor.selectionStart())
+        if not cursor.hasSelection() or cursor.selectionEnd() > block.position() + block.length() - 1:
+            return None
+        if cursor.selectionStart() == block.position() and cursor.selectionEnd() == block.position() + block.length() - 1:
+            return None
+        formats = block.layout().formats()
+        if not formats:
+            return None
+        fragment = QTextDocument()
+        QTextCursor(fragment).insertFragment(cursor.selection())
+        removed = []
+        for item in formats:
+            start = max(cursor.selectionStart(), block.position() + item.start)
+            end = min(cursor.selectionEnd(), block.position() + item.start + item.length)
+            if end <= start:
+                continue
+            start, end = start - cursor.selectionStart(), end - cursor.selectionStart()
+            if 0 < item.format.fontPointSize() <= 1:
+                removed.append((start, end))
+            else:
+                rich = QTextCursor(fragment)
+                rich.setPosition(start)
+                rich.setPosition(end, QTextCursor.KeepAnchor)
+                rich.mergeCharFormat(item.format)
+        for match in WIKI_LINK_DISPLAY_PATTERN.finditer(block.text()):
+            group = "label" if match.group("label") else "link"
+            start, end = match.span(group)
+            if group == "link" and match.group("link").endswith("|"):
+                end -= 1
+            start = block.position() + len(block.text()[:start].encode("utf-16-le")) // 2
+            end = block.position() + len(block.text()[:end].encode("utf-16-le")) // 2
+            start, end = max(cursor.selectionStart(), start), min(cursor.selectionEnd(), end)
+            if end > start:
+                rich = QTextCursor(fragment)
+                rich.setPosition(start - cursor.selectionStart())
+                rich.setPosition(end - cursor.selectionStart(), QTextCursor.KeepAnchor)
+                fmt = QTextCharFormat()
+                fmt.setAnchor(True)
+                fmt.setAnchorHref(vault_link_href(match.group("link").rstrip("|")))
+                rich.mergeCharFormat(fmt)
+        for start, end in sorted(removed, reverse=True):
+            rich = QTextCursor(fragment)
+            rich.setPosition(start)
+            rich.setPosition(end, QTextCursor.KeepAnchor)
+            rich.removeSelectedText()
+        return fragment.toHtml()
+
+    def _selection_clipboard_mime(self, mode="formatted"):
+        html = self._partial_selection_html()
+        if html is not None:
+            return clipboard_from_html(html, mode=mode)
+        return clipboard_from_markdown(self._selection_as_markdown_for_clipboard(), mode=mode)
+
+    def createMimeDataFromSelection(self):  # type: ignore[override]
+        """Also cover native Qt Copy/Cut actions and selection dragging."""
+        return self._selection_clipboard_mime()
 
     def copy(self) -> None:  # type: ignore[override]
-        """Copy selection as plain external text + internal markdown payload."""
+        """Copy clean HTML, readable plain text, and internal Markdown."""
         self._copy_selection_to_clipboard()
 
     def _copy_selection_as_html(self) -> None:
-        """Convert selected markdown text to HTML and copy to clipboard."""
-        cursor = self.textCursor()
-        if not cursor.hasSelection():
-            return
-        
-        markdown_text = self._selection_storage_markdown(cursor)
-        if not markdown_text:
-            return
-        
-        try:
-            # Convert markdown to HTML with common extensions
-            html = render_markdown(
-                markdown_text,
-                extensions=["extra", "sane_lists", "tables", "fenced_code", "nl2br"]
-            )
-            
-            self._set_clipboard_markdown(
-                markdown_text,
-                include_internal_payload=True,
-                include_text_markdown=True,
-                html=html,
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to convert selection to HTML: {e}")
-            # Fallback to plain text
-            clipboard = QGuiApplication.clipboard()
-            clipboard.setText(markdown_text)
+        """Compatibility entry point for the shared formatted Copy action."""
+        self._copy_selection_to_clipboard()
+
+    def _copy_selection_as_plain_text(self):
+        if self.textCursor().hasSelection():
+            QApplication.clipboard().setMimeData(self._selection_clipboard_mime("plain"))
+
+    def _add_copy_plain_action(self, menu):
+        action = menu.addAction("Copy as Plain Text", self._copy_selection_as_plain_text)
+        action.setEnabled(self.textCursor().hasSelection())
 
     def _install_copy_actions(self, menu: QMenu) -> None:
         """Replace the default Copy action with sanitized versions and add 'Copy As Markdown'."""
@@ -6678,6 +6803,7 @@ class MarkdownEditor(QTextEdit):
         copy_action, md_action = self._build_copy_actions(menu)
         menu.addAction(copy_action)
         menu.addAction(md_action)
+        self._add_copy_plain_action(menu)
 
     def _build_copy_actions(self, parent) -> tuple[QAction, QAction]:
         def do_copy():
@@ -7760,6 +7886,20 @@ class MarkdownEditor(QTextEdit):
             self.linkHovered.emit("")  # Empty string to clear status bar
 
     # --- Vi-mode cursor -------------------------------------------------
+    def _vi_line_outline_rect(self) -> QRect:
+        """Frame the active visual row without changing its text or background."""
+        if (
+            not self._vi_mode_active
+            or self._vi_cursor_style != "line"
+            or self._suppress_vi_cursor
+            or self._in_mode_window_transition()
+            or self.document().isEmpty()
+            or self.textCursor().hasSelection()
+        ):
+            return QRect()
+        row = self.cursorRect()
+        return QRect(1, row.top(), max(0, self.viewport().width() - 2), row.height())
+
     def set_vi_cursor_style(self, style: str) -> None:
         """Set vi navigation cursor style: 'block' or 'line'."""
         normalized = str(style or "").strip().lower()
@@ -8373,7 +8513,7 @@ class MarkdownEditor(QTextEdit):
 
     def _system_clipboard_set(self, text: str) -> None:
         try:
-            QGuiApplication.clipboard().setText(text)
+            QGuiApplication.clipboard().setMimeData(clipboard_from_markdown(text))
         except Exception:
             pass
 
@@ -8733,7 +8873,7 @@ class MarkdownEditor(QTextEdit):
                     pass
             self._vi_saved_flash_time = None
             self._vi_last_cursor_pos = -1
-        self.setCursorWidth(self._vi_block_cursor_width if active else self._vi_default_cursor_width)
+        self.setCursorWidth(self._vi_block_cursor_width if active and self._vi_cursor_style == "block" else self._vi_default_cursor_width)
         self._update_vi_cursor()
         # Ensure editor focus when vi mode is toggled and no dialog is open
         if not self._dialog_block_input and not self.property("suppressViFocus"):
@@ -8779,7 +8919,7 @@ class MarkdownEditor(QTextEdit):
 
     def _ensure_cursor_margin(self) -> None:
         """Keep the caret visible without treating a tall image as one giant caret."""
-        if self._cursor_scroll_guard:
+        if self._cursor_scroll_guard or self._cursor_events_blocked:
             return
         sb = self.verticalScrollBar()
         if not sb:
@@ -8943,6 +9083,11 @@ class MarkdownEditor(QTextEdit):
             or self._in_mode_window_transition()
         ):
             return
+        self.setCursorWidth(
+            self._vi_block_cursor_width
+            if self._vi_mode_active and self._vi_cursor_style == "block"
+            else self._vi_default_cursor_width
+        )
         if not self._vi_mode_active:
             remaining = [
                 s for s in self.extraSelections()
@@ -8950,6 +9095,7 @@ class MarkdownEditor(QTextEdit):
                 and s.format.property(self._VI_LINE_EXTRA_KEY) is None
             ]
             self.setExtraSelections(remaining)
+            self.viewport().update()
             return
         doc = self.document()
         if doc is None or doc.isEmpty():
@@ -8962,6 +9108,7 @@ class MarkdownEditor(QTextEdit):
                 and s.format.property(self._VI_LINE_EXTRA_KEY) is None
             ]
             self.setExtraSelections(remaining)
+            self.viewport().update()
             return
         accent_bg, accent_fg = self._vi_cursor_colors()
         existing = [
@@ -8980,17 +9127,9 @@ class MarkdownEditor(QTextEdit):
             fmt.setForeground(accent_fg)
             fmt.setProperty(QTextFormat.FullWidthSelection, False)
             fmt.setProperty(self._VI_EXTRA_KEY, True)
-        else:
-            line_cursor = QTextCursor(cursor)
-            line_cursor.clearSelection()
-            extra.cursor = line_cursor
-            fmt = extra.format
-            fmt.setBackground(accent_bg)
-            fmt.setForeground(accent_fg)
-            fmt.setProperty(QTextFormat.FullWidthSelection, True)
-            fmt.setProperty(self._VI_LINE_EXTRA_KEY, True)
-        existing.append(extra)
+            existing.append(extra)
         self.setExtraSelections(existing)
+        self.viewport().update()
 
     def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
         accent_value = (

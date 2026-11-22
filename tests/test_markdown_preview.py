@@ -778,16 +778,17 @@ def test_host_reading_palette_overrides_global_preview_and_refreshes_lists(qtbot
     values = {
         "markdown_preview.paper_bg": "#00251f",
         "markdown_preview.text": "#caffef",
+        "markdown_editor.syntax.bold": "#cadd21",
     }
     monkeypatch.setattr(
         preview_module, "theme_value", lambda path, default=None: values.get(path, default)
     )
     monkeypatch.setattr(
-        preview_module.config, "load_reading_view_use_theme_colors", lambda: True
+        preview_module.config, "load_reading_view_background", lambda: "theme"
     )
     view = MarkdownReadingView()
     qtbot.addWidget(view)
-    view.set_markdown("Paragraph\n\n- **canStart()** is the gatekeeper\n- start() is the worker")
+    view.set_markdown("Paragraph\n\n* **canStart()** is the gatekeeper\n* start() is the worker")
     palette = QPalette(view.palette())
     palette.setColor(QPalette.Base, QColor("#320a18"))
     palette.setColor(QPalette.Text, QColor("#f4f7fb"))
@@ -795,15 +796,19 @@ def test_host_reading_palette_overrides_global_preview_and_refreshes_lists(qtbot
     assert "background: #320a18" in view.last_html
     assert "background: #00251f" not in view.last_html
     block = view.browser.document().begin()
+    list_blocks = 0
     while block.isValid():
         if block.textList():
+            list_blocks += 1
             iterator = block.begin()
             while not iterator.atEnd():
                 fragment = iterator.fragment()
                 if fragment.text().strip("\u200b "):
-                    assert fragment.charFormat().foreground().color() == QColor("#f4f7fb")
+                    expected = "#cadd21" if fragment.charFormat().fontWeight() >= 600 else "#f4f7fb"
+                    assert fragment.charFormat().foreground().color() == QColor(expected)
                 iterator += 1
         block = block.next()
+    assert list_blocks == 2
     # White-paper mode still works with a folder-specific palette.
     view._apply_theme_mode(False)
     assert "background: #ffffff" in view.last_html
@@ -1085,3 +1090,64 @@ def test_folder_window_reading_action_tracks_active_markdown_tab(
         assert window.editor_zoom_steps == editor_zoom_in_reading_view + 2
     finally:
         window.close()
+
+
+@pytest.mark.parametrize("indent", ["  ", "    ", "\t"])
+@pytest.mark.parametrize("loose", [False, True])
+def test_reading_view_preserves_nested_bullets(qtbot, indent, loose) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    gap = "\n\n" if loose else "\n"
+    view.set_markdown(gap.join([
+        "* **Review context**",
+        indent + "* Fetch each review's data",
+        indent * 2 + "* Add `fetchData()`",
+        "* Queueable work",
+        indent + "* Use `localWork()`",
+    ]))
+    items = []
+    block = view.browser.document().begin()
+    while block.isValid():
+        if block.textList():
+            items.append((block.text().replace("\u200b", ""),
+                          block.textList().format().indent()))
+        block = block.next()
+    assert [depth for _, depth in items] == [1, 2, 3, 1, 2]
+    assert [label for label, _ in items] == [
+        "Review context", "Fetch each review's data", "Add fetchData()",
+        "Queueable work", "Use localWork()",
+    ]
+    assert view.browser.document().find("Review context").charFormat().fontWeight() >= 700
+
+
+def test_reading_view_bold_accepts_space_before_closing_markers(qtbot) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown(
+        "* **No dependencies causing loops... **\n"
+        "  * Mitigated with runLast"
+    )
+    assert "**" not in view.browser.toPlainText()
+    cursor = view.browser.document().find("No dependencies causing loops...")
+    assert cursor.charFormat().fontWeight() >= 700
+    child = view.browser.document().find("Mitigated with runLast")
+    assert child.block().textList().format().indent() == 2
+
+
+@pytest.mark.parametrize("indent", ["  ", "\t"])
+def test_reading_view_keeps_tabbed_prose_indentation(qtbot, indent) -> None:
+    view = MarkdownReadingView()
+    qtbot.addWidget(view)
+    view.set_markdown(
+        "Runs on create.\n"
+        + indent + "if `initial`:\n"
+        + indent * 2 + "**Evaluate decisions**\n"
+        + indent + "else:\n"
+        + indent * 2 + "Load records"
+    )
+    width = len(indent.expandtabs(4))
+    rendered = view.browser.toPlainText()
+    assert "\n" + " " * width + "if initial:" in rendered
+    assert "\n" + " " * (width * 2) + "Evaluate decisions" in rendered
+    assert view.browser.document().find("Evaluate decisions").charFormat().fontWeight() >= 700
+    assert "<pre>" not in view.last_html

@@ -106,13 +106,20 @@ class WebServer:
         # TODO: Integrate with StillPoint's markdown renderer
         # For now, use basic markdown
         text = self._rewrite_task_and_dash_markers(text)
+        from sp.markdown_html import _preserve_prose_indentation
+
         text = self._normalize_markdown_lists(text)
+        text = _preserve_prose_indentation(text)
         text = self._rewrite_highlight(text)
         text = self._rewrite_strikethrough(text)
         text = self._rewrite_wiki_style_links(text)
         text = self._rewrite_markdown_image_links(text, page_path)
         import markdown
-        html = markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
+        from sp.markdown_html import EditorEmphasisExtension
+
+        html = markdown.markdown(
+            text, extensions=["fenced_code", "tables", "nl2br", EditorEmphasisExtension()]
+        )
         return self._rewrite_task_checkboxes(html)
 
     @staticmethod
@@ -265,97 +272,9 @@ class WebServer:
 
     @staticmethod
     def _normalize_markdown_lists(text: str) -> str:
-        """Insert blank lines before list blocks when missing (improves list parsing)."""
-        def _is_list_line(value: str) -> bool:
-            trimmed = value.lstrip()
-            if trimmed.startswith(("* ", "- ", "+ ")):
-                return True
-            digits = ""
-            for ch in trimmed:
-                if ch.isdigit():
-                    digits += ch
-                else:
-                    break
-            return bool(digits) and trimmed[len(digits):].startswith(". ")
+        from sp.markdown_html import _normalize_markdown_lists
 
-        def _indent_cols(value: str) -> int:
-            cols = 0
-            for ch in value:
-                if ch == " ":
-                    cols += 1
-                elif ch == "\t":
-                    cols += 4
-                else:
-                    break
-            return cols
-
-        def _strip_indent(value: str, cols: int) -> str:
-            if cols <= 0:
-                return value
-            remaining = cols
-            idx = 0
-            while idx < len(value) and remaining > 0:
-                ch = value[idx]
-                if ch == " ":
-                    remaining -= 1
-                elif ch == "\t":
-                    remaining -= 4
-                else:
-                    break
-                idx += 1
-            return value[idx:]
-
-        lines = text.splitlines()
-        normalized: list[str] = []
-        in_fence = False
-        fence_marker = ""
-        deindent_active = False
-        deindent_cols = 0
-
-        for idx, line in enumerate(lines):
-            stripped = line.strip()
-
-            if stripped.startswith(("```", "~~~")):
-                marker = stripped[:3]
-                if not in_fence:
-                    in_fence = True
-                    fence_marker = marker
-                elif marker == fence_marker:
-                    in_fence = False
-                    fence_marker = ""
-                normalized.append(line)
-                continue
-
-            if in_fence:
-                normalized.append(line)
-                continue
-
-            if stripped == "":
-                normalized.append(line)
-                continue
-
-            if not deindent_active and _is_list_line(line):
-                indent = _indent_cols(line)
-                if indent >= 4:
-                    deindent_active = True
-                    deindent_cols = 4
-
-            if _is_list_line(line):
-                if normalized:
-                    prev = normalized[-1].strip()
-                    if prev and not _is_list_line(prev):
-                        normalized.append("")
-                if deindent_active:
-                    normalized.append(_strip_indent(line, deindent_cols))
-                    continue
-            else:
-                if deindent_active:
-                    deindent_active = False
-                    deindent_cols = 0
-
-            normalized.append(line)
-
-        return "\n".join(normalized)
+        return _normalize_markdown_lists(text)
 
     @staticmethod
     def _rewrite_strikethrough(text: str) -> str:

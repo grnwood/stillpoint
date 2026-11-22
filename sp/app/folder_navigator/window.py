@@ -6865,6 +6865,7 @@ class Window(QMainWindow):
                         "Large Markdown opened in lightweight mode "
                         f"({fallback_reason}) to keep Folder Navigator responsive."
                     )
+                    self._add_full_markdown_button(tab)
                     if pinned:
                         self.statusBar().showMessage(
                             f"Full Markdown preview skipped for {path.name}: {fallback_reason}",
@@ -6912,76 +6913,7 @@ class Window(QMainWindow):
         if not tab.editor:
             self._install_preview_context_menu(tab, getattr(tab, "viewer", tab))
         if tab.editor:
-            install_primary_wheel_zoom(tab.editor, self._zoom_active_view)
-            if tab.reading_view is not None:
-                tab.reading_view.toc_widget.set_base_path(path.as_uri())
-                tab.reading_view.configure_focus_mode(lambda: [
-                    self.folder_rail_container, self.bookmarks_container,
-                    self.tabs.tabBar(), self.tabs.cornerWidget(),
-                    self.tabs.cornerWidget(Qt.TopLeftCorner),
-                    self.chat_container,
-                ])
-                tab.reading_view.focus_button.setVisible(tab.reading_view_enabled)
-                install_primary_wheel_zoom(
-                    tab.reading_view.browser, self._zoom_active_view
-                )
-            if tab.markdown:
-                tab.editor.set_font_point_size(
-                    max(6, tab.editor.font().pointSize() + self.editor_zoom_steps)
-                )
-                tab.reading_view.match_editor_layout(tab.editor)
-            elif self.editor_zoom_steps > 0:
-                tab.editor.zoomIn(self.editor_zoom_steps)
-            elif self.editor_zoom_steps < 0:
-                tab.editor.zoomOut(-self.editor_zoom_steps)
-            # Folder Navigator owns a deliberately small editor context menu.
-            # In particular, Markdown tabs must not expose StillPoint page,
-            # link-graph, AI, or vault-navigation actions here.
-            tab.editor.setContextMenuPolicy(Qt.CustomContextMenu)
-            tab.editor.customContextMenuRequested.connect(
-                lambda point, t=tab: self._show_editor_context_menu(t, point)
-            )
-            tab.editor.viNavigationEscapePressed.connect(
-                lambda t=tab: self._focus_tree_from_editor(t)
-            )
-            tab.editor.installEventFilter(self)
-            if isinstance(tab.editor, MarkdownEditor):
-                tab.editor.setProperty("folderNavigatorMarkdown", True)
-                tab.editor.highlighter.set_folder_navigator_table_style(True)
-                tab.readingLinkActivated.connect(
-                    lambda target, current=tab: self._open_reading_view_link(
-                        current, target
-                    )
-                )
-                tab.readingViewChanged.connect(
-                    lambda enabled, current=tab: self._on_tab_reading_view_changed(
-                        current, enabled
-                    )
-                )
-                tab.editor.headingPickerRequested.connect(
-                    lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
-                )
-            tab.editor.document().modificationChanged.connect(lambda dirty, t=tab: self._modified(t, dirty))
-            if tab.markdown:
-                # MarkdownEditor may rewrite display symbols while handling a
-                # keystroke. Those rewrites can change the document's modified
-                # flag without another useful modificationChanged edge, so
-                # compare serialized content after the keystroke settles.
-                tab.editor.textChanged.connect(
-                    lambda t=tab: QTimer.singleShot(
-                        0, t, lambda current=t: self._refresh_markdown_dirty(current)
-                    )
-                )
-            # Markdown's initial display formatting can toggle Qt's modified
-            # flag after the file is loaded. Clear only formatting-only changes;
-            # never clear the flag once the text differs from disk.
-            for delay in (0, 100):
-                QTimer.singleShot(
-                    delay, tab,
-                    lambda t=tab: self._clear_initial_formatting_dirty(t),
-                )
-            if line:
-                self._reveal_editor_line(tab, line)
+            self._configure_editor_tab(tab, line)
         self.recent.insert(0, path)
         self.recent = list(dict.fromkeys(self.recent))[:100]
         self._watch_files()
@@ -6998,6 +6930,152 @@ class Window(QMainWindow):
             self._schedule_markdown_preview(
                 tab, immediate=pinned and not defer_enhancements
             )
+
+
+    def _add_full_markdown_button(self, tab):
+        tab.rich_markdown_button = QPushButton("Render Full Markdown", tab)
+        tab.rich_markdown_button.setToolTip(
+            "Render the whole document and enable Markdown edit/reading views. Large documents may take longer."
+        )
+        tab.rich_markdown_button.clicked.connect(
+            lambda _checked=False: self._request_full_markdown(tab)
+        )
+        tab.layout().insertWidget(1, tab.rich_markdown_button, 0, Qt.AlignLeft)
+
+    def _request_full_markdown(self, tab):
+        if tab._retired or self.tabs.indexOf(tab) < 0 or tab.property("folderFullMarkdownPending"):
+            return
+        tab.setProperty("folderFullMarkdownPending", True)
+        tab.rich_markdown_button.setEnabled(False)
+        tab.rich_markdown_button.setText("Rendering Markdown…")
+        self.statusBar().showMessage(f"Rendering full Markdown for {tab.path.name}…")
+        QTimer.singleShot(0, tab, lambda: self._render_full_markdown(tab))
+
+    def _render_full_markdown(self, tab):
+        """Upgrade an explicitly requested large preview without reloading disk."""
+        if self._closing_event.is_set() or tab._retired or self.tabs.indexOf(tab) < 0:
+            return
+        replacement = None
+        source = tab.text_for_save()
+        was_dirty = tab.dirty
+        line = tab.editor.textCursor().blockNumber() + 1
+        try:
+            loaded = TextFile(source, tab.loaded.encoding, tab.loaded.newline, tab.loaded.fingerprint)
+            replacement = Tab(tab.path, loaded, markdown=True, root=self.root)
+            replacement.editor.set_markdown(source)
+            replacement.loaded = tab.loaded
+            replacement.clean_text = tab.clean_text if was_dirty else replacement.text_for_save()
+            replacement.detached = tab.detached
+            replacement.pinned = tab.pinned
+            replacement.editor.setReadOnly(tab.editor.isReadOnly())
+            replacement.setProperty("folderMarkdownRendered", True)
+            replacement.setProperty("folderFullMarkdownOverride", True)
+            self._configure_editor_tab(replacement)
+            if self._reading_view_preferred:
+                replacement.set_reading_view(True)
+        except Exception as exc:
+            if replacement is not None:
+                replacement.deleteLater()
+            tab.setProperty("folderFullMarkdownPending", False)
+            tab.rich_markdown_button.setEnabled(True)
+            tab.rich_markdown_button.setText("Render Full Markdown")
+            tab.show_notice(f"Full Markdown rendering failed: {exc}. The source buffer is still available.")
+            self.statusBar().showMessage(f"Full Markdown preview failed for {tab.path.name}: {exc}", 12000)
+            return
+        # Keep the original tab alive until construction/rendering succeeds.
+        # File encoding, conflict fingerprint, dirty state and edits survive.
+        index = self.tabs.indexOf(tab)
+        self.tabs.insertTab(index, replacement, tab.path.name)
+        self.tabs.removeTab(self.tabs.indexOf(tab))
+        tab.deleteLater()
+        self.tabs.setCurrentWidget(replacement)
+        self._apply_folder_palette(QColor(self._folder_identity_accent))
+        replacement.editor.document().setModified(was_dirty)
+        self._modified(replacement, was_dirty)
+        self._reveal_editor_line(replacement, line)
+        if replacement.reading_view_enabled:
+            replacement.reading_view.scroll_to_source_line(line)
+            replacement.reading_view.focus_reader()
+        self._update_tab_tooltip(replacement)
+        self._persist()
+        self.statusBar().showMessage(f"Full Markdown rendered for {replacement.path.name}", 4000)
+
+    def _configure_editor_tab(self, tab, line=None):
+        """Wire shared editor controls for a newly opened or upgraded tab."""
+        path = tab.path
+        install_primary_wheel_zoom(tab.editor, self._zoom_active_view)
+        if tab.reading_view is not None:
+            tab.reading_view.toc_widget.set_base_path(path.as_uri())
+            tab.reading_view.configure_focus_mode(lambda: [
+                self.folder_rail_container, self.bookmarks_container,
+                self.tabs.tabBar(), self.tabs.cornerWidget(),
+                self.tabs.cornerWidget(Qt.TopLeftCorner),
+                self.chat_container,
+            ])
+            tab.reading_view.focus_button.setVisible(tab.reading_view_enabled)
+            install_primary_wheel_zoom(
+                tab.reading_view.browser, self._zoom_active_view
+            )
+        if tab.markdown:
+            tab.editor.set_font_point_size(
+                max(6, tab.editor.font().pointSize() + self.editor_zoom_steps)
+            )
+            tab.reading_view.match_editor_layout(tab.editor)
+        elif self.editor_zoom_steps > 0:
+            tab.editor.zoomIn(self.editor_zoom_steps)
+        elif self.editor_zoom_steps < 0:
+            tab.editor.zoomOut(-self.editor_zoom_steps)
+        # Folder Navigator owns a deliberately small editor context menu.
+        # In particular, Markdown tabs must not expose StillPoint page,
+        # link-graph, AI, or vault-navigation actions here.
+        tab.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        tab.editor.customContextMenuRequested.connect(
+            lambda point, t=tab: self._show_editor_context_menu(t, point)
+        )
+        tab.editor.viNavigationEscapePressed.connect(
+            lambda t=tab: self._focus_tree_from_editor(t)
+        )
+        tab.editor.installEventFilter(self)
+        if isinstance(tab.editor, MarkdownEditor):
+            tab.editor.setProperty("folderNavigatorMarkdown", True)
+            tab.editor.highlighter.set_folder_navigator_table_style(True)
+            tab.readingLinkActivated.connect(
+                lambda target, current=tab: self._open_reading_view_link(
+                    current, target
+                )
+            )
+            tab.readingViewChanged.connect(
+                lambda enabled, current=tab: self._on_tab_reading_view_changed(
+                    current, enabled
+                )
+            )
+            tab.editor.headingPickerRequested.connect(
+                lambda _point, _prefer_above, t=tab: self._show_heading_picker(t)
+            )
+            tab.reading_view.browser.headingPickerRequested.connect(
+                lambda t=tab: self._show_heading_picker(t)
+            )
+        tab.editor.document().modificationChanged.connect(lambda dirty, t=tab: self._modified(t, dirty))
+        if tab.markdown:
+            # MarkdownEditor may rewrite display symbols while handling a
+            # keystroke. Those rewrites can change the document's modified
+            # flag without another useful modificationChanged edge, so
+            # compare serialized content after the keystroke settles.
+            tab.editor.textChanged.connect(
+                lambda t=tab: QTimer.singleShot(
+                    0, t, lambda current=t: self._refresh_markdown_dirty(current)
+                )
+            )
+        # Markdown's initial display formatting can toggle Qt's modified
+        # flag after the file is loaded. Clear only formatting-only changes;
+        # never clear the flag once the text differs from disk.
+        for delay in (0, 100):
+            QTimer.singleShot(
+                delay, tab,
+                lambda t=tab: self._clear_initial_formatting_dirty(t),
+            )
+        if line:
+            self._reveal_editor_line(tab, line)
 
     def _schedule_preview_hydration(self, tab, *, immediate=False):
         """Hydrate one rich preview only after disposable navigation settles."""
@@ -8063,7 +8141,8 @@ class Window(QMainWindow):
 
     def _position_heading_picker(self, tab, picker):
         """Center the picker in the editor viewport and keep it on-screen."""
-        viewport = tab.editor.viewport()
+        surface = tab.reading_view.browser if tab.reading_view_enabled else tab.editor
+        viewport = surface.viewport()
         viewport_top_left = viewport.mapToGlobal(QPoint(0, 0))
         viewport_center = viewport_top_left + viewport.rect().center()
         screen = QApplication.screenAt(viewport_center) or self.screen()
@@ -8106,12 +8185,15 @@ class Window(QMainWindow):
             return
         picker = HeadingPicker(headings, self)
         self._position_heading_picker(tab, picker)
-        if picker.exec() == QDialog.Accepted and picker.selected_line:
+        accepted = picker.exec() == QDialog.Accepted
+        if accepted and picker.selected_line:
             if tab.reading_view_enabled and tab.reading_view is not None:
                 tab.reading_view.scroll_to_source_line(picker.selected_line)
-                tab.reading_view.focus_reader()
             else:
                 self._reveal_editor_line(tab, picker.selected_line)
+        if tab.reading_view_enabled:
+            self.activateWindow()
+            tab.reading_view.focus_reader()
 
     def _format_active_markdown_table(self):
         tab = self.active_tab()
@@ -11178,10 +11260,9 @@ class Window(QMainWindow):
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         if tab.markdown:
-            menu.addAction(
-                "Copy as Markdown",
-                lambda: QApplication.clipboard().setText(tab.editor.to_markdown()),
-            )
+            _, copy_markdown = tab.editor._build_copy_actions(menu)
+            copy_markdown.setText("Copy as Markdown")
+            menu.addAction(copy_markdown)
             menu.addAction("Format Markdown Table", self._format_active_markdown_table)
         reveal_action = menu.addAction("Reveal in Folder")
         reveal_action.triggered.connect(lambda: self.reveal_tree(tab.path))

@@ -399,6 +399,7 @@ class ModeWindow(QMainWindow):
         self.editor.task_context_menu_provider = self._task_context_menu
         self.editor.viewport().installEventFilter(self)
         self.editor.cursorPositionChanged.connect(self._on_cursor_moved)
+        self.editor.viInsertModeChanged.connect(lambda _insert: self._update_paragraph_highlight())
         self.editor.textChanged.connect(self._on_editor_text_changed)
         self.editor.insertDateRequested.connect(self._insert_date)
         self.editor.findBarRequested.connect(self._on_editor_find_requested)
@@ -971,14 +972,20 @@ class ModeWindow(QMainWindow):
             (self.mode == "focus" and self._settings.get("paragraph_focus", False))
             or (self.mode == "audience" and self._settings.get("paragraph_highlight", True))
         )
+        if self.editor._vi_mode_active and self.editor._vi_cursor_style == "line":
+            enable = False
         selections = [s for s in self.editor.extraSelections() if s.format.property(self._HIGHLIGHT_KEY) is None]
         if not enable:
-            self.editor.setExtraSelections(selections)
+            try:
+                self.editor.setExtraSelections(selections)
+            finally:
+                self._highlight_guard = False
             return
         cursor = self.editor.textCursor()
         try:
             cursor.select(QTextCursor.BlockUnderCursor)
         except Exception:
+            self._highlight_guard = False
             return
         extra = QTextEdit.ExtraSelection()
         extra.cursor = cursor
