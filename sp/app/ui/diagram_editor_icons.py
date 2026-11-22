@@ -15,12 +15,18 @@ _ICON_STEMS = {
     "plantuml": "PlantUML",
     "mermaid": "Mermaid",
     "excalidraw": "Excalidraw",
+    "mindmap": "Mindmap",
+    "focus": "Focus",
+    "audience": "Audience",
 }
 
 _DISPLAY_NAMES = {
     "plantuml": "StillPoint PlantUML",
     "mermaid": "StillPoint Mermaid",
     "excalidraw": "StillPoint Excalidraw",
+    "mindmap": "StillPoint Map",
+    "focus": "StillPoint Focus",
+    "audience": "StillPoint Audience",
 }
 
 

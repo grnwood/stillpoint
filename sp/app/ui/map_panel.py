@@ -13,13 +13,16 @@ from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplicatio
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
+    QPushButton,
     QScrollArea,
     QToolButton,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -126,6 +129,7 @@ class _MindNode:
     line_number: int = 0
     section_end_line: int = 0
     content_end_line: int = 0
+    has_body: bool = False
     children: list["_MindNode"] = field(default_factory=list)
     side: int = 1
     lines: list[str] = field(default_factory=list)
@@ -144,7 +148,9 @@ class _DraftHeading:
     level: int
     text: str = ""
     as_child: bool = False
+    before: bool = False
     restored_scope_depth: Optional[int] = None
+    restored_collapsed: bool = False
 
 
 @dataclass
@@ -154,6 +160,7 @@ class _DetachedSession:
     selected_node_ids: set[str]
     anchor_node_id: Optional[str]
     focus_node_id: Optional[str]
+    changed: bool = False
 
 
 class _MapContentTooltip(QFrame):
@@ -371,7 +378,18 @@ class _MapContentTooltip(QFrame):
         super().leaveEvent(event)
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self._editor and event.type() == QEvent.ShortcutOverride:
+            parent = self.parentWidget()
+            if isinstance(parent, MapPanel) and parent._selected_note_popup_active:
+                event.accept()
+                return True
         if obj is self._editor and event.type() == QEvent.KeyPress:
+            parent = self.parentWidget()
+            if isinstance(parent, MapPanel) and parent._handle_selected_note_popup_keypress(
+                event.key(), event.modifiers() & ~Qt.KeypadModifier
+            ):
+                event.accept()
+                return True
             try:
                 if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
                     self.hide()
@@ -428,6 +446,12 @@ class _MapContentTooltip(QFrame):
         event.accept()
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        parent = self.parentWidget()
+        if isinstance(parent, MapPanel) and parent._handle_selected_note_popup_keypress(
+            event.key(), event.modifiers() & ~Qt.KeypadModifier
+        ):
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier:
             self.hide()
             self.dismissed.emit()
@@ -494,6 +518,103 @@ class _InlineNodeRenameEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _MapBodyEditDialog(QDialog):
+    saveRequested = Signal()
+
+    def __init__(self, parent: QWidget, heading: str, body: str) -> None:
+        super().__init__(parent, Qt.Tool)
+        self.setWindowTitle(f"Edit content — {heading}")
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        vi = config.load_vi_mode_enabled()
+        hint = QLabel("Ctrl+Enter saves · " + ("Vi: i edits · Esc exits insert, then cancels" if vi else "Esc cancels") + " · Click outside cancels")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.editor = MarkdownEditor(self)
+        self.editor.set_context(None, getattr(parent, "_current_page_path", None))
+        self.editor.set_page_navigation_enabled(False)
+        self.editor.set_task_hover_edit_enabled(False)
+        self.editor.set_vi_mode_enabled(vi)
+        self.editor.setPlaceholderText("Write this heading’s content…")
+        self.editor.document().setDocumentMargin(4)
+        self.editor.set_markdown(body)
+        if not body:
+            self.editor.clear()
+        self.editor.installEventFilter(self)
+        layout.addWidget(self.editor, 1)
+        self.error_label = QLabel()
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("Save (Ctrl+Enter)")
+        save.setAutoDefault(False)
+        save.clicked.connect(self.saveRequested.emit)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        for sequence in ("Ctrl+Return", "Ctrl+Enter"):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(self.saveRequested.emit)
+
+    def eventFilter(self, watched, event):
+        if self.isVisible() and event.type() == QEvent.MouseButtonPress and isinstance(watched, QWidget):
+            if watched is not self and not self.isAncestorOf(watched):
+                self.reject()
+                return False
+        if self.isVisible() and event.type() == QEvent.ApplicationDeactivate:
+            self.reject()
+            return False
+        if watched is self.editor and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            save = event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.ControlModifier
+            cancel = event.key() == Qt.Key_Escape and not event.modifiers()
+            if save or cancel:
+                event.accept()
+                if event.type() == QEvent.KeyPress:
+                    if save:
+                        self.saveRequested.emit()
+                    elif self.editor._vi_feature_enabled and self.editor._vi_insert_mode:
+                        self.editor._enter_vi_navigation_mode()
+                    else:
+                        self.reject()
+                return True
+        return super().eventFilter(watched, event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, event) -> None:
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isVisible() and not self.isActiveWindow():
+            QTimer.singleShot(0, self, self._cancel_if_inactive)
+
+    def _cancel_if_inactive(self) -> None:
+        if not self.isVisible() or self.isActiveWindow():
+            return
+        # Editor-owned menus/dialogs can take activation while remaining part
+        # of this editing interaction.
+        active = QApplication.activePopupWidget() or QApplication.activeWindow()
+        if active is not None and self.isAncestorOf(active):
+            return
+        self.reject()
+
+    def show_error(self, message: str) -> None:
+        self.error_label.setText(message)
+        self.error_label.show()
+        self.editor.setFocus()
+
+
 class MapPanel(QWidget):
     """Native SVG-based mind map panel for markdown headings only."""
 
@@ -504,6 +625,7 @@ class MapPanel(QWidget):
     statusMessageRequested = Signal(str, int)
     focusSyncRequested = Signal()
     windowModeToggleRequested = Signal()
+    closeWindowRequested = Signal()
 
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
     _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -567,6 +689,15 @@ class MapPanel(QWidget):
         self._note_font_size_offset: int = 0
         self._theme_colors = self._map_theme_colors()
         self._scroll_animations: list[QPropertyAnimation] = []
+        self._undo_stack: list[tuple[str, int]] = []
+        self._redo_stack: list[tuple[str, int]] = []
+        self._cut_node_ids: set[str] = set()
+        self._keyboard_help: Optional[QDialog] = None
+        self._body_editor: Optional[_MapBodyEditDialog] = None
+        self._detached_window = False
+        self._vi_delete_pending: Optional[str] = None
+        self._delete_flash_node_id: Optional[str] = None
+        self._delete_flash_ticks = 0
 
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -713,6 +844,17 @@ class MapPanel(QWidget):
         self.window_mode_btn.clicked.connect(self.windowModeToggleRequested.emit)
         self.window_mode_btn.hide()
         toolbar.addWidget(self.window_mode_btn)
+        self.help_btn = QToolButton()
+        self.help_btn.setText("?")
+        self.help_btn.setToolTip("Map keyboard help (?)")
+        self.help_btn.clicked.connect(self._show_keyboard_help)
+        toolbar.addWidget(self.help_btn)
+        self.close_window_btn = QToolButton()
+        self.close_window_btn.setText("✕")
+        self.close_window_btn.setToolTip("Close map window")
+        self.close_window_btn.clicked.connect(self.closeWindowRequested.emit)
+        self.close_window_btn.hide()
+        toolbar.addWidget(self.close_window_btn, 0, Qt.AlignRight)
         root.addLayout(toolbar)
 
         self.preview_label = ZoomablePreviewLabel()
@@ -722,6 +864,17 @@ class MapPanel(QWidget):
         self.preview_label.setText("Open a page to view its map.")
         self.preview_label.zoomRequested.connect(self._adjust_zoom)
         self.preview_label.installEventFilter(self)
+        self._delete_message = QLabel(self)
+        self._delete_message.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._delete_message.setStyleSheet("background: #7f1d1d; color: white; padding: 4px 8px;")
+        self._delete_message.hide()
+        self._delete_flash_timer = QTimer(self)
+        self._delete_flash_timer.setInterval(90)
+        self._delete_flash_timer.timeout.connect(self._advance_delete_feedback)
+        self._delete_message_timer = QTimer(self)
+        self._delete_message_timer.setSingleShot(True)
+        self._delete_message_timer.setInterval(2500)
+        self._delete_message_timer.timeout.connect(self._delete_message.hide)
         self._tooltip_timer = QTimer(self)
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.setInterval(600)
@@ -730,7 +883,7 @@ class MapPanel(QWidget):
         self._tooltip_hide_timer.setSingleShot(True)
         self._tooltip_hide_timer.setInterval(250)
         self._tooltip_hide_timer.timeout.connect(self._hide_hover_tooltip_if_idle)
-        self._content_tooltip = _MapContentTooltip()
+        self._content_tooltip = _MapContentTooltip(self)
         self._content_tooltip.pinRequested.connect(self._pin_hover_tooltip)
         self._content_tooltip.dismissed.connect(self._on_tooltip_dismissed)
         self._content_tooltip.hoverChanged.connect(self._on_tooltip_hover_changed)
@@ -746,6 +899,7 @@ class MapPanel(QWidget):
         self._filter_off_shortcut.activated.connect(self.clear_filter)
 
         root.addWidget(self._wrap_scroll_area(), 1)
+        root.addWidget(self._delete_message)
 
         self._apply_palette_styles()
         self._update_level_controls()
@@ -821,6 +975,16 @@ class MapPanel(QWidget):
 
     def _apply_palette_styles(self) -> None:
         self._theme_colors = self._map_theme_colors()
+        self.close_window_btn.setStyleSheet(
+            "QToolButton { background: "
+            f"{theme_value('mode_window.close_button.bg', '#1c1f24')}; color: "
+            f"{theme_value('mode_window.close_button.text', '#f0f3f8')}; border: 1px solid "
+            f"{theme_value('mode_window.close_button.border', '#3b4251')}; "
+            "padding: 6px 10px; border-radius: 10px; }"
+            "QToolButton:hover { background: "
+            f"{theme_value('mode_window.close_button.bg_hover', '#2a303c')}; "
+            "}"
+        )
         colors = self._theme_colors
         mono = self._toolbar_icon_color()
         accept = QColor("#16a34a")
@@ -862,7 +1026,9 @@ class MapPanel(QWidget):
 
     def set_window_mode_control(self, *, visible: bool, windowed: bool = False) -> None:
         """Show and update the detached mind-map window mode control."""
+        self._detached_window = visible
         self.window_mode_btn.setVisible(visible)
+        self.close_window_btn.setVisible(visible)
         self.window_mode_btn.setProperty("windowed", windowed)
         self.window_mode_btn.setToolTip(
             "Switch to full screen" if windowed else "Switch to windowed mode"
@@ -929,7 +1095,16 @@ class MapPanel(QWidget):
     def set_content(self, page_path: Optional[str], markdown_text: str) -> None:
         self._cancel_hover_tooltip()
         is_new_page = page_path != self._current_page_path
-        incoming_text = markdown_text or ""
+        # Editor refreshes contain display markers for headings, links, and
+        # tasks. Store source Markdown consistently so a display round trip
+        # does not look like an external edit and erase map undo history.
+        incoming_text = self._content_tooltip._editor._from_display(markdown_text or "")
+        if is_new_page or incoming_text.rstrip("\n") != self._current_markdown.rstrip("\n"):
+            self._clear_delete_feedback()
+            self._vi_delete_pending = None
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            self._cut_node_ids.clear()
         if (
             not is_new_page
             and self._detached_session is not None
@@ -953,6 +1128,11 @@ class MapPanel(QWidget):
         self._render_current(reset_zoom=is_new_page, reset_canvas=is_new_page)
 
     def clear_content(self) -> None:
+        self._clear_delete_feedback()
+        self._vi_delete_pending = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._cut_node_ids.clear()
         self._current_page_path = None
         self._current_markdown = ""
         self._svg_content = ""
@@ -1212,6 +1392,13 @@ class MapPanel(QWidget):
             self._draft_runtime_node = None
             self._apply_draft_node(root)
         self._latest_root = root
+        if self._pending_selected_line is not None:
+            target = next((node for node in self._collect_nodes(root) if node.line_number == self._pending_selected_line), None)
+            parent = self._find_parent(root, target) if target is not None else None
+            while parent is not None:
+                self._collapsed_node_ids.discard(parent.node_id)
+                self._scope_expansion_depths[parent.node_id] = max(1, self._scope_depth(parent))
+                parent = self._find_parent(root, parent)
         self._max_heading_level = max((node.level for node in self._collect_nodes(root)), default=1)
         valid_scope_ids = {node.node_id for node in self._collect_nodes(root)}
         self._scope_expansion_depths = {
@@ -1288,6 +1475,24 @@ class MapPanel(QWidget):
             self._inline_rename_edit.selectAll()
             return
         self.preview_label.setFocus(Qt.OtherFocusReason)
+
+    def focus_heading_at_line(self, line_number: int) -> bool:
+        """Reveal and expand the heading containing an editor cursor line."""
+        root = self._latest_root
+        if root is None:
+            return False
+        line_number = max(1, min(line_number, max(1, len(self._current_markdown.splitlines()))))
+        candidates = [node for node in self._collect_nodes(root) if 0 < node.line_number <= line_number <= node.section_end_line]
+        node = max(candidates, key=lambda item: (item.line_number, item.depth), default=root)
+        self._filter_node_id = None
+        self._collapsed_node_ids.discard(node.node_id)
+        if node.children:
+            self._scope_expansion_depths[node.node_id] = max(1, self._scope_depth(node))
+        self._pending_selected_line = node.line_number
+        self.refresh()
+        self.preview_label.setFocus(Qt.OtherFocusReason)
+        self.center_selected_node()
+        return True
 
     def contains_focus(self) -> bool:
         focus_widget = QApplication.focusWidget()
@@ -1422,12 +1627,15 @@ class MapPanel(QWidget):
             return 1
         return max(1, node.level)
 
-    def _start_draft_heading(self, *, as_child: bool) -> bool:
+    def _start_draft_heading(self, *, as_child: bool, before: bool = False) -> bool:
         if self._draft_heading is not None or not self._latest_root:
             return False
         anchor = self._selected_node() or self._latest_root
         if anchor is None:
             return False
+        if as_child and anchor.level >= HEADING_MAX_LEVEL:
+            self._show_status_message("Cannot add a child beyond the maximum heading level.")
+            return True
         parent = anchor if as_child else (self._find_parent(self._latest_root, anchor) or self._latest_root)
         restored_scope_depth: Optional[int] = None
         if as_child:
@@ -1441,8 +1649,12 @@ class MapPanel(QWidget):
             parent_node_id=parent.node_id,
             level=self._new_heading_level(anchor, as_child=as_child),
             as_child=as_child,
+            before=before,
             restored_scope_depth=restored_scope_depth,
+            restored_collapsed=anchor.node_id in self._collapsed_node_ids,
         )
+        if as_child:
+            self._collapsed_node_ids.discard(anchor.node_id)
         self._selected_node_id = self._draft_heading.node_id
         self.refresh()
         return True
@@ -1457,6 +1669,8 @@ class MapPanel(QWidget):
                 self._scope_expansion_depths.pop(anchor_id, None)
             else:
                 self._scope_expansion_depths[anchor_id] = draft.restored_scope_depth
+        if draft.as_child and draft.restored_collapsed:
+            self._collapsed_node_ids.add(anchor_id)
         self._draft_heading = None
         self._draft_runtime_node = None
         self._selected_node_id = anchor_id
@@ -1471,7 +1685,9 @@ class MapPanel(QWidget):
         if not heading_text:
             return self._cancel_draft_heading()
         anchor = self._node_by_id(draft.anchor_node_id)
-        after_line = self._subtree_end_line(anchor) if anchor is not None else 0
+        after_line = (anchor.line_number - 1 if draft.before else anchor.section_end_line) if anchor is not None else 0
+        before_text = self._current_markdown
+        self._remember_edit()
         anchor_id = draft.anchor_node_id
         self._current_markdown, inserted_line = self._insert_heading_into_markdown(
             self._current_markdown,
@@ -1484,7 +1700,9 @@ class MapPanel(QWidget):
         self._draft_heading = None
         self._draft_runtime_node = None
         self._pending_selected_line = inserted_line
-        self.headingCreateRequested.emit(self._current_page_path, after_line, draft.level, heading_text)
+        # Use the same guarded content update as moves, including when the
+        # editor has not yet applied a previous map edit.
+        self.headingReorderRequested.emit(self._current_page_path, before_text, self._current_markdown, inserted_line)
         self.refresh()
         self.preview_label.setFocus(Qt.ShortcutFocusReason)
         return True
@@ -1623,11 +1841,16 @@ class MapPanel(QWidget):
         )
         if not changed:
             return self._cancel_inline_rename()
+        before_text = self._current_markdown
+        self._remember_edit()
         self._current_markdown = updated_markdown
         self._inline_rename_node_id = None
-        self._inline_rename_edit.hide()
         self._pending_selected_line = node.line_number
-        self.headingRenameRequested.emit(self._current_page_path, node.line_number, node.level, heading_text)
+        # Hiding the focused name field restores canvas focus and refreshes
+        # from the editor. Publish first so that refresh sees the rename,
+        # rather than the old page, and preserves this undo entry.
+        self.headingReorderRequested.emit(self._current_page_path, before_text, updated_markdown, node.line_number)
+        self._inline_rename_edit.hide()
         self.refresh()
         self.preview_label.setFocus(Qt.OtherFocusReason)
         return True
@@ -1857,6 +2080,8 @@ class MapPanel(QWidget):
         return self._hierarchy_neighbor(direction)
 
     def _handle_navigation_key(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
+        if key in (Qt.Key_H, Qt.Key_J, Qt.Key_K, Qt.Key_L) and not config.load_vi_mode_enabled():
+            return False
         if key in (Qt.Key_Right, Qt.Key_L) and not mods:
             node = self._selected_node()
             if node and node.children and not self._visible_children(node):
@@ -1886,6 +2111,79 @@ class MapPanel(QWidget):
             return False
         self._mark_activation_source("keyboard_keep_panel" if keep_focus else "keyboard")
         self.headingActivated.emit(self._current_page_path, node.line_number)
+        return True
+
+    def _edit_selected_body(self) -> bool:
+        node = self._selected_node()
+        if node is None or not self._current_page_path:
+            return False
+        if self._body_editor is not None:
+            self._body_editor.raise_()
+            self._body_editor.editor.setFocus()
+            return True
+        self._content_tooltip.hide()
+        self._on_tooltip_dismissed()
+        path, original = self._current_page_path, self._current_markdown
+        lines = original.splitlines(keepends=True)
+        start = node.line_number if node.depth > 0 or self._root_is_page_h1 else 0
+        end = min((child.line_number - 1 for child in node.children if child.line_number > 0), default=node.section_end_line)
+        initial_body = "".join(lines[start:end])
+        popup = _MapBodyEditDialog(self, node.heading_text or node.label, initial_body)
+        initial_editor_text = popup.editor.toPlainText()
+        self._body_editor = popup
+        self._update_tooltip_font_size()
+
+        def finish() -> None:
+            self._body_editor = None
+            self.preview_label.setFocus(Qt.OtherFocusReason)
+
+        def save() -> None:
+            if self._current_page_path != path or self._current_markdown != original:
+                popup.show_error("This page changed while you were editing. Copy your draft, then reopen the node to edit the latest content.")
+                return
+            if popup.editor.toPlainText() == initial_editor_text:
+                popup.accept()
+                return
+            body = popup.editor.to_markdown()
+            if any(HEADING_MARK_PATTERN.match(line) or (line and heading_level_from_char(line.lstrip()[:1])) for line in body.splitlines()):
+                popup.show_error("Use the map controls to add or rename headings. This editor changes body content only.")
+                return
+            prefix, suffix = "".join(lines[:start]), "".join(lines[end:])
+            if body and not body.endswith("\n"):
+                body += "\n"
+            if body and prefix and not prefix.endswith("\n"):
+                prefix += "\n"
+            updated = prefix + body + suffix
+            if updated != original:
+                # Map undo covers visible heading/structure changes. Older
+                # document snapshots would also revert this hidden body edit.
+                self._undo_stack.clear()
+                self._redo_stack.clear()
+                self._cut_node_ids.clear()
+                self._current_markdown = updated
+                self._pending_selected_line = node.line_number
+                self.headingReorderRequested.emit(path, original, updated, node.line_number)
+                self.refresh()
+            popup.accept()
+
+        popup.finished.connect(finish)
+        popup.saveRequested.connect(save)
+        anchor = self._selected_node_popup_anchor()
+        avail = popup_available_geometry(anchor=anchor, parent=self)
+        height = min(320, max(200, 90 + popup.editor.fontMetrics().lineSpacing() * min(10, len(initial_body.splitlines()) + 1)))
+        size = QSize(min(560, max(1, avail.width() - 24)), min(height, max(1, avail.height() - 64)))
+        popup.resize(size)
+        popup.show()
+        # Native title bars are outside QWidget.size(). Fit the complete frame
+        # after it exists so the bottom buttons stay inside the work area.
+        frame = popup.frameGeometry().size()
+        extra = frame - popup.size()
+        popup.setMaximumSize(max(1, avail.width() - 16 - extra.width()), max(1, avail.height() - 16 - extra.height()))
+        popup.resize(size.boundedTo(popup.maximumSize()))
+        popup.move(clamp_popup_top_left(anchor, popup.frameGeometry().size(), avail, margin=8))
+        popup.raise_()
+        popup.activateWindow()
+        popup.editor.setFocus(Qt.OtherFocusReason)
         return True
 
     def _build_map_svg(self, root: _MindNode, *, reset_canvas: bool) -> str:
@@ -1941,6 +2239,7 @@ class MapPanel(QWidget):
             f".collapsed {{ fill: {self._theme_colors['collapsed_fill']}; }}"
             f".selected {{ stroke: {selected_stroke}; stroke-width: 3.5; filter: drop-shadow(0 0 10px {selected_shadow}); }}"
             f".multi-selected {{ stroke: {selected_stroke}; stroke-width: 2.25; }}"
+            ".pending-move { stroke: #d97706; stroke-width: 3; stroke-dasharray: 6 4; }"
             f".drop-target {{ stroke: #16a34a; stroke-width: 3; stroke-dasharray: 8 5; }}"
             f".edge-1 {{ stroke: {self._theme_colors['edge_pos']}; stroke-width: 2.2; fill: none; }}"
             f".edge--1 {{ stroke: {self._theme_colors['edge_neg']}; stroke-width: 2.2; fill: none; }}"
@@ -1979,7 +2278,7 @@ class MapPanel(QWidget):
             parent.children.append(node)
             return
         try:
-            insert_idx = parent.children.index(anchor) + 1
+            insert_idx = parent.children.index(anchor) + (0 if draft.before else 1)
         except ValueError:
             insert_idx = len(parent.children)
         parent.children.insert(insert_idx, node)
@@ -1991,9 +2290,10 @@ class MapPanel(QWidget):
         ordered_nodes: list[_MindNode] = []
         seq = 0
         self._root_is_page_h1 = False
-        total_lines = len(markdown_text.splitlines())
+        source_lines = markdown_text.splitlines()
+        total_lines = len(source_lines)
 
-        for line_number, raw_line in enumerate(markdown_text.splitlines(), start=1):
+        for line_number, raw_line in enumerate(source_lines, start=1):
             text = raw_line.rstrip("\n")
             stripped = text.lstrip()
             if not stripped.strip() or self._HR_RE.match(text):
@@ -2052,7 +2352,8 @@ class MapPanel(QWidget):
             direct_children = [child for child in node.children if child.line_number > 0]
             first_child_line = min((child.line_number for child in direct_children), default=node.section_end_line + 1)
             node.content_end_line = min(node.section_end_line, first_child_line - 1)
-        root.content_end_line = root.section_end_line
+            body_start = node.line_number if node.depth > 0 or self._root_is_page_h1 else 0
+            node.has_body = any(line.strip() for line in source_lines[body_start:node.content_end_line])
         return root
 
     def _normalize_label(self, text: str) -> str:
@@ -2201,10 +2502,16 @@ class MapPanel(QWidget):
             css += " selected"
         elif node.node_id in self._selected_node_ids:
             css += " multi-selected"
+        if node.node_id in self._cut_node_ids:
+            css += " pending-move"
         if node.node_id == self._drop_target_node_id and self._drop_target_valid:
             css += " drop-target"
         self._node_hitboxes[node.node_id] = (x, y, node.width, node.height)
-        parts = [f'<rect class="{css}" x="{x:.1f}" y="{y:.1f}" width="{node.width:.1f}" height="{node.height:.1f}" rx="14" ry="14"/>']
+        flash = ""
+        if node.node_id == self._delete_flash_node_id:
+            color = "#ef4444" if self._delete_flash_ticks % 2 == 0 else "#ffffff"
+            flash = f' style="stroke: {color}; stroke-width: 4; filter: none;"'
+        parts = [f'<rect class="{css}"{flash} x="{x:.1f}" y="{y:.1f}" width="{node.width:.1f}" height="{node.height:.1f}" rx="14" ry="14"/>']
         text_y = y + self._BOX_VPAD + 15
         visible_lines = node.lines
         if self._draft_runtime_node is not None and node.node_id == self._draft_runtime_node.node_id and visible_lines:
@@ -2213,6 +2520,13 @@ class MapPanel(QWidget):
             tx = node.x + ox
             parts.append(f'<text x="{tx:.1f}" y="{text_y:.1f}" text-anchor="middle" font-size="14">{html.escape(line)}</text>')
             text_y += self._LINE_HEIGHT
+        dot_color = self._theme_colors["text"]
+        dot_fill = dot_color if node.has_body else "none"
+        dot_class = "filled" if node.has_body else "empty"
+        parts.append(
+            f'<circle class="content-dot {dot_class}" cx="{x + 8:.1f}" cy="{y + node.height - 7:.1f}" '
+            f'r="2.1" fill="{dot_fill}" stroke="{dot_color}" stroke-width="0.8" opacity="0.7"/>'
+        )
         if node.children:
             indicator_size = float(self._INDICATOR_SIZE)
             indicator_x = x + node.width - (indicator_size / 2)
@@ -2371,21 +2685,23 @@ class MapPanel(QWidget):
         """Increase the note preview font size offset."""
         self._note_font_size_offset = min(10, self._note_font_size_offset + 1)
         config.save_map_note_font_size_offset(self._note_font_size_offset)
-        if self._content_tooltip.isVisible():
+        if self._content_tooltip.isVisible() or self._body_editor is not None:
             self._update_tooltip_font_size()
 
     def _decrease_note_font_size(self) -> None:
         """Decrease the note preview font size offset."""
         self._note_font_size_offset = max(-5, self._note_font_size_offset - 1)
         config.save_map_note_font_size_offset(self._note_font_size_offset)
-        if self._content_tooltip.isVisible():
+        if self._content_tooltip.isVisible() or self._body_editor is not None:
             self._update_tooltip_font_size()
 
     def _update_tooltip_font_size(self) -> None:
-        """Update the tooltip font size based on note font preference only."""
+        """Keep note preview and body editing text at the same size."""
         # Keep note text size independent from map canvas zoom.
         zoom = 1.0 + (self._note_font_size_offset * 0.1)
         self._content_tooltip.set_font_zoom(zoom)
+        if self._body_editor is not None:
+            self._body_editor.editor.set_font_point_size(self._content_tooltip._editor.font().pointSize())
 
     def _tooltip_debug_log(self, event: str, **fields) -> None:
         if not log_enabled("ui_state"):
@@ -2597,6 +2913,10 @@ class MapPanel(QWidget):
         if not (self._selected_note_popup_active and self._content_tooltip.isVisible()):
             return False
         self._tooltip_debug_log("selected_popup_keypress", key=int(key), mods=getattr(mods, "value", 0))
+        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
+            self._content_tooltip.hide()
+            self._on_tooltip_dismissed()
+            return self._edit_selected_body() if self._detached_window else self._activate_selected_node(keep_focus=True)
         if key == Qt.Key_Escape and mods == Qt.NoModifier:
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
@@ -2651,6 +2971,12 @@ class MapPanel(QWidget):
         if key in (Qt.Key_PageDown, Qt.Key_Space) and mods == Qt.NoModifier:
             self._content_tooltip.page_forward()
             return True
+        if config.load_vi_mode_enabled() and mods == Qt.ControlModifier and key in (Qt.Key_D, Qt.Key_U):
+            if key == Qt.Key_D:
+                self._content_tooltip.page_forward()
+            else:
+                self._content_tooltip.page_backward()
+            return True
         if key == Qt.Key_PageUp and mods == Qt.NoModifier:
             self._content_tooltip.page_backward()
             return True
@@ -2666,6 +2992,7 @@ class MapPanel(QWidget):
             line_number=node.line_number,
             section_end_line=node.section_end_line,
             content_end_line=node.content_end_line,
+            has_body=node.has_body,
             side=node.side,
         )
         cloned.children = [self._clone_node_tree(child) for child in node.children]
@@ -2811,6 +3138,9 @@ class MapPanel(QWidget):
         new_level: int,
     ) -> bool:
         block = raw_children[start:end + 1]
+        if new_parent.level >= HEADING_MAX_LEVEL:
+            self._show_status_message("Cannot move a branch below the maximum heading level.")
+            return True
         if any(self._subtree_contains(node, new_parent) for node in block):
             self._show_status_message("Cannot move a heading into itself or its own subtree.")
             return True
@@ -2830,6 +3160,7 @@ class MapPanel(QWidget):
         self._recompute_depths(self._latest_root or new_parent)
         self._scope_expansion_depths[new_parent.node_id] = max(self._scope_depth(new_parent), 1)
         if self._detached_session is not None:
+            self._detached_session.changed = True
             self._detached_session.selected_node_ids = set(self._selected_node_ids)
             self._detached_session.anchor_node_id = self._selection_anchor_node_id
             self._detached_session.focus_node_id = self._selected_node_id
@@ -2906,6 +3237,8 @@ class MapPanel(QWidget):
     def _handle_multi_select_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
         if mods != Qt.ShiftModifier:
             return False
+        if key in (Qt.Key_U, Qt.Key_N, Qt.Key_H, Qt.Key_L) and not config.load_vi_mode_enabled():
+            return False
         direction = None
         if key in (Qt.Key_Up, Qt.Key_U):
             direction = "up"
@@ -2921,6 +3254,8 @@ class MapPanel(QWidget):
 
     def _handle_detached_reorder_keypress(self, key: int, mods: Qt.KeyboardModifiers) -> bool:
         if mods != Qt.ControlModifier:
+            return False
+        if key in (Qt.Key_H, Qt.Key_J, Qt.Key_K, Qt.Key_L) and not config.load_vi_mode_enabled():
             return False
         if key in (Qt.Key_Left, Qt.Key_H):
             return self._outdent_selected_block()
@@ -2992,6 +3327,8 @@ class MapPanel(QWidget):
             return False
         rebuilt_text, line_map = self._rebuild_markdown_from_tree(session.root, session.base_text)
         focus_line = int(line_map.get(self._selected_node_id or "", 0))
+        if rebuilt_text != session.base_text:
+            self._remember_edit()
         self._current_markdown = rebuilt_text
         self._pending_selected_line = focus_line or self._pending_selected_line
         self._detached_session = None
@@ -3000,6 +3337,189 @@ class MapPanel(QWidget):
         self.refresh()
         self.preview_label.setFocus(Qt.ShortcutFocusReason)
         return True
+
+    def _remember_edit(self) -> None:
+        self._clear_delete_feedback()
+        node = self._selected_node()
+        if self._draft_heading is not None:
+            node = self._node_by_id(self._draft_heading.anchor_node_id)
+        self._undo_stack.append((self._current_markdown, node.line_number if node else 0))
+        self._undo_stack = self._undo_stack[-100:]
+        self._redo_stack.clear()
+        self._cut_node_ids.clear()
+
+    def _clear_delete_feedback(self) -> None:
+        self._delete_flash_timer.stop()
+        self._delete_message_timer.stop()
+        self._delete_flash_node_id = None
+        self._delete_message.hide()
+
+    def _advance_delete_feedback(self) -> None:
+        self._delete_flash_ticks += 1
+        if self._delete_flash_ticks >= 6:
+            self._delete_flash_timer.stop()
+            self._delete_flash_node_id = None
+        self.refresh()
+
+    def _delete_selected_node(self) -> bool:
+        node = self._selected_node()
+        if node is None or not self._current_page_path or self._draft_heading is not None:
+            return False
+        if self._detached_session is not None:
+            return False
+        if len(self._selected_node_ids) > 1:
+            self._show_status_message("Select one node to delete.")
+            return True
+        if node.depth == 0 and not self._root_is_page_h1:
+            self._show_status_message("The page root is not a heading and cannot be deleted.")
+            return True
+        lines = self._current_markdown.splitlines(keepends=True)
+        end = min((child.line_number - 1 for child in node.children if child.line_number > 0), default=node.section_end_line)
+        if node.has_body:
+            self._delete_flash_node_id = node.node_id
+            self._delete_flash_ticks = 0
+            message = "node has body content, not deleting"
+            self._delete_message.setText(message)
+            self._delete_message.show()
+            self._delete_message_timer.start()
+            self._delete_flash_timer.start()
+            self._show_status_message(message)
+            self.refresh()
+            return True
+        before = self._current_markdown
+        self._remember_edit()
+        # Remove the empty heading and its blank body. Promote its children
+        # into its place while preserving every descendant and its content.
+        for child in node.children:
+            delta = max(1, node.level) - child.level
+            for descendant in self._collect_nodes(child):
+                index = descendant.line_number - 1
+                ending = "\r\n" if lines[index].endswith("\r\n") else "\n" if lines[index].endswith("\n") else ""
+                lines[index] = f"{'#' * max(1, descendant.level + delta)} {descendant.heading_text}{ending}"
+        del lines[node.line_number - 1:end]
+        updated = "".join(lines)
+        self._current_markdown = updated
+        self._filter_node_id = None
+        root = self._parse_markdown(self._current_page_path, updated)
+        remaining = self._collect_nodes(root)
+        target = next((item for item in remaining if item.line_number >= node.line_number), remaining[-1])
+        self._pending_selected_line = target.line_number
+        self.headingReorderRequested.emit(self._current_page_path, before, updated, target.line_number)
+        self.refresh()
+        self.preview_label.setFocus(Qt.OtherFocusReason)
+        self.center_selected_node()
+        return True
+
+    def _undo_map_edit(self, *, redo: bool = False) -> bool:
+        source, destination = (self._redo_stack, self._undo_stack) if redo else (self._undo_stack, self._redo_stack)
+        if not source or not self._current_page_path:
+            self._show_status_message("No map edit to redo." if redo else "No map edit to undo.")
+            return True
+        self._clear_delete_feedback()
+        node = self._selected_node()
+        destination.append((self._current_markdown, node.line_number if node else 0))
+        text, line = source.pop()
+        before = self._current_markdown
+        self._current_markdown = text
+        self._pending_selected_line = line
+        self._cut_node_ids.clear()
+        self.headingReorderRequested.emit(self._current_page_path, before, text, line)
+        self.refresh()
+        return True
+
+    def _finish_map_move(self, handled: bool) -> bool:
+        """Apply a completed keyboard or mouse move as one undoable edit."""
+        if self._detached_session is not None:
+            session = self._detached_session
+            if session.changed:
+                self.commit_detached_changes()
+            else:
+                self.cancel_detached_changes()
+        return handled
+
+    def _mark_branch_for_move(self) -> bool:
+        parent, siblings, start, end = self._selected_raw_block()
+        if parent is None or start < 0:
+            self._show_status_message("Select sibling headings to move.")
+            return True
+        self._cut_node_ids = {node.node_id for node in siblings[start:end + 1]}
+        self.refresh()
+        self._show_status_message("Branch marked. Select a new parent and press Ctrl+V; Esc cancels.")
+        return True
+
+    def _paste_branch(self) -> bool:
+        if not self._cut_node_ids:
+            self._show_status_message("Mark a branch with Ctrl+X first.")
+            return True
+        target = self._selected_node()
+        if target is None or not self._latest_root:
+            return True
+        nodes = [node for node in self._collect_nodes(self._latest_root) if node.node_id in self._cut_node_ids]
+        if not nodes or any(self._subtree_contains(node, target) for node in nodes):
+            self._show_status_message("Cannot move a branch into itself or its descendants.")
+            return True
+        target_id = target.node_id
+        self._selected_node_ids = set(self._cut_node_ids)
+        self._selected_node_id = nodes[0].node_id
+        self._selection_anchor_node_id = nodes[0].node_id
+        return self._finish_map_move(self._drop_selected_block_onto(self._node_by_id(target_id) or target))
+
+    def _keyboard_help_html(self) -> str:
+        vi = config.load_vi_mode_enabled()
+        rows = [
+            ("Navigate", "Arrow keys", "H / J / K / L"),
+            ("Review content", "Enter", "Enter"),
+            ("Expand / collapse branch", "Space", "Space"),
+            ("Edit body (map window)" if self._detached_window else "Reveal heading in editor; keep map focus", "Ctrl+Enter", "Ctrl+Enter"),
+            ("Rename heading", "F2", "i"),
+            ("Add sibling below", "Shift+Enter", "o"),
+            ("Add sibling above", "—", "Shift+O"),
+            ("Add child", "Ctrl+I / Insert", "a"),
+            ("Delete empty node (preserve children)", "Delete", "dd"),
+            ("Move branch up / down", "Ctrl+↑ / Ctrl+↓", "Ctrl+K / Ctrl+J"),
+            ("Indent / outdent branch", "Ctrl+→ / Ctrl+←", "Ctrl+L / Ctrl+H"),
+            ("Extend sibling selection", "Shift+↑ / Shift+↓", "Shift+U / Shift+N"),
+            ("Zoom in / out", "Alt+↑ / Alt+↓", "Alt+K / Alt+J"),
+            ("Fit map / center selection", "F / Alt+C", "F / Alt+C"),
+            ("Move to another parent", "Ctrl+X, navigate, Ctrl+V", "Ctrl+X, navigate, Ctrl+V"),
+            ("Undo / redo", "Ctrl+Z / Ctrl+Shift+Z", "u / Ctrl+R"),
+            ("Return / cancel", "Esc", "Esc"),
+            ("Scroll review", "↑ / ↓", "K / J"),
+            ("Page through review", "PageUp / PageDown", "Ctrl+U / Ctrl+D"),
+            ("Keyboard help", "?", "?"),
+        ]
+        header = "<th>Action</th><th>Standard keys</th>" + ("<th>Vi keys</th>" if vi else "")
+        body = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row[:3 if vi else 2]) + "</tr>" for row in rows if vi or row[1] != "—")
+        return (
+            "<style>th, td { padding: 5px 12px; text-align: left; } th { font-weight: bold; }</style>"
+            f"<h2>Map keyboard help</h2><table cellspacing='0'><tr>{header}</tr>{body}</table>"
+            "<p>While adding or renaming: type normally, Enter saves, Esc cancels.</p>"
+            "<p>In the body editor: Ctrl+Enter saves; Esc or clicking outside cancels. In vi insert mode, Esc returns to navigation first. Child headings stay separate.</p>"
+            "<p>Moves carry the heading, its content, and all descendants. Map undo covers heading and structure changes. Saving body content starts a fresh map undo history.</p>"
+        )
+
+    def _show_keyboard_help(self) -> None:
+        if self._keyboard_help is None:
+            self._keyboard_help = QDialog(self, Qt.Tool)
+            self._keyboard_help.setWindowTitle("Map keyboard help")
+            layout = QVBoxLayout(self._keyboard_help)
+            browser = QTextBrowser()
+            browser.setObjectName("mapKeyboardHelp")
+            layout.addWidget(browser)
+            close = QToolButton()
+            close.setText("Close")
+            close.clicked.connect(self._keyboard_help.close)
+            layout.addWidget(close, 0, Qt.AlignRight)
+            self._keyboard_help.finished.connect(lambda: self.preview_label.setFocus(Qt.OtherFocusReason))
+        browser = self._keyboard_help.findChild(QTextBrowser, "mapKeyboardHelp")
+        browser.setHtml(self._keyboard_help_html())
+        avail = popup_available_geometry(anchor=self.help_btn.mapToGlobal(QPoint(0, 0)), parent=self)
+        size = QSize(min(800, avail.width()), min(780, avail.height()))
+        self._keyboard_help.resize(size)
+        self._keyboard_help.move(clamp_popup_top_left(self.help_btn.mapToGlobal(QPoint(0, self.help_btn.height())), size, avail))
+        self._keyboard_help.show()
+        self._keyboard_help.raise_()
+        self._keyboard_help.activateWindow()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         if event.type() != QEvent.KeyPress:
@@ -3012,7 +3532,61 @@ class MapPanel(QWidget):
         # that flag as incidental so arrows behave like the same keys on
         # other platforms.
         mods = event.modifiers() & ~Qt.KeypadModifier
+        # Text entry owns every key, including map commands such as F and ?.
+        if self._draft_heading is not None:
+            self._handle_draft_keypress(event)
+            event.accept()
+            return
         if self._handle_selected_note_popup_keypress(key, mods):
+            event.accept()
+            return
+        vi = config.load_vi_mode_enabled()
+        pending_delete = self._vi_delete_pending
+        self._vi_delete_pending = None
+        if pending_delete is not None and key == Qt.Key_Escape and not mods:
+            event.accept()
+            return
+        if not mods and (key == Qt.Key_Delete or (vi and key == Qt.Key_D)):
+            if not event.isAutoRepeat():
+                if key == Qt.Key_Delete or pending_delete == self._selected_node_id:
+                    self._delete_selected_node()
+                else:
+                    self._vi_delete_pending = self._selected_node_id
+            event.accept()
+            return
+        if key == Qt.Key_Question and mods in (Qt.NoModifier, Qt.ShiftModifier):
+            self._show_keyboard_help()
+            event.accept()
+            return
+        if key == Qt.Key_Escape and not mods and self._cut_node_ids:
+            self._cut_node_ids.clear()
+            self.refresh()
+            event.accept()
+            return
+        if (key == Qt.Key_Z and mods in (Qt.ControlModifier, Qt.ControlModifier | Qt.ShiftModifier)) or (
+            vi and ((key == Qt.Key_U and not mods) or (key == Qt.Key_R and mods == Qt.ControlModifier))
+        ):
+            self._undo_map_edit(redo=bool(mods & Qt.ShiftModifier) or key == Qt.Key_R)
+            event.accept()
+            return
+        if key == Qt.Key_X and mods == Qt.ControlModifier:
+            self._mark_branch_for_move()
+            event.accept()
+            return
+        if key == Qt.Key_V and mods == Qt.ControlModifier:
+            self._paste_branch()
+            event.accept()
+            return
+        if vi and key in (Qt.Key_O, Qt.Key_A, Qt.Key_I) and mods in (Qt.NoModifier, Qt.ShiftModifier):
+            if key == Qt.Key_O:
+                self._start_draft_heading(as_child=False, before=bool(mods & Qt.ShiftModifier))
+            elif key == Qt.Key_A and not mods:
+                self._start_draft_heading(as_child=True)
+            elif key == Qt.Key_I and not mods:
+                self._start_inline_rename()
+            else:
+                super().keyPressEvent(event)
+                return
             event.accept()
             return
         if key == Qt.Key_Escape and not mods and self._detached_session is not None:
@@ -3023,12 +3597,12 @@ class MapPanel(QWidget):
             if self.commit_detached_changes():
                 event.accept()
                 return
-        if key == Qt.Key_J and mods == Qt.AltModifier:
-            if self.zoom_selected_node(1):
+        if vi and key == Qt.Key_J and mods == Qt.AltModifier:
+            if self.zoom_selected_node(-1):
                 event.accept()
                 return
-        if key == Qt.Key_K and mods == Qt.AltModifier:
-            if self.zoom_selected_node(-1):
+        if vi and key == Qt.Key_K and mods == Qt.AltModifier:
+            if self.zoom_selected_node(1):
                 event.accept()
                 return
         if key == Qt.Key_Down and mods == Qt.AltModifier:
@@ -3051,10 +3625,6 @@ class MapPanel(QWidget):
             self.fit_map()
             event.accept()
             return
-        if self._draft_heading is not None:
-            if self._handle_draft_keypress(event):
-                event.accept()
-                return
         if key == Qt.Key_Escape and not mods:
             if self._cancel_inline_rename():
                 event.accept()
@@ -3075,20 +3645,20 @@ class MapPanel(QWidget):
             self.increase_heading_level()
             event.accept()
             return
-        if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier:
+        if (key == Qt.Key_F2 and not mods) or (key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier):
             if self._start_inline_rename():
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ShiftModifier:
-            if self._activate_selected_node(keep_focus=True):
+            if self._start_draft_heading(as_child=False):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
-            if self._activate_selected_node(keep_focus=False):
+            if (self._edit_selected_body() if self._detached_window else self._activate_selected_node(keep_focus=True)):
                 event.accept()
                 return
         if key in (Qt.Key_Return, Qt.Key_Enter) and not mods:
-            if self._start_draft_heading(as_child=False):
+            if self._show_selected_node_note_popup():
                 event.accept()
                 return
         if key == Qt.Key_Insert and not mods:
@@ -3110,6 +3680,7 @@ class MapPanel(QWidget):
                     event.accept()
                     return
         if self._handle_detached_reorder_keypress(key, mods):
+            self._finish_map_move(True)
             event.accept()
             return
         if self._handle_multi_select_keypress(key, mods):
@@ -3121,8 +3692,28 @@ class MapPanel(QWidget):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched, event):  # type: ignore[override]
+        if watched is self.preview_label and event.type() == QEvent.ShortcutOverride:
+            key = event.key()
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            vi = config.load_vi_mode_enabled()
+            if self._draft_heading is not None or (not mods and key in (Qt.Key_F2, Qt.Key_Delete)) or (
+                vi and not mods and key in (Qt.Key_U, Qt.Key_D)
+            ) or (
+                mods == Qt.ControlModifier and key in (Qt.Key_X, Qt.Key_V, Qt.Key_Z, Qt.Key_I, Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space)
+            ) or (mods == (Qt.ControlModifier | Qt.ShiftModifier) and key == Qt.Key_Z) or (
+                vi and mods == Qt.ControlModifier and key in (Qt.Key_H, Qt.Key_J, Qt.Key_K, Qt.Key_L, Qt.Key_R)
+            ) or (
+                mods in (Qt.ControlModifier, Qt.ShiftModifier, Qt.AltModifier)
+                and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down)
+            ) or (
+                vi and mods == Qt.AltModifier and key in (Qt.Key_J, Qt.Key_K)
+            ):
+                event.accept()
+                return True
         if watched is self.preview_label and event.type() == QEvent.FocusIn:
             self.focusSyncRequested.emit()
+        if watched is self.preview_label and event.type() == QEvent.FocusOut:
+            self._vi_delete_pending = None
         if watched is self.preview_label and event.type() == QEvent.Leave:
             # Keep keyboard-open selected-note popup stable when focus leaves preview.
             if self._tooltip_pinned or self._selected_note_popup_active:
@@ -3200,7 +3791,9 @@ class MapPanel(QWidget):
                 if self._drag_active:
                     target = self._node_by_id(self._drop_target_node_id) if self._drop_target_node_id else None
                     if target is not None and self._drop_target_valid:
-                        self._drop_selected_block_onto(target)
+                        self._finish_map_move(self._drop_selected_block_onto(target))
+                    elif self._detached_session is not None:
+                        self.cancel_detached_changes()
                     self._clear_drag_state()
                     self.refresh()
                     event.accept()

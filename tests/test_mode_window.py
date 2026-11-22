@@ -19,6 +19,7 @@ def _drain_events(wait_ms: int = 25, rounds: int = 4) -> None:
 
 @pytest.mark.parametrize("mode", ["focus", "audience"])
 def test_reading_startup_uses_scaled_font_before_editor_is_shown(qtbot, mode):
+    from sp.app.ui.diagram_editor_icons import get_diagram_editor_icon
     base = MarkdownEditor()
     qtbot.addWidget(base)
     base.set_markdown("# Heading\n\nBody text")
@@ -26,6 +27,8 @@ def test_reading_startup_uses_scaled_font_before_editor_is_shown(qtbot, mode):
                         read_only=False, heading_provider=lambda: [],
                         settings={"reading_view": True, "font_size": 20, "font_scale": 1.5})
     qtbot.addWidget(window)
+    assert not window.windowIcon().isNull()
+    assert window.windowIcon().cacheKey() == get_diagram_editor_icon(mode).cacheKey()
     _drain_events()
     initial = window.reading_view._base_font_point_size
     assert initial == 30

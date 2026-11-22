@@ -175,7 +175,10 @@ class ModeWindow(QMainWindow):
 
         # Set window icon explicitly (especially important on Windows)
         from sp.app.main import get_app_icon
-        self.setWindowIcon(get_app_icon())
+        from .diagram_editor_icons import get_diagram_editor_icon
+
+        mode_icon = get_diagram_editor_icon(mode.lower())
+        self.setWindowIcon(mode_icon if not mode_icon.isNull() else get_app_icon())
         
         self.mode = mode.lower()
         self._base_editor = base_editor

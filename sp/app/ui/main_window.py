@@ -19266,6 +19266,7 @@ class MainWindow(QMainWindow):
                 ),
             )
         else:
+            self._apply_pending_editor_sync_if_needed(path)
             self._scroll_to_line_with_flash(line, expected_path=self.current_path, expected_load_token=self._current_editor_load_token())
 
         if activation_source == "keyboard":
@@ -19284,7 +19285,8 @@ class MainWindow(QMainWindow):
             target_focus_widget = None
             if sender is not None:
                 try:
-                    target_focus_widget = getattr(sender, "preview_label", None)
+                    panel = self._map_source_panel(sender)
+                    target_focus_widget = getattr(panel, "preview_label", None)
                 except Exception:
                     target_focus_widget = None
             if target_focus_widget is None and focused_widget is not None:
@@ -19297,7 +19299,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            QTimer.singleShot(0, _restore_panel_focus)
+            QTimer.singleShot(75 if path_changed else 0, _restore_panel_focus)
 
     def _insert_heading_from_map_request(self, path: str, after_line: int, level: int, text: str) -> None:
         heading_text = str(text or "").strip()
@@ -19489,19 +19491,24 @@ class MainWindow(QMainWindow):
             self._open_file(path)
         expected_path = self.current_path
         expected_load_token = self._current_editor_load_token()
-        QTimer.singleShot(
-            50 if path_changed else 0,
-            lambda p=path, before=base_text, after=new_text, line=focus_line, path_hint=expected_path, load_token=expected_load_token, source_obj=source, focus_pref=focus_target: self._apply_map_heading_reorder(
-                p,
-                before,
-                after,
-                line,
-                expected_path=path_hint,
-                expected_load_token=load_token,
-                source=source_obj,
-                focus_target=focus_pref,
-            ),
-        )
+        def apply_edit() -> None:
+            self._apply_map_heading_reorder(
+                path,
+                base_text,
+                new_text,
+                focus_line,
+                expected_path=expected_path,
+                expected_load_token=expected_load_token,
+                source=source,
+                focus_target=focus_target,
+            )
+
+        if path_changed:
+            QTimer.singleShot(50, apply_edit)
+        else:
+            # Queue the latest content before a popup closes and map focus
+            # triggers a refresh from the editor.
+            apply_edit()
 
     def _apply_map_heading_reorder(
         self,
@@ -19527,12 +19534,12 @@ class MainWindow(QMainWindow):
                 current_text = self.editor.toPlainText()
             except Exception:
                 current_text = ""
-        if current_text != base_text:
+        if self.editor._from_display(current_text) != self.editor._from_display(base_text):
             self.statusBar().showMessage("Map edit cancelled: the page changed while detached editing was active.", 5000)
             return
         if not self._editor_has_focus():
             self._queue_pending_editor_sync_from_map(path, new_text, focus_line)
-            self._restore_map_source_focus(source, focus_line, target=focus_target)
+            self._restore_map_source_focus(source, focus_line, target=focus_target, expected_content=new_text)
             return
         cursor = QTextCursor(self.editor.document())
         self._suspend_autosave = True
@@ -19552,7 +19559,7 @@ class MainWindow(QMainWindow):
             self._refresh_detached_map_panels(self.current_path)
         except Exception:
             pass
-        self._restore_map_source_focus(source, focus_line, target=focus_target)
+        self._restore_map_source_focus(source, focus_line, target=focus_target, expected_content=new_text)
         if focus_line > 0:
             scroll_path = self.current_path
             scroll_token = self._current_editor_load_token()
@@ -19578,12 +19585,16 @@ class MainWindow(QMainWindow):
             return None
         return None
 
-    def _restore_map_source_focus(self, source, focus_line: int, *, target: str = "map") -> None:
+    def _restore_map_source_focus(self, source, focus_line: int, *, target: str = "map", expected_content: Optional[str] = None) -> None:
         panel = self._map_source_panel(source)
         if panel is None:
             return
         def _restore() -> None:
             try:
+                # A newer map edit can finish before this queued callback.
+                # Its selection must take precedence over the older edit.
+                if expected_content is not None and getattr(panel, "_current_markdown", None) != expected_content:
+                    return
                 if hasattr(panel, "restore_selection_focus"):
                     panel.restore_selection_focus(focus_line, target=target)
                 else:
@@ -19892,17 +19903,32 @@ class MainWindow(QMainWindow):
             lambda: self._detached_panels.remove(window) if window in self._detached_panels else None
         )
 
-    def _install_detached_panel_refresh_hook(self, window: QMainWindow, callback: Callable[[], None]) -> None:
+    def _install_detached_panel_refresh_hook(self, window: QMainWindow, callback: Callable[[], None], *, activation_focus: Optional[QWidget] = None) -> None:
         class _DetachedRefreshHook(QObject):
             def __init__(self, target: QMainWindow, refresh_cb: Callable[[], None]) -> None:
                 super().__init__(target)
                 self._target = target
                 self._refresh_cb = refresh_cb
+                self._focus_timer = QTimer(self)
+                self._focus_timer.setSingleShot(True)
+                self._focus_timer.setInterval(50)
+                self._focus_timer.timeout.connect(self.restore_requested_focus)
 
             def eventFilter(self, obj, event):
                 if obj is self._target and event.type() in (QEvent.Show, QEvent.WindowActivate, QEvent.FocusIn):
-                    QTimer.singleShot(0, self._refresh_cb)
+                    QTimer.singleShot(0, self._target, self._refresh_cb)
+                    if event.type() == QEvent.WindowActivate and activation_focus is not None:
+                        self.schedule_requested_focus()
                 return False
+
+            def schedule_requested_focus(self) -> None:
+                self._focus_timer.start()
+
+            def restore_requested_focus(self) -> None:
+                if activation_focus is not None and self._target.isActiveWindow() and self._target.property("_map_focus_requested"):
+                    activation_focus.setFocus(Qt.ActiveWindowFocusReason)
+                    if activation_focus.hasFocus():
+                        self._target.setProperty("_map_focus_requested", False)
 
         hook = _DetachedRefreshHook(window, callback)
         window.installEventFilter(hook)
@@ -20070,6 +20096,11 @@ class MainWindow(QMainWindow):
             return
         from .map_panel import MapPanel
 
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        if self._detached_map_panels:
+            self._focus_map_panel_window(self._detached_map_panels[0], cursor_line)
+            return
+
         panel = MapPanel()
         panel.headingActivated.connect(self._open_heading_from_map)
         panel.headingCreateRequested.connect(self._insert_heading_from_map_request)
@@ -20083,20 +20114,23 @@ class MainWindow(QMainWindow):
             ) if self.current_path else p.clear_content()
         )
         panel.set_window_mode_control(visible=True, windowed=False)
-        if self.current_path:
-            panel.set_content(self._normalize_editor_path(self.current_path), self._get_editor_text_for_path(self.current_path))
-        else:
-            panel.clear_content()
         window = QMainWindow(None)
         self._prepare_top_level_window(window)
         window.setWindowTitle("Map")
+        from .diagram_editor_icons import get_diagram_editor_icon
+
+        map_icon = get_diagram_editor_icon("mindmap")
+        if not map_icon.isNull():
+            window.setWindowIcon(map_icon)
         window.setCentralWidget(panel)
+        window.setFocusProxy(panel.preview_label)
+        panel.closeWindowRequested.connect(window.close)
         window.resize(820, 720)
         self._apply_geometry_persistence(window, "map_panel_window")
         panel.windowModeToggleRequested.connect(
             lambda w=window, p=panel: self._toggle_map_window_mode(w, p)
         )
-        window.showFullScreen()
+        window.setWindowState(Qt.WindowFullScreen)
         self._register_detached_panel(window)
         self._detached_map_panels.append(panel)
         window.destroyed.connect(lambda: self._detached_map_panels.remove(panel) if panel in self._detached_map_panels else None)
@@ -20106,8 +20140,43 @@ class MainWindow(QMainWindow):
                 self._normalize_editor_path(self.current_path),
                 self._get_editor_text_for_path(self.current_path),
             ) if self.current_path else p.clear_content(),
+            activation_focus=panel.preview_label,
         )
-        QTimer.singleShot(0, lambda p=panel: p.preview_label.setFocus(Qt.OtherFocusReason))
+        self._focus_map_panel_window(panel, cursor_line)
+
+    def _focus_map_panel_window(self, panel, cursor_line: int) -> None:
+        """Reuse the detached map and navigate it to the current editor point."""
+        path = self._normalize_editor_path(self.current_path) if self.current_path else None
+        if path:
+            panel.set_content(path, self._get_editor_text_for_path(path))
+        else:
+            panel.clear_content()
+        window = panel.window()
+        window.setProperty("_map_focus_requested", True)
+        # Set the window's remembered child focus before asynchronous native
+        # activation can restore a previously focused toolbar control.
+        panel.preview_label.setFocus(Qt.ActiveWindowFocusReason)
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        handle = window.windowHandle()
+        if handle is not None:
+            handle.requestActivate()
+        QApplication.setActiveWindow(window)
+
+        def focus_heading() -> None:
+            if panel._current_page_path != path:
+                return
+            panel.focus_heading_at_line(cursor_line)
+            panel.preview_label.setFocus(Qt.ActiveWindowFocusReason)
+
+        # Center after showing/restoring the window so the viewport has its
+        # actual size, and after activation refreshes the map content.
+        QTimer.singleShot(0, window, focus_heading)
+        # Native activation can restore its remembered focus after the first
+        # queued callback. Keep the request until activation has settled.
+        window._detached_refresh_hook.schedule_requested_focus()
 
     @staticmethod
     def _toggle_map_window_mode(window: QMainWindow, panel) -> None:

@@ -36,13 +36,37 @@ def test_editor_icon_path_prefers_native_platform_format(
     assert selected.name == expected_name
 
 
-@pytest.mark.parametrize("editor", ["plantuml", "mermaid", "excalidraw"])
+@pytest.mark.parametrize("editor", ["plantuml", "mermaid", "excalidraw", "mindmap", "focus", "audience"])
 def test_generated_editor_icon_assets_exist_and_load(qapp, editor: str) -> None:
     icon_path = icons.get_diagram_editor_icon_path(editor)
 
     assert icon_path is not None
     assert icon_path.is_file()
     assert not icons.get_diagram_editor_icon(editor).isNull()
+
+
+@pytest.mark.parametrize("slug,stem", [("mindmap", "Mindmap"), ("focus", "Focus"), ("audience", "Audience")])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+@pytest.mark.parametrize("layout", ["sp/assets/icons", "_internal/sp/assets/icons"])
+def test_mode_icon_resolves_from_frozen_bundle(tmp_path, monkeypatch, slug, stem, platform, layout):
+    name = f"{stem}.ico" if platform == "win32" else f"{stem}.icns" if platform == "darwin" else f"linux-png/{slug}-512x512.png"
+    expected = tmp_path / layout / name
+    expected.parent.mkdir(parents=True)
+    expected.touch()
+    monkeypatch.setattr(icons.sys, "platform", platform)
+    monkeypatch.setattr(icons.sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert icons.get_diagram_editor_icon_path(slug) == expected
+
+
+@pytest.mark.parametrize("slug,stem", [("mindmap", "Mindmap"), ("focus", "Focus"), ("audience", "Audience")])
+def test_mode_icon_assets_cover_platforms_and_resolutions(qapp, slug, stem):
+    from PySide6.QtGui import QImage
+    directory = Path(__file__).resolve().parents[1] / "sp/assets/icons"
+    for suffix in ("ico", "icns"):
+        assert (directory / f"{stem}.{suffix}").stat().st_size > 0
+    for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
+        image = QImage(str(directory / "linux-png" / f"{slug}-{size}x{size}.png"))
+        assert image.width() == image.height() == size
 
 
 def test_standalone_editor_uses_native_macos_icon(qapp, tmp_path, monkeypatch) -> None:

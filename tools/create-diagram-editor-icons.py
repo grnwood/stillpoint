@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,9 @@ EDITORS = {
     "plantuml": (ASSETS / "puml_logo.svg", "PlantUML"),
     "mermaid": (ASSETS / "mmd-favicon.svg", "Mermaid"),
     "excalidraw": (ASSETS / "excalidraw-icon.svg", "Excalidraw"),
+    "mindmap": (ASSETS / "mindmap.svg", "Mindmap"),
+    "focus": (ASSETS / "focus-mode.svg", "Focus"),
+    "audience": (ASSETS / "present-mode.svg", "Audience"),
 }
 
 
@@ -94,12 +98,16 @@ def write_editor_assets(slug: str, display_name: str, master: Image.Image) -> No
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--editor", action="append", choices=EDITORS, help="Generate only this icon set (repeatable).")
+    args = parser.parse_args()
     if not BASE.is_file():
         raise SystemExit(f"StillPoint icon master not found: {BASE}")
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="stillpoint-editor-icons-") as temp_dir:
         temp = Path(temp_dir)
-        for slug, (svg_path, display_name) in EDITORS.items():
+        for slug in args.editor or EDITORS:
+            svg_path, display_name = EDITORS[slug]
             rendered = temp / f"{slug}.png"
             render_svg(svg_path, rendered)
             write_editor_assets(slug, display_name, composite(rendered))
